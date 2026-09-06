@@ -107,6 +107,19 @@ from here. A specifier that is merely unfollowable (a path alias, an absolute in
 that matches a project file) SHALL NOT be treated as external, because the source stated no such
 thing. A concrete import binding for the same name SHALL win over an unresolvable one.
 
+The disclosure covers receivers rooted at the enclosing object. A receiver rooted at a CLASS NAME
+instead — `Holder.shared.work()`, a static field on another class — is out of scope and remains
+both unbound and undisclosed, exactly as before this change; it SHALL NOT be claimed as covered.
+The disclosure is served by `analyze_error_propagation` alone: other conclusion tools see the
+residue as an absent edge, as they did before.
+
+#### Scenario: A class-name static-field receiver stays out of scope
+
+- **GIVEN** a `Holder.shared.work()` call, whose receiver is a static field on another class
+- **WHEN** the call graph is built
+- **THEN** no edge is emitted and no chained-receiver boundary is reported — the shape is declared
+  out of scope rather than described as covered
+
 #### Scenario: An unread shape is disclosed rather than omitted
 
 - **GIVEN** a `this.a.b.m()`, a `this.map['k'].m()`, a `this.dep!.m()` or a `self.get_dep().m()`

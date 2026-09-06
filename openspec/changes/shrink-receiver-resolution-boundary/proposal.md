@@ -12,13 +12,16 @@ queries only ever captured an `(identifier)`, `(this)` or `(super)` receiver, an
 receiver is a nested member expression, so it matched no alternative: no resolved edge, no
 `external::` leaf, and — because `exception-flow.ts` classified it `other`, a kind documented as
 "resolves to an internal edge or an `external::obj.x` edge" — nothing any conclusion could
-disclose either. It is the last call shape that was silently absent rather than honestly unknown.
+disclose either. It is the last silently-absent shape rooted at `this`/`self` — a claim now bounded
+by measurement rather than assertion: a class-name static-field receiver (`Holder.shared.work()`)
+is still both unbound and undisclosed, identically before and after this change.
 
 It is not rare. Counted with the extractor itself over this repository's `src/`: **327 chained
 intra-object call sites against 544 direct ones — 38% of all intra-object calls**, concentrated
 exactly where dependencies are held as fields (`this.store.…`, `this.logger.…`, `this.spinner.…`).
-Every one of them widened `analyze_error_propagation`'s escape set silently, and left the field's
-type looking uncalled.
+Every one of them silently NARROWED `analyze_error_propagation`'s escape set — an unreachable
+callee contributes no exceptions, so a clean result was under-reporting rather than proof — and
+left the field's type looking uncalled.
 
 ## What changes
 
@@ -62,10 +65,14 @@ Four external repositories, `analyze --force` with both builds, full edge-row di
 |---|---:|---:|---:|
 | python-poetry/poetry (Python) | 447 | 29 | 0 |
 | nestjs/nest (TS) | 1,835 | 530 | 0 |
+| nestjs/nest @`39fbddae` (re-measured) | 1,925 | 397 | 0 |
 | typeorm/typeorm (TS) | 3,596 | 530 | 0 |
 | mikro-orm/mikro-orm (TS) | ~3,900 | 419 | 0 |
 
-**Zero false positives.** 55 edges hand-verified against source; a whole-population automated
+The two `nest` rows are different clones, and the count moves with the tree; `poetry`'s 29
+reproduced exactly across both runs, so the method is stable even though the figure is not.
+
+**Zero false positives.** 55 edges hand-verified against source, plus 12 more on the re-measure; a whole-population automated
 check over all 1,508 new edges; and for every edge whose callee class name is duplicated in the
 repository, the binding was checked against the caller's own import — 126 of 126 correct in
 `nest` alone. No new edge points at an external, synthetic or dangling node.
@@ -102,8 +109,8 @@ reasoning is not lost):
 
 ## Why this is in scope
 
-Call-graph recall is the substrate every conclusion inherits, and this is the one remaining call
-shape that was *silent* rather than disclosed. The technique is deterministic, local, and needs no
+Call-graph recall is the substrate every conclusion inherits, and this closes the `this`-rooted
+family of shapes that were *silent* rather than disclosed. The technique is deterministic, local, and needs no
 LSP or type checker — the same posture as the rest of the analyzer.
 
 ## Impact
