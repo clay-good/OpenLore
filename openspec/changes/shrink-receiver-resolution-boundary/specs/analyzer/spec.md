@@ -17,7 +17,16 @@ inference; this requirement adds the field and return-type dimension it lacked.
 
 Resolution SHALL search only within the receiver's own type (walking the enclosing class chain so
 an inherited field still types), never across the global name space, and SHALL bind only a unique
-candidate.
+candidate. Where the caller's file carries an import binding for the type name, that binding SHALL
+be decisive: only a candidate from the imported target may bind, and no such candidate SHALL be a
+refusal rather than a fall-through to a same-named definition elsewhere.
+
+A field SHALL be attributed only to the class that provably owns it. A write inside a construct
+that rebinds the receiver — a TS/JS `function` expression or object-literal method, a Python `def`
+nested inside another `def` — SHALL NOT be attributed to the enclosing class, a field of an
+unnameable class expression SHALL NOT be attributed outward, a `static` declaration SHALL NOT type
+an instance receiver, a plain constructor parameter SHALL NOT be treated as a field, and a
+capitalized name the file declares as a FUNCTION SHALL NOT be treated as a type.
 
 Supported languages SHALL be reported in the capability matrix as `receiverResolution`;
 unsupported languages SHALL be disclosed there, not silently left unresolved.
@@ -60,8 +69,30 @@ provenance is unknown rather than merely unreached — and SHALL NOT treat them 
 - **THEN** no edge of any kind is emitted for it, and `analyze_error_propagation` reports it as a
   chained-receiver boundary whose callee's exceptions are out of scope
 
+#### Scenario: An import binding overrules a same-named definition elsewhere
+
+- **GIVEN** a field typed `Client`, where the caller's file imports `Client` from one module and
+  an unrelated `Client` carrying the called method exists elsewhere in the repository
+- **WHEN** the call graph is built
+- **THEN** no edge is emitted — the import binding decides, and the namesake is never bound
+
 #### Scenario: A conflicting field declaration refuses
 
 - **GIVEN** a field declared with one type and assigned a different type elsewhere in the file
 - **WHEN** the call graph is built
 - **THEN** the registry refuses that field, and the call site stays unresolved and disclosed
+
+### Requirement: ChainedReceiverResidueIsScopedAndDeclared
+
+Recovery SHALL be confined to a single field hop on a receiver rooted at the enclosing object. A
+deeper chain, a computed or indexed receiver, a receiver obtained from a call, and a callee dropped
+by the language's builtin-noise filter SHALL NOT be bound — and SHALL still be classified as
+chained intra-object call sites so the disclosure covers them. A type name that does not follow the
+capitalized-class convention SHALL NOT type a field.
+
+#### Scenario: An unread shape is disclosed rather than omitted
+
+- **GIVEN** a `this.a.b.m()`, a `this.map['k'].m()`, a `this.dep!.m()` or a `self.get_dep().m()`
+- **WHEN** the call graph is built and `analyze_error_propagation` runs over the caller
+- **THEN** no edge is emitted for it, and the site is reported under the chained-receiver boundary
+  rather than being absent from the result

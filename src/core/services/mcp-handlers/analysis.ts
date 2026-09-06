@@ -51,7 +51,7 @@ import { formatSignatureMaps } from '../../analyzer/signature-extractor.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from '../../analyzer/code-shaper.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
 import { cfgSupportsLanguage, variableSliceLines, type FunctionCfg } from '../../analyzer/cfg.js';
-import type { EdgeConfidence } from '../../analyzer/call-graph-types.js';
+import { EDGE_CONFIDENCE_VALUES, type EdgeConfidence } from '../../analyzer/call-graph-types.js';
 import { buildArchitectureOverview } from '../../analyzer/architecture-writer.js';
 import { buildDomainEvidence } from '../../generator/domain-evidence.js';
 import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
@@ -650,10 +650,7 @@ interface FocusSliceAccumulator {
 
 const FOCUS_EVIDENCE_LIMIT = 50;
 const FOCUS_OVERLAY_EDGE_LIMIT = 20_000;
-const EDGE_CONFIDENCES = new Set<EdgeConfidence>([
-  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
-  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
-]);
+const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 
 function isFocusNode(value: unknown): value is FocusNode {
   if (!value || typeof value !== 'object') return false;

@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { CallGraphBuilder, callDistance, CALL_DISTANCE_COSTS, layerOf, classifyLayerEdge } from './call-graph.js';
+import { EDGE_CONFIDENCE_VALUES } from './call-graph-types.js';
 import type { CallEdge, EdgeConfidence } from './call-graph.js';
 import * as barrel from './call-graph.js';
 import * as cgTypes from './call-graph-types.js';
@@ -2381,6 +2382,17 @@ describe('callDistance', () => {
       expect(CALL_DISTANCE_COSTS[confidence]).toBe(cost);
     });
   }
+
+  // change: shrink-receiver-resolution-boundary. Three runtime validators used to carry their own
+  // hand-written copy of the confidence set. Adding `receiver_inferred` to the union without them
+  // meant the edges were written to SQLite and silently dropped on every read, and one path called
+  // the freshly-written artifact invalid. The set is now DERIVED; this pins that it stays derived.
+  it('exposes every confidence value to the runtime validators', () => {
+    for (const confidence of Object.keys(expected) as EdgeConfidence[]) {
+      expect(EDGE_CONFIDENCE_VALUES.has(confidence), `${confidence} must be accepted on read`).toBe(true);
+    }
+    expect(EDGE_CONFIDENCE_VALUES.size).toBe(Object.keys(expected).length);
+  });
 
   it('ranks strongly-resolved edges nearer than heuristic ones', () => {
     expect(callDistance(edge('import'))).toBeLessThan(callDistance(edge('name_only')));
