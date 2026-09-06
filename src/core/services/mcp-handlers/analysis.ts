@@ -24,6 +24,7 @@ import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { escapeRegExp } from '../../../utils/misc.js';
 import { readFileConfined, readFileConfinedWithStat } from '../../../utils/path-confinement.js';
+import { readAnalysisArtifactOrPartial, readDependencyGraphOrPartial } from './artifact-cache.js';
 import {
   DEFAULT_MAX_FILES,
   DEFAULT_DRIFT_MAX_FILES,
@@ -189,11 +190,15 @@ export async function handleAnalyzeCodebase(
 export async function handleGetArchitectureOverview(directory: string): Promise<unknown> {
   const absDir = await validateDirectory(directory);
 
-  let depGraph: import('../../analyzer/dependency-graph.js').DependencyGraphResult | null = null;
-  try {
-    const raw = await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH), 'utf-8');
-    depGraph = JSON.parse(raw) as import('../../analyzer/dependency-graph.js').DependencyGraphResult;
-  } catch { /* ignore */ }
+  const analysisDir = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  // Answered from the partial first-run index when no published dependency graph exists yet
+  // (change: refine-first-run-partial-serving). Without this the guard below saw a non-null
+  // partial CONTEXT and a null graph, fell through, and built an overview of zeroes — a
+  // fabricated negative that read as a complete answer, with the real graph sitting unread in
+  // the partial index. Reading it is both the fix and the feature.
+  const depGraph = await readDependencyGraphOrPartial<
+    import('../../analyzer/dependency-graph.js').DependencyGraphResult
+  >(analysisDir, ARTIFACT_DEPENDENCY_GRAPH);
 
   const ctx = await readCachedContext(absDir);
 
@@ -205,10 +210,36 @@ export async function handleGetArchitectureOverview(directory: string): Promise<
   let domainEvidence: unknown[] = [];
   if (ctx) {
     try {
-      const repo = JSON.parse(await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_REPO_STRUCTURE), 'utf-8')) as RepoStructure;
-      domainEvidence = buildDomainEvidence(repo, ctx);
+      const raw = await readAnalysisArtifactOrPartial(analysisDir, ARTIFACT_REPO_STRUCTURE);
+      if (raw !== null) domainEvidence = buildDomainEvidence(JSON.parse(raw) as RepoStructure, ctx);
     } catch { /* the architectural summary remains usable when this artifact is absent */ }
   }
+  if (ctx?.partial) {
+    // Hubs, entry points and every cluster's role are derived from the call graph, which a
+    // partial index does not have. Reported as `[]`, `0` and "internal" they read as positive
+    // architectural claims — "this repo has no hubs", "every cluster is an implementation
+    // detail". Omitted, they read as what they are: not known yet. The dependency-graph half
+    // above is real and is served.
+    return {
+      summary: {
+        totalFiles: overview.summary.totalFiles,
+        totalClusters: overview.summary.totalClusters,
+        totalEdges: overview.summary.totalEdges,
+        cycles: overview.summary.cycles,
+      },
+      clusters: overview.clusters.map(cluster => ({
+        id: cluster.id,
+        name: cluster.name,
+        fileCount: cluster.fileCount,
+        dependsOn: cluster.dependsOn,
+      })),
+      omitted: ['globalEntryPoints', 'criticalHubs', 'layerViolations', 'cluster roles',
+        'per-cluster hub and entry-point counts'],
+      omittedBecause: 'they are derived from the call graph, which this first build has not '
+        + 'produced yet; reporting them as empty would state something the index cannot know',
+    };
+  }
+
   return {
     summary: overview.summary,
     clusters: overview.clusters,

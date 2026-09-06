@@ -21,7 +21,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, stat, unlink } from 'node:fs/promises';
+import { stat, unlink } from 'node:fs/promises';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBytesBounded } from '../../utils/bounded-artifact-read.js';
 import { basename, join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { ARTIFACT_REFACTOR_PRIORITIES } from '../../constants.js';
@@ -88,17 +89,24 @@ export function manifestPathOf(analysisDir: string): string {
  * report `analysis-changed` forever. Passing the name through keeps the record
  * platform-independent by construction.
  */
-async function digestOf(analysisDir: string, name: string): Promise<GenerationArtifactRecord | null> {
-  try {
-    const contents = await readFile(join(analysisDir, name));
-    return {
-      path: name,
-      sha256: createHash('sha256').update(contents).digest('hex'),
-      bytes: contents.byteLength,
-    };
-  } catch {
-    return null;
-  }
+async function digestOf(
+  analysisDir: string,
+  name: string,
+  maxBytes: number = ANALYSIS_ARTIFACT_MAX_BYTES,
+): Promise<GenerationArtifactRecord | null> {
+  // Bounded, symlink-refusing, regular-files-only. These artifacts live under `.openlore/`,
+  // which the security model treats as untrusted repository content — and this function is the
+  // FIRST thing that touches an artifact on the verification path, so a plain `readFile` here
+  // defeats every ceiling applied later. A FIFO at one of these paths blocked a libuv worker in
+  // `open()`, which `process.exit` cannot interrupt: the server could not be shut down.
+  // Hashes the BYTES, not decoded text, so digests recorded by earlier versions still verify.
+  const read = await readArtifactBytesBounded(join(analysisDir, name), maxBytes);
+  if (read.state !== 'ok') return null;
+  return {
+    path: name,
+    sha256: createHash('sha256').update(read.bytes).digest('hex'),
+    bytes: read.bytes.byteLength,
+  };
 }
 
 /** Verify one artifact against a manifest record without trusting mtime granularity. */
@@ -106,11 +114,12 @@ export async function artifactMatchesGeneration(
   analysisDir: string,
   manifest: GenerationManifest,
   name: string,
+  maxBytes?: number,
 ): Promise<boolean> {
   if (manifest.compatibility === 'legacy') return true;
   const expected = manifest.artifacts.find(record => record.path === name);
   if (!expected) return false;
-  const current = await digestOf(analysisDir, name);
+  const current = await digestOf(analysisDir, name, maxBytes);
   return current !== null
     && current.sha256 === expected.sha256
     && current.bytes === expected.bytes;
@@ -167,16 +176,15 @@ export async function publishGeneration(
 export async function readCurrentGeneration(
   analysisDir: string,
   legacyArtifacts: string[] = [],
+  maxBytes: number = ANALYSIS_ARTIFACT_MAX_BYTES,
 ): Promise<GenerationManifest | null> {
-  let raw: string;
-  try {
-    raw = await readFile(manifestPathOf(analysisDir), 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return synthesizeLegacyGeneration(analysisDir, legacyArtifacts);
-    }
-    return null;
-  }
+  // Same bounded read, and the absent/refused distinction is load-bearing: a MISSING manifest is
+  // a legitimate legacy analysis, while a manifest that is a symlink, a FIFO, or oversized is a
+  // poisoned one and must fail closed rather than be synthesized around.
+  const read = await readArtifactBytesBounded(manifestPathOf(analysisDir), maxBytes);
+  if (read.state === 'absent') return synthesizeLegacyGeneration(analysisDir, legacyArtifacts);
+  if (read.state !== 'ok') return null;
+  const raw = read.bytes.toString('utf8');
 
   try {
     const parsed = JSON.parse(raw) as GenerationManifest;

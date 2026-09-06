@@ -34,7 +34,7 @@ import { join } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
 import { loadTraversalIndex } from './traversal.js';
-import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
+import { assembleBoundary, computeStaleness, edgeBasisWithinSet, withheldOnPartialIndex } from './confidence-boundary.js';
 import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
@@ -178,6 +178,10 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
   if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  // A partial first-run index cannot ground a negative conclusion (change:
+  // refine-first-run-partial-serving).
+  const withheld = withheldOnPartialIndex(ctx, 'dead-code candidates');
+  if (withheld) return withheld;
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

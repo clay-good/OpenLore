@@ -63,8 +63,10 @@ import {
   REQUIRED_ANALYSIS_ARTIFACTS,
   markGenerationUnavailable,
   publishGeneration,
+  readCurrentGeneration,
 } from '../runtime/analysis-generation.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { readPartialIndexStamp } from '../runtime/partial-index.js';
 
 /** Artifact format version. Bump only on a shape change of the envelope below. */
 export const BUNDLE_VERSION = 2;
@@ -228,7 +230,7 @@ export interface ImportedBundle extends Bundle {
 
 /** A structured, recoverable bundle error with a stable code for the CLI to branch on. */
 export class BundleError extends Error {
-  constructor(public readonly code: 'no-index' | 'unreadable', message: string) {
+  constructor(public readonly code: 'no-index' | 'unreadable' | 'partial-index', message: string) {
     super(message);
     this.name = 'BundleError';
   }
@@ -521,6 +523,29 @@ export async function buildBundle(
     throw new BundleError(
       'no-index',
       `No "${ARTIFACT_CALL_GRAPH_DB}" found in ${analysisDir}. Run "openlore analyze" before exporting.`,
+    );
+  }
+
+  // A partial first-run index is local serving state, never a shareable artifact (change:
+  // refine-first-run-partial-serving). It lives OUTSIDE the analysis directory, so it cannot be
+  // swept into a bundle even in principle — that half is structural and needs no check. What
+  // this refuses is the other half: a live partial index with nothing published means a first
+  // build is still running here, so there is no complete index to export yet.
+  //
+  // There is deliberately no matching import-side check. A scan of the bundled context could
+  // only be a bounded prefix scan (the context is the largest member by far), and a bounded
+  // scan cannot decide a question about attacker-chosen key order — a guard that looks like a
+  // check but is not is worse than the structural argument standing on its own.
+  // Keyed on "a partial index is live AND no generation has been published", not on the stamp
+  // alone. A cleanup that failed (Windows EBUSY while a reader holds a descriptor) leaves a
+  // stamp whose pid is still alive, and refusing on that would block `openlore export` for ten
+  // minutes after a successful analyze. A published generation settles it: the index is complete.
+  if (await readPartialIndexStamp(analysisDir)
+    && await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]) === null) {
+    throw new BundleError(
+      'partial-index',
+      `A first analysis of ${analysisDir} is still running, so this index is incomplete. `
+      + 'Wait for it to finish, then export.',
     );
   }
 

@@ -36,14 +36,35 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     // artifact writer (`json-stream.ts`), which writes via a temp file handle + rename rather
     // than `writeFile` — without them analyze aborts at the artifact write and never reaches
     // what these cases actually assert.
-    open: vi.fn().mockImplementation((path, flags) => flags === 'r'
+    // `mkdir`/`writeFile` are stubbed, so no artifact ever reaches disk. The bounded artifact
+    // reader (`bounded-artifact-read.ts`) opens with a NUMERIC read-only flag set and then
+    // stats and reads that descriptor — where the old `readFile` stub sufficed, it now needs a
+    // handle-shaped stand-in, or generation publication fails on artifacts these cases never
+    // meant to exercise.
+    lstat: vi.fn().mockResolvedValue({ isSymbolicLink: () => false, ino: 1n, dev: 1n }),
+    open: vi.fn().mockImplementation((path, flags) => {
+      if (typeof flags === 'number' && (flags & 0o3) === 0) {
+        let drained = false;
+        const stat = async () => ({ isFile: () => true, size: 2n, dev: 1n, ino: 1n, mtimeNs: 1n, ctimeNs: 1n });
+        return Promise.resolve({
+          stat,
+          read: async (buffer: Buffer) => {
+            if (drained) return { bytesRead: 0 };
+            drained = true;
+            return { bytesRead: buffer.write('{}', 0, 'utf8') };
+          },
+          close: async () => {},
+        });
+      }
+      return flags === 'r'
       ? actual.open(path, flags)
       : Promise.resolve({
         write: vi.fn().mockResolvedValue({ bytesWritten: 0 }),
         writeFile: vi.fn().mockResolvedValue(undefined),
         sync: vi.fn().mockResolvedValue(undefined),
         close: vi.fn().mockResolvedValue(undefined),
-      })),
+      });
+    }),
     rename: vi.fn().mockResolvedValue(undefined),
     link: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),

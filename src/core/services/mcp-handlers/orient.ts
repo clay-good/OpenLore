@@ -18,7 +18,7 @@ import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
-import { readJsonArtifactCached, readDependencyGraphCached } from './artifact-cache.js';
+import { readJsonArtifactCached, readDependencyGraphOrPartial } from './artifact-cache.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
@@ -693,8 +693,8 @@ export async function handleOrient(
     if (rules.rules.length > 0 && relevantFiles.length > 0) {
       // Parsed once per version of the artifact, not once per orient.
       // (change: optimize-serving-hot-path-caches)
-      const depGraph = await readDependencyGraphCached<DependencyGraphResult>(
-        join(outputDir, 'dependency-graph.json'),
+      const depGraph = await readDependencyGraphOrPartial<DependencyGraphResult>(
+        outputDir, 'dependency-graph.json',
       );
       if (depGraph) {
         const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '');

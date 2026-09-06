@@ -22,6 +22,7 @@ import { ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '..
 import { gitPathArgs } from '../../../utils/git-args.js';
 import type { IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
+import type { PartialIndexStamp } from '../../runtime/partial-index.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
 
@@ -133,10 +134,44 @@ export function integrityDisclosure(integrity?: IndexIntegrity): IndexIntegrityD
 }
 
 /**
- * The repair-in-progress marker for a directory, or undefined when no background
- * repair is running. Handlers pass this into {@link assembleBoundary} so a stale
- * answer served during a self-heal is disclosed as *repairing*, not silently stale
- * (change: make-index-self-healing).
+ * Refuse to serve a negative conclusion computed from a partial first-run index
+ * (change: refine-first-run-partial-serving).
+ *
+ * A partial index is a SOUND LOWER BOUND on what exists: it can prove a caller is there, never
+ * that one is not. "This function is dead", "no test reaches this", "nothing calls it" are
+ * exactly the claims partiality inverts — the file holding the only caller may simply not have
+ * been reached yet — so they are withheld rather than downgraded. Positive lookups and
+ * navigation are unaffected and keep answering.
+ *
+ * The result carries no boundary of its own: `dispatchTool` attaches the completeness receipt to
+ * every response, so repeating the same paragraph here would send it twice.
+ *
+ * Returns null when the index is complete, so a handler reads as a one-line guard.
+ */
+export function withheldOnPartialIndex(
+  ctx: { partial?: PartialIndexStamp } | null | undefined,
+  conclusion: string,
+): {
+  error: string;
+  withheld: true;
+  reason: 'partial-index';
+  remedy: string;
+} | null {
+  if (!ctx?.partial) return null;
+  return {
+    error: `Withheld: ${conclusion} cannot be computed from a partial first-run index. `
+      + 'A negative conclusion drawn now could be inverted by a file this index has not '
+      + 'reached, so none is served.',
+    withheld: true,
+    reason: 'partial-index',
+    remedy: 'Re-run this tool once the first analysis completes.',
+  };
+}
+
+/**
+ * The repair-in-progress marker for a directory, or undefined when no background repair is
+ * running. Handlers pass this into {@link assembleBoundary} so a stale answer served during a
+ * self-heal is disclosed as *repairing*, not silently stale (change: make-index-self-healing).
  */
 export function repairDisclosure(directory: string): RepairInProgressMarker | undefined {
   const status = repairStatusFor(directory);

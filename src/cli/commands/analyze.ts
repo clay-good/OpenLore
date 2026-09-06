@@ -82,6 +82,16 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
   wait?: boolean;
   /** Repeatable workspace package names to recompute against the retained graph. */
   shard?: string[];
+  /**
+   * Internal: flush a partial index during an index-absent first build so tool calls made
+   * while it runs are answered from what exists (change: refine-first-run-partial-serving).
+   *
+   * Set explicitly by the background auto-init build, which also passes `--embedded` and so
+   * cannot be recognised as interactive any other way. An interactive `openlore analyze`
+   * turns the lane on by default; CI and embedded hosts leave it off and keep the
+   * single-write build.
+   */
+  partialServing?: boolean;
 }
 
 interface AnalysisResult {
@@ -200,6 +210,7 @@ export async function runAnalysis(
     reExtract?: boolean;
     ownership?: AnalysisOwnership & { state: 'owned' };
     shards?: string[];
+    partialServing?: boolean;
   },
 ): Promise<AnalysisResult> {
   const reporter = {
@@ -284,6 +295,7 @@ export const analyzeCommand = new Command('analyze')
   // Internal flag set by `openlore install` (hidden from help): install does the
   // agent wiring itself, so analyze must not also print its agent-onboarding tips.
   .addOption(new Option('--embedded').hideHelp())
+  .addOption(new Option('--partial-serving').hideHelp())
   .addOption(new Option('--fresh-spec-directory').hideHelp())
   .addHelpText(
     'after',
@@ -332,6 +344,12 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       embed: options.embed ?? false,
       reindexSpecs: options.reindexSpecs ?? false,
       aiConfigs: options.aiConfigs ?? false,
+      // A human waiting at a terminal for a first build is exactly who partial serving is
+      // for, so an interactive run opts in by default. An embedded/CI build keeps the
+      // single-write behaviour unless it asks for the lane by name — which the background
+      // auto-init build does, because it passes `--embedded` too.
+      partialServing: options.partialServing === true
+        || (options.embedded !== true && !process.env.CI),
       quiet: false,
       verbose: false,
       noColor: false,
@@ -550,6 +568,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
           reExtract: opts.force ?? false,
           ownership,
           shards: opts.shard,
+          partialServing: opts.partialServing,
         });
       } finally {
         await ownership.release();

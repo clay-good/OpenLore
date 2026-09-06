@@ -180,6 +180,16 @@ trust boundary for served content.
 | `widen-architecture-rule-vocabulary` | required, circular, reachable/orphan, captures, instability |
 | `widen-overlay-language-coverage` | Go error flow, Kotlin/Dart types, four CFG languages, Python/Go HTTP clients |
 
+Shipped and archived since: `refine-first-run-partial-serving` (2026-09-06) — an index-absent
+first build now flushes a partial index and serves the repository structure and dependency graph
+from it, with a completeness receipt attached at the dispatcher so every transport carries it,
+negative conclusions withheld, and the published output still byte-identical to a single-write
+build. Four rounds of adversarial review during the build also closed three PRE-EXISTING holes the
+feature made reachable in the state where `.openlore/` is most likely to be adversarial (a freshly
+cloned repo with no analysis): a named pipe under `.openlore/` could hang a tool call and stop the
+server from exiting, the generation-manifest reads that verify every artifact were unbounded, and
+a committed `.openlore/runtime` symlink redirected a recursive delete out of the repository.
+
 ## Maintenance rules (what kept this table honest)
 
 - Ship a `change: <name>` marker in the code, or expect this table to call the change unbuilt.

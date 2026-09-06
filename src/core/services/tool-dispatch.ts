@@ -18,6 +18,15 @@
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import type { DecisionScope } from '../../types/index.js';
 import { resolveCanonicalToolName, enforceConclusionContract } from './mcp-handlers/tool-contract.js';
+import { withPartialReceiptScope, partialReceiptForThisRequest } from './mcp-handlers/partial-request.js';
+import {
+  PARTIAL_INDEX_ABSENT_FACTS,
+  describePartialIndex,
+  partialBuildStagePercent,
+  readPartialIndexStamp,
+} from '../runtime/partial-index.js';
+import { join, resolve } from 'node:path';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from './config-manager.js';
 import { redactSecretsWithReport } from './secret-redaction.js';
@@ -143,9 +152,57 @@ export async function dispatchTool(
   signal?: AbortSignal,
 ): Promise<unknown> {
   const canonical = resolveCanonicalToolName(name);
-  const result = await dispatchToolImpl(canonical, args, directory, signal);
-  const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
-  return redactSourceToolResult(canonical, checked, directory);
+  return withPartialReceiptScope(async () => {
+    const result = await dispatchToolImpl(canonical, args, directory, signal);
+    const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
+    return withPartialIndexReceipt(await redactSourceToolResult(canonical, checked, directory), directory);
+  });
+}
+
+/**
+ * Attach the completeness receipt to a result computed from a partial first-run index.
+ *
+ * Here, in the one place every transport passes through, rather than in each handler or at one
+ * transport's response assembly: the serve daemon `sendJson`s this object, the stdio server
+ * serializes it, and every CLI wrapper prints it — so a receipt attached here cannot be dropped
+ * by choosing a different front end. Handlers stay unaware of it.
+ *
+ * A non-object result (a plain string from `get_signatures`, say) is returned untouched; those
+ * tools do not answer from the context, and wrapping them would change their contract.
+ */
+async function withPartialIndexReceipt(result: unknown, directory: string): Promise<unknown> {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  // Two ways a response is partial-index-shaped, and both must disclose. The first is an
+  // answer COMPUTED FROM a partial index — the read path recorded it in this request's scope,
+  // at no I/O cost. The second is a tool that could not answer at all: it says "run openlore
+  // analyze", which during a first build is advice to run the command that is already running.
+  // A not-ready result is the cold path by definition, so it can afford to ask the filesystem
+  // whether a build is in flight — and that is the case where the answer matters most.
+  // `notReady` OR a bare `{error}`: about eighteen handlers report an unusable index with a
+  // plain error string rather than the structured not-ready shape, and every one of them says
+  // "run analyze" during a build that is already running. Both are cold paths — the handler
+  // produced no answer — so both can afford the one stat that tells the caller the truth.
+  const failed = (result as { notReady?: unknown }).notReady === true
+    || typeof (result as { error?: unknown }).error === 'string';
+  const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const stamp = partialReceiptForThisRequest()
+    ?? (failed ? await readPartialIndexStamp(analysisDir) : null);
+  // The receipt says "THIS repository's first analysis is still running", so it must describe
+  // the repository the caller asked about. A federated read consults a PEER's context, and a
+  // peer mid-build would otherwise stamp a local, complete answer with the peer's file counts.
+  // The stamp names the directory it was written for precisely so this can be checked.
+  if (!stamp || resolve(stamp.analysisDir) !== resolve(analysisDir)) return result;
+  return {
+    ...(result as Record<string, unknown>),
+    partialIndex: {
+      partial: true as const,
+      buildPhase: stamp.buildPhase,
+      buildStagePercent: partialBuildStagePercent(stamp),
+      filesMapped: stamp.filesMapped,
+      absent: [...PARTIAL_INDEX_ABSENT_FACTS],
+      detail: describePartialIndex(stamp),
+    },
+  };
 }
 
 export const SOURCE_CARRYING_TOOLS = new Set([

@@ -3078,6 +3078,17 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             text: `\n[openlore index] ${repairDisclosureText(repair.reason)} Informational signal.\n`,
           });
         }
+        // The completeness receipt for a partial first-run index (change:
+        // refine-first-run-partial-serving). `dispatchTool` attaches it to the RESULT, so it
+        // reaches this transport, the serve daemon, and every CLI wrapper alike — and this
+        // rendering can never disagree with the structured field a programmatic caller reads.
+        const partialIndex = (result as { partialIndex?: { detail?: unknown } } | null)?.partialIndex;
+        if (partialIndex && typeof partialIndex.detail === 'string') {
+          content.push({
+            type: 'text',
+            text: `\n[openlore index] ${partialIndex.detail} Informational signal.\n`,
+          });
+        }
       }
 
       if (tracker && (panicPolicy === 'advisory' || panicPolicy === 'experimental_blocking')) {

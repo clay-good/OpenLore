@@ -248,6 +248,15 @@ export interface LLMContext {
   /** Reconciled ownership domains shared by standalone and agent-hosted consumers. */
   domains?: DetectedDomain[];
   /**
+   * Present ONLY on a partial first-run index (change: refine-first-run-partial-serving),
+   * which lives in its own runtime directory and is never an analysis artifact. Its
+   * presence on a parsed context is the single signal that says "this answer was computed
+   * from an index that is still being built" — the completeness receipt every consumer
+   * discloses, and the reason negative conclusions are withheld. A published analysis
+   * never carries it.
+   */
+  partial?: import('../runtime/partial-index.js').PartialIndexStamp;
+  /**
    * Per-function CFG + reaching-definitions overlay (spec:
    * add-intraprocedural-cfg-dataflow-overlay). Transient: written to the SQLite
    * store but STRIPPED before llm-context.json is persisted, so it never enters
@@ -681,6 +690,23 @@ export class AnalysisArtifactGenerator {
     }
 
     return artifacts;
+  }
+
+  /**
+   * The repository structure alone, without the call-graph pass.
+   *
+   * The partial first-run index (change: refine-first-run-partial-serving) is flushed at
+   * phase boundaries that precede that pass, so it needs exactly this much and nothing
+   * more. Deliberately a thin accessor rather than a second code path: the structure a
+   * partial index serves is byte-for-byte the structure the completed build computes from
+   * the same inputs, minus the undomained roll-up `generate()` layers on afterwards.
+   */
+  generateStructureOnly(
+    repoMap: RepositoryMap,
+    depGraph: DependencyGraphResult,
+    enrichment?: EnrichmentData,
+  ): RepoStructure {
+    return this.generateRepoStructure(repoMap, depGraph, enrichment);
   }
 
   /**
