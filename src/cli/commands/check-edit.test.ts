@@ -94,8 +94,14 @@ describe('check-edit path and hook payload parsing', () => {
     expect(repoRelativeFile(root, 'src/missing.ts')).toBeUndefined();
   });
 
-  it('resolves a path reached through a symlinked repository root', async () => {
-    if (!aliasAvailable) return; // premise unbuildable here; the assertions above still ran
+  // skipIf(win32): NOT because the premise is unbuildable — the runner does create the symlink,
+  // and the hook-payload case below resolves through it fine. This one fails there for a reason
+  // worth stating: it passes the CANONICAL root while the file arrives through the alias, and
+  // Windows resolution returns undefined for that pairing where POSIX returns `src/api.ts`.
+  // The blanket file-level skip this replaces was hiding that difference rather than a missing
+  // fixture. Tracked in #452; the three cases around it now run on Windows.
+  it.skipIf(process.platform === 'win32')('resolves a path reached through a symlinked repository root', async () => {
+    if (!aliasAvailable) return; // premise genuinely unbuildable on this host
     const canonicalRoot = await realpath(root);
     expect(repoRelativeFile(canonicalRoot, join(alias, 'src', 'api.ts'))).toBe('src/api.ts');
   });
