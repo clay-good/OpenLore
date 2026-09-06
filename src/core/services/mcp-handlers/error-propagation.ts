@@ -22,6 +22,10 @@
 import { relative } from 'node:path';
 import type Parser from 'tree-sitter';
 import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
+import {
+  loadDynamicBoundaryReport,
+  dynamicBoundaryCrossing,
+} from './dynamic-boundary-disclosure.js';
 import { readFileConfined } from '../../../utils/path-confinement.js';
 import {
   ERROR_PROPAGATION_LANGUAGES,
@@ -386,10 +390,19 @@ export async function handleAnalyzeErrorPropagation(
     if (external.size) boundaries.add(`${external.size} external/unresolved callee(s) not analyzed — their returned errors and panics are out of scope, never assumed none.`);
     if (testCallees.size) boundaries.add(`${testCallees.size} test-only callee(s) excluded from the production Go error-flow result.`);
     releaseTrees(trees);
+    // Dynamic-boundary disclosure (change: disclose-dynamic-boundary-regions). This surface's
+    // disclosure is a free-text `boundaries` list, so the sentence is RENDERED FROM the structured
+    // crossing that also rides the result — one source, so the two cannot say different things.
+    const dynamicCrossing = dynamicBoundaryCrossing(
+      await loadDynamicBoundaryReport(absDir),
+      [query.filePath, ...escapes.map(e => e.originFile)],
+    );
+    if (dynamicCrossing) boundaries.add(dynamicCrossing.detail);
     return {
       query: queryLabel, errorModel: 'go-value',
       summary: { escapes: escapes.length, returnedErrors: escapes.filter(e => e.kind !== 'panic').length, panics: escapes.filter(e => e.kind === 'panic').length, propagated: escapes.filter(e => e.kind === 'propagated_error').length, handledInternally: handledList.length, functionsAnalyzed: analyzed, externalCalleesNotAnalyzed: external.size },
       escapes, handledInternally: handledList, boundaries: [...boundaries].sort(),
+      ...(dynamicCrossing ? { dynamicBoundaries: dynamicCrossing } : {}),
       ...(external.size ? { externalCalleesNotAnalyzed: { count: external.size, sample: [...external].sort().slice(0, 15) } } : {}),
       note: 'Go model: escapes are returned error values and unrecovered panics; handledInternally are checked-and-not-returned errors and recovered panics. This is a sound lower bound: unresolved calls and discarded results are disclosed in boundaries.',
     };
@@ -695,6 +708,17 @@ export async function handleAnalyzeErrorPropagation(
     );
   }
 
+  // Dynamic-boundary disclosure (change: disclose-dynamic-boundary-regions). Same rule as the Go
+  // lane: the sentence in `boundaries` is RENDERED FROM the structured crossing that also rides the
+  // result, so the free-text and structured disclosures cannot diverge. A callee reached only
+  // through a reflective dispatch is not in the escape set at all, which is exactly why a clean
+  // escape set next to a site must not read as "this function throws nothing".
+  const dynamicCrossing = dynamicBoundaryCrossing(
+    await loadDynamicBoundaryReport(absDir),
+    [query.filePath, ...escapeList.map(e => e.originFile)],
+  );
+  if (dynamicCrossing) boundaries.add(dynamicCrossing.detail);
+
   const directCount = escapeList.filter(e => e.kind === 'direct').length;
   const declaredCount = escapeList.filter(e => e.kind === 'declared').length;
   const propagatedCount = escapeList.filter(e => e.kind === 'propagated').length;
@@ -718,6 +742,7 @@ export async function handleAnalyzeErrorPropagation(
     escapes: escapeList,
     handledInternally: handledList,
     boundaries: [...boundaries].sort(),
+    ...(dynamicCrossing ? { dynamicBoundaries: dynamicCrossing } : {}),
     ...(externalCallees.size > 0
       ? { externalCalleesNotAnalyzed: { count: externalCallees.size, sample: externalSample.slice(0, 15) } }
       : {}),

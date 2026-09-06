@@ -30,6 +30,12 @@
 import { validateDirectory, readCachedContext } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
 import { deadCodeIds } from './reachability.js';
+import {
+  loadDynamicBoundaryReport,
+  loadImportAdjacency,
+  dynamicBoundaryCrossing,
+  buildQualifier,
+} from './dynamic-boundary-disclosure.js';
 import { seedsFromSymbols, seedsFromFiles } from './test-impact.js';
 import { computeLandmarkSignals, type LandmarkSignal } from '../../analyzer/landmark-signals.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
@@ -76,6 +82,17 @@ interface CoverageGap {
    * untested symbol (e.g. an entry point invoked by a framework): untested-not-dead.
    */
   alsoFlaggedDead?: true;
+  /**
+   * The `also-dead` label was WITHHELD because a dynamic-boundary site can name this symbol
+   * (change: disclose-dynamic-boundary-regions). `also-dead` asserts that nothing calls the symbol;
+   * a reflective, computed, or container-resolved dispatch that can reach it is precisely the
+   * evidence that no such assertion is established. The symbol is still reported as a gap — the
+   * boundary withholds a claim, it never implies the symbol is tested or reached.
+   */
+  deadLabelWithheld?: {
+    reason: 'dynamic-boundary';
+    site: { file: string; line: number; kind: string };
+  };
   /**
    * WHY the symbol landed in the dead set (change: demote-dead-flagged-coverage-gaps).
    * Present exactly when `alsoFlaggedDead` is — the boolean's meaning is unchanged.
@@ -209,6 +226,12 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // Strict mode is threaded into the dead set too, so `alsoFlaggedDead` rests on
   // the SAME edge basis as the gap partition (no strict/non-strict disagreement).
   const deadIds = await deadCodeIds(absDir, cg, { directResolvedOnly: input.directResolvedOnly });
+  // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions), read once per invocation.
+  const dynamicReport = await loadDynamicBoundaryReport(absDir);
+  const qualifyDynamic = buildQualifier(
+    dynamicReport,
+    dynamicReport ? await loadImportAdjacency(absDir) : new Map(),
+  );
   const landmarks = computeLandmarkSignals(cg, { deadIds });
   const signalsById = new Map(landmarks.map(l => [l.id, l.signals]));
 
@@ -222,9 +245,21 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
       signals,
     };
     if (deadIds.has(n.id)) {
-      gap.alsoFlaggedDead = true;
-      // Derived from the dead set + the node's own fan-in — no extra traversal.
-      gap.deadReason = gap.fanIn > 0 ? 'dead-via-unreachable-callers' : 'no-callers';
+      // `also-dead` asserts the ABSENCE of any caller. A dynamic-boundary site that can name this
+      // symbol is exactly the evidence that such an assertion is not established, so the label is
+      // WITHHELD rather than qualified (change: disclose-dynamic-boundary-regions). One-directional:
+      // the symbol is still reported as a gap — the boundary never implies it is tested or reached.
+      const hidden = qualifyDynamic(n.filePath, n.language);
+      if (hidden) {
+        gap.deadLabelWithheld = {
+          reason: 'dynamic-boundary',
+          site: { file: hidden.file, line: hidden.site.line, kind: hidden.site.kind },
+        };
+      } else {
+        gap.alsoFlaggedDead = true;
+        // Derived from the dead set + the node's own fan-in — no extra traversal.
+        gap.deadReason = gap.fanIn > 0 ? 'dead-via-unreachable-callers' : 'no-callers';
+      }
     }
     return gap;
   });
@@ -312,7 +347,15 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // add-confidence-boundary-disclosure)
   const reachBasis = edgeBasisWithinSet(cg.edges, reachedByTest);
   const staleness = await computeStaleness(absDir);
-  const confidenceBoundary = assembleBoundary({ basis: reachBasis, staleness, integrity: ctx?.integrity });
+  // Scoped to the files this report actually names, never the repository (change:
+  // disclose-dynamic-boundary-regions).
+  const dynamicCrossing = dynamicBoundaryCrossing(dynamicReport, gaps.map(g => g.file));
+  const confidenceBoundary = assembleBoundary({
+    basis: reachBasis,
+    staleness,
+    integrity: ctx?.integrity,
+    ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+  });
 
   const testedCount = inScope.filter(n => reachedByTest.has(n.id)).length;
 

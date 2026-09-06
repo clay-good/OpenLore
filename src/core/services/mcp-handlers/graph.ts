@@ -57,6 +57,10 @@ import {
   repairDisclosure,
   type BoundaryEdge,
 } from './confidence-boundary.js';
+import {
+  loadDynamicBoundaryReport,
+  dynamicBoundaryCrossing,
+} from './dynamic-boundary-disclosure.js';
 import { computeIndexStaleness, withIndexStaleness } from './index-staleness.js';
 
 // ============================================================================
@@ -903,7 +907,22 @@ export async function handleAnalyzeImpact(
       if (e.calleeId && involvedIds.has(e.calleeId)) impactEdges.push({ confidence: e.confidence, synthesizedBy: e.synthesizedBy });
     }
   }
-  const confidenceBoundary = assembleBoundary({ basis: edgeBasis(impactEdges), staleness: await computeStaleness(absDir), integrity: ctx?.integrity, repair: repairDisclosure(absDir) });
+  // Dynamic-boundary sites inside the traversed subgraph (change:
+  // disclose-dynamic-boundary-regions). The impact set is already a lower bound; this names the
+  // constructs that make it one, scoped to the files the traversal actually reached.
+  // `involvedFiles` is the seed plus every upstream/downstream/infra neighbour's file — exactly the
+  // subgraph this answer traversed, and already assembled above for the governing-decisions join.
+  const dynamicCrossing = dynamicBoundaryCrossing(
+    await loadDynamicBoundaryReport(absDir),
+    involvedFiles,
+  );
+  const confidenceBoundary = assembleBoundary({
+    basis: edgeBasis(impactEdges),
+    staleness: await computeStaleness(absDir),
+    integrity: ctx?.integrity,
+    repair: repairDisclosure(absDir),
+    ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+  });
 
   // Unresolved-ambiguous call sites touching the impact set (change:
   // harden-call-resolution-ambiguity). A site whose CALLER is in-scope is an outbound

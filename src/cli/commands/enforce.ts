@@ -243,6 +243,37 @@ export function impactCertificateFindings(cert: ImpactCertificate): GovernanceFi
   });
 }
 
+/**
+ * Map an impact certificate's dynamic-boundary crossing onto a governance finding (change:
+ * disclose-dynamic-boundary-regions).
+ *
+ * This is a QUALIFICATION, not an informational disclosure — which is the spec's condition for
+ * emitting at all. The certificate's central claim is negative ("this change opens no new path into
+ * a declared surface"), and a reflective, computed, or container-resolved dispatch in the changed
+ * files is precisely the construct that can open one without leaving an edge. The finding says that
+ * claim is not established here and names the site.
+ *
+ * Advisory by default, like every non-corpus code: the gate reports it and does not block until a
+ * policy classes it `blocking`. The `info` severity rides the emitted finding, never the registry.
+ * Pure; no I/O.
+ */
+export function dynamicBoundaryFindings(cert: ImpactCertificate): GovernanceFinding[] {
+  const crossing = cert.dynamicBoundaries;
+  if (!crossing?.sites?.length) return [];
+  return [...crossing.sites]
+    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line
+      || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
+    .map((site) => ({
+      code: 'dynamic-boundary-in-conclusion-scope',
+      severity: 'info' as const,
+      source: 'dynamic-boundary',
+      subject: `${site.file}:${site.line}`,
+      discriminator: site.kind,
+      message: `a ${site.kind} here is dispatch the call graph cannot follow, so "no new path into a `
+        + 'declared surface" is not established for this change.',
+    }));
+}
+
 /** Adapt source-rich corpus intent findings to the unified enforcement shape. */
 export function corpusIntentGovernanceFindings(
   findings: readonly CorpusIntentFinding[],
@@ -488,6 +519,7 @@ export async function collectGovernanceFindings(
       const cert = await computeImpactCertificate({ directory: cwd, baseRef });
       if (!('error' in cert)) {
         findings.push(...impactCertificateFindings(cert));
+        findings.push(...dynamicBoundaryFindings(cert));
         if (impactCertificateAssessmentComplete(cert)) {
           assessedCodes.add('surface-info');
           assessedCodes.add('surface-warn');

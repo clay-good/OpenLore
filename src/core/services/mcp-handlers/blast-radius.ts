@@ -23,6 +23,10 @@ import { seedsFromFiles, handleSelectTests } from './test-impact.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
+import {
+  loadDynamicBoundaryReport,
+  dynamicBoundaryCrossing,
+} from './dynamic-boundary-disclosure.js';
 import type { ConfidenceBoundary } from './confidence-boundary.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { DriftIssue, DriftResult } from '../../../types/index.js';
@@ -372,7 +376,17 @@ export async function computeBlastRadius(
   // the working tree must say so (fix-cli-conclusion-honesty). Same shared shape the
   // certification commands emit; absent when the index is current.
   const staleness = await computeStaleness(absDir);
-  const confidenceBoundary = assembleBoundary({ staleness, integrity: ctx.integrity });
+  // Dynamic-boundary sites in the changed files and the caller closure this briefing computed
+  // (change: disclose-dynamic-boundary-regions) — the constructs that make the radius a lower bound.
+  const dynamicCrossing = dynamicBoundaryCrossing(
+    await loadDynamicBoundaryReport(absDir),
+    [...changedFiles, ...seeds.map(s => s.filePath)],
+  );
+  const confidenceBoundary = assembleBoundary({
+    staleness,
+    integrity: ctx.integrity,
+    ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+  });
 
   // Federation block: forward the composed select_tests result when it ran, otherwise
   // a truthful note. Never claim the shipped federation capability is unshipped

@@ -34,8 +34,14 @@ import { join } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
 import { loadTraversalIndex } from './traversal.js';
-import { assembleBoundary, computeStaleness, edgeBasisWithinSet, withheldOnPartialIndex } from './confidence-boundary.js';
+import { assembleBoundary, computeStaleness, edgeBasisWithinSet, withheldOnPartialIndex, type KnownUnknowableCrossing } from './confidence-boundary.js';
 import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
+import {
+  loadDynamicBoundaryReport,
+  dynamicBoundaryCrossing,
+  buildQualifier,
+  qualificationReason,
+} from './dynamic-boundary-disclosure.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -107,6 +113,13 @@ interface DepSignals {
    *  used" signal that catches namespace/default/re-export usage named-import
    *  detection misses. A symbol in a consumed module can't be high-confidence dead. */
   files: Set<string>;
+  /**
+   * Forward import adjacency, repo-relative path → the paths it imports. Used to compute the set of
+   * files that can NAME a candidate's module (change: disclose-dynamic-boundary-regions), which is
+   * what keeps a dynamic-boundary qualification scoped to the candidate's own reachable
+   * neighbourhood instead of the whole repository.
+   */
+  imports: Map<string, string[]>;
 }
 
 /** Load the cross-file import signals from the dependency graph. */
@@ -115,17 +128,24 @@ async function loadDepSignals(absDir: string): Promise<DepSignals | null> {
     const raw = await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH), 'utf-8');
     const g = JSON.parse(raw) as {
       nodes?: Array<{ id: string; file?: { path?: string } }>;
-      edges?: Array<{ target?: string; importedNames?: string[] }>;
+      edges?: Array<{ source?: string; target?: string; importedNames?: string[] }>;
     };
     const names = new Set<string>();
     const idToPath = new Map((g.nodes ?? []).map(n => [n.id, n.file?.path ?? '']));
     const files = new Set<string>();
+    const imports = new Map<string, string[]>();
     for (const e of g.edges ?? []) {
       for (const n of e.importedNames ?? []) names.add(n);
       const path = e.target ? idToPath.get(e.target) : undefined;
       if (path) files.add(path);
+      const from = e.source ? idToPath.get(e.source) : undefined;
+      if (from && path) {
+        const list = imports.get(from);
+        if (list) list.push(path);
+        else imports.set(from, [path]);
+      }
     }
-    return { names, files };
+    return { names, files, imports };
   } catch {
     return null;
   }
@@ -242,7 +262,12 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // add-confidence-boundary-disclosure)
   const liveBasis = edgeBasisWithinSet(cg.edges, live);
   const staleness = await computeStaleness(absDir);
-  const confidenceBoundary = assembleBoundary({ basis: liveBasis, staleness, integrity: ctx?.integrity });
+  const boundaryParts = { basis: liveBasis, staleness, integrity: ctx?.integrity };
+  // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions). Read once per invocation —
+  // and not at all beyond this, since a repository with no site has no artifact. The crossing itself
+  // is assembled per answer, from the files THAT answer touched, never from the repository.
+  const dynamicReport = await loadDynamicBoundaryReport(absDir);
+  const qualifyDynamic = buildQualifier(dynamicReport, dep?.imports ?? new Map());
 
   // ── Delete-impact mode: "what becomes dead if I delete X?" ──────────────────
   if (input.ifDeleted !== undefined) {
@@ -273,7 +298,13 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         : 'These nodes are reachable only through the target. Deleting it orphans them — verify before removing (dynamic callers are invisible here).',
       ...(federationRequested ? { federationNote: 'Federation scope is not applied in delete-impact (ifDeleted) mode — it is a within-repo reachability query. To see cross-repo consumers that keep a symbol live, call find_dead_code with federation and without ifDeleted, or analyze_impact with federation.' } : {}),
       soundness: deadCodeSoundness(exportSignal, languages),
-      confidenceBoundary,
+      confidenceBoundary: assembleBoundary({
+        ...boundaryParts,
+        extraCrossings: crossingsOf(dynamicBoundaryCrossing(
+          dynamicReport,
+          [target.filePath, ...becomesDead.map(n => n.file)],
+        )),
+      }),
     };
   }
 
@@ -327,6 +358,21 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (scriptContainerFiles.has(n.filePath)) {
         confidence = 'low';
         reasons.push('script-container templates and framework macros are unanalyzed and may invoke this symbol');
+      }
+
+      // A dynamic-boundary site that can NAME this symbol (change:
+      // disclose-dynamic-boundary-regions). Two rules make this a refinement rather than a third
+      // downgrade:
+      //   - it never lowers confidence a second time. `low` is already the floor the dynamic-language
+      //     rule sets, and a candidate a whole-language cap already covers is not made "more dead".
+      //   - it REPLACES the generic caveat with the specific site, so the reader learns which
+      //     construct bounds the answer rather than only that the language is dynamic.
+      // The shipped language-level cap remains the floor for a language with no matcher, because a
+      // language with no matcher records no sites and this simply never fires for it.
+      const dynamicHit = qualifyDynamic(n.filePath, n.language);
+      if (dynamicHit) {
+        confidence = 'low';
+        reasons.push(qualificationReason(dynamicHit));
       }
 
       return {
@@ -411,8 +457,19 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     ...(federationBlock ? { federation: federationBlock } : {}),
     soundness: deadCodeSoundness(exportSignal, languages),
     ...(parseHealthNote ? { parseHealthBoundary: parseHealthNote } : {}),
-    confidenceBoundary,
+    confidenceBoundary: assembleBoundary({
+      ...boundaryParts,
+      extraCrossings: crossingsOf(dynamicBoundaryCrossing(
+        dynamicReport,
+        finalRanked.map(r => r.file),
+      )),
+    }),
   };
+}
+
+/** `extraCrossings` takes a list; a helper keeps every call site from repeating the same ternary. */
+function crossingsOf(crossing: KnownUnknowableCrossing | undefined): KnownUnknowableCrossing[] {
+  return crossing ? [crossing] : [];
 }
 
 function deadCodeSoundness(exportSignal: 'dependency-graph' | 'none', languages: string[]): {

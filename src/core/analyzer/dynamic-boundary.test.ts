@@ -339,14 +339,13 @@ end
 });
 
 describe('evidence is safe before it is persisted', () => {
+  const ESC = String.fromCharCode(27);
+
   it('redacts a credential and strips terminal control sequences', () => {
-    const { evidence } = toEvidence(
-      // eslint-disable-next-line no-control-regex -- deliberate: an ESC smuggled through source
-      'eval("sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")[2J',
-    );
-    expect(evidence).not.toContain('sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
-    // eslint-disable-next-line no-control-regex -- asserting the ESC is gone
-    expect(evidence).not.toMatch(//);
+    const key = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const { evidence } = toEvidence(`eval("${key}")${ESC}[2J`);
+    expect(evidence).not.toContain(key);
+    expect(evidence).not.toContain(ESC);
     expect(evidence).toContain('eval(');
   });
 

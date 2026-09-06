@@ -30,6 +30,11 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
+import {
+  loadDynamicBoundaryReport,
+  dynamicBoundaryCrossing,
+} from './dynamic-boundary-disclosure.js';
+import type { KnownUnknowableCrossing } from './confidence-boundary.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js';
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
@@ -133,6 +138,15 @@ export interface ImpactCertificate {
   highestSurfaceSeverity: CoveringSurfaceSeverity | 'none';
   posture: 'advisory';
   caveats: string[];
+  /**
+   * Dispatch sites in the changed files that the call graph cannot follow (change:
+   * disclose-dynamic-boundary-regions). The certificate's central claim is a NEGATIVE one — "this
+   * change opens no new path into a declared surface" — and a reflective, computed, or
+   * container-resolved dispatch in the diff is exactly the construct that can open one invisibly.
+   * The crossing names which site, so the qualification is specific rather than the standing caveat.
+   * Absent when the change touches no site.
+   */
+  dynamicBoundaries?: KnownUnknowableCrossing;
   headline: string;
 }
 
@@ -910,6 +924,15 @@ export async function computeImpactCertificate(
     'Newly-opened-path detection is over the static call graph: dynamic dispatch, reflection, and DI can hide a real opening (under-approximation) — verify rather than assume "no new reach".',
     'A surface is the declared boundary; symbols outside every declared surface are not assessed.',
   ];
+  // The caveat above states the posture for every certificate. When the change actually TOUCHES a
+  // recorded dynamic-boundary site, say which one (change: disclose-dynamic-boundary-regions): the
+  // structured crossing rides the certificate and the sentence is rendered from it, so the reader
+  // learns which construct could hide an opening rather than only that some construct might.
+  const dynamicCrossing = dynamicBoundaryCrossing(
+    await loadDynamicBoundaryReport(absDir),
+    changedFiles,
+  );
+  if (dynamicCrossing) caveats.push(dynamicCrossing.detail);
   if (diffError) caveats.push(`The change diff could not be read (base ${baseRef}): ${diffError}. Newly-opened paths were not computed.`);
   // Only reachable when --allow-base-fallback was set (an unresolvable base is otherwise fatal).
   if (baseResolution.fellBack) caveats.push(`Requested base ref "${baseResolution.requested}" did not resolve; certified against "${resolvedBaseRef}" (--allow-base-fallback).`);
@@ -940,6 +963,7 @@ export async function computeImpactCertificate(
     highestSurfaceSeverity: highestRank === 0 ? 'none' : (['', 'info', 'warn', 'critical'][highestRank] as CoveringSurfaceSeverity),
     posture: 'advisory',
     caveats,
+    ...(dynamicCrossing ? { dynamicBoundaries: dynamicCrossing } : {}),
     headline: '',
   };
   cert.headline = renderHeadline(cert);

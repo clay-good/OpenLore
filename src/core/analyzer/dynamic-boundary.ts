@@ -374,7 +374,7 @@ type ImportStyle = 'js' | 'python' | 'jvm' | 'go' | 'php';
 
 /** Escape a package/namespace token for embedding in a `RegExp`. */
 function escapeToken(token: string): string {
-  return token.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+  return token.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 }
 
 /**
