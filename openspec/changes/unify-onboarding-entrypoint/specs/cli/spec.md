@@ -42,10 +42,14 @@ and `--uninstall` SHALL remove only OpenLore-managed entries from both scopes.
 Background auto-initialization SHALL apply only to git work trees; SHALL be suppressible per
 repo (`autoInit: false` in `.openlore/config.json`) and per environment
 (`OPENLORE_NO_AUTO_ANALYZE`); SHALL disclose its first run in a repo with a single
-non-blocking notice naming what was built and how to opt out; and SHALL degrade to a
-signatures/keyword-only build with an explicit degradation disclosure above a file-count
-ceiling. Auto-init SHALL never block a tool call, never write outside the repo's `.openlore`
-directory and the user-level cache, and never run twice concurrently for one repo.
+non-blocking notice naming what was built, where it landed, and how to opt out; and SHALL
+degrade to a signatures/keyword-only build with an explicit degradation disclosure above a
+file-count ceiling. Auto-init SHALL never block a tool call, never write outside the repo's
+`.openlore` directory and the user-level cache, and never run twice concurrently for one repo.
+Auto-init SHALL NOT install a git hook: writing executable repository configuration into a
+repository the user has run no command in is a different consent class from building a local
+index, and a one-line disclosure in a tool response is not consent for it. The commit gate is
+wired by an explicit `openlore install` only.
 
 #### Scenario: Non-repo directory is never indexed
 
@@ -60,17 +64,25 @@ directory and the user-level cache, and never run twice concurrently for one rep
 - **THEN** no background build starts and the not-ready conclusion names the opt-out as the
   reason with the one manual command to build
 
+#### Scenario: Auto-init installs no git hook
+
+- **GIVEN** a git repository the user has run no OpenLore command in
+- **WHEN** background auto-init builds its index
+- **THEN** no pre-commit or post-commit hook is written; the decision trail is wired only by an
+  explicit `openlore install` in that repository
+
 ## MODIFIED Requirements
 
 ### Requirement: ZeroInteractionOnboarding
 
 The zero-interaction path SHALL extend from "one command per repo" to "one command per
 user": the postinstall hint SHALL stay exactly `openlore install` (which now wires the user
-scope by default), and every repo wiring — explicit or auto-init — SHALL include the
-decisions pre-commit hook in autopilot (non-blocking, trail-only) mode once decision
-autopilot exists, so the single entrypoint yields both the navigation face and the
-governance trail with no additional command or flag. Blocking review mode SHALL remain an
-explicit opt-in. All existing zero-interaction behavior (CI/TTY-guarded postinstall,
+scope by default), and every EXPLICIT repo wiring SHALL include the decisions pre-commit hook
+in autopilot (non-blocking, trail-only) mode, so the single entrypoint yields both the
+navigation face and the governance trail with no additional command or flag. A repository
+whose config already sets `governance.autopilot: false` SHALL keep blocking review mode —
+an explicit choice is never flipped — and blocking review mode SHALL remain an explicit
+opt-in everywhere else. All existing zero-interaction behavior (CI/TTY-guarded postinstall,
 non-blocking cold-start build, `connect --yes`, passive update notifier) is unchanged.
 
 #### Scenario: Installing the package does not touch the project

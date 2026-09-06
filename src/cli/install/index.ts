@@ -208,12 +208,81 @@ export function resolveUserScopeRoot(explicit?: string): string {
   return homedir();
 }
 
+/**
+ * Wire the decisions commit gate in AUTOPILOT mode — one entrypoint, both faces.
+ *
+ * Autopilot means the gate records and syncs verified decisions and NEVER blocks a
+ * commit (change: add-decision-autopilot). Blocking human review stays an explicit
+ * opt-in, so a user who runs the one advertised command gains a decision trail and
+ * loses nothing: the doctrine is advisory by default, blocking on request.
+ *
+ * Fail-soft in every direction. Not a git repository, no config yet, an explicit
+ * `autopilot: false`, an unwritable hook path — each is a one-line note, never a
+ * failed install (change: unify-onboarding-entrypoint).
+ */
+export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skipped'> {
+  try {
+    const { isGitRepository } = await import('../../core/drift/git-diff.js');
+    if (!(await isGitRepository(cwd))) {
+      logger.info('Decision trail', 'skipped — not a git repository, so there is no commit gate to wire');
+      return 'skipped';
+    }
+    const { readOpenLoreConfig, writeOpenLoreConfig } = await import('../../core/services/config-manager.js');
+    const config = await readOpenLoreConfig(cwd);
+    if (!config) {
+      logger.info('Decision trail', 'skipped — no .openlore/config.json yet; run "openlore install" again after init');
+      return 'skipped';
+    }
+    if (config.governance?.autopilot === false) {
+      // An explicit false is a considered choice for blocking human review. Wire
+      // the hook, but never flip the mode out from under it.
+      logger.info('Decision trail', 'governance.autopilot is explicitly false — installing the gate in blocking review mode, as configured');
+    } else if (config.governance?.autopilot !== true) {
+      await writeOpenLoreConfig(cwd, { ...config, governance: { ...config.governance, autopilot: true } });
+    }
+    const { installPreCommitHook } = await import('../commands/decisions.js');
+    const exitCodeBefore = process.exitCode;
+    await installPreCommitHook(cwd);
+    if (process.exitCode !== undefined && process.exitCode !== 0 && process.exitCode !== exitCodeBefore) {
+      // installPreCommitHook reports its own failures by setting exitCode. A commit
+      // gate that could not be installed must not fail the whole install.
+      process.exitCode = exitCodeBefore;
+      logger.info('Decision trail', 'the commit gate could not be installed — see the message above; everything else is wired');
+      return 'skipped';
+    }
+    return 'wired';
+  } catch (error) {
+    logger.info('Decision trail', `skipped — ${(error as Error).message}`);
+    return 'skipped';
+  }
+}
+
+/** Remove the decisions commit gate on `--uninstall`. Quiet when there is nothing to remove. */
+export async function unwireGovernanceGate(cwd: string): Promise<void> {
+  try {
+    const { isGitRepository } = await import('../../core/drift/git-diff.js');
+    if (!(await isGitRepository(cwd))) return;
+    const { uninstallPreCommitHook } = await import('../commands/decisions.js');
+    await uninstallPreCommitHook(cwd);
+  } catch {
+    // Never fail an uninstall over a hook we may not have installed.
+  }
+}
+
 export interface SurfaceStatus {
   agent: AgentName;
   /** A marker for this agent was found in the project tree. */
   detected: boolean;
   /** OpenLore is already fully wired for this agent (a fresh apply would be a no-op). */
   connected: boolean;
+  /** Does this agent have a user-scope surface OpenLore can wire? */
+  supportsUserScope: boolean;
+  /**
+   * OpenLore's managed footprint is present at the USER scope, so every repository
+   * reaches it (change: unify-onboarding-entrypoint). `false` for an agent with no
+   * user scope.
+   */
+  userScope: boolean;
 }
 
 /**
@@ -222,13 +291,26 @@ export interface SurfaceStatus {
  * has nothing left to create or update — reusing the adapters' own logic instead
  * of duplicating per-agent file knowledge here.
  */
-export async function surfaceStatus(cwd?: string): Promise<SurfaceStatus[]> {
+export async function surfaceStatus(cwd?: string, home?: string): Promise<SurfaceStatus[]> {
   const root = cwd ?? process.cwd();
   const detected = new Set((await detect(root)).map((s) => s.agent));
   const out: SurfaceStatus[] = [];
   for (const agent of ALL_AGENTS) {
-    const connected = await ADAPTERS[agent].isConnected(root);
-    out.push({ agent, detected: detected.has(agent), connected });
+    const adapter = ADAPTERS[agent];
+    const connected = await adapter.isConnected(root);
+    const supportsUserScope = adapter.supportsGlobal === true;
+    let userScope = false;
+    if (supportsUserScope) {
+      // Never resolve (or fail on) a home directory for an agent that has no user
+      // scope to report — and never let a status read throw.
+      try {
+        const userRoot = adapter.userRoot?.(resolveUserScopeRoot(home)) ?? resolveUserScopeRoot(home);
+        userScope = await adapter.isConnectedUserScope?.(userRoot) ?? false;
+      } catch {
+        userScope = false;
+      }
+    }
+    out.push({ agent, detected: detected.has(agent), connected, supportsUserScope, userScope });
   }
   return out;
 }
@@ -372,6 +454,17 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
       'Hand-edited OpenLore block(s) detected. Re-run with --force to overwrite, or revert your edits.'
     );
     return 1;
+  }
+
+  // One entrypoint, both faces: the same command that wires navigation wires the
+  // decision trail, in non-blocking autopilot mode (change:
+  // unify-onboarding-entrypoint). Deliberately independent of `--no-analyze`,
+  // which is about the index, not about governance.
+  if (!opts.dryRun) {
+    if (opts.uninstall) await unwireGovernanceGate(cwd);
+    else if (await wireGovernanceGate(cwd) === 'wired') {
+      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
+    }
   }
 
   // One-command setup: build the index so orient() works on the first session.

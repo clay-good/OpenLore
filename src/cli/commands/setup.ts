@@ -23,7 +23,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { checkbox } from '@inquirer/prompts';
 import { logger } from '../../utils/logger.js';
-import { installPreCommitHook, uninstallClaudeHook } from './decisions.js';
+import { uninstallClaudeHook } from './decisions.js';
 import { readOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/config-manager.js';
 import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
@@ -1279,7 +1279,12 @@ export const setupCommand = new Command('setup')
     }
 
     if (tools.includes('claude')) {
-      await installPreCommitHook(projectRoot);
+      // Thin alias for what `openlore install` already does (change:
+      // unify-onboarding-entrypoint): the same non-blocking autopilot gate, so a
+      // user who reaches the trail through `setup` gets the identical posture
+      // rather than a second, stricter one.
+      const { wireGovernanceGate } = await import('../install/index.js');
+      await wireGovernanceGate(projectRoot);
       // Freshness is owned by the MCP server's --watch-auto (Spec 13.1); strip
       // any legacy full-analyze PostToolUse hook a prior version installed (B9).
       await uninstallClaudeHook(projectRoot);

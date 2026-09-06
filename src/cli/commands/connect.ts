@@ -105,7 +105,15 @@ connectCommand
     logger.discovery('Supported agents:');
     for (const s of status) {
       const state = s.connected ? 'connected' : s.detected ? 'detected, not connected' : 'not connected';
-      logger.info(s.agent.padEnd(14), state);
+      // Scope matters: a user-scope wiring reaches every repository, so "not
+      // connected" here does not mean the agent cannot reach OpenLore
+      // (change: unify-onboarding-entrypoint).
+      const scope = s.userScope
+        ? ' — also wired at the user scope (every repository)'
+        : s.supportsUserScope
+          ? ' — no user-scope wiring (run "openlore install" to add it)'
+          : ' — per-repo only (no user-scope surface)';
+      logger.info(s.agent.padEnd(14), state + scope);
     }
   });
 

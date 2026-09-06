@@ -258,6 +258,7 @@ export const claudeCodeAdapter: Adapter = {
   // repository (change: unify-onboarding-entrypoint).
   supportsGlobal: true,
   isConnected: (root) => hasManagedBlock(root, MD_FILE),
+  isConnectedUserScope: (userRoot) => hasManagedBlock(userRoot, LAYOUTS.user.md),
   async apply(ctx: ApplyContext): Promise<ApplyResult> {
     const layout = layoutFor(ctx);
     const mcpPath = safeJoin(ctx.root, layout.mcp);

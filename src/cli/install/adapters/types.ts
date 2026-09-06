@@ -72,6 +72,11 @@ export interface Adapter {
   supportsGlobal?: boolean;
   /** Absolute root for this adapter's user scope (defaults to the user's home directory). */
   userRoot?(home: string): string;
+  /**
+   * Marker-based presence check for the USER scope, mirroring {@link isConnected}.
+   * Only meaningful for an adapter with `supportsGlobal: true`.
+   */
+  isConnectedUserScope?(userRoot: string): Promise<boolean>;
   apply(ctx: ApplyContext): Promise<ApplyResult>;
   uninstall(ctx: ApplyContext): Promise<ApplyResult>;
   /**
