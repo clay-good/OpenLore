@@ -75,11 +75,13 @@ as a site with its refusal reason. A syntactic partition (literal vs. not) would
 of those in a silent hole: no edge and no site, which reads as "no dynamic dispatch here" — the
 worst possible outcome and the exact failure this change exists to remove.
 
-**2. The sites are persisted and roll up to a region view.** Sites are stored alongside the
-existing per-file analysis artifacts (no schema change to `nodes`/`edges`: a sidecar keyed by
-file, mirroring how `parse-health.json` already discloses per-file parse boundaries). A symbol
-is `dynamicBoundaryAdjacent` when it *contains* a site; a region (community) carries a count.
-Aggregate counts land in the `parse-health`-adjacent disclosure surface. Sites are part of the
+**2. The sites are persisted.** Sites are stored alongside the existing per-file analysis
+artifacts (no schema change to `nodes`/`edges`: a sidecar keyed by file, mirroring how
+`parse-health.json` already discloses per-file parse boundaries), and roll up to per-kind and
+per-language counts. *(As built: there is no per-symbol `dynamicBoundaryAdjacent` flag and no
+per-region count. Adjacency is answered at FILE granularity by the conclusion-side qualifier,
+which is what the negative-verdict rules actually need — a per-symbol flag would have been a
+second, narrower index nothing consumes.)* Sites are part of the
 memoized Pass-1 fact set — a fact-cache hit must never yield an empty site set — and the
 incremental watcher maintains the sidecar in its own lane, as it already does for parse-health
 and the style fingerprint.
@@ -142,9 +144,12 @@ dependency, and no hot-path cost; it converts a README paragraph into a per-answ
   the Pass-1 fact-cache payload (new field + format-version bump), the watcher's sidecar lane,
   `docs/reachability-dead-code.md`, `docs/language-support.md`. (NOT `openlore status` — that
   command is not on `main`; PR #224 never landed.)
-- **Specs:** `analyzer` — 2 ADDED (DynamicBoundarySitesAreExtractedAndPersisted,
-  DynamicBoundaryVocabularyIsClosedAndPartitioned); `mcp-handlers` — 2 ADDED
-  (ConclusionsDiscloseDynamicBoundariesInScope, DeadAndSafeVerdictsAreCappedNearADynamicBoundary).
+- **Specs:** `analyzer` — 3 ADDED (`DynamicBoundarySitesAreExtractedAndPersisted`,
+  `DynamicBoundaryVocabularyIsClosedAndGroundedInSyntax`,
+  `DynamicBoundarySitesStayLiveOnIncrementalUpdate`); `mcp-handlers` — 3 ADDED
+  (`ConclusionsDiscloseDynamicBoundariesThroughTheConfidenceBoundaryContract`,
+  `NegativeVerdictsAreQualifiedNearADynamicBoundaryWithoutDoubleDowngrading`,
+  `DynamicBoundaryFindingIsRegisteredAndAdvisory`).
 - **Tool surface:** unchanged — no new tool, no preset change. Existing responses gain a
   bounded `dynamicBoundaries` array inside the disclosure field they already carry.
 - **Performance:** the extraction walk is Query-driven, and three of the six kinds

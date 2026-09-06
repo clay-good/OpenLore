@@ -21,8 +21,11 @@
 - [x] Persist sites in a sidecar artifact next to `parse-health.json` (atomic write via the
       shared `atomicWriteFile`); deterministic order (file, line, kind); absent when empty, and
       read at most once per conclusion invocation
-- [x] Per-symbol `dynamicBoundaryAdjacent` lookup + per-region counts (no `openlore status`
-      surface — that command is not on `main`; PR #224 never landed)
+- [x] Adjacency lookup + rollup counts — built at FILE granularity (`buildQualifier`) rather than
+      as a per-symbol `dynamicBoundaryAdjacent` flag: that is the granularity the negative-verdict
+      rules consume, and a per-symbol flag would have been a second index nothing reads. Per-kind
+      and per-language counts ride the artifact. No `openlore status` surface — that command is not
+      on `main`; PR #224 never landed
 - [x] Sites join the Pass-1 memoized fact set: extend `FileExtractResult` + `SerializedFacts` +
       serialize/deserialize and BUMP `FACT_FORMAT_VERSION`, else every cache hit reports zero
       sites — a false "clean" disclosure
