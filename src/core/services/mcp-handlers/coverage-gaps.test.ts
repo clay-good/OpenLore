@@ -6,7 +6,7 @@
  * untested-not-dead distinct from also-dead, scopes to a diff, and is deterministic.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('./utils.js', () => ({
   validateDirectory: vi.fn(async (d: string) => d),
@@ -17,6 +17,10 @@ vi.mock('../../drift/git-diff.js', () => ({
   getChangedFiles: vi.fn(async () => ({ files: [] })),
 }));
 
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../../constants.js';
 import { handleReportCoverageGaps } from './coverage-gaps.js';
 import { readCachedContext } from './utils.js';
 import { getChangedFiles } from '../../drift/git-diff.js';
@@ -51,11 +55,12 @@ interface GapResult {
     name: string; file: string; fanIn: number; signals: Array<{ label: string }>;
     alsoFlaggedDead?: true;
     deadReason?: 'no-callers' | 'dead-via-unreachable-callers';
+    deadLabelWithheld?: { reason: string; site: { file: string; line: number; kind: string } };
   }>;
   composition?: {
-    returned: { live: number; deadFlagged: number };
-    omittedRemainder?: { live: number; deadFlagged: number };
-    total: { live: number; deadFlagged: number };
+    returned: { live: number; deadFlagged: number; boundaryWithheld?: number };
+    omittedRemainder?: { live: number; deadFlagged: number; boundaryWithheld?: number };
+    total: { live: number; deadFlagged: number; boundaryWithheld?: number };
   };
   omitted?: number;
   note?: string;
@@ -86,6 +91,11 @@ const EDGES = [
 ];
 // hubFunctions drives the hub/chokepoint label; both hubs are listed.
 const FIXTURE = () => graph(NODES, EDGES, { hubFunctions: [testedHub, untestedHub] });
+/** Point the mocked context at the shared fixture graph. */
+function setFixture(): void {
+  vi.mocked(readCachedContext).mockResolvedValue({ callGraph: FIXTURE() } as never);
+  vi.mocked(getChangedFiles).mockResolvedValue({ files: [] } as never);
+}
 
 describe('handleReportCoverageGaps', () => {
   beforeEach(() => {
@@ -340,5 +350,84 @@ describe('handleReportCoverageGaps', () => {
     vi.mocked(readCachedContext).mockResolvedValueOnce(null as never);
     const r = await handleReportCoverageGaps({ directory: '/p' }) as { error: string };
     expect(r.error).toMatch(/analyze_codebase/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dynamic-boundary withholding (change: disclose-dynamic-boundary-regions)
+// ---------------------------------------------------------------------------
+
+describe('the also-dead label is withheld behind a dynamic boundary', () => {
+  let root: string;
+
+  async function writeSites(entries: Array<{ filePath: string; language: string; kind: string; line: number }>) {
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'dynamic-boundary.json'), JSON.stringify({
+      version: 1, totalSites: entries.length, totalFiles: entries.length, byKind: [], byLanguage: [],
+      files: entries.map(e => ({
+        filePath: e.filePath, language: e.language,
+        sites: [{ line: e.line, kind: e.kind, refusal: 'no-static-target', evidence: 'o[n]()', unattributed: true }],
+      })),
+    }));
+  }
+
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'openlore-gaps-dyn-')); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  it('withholds also-dead, names the site, and STILL reports the symbol as a gap', async () => {
+    setFixture();
+    await writeSites([{ filePath: 'src/a.ts', language: 'typescript', kind: 'computed-member', line: 12 }]);
+    const r = await handleReportCoverageGaps({ directory: root }) as GapResult;
+
+    const withheld = r.coverageGaps.filter(g => g.deadLabelWithheld);
+    expect(withheld.length).toBeGreaterThan(0);
+    for (const g of withheld) {
+      expect(g.alsoFlaggedDead).toBeUndefined();
+      expect(g.deadReason).toBeUndefined();
+      expect(g.deadLabelWithheld).toEqual({
+        reason: 'dynamic-boundary',
+        site: { file: 'src/a.ts', line: 12, kind: 'computed-member' },
+      });
+    }
+    // One-directional: withholding a label never removes the gap, never implies the symbol is
+    // tested or reached, AND never promotes it into the live bucket or the live ranking tier —
+    // an undecided symbol is strictly less decided than a plain dead-flagged one.
+    const clean = await mkdtemp(join(tmpdir(), 'openlore-gaps-clean-'));
+    try {
+      setFixture();
+      const baseline = await handleReportCoverageGaps({ directory: clean }) as GapResult;
+      expect(r.gapCount).toBe(baseline.gapCount);
+      expect(r.reachableFromTest).toBe(baseline.reachableFromTest);
+      // The live count must NOT grow: the withheld symbols came out of the dead bucket, and they
+      // land in their own, never in `live`.
+      expect(r.composition!.total.live).toBe(baseline.composition!.total.live);
+      expect(r.composition!.total.boundaryWithheld).toBe(withheld.length);
+      expect(r.composition!.total.live + r.composition!.total.deadFlagged
+        + (r.composition!.total.boundaryWithheld ?? 0)).toBe(r.gapCount);
+      // …and they must not have jumped the ranking: every live gap still precedes every withheld one.
+      const names = r.coverageGaps.map(g => g.name);
+      const lastLive = Math.max(...r.coverageGaps
+        .map((g, i) => (!g.alsoFlaggedDead && !g.deadLabelWithheld ? i : -1)));
+      const firstWithheld = names.findIndex((_, i) => !!r.coverageGaps[i].deadLabelWithheld);
+      if (lastLive >= 0 && firstWithheld >= 0) expect(firstWithheld).toBeGreaterThan(lastLive);
+    } finally {
+      await rm(clean, { recursive: true, force: true });
+    }
+  });
+
+  it('a site in a file that cannot name the symbol leaves also-dead intact', async () => {
+    setFixture();
+    await writeSites([{ filePath: 'src/unrelated.ts', language: 'typescript', kind: 'computed-member', line: 1 }]);
+    const r = await handleReportCoverageGaps({ directory: root }) as GapResult;
+    expect(r.coverageGaps.some(g => g.alsoFlaggedDead)).toBe(true);
+    expect(r.coverageGaps.every(g => !g.deadLabelWithheld)).toBe(true);
+  });
+
+  it('a kind that cannot hide a caller does not withhold the label', async () => {
+    setFixture();
+    await writeSites([{ filePath: 'src/a.ts', language: 'typescript', kind: 'code-eval', line: 4 }]);
+    const r = await handleReportCoverageGaps({ directory: root }) as GapResult;
+    expect(r.coverageGaps.every(g => !g.deadLabelWithheld)).toBe(true);
   });
 });

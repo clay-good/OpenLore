@@ -108,6 +108,9 @@ describe('Pass-1 late-fact reuse', () => {
     __resetAnalyzerWorkCountersForTests(true);
     await new CallGraphBuilder().build(files);
     const cold = __getAnalyzerWorkCountersForTests();
+    // Also the no-second-parse guard for the dynamic-boundary matcher (change:
+    // disclose-dynamic-boundary-regions): it walks the tree the extractor already parsed, so this
+    // count must not move when the matcher records sites. See the dedicated case below.
     expect(cold.parses).toBe(1);
     expect(cold.nativeQueryCompiles).toBeGreaterThan(1);
     expect(cold.nativeQueryCompileCounts).toHaveLength(cold.nativeQueryCompiles);
@@ -212,5 +215,32 @@ describe('Pass-1 late-fact reuse', () => {
     expect(JSON.stringify(serializeCallGraph(optimized))).toBe(JSON.stringify(serializeCallGraph(legacy)));
     if (grammarLoadFailed(language)) return;
     expect(optimized.inheritanceEdges.length).toBeGreaterThan(0);
+  });
+});
+
+describe('the dynamic-boundary matcher adds no parse', () => {
+  it('a file dense with dynamic constructs is still parsed exactly once', async () => {
+    // The matcher's whole cost claim is "no second parse". A file with none of the trigger tokens
+    // never even walks; a file full of them must still parse once and only once.
+    __resetAnalyzerWorkCountersForTests(true);
+    const graph = await new CallGraphBuilder().build([{
+      path: '/virtual/reflective.py',
+      language: 'Python',
+      content: [
+        'import importlib',
+        '',
+        'def dispatch(handler, action, name):',
+        '    getattr(handler, action)()',
+        '    eval("1 + 1")',
+        '    importlib.import_module(name)',
+        '    setattr(handler, name, None)',
+        '    TABLE[action]()',
+        '    return handler',
+      ].join('\n'),
+    }]);
+    expect(__getAnalyzerWorkCountersForTests().parses).toBe(1);
+    // …and it really did record sites, so the assertion above is not vacuous.
+    expect(graph.dynamicBoundaryByFile?.get('/virtual/reflective.py')?.sites.length)
+      .toBeGreaterThan(0);
   });
 });

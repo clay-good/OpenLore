@@ -134,6 +134,13 @@ export const ARTIFACT_STYLE_FINGERPRINT = 'style-fingerprint.json';
 /** Filename for the per-file parse-health artifact (change: add-parse-health-boundary-disclosure) */
 export const ARTIFACT_PARSE_HEALTH = 'parse-health.json';
 
+/**
+ * Filename for the dynamic-boundary site artifact (change: disclose-dynamic-boundary-regions).
+ * A fail-soft disclosure sidecar like `parse-health.json`: absent when the repository records no
+ * site, so every consumer reads "no artifact" as "no boundary" and a clean repo pays nothing.
+ */
+export const ARTIFACT_DYNAMIC_BOUNDARY = 'dynamic-boundary.json';
+
 /** Filename for the external package inventory artifact */
 export const ARTIFACT_EXTERNAL_PACKAGES = 'external-packages.json';
 

@@ -843,6 +843,14 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       if (artifacts.repoStructure.envVars.length > 0) {
         console.log(`    ├─ ${opts.output}env-inventory.json  (${artifacts.repoStructure.envVars.length} env var(s))`);
       }
+      // Listed like the peer inventories, and only when something was recorded — the artifact is
+      // absent on a repository with no site (change: disclose-dynamic-boundary-regions).
+      if (artifacts.dynamicBoundary) {
+        console.log(
+          `    ├─ ${opts.output}dynamic-boundary.json  (${artifacts.dynamicBoundary.totalSites} `
+          + `dispatch site(s) the call graph cannot follow, in ${artifacts.dynamicBoundary.totalFiles} file(s))`,
+        );
+      }
       // CODEBASE.md (digestWritten) is the last branch when present, so it owns the
       // └─ corner; otherwise the corner falls to ARCHITECTURE.md / SUMMARY.md.
       if (architectureMdWritten) {

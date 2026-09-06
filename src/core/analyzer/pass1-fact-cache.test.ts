@@ -446,6 +446,43 @@ describe('serialization round-trips the extractor’s own answer', () => {
     expect(back.httpDegradations).toEqual(facts!.httpDegradations);
   });
 
+  it('preserves dynamic-boundary candidates — a cache hit must never report a clean file', async () => {
+    // The dangerous failure is silent: a dropped field turns a cache hit into "this file contains
+    // no dynamic dispatch", which is a false CLEAN disclosure — worse than no disclosure at all.
+    const file = {
+      path: '/virtual/reflective.py',
+      language: 'Python',
+      content: 'def dispatch(o, a):\n    return getattr(o, a)()\n',
+    };
+    const facts = await dispatchFileExtract(file);
+    expect(facts?.dynamicBoundary?.length, 'fixture must actually record a candidate')
+      .toBeGreaterThan(0);
+    const back = deserializeFacts(serializeFacts(facts))!.facts!;
+    expect(back.dynamicBoundary).toEqual(facts!.dynamicBoundary);
+  });
+
+  it('a fully-cached re-analyze reports the same sites, never zero', async () => {
+    const files = [{
+      path: '/virtual/reflective.py',
+      language: 'Python',
+      content: 'import importlib\n\ndef dispatch(o, a, n):\n    getattr(o, a)()\n    importlib.import_module(n)\n',
+    }];
+    const storage = new MemoryStorage();
+    const cold = new BufferedPass1FactCache(storage, 'dyn-sites-v1');
+    const coldGraph = await new CallGraphBuilder({ pass1Cache: cold }).build(files);
+    storage.absorb(cold);
+
+    const warm = new BufferedPass1FactCache(storage, 'dyn-sites-v1');
+    const warmGraph = await new CallGraphBuilder({ pass1Cache: warm }).build(files);
+
+    expect(warmGraph.pass1Cache?.reused).toBe(files.length);
+    expect(warmGraph.pass1Cache?.extracted).toBe(0);
+    const coldSites = coldGraph.dynamicBoundaryByFile?.get(files[0].path);
+    const warmSites = warmGraph.dynamicBoundaryByFile?.get(files[0].path);
+    expect(coldSites?.sites.length).toBeGreaterThan(0);
+    expect(warmSites).toEqual(coldSites);
+  });
+
   it('preserves a proven-empty HTTP call fact instead of turning it into a warm-cache reparse', () => {
     const facts = { nodes: [], rawEdges: [], httpCalls: [] };
     const back = deserializeFacts(serializeFacts(facts))?.facts;

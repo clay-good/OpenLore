@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 105
+## To build — 104
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -189,6 +189,16 @@ feature made reachable in the state where `.openlore/` is most likely to be adve
 cloned repo with no analysis): a named pipe under `.openlore/` could hang a tool call and stop the
 server from exiting, the generation-manifest reads that verify every artifact were unbounded, and
 a committed `.openlore/runtime` symlink redirected a recursive delete out of the repository.
+
+Shipped and archived since: `disclose-dynamic-boundary-regions` (2026-09-06) — the call graph now
+records every dispatch it cannot follow (reflection, computed members, `eval`, dynamic imports,
+metaprogrammed definitions, DI resolution) as a **dynamic-boundary site**, and every conclusion whose
+soundness rests on reachability discloses the sites inside the subgraph it traversed. `find_dead_code`
+names the specific construct, `report_coverage_gaps` withholds `also-dead`, and `verify_claim` caps a
+`dead`/`safe-to-change` verdict at `unverifiable` — disclosure only, never resolution, and never the
+opposite conclusion. Four adversarial review rounds plus an end-to-end dogfood on three external
+repositories found 19 defects during the build, the sharpest being a `moduleLevel` marker that was
+false on 38% of sites and a retraction key that let an ordinary call erase a site outright.
 
 ## Maintenance rules (what kept this table honest)
 

@@ -26,12 +26,14 @@ import {
   ARTIFACT_CALL_GRAPH_DB,
   ARTIFACT_STYLE_FINGERPRINT,
   ARTIFACT_PARSE_HEALTH,
+  ARTIFACT_DYNAMIC_BOUNDARY,
   MAX_HTML_INLINE_SCRIPT_CHARS,
 } from '../../constants.js';
 import { graphDigest, writeTraversalIndexArtifact } from './condensation.js';
 import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
 import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
 import { buildParseHealthReport, isLossyUtf8, type ParseHealthReport, type FileParseHealth } from './parse-health.js';
+import { buildDynamicBoundaryReport, type DynamicBoundaryReport } from './dynamic-boundary.js';
 import {
   resolveMemoryStrategy,
   withCfgOverlayShed,
@@ -288,6 +290,13 @@ export interface AnalysisArtifacts {
    */
   parseHealth?: ParseHealthReport;
   /**
+   * Dispatch the call-graph resolver cannot follow — reflection, computed members, `eval`, DI
+   * resolution — recorded per file and rolled up (change: disclose-dynamic-boundary-regions).
+   * Absent when the repository records no site, so a repo with no dynamic dispatch pays zero.
+   * Persisted as its own `dynamic-boundary.json`.
+   */
+  dynamicBoundary?: DynamicBoundaryReport;
+  /**
    * A one-line note about the Pass-1 extraction lane, present ONLY when something degraded
    * (change: optimize-parallel-extraction-pool) — a worker failed, or the worker pool could
    * not be used at all. It describes HOW the facts were computed, never WHAT they are.
@@ -419,6 +428,8 @@ export class AnalysisArtifactGenerator {
   private _styleFingerprint?: StyleFingerprint;
   /** Parse-health report computed during the last generateLLMContext (call-graph walk). */
   private _parseHealth?: ParseHealthReport;
+  /** Dynamic-boundary report computed during the last generateLLMContext (call-graph walk). */
+  private _dynamicBoundary?: DynamicBoundaryReport;
   /**
    * What the graceful-degradation ladder shed on the last build under memory pressure, if anything
    * (change: make-analyze-scale-to-any-repo). Undefined at full fidelity. Also folded into
@@ -499,6 +510,7 @@ export class AnalysisArtifactGenerator {
       llmContext,
       styleFingerprint: this._styleFingerprint,
       parseHealth: this._parseHealth,
+      dynamicBoundary: this._dynamicBoundary,
       extractionLaneNote: this._extractionLaneNote,
       pass1CacheNote: this._pass1CacheNote,
       memoryDegradation: this._memoryDegradation,
@@ -632,6 +644,23 @@ export class AnalysisArtifactGenerator {
       } else {
         saves.push(
           rm(join(this.options.outputDir, ARTIFACT_PARSE_HEALTH), { force: true }).catch(() => {})
+        );
+      }
+
+      // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions) — same fail-soft,
+      // same delete-when-absent. The delete is load-bearing for the identical reason: a repository
+      // whose last reflective call is removed must stop disclosing one, and two full runs on the
+      // same tree must not differ on disk because of what an earlier run found.
+      if (artifacts.dynamicBoundary) {
+        saves.push(
+          atomicWriteFile(
+            join(this.options.outputDir, ARTIFACT_DYNAMIC_BOUNDARY),
+            JSON.stringify(artifacts.dynamicBoundary, null, 2)
+          ).catch(() => {})
+        );
+      } else {
+        saves.push(
+          rm(join(this.options.outputDir, ARTIFACT_DYNAMIC_BOUNDARY), { force: true }).catch(() => {})
         );
       }
 
@@ -1662,6 +1691,13 @@ export class AnalysisArtifactGenerator {
       this._memoryDegradation,
       callGraphResult.grammarUnavailable,
       summarizeScriptContainers(scriptContainerFiles),
+    );
+
+    // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions). Already finalized against
+    // Pass-2 resolution by the call-graph builder, so this is a pure rollup. `undefined` on a repo
+    // with no site, which is what makes the artifact absent and the disclosure path free.
+    this._dynamicBoundary = buildDynamicBoundaryReport(
+      [...(callGraphResult.dynamicBoundaryByFile?.values() ?? [])],
     );
 
     // Intra-procedural CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).

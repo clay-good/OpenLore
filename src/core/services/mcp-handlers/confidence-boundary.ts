@@ -56,7 +56,19 @@ export interface EdgeBasis {
   synthesizedByRule?: Record<string, number>;
 }
 
-export type KnownUnknowableKind = 'synthesized-dispatch' | 'unindexed-repo';
+export type KnownUnknowableKind = 'synthesized-dispatch' | 'unindexed-repo' | 'dynamic-boundary';
+
+/**
+ * One dynamic-dispatch construct the resolver could not follow, as disclosed on a conclusion
+ * (change: disclose-dynamic-boundary-regions). The structured half of the crossing: the reader
+ * gets the file, line and kind rather than a prose caveat about the language.
+ */
+export interface DisclosedDynamicSite {
+  file: string;
+  line: number;
+  /** A member of the analyzer's closed dynamic-boundary vocabulary. */
+  kind: string;
+}
 
 /** A boundary the computation is known to be unable to see past. */
 export interface KnownUnknowableCrossing {
@@ -66,6 +78,18 @@ export interface KnownUnknowableCrossing {
   count: number;
   /** Actionable, human-readable disclosure. */
   detail: string;
+  /**
+   * The sites in scope, when kind === 'dynamic-boundary'. Bounded, and deduplicated by kind+file to
+   * one entry per group — a file dispatching reflectively fifty times is one fact about that file.
+   * `count` therefore counts SITES while this list counts GROUPS; `omittedSites` is the truncation
+   * receipt in the same group unit, so a bounded list never reads as the whole set.
+   */
+  sites?: DisclosedDynamicSite[];
+  /**
+   * File+kind groups not listed because the disclosure bound was reached. Absent when nothing was
+   * omitted. In groups, matching `sites`, NOT in the raw site unit `count` uses.
+   */
+  omittedSites?: number;
 }
 
 /** The index lags the working tree: source has changed since the build commit. */

@@ -21,6 +21,10 @@ import { loadTraversalIndex } from './traversal.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
 import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
+import {
+  loadDynamicBoundaryReport,
+  dynamicBoundaryCrossing,
+} from './dynamic-boundary-disclosure.js';
 
 export interface SelectTestsInput {
   directory: string;
@@ -345,6 +349,11 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     };
   }
 
+  const dynamicCrossing = dynamicBoundaryCrossing(
+    await loadDynamicBoundaryReport(absDir),
+    [...seeds.map(s => s.filePath), ...selectedTests.map(t => t.file)],
+  );
+
   return {
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
@@ -354,6 +363,14 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     ...(federationBlock ? { federation: federationBlock } : {}),
     soundness: { posture: 'over-approximate' as const, caveats },
     coverage: { languages: seedLangs, testDetection },
-    confidenceBoundary: assembleBoundary({ basis: selectBasis, staleness: await computeStaleness(absDir), integrity: ctx?.integrity }),
+    // Selection is an over-approximation of what MUST run, but the backward reachability it rests
+    // on is a lower bound: a test that only reaches a seed reflectively is not selected. Name the
+    // sites that make it one (change: disclose-dynamic-boundary-regions).
+    confidenceBoundary: assembleBoundary({
+      basis: selectBasis,
+      staleness: await computeStaleness(absDir),
+      integrity: ctx?.integrity,
+      ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+    }),
   };
 }
