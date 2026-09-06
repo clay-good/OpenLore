@@ -63,6 +63,33 @@
       and `untypedReceiverCalls`) pinned in `exception-flow.test.ts` and
       `error-propagation.test.ts`; `receiverFields` added to the fact-cache round-trip
 
+- [x] Round 2 — integration: the same "renders a call site the source does not contain" defect in
+      `blast_radius` / `analyze_impact` (`this.save` for `this.repo.save`), which reaches
+      `structural_diff`, the chat tools and `openlore review`; `SCHEMA_VERSION` 11→12 so an OLDER
+      OpenLore fails honestly instead of dropping the new rows and rejecting a valid `.olbundle` as
+      tampered; stale capability lists in `docs/mcp-tools.md` and `CLAUDE.md`; the CLI view type
+- [x] Round 2 — soundness: an import binding is now DECISIVE (a package-imported `Client` was
+      binding to an in-project namesake); a STATIC-context write no longer types the instance
+      field; `super.<field>` reads the PARENT's slot; the wrapper peel reaches `as` / `satisfies` /
+      `<T>` / `await`
+- [x] Round 2 — dogfood: 4 external repositories (poetry, nest, typeorm, mikro-orm), 1,508 new
+      edges, **0 false positives** across a 55-edge hand audit, a whole-population automated check
+      and a 126/126 same-name-class disambiguation check; **0 pre-existing edges removed or
+      changed**; disclosure verified on real code
+- [x] Round 3 — the round-2 fixes themselves: `private static` hid the `static` keyword behind the
+      accessibility modifier (a false edge); the parent walk was breadth-first, contradicting
+      Python's MRO (a wrong callee); the wrapper peel was INERT because each wrapper arrives inside
+      parentheses, and `type_assertion` puts its type first; the external-import marker refused
+      `src/`-layout Python packages and every TS path alias (recall regressions I introduced); an
+      external marker shadowed a concrete binding for the same name
+- [x] Round 3 — claims: re-measured every figure with the extractor itself. The chained-site count
+      was wrong (261 → **327**, against 544 direct — 38%, which is what the "roughly a third" claim
+      had right); `self_cls` 521 → 522. Corrected in the proposal, the tasks and the PR body
+- [x] Round 3 — declared what was refused but undeclared: generic/union/namespace-qualified
+      annotations, interface-typed fields, the per-file fact cap, cross-file inherited fields, and
+      the external-import refusal itself; fixed the false Ruby claim in the capability text and
+      completed the five-step "add a language" checklist (two of its steps fail SILENTLY if missed)
+
 ## Spec
 - [x] `analyzer` delta: ADD IntraObjectReceiverResolutionViaTypeRegistries,
       ResidualReceiverBoundaryStaysDisclosed, ChainedReceiverResidueIsScopedAndDeclared

@@ -186,12 +186,24 @@ function isParameterProperty(parameter: RegistryNode): boolean {
   return /^\s*(?:public|private|protected|readonly)\b/.test(parameter.text);
 }
 
+/** Member modifiers that may PRECEDE `static` in a declaration. The grammar orders
+ *  `accessibility_modifier` before `static`, so `private static repo: Repo` hides the keyword
+ *  from a naive prefix test — and hiding it fabricates an edge, because `this.repo` in an
+ *  instance method is undefined when the only declaration is a static slot. */
+const MEMBER_MODIFIER = /^\s*(?:public|private|protected|readonly|override|abstract|declare|accessor)\b\s*/;
+
 /** Is this member declared `static`? A static slot is a different one from the instance member of
  *  the same name, and the registry key has no static/instance dimension — so neither a `static`
  *  field declaration nor an assignment made inside a `static` method may type a `this.` receiver.
- *  The grammar uses one node type for both, so the modifier is read off the declaration text. */
+ *  The grammar uses one node type for both, so the modifier is read off the declaration text;
+ *  leading modifiers are stripped first, in either order (`private static`, `static readonly`). */
 function isStaticMember(declaration: RegistryNode): boolean {
-  return /^\s*static\b/.test(declaration.text);
+  let text = declaration.text;
+  for (let prior = ''; text !== prior;) {
+    prior = text;
+    text = text.replace(MEMBER_MODIFIER, '');
+  }
+  return /^static\b/.test(text);
 }
 
 function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): ReceiverFieldFact[] {

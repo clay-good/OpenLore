@@ -502,6 +502,26 @@ describe('extractExceptionFacts — call-site receiver classification', () => {
     expect(r('f')).toBe('other');
   });
 
+  it('sees through a cast, an assertion and an await to a self-rooted receiver', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      'class K {\n  async m() {\n' +
+      '    (this.dep as Dep).a();\n' +
+      '    (this.dep satisfies Dep).b();\n' +
+      '    (<Dep>this.dep).c();\n' +
+      '    (await this.p).d();\n' +
+      '    (await getThing()).e();\n' +
+      '  }\n}',
+      'TypeScript',
+    );
+    const r = (name: string) => facts.callSites.find(c => c.calleeName === name)?.receiver;
+    for (const name of ['a', 'b', 'c', 'd']) {
+      expect(r(name), `${name} hides a self-rooted receiver behind a wrapper`).toBe('self-field');
+    }
+    // A wrapper around something that is NOT self-rooted must stay `other` — peeling must not
+    // manufacture a boundary either.
+    expect(r('e')).toBe('other');
+  });
+
   it('leaves a language outside the receiver registry on its pre-existing classification', async () => {
     const facts = await extractExceptionFactsFromSource(
       'class K {\n  void m() {\n    this.dep.a();\n  }\n}',

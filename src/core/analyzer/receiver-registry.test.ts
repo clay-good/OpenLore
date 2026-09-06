@@ -503,6 +503,22 @@ describe('residue never falls through to another strategy', () => {
     expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
   });
 
+  // The CHA feed excludes chained raw edges. Without that guard CHA sees `recv: 'this'` and
+  // name-binds `this.repo.save()` inside the CALLER's own hierarchy. A hierarchy is required for
+  // CHA to fire at all, so this fixture — not the Python one below — is what actually pins it.
+  it('does not let CHA name-bind a chained receiver inside the caller’s own hierarchy', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('svc.ts', `
+        class Base { save(x: number) { return x; } }
+        export class Service extends Base {
+          private repo: unknown;
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
   it('mints no external leaf for a Python residue', async () => {
     const result = await new CallGraphBuilder().build([
       py('service.py', [
@@ -733,6 +749,106 @@ describe('round-2 refusals', () => {
     const edge = edgeTo(result, 'run', 'save');
     // The parent's slot is a `B`; binding the subclass's `A` would be a wrong edge.
     if (edge) expect(result.nodes.get(edge.calleeId)?.className).toBe('B');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-3 adversarial findings
+// ---------------------------------------------------------------------------
+
+describe('round-3 refusals and recall', () => {
+  const repo = ts('repo.ts', 'export class Repo { save(x: number) { return x; } }');
+
+  for (const decl of ['private static repo: Repo;', 'static readonly repo: Repo;', 'protected static repo = new Repo();']) {
+    it(`does not let \`${decl}\` type an instance receiver`, async () => {
+      const result = await new CallGraphBuilder().build([
+        repo,
+        ts('svc.ts', `
+          import { Repo } from './repo';
+          export class Service {
+            ${decl}
+            run() { return this.repo.save(1); }
+          }
+        `),
+      ]);
+      expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+    });
+  }
+
+  it('does not let a `private static` METHOD body type an instance receiver', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('svc.ts', `
+        import { Repo } from './repo';
+        export class Service {
+          private static init() { this.repo = new Repo(); }
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('walks Python bases depth-first, matching attribute lookup order', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('repo.py', 'class Repo:\n    def save(self, x):\n        return x\n'),
+      py('other.py', 'class Other:\n    def save(self, x):\n        return x + 1\n'),
+      py('s.py', [
+        'from repo import Repo',
+        'from other import Other',
+        '',
+        'class Z:',
+        '    def __init__(self):',
+        '        self.dep = Other()',
+        '',
+        'class A(Z):',
+        '    pass',
+        '',
+        'class B:',
+        '    def __init__(self):',
+        '        self.dep = Repo()',
+        '',
+        'class C(A, B):',
+        '    def run(self):',
+        '        return self.dep.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    const edge = edgeTo(result, 'run', 'save');
+    // MRO of C is C, A, Z, B — so Z's `Other` answers, never B's `Repo`.
+    if (edge) expect(result.nodes.get(edge.calleeId)?.className).toBe('Other');
+  });
+
+  it('resolves an absolute Python import in a `src/`-layout package', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('src/myapp/models.py', 'class Repo:\n    def save(self, x):\n        return x\n'),
+      py('src/myapp/service.py', [
+        'from myapp.models import Repo',
+        '',
+        'class Service:',
+        '    def __init__(self):',
+        '        self.repo = Repo()',
+        '',
+        '    def run(self):',
+        '        return self.repo.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('resolves through a TypeScript path alias rather than calling it external', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('src/repo.ts', 'export class Repo { save(x: number) { return x; } }'),
+      ts('src/svc.ts', `
+        import { Repo } from '@/repo';
+        export class Service {
+          constructor(private repo: Repo) {}
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
   });
 });
 
