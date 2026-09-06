@@ -292,7 +292,17 @@ export async function runPostCommitDecisionCheck(rootPath: string): Promise<void
   logger.warning('openlore: pre-commit gate was bypassed (--no-verify). Architectural decisions were not reviewed for this commit. Run: openlore decisions --consolidate --gate');
 }
 
-export async function installPreCommitHook(rootPath: string): Promise<void> {
+export async function installPreCommitHook(
+  rootPath: string,
+  /**
+   * How the gate will behave once installed. In `autopilot` mode the gate records
+   * and syncs verified decisions and never blocks a commit, so the blocking notice
+   * below would be flatly untrue — and it was being printed one line above
+   * `openlore install`'s own "no commit is blocked by default"
+   * (change: unify-onboarding-entrypoint).
+   */
+  opts: { autopilot?: boolean } = {},
+): Promise<void> {
   const target = await resolveGitHookTarget(rootPath, 'pre-commit');
   const hookPath = target.hookPath;
 
@@ -344,7 +354,9 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
   else {
     if (appendedPre) logger.discovery('Existing pre-commit hook found. Appending decisions gate.');
     logger.success(`Pre-commit hook installed at ${displayHookPath(hookPath)}`);
-    logger.discovery('Commits will be gated until decisions are approved. Use --no-verify to skip.');
+    logger.discovery(opts.autopilot
+      ? 'Verified decisions are recorded and synced at commit time. No commit is blocked.'
+      : 'Commits will be gated until decisions are approved. Use --no-verify to skip.');
   }
 
   // Install post-commit hook to detect --no-verify bypass

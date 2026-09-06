@@ -7,6 +7,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInstall, wireGovernanceGate } from './index.js';
@@ -136,5 +138,21 @@ describe('the gate reports honestly when it cannot be installed', () => {
     expect(await wireGovernanceGate(dir)).toBe('skipped');
     // And the failure did not leak out as the command's exit code.
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('the trail is wired on a repository seeing OpenLore for the first time', () => {
+  it('wires the gate AFTER the index build, which is what creates the config', async () => {
+    // The ordering that matters: on a fresh repo `.openlore/config.json` does not
+    // exist until the install's own index build runs `init`. Wiring the gate before
+    // that meant the headline flow always reported "no config yet" and silently
+    // skipped the decision trail — invisible to any test that pre-creates a config.
+    const source = readFileSync(fileURLToPath(new URL('./index.ts', import.meta.url)), 'utf8');
+    const analyzeBlock = source.slice(source.indexOf('const shouldAnalyze'));
+    const buildAt = analyzeBlock.indexOf('await buildIndex(cwd)');
+    const gateAt = analyzeBlock.indexOf('await wireGovernanceGate(cwd)');
+    expect(buildAt).toBeGreaterThan(-1);
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(gateAt).toBeGreaterThan(buildAt);
   });
 });

@@ -242,7 +242,7 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     }
     const { installPreCommitHook } = await import('../commands/decisions.js');
     const exitCodeBefore = process.exitCode;
-    await installPreCommitHook(cwd);
+    await installPreCommitHook(cwd, { autopilot: config.governance?.autopilot !== false });
     // installPreCommitHook reports its own failures by setting a nonzero exitCode.
     // Compare against SUCCESS, not against the prior value: if something earlier had
     // already set 1 and the hook install also fails with 1, a delta comparison reads
@@ -510,24 +510,28 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     return 1;
   }
 
-  // One entrypoint, both faces: the same command that wires navigation wires the
-  // decision trail, in non-blocking autopilot mode (change:
-  // unify-onboarding-entrypoint). Deliberately independent of `--no-analyze`,
-  // which is about the index, not about governance.
-  if (!opts.dryRun) {
-    if (opts.uninstall) await unwireGovernanceGate(cwd);
-    else if (await wireGovernanceGate(cwd) === 'wired') {
-      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
-    }
-  }
+  if (!opts.dryRun && opts.uninstall) await unwireGovernanceGate(cwd);
 
   // One-command setup: build the index so orient() works on the first session.
   // Opt out with --no-analyze; never runs for dry-run or uninstall.
   const shouldAnalyze = opts.analyze !== false && !opts.dryRun && !opts.uninstall;
   if (shouldAnalyze) {
     const indexBuilt = await buildIndex(cwd);
+    // AFTER the index build, which is what creates `.openlore/config.json` on a
+    // repository seeing OpenLore for the first time. Wiring the gate before it
+    // meant the headline flow — a bare `openlore install` on a fresh repo — always
+    // reported "no config yet" and silently skipped the decision trail
+    // (change: unify-onboarding-entrypoint).
+    if (await wireGovernanceGate(cwd) === 'wired') {
+      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
+    }
     if (indexBuilt) await printProveGuidance(cwd);
   } else if (!opts.dryRun && !opts.uninstall) {
+    // `--no-analyze` skipped init, so there is no config to wire governance into.
+    // Try anyway: a repository that already has one still gets its trail.
+    if (await wireGovernanceGate(cwd) === 'wired') {
+      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
+    }
     // --no-analyze skipped init too, so a bare "openlore analyze" would fail
     // ("Run openlore init first"). Advise a sequence that actually works.
     logger.info(
@@ -563,7 +567,7 @@ function reportScopes(info: {
     logger.info(
       'User scope',
       info.uninstall
-        ? `OpenLore-managed ${info.globalAgents.join(', ')} entries under ${info.home} ${verb} removed`
+        ? `OpenLore-managed ${info.globalAgents.join(', ')} entries under ${info.home} ${info.dryRun ? 'would be' : 'were'} removed`
         : `${info.globalAgents.join(', ')} ${verb} wired under ${info.home} — every git repository you open from now on reaches OpenLore, `
           + 'and builds its index in the background on first touch (opt out per repo with `"autoInit": false`)',
     );
