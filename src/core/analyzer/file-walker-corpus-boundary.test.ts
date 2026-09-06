@@ -394,8 +394,11 @@ describe('FileWalker — truncation receipt details & interactions', () => {
   });
 });
 
-describe('FileWalker — symlink × include × truncation cross-interactions', () => {
-  it('does NOT let a broad include override symlink confinement', async () => {
+describe('FileWalker — symlink × include × truncation cross-interactions', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+
+  it.skipIf(process.platform === 'win32')('does NOT let a broad include override symlink confinement', async () => {
     // `**/*.ts` force-descends every directory, but the out-of-root check runs AFTER the include
     // gate and must NOT be bypassed — the exact security hole the symlink work closed.
     const repo = makeRepo();
@@ -410,9 +413,12 @@ describe('FileWalker — symlink × include × truncation cross-interactions', (
     expect(paths.some((p) => p.endsWith('secret.ts'))).toBe(false);
     expect(paths).toContain('src/mine.ts');
     expect(Object.keys(result.summary.skippedReasons ?? {})).toContain('symlink:outside-root');
-  });
+  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-  it('marks truncation when the cap fills from a directory reached via a symlink', async () => {
+
+  it.skipIf(process.platform === 'win32')('marks truncation when the cap fills from a directory reached via a symlink', async () => {
     // real dir and its symlink are both root entries; whichever readdir yields first indexes
     // `real/`, fills the cap of 1, and the second admissible file trips the receipt. Assert
     // count+flag only (atPath is order-dependent here).
@@ -429,8 +435,11 @@ describe('FileWalker — symlink × include × truncation cross-interactions', (
   });
 });
 
-describe('FileWalker — followed-symlink disclosure', () => {
-  it('counts a followed symlinked directory AND a followed symlinked file', async () => {
+describe('FileWalker — followed-symlink disclosure', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+
+  it.skipIf(process.platform === 'win32')('counts a followed symlinked directory AND a followed symlinked file', async () => {
     // The spec requires the followed count be disclosed. `.impl` is a dot-dir the walker skips on
     // its own, so the link is the only way in — one followed dir; the vendored file link is the
     // second.

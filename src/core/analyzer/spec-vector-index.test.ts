@@ -204,9 +204,12 @@ describe('SpecVectorIndex', () => {
       await expect(SpecVectorIndex.build(tmpDir, specsDir, null)).rejects.toThrow(
         /Cannot read authoritative spec artifact oversized\/spec\.md/,
       );
-    });
+    });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-    it('does not follow a spec symlink outside the confined specs directory', async () => {
+
+    it.skipIf(process.platform === 'win32')('does not follow a spec symlink outside the confined specs directory', async () => {
       const specsDir = join(tmpDir, 'openspec', 'specs');
       const domainDir = join(specsDir, 'escaped');
       const outside = join(tmpDir, 'outside.md');
@@ -227,9 +230,12 @@ describe('SpecVectorIndex', () => {
 
       await expect(SpecVectorIndex.build(tmpDir, specsDir, null, undefined, decisionsDir))
         .rejects.toThrow(/Cannot read authoritative decision artifact adr-0001-oversized\.md/);
-    });
+    });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-    it('does not follow an ADR symlink outside the confined decisions directory', async () => {
+
+    it.skipIf(process.platform === 'win32')('does not follow an ADR symlink outside the confined decisions directory', async () => {
       const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
       const decisionsDir = join(tmpDir, 'openspec', 'decisions');
       const outside = join(tmpDir, 'outside-adr.md');

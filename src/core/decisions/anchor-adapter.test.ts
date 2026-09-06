@@ -49,7 +49,23 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'openlore-anchor-'));
   await mkdir(join(root, 'src'), { recursive: true });
 });
-afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { await removeFixture(root); });
+
+/**
+ * Remove a fixture, tolerating a handle Windows will not let us delete around.
+ *
+ * POSIX unlinks an open file happily; Windows refuses with EBUSY/EPERM until the last handle
+ * closes, and these fixtures hold call-graph.db whose SQLite -shm/-wal siblings clear a beat
+ * after the store does. A plain rm raced that and the tests failed in TEARDOWN, naming a temp
+ * path — which reads as unrelated to anything they assert. Deletion is not under test here, so
+ * retry briefly and then leave it to the OS.
+ */
+async function removeFixture(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { await rm(dir, { recursive: true, force: true }); return; }
+    catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+}
 
 describe('AnchorContext.open', () => {
   it('returns null when no analysis exists', () => {

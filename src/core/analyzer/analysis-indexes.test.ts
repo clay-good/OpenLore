@@ -118,9 +118,12 @@ describe('shared analysis index builder', () => {
     });
     expect(readSourceCapped).not.toHaveBeenCalled();
     expect((vectorBuild.mock.calls[0][6] as Map<string, string>).size).toBe(0);
-  });
+  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-  it('drops call-graph file symlinks that escape the repository', async () => {
+
+  it.skipIf(process.platform === 'win32')('drops call-graph file symlinks that escape the repository', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openlore-index-root-'));
     const outside = await mkdtemp(join(tmpdir(), 'openlore-index-outside-'));
     await mkdir(join(root, 'src'));

@@ -26,6 +26,22 @@ const edgeCA: CallEdge = {
   line:       12,
 };
 
+/**
+ * Remove a fixture, tolerating a handle Windows will not let us delete around.
+ *
+ * POSIX unlinks an open file happily; Windows refuses with EBUSY/EPERM until the last handle
+ * closes, and these fixtures hold call-graph.db whose SQLite -shm/-wal siblings clear a beat
+ * after the store does. A plain rm raced that and the tests failed in TEARDOWN, naming a temp
+ * path — which reads as unrelated to anything they assert. Deletion is not under test here, so
+ * retry briefly and then leave it to the OS.
+ */
+async function removeFixture(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { await rm(dir, { recursive: true, force: true }); return; }
+    catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+}
+
 describe('EdgeStore', () => {
   let dir: string;
   let dbPath: string;
@@ -40,7 +56,7 @@ describe('EdgeStore', () => {
 
   afterEach(async () => {
     store.close();
-    await rm(dir, { recursive: true, force: true });
+    await removeFixture(dir);
   });
 
   describe('incremental-closure hot-path infra (fix-transitive-incremental-staleness)', () => {
@@ -189,7 +205,7 @@ describe('EdgeStore', () => {
         expect(es.countNodes()).toBe(0);     // and wiped the data (rebuild-on-bump)
       } finally {
         es.close();
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
 
@@ -221,7 +237,7 @@ describe('EdgeStore', () => {
         expect(es.getNodeByStableId('sid:foo(x: number)')?.id).toBe('src/a.ts::foo');
       } finally {
         es.close();
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
   });
@@ -253,7 +269,7 @@ describe('EdgeStore', () => {
         expect((raw.prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number }).version).toBe(1);
       } finally {
         raw.close();
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
 
@@ -271,7 +287,7 @@ describe('EdgeStore', () => {
         expect(w.countNodes()).toBe(0);
       } finally {
         w.close();
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
 
@@ -297,7 +313,7 @@ describe('EdgeStore', () => {
         expect(writer.getSchemaVersion()).toBe(SCHEMA_VERSION);
       } finally {
         writer.close();
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
 
@@ -324,7 +340,7 @@ describe('EdgeStore', () => {
       expect(readFileSync(p)).toEqual(before);
       expect(existsSync(`${p}-wal`)).toBe(false);
       expect(existsSync(`${p}-shm`)).toBe(false);
-      await rm(d, { recursive: true, force: true });
+      await removeFixture(d);
     });
   });
 
@@ -344,7 +360,7 @@ describe('EdgeStore', () => {
         expect(existsSync(`${p}.corrupt-0`)).toBe(true);
         expect(existsSync(p)).toBe(false);
       } finally {
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
 
@@ -361,7 +377,7 @@ describe('EdgeStore', () => {
         expect(readFileSync(`${p}.corrupt-0`, 'utf-8')).toBe('garbage one');
         expect(readFileSync(`${p}.corrupt-1`, 'utf-8')).toBe('garbage two');
       } finally {
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
 
@@ -376,7 +392,7 @@ describe('EdgeStore', () => {
         es.close();
         expect(existsSync(`${p}.corrupt-0`)).toBe(true); // corrupt bytes preserved aside
       } finally {
-        await rm(d, { recursive: true, force: true });
+        await removeFixture(d);
       }
     });
   });

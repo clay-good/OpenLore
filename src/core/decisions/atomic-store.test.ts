@@ -65,7 +65,11 @@ describe('atomicWriteFile', () => {
     expect(await readFile(path, 'utf-8')).toBe('second');
   });
 
-  it('preserves an existing file mode across atomic replacement', async () => {
+  // skipIf(win32): POSIX permission bits do not exist there. Node maps a mode to the single
+  // read-only attribute, so 0o644 comes back 0o666 and the assertion compares a mode the
+  // filesystem never stored. What it guards - a replace must not widen permissions - is a
+  // POSIX property, exercised on Linux.
+  it.skipIf(process.platform === 'win32')('preserves an existing file mode across atomic replacement', async () => {
     const path = join(root, 'shared.json');
     await writeFile(path, 'first', { mode: 0o644 });
     await atomicWriteFile(path, 'second');
@@ -283,8 +287,11 @@ describe('memory store — durability + concurrency end-to-end', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // decision store quarantine + sequence
 // ════════════════════════════════════════════════════════════════════════════
-describe('decision store — quarantine + sequence', () => {
-  it('rejects an outbound .openlore directory symlink before writing either store', async () => {
+describe('decision store — quarantine + sequence', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+
+  it.skipIf(process.platform === 'win32')('rejects an outbound .openlore directory symlink before writing either store', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'openlore-atomic-outside-'));
     await symlink(outside, join(root, '.openlore'), 'dir');
     try {

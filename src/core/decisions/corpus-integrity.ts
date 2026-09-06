@@ -9,7 +9,20 @@
  */
 
 import { readdir, stat } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
+
+/**
+ * A corpus path as it is SERVED — POSIX-separated on every host.
+ *
+ * These strings do not stay internal: they become a governance finding's `subject` and
+ * `message` (for example `requirement:openspec/specs/x/spec.md#Name`), which an operator's
+ * enforcement policy can match on and which `openlore enforce` reports. With a native
+ * separator the same requirement in the same corpus carried a different subject on Windows
+ * than on Linux, so a policy written against one silently did not match the other.
+ */
+function corpusRelPath(rootPath: string, target: string): string {
+  return relative(rootPath, target).split(sep).join('/');
+}
 import type { AnchoredMemory, PendingDecision, StructuralAnchor } from '../../types/index.js';
 import type { GovernanceFinding } from '../services/mcp-handlers/enforcement-policy.js';
 import {
@@ -655,7 +668,7 @@ async function readSpecs(
     try {
       out.push({
         domain,
-        file: relative(rootPath, path),
+        file: corpusRelPath(rootPath, path),
         text: await readCorpusFile(rootPath, relative(rootPath, path), budget),
       });
     } catch (error) {

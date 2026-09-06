@@ -66,9 +66,12 @@ describe('check-edit path and hook payload parsing', () => {
     alias = `${root}-alias`;
     await symlink(root, alias, 'dir');
   });
-  afterEach(async () => { await rm(alias, { force: true }); await rm(root, { recursive: true, force: true }); });
+  afterEach(async () => { await rm(alias, { force: true }); await rm(root, { recursive: true, force: true }); });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-  it('canonicalizes repository-contained aliases and rejects escapes or missing paths', async () => {
+
+  it.skipIf(process.platform === 'win32')('canonicalizes repository-contained aliases and rejects escapes or missing paths', async () => {
     const canonicalRoot = await realpath(root);
     expect(repoRelativeFile(root, join(root, 'src', 'api.ts'))).toBe('src/api.ts');
     expect(repoRelativeFile(root, 'src/api.ts')).toBe('src/api.ts');
@@ -76,9 +79,12 @@ describe('check-edit path and hook payload parsing', () => {
     expect(repoRelativeFile(root, 'src')).toBeUndefined();
     expect(repoRelativeFile(root, '../secret')).toBeUndefined();
     expect(repoRelativeFile(root, 'src/missing.ts')).toBeUndefined();
-  });
+  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-  it('extracts Claude PostToolUse file paths and fails soft on malformed input', () => {
+
+  it.skipIf(process.platform === 'win32')('extracts Claude PostToolUse file paths and fails soft on malformed input', () => {
     expect(fileFromHookPayload(root, JSON.stringify({ tool_input: { file_path: join(alias, 'src', 'api.ts') } })))
       .toBe('src/api.ts');
     expect(fileFromHookPayload(root, '{bad')).toBeUndefined();

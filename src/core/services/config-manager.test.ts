@@ -131,9 +131,12 @@ describe('config-manager', () => {
     it('should return null when config does not exist', async () => {
       const result = await readOpenLoreConfig(testDir);
       expect(result).toBe(null);
-    });
+    });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-    it('refuses to write config through an outbound .openlore symlink', async () => {
+
+    it.skipIf(process.platform === 'win32')('refuses to write config through an outbound .openlore symlink', async () => {
       const outside = join(tmpdir(), `openlore-config-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       try {
         await mkdir(outside, { recursive: true });

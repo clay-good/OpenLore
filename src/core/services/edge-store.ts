@@ -80,19 +80,32 @@ function schemaMismatchFault(onDiskVersion: number): StoreLifecycleFault {
 }
 
 function openDatabase(dbPath: string, readOnly = false): DatabaseSync {
+  // `new DatabaseSync` SUCCEEDS on a corrupt file — SQLite does not read the header until
+  // the first statement — so the throw below comes from a handle that is already open. If it
+  // escapes without a close, that handle leaks for the lifetime of the process, and the
+  // caller's corrupt-store quarantine then cannot move the file aside: Windows refuses to
+  // unlink anything still open. The observable was a quarantine that reported
+  // "could not be moved aside (EBUSY)" and started from an empty store — the silent-empty
+  // substitute the quarantine invariant exists to prevent. POSIX unlinks an open file
+  // regardless, so the leak was real there too but never showed.
   const db = new DatabaseSync(dbPath, { readOnly });
-  // journal_mode and synchronous can rewrite a database header even when no
-  // application rows change. A read handle must therefore set neither pragma.
-  if (!readOnly) {
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA synchronous = NORMAL');
+  try {
+    // journal_mode and synchronous can rewrite a database header even when no
+    // application rows change. A read handle must therefore set neither pragma.
+    if (!readOnly) {
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('PRAGMA synchronous = NORMAL');
+    }
+    // Wait (don't immediately throw "database is locked") when another process
+    // holds the write lock — e.g. the incremental watcher marking files stale
+    // while a post-commit `analyze --force` rebuilds the store. Without this the
+    // loser of the race throws on open/write and silently drops its work
+    // (fix-transitive-incremental-staleness widened this contention).
+    db.exec('PRAGMA busy_timeout = 5000');
+  } catch (err) {
+    try { db.close(); } catch { /* already gone; the original error is the one that matters */ }
+    throw err;
   }
-  // Wait (don't immediately throw "database is locked") when another process
-  // holds the write lock — e.g. the incremental watcher marking files stale
-  // while a post-commit `analyze --force` rebuilds the store. Without this the
-  // loser of the race throws on open/write and silently drops its work
-  // (fix-transitive-incremental-staleness widened this contention).
-  db.exec('PRAGMA busy_timeout = 5000');
   return db;
 }
 
@@ -1556,12 +1569,18 @@ export class EdgeStore {
 
   private static openInternal(dbPath: string, mode: 'read' | 'analyze'): EdgeStore {
     const existed = existsSync(dbPath);
+    // Held so the catch can release it. `openDatabase` SUCCEEDS on a corrupt file — the
+    // corruption surfaces from the schema probe in the EdgeStore constructor below — so the
+    // handle is already open when that throws, and nothing owns it: the EdgeStore was never
+    // constructed. POSIX renames a file with an open handle regardless, so the quarantine
+    // still worked there and the leak stayed invisible. On Windows the move failed EBUSY and
+    // the store fell back to "starting from an empty store" — the silent-empty substitute the
+    // quarantine invariant exists to prevent, on the one platform that could not do it.
+    let rawDb: ReturnType<typeof openDatabase> | undefined;
     try {
-      const store = new EdgeStore(
-        openDatabase(dbPath, mode === 'read' && existed),
-        mode,
-        mode === 'read' && !existed,
-      );
+      rawDb = openDatabase(dbPath, mode === 'read' && existed);
+      const store = new EdgeStore(rawDb, mode, mode === 'read' && !existed);
+      rawDb = undefined; // ownership passed to the store; it closes on its own path now
       // Existing read targets are probed through a read-only handle so an invalid
       // schema cannot be altered merely by opening it. A healthy current store is
       // then reopened with the historical writable handle expected by incremental
@@ -1572,6 +1591,9 @@ export class EdgeStore {
       }
       return store;
     } catch (err) {
+      // Release the handle before touching the file. Windows will not rename or unlink a
+      // file that anything still has open, and the quarantine below does exactly that.
+      if (rawDb) { try { rawDb.close(); } catch { /* already gone */ } }
       // A locked/busy open is transient, not corruption — surface it for the caller
       // to retry rather than quarantining a healthy store.
       if (!isCorruptionError(err)) throw err;

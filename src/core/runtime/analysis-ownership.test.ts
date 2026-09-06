@@ -215,8 +215,11 @@ describe('analysis ownership — reclamation', () => {
 // PROGRESS AND HEARTBEAT
 // ============================================================================
 
-describe('analysis ownership — progress sidecar', () => {
-  it('never writes or executes the legacy repository-resident watchdog path', async () => {
+describe('analysis ownership — progress sidecar', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+
+  it.skipIf(process.platform === 'win32')('never writes or executes the legacy repository-resident watchdog path', async () => {
     const { root, analysisDir } = await fixture();
     const outside = await mkdtemp(join(tmpdir(), 'openlore-watchdog-victim-'));
     roots.push(outside);
@@ -250,9 +253,12 @@ describe('analysis ownership — progress sidecar', () => {
     expect(held.state).toBe('owned');
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(await readFile(victim, 'utf8')).toBe('SAFE');
-  });
+  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-  it('replaces a hostile progress symlink without following it during acquire or watchdog beats', async () => {
+
+  it.skipIf(process.platform === 'win32')('replaces a hostile progress symlink without following it during acquire or watchdog beats', async () => {
     const { root, analysisDir } = await fixture();
     const outside = await mkdtemp(join(tmpdir(), 'openlore-progress-victim-'));
     roots.push(outside);

@@ -368,9 +368,12 @@ describe('detectCorpusIntegrity', () => {
     await writeFile(join(outside, 'specs', 'x', 'spec.md'), '# Outside\n');
 
     await expect(detectCorpusIntegrity(root, { openspecPath: outside })).rejects.toThrow(/outside project directory/);
-  });
+  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
 
-  it('rejects symlink escapes from stores, specs, proposals, delta directories, and anchors', async () => {
+
+  it.skipIf(process.platform === 'win32')('rejects symlink escapes from stores, specs, proposals, delta directories, and anchors', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'openlore-corpus-outside-files-'));
     await writeFile(join(outside, 'pending.json'), '{"decisions":[]}');
     await writeFile(join(outside, 'spec.md'), '# Outside\n');
