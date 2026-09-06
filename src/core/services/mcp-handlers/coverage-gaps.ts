@@ -30,6 +30,12 @@
 import { validateDirectory, readCachedContext } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
 import { deadCodeIds } from './reachability.js';
+import {
+  loadDynamicBoundaryReport,
+  loadImportAdjacency,
+  dynamicBoundaryCrossing,
+  buildQualifier,
+} from './dynamic-boundary-disclosure.js';
 import { seedsFromSymbols, seedsFromFiles } from './test-impact.js';
 import { computeLandmarkSignals, type LandmarkSignal } from '../../analyzer/landmark-signals.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
@@ -76,6 +82,17 @@ interface CoverageGap {
    * untested symbol (e.g. an entry point invoked by a framework): untested-not-dead.
    */
   alsoFlaggedDead?: true;
+  /**
+   * The `also-dead` label was WITHHELD because a dynamic-boundary site can name this symbol
+   * (change: disclose-dynamic-boundary-regions). `also-dead` asserts that nothing calls the symbol;
+   * a reflective, computed, or container-resolved dispatch that can reach it is precisely the
+   * evidence that no such assertion is established. The symbol is still reported as a gap — the
+   * boundary withholds a claim, it never implies the symbol is tested or reached.
+   */
+  deadLabelWithheld?: {
+    reason: 'dynamic-boundary';
+    site: { file: string; line: number; kind: string };
+  };
   /**
    * WHY the symbol landed in the dead set (change: demote-dead-flagged-coverage-gaps).
    * Present exactly when `alsoFlaggedDead` is — the boolean's meaning is unchanged.
@@ -209,6 +226,12 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // Strict mode is threaded into the dead set too, so `alsoFlaggedDead` rests on
   // the SAME edge basis as the gap partition (no strict/non-strict disagreement).
   const deadIds = await deadCodeIds(absDir, cg, { directResolvedOnly: input.directResolvedOnly });
+  // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions), read once per invocation.
+  const dynamicReport = await loadDynamicBoundaryReport(absDir);
+  const qualifyDynamic = buildQualifier(
+    dynamicReport,
+    dynamicReport ? await loadImportAdjacency(absDir) : new Map(),
+  );
   const landmarks = computeLandmarkSignals(cg, { deadIds });
   const signalsById = new Map(landmarks.map(l => [l.id, l.signals]));
 
@@ -222,9 +245,21 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
       signals,
     };
     if (deadIds.has(n.id)) {
-      gap.alsoFlaggedDead = true;
-      // Derived from the dead set + the node's own fan-in — no extra traversal.
-      gap.deadReason = gap.fanIn > 0 ? 'dead-via-unreachable-callers' : 'no-callers';
+      // `also-dead` asserts the ABSENCE of any caller. A dynamic-boundary site that can name this
+      // symbol is exactly the evidence that such an assertion is not established, so the label is
+      // WITHHELD rather than qualified (change: disclose-dynamic-boundary-regions). One-directional:
+      // the symbol is still reported as a gap — the boundary never implies it is tested or reached.
+      const hidden = qualifyDynamic(n.filePath, n.language);
+      if (hidden) {
+        gap.deadLabelWithheld = {
+          reason: 'dynamic-boundary',
+          site: { file: hidden.file, line: hidden.site.line, kind: hidden.site.kind },
+        };
+      } else {
+        gap.alsoFlaggedDead = true;
+        // Derived from the dead set + the node's own fan-in — no extra traversal.
+        gap.deadReason = gap.fanIn > 0 ? 'dead-via-unreachable-callers' : 'no-callers';
+      }
     }
     return gap;
   });
@@ -238,7 +273,15 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // (evidence), then a stable file+name tiebreak. Still label-based and
   // deterministic — no composite score, no new tuning constant.
   const isLoadBearing = (g: CoverageGap) => g.signals.some(s => s.label === 'hub' || s.label === 'chokepoint');
-  const isLive = (g: CoverageGap) => !g.alsoFlaggedDead;
+  // A gap whose dead label was WITHHELD at a dynamic boundary is not live — it is UNDECIDED, which
+  // is strictly less decided than a plain dead flag (change: disclose-dynamic-boundary-regions).
+  // Partitioning on the label alone would promote it into the live tier: it would rank above
+  // genuinely-live-and-untested gaps, displace them out of the returned page, and be counted as
+  // `live` in the composition — the system reporting a symbol as live because a boundary is nearby,
+  // which is exactly what the one-directionality rule forbids. The partition is on "reachability
+  // established", not on which label happens to be set.
+  const isReachabilityUndecided = (g: CoverageGap) => !!g.alsoFlaggedDead || !!g.deadLabelWithheld;
+  const isLive = (g: CoverageGap) => !isReachabilityUndecided(g);
   gaps.sort((a, b) => {
     const al = isLive(a) ? 1 : 0;
     const bl = isLive(b) ? 1 : 0;
@@ -258,17 +301,22 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // AND the omitted remainder, so a 264-gap set discloses its shape without the
   // caller re-deriving it.
   const liveOf = (list: CoverageGap[]) => list.filter(isLive).length;
+  const withheldOf = (list: CoverageGap[]) => list.filter(g => !!g.deadLabelWithheld).length;
+  // Three buckets, not two: a withheld gap is folded into neither `live` nor `deadFlagged`, so the
+  // published counts never absorb an undecided symbol into a decided one. `deadFlagged` keeps its
+  // exact previous meaning — the symbols still carrying the label.
+  const bucket = (list: CoverageGap[], size: number) => {
+    const live = liveOf(list);
+    const boundaryWithheld = withheldOf(list);
+    return { live, deadFlagged: size - live - boundaryWithheld, ...(boundaryWithheld > 0 ? { boundaryWithheld } : {}) };
+  };
+  // `returned` is a prefix slice, so the remainder is the rest of the same array — no membership
+  // scan, and no dependence on object identity.
+  const remainder = gaps.slice(returned.length);
   const composition = {
-    returned: { live: liveOf(returned), deadFlagged: returned.length - liveOf(returned) },
-    ...(omitted > 0
-      ? {
-          omittedRemainder: {
-            live: liveOf(gaps) - liveOf(returned),
-            deadFlagged: omitted - (liveOf(gaps) - liveOf(returned)),
-          },
-        }
-      : {}),
-    total: { live: liveOf(gaps), deadFlagged: gaps.length - liveOf(gaps) },
+    returned: bucket(returned, returned.length),
+    ...(omitted > 0 ? { omittedRemainder: bucket(remainder, omitted) } : {}),
+    total: bucket(gaps, gaps.length),
   };
 
   // ── Honest coverage posture (mirrors select_tests' testDetection) ───────────
@@ -312,7 +360,16 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // add-confidence-boundary-disclosure)
   const reachBasis = edgeBasisWithinSet(cg.edges, reachedByTest);
   const staleness = await computeStaleness(absDir);
-  const confidenceBoundary = assembleBoundary({ basis: reachBasis, staleness, integrity: ctx?.integrity });
+  // Scoped to the files of every gap this report computed — including the remainder it reports only
+  // as a count, since those gaps are part of the answer too — never the repository (change:
+  // disclose-dynamic-boundary-regions).
+  const dynamicCrossing = dynamicBoundaryCrossing(dynamicReport, gaps.map(g => g.file));
+  const confidenceBoundary = assembleBoundary({
+    basis: reachBasis,
+    staleness,
+    integrity: ctx?.integrity,
+    ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+  });
 
   const testedCount = inScope.filter(n => reachedByTest.has(n.id)).length;
 

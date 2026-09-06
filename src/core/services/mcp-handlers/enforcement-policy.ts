@@ -160,6 +160,17 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A stable matched module depends on a strictly more-unstable module.',
     remediation: 'Instability inversion: {subject}; invert the dependency through a stable interface.',
   },
+  // ── dynamic-boundary disclosure (disclose-dynamic-boundary-regions) ──
+  'dynamic-boundary-in-conclusion-scope': {
+    // Advisory, like every non-corpus code: blocking is always opt-in. A team that wants CI to
+    // notice "this deletion candidate sits behind a DI container" classes it `blocking` in policy;
+    // everyone else sees nothing change. The finding's own `severity` is `info` and rides the
+    // emitted finding, never this entry — it plays no part in classing.
+    defaultClass: 'advisory',
+    source: 'dynamic-boundary',
+    description: 'A conclusion qualified or capped a verdict because a dispatch site the call graph cannot follow lies in its scope.',
+    remediation: 'Dynamic boundary in scope: {subject}; the negative conclusion is not established here — verify the dispatch the call graph cannot follow (reflection, a computed member, `eval`, a dynamic import, a metaprogrammed definition, or a DI container) by hand.',
+  },
   // ── decision-bound architecture constraints ──
   'decision-constraint-violation': {
     defaultClass: 'advisory',

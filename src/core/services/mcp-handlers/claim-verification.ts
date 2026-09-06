@@ -42,6 +42,14 @@ import { traversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
 import { deadCodeIds } from './reachability.js';
 import {
+  loadDynamicBoundaryReport,
+  loadImportAdjacency,
+  buildQualifier,
+  qualificationReason,
+  describeSite,
+  type QualifyingHit,
+} from './dynamic-boundary-disclosure.js';
+import {
   assembleBoundary,
   buildPairEdgeIndex,
   computeStaleness,
@@ -266,6 +274,18 @@ function chainEdges(chain: string[], pairIndex: Map<string, BoundaryEdge>): Boun
     if (e) out.push(e);
   }
   return out;
+}
+
+/**
+ * The dynamic-boundary site that can name `subject`, or `undefined`. Loads the artifact lazily —
+ * a repository with no site has none, so a clean repository pays one failed `readFile` and the
+ * import graph is never read at all (change: disclose-dynamic-boundary-regions).
+ */
+async function dynamicHitFor(absDir: string, subject: FunctionNode): Promise<QualifyingHit | undefined> {
+  const report = await loadDynamicBoundaryReport(absDir);
+  if (!report) return undefined;
+  const qualify = buildQualifier(report, await loadImportAdjacency(absDir));
+  return qualify(subject.filePath, subject.language);
 }
 
 /**
@@ -561,6 +581,42 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
     case 'dead':          result = await verifyDead(absDir, cg, subject); break;
     case 'safe-to-change': result = verifySafeToChange(cg, subject); break;
     default:              return { error: `Unhandled claim kind "${input.kind}".` };
+  }
+
+  // ── Dynamic-boundary cap (change: disclose-dynamic-boundary-regions) ─────────
+  // `dead` and `safe-to-change` are the two claims that assert an ABSENCE — of a caller, of risk —
+  // and this is the tool an agent calls immediately before asserting to a human. A dispatch site
+  // that can name the subject is exactly the evidence the absence is not established.
+  //
+  // `refuted` is untouched: it says the subject IS live / DOES have callers, a positive claim a
+  // hidden caller can only reinforce. `confirmed` is capped to `unverifiable`. A verdict already
+  // `unverifiable` for another crossing keeps its verdict and its reason, and the dynamic crossing
+  // is APPENDED — so a subject that is both reached synthesizedly and sits next to a reflective
+  // dispatch carries both reasons, neither silently overwriting the other.
+  if ((input.kind === 'dead' || input.kind === 'safe-to-change') && result.verdict !== 'refuted') {
+    const hit = await dynamicHitFor(absDir, subject);
+    if (hit) {
+      const crossing: KnownUnknowableCrossing = {
+        kind: 'dynamic-boundary',
+        // The qualifier names ONE site — the lowest-line caller-hiding one in the file that
+        // qualified — so one is the honest count here. `count` is sites everywhere it appears; this
+        // path discloses a single site rather than a scope's worth, and says so by carrying 1.
+        count: 1,
+        sites: [{ file: hit.file, line: hit.site.line, kind: hit.site.kind }],
+        detail: 'A dispatch the call graph cannot follow — '
+          + `${describeSite({ file: hit.file, line: hit.site.line, kind: hit.site.kind })} — `
+          + `can reach "${subject.name}" without a graph edge, so its absence of callers is not established.`,
+      };
+      result = {
+        ...result,
+        verdict: 'unverifiable',
+        reason: result.verdict === 'confirmed'
+          ? `"${subject.name}" cannot be verified ${input.kind === 'dead' ? 'dead' : 'safe to change'}: `
+            + `${qualificationReason(hit)}.`
+          : `${result.reason} It is also bounded by ${qualificationReason(hit)}.`,
+        extraCrossings: [...(result.extraCrossings ?? []), crossing],
+      };
+    }
   }
 
   const confidenceBoundary: ConfidenceBoundary = assembleBoundary({

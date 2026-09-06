@@ -10,7 +10,12 @@ not through a new response field: the known-unknowable crossing vocabulary SHALL
 conclusion that already assembles a confidence boundary discloses them without a shape addition.
 A conclusion surface that today discloses only free-text caveats SHALL render its disclosure
 **from** that structured crossing rather than maintaining a parallel one, and each such surface
-SHALL be listed in the change as a shape addition rather than described as unchanged.
+SHALL be listed here as a shape addition rather than described as unchanged. Those additions are:
+`analyze_error_propagation` and `change_impact_certificate` gain a `dynamicBoundaries` field
+carrying the crossing (neither assembles a `confidenceBoundary`); the certificate additionally
+gains `newPathClaimQualified`, marking that its negative claim is withheld rather than softened;
+and `report_coverage_gaps` gains `deadLabelWithheld` on a gap plus a `boundaryWithheld` bucket in
+its composition, because an undecided symbol must be counted as neither live nor dead.
 
 Disclosure SHALL be scoped to the subgraph the conclusion traversed, never to the repository. It
 SHALL be bounded and deduplicated by kind and file, and a bounded disclosure SHALL carry a
@@ -44,23 +49,29 @@ boundary site lies in the subject's computable neighborhood.
 
 **Scope is computable, not repository-wide.** A dead-code candidate SHALL be qualified when a
 site of kind `reflective-invoke`, `computed-member`, or `container-resolution` occurs in the
-candidate's own file, or in a file within the transitive import closure of the candidate's module
-— the set of files that can name it — restricted to sites whose language matches the candidate's.
+candidate's own file, or in a file whose transitive import closure CONTAINS the candidate's module
+— the set of files that can name it, which is the forward closure from the SITE, not from the
+candidate — restricted to sites whose language matches the candidate's.
 The qualification SHALL name the file and line of the specific site that caused it. Sites outside
 that closure SHALL NOT qualify the candidate; the existing whole-repository caveat continues to
 carry that case.
 
 **No double downgrade.** Where an existing whole-language or synthesized-dispatch downgrade
 already applies, the site-based treatment SHALL NOT lower confidence further; it SHALL instead
-**replace the generic caveat with the specific site** as the stated reason, so the reader learns
-*which* construct bounds the answer rather than only *that* the language is dynamic. The shipped
-language-level cap remains the floor for languages with no matcher. A verdict already
+state the specific site as an **additional named reason**, so the reader learns *which* construct
+bounds the answer rather than only *that* the candidate is low-confidence. (The shipped
+dynamic-language cap contributes no per-candidate reason of its own, so there is nothing to
+replace — the site is what makes that cap legible.) The shipped language-level cap remains the
+floor for languages with no matcher. A verdict already
 `unverifiable` for another crossing SHALL carry both crossings, never one silently overwriting
 the other.
 
 The `also-dead` label in the coverage-gap report SHALL be withheld for a qualified symbol in
 favor of the plain gap label. A `dead` or `safe-to-change` claim verified against a qualified
-neighborhood SHALL resolve to `unverifiable`, with the boundary named in the receipt.
+neighborhood SHALL resolve to `unverifiable`, with the boundary named in the verdict's reason and
+carried as a structured crossing on the confidence boundary. It SHALL NOT be named in a receipt: a
+receipt is minted only for a decided verdict, and that shipped invariant is not weakened to
+accommodate this one.
 
 A boundary SHALL NEVER be used to assert the opposite conclusion: the system SHALL NOT report a
 symbol as live, tested, or unsafe merely because a boundary is nearby.
@@ -71,20 +82,20 @@ symbol as live, tested, or unsafe merely because a boundary is nearby.
 - **WHEN** candidates are computed
 - **THEN** the candidate's confidence is unchanged and no site is cited as its reason
 
-#### Scenario: The specific reason replaces the generic one
+#### Scenario: The specific reason is named alongside the generic cap
 
 - **GIVEN** a Python dead-code candidate already capped at low confidence by the shipped
   dynamic-language rule, whose file contains a `reflective-invoke` site
 - **WHEN** candidates are computed
 - **THEN** the confidence is unchanged — not lowered a second time — and the stated reason names
-  that site's file and line rather than only "dynamic language"
+  that site's file and line
 
 #### Scenario: Two crossings both survive
 
 - **GIVEN** a `safe-to-change` claim whose subject has both a synthesized-dispatch crossing and a
   dynamic-boundary site
 - **WHEN** the claim is verified
-- **THEN** the verdict is `unverifiable` and the receipt carries both crossings
+- **THEN** the verdict is `unverifiable` and the confidence boundary carries both crossings
 
 #### Scenario: The qualification is one-directional
 

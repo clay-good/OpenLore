@@ -6,8 +6,15 @@
 
 The analyzer SHALL record every source construct that performs dispatch the call-graph resolver
 cannot follow — a **dynamic-boundary site** — as a persisted fact, without attempting to resolve
-it. Each site SHALL carry its file path, line, the enclosing symbol (or an explicit module-level
-marker), a `kind` from the closed vocabulary, a refusal reason, and the matched evidence text.
+it. Each site SHALL carry its file path, line, the enclosing symbol (or, when no indexed symbol
+contains it, an explicit UNATTRIBUTED marker), a `kind` from the closed vocabulary, a refusal
+reason, and the matched evidence text.
+
+The marker SHALL NOT claim module scope. An attribution miss means either that the construct is at
+module scope OR that it sits inside something the language extractor does not model — Python's
+emits no node for a dunder other than `__init__` — and the extractor cannot tell the two apart.
+Naming the marker for the first case would convert an unknown attribution into a confident false
+one, inside the requirement that exists to disclose unknown rather than imply absent.
 
 Sites SHALL NOT introduce a node or edge into the call graph. Extraction SHALL reuse each file's
 already-parsed tree — **no second parse**. Where a construct is not reachable from an existing
@@ -23,8 +30,11 @@ reused. A cache hit SHALL NEVER yield an empty site set for a file that has site
 
 Sites SHALL be emitted in a deterministic order — by file, then line, then kind — so two analyses
 of unchanged sources produce byte-identical artifacts. The artifact SHALL be absent when no site
-was recorded, and the disclosure path SHALL read it at most once per conclusion invocation and
-not at all when it is absent.
+was recorded, and a repository with no site SHALL pay at most one failed read and no parse, and
+receive no crossing. (Absence is only knowable by attempting the read, so "reads none" is not
+achievable; what is achievable, and required, is that nothing beyond that read is spent.) The
+disclosure path SHALL NOT re-read the artifact once per composed handler within a single
+user-facing call.
 
 Evidence text is untrusted input from the analyzed repository. It SHALL be credential-redacted
 with the substrate's shared redaction, neutralized for terminal control sequences, and truncated
@@ -38,7 +48,8 @@ reported as unsupported rather than as containing no dynamic dispatch.
 #### Scenario: A reflective invocation is recorded, not resolved
 
 - **GIVEN** a Python function containing `getattr(handler, action)()` where `action` is a
-  parameter
+  parameter — the result INVOKED, since a bare `getattr(o, k)` reads an attribute and dispatches
+  nothing
 - **WHEN** the repository is analyzed
 - **THEN** a site of kind `reflective-invoke` is recorded against the enclosing function, and the
   call graph contains no new edge for that call site
@@ -56,11 +67,12 @@ reported as unsupported rather than as containing no dynamic dispatch.
 - **WHEN** the sites of both runs are compared
 - **THEN** they are identical
 
-#### Scenario: A clean repository writes no artifact and reads none
+#### Scenario: A clean repository writes no artifact and parses nothing
 
 - **GIVEN** a repository in which no site was recorded
 - **WHEN** it is analyzed and a conclusion tool is invoked
-- **THEN** no site artifact is written and the disclosure path performs no read for it
+- **THEN** no site artifact is written, the disclosure path parses nothing, and no crossing is
+  attached
 
 #### Scenario: A credential in an eval string never reaches the artifact
 
@@ -88,6 +100,15 @@ The vocabulary SHALL carry a measured **density budget**: on the substrate's own
 on each language fixture, recorded sites SHALL NOT exceed a declared per-thousand-lines ceiling,
 and a matcher that exceeds it SHALL fail the test suite rather than ship.
 
+The refusal reason SHALL likewise be drawn from a closed, source-declared vocabulary, and SHALL
+never state something the analyzer did not establish: `no-static-target` (the selector is computed
+at runtime), `unresolved-external` (a literal selector naming no symbol in the index),
+`resolvable-but-unbound` (a literal selector naming exactly one symbol the resolver did not bind —
+its own reason, because folding it into `unresolved-external` would assert that a symbol plainly
+present resolves to nothing), `ambiguous-target` (naming more than one), and
+`unresolved-in-file-scope` (a record derived from a single file, which has no repository-wide
+symbol table and therefore SHALL NOT claim a repository-wide absence it never checked).
+
 The partition between a site and a recovered edge SHALL be determined by **resolution outcome,
 not by argument form**. A matched construct that literal reflective resolution binds to exactly
 one internal symbol SHALL yield an edge and no site; every other matched construct — including
@@ -108,6 +129,12 @@ extraction walk.
 - **WHEN** the repository is analyzed
 - **THEN** no edge is emitted and a site of kind `reflective-invoke` IS recorded with refusal
   reason `unresolved-external`
+
+#### Scenario: A refusal never states something that is not so
+
+- **GIVEN** `getattr(handler, "process")()` where an internal symbol named `process` DOES exist
+- **WHEN** the repository is analyzed
+- **THEN** the refusal is `resolvable-but-unbound`, never `unresolved-external`
 
 #### Scenario: Density stays within budget
 

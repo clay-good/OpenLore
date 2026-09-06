@@ -20,6 +20,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
 | `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-capability.ts`) |
+| `dynamicBoundary` | Dispatch the resolver cannot follow — reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition, DI-container resolution — recorded as a disclosed **boundary site**, never resolved into an edge. Backed for TypeScript/JavaScript/Python/Ruby/Go/Java/PHP/C#. A language WITHOUT it records no site because none is looked for, never because it contains no dynamic dispatch. | `DYNAMIC_BOUNDARY_LANG_SPECS` (`dynamic-boundary.ts`) |
 | `errorPropagation` | Static exception escape/handler extraction for TypeScript, JavaScript, Python, Java, and C#; Java/C# typed handlers are exact-name lower bounds, with finally/resource-cleanup limits disclosed. Go uses a separate value-shaped model for proven returned-error positions and a narrow unconditional deferred-recover pattern; ambiguous result types, unwind ordering, and unresolved calls are boundaries, never exception terminology. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
 
 ## The registry is derived, not hand-listed
@@ -29,7 +30,7 @@ The declarative registry (`src/core/analyzer/language-support.ts`) is the single
 consult at run time (the table above), never hand-maintained in parallel. So the coverage matrix
 cannot silently drift from what the analyzer actually does. `language-support.test.ts` behaviorally
 cross-checks **every member** of the `signatures`, `callGraph`, `complexity`, `imports`, `typeInference`,
-`cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, and `errorPropagation` sets by running the real extractor on a per-language fixture and asserting it produces
+`cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, `errorPropagation`, and `dynamicBoundary` sets by running the real extractor on a per-language fixture and asserting it produces
 output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
 `cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
 (`cfgSupportsLanguage`, `isIacLanguage`) for every language, and `iacProjection`'s per-ecosystem node

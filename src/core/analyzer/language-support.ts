@@ -18,6 +18,7 @@
  *   - `typeInference`  ← {@link TYPE_INFERENCE_LANGUAGES}   (type-inference-engine.ts)
  *   - `iacProjection`  ← {@link isIacLanguage}              (iac/types.ts)
  *   - `styleFingerprint`← {@link STYLE_FINGERPRINT_LANGUAGES} (style-fingerprint.ts)
+ *   - `dynamicBoundary`← {@link supportsDynamicBoundary}    (dynamic-boundary.ts)
  * A behavioral test (`language-support.test.ts`) cross-checks each flag against the live
  * extractor on a fixture, so the registry cannot silently drift from reality.
  *
@@ -36,6 +37,7 @@ import { SIGNATURE_LANGUAGES } from './signature-extractor.js';
 import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
 import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
+import { supportsDynamicBoundary } from './dynamic-boundary.js';
 import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-capability.js';
 import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
@@ -61,6 +63,7 @@ export const CAPABILITIES = [
   'iacProjection',
   'crossServiceHttp',
   'errorPropagation',
+  'dynamicBoundary',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -78,6 +81,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
   errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
+  dynamicBoundary: 'Dynamic-boundary site recording: reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition and DI-container resolution are recorded as disclosed boundaries. A language WITHOUT this reports no site because none is looked for — never because it contains no dynamic dispatch.',
 };
 
 /**
@@ -147,6 +151,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (isIacLanguage(language)) out.push('iacProjection');
   if (CROSS_SERVICE_HTTP_LANGUAGES.has(language)) out.push('crossServiceHttp');
   if (ERROR_PROPAGATION_LANGUAGES.has(language)) out.push('errorPropagation');
+  if (supportsDynamicBoundary(language)) out.push('dynamicBoundary');
   // Return in canonical CAPABILITIES order for determinism.
   return CAPABILITIES.filter(c => out.includes(c));
 }

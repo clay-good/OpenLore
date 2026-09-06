@@ -56,6 +56,16 @@ import {
   type GrammarUnavailableReason,
   type ParseHealthNode,
 } from './parse-health.js';
+import {
+  matchDynamicBoundaries,
+  finalizeDynamicBoundarySites,
+  buildFileDynamicBoundary,
+  REFLECTIVE_RESOLUTION_RULE,
+  type AttributedCandidate,
+  type DynamicBoundaryNode,
+  type FileDynamicBoundary,
+  type ResolutionProbe,
+} from './dynamic-boundary.js';
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
 // synchronous native call nothing else can interrupt.
 import { parseWithBudget as rawParseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
@@ -203,6 +213,46 @@ function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], 
     if (!raw) return undefined;
     raw.filePath = filePath;
     return raw;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Record this file's dynamic-boundary CANDIDATES over the already-parsed tree (change:
+ * disclose-dynamic-boundary-regions).
+ *
+ * Candidates, not sites: the partition between "the resolver bound this" and "the resolver refused
+ * this" is decided after Pass 2, by `finalizeDynamicBoundarySites`. Attribution happens here
+ * because this is where the file's `nodes` exist — `findEnclosingFunction` maps each construct's
+ * byte offset to its enclosing symbol. A construct the offset maps to nothing is left unattributed,
+ * and the finalizer marks it exactly that — never "module level", which the extractor cannot
+ * establish (see the `unattributed` field's own doc).
+ *
+ * Fail-soft and additive: any error, or a language with no declared matcher, yields `undefined`, and
+ * nothing here can add a node or an edge.
+ */
+function tallyDynamicBoundary(
+  language: string,
+  // `unknown`, not a binding type: the extractors hand this in as `Parser.SyntaxNode` on the native
+  // lanes and as the structural `TsNodeLike` on the query-driven one. The matcher reads only the
+  // minimal shape it declares, so the cast is where the two lanes meet.
+  root: unknown,
+  nodes: FunctionNode[],
+  content: string,
+): AttributedCandidate[] | undefined {
+  if (!root) return undefined;
+  try {
+    const candidates = matchDynamicBoundaries(
+      language,
+      root as DynamicBoundaryNode,
+      content,
+    );
+    if (candidates.length === 0) return undefined;
+    return candidates.map(c => {
+      const enclosing = findEnclosingFunction(nodes, c.startIndex);
+      return enclosing ? { ...c, symbolId: enclosing.id } : { ...c };
+    });
   } catch {
     return undefined;
   }
@@ -1313,12 +1363,13 @@ async function extractTSGraph(
 
   const style = tallyStyle('TypeScript', tree, nodes, filePath);
   const parseHealth = tallyParseHealth('TypeScript', tree.rootNode as unknown as ParseHealthNode, filePath);
+  const dynamicBoundary = tallyDynamicBoundary('TypeScript', tree.rootNode, nodes, content);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   const classRelationships = collectClassRelationshipFacts('TypeScript', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('TypeScript', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpCalls = await extractHttpCalls(filePath, content);
-  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch, httpCalls };
+  return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, dynamicDispatch, httpCalls };
 }
 
 // ============================================================================
@@ -1494,13 +1545,14 @@ async function extractPyGraph(
 
   const style = tallyStyle('Python', tree, nodes, filePath);
   const parseHealth = tallyParseHealth('Python', tree.rootNode as unknown as ParseHealthNode, filePath);
+  const dynamicBoundary = tallyDynamicBoundary('Python', tree.rootNode, nodes, content);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   const classRelationships = collectClassRelationshipFacts('Python', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Python', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpDegradations: HttpExtractionDegradation[] = [];
   const httpCalls = extractPythonHttpCallsFromRoot(filePath, tree.rootNode, d => httpDegradations.push(d));
-  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch, httpCalls, httpDegradations };
+  return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, dynamicDispatch, httpCalls, httpDegradations };
 }
 
 // ============================================================================
@@ -1595,13 +1647,14 @@ async function extractGoGraph(
 
   const style = tallyStyle('Go', tree, nodes, filePath);
   const parseHealth = tallyParseHealth('Go', tree.rootNode as unknown as ParseHealthNode, filePath);
+  const dynamicBoundary = tallyDynamicBoundary('Go', tree.rootNode, nodes, content);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   const classRelationships = collectClassRelationshipFacts('Go', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Go', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpDegradations: HttpExtractionDegradation[] = [];
   const httpCalls = extractGoHttpCallsFromRoot(filePath, tree.rootNode, d => httpDegradations.push(d));
-  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch, httpCalls, httpDegradations };
+  return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, dynamicDispatch, httpCalls, httpDegradations };
 }
 
 // ============================================================================
@@ -1811,7 +1864,8 @@ async function extractRubyGraph(
   const classRelationships = collectClassRelationshipFacts('Ruby', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Ruby', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
-  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
+  const dynamicBoundary = tallyDynamicBoundary('Ruby', tree.rootNode, nodes, content);
+  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary };
 }
 
 // ============================================================================
@@ -2028,7 +2082,8 @@ async function extractJavaGraph(
   const classRelationships = collectClassRelationshipFacts('Java', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Java', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
-  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
+  const dynamicBoundary = tallyDynamicBoundary('Java', tree.rootNode, nodes, content);
+  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary };
 }
 
 // ============================================================================
@@ -2801,7 +2856,8 @@ async function extractByQueries(
       : tallyParseHealth('', _root as unknown as ParseHealthNode, filePath);
     const classRelationships = collectClassRelationshipFacts(spec.language, runOptionalQuery);
     const dynamicDispatch = collectPass1DynamicDispatch(spec.language, content, _root, nodes, filePath);
-    return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
+    const dynamicBoundary = tallyDynamicBoundary(spec.language, _root, nodes, content);
+    return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary };
   });
   return grammarStatus(spec.language) === 'unavailable'
     ? emptyForUnavailable(spec.language)
@@ -4963,6 +5019,87 @@ export async function synthesizeDynamicDispatchEdges(
 }
 
 /**
+ * The largest exact match count any of this file's candidates carries, or `undefined`.
+ *
+ * Read across the whole array rather than off the first element: a script container merges several
+ * lanes' candidate arrays into one, so which element is first is an accident of merge order.
+ */
+function maxMatchedTotal(candidates: AttributedCandidate[]): number | undefined {
+  let max = 0;
+  for (const c of candidates) if (c.matchedTotal && c.matchedTotal > max) max = c.matchedTotal;
+  return max > 0 ? max : undefined;
+}
+
+/**
+ * Decide the dynamic-boundary partition once Pass-2 resolution has run (change:
+ * disclose-dynamic-boundary-regions).
+ *
+ * This is the second half of the two-phase rule the spec makes normative: the extractor records a
+ * CANDIDATE for every recognized construct, and only here — with the resolved edge set and the whole
+ * node table in hand — is it decided whether the resolver actually bound it. A candidate the
+ * resolver bound to an internal symbol is retracted (the graph already carries that edge, so there
+ * is nothing undisclosed); every other candidate becomes a site carrying WHY the resolver refused
+ * it. Deciding on argument form instead would leave a literal-but-unresolvable target with neither
+ * an edge nor a site — a silence indistinguishable from "no dynamic dispatch here".
+ *
+ * Purely additive: it reads `allNodes` and `edges` and returns a separate map. No node or edge is
+ * created, mutated, or removed, which is what keeps the emitted graph byte-identical to a build
+ * with the matcher disabled.
+ */
+function finalizeDynamicBoundaries(
+  byFile: Map<string, { language: string; candidates: AttributedCandidate[] }>,
+  allNodes: Map<string, FunctionNode>,
+  edges: CallEdge[],
+): Map<string, FileDynamicBoundary> | undefined {
+  if (byFile.size === 0) return undefined;
+
+  // Internal symbols only: an `external::` placeholder is not something a reflective selector can
+  // be said to have resolved to, and counting it would mask a genuine boundary as "resolved".
+  const nameCounts = new Map<string, number>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    nameCounts.set(n.name, (nameCounts.get(n.name) ?? 0) + 1);
+  }
+  // A candidate is retracted ONLY by an edge the reflective resolver itself produced — never by
+  // one that merely shares a caller and a name. A resolved edge carries no byte offset and no
+  // column, so a caller+line+name key cannot tell two calls apart: in
+  // `x = getattr(o, "run"); run()` the ordinary `run()` edge would erase the `getattr` site,
+  // leaving neither an edge nor a site — the exact silence this feature exists to remove.
+  //
+  // Nothing emits the rule yet (the sibling change `resolve-literal-reflective-dispatch` owns it),
+  // so today nothing retracts — which is the honest answer, because today's graph really does carry
+  // no edge for any of these constructs. The key set is built only over callers that carry a
+  // candidate, so a repository with one reflective file does not allocate a string per graph edge.
+  const callersWithCandidates = new Set<string>();
+  for (const { candidates } of byFile.values()) {
+    for (const c of candidates) if (c.symbolId) callersWithCandidates.add(c.symbolId);
+  }
+  const resolvedKeys = new Set<string>();
+  if (callersWithCandidates.size > 0) {
+    for (const e of edges) {
+      if (e.synthesizedBy !== REFLECTIVE_RESOLUTION_RULE) continue;
+      if (!callersWithCandidates.has(e.callerId)) continue;
+      resolvedKeys.add(`${e.callerId}\u0000${e.calleeName}`);
+    }
+  }
+
+  const probe: ResolutionProbe = {
+    resolvedToEdge: (c) =>
+      !!c.symbolId && !!c.literalTarget
+      && resolvedKeys.has(`${c.symbolId}\u0000${c.literalTarget}`),
+    countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
+  };
+
+  const out = new Map<string, FileDynamicBoundary>();
+  for (const [filePath, { language, candidates }] of byFile) {
+    const sites = finalizeDynamicBoundarySites(candidates, probe);
+    const record = buildFileDynamicBoundary(filePath, language, sites, maxMatchedTotal(candidates));
+    if (record) out.set(filePath, record);
+  }
+  return out.size > 0 ? out : undefined;
+}
+
+/**
  * Does a Pass-1 extraction result carry no facts at all? Used only to decide whether a
  * WORKER's silence has been proven trustworthy (see `extraction-pool.ts`) — never to alter
  * a result. `undefined` (a language with no extractor) is not emptiness: it is the same
@@ -4979,6 +5116,7 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
     && !result.style
     && !result.classRelationships?.length
     && !result.dynamicDispatch
+    && !result.dynamicBoundary?.length
     && !result.httpCalls?.length
     && !result.httpDegradations?.length;
 }
@@ -5062,6 +5200,9 @@ export class CallGraphBuilder {
     const cfgSpill = this.cfgSpill;
     const styleByFile = new Map<string, FileStyleRaw>();
     const parseHealthByFile = new Map<string, FileParseHealth>();
+    // Dynamic-boundary CANDIDATES, kept raw until Pass-2 resolution can decide the partition
+    // (change: disclose-dynamic-boundary-regions).
+    const dynamicBoundaryCandidates = new Map<string, { language: string; candidates: AttributedCandidate[] }>();
     const grammarUnavailableByLanguage = new Map<string, GrammarUnavailableBoundary>();
     let relationships = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
     const dynamicDispatchFacts: DynamicDispatchFacts[] = [];
@@ -5201,6 +5342,14 @@ export class CallGraphBuilder {
           // real file language for the rollup (change: add-parse-health-boundary-disclosure).
           result.parseHealth.language = file.language;
           parseHealthByFile.set(file.path, result.parseHealth);
+        }
+        if (result.dynamicBoundary?.length) {
+          // Like parse health, the matcher runs before the real file language is known here, so
+          // the language is attached at collection (change: disclose-dynamic-boundary-regions).
+          dynamicBoundaryCandidates.set(file.path, {
+            language: file.language,
+            candidates: result.dynamicBoundary,
+          });
         }
         for (const fact of result.classRelationships ?? []) {
           const key = `${file.path}::${fact.className}`;
@@ -6119,6 +6268,7 @@ export class CallGraphBuilder {
       },
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
+      dynamicBoundaryByFile: finalizeDynamicBoundaries(dynamicBoundaryCandidates, allNodes, edges),
       httpClientDegradations: httpClientDegradations.length > 0 ? httpClientDegradations : undefined,
       grammarUnavailable: grammarUnavailableByLanguage.size > 0
         ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
@@ -6256,6 +6406,7 @@ function mergeScriptContainerResults(
   results: FileExtractResult[],
 ): FileExtractResult {
   const merged: FileExtractResult = { nodes: [], rawEdges: [], cfg: new Map() };
+  let containerMatched = 0;
   const styles = results.flatMap(result => result.style ? [result.style] : []);
   const health = results.flatMap(result => result.parseHealth ? [result.parseHealth] : []);
 
@@ -6270,6 +6421,16 @@ function mergeScriptContainerResults(
       merged.dynamicDispatch ??= { events: [], callbacks: [] };
       merged.dynamicDispatch.events.push(...result.dynamicDispatch.events);
       merged.dynamicDispatch.callbacks.push(...result.dynamicDispatch.callbacks);
+    }
+    if (result.dynamicBoundary?.length) {
+      merged.dynamicBoundary = [...(merged.dynamicBoundary ?? []), ...result.dynamicBoundary];
+      // Each script lane matched and capped INDEPENDENTLY, so the container's true scale is the
+      // SUM of the lanes' counts, never the largest one. A lane's own count is its `matchedTotal`
+      // when it was capped, and its retained length when it was not.
+      containerMatched += Math.max(
+        result.dynamicBoundary[0]?.matchedTotal ?? 0,
+        result.dynamicBoundary.length,
+      );
     }
     if (result.httpCalls?.length) merged.httpCalls = [...(merged.httpCalls ?? []), ...result.httpCalls];
     if (result.httpDegradations?.length) {
@@ -6303,6 +6464,12 @@ function mergeScriptContainerResults(
       counters,
       functionsSampled: styles.reduce((sum, style) => sum + style.functionsSampled, 0),
     };
+  }
+
+  // Re-stamp the merged candidate list with the container's summed total, so a two-lane `.vue`
+  // file over the cap reports its real count rather than one lane's.
+  if (merged.dynamicBoundary?.length && containerMatched > merged.dynamicBoundary.length) {
+    for (const c of merged.dynamicBoundary) c.matchedTotal = containerMatched;
   }
 
   if (health.length > 0) {
@@ -6340,6 +6507,38 @@ export async function extractFileParseHealth(
   const h = result?.parseHealth;
   if (h) h.language = file.language;
   return h;
+}
+
+/**
+ * Record ONE file's dynamic-boundary sites in isolation (change: disclose-dynamic-boundary-regions).
+ * Runs the same per-language dispatch the full build uses over a single file, so the watcher can
+ * keep `dynamic-boundary.json` live for a changed file without a whole-graph rebuild.
+ *
+ * The partition is decided against THIS FILE's own resolution, which is all a single-file re-derive
+ * can see. That is a sound direction: a construct the whole-repository build would have retracted
+ * can only appear here as a site — a disclosed boundary is never a false claim of absence, whereas
+ * omitting one would be. Fail-soft: a parse failure yields no sites.
+ */
+export async function extractFileDynamicBoundary(
+  file: { path: string; content: string; language: string },
+): Promise<FileDynamicBoundary | undefined> {
+  const result = await dispatchFileExtract(file);
+  const candidates = result?.dynamicBoundary;
+  if (!candidates?.length) return undefined;
+  const sites = finalizeDynamicBoundarySites(candidates, {
+    // Pass-1 raw edges predate resolution entirely — no reflective-resolution edge can exist here,
+    // so nothing retracts on this lane. Deliberate and sound in the disclosing direction: a
+    // single-file re-derive can only ever report MORE boundaries than the full build, never fewer,
+    // and an extra disclosed boundary is never a false claim of absence.
+    resolvedToEdge: () => false,
+    // A single-file derivation has no repository-wide symbol table, so it can count NOTHING — not
+    // even a name this file defines. `0` would write "resolves to no symbol in this index" about a
+    // target that resolves perfectly well one file over; `1` would write "resolves to ONE symbol"
+    // when this file establishes only a lower bound of one and five more may exist elsewhere. Both
+    // are exactly the repository-wide claim `unresolved-in-file-scope` exists to refuse.
+    countSymbolsNamed: () => null,
+  });
+  return buildFileDynamicBoundary(file.path, file.language, sites, maxMatchedTotal(candidates));
 }
 
 export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph {

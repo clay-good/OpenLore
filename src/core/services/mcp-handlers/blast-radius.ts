@@ -23,6 +23,10 @@ import { seedsFromFiles, handleSelectTests } from './test-impact.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
+import {
+  loadDynamicBoundaryReport,
+  dynamicBoundaryCrossing,
+} from './dynamic-boundary-disclosure.js';
 import type { ConfidenceBoundary } from './confidence-boundary.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { DriftIssue, DriftResult } from '../../../types/index.js';
@@ -74,6 +78,14 @@ interface ImpactResult {
   blastRadius: { total: number; upstream: number; downstream: number; infrastructure?: number };
   riskLevel: RiskLevel;
   crossDomain?: { ecosystems: string[] };
+  /**
+   * The caller and callee closures this impact analysis traversed. Read here only for their FILES,
+   * to scope the dynamic-boundary disclosure to the closure the briefing actually computed
+   * (change: disclose-dynamic-boundary-regions) — a site in an upstream caller's file is precisely
+   * what bounds a blast radius, and scoping to the changed files alone would never disclose it.
+   */
+  upstreamChain?: Array<{ file?: string }>;
+  downstreamCriticalPath?: Array<{ file?: string }>;
   governingDecisions?: Array<{ id?: string; title: string; affectedDomains?: string[]; provenance?: ServedContentProvenance }>;
 }
 
@@ -220,6 +232,9 @@ export async function computeBlastRadius(
   // Symbols whose impact analysis threw. `analyzedSymbolCount` is documented below as
   // authoritative, so it must count symbols actually ANALYZED, not merely attempted.
   let impactFailures = 0;
+  // Every file the composed impact analyses traversed — the caller/callee closure, not just the
+  // diff. Accumulated as the loop runs so the boundary disclosure covers what the briefing saw.
+  const traversedFiles = new Set<string>(changedFiles);
 
   for (const seed of analyzed) {
     // Per-symbol best-effort: one symbol whose impact analysis throws must not
@@ -238,6 +253,9 @@ export async function computeBlastRadius(
     const isHub = r.metrics?.isHub ?? false;
     topSymbols.push({ symbol: r.symbol, file: r.file, riskLevel: risk, affectedCallers: callers, fanIn: r.metrics?.fanIn ?? 0, isHub });
     if (isHub) hubsTouched.push({ symbol: r.symbol, fanIn: r.metrics?.fanIn ?? 0 });
+    if (r.file) traversedFiles.add(r.file);
+    for (const n of r.upstreamChain ?? []) if (n.file) traversedFiles.add(n.file);
+    for (const n of r.downstreamCriticalPath ?? []) if (n.file) traversedFiles.add(n.file);
     for (const e of r.crossDomain?.ecosystems ?? []) layers.add(e);
     for (const d of r.governingDecisions ?? []) {
       governing.set(d.title, d.provenance ?? 'local-unreviewed');
@@ -372,7 +390,17 @@ export async function computeBlastRadius(
   // the working tree must say so (fix-cli-conclusion-honesty). Same shared shape the
   // certification commands emit; absent when the index is current.
   const staleness = await computeStaleness(absDir);
-  const confidenceBoundary = assembleBoundary({ staleness, integrity: ctx.integrity });
+  // Dynamic-boundary sites in the changed files and the caller closure this briefing computed
+  // (change: disclose-dynamic-boundary-regions) — the constructs that make the radius a lower bound.
+  const dynamicCrossing = dynamicBoundaryCrossing(
+    await loadDynamicBoundaryReport(absDir),
+    traversedFiles,
+  );
+  const confidenceBoundary = assembleBoundary({
+    staleness,
+    integrity: ctx.integrity,
+    ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+  });
 
   // Federation block: forward the composed select_tests result when it ran, otherwise
   // a truthful note. Never claim the shipped federation capability is unshipped
