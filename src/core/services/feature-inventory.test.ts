@@ -266,3 +266,54 @@ describe('feature-inventory', () => {
     expect(inv.optInCount).toBe(10);
   });
 });
+
+describe('auto-init is listed with its state and the snippet to change it', () => {
+  const dirs: string[] = [];
+
+  async function freshProject(extra: Record<string, unknown> = {}): Promise<string> {
+    const dir = join(tmpdir(), `openlore-autoinit-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    dirs.push(dir);
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(
+      join(dir, '.openlore', 'config.json'),
+      JSON.stringify({ ...BASE_CONFIG, ...extra }, null, 2),
+    );
+    return dir;
+  }
+
+  afterEach(async () => {
+    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+
+  it('reports on-by-default with the disable snippet', async () => {
+    const dir = await freshProject();
+    const inv = await collectFeatureInventory(dir);
+    const autoInit = inv.features.find(f => f.id === 'auto-init');
+    expect(autoInit).toBeDefined();
+    expect(autoInit!.state).toBe('default-on');
+    expect(autoInit!.activate).toContain('"autoInit": false');
+  });
+
+  it('reports the per-repo opt-out with the snippet to re-enable it', async () => {
+    const dir = await freshProject({ autoInit: false });
+    const autoInit = (await collectFeatureInventory(dir)).features.find(f => f.id === 'auto-init');
+    expect(autoInit!.state).toBe('inactive');
+    expect(autoInit!.detail).toContain('disabled for this repo');
+    expect(autoInit!.activate).toContain('"autoInit": true');
+  });
+
+  it('reports the environment opt-out separately from the config one', async () => {
+    const dir = await freshProject();
+    const previous = process.env.OPENLORE_NO_AUTO_ANALYZE;
+    process.env.OPENLORE_NO_AUTO_ANALYZE = '1';
+    try {
+      const autoInit = (await collectFeatureInventory(dir)).features.find(f => f.id === 'auto-init');
+      expect(autoInit!.state).toBe('inactive');
+      expect(autoInit!.detail).toContain('OPENLORE_NO_AUTO_ANALYZE');
+      expect(autoInit!.activate).toContain('unset OPENLORE_NO_AUTO_ANALYZE');
+    } finally {
+      if (previous === undefined) delete process.env.OPENLORE_NO_AUTO_ANALYZE;
+      else process.env.OPENLORE_NO_AUTO_ANALYZE = previous;
+    }
+  });
+});

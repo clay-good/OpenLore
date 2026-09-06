@@ -55,7 +55,7 @@
      only and discloses the degradation, instead of pinning a laptop on a monorepo.
 3. **`install` absorbs governance wiring.** Once `add-decision-autopilot` lands,
    `openlore install` wires the decisions pre-commit hook *in autopilot (non-blocking,
-   trail-only) mode* by default — one entrypoint yields both faces. Blocking human-review
+   trail-only) mode* by default — one entrypoint yields navigation and a decision trail. Blocking human-review
    mode stays an explicit opt-in (doctrine: advisory by default, blocking opt-in).
    `openlore setup` remains for skills/panic extras; its gate-wiring becomes a thin alias.
 4. **Postinstall stays side-effect-free.** The hint it prints stays exactly

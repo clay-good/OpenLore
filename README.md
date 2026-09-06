@@ -166,10 +166,10 @@ The fastest way to evaluate a tool is to find out quickly that it isn't for you.
 ```bash
 npm install -g openlore
 cd /path/to/your-project
-openlore install     # detect your agent, wire it up, AND build the index
+openlore install     # wire your agent — here and for every future repo — AND build the index
 ```
 
-That single command auto-detects your agent surfaces and wires each to call `orient()`, registers the MCP server so it starts with your agent, builds the local BM25 index (no network), and — for Claude Code — injects a bounded, ignorable orientation block before each new prompt so the common task begins already oriented. **Nothing prompts you; nothing runs on `npm install`.**
+That single command auto-detects your agent surfaces and wires each to call `orient()`, registers the MCP server so it starts with your agent, builds the local BM25 index (no network), wires a non-blocking decision trail, and — for Claude Code — injects a bounded, ignorable orientation block before each new prompt so the common task begins already oriented. It also wires the **user** scope for agents that have one, so every git repository you open afterwards reaches OpenLore and builds its index in the background on first touch (git work trees only, disclosed once per repository, `--repo-only` to opt out). **Nothing prompts you; nothing runs on `npm install`.**
 
 ```bash
 openlore install --no-analyze   # wire surfaces only; build the index later

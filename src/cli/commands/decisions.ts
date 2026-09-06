@@ -292,20 +292,47 @@ export async function runPostCommitDecisionCheck(rootPath: string): Promise<void
   logger.warning('openlore: pre-commit gate was bypassed (--no-verify). Architectural decisions were not reviewed for this commit. Run: openlore decisions --consolidate --gate');
 }
 
-export async function installPreCommitHook(rootPath: string): Promise<void> {
+/**
+ * Does this repository already carry an OpenLore decisions commit gate?
+ *
+ * Read by `openlore install` so it never changes the mode of a gate someone else
+ * configured: an absent `governance.autopilot` means blocking review, so writing
+ * the non-blocking default over an EXISTING gate would silently downgrade it
+ * (change: unify-onboarding-entrypoint).
+ */
+export async function hasOpenLoreCommitGate(rootPath: string): Promise<boolean> {
+  try {
+    const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
+    return (await readFile(hookPath, 'utf-8')).includes(HOOK_MARKER);
+  } catch {
+    return false; // no hook, or unreadable — either way, no gate we must preserve
+  }
+}
+
+export async function installPreCommitHook(
+  rootPath: string,
+  /**
+   * How the gate will behave once installed. In `autopilot` mode the gate records
+   * and syncs verified decisions and never blocks a commit, so the blocking notice
+   * below would be flatly untrue — and it was being printed one line above
+   * `openlore install`'s own "no commit is blocked by default"
+   * (change: unify-onboarding-entrypoint).
+   */
+  opts: { autopilot?: boolean } = {},
+): Promise<boolean> {
   const target = await resolveGitHookTarget(rootPath, 'pre-commit');
   const hookPath = target.hookPath;
 
   if (!(await isResolvedGitRepository(rootPath, target))) {
     logger.error('Not a git repository. Cannot install hook.');
     process.exitCode = 1;
-    return;
+    return false;
   }
   const launcher = await resolveTrustedHookLauncher(rootPath);
   if (!launcher) {
     logger.error('Refusing to install a security hook that executes mutable code from this repository. Install OpenLore globally and retry.');
     process.exitCode = 1;
-    return;
+    return false;
   }
   const hookContent = renderHookContent(renderTrustedHookCommand(launcher, ['decisions', '--gate']));
   await ensureDecisionSupportFiles(rootPath);
@@ -313,7 +340,7 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
     logger.warning(hookManagerWarning(target, 'openlore decisions --gate'));
     const postTarget = await resolveGitHookTarget(rootPath, 'post-commit');
     logger.warning(hookManagerWarning(postTarget, 'openlore decisions --post-commit-check'));
-    return;
+    return false;
   }
 
   let preAlreadyInstalled = false;
@@ -338,13 +365,15 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
   });
   if (preResult.status === 'unavailable') {
     logger.warning(`Cannot install the decisions hook at ${displayHookPath(hookPath)}: ${preResult.reason}`);
-    return;
+    return false;
   }
   if (preAlreadyInstalled) logger.success('Pre-commit hook already installed.');
   else {
     if (appendedPre) logger.discovery('Existing pre-commit hook found. Appending decisions gate.');
     logger.success(`Pre-commit hook installed at ${displayHookPath(hookPath)}`);
-    logger.discovery('Commits will be gated until decisions are approved. Use --no-verify to skip.');
+    logger.discovery(opts.autopilot
+      ? 'Verified decisions are recorded and synced at commit time. No commit is blocked.'
+      : 'Commits will be gated until decisions are approved. Use --no-verify to skip.');
   }
 
   // Install post-commit hook to detect --no-verify bypass
@@ -352,7 +381,8 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
   const postCommitPath = postTarget.hookPath;
   if (!postTarget.canInstall) {
     logger.warning(hookManagerWarning(postTarget, 'openlore decisions --post-commit-check'));
-    return;
+    // The gate itself IS installed; only its bypass detector is not.
+    return true;
   }
   const postResult = await updateHookFile(postCommitPath, (existing) => {
     if (existing?.includes(POST_COMMIT_HOOK_MARKER)) return null;
@@ -363,9 +393,10 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
   });
   if (postResult.status === 'unavailable') {
     logger.warning(`Cannot install the decisions post-commit hook at ${displayHookPath(postCommitPath)}: ${postResult.reason}`);
-    return;
+    return true;
   }
   logger.success(`Post-commit hook installed at ${displayHookPath(postCommitPath)} (bypass detector)`);
+  return true;
 }
 
 export async function uninstallPreCommitHook(rootPath: string): Promise<void> {

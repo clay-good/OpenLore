@@ -42,6 +42,14 @@ export interface OpenLoreConfig {
      */
     mode: PanicResponseMode;
   };
+  /**
+   * Optional background auto-initialization switch (change:
+   * unify-onboarding-entrypoint). Default `true`. When `false`, no background
+   * auto-init or self-healing repair runs for this repository — explicit
+   * commands (`openlore analyze`, `openlore install`) are unaffected. The
+   * environment opt-out `OPENLORE_NO_AUTO_ANALYZE` remains equivalent.
+   */
+  autoInit?: boolean;
   createdAt: string;
   lastRun: string | null;
   /**

@@ -6,7 +6,9 @@
 
 Handles reading, writing, and managing configuration files for both `.openlore/config.json` and
 `openspec/config.yaml`, including directory structure setup and configuration merging.
+
 ## Requirements
+
 ### Requirement: Readopenloreconfig
 
 The system SHALL read the `.openlore/config.json` file from the specified root path and return its
@@ -365,6 +367,22 @@ Invalid configuration SHALL be refused rather than silently renamed or widened.
 - **GIVEN** a manifest or configuration exceeds the workspace pattern or shard limit
 - **WHEN** shards are detected
 - **THEN** analysis stops with a bounded error before performing unbounded glob expansion
+
+### Requirement: AutoInitOptOutKey
+
+`.openlore/config.json` SHALL support an optional `autoInit: boolean` key (default `true`).
+When `false`, no background auto-initialization (cold-start bootstrap or any successor
+background repair trigger) runs for that repository; explicit commands (`openlore analyze`,
+`openlore install`) are unaffected. The key SHALL be listed by the feature inventory
+(`openlore features`) with its active state and the snippet to change it, and SHALL remain
+optional — zero required config keys is preserved.
+
+#### Scenario: Opt-out is respected and visible
+
+- **GIVEN** `autoInit: false` in a repo's `.openlore/config.json`
+- **WHEN** the user runs `openlore features`
+- **THEN** auto-init is listed as disabled for this repo with the snippet to re-enable it,
+  and no background build has run
 
 ## Technical Notes
 

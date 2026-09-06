@@ -36,6 +36,7 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
   panicResponse: { mode: 'off' },
   createdAt: '2026-07-18T00:00:00.000Z',
   lastRun: null,
+  autoInit: true,
   blastRadius: {},
   specStore: { name: 's', path: '/tmp/s', targets: [] },
   governance: {},
@@ -76,7 +77,7 @@ describe('config-schema — type-completeness bind', () => {
 
   it('every validator kind is a recognized shape', () => {
     for (const kind of Object.values(CONFIG_FIELD_KINDS)) {
-      expect(['string', 'string-or-null', 'object']).toContain(kind);
+      expect(['string', 'string-or-null', 'boolean', 'object']).toContain(kind);
     }
   });
 

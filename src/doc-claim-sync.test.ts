@@ -293,3 +293,31 @@ describe('doc-claim sync: certified scale envelope is manifest-bound', () => {
     expect(manifest.policy.ci).toContain('do not enforce checked-in wall-clock observations as portable thresholds');
   });
 });
+
+/**
+ * Onboarding claims that name a number or a negative behavior (change:
+ * unify-onboarding-entrypoint). Both are the shape this file exists for: a figure
+ * that lives in a constant, and a promise nothing else would notice breaking.
+ */
+describe('onboarding claims stay bound to the code', () => {
+  it('the docs auto-init ceiling matches the constant', async () => {
+    const { AUTO_INIT_DEGRADED_FILE_CEILING } = await import('./constants.js');
+    const docs = read('docs/install.md');
+    const line = docs.split('\n').find(l => l.includes('AUTO_INIT_DEGRADED_FILE_CEILING'));
+    expect(line, 'expected docs/install.md to name the ceiling constant').toBeDefined();
+    expect(line).toContain(AUTO_INIT_DEGRADED_FILE_CEILING.toLocaleString('en-US'));
+  });
+
+  it('background auto-init installs no git hook', () => {
+    // The spec scenario asserts a negative, so bind it to the code: the auto-init
+    // build path runs `init` and `analyze` and nothing else, and neither the
+    // bootstrap nor the analyze command may reach a hook installer.
+    const bootstrap = read('src/core/services/cold-start-bootstrap.ts');
+    expect(bootstrap).not.toMatch(/installPreCommitHook|wireGovernanceGate|hooks\//);
+    const analyze = read('src/cli/commands/analyze.ts');
+    expect(analyze).not.toMatch(/installPreCommitHook|wireGovernanceGate/);
+    // And the argv the bootstrap spawns is exactly those two subcommands.
+    const spawned = [...bootstrap.matchAll(/await run\(\[\s*'([a-z-]+)'/g)].map(m => m[1]);
+    expect(new Set(spawned)).toEqual(new Set(['init', 'analyze']));
+  });
+});

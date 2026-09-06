@@ -716,6 +716,18 @@ export const WATCH_BULK_THRESHOLD = 25;
 export const WATCH_EMBED_FILE_CEILING = 5000;
 
 /**
+ * Above this many files in the tree, a BACKGROUND auto-init build sheds its
+ * semantic-embedding pass and builds signatures + the keyword (BM25) index only,
+ * disclosing the degradation (change: unify-onboarding-entrypoint).
+ *
+ * Deliberately the same number as {@link WATCH_EMBED_FILE_CEILING}: it is the same
+ * judgment — "this tree is too big to embed continuously in the background" — and
+ * two constants for one judgment would drift. An EXPLICIT `openlore analyze` is
+ * never degraded by this ceiling; the user asked for it.
+ */
+export const AUTO_INIT_DEGRADED_FILE_CEILING = WATCH_EMBED_FILE_CEILING;
+
+/**
  * Quiet period (ms) after a detected VCS bulk operation (.git/HEAD or index
  * churn) before a single coalesced refresh runs, so the whole op settles first.
  */

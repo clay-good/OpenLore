@@ -49,7 +49,7 @@ export const CONFIG_SCHEMA_VERSION = '1.2.0';
  * Top-level value shapes retained as the public compatibility map for callers and tests.
  * The recursive schema below refines object fields without changing this exported shape.
  */
-export type ConfigFieldKind = 'string' | 'string-or-null' | 'object';
+export type ConfigFieldKind = 'string' | 'string-or-null' | 'boolean' | 'object';
 
 type RequiredKeys<T> = {
   [K in keyof T]-?: Record<string, never> extends Pick<T, K> ? never : K
@@ -275,6 +275,7 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
     panicResponse: panicRule,
     createdAt: stringRule,
     lastRun: { kind: 'string-or-null' },
+    autoInit: booleanRule,
     blastRadius: blastRadiusRule,
     specStore: specStoreRule,
     governance: governanceRule,
@@ -314,6 +315,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   panicResponse: 'object',
   createdAt: 'string',
   lastRun: 'string-or-null',
+  autoInit: 'boolean',
   blastRadius: 'object',
   specStore: 'object',
   governance: 'object',

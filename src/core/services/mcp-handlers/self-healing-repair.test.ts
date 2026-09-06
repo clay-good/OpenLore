@@ -4,6 +4,9 @@
  * confidence boundary.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { computeRepairReason } from './utils.js';
 import { assembleBoundary, repairDisclosure } from './confidence-boundary.js';
 import {
@@ -43,10 +46,17 @@ describe('computeRepairReason — worst-first read-path trigger selection', () =
 });
 
 describe('repairDisclosure — served-stale answers are disclosed as repairing', () => {
-  afterEach(() => _resetRepairServiceForTesting());
+  const dirs: string[] = [];
+  afterEach(() => {
+    _resetRepairServiceForTesting();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
 
   it('marks the boundary incomplete with the repair reason while a repair is in flight', async () => {
-    const dir = '/tmp/does-not-need-to-exist-for-status';
+    // Auto-init runs only inside a git work tree (change: unify-onboarding-entrypoint).
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-heal-'));
+    dirs.push(dir);
+    mkdirSync(join(dir, '.git'), { recursive: true });
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const p = repairInBackground(dir, 'integrity-mismatched', {
@@ -56,7 +66,7 @@ describe('repairDisclosure — served-stale answers are disclosed as repairing',
 
     const marker = repairDisclosure(dir);
     expect(marker).toMatchObject({ inProgress: true, reason: 'integrity-mismatched' });
-    expect(marker?.detail).toMatch(/background index refresh has started/i);
+    expect(marker?.detail).toMatch(/background refresh has started/i);
 
     const boundary = assembleBoundary({ repair: marker });
     expect(boundary.repair).toEqual(marker);

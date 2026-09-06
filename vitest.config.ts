@@ -15,6 +15,7 @@ export default defineConfig({
     // suites pass only on fast hardware; under a full parallel run they timed out
     // and read as logic failures. 30s is chosen to be comfortably above the real
     // work while still catching a genuine hang.
+    setupFiles: ['./vitest.setup.ts'],
     testTimeout: 30_000,
     hookTimeout: 30_000,
     env: {

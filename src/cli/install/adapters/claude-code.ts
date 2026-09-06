@@ -10,7 +10,7 @@
  * server never loaded; `apply` now migrates that stale entry away.
  */
 
-import { mkdir, readFile, unlink } from 'node:fs/promises';
+import { mkdir, lstat, readFile, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { applyMarkdownBlock, uninstallMarkdownBlock, hasManagedBlock } from './markdown-block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreservingFormat, type JsonPathEdit } from '../json-managed.js';
@@ -19,13 +19,166 @@ import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
+import { isGuardedWriteFailure, withGuardedConfigWrite } from '../guarded-config-write.js';
 
 const MD_FILE = 'CLAUDE.md';
 const SETTINGS_PATH = '.claude/settings.json';
 const SETTINGS_LOCAL_PATH = '.claude/settings.local.json';
 const MCP_PATH = '.mcp.json';
 
-/** Permission that lets the agent run the `openlore` CLI without a per-call prompt. */
+/** Where Claude Code reads each managed file, per scope. */
+interface ClaudeLayout {
+  /** Instruction block file, relative to the scope root. */
+  md: string;
+  /** File Claude Code actually reads MCP servers from, relative to the scope root. */
+  mcp: string;
+  /** Hook settings file, relative to the scope root. */
+  settings: string;
+  /** File carrying the `Bash(openlore:*)` permission, relative to the scope root. */
+  permissions: string;
+  /**
+   * May a file that holds nothing but OpenLore entries be deleted on uninstall?
+   * False for the user scope: `~/.claude.json` is Claude Code's own account state,
+   * never ours to remove even if our removal happened to empty our view of it.
+   */
+  mayDeleteMcpFile: boolean;
+  /**
+   * Same question for the settings file. Also false for the user scope: Claude Code
+   * writes `~/.claude/settings.json` itself (as `{}` on a fresh profile), so an
+   * `install` → `uninstall` round trip must not delete a file we did not create.
+   */
+  mayDeleteSettingsFile: boolean;
+}
+
+/**
+ * User scope mirrors the repo footprint into the files Claude Code reads for
+ * EVERY project (change: unify-onboarding-entrypoint):
+ *   `~/.claude.json`            — user-scope MCP servers
+ *   `~/.claude/settings.json`   — user-scope hooks AND permissions
+ *   `~/.claude/CLAUDE.md`       — user-scope instructions
+ * Project scope wins over user scope inside Claude Code itself, so a repo that
+ * was wired explicitly keeps its own entry.
+ */
+const LAYOUTS: Record<'repo' | 'user', ClaudeLayout> = {
+  repo: {
+    md: MD_FILE,
+    mcp: MCP_PATH,
+    settings: SETTINGS_PATH,
+    permissions: SETTINGS_LOCAL_PATH,
+    mayDeleteMcpFile: true,
+    mayDeleteSettingsFile: true,
+  },
+  user: {
+    md: '.claude/CLAUDE.md',
+    mcp: '.claude.json',
+    settings: SETTINGS_PATH,
+    permissions: SETTINGS_PATH,
+    mayDeleteMcpFile: false,
+    mayDeleteSettingsFile: false,
+  },
+};
+
+function layoutFor(ctx: ApplyContext): ClaudeLayout {
+  return LAYOUTS[ctx.scope ?? 'repo'];
+}
+
+/**
+ * Write options for a managed file in this scope.
+ *
+ * An existing file keeps its own mode (`preserveMode`). A user-scope JSON config
+ * OpenLore CREATES is `0600`, not the umask default: `~/.claude.json` and
+ * `~/.claude/settings.json` are where Claude Code keeps account state, it creates
+ * them `0600` itself, and `open(O_CREAT)` never lowers the mode of a file that
+ * already exists — so whoever creates the file first decides. On a shared host,
+ * OpenLore getting there first must not be the reason that state is world-readable
+ * (change: unify-onboarding-entrypoint).
+ *
+ * Scope note: this covers the JSON configs written here. `~/.claude/CLAUDE.md` goes
+ * through the shared markdown-block helper and keeps the default mode — it holds
+ * generated instructions, not account state.
+ */
+function writeOptionsFor(ctx: ApplyContext): { preserveMode: true; mode?: number } {
+  return ctx.scope === 'user' ? { preserveMode: true, mode: 0o600 } : { preserveMode: true };
+}
+
+/**
+ * Publish a managed file, refusing rather than clobbering a concurrent writer.
+ *
+ * The repo scope keeps the plain last-writer-wins rename: OpenLore is effectively
+ * the only writer of `.mcp.json` / `.claude/settings.local.json` during an install.
+ * The USER scope does not have that luxury — `~/.claude.json` is rewritten by any
+ * running Claude Code, and bare `openlore install` is precisely the command a user
+ * runs with their agent open. There, the write is a compare-and-swap against the
+ * exact bytes we read: a concurrent write loses nothing, because ours refuses.
+ *
+ * Returns false when the target moved under us; the caller reports that instead of
+ * claiming a write that did not happen (change: unify-onboarding-entrypoint).
+ */
+async function publishManagedFile(
+  ctx: ApplyContext,
+  path: string,
+  data: string,
+  observedRaw: string | null,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  await mkdir(dirname(path), { recursive: true, ...(ctx.scope === 'user' ? { mode: 0o700 } : {}) });
+  const options = writeOptionsFor(ctx);
+  if (ctx.scope !== 'user') {
+    await confinedAtomicWriteFile(ctx.root, path, data, options);
+    return { ok: true };
+  }
+
+  // The compare-and-swap branch of confinedAtomicWriteFile moves the target aside
+  // before republishing it, so it REQUIRES the caller to serialize and to leave a
+  // recovery journal — otherwise a crash in that window leaves ~/.claude.json
+  // missing and nothing ever puts it back. `openlore setup` already had this right;
+  // the machinery is now shared (change: unify-onboarding-entrypoint).
+  const result = await withGuardedConfigWrite(ctx.root, path, async recoveryJournalPath => {
+    // Re-observe INSIDE the lock. The caller's snapshot was taken before it, and
+    // the recovery step above can legitimately change the file — completing an
+    // interrupted publication is its whole job. Comparing against a pre-lock
+    // snapshot reported "another process changed it" for OpenLore's own recovery.
+    //
+    // lstat, not stat: the confinement layer checks identity with lstat, and a
+    // SYMLINKED target is a confinement problem, not a concurrency one. Diagnosing
+    // it as contention sent a user whose ~/.claude.json is symlinked into a
+    // dotfiles repository into a retry loop that could never succeed.
+    let identity: Awaited<ReturnType<typeof lstat>> | null = null;
+    try {
+      identity = await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (identity !== null && !identity.isFile()) {
+      return { ok: false as const, reason: 'it is a symbolic link or another non-regular file, which OpenLore will not write through' };
+    }
+    const currentRaw = identity === null ? null : await readRawOrNull(path);
+    if (currentRaw !== observedRaw) {
+      return {
+        ok: false as const,
+        reason: currentRaw === null || observedRaw === null
+          ? 'it appeared or vanished between being read and being written'
+          : 'it changed between being read and being written',
+      };
+    }
+    try {
+      await confinedAtomicWriteFile(ctx.root, path, data, {
+        ...options,
+        expectedIdentity: identity,
+        ...(currentRaw !== null ? { expectedContent: currentRaw } : {}),
+        recoveryJournalPath,
+      });
+      return { ok: true as const };
+    } catch (error) {
+      if (/Confined write conflict/.test((error as Error).message)) {
+        return { ok: false as const, reason: 'another process changed it during this install' };
+      }
+      throw error;
+    }
+  });
+  if (isGuardedWriteFailure(result)) return { ok: false, reason: result.reason };
+  return result;
+}
+
 const OPENLORE_PERMISSION = 'Bash(openlore:*)';
 
 /**
@@ -137,6 +290,32 @@ function isJsonObjectText(raw: string | null): boolean {
 }
 
 /**
+ * Refuse to write a file that exists but cannot be read as a JSON object.
+ *
+ * An unreadable file used to fall through to "treat it as `{}`, then write a fresh
+ * pretty-printed document" — which REPLACES it with OpenLore's two keys and nothing
+ * else. That is survivable for a repo `.mcp.json`; it is catastrophic for
+ * `~/.claude.json`, which holds Claude Code's account state, and it fires on inputs
+ * that are not corruption at all: a UTF-8 BOM, a JSONC settings file with comments,
+ * an EACCES read, or a file caught mid-rewrite by a running Claude Code.
+ *
+ * A file we cannot parse is a file we do not understand, so we do not touch it
+ * (change: unify-onboarding-entrypoint).
+ */
+function refusalForUnreadableJson(
+  path: string,
+  raw: string | null,
+  displayName: string,
+): PlannedChange | null {
+  if (raw == null || isJsonObjectText(raw)) return null;
+  return {
+    path,
+    kind: 'noop',
+    summary: `${displayName}: refused to rewrite — it exists but is not readable as JSON (comments, a byte-order mark, or a concurrent write). Nothing was changed.`,
+  };
+}
+
+/**
  * Serialize the managed update to `path`. When the file already exists with parseable JSON, edit
  * ONLY the managed paths on the original text (preserving the user's formatting); otherwise emit a
  * fresh pretty-printed document. Keeps install merge-not-clobber down to the byte (decision df27e8ef).
@@ -194,6 +373,102 @@ function managedRemovalEdits(parsed: Record<string, unknown>): JsonPathEdit[] {
   return edits;
 }
 
+/**
+ * The `permissions` object `base` would have once `Bash(openlore:*)` is allowed, or
+ * null when it is already there. Shared by the folded user-scope write and the
+ * separate repo-scope `settings.local.json` write so both grant the identical thing.
+ */
+function withOpenLorePermission(
+  base: Record<string, unknown>,
+): { permissions: Record<string, unknown>; allow: unknown[] } | null {
+  const perms = (base.permissions as Record<string, unknown>) ?? {};
+  const allow = Array.isArray(perms.allow) ? (perms.allow as unknown[]) : [];
+  if (allow.includes(OPENLORE_PERMISSION)) return null;
+  const nextAllow = [...allow, OPENLORE_PERMISSION];
+  return { permissions: { ...perms, allow: nextAllow }, allow: nextAllow };
+}
+
+/**
+ * Does this `mcpServers.openlore` entry look like the one OpenLore writes?
+ *
+ * Deliberately shape-based and conservative: a command plus an argv that names the
+ * `openlore` package and its `mcp` subcommand. Used ONLY as an uninstall fallback
+ * when the managed-meta marker is gone, so the cost of a false negative is a
+ * leftover entry and the cost of a false positive would be deleting a user's own
+ * server — hence the narrow test.
+ */
+function isOurMcpEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const args = (entry as { args?: unknown }).args;
+  if (!Array.isArray(args)) return false;
+  const flat = args.filter((a): a is string => typeof a === 'string');
+  return flat.includes('openlore') && flat.includes('mcp');
+}
+
+/** Record a refused write, naming the cause the code actually observed. */
+function refusedWrite(
+  result: ApplyResult,
+  path: string,
+  displayName: string,
+  reason: string,
+): ApplyResult {
+  result.changes.push({
+    path,
+    kind: 'noop',
+    summary: `${displayName}: not written — ${reason}`,
+  });
+  result.warnings.push(
+    `${displayName} was not written because ${reason}. OpenLore refused rather than overwrite it. `
+    + 'Re-run install once the cause is resolved.',
+  );
+  result.conflict = true;
+  return result;
+}
+
+/**
+ * Test seam for the compare-and-swap contract.
+ *
+ * The race it guards — a running Claude Code rewriting `~/.claude.json` between our
+ * read and our write — cannot be scheduled deterministically from outside, and a
+ * test that races the real scheduler asserts nothing. This exposes the exact
+ * question instead: given the bytes we observed, does a publication whose target
+ * has since changed refuse, and leave the change intact?
+ */
+export function _publishManagedFileForTesting(
+  ctx: ApplyContext,
+  path: string,
+  data: string,
+  observedRaw: string | null,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  return publishManagedFile(ctx, path, data, observedRaw);
+}
+
+/**
+ * Append the managed instruction block, LAST, once every registration this scope
+ * needs has actually been written.
+ *
+ * Order matters for honesty: the block tells an agent to call `orient` and the rest
+ * of the tool surface. Written first, a refused MCP registration left a scope whose
+ * instructions describe tools nothing wired — the half-wired state the pre-flight
+ * exists to prevent, reached through the one refusal a pre-flight cannot predict
+ * (change: unify-onboarding-entrypoint).
+ */
+async function withInstructionBlock(
+  ctx: ApplyContext,
+  layout: ClaudeLayout,
+  result: ApplyResult,
+): Promise<ApplyResult> {
+  const md = await applyMarkdownBlock(ctx, {
+    fileName: layout.md,
+    createIfMissing: true,
+    blockBody: ctx.instructionTemplate,
+  });
+  result.changes.push(...md.changes);
+  result.warnings.push(...md.warnings);
+  if (md.conflict) result.conflict = true;
+  return result;
+}
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     await readFile(path);
@@ -205,16 +480,50 @@ async function fileExists(path: string): Promise<boolean> {
 
 export const claudeCodeAdapter: Adapter = {
   name: 'claude-code',
+  // Claude Code reads MCP servers, hooks, permissions, and instructions from the
+  // user's home as well as the project — so one install can reach every future
+  // repository (change: unify-onboarding-entrypoint).
+  supportsGlobal: true,
   isConnected: (root) => hasManagedBlock(root, MD_FILE),
+  isConnectedUserScope: (userRoot) => hasManagedBlock(userRoot, LAYOUTS.user.md),
   async apply(ctx: ApplyContext): Promise<ApplyResult> {
-    const mcpPath = safeJoin(ctx.root, MCP_PATH);
-    const settingsPath = safeJoin(ctx.root, SETTINGS_PATH);
-    const localPath = safeJoin(ctx.root, SETTINGS_LOCAL_PATH);
-    const mdResult = await applyMarkdownBlock(ctx, {
-      fileName: MD_FILE,
-      createIfMissing: true,
-      blockBody: ctx.instructionTemplate,
-    });
+    const layout = layoutFor(ctx);
+    const mcpPath = safeJoin(ctx.root, layout.mcp);
+    const settingsPath = safeJoin(ctx.root, layout.settings);
+    const localPath = safeJoin(ctx.root, layout.permissions);
+
+    // Pre-flight EVERY managed JSON file before writing anything. A refusal
+    // discovered halfway through used to leave the scope half-wired — instructions
+    // written, MCP server unregistered — which is worse than not starting
+    // (change: unify-onboarding-entrypoint).
+    const rawMcpOriginal = await readRawOrNull(mcpPath);
+    const rawSettingsOriginal = await readRawOrNull(settingsPath);
+    const rawLocalOriginal = localPath === settingsPath
+      ? rawSettingsOriginal
+      : await readRawOrNull(localPath);
+    const preflight = [
+      refusalForUnreadableJson(mcpPath, rawMcpOriginal, layout.mcp),
+      refusalForUnreadableJson(settingsPath, rawSettingsOriginal, layout.settings),
+      ...(localPath === settingsPath
+        ? []
+        : [refusalForUnreadableJson(localPath, rawLocalOriginal, layout.permissions)]),
+    ].filter((refusal): refusal is PlannedChange => refusal !== null);
+    if (preflight.length > 0) {
+      return {
+        changes: preflight,
+        warnings: preflight.map(refusal =>
+          `${refusal.path} could not be parsed as JSON, so OpenLore left it — and everything else `
+          + 'in this scope — untouched. Fix or move the file, then re-run install.'),
+        conflict: true,
+      };
+    }
+
+    // The instruction block is written LAST (below). Written first, a refusal on any
+    // JSON file left the scope carrying instructions that tell an agent to call
+    // tools no MCP registration had been written for — the half-wired state the
+    // pre-flight exists to prevent, reached by the one refusal the pre-flight
+    // cannot predict (change: unify-onboarding-entrypoint).
+    const mdResult: ApplyResult = { changes: [], warnings: [], conflict: false };
 
     // --- 1. MCP server registration → .mcp.json (the file Claude Code reads) ---
     const existingMcp = await readJsonOrEmpty(mcpPath);
@@ -224,10 +533,12 @@ export const claudeCodeAdapter: Adapter = {
       mdResult.changes.push({
         path: mcpPath,
         kind: 'noop',
-        summary: `${MCP_PATH}: refused to overwrite hand-edited OpenLore entries (use --force)`,
+        summary: `${layout.mcp}: refused to overwrite hand-edited OpenLore entries (use --force)`,
       });
       mdResult.warnings.push(
-        `${MCP_PATH} has hand-edits in OpenLore-managed paths — pass --force to overwrite`
+        `${layout.mcp} has hand-edits in OpenLore-managed paths — pass --force to overwrite. `
+        + 'Nothing else in this scope was written: an instruction block naming tools no '
+        + 'registration wired would be worse than no block at all.',
       );
       mdResult.conflict = true;
       return mdResult;
@@ -236,7 +547,7 @@ export const claudeCodeAdapter: Adapter = {
     const { next: nextMcp, action: mcpAction } = mergeEntries(existingMcp, [
       { path: 'mcpServers.openlore', value: entry },
     ]);
-    const rawMcp = hadMcp ? await readRawOrNull(mcpPath) : null;
+    const rawMcp = hadMcp ? rawMcpOriginal : null;
     const mcpBefore = hadMcp ? (rawMcp ?? JSON.stringify(existingMcp, null, 2) + '\n') : '';
     const mcpAfter = serializeManaged(rawMcp, nextMcp, [
       { path: ['mcpServers', 'openlore'], value: entry },
@@ -246,10 +557,10 @@ export const claudeCodeAdapter: Adapter = {
       path: mcpPath,
       kind: !hadMcp ? 'create' : mcpAction === 'noop' ? 'noop' : 'update',
       summary: !hadMcp
-        ? `create ${MCP_PATH} with mcpServers.openlore`
+        ? `create ${layout.mcp} with mcpServers.openlore`
         : mcpAction === 'noop'
-          ? `${MCP_PATH}: already up to date`
-          : `update mcpServers.openlore in ${MCP_PATH}`,
+          ? `${layout.mcp}: already up to date`
+          : `update mcpServers.openlore in ${layout.mcp}`,
       preview: !hadMcp
         ? previewCreate(mcpPath, mcpAfter)
         : mcpAction === 'noop'
@@ -257,13 +568,13 @@ export const claudeCodeAdapter: Adapter = {
           : previewDiff(mcpPath, mcpBefore, mcpAfter),
     });
     if (!ctx.dryRun && (mcpAction !== 'noop' || !hadMcp)) {
-      await mkdir(dirname(mcpPath), { recursive: true });
-      await confinedAtomicWriteFile(ctx.root, mcpPath, mcpAfter, { preserveMode: true });
+      const published = await publishManagedFile(ctx, mcpPath, mcpAfter, rawMcpOriginal);
+      if (!published.ok) return refusedWrite(mdResult, mcpPath, layout.mcp, published.reason);
     }
 
     // --- 2. Hooks → .claude/settings.json (marker-identified) ------------------
     // SessionStart (whole-repo primer) + UserPromptSubmit (task-scoped injection).
-    const rawSettings = await readRawOrNull(settingsPath);
+    const rawSettings = rawSettingsOriginal;
     const had = rawSettings != null;
     const existing = await readJsonOrEmpty(settingsPath);
 
@@ -297,6 +608,22 @@ export const claudeCodeAdapter: Adapter = {
       settingsEdits.push({ path: ['hooks', key], value: merged });
     }
 
+    // In the user scope the hooks file and the permission file are ONE file. Two
+    // sequential read-modify-write passes over the same path worked in a real run
+    // (the second re-read what the first wrote) but produced two contradictory
+    // `--dry-run` previews of the same file, the second silently dropping the
+    // hooks — and dry-run's whole contract is that it describes the real outcome.
+    // Fold the permission into this single write instead
+    // (change: unify-onboarding-entrypoint).
+    const permissionSharesSettingsFile = settingsPath === localPath;
+    if (permissionSharesSettingsFile) {
+      const merged = withOpenLorePermission(base);
+      if (merged) {
+        next.permissions = merged.permissions;
+        settingsEdits.push({ path: ['permissions', 'allow'], value: merged.allow });
+      }
+    }
+
     const changed = JSON.stringify(existing) !== JSON.stringify(next);
     const before = had ? (rawSettings ?? '') : '';
     const after = serializeManaged(rawSettings, next, settingsEdits);
@@ -304,10 +631,10 @@ export const claudeCodeAdapter: Adapter = {
       path: settingsPath,
       kind: !had ? 'create' : !changed ? 'noop' : 'update',
       summary: !had
-        ? `create ${SETTINGS_PATH} with SessionStart + UserPromptSubmit hooks`
+        ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''}`
         : !changed
-          ? `${SETTINGS_PATH}: already up to date`
-          : `update SessionStart + UserPromptSubmit hooks in ${SETTINGS_PATH}`,
+          ? `${layout.settings}: already up to date`
+          : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''} in ${layout.settings}`,
       preview: !had
         ? previewCreate(settingsPath, after)
         : !changed
@@ -316,8 +643,8 @@ export const claudeCodeAdapter: Adapter = {
     };
 
     if (!ctx.dryRun && changed) {
-      await mkdir(dirname(settingsPath), { recursive: true });
-      await confinedAtomicWriteFile(ctx.root, settingsPath, after, { preserveMode: true });
+      const published = await publishManagedFile(ctx, settingsPath, after, rawSettingsOriginal);
+      if (!published.ok) return refusedWrite(mdResult, settingsPath, layout.settings, published.reason);
     }
 
     mdResult.changes.push(change);
@@ -325,8 +652,10 @@ export const claudeCodeAdapter: Adapter = {
     // --- 3. Tool permission → .claude/settings.local.json -----------------------
     // Allow the agent to run the `openlore` CLI without a per-call approval. We
     // append our single sentinel permission string to permissions.allow if absent
-    // (idempotent), preserving any permissions the user already configured.
-    const rawLocal = await readRawOrNull(localPath);
+    // (idempotent), preserving any permissions the user already configured. Skipped
+    // in the user scope, where it was folded into the single settings write above.
+    if (permissionSharesSettingsFile) return withInstructionBlock(ctx, layout, mdResult);
+    const rawLocal = rawLocalOriginal;
     const hadLocal = rawLocal != null;
     const existingLocal = await readJsonOrEmpty(localPath);
     const perms = (existingLocal.permissions as Record<string, unknown>) ?? {};
@@ -335,7 +664,7 @@ export const claudeCodeAdapter: Adapter = {
       mdResult.changes.push({
         path: localPath,
         kind: 'noop',
-        summary: `${SETTINGS_LOCAL_PATH}: ${OPENLORE_PERMISSION} already allowed`,
+        summary: `${layout.permissions}: ${OPENLORE_PERMISSION} already allowed`,
       });
     } else {
       const nextAllow = [...allow, OPENLORE_PERMISSION];
@@ -347,50 +676,79 @@ export const claudeCodeAdapter: Adapter = {
         path: localPath,
         kind: hadLocal ? 'update' : 'create',
         summary: hadLocal
-          ? `add ${OPENLORE_PERMISSION} to ${SETTINGS_LOCAL_PATH}`
-          : `create ${SETTINGS_LOCAL_PATH} with ${OPENLORE_PERMISSION}`,
+          ? `add ${OPENLORE_PERMISSION} to ${layout.permissions}`
+          : `create ${layout.permissions} with ${OPENLORE_PERMISSION}`,
         preview: hadLocal
           ? previewDiff(localPath, rawLocal ?? '', localAfter)
           : previewCreate(localPath, localAfter),
       });
       if (!ctx.dryRun) {
-        await mkdir(dirname(localPath), { recursive: true });
-        await confinedAtomicWriteFile(ctx.root, localPath, localAfter, { preserveMode: true });
+        const published = await publishManagedFile(ctx, localPath, localAfter, rawLocal);
+        if (!published.ok) return refusedWrite(mdResult, localPath, layout.permissions, published.reason);
       }
     }
 
-    return mdResult;
+    return withInstructionBlock(ctx, layout, mdResult);
   },
 
   async uninstall(ctx: ApplyContext): Promise<ApplyResult> {
-    const mcpPath = safeJoin(ctx.root, MCP_PATH);
-    const settingsPath = safeJoin(ctx.root, SETTINGS_PATH);
-    const localPath = safeJoin(ctx.root, SETTINGS_LOCAL_PATH);
+    const layout = layoutFor(ctx);
+    const mcpPath = safeJoin(ctx.root, layout.mcp);
+    const settingsPath = safeJoin(ctx.root, layout.settings);
+    const localPath = safeJoin(ctx.root, layout.permissions);
     // deleteIfBlockOnly: remove CLAUDE.md when stripping our block empties it
     // (i.e. install created it). A CLAUDE.md with the user's own content is left
     // in place — only the OpenLore block is removed — so this never clobbers user
     // notes; it just avoids leaving a stray empty file behind.
-    const md = await uninstallMarkdownBlock(ctx, MD_FILE, true);
+    const md = await uninstallMarkdownBlock(ctx, layout.md, true);
 
     // Strip mcpServers.openlore from .mcp.json; delete the file if it was ours.
     try {
       const rawMcp = await readFile(mcpPath, 'utf8');
       const parsedMcp = JSON.parse(rawMcp) as Record<string, unknown>;
-      const { next, removed } = removeManaged(parsedMcp);
+      let { next, removed } = removeManaged(parsedMcp);
+      let removalEdits = managedRemovalEdits(parsedMcp);
+      // User scope ONLY. The rationale is specific to a file OpenLore does not own
+      // (`~/.claude.json`, whose unrecognized top-level keys another tool may drop).
+      // In a repository, a hand-written `.mcp.json` with an `openlore` entry and no
+      // managed marker is the user's own file — removing that entry, and deleting
+      // the file when it was the only one, is not ours to do.
+      if (!removed && !layout.mayDeleteMcpFile
+        && isOurMcpEntry((parsedMcp.mcpServers as Record<string, unknown>)?.openlore)) {
+        // The `_openlore` meta is how removal normally identifies our entries — but
+        // this file belongs to Claude Code, not to us, and any tool that rewrites it
+        // may drop an unrecognized top-level key. Without this fallback the meta's
+        // loss would strand `mcpServers.openlore` in EVERY repository, with uninstall
+        // reporting nothing (change: unify-onboarding-entrypoint). The entry is only
+        // removed when it still looks like the one we write.
+        const servers = { ...(parsedMcp.mcpServers as Record<string, unknown>) };
+        delete servers.openlore;
+        const rest = { ...parsedMcp };
+        if (Object.keys(servers).length === 0) delete rest.mcpServers;
+        else rest.mcpServers = servers;
+        next = rest;
+        removed = true;
+        removalEdits = [Object.keys(servers).length === 0
+          ? { path: ['mcpServers'], value: undefined }
+          : { path: ['mcpServers', 'openlore'], value: undefined }];
+      }
       if (removed) {
-        if (Object.keys(next).length === 0) {
+        if (Object.keys(next).length === 0 && layout.mayDeleteMcpFile) {
           if (!ctx.dryRun) await unlink(mcpPath);
           md.changes.push({
             path: mcpPath,
             kind: 'delete',
-            summary: `remove ${MCP_PATH} (was OpenLore-only)`,
+            summary: `remove ${layout.mcp} (was OpenLore-only)`,
           });
         } else {
-          if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, mcpPath, serializeManaged(rawMcp, next, managedRemovalEdits(parsedMcp)), { preserveMode: true });
+          if (!ctx.dryRun) {
+            const published = await publishManagedFile(ctx, mcpPath, serializeManaged(rawMcp, next, removalEdits), rawMcp);
+            if (!published.ok) return refusedWrite(md, mcpPath, layout.mcp, published.reason);
+          }
           md.changes.push({
             path: mcpPath,
             kind: 'update',
-            summary: `strip OpenLore entries from ${MCP_PATH}`,
+            summary: `strip OpenLore entries from ${layout.mcp}`,
           });
         }
       }
@@ -399,11 +757,15 @@ export const claudeCodeAdapter: Adapter = {
     }
 
     const rawSettings = await readRawOrNull(settingsPath);
-    if (rawSettings == null) return md;
+    if (rawSettings == null) {
+      await stripPermission(ctx, layout, localPath, md);
+      return md;
+    }
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(rawSettings);
     } catch {
+      await stripPermission(ctx, layout, localPath, md);
       return md;
     }
     // Strip our hook entries (SessionStart + UserPromptSubmit, each identified by
@@ -438,67 +800,101 @@ export const claudeCodeAdapter: Adapter = {
     removalEdits.push(...managedRemovalEdits(parsed));
     const { next, removed } = removeManaged(parsed);
     if (removed) changed = true;
-    if (!changed) return md;
+    if (!changed) {
+      await stripPermission(ctx, layout, localPath, md);
+      return md;
+    }
 
     // If file is now empty (only had our entries), delete it.
-    const isEmpty = Object.keys(next).length === 0;
+    const isEmpty = Object.keys(next).length === 0 && layout.mayDeleteSettingsFile;
     if (isEmpty) {
       if (!ctx.dryRun) await unlink(settingsPath);
       md.changes.push({
         path: settingsPath,
         kind: 'delete',
-        summary: `remove ${SETTINGS_PATH} (was OpenLore-only)`,
+        summary: `remove ${layout.settings} (was OpenLore-only)`,
       });
     } else {
-      if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, settingsPath, serializeManaged(rawSettings, next, removalEdits), { preserveMode: true });
+      if (!ctx.dryRun) {
+        const published = await publishManagedFile(ctx, settingsPath, serializeManaged(rawSettings, next, removalEdits), rawSettings);
+        if (!published.ok) return refusedWrite(md, settingsPath, layout.settings, published.reason);
+      }
       md.changes.push({
         path: settingsPath,
         kind: 'update',
-        summary: `strip OpenLore entries from ${SETTINGS_PATH}`,
+        summary: `strip OpenLore entries from ${layout.settings}`,
       });
     }
 
-    // Strip our permission from .claude/settings.local.json (mirror of apply step 3).
-    const rawLocal = await readRawOrNull(localPath);
-    if (rawLocal != null) {
-      let parsedLocal: Record<string, unknown>;
-      try {
-        parsedLocal = JSON.parse(rawLocal);
-      } catch {
-        return md;
-      }
-      const permsObj = parsedLocal.permissions as Record<string, unknown> | undefined;
-      if (permsObj && Array.isArray(permsObj.allow) && permsObj.allow.includes(OPENLORE_PERMISSION)) {
-        const filtered = (permsObj.allow as unknown[]).filter((p) => p !== OPENLORE_PERMISSION);
-        const localEdits: JsonPathEdit[] = [];
-        if (filtered.length === 0) {
-          localEdits.push({ path: ['permissions', 'allow'], value: undefined });
-          delete permsObj.allow;
-          if (Object.keys(permsObj).length === 0) {
-            localEdits.push({ path: ['permissions'], value: undefined });
-            delete parsedLocal.permissions;
-          }
-        } else {
-          localEdits.push({ path: ['permissions', 'allow'], value: filtered });
-          permsObj.allow = filtered;
-        }
-        if (Object.keys(parsedLocal).length === 0) {
-          if (!ctx.dryRun) await unlink(localPath);
-          md.changes.push({
-            path: localPath,
-            kind: 'delete',
-            summary: `remove ${SETTINGS_LOCAL_PATH} (was OpenLore-only)`,
-          });
-        } else {
-          if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, localPath, serializeManaged(rawLocal, parsedLocal, localEdits), { preserveMode: true });
-          md.changes.push({
-            path: localPath,
-            kind: 'update',
-            summary: `strip ${OPENLORE_PERMISSION} from ${SETTINGS_LOCAL_PATH}`,
-          });
-        }
-      }
-    }
+    await stripPermission(ctx, layout, localPath, md);
     return md;
   },
 };
+
+/**
+ * Strip `Bash(openlore:*)` from the permission file (mirror of apply step 3).
+ *
+ * Its own function so it runs on EVERY uninstall path. Inline, it sat behind the
+ * hook-settings early returns, so an absent/unchanged settings file left the
+ * permission behind — and in the user scope, where the permission and the hooks
+ * share one file, that early return would have skipped the second half of the
+ * same file's cleanup.
+ */
+async function stripPermission(
+  ctx: ApplyContext,
+  layout: ClaudeLayout,
+  localPath: string,
+  md: ApplyResult,
+): Promise<void> {
+  const rawLocal = await readRawOrNull(localPath);
+  if (rawLocal == null) return;
+  let parsedLocal: Record<string, unknown>;
+  try {
+    parsedLocal = JSON.parse(rawLocal);
+  } catch {
+    return;
+  }
+  const permsObj = parsedLocal.permissions as Record<string, unknown> | undefined;
+  if (permsObj && Array.isArray(permsObj.allow) && permsObj.allow.includes(OPENLORE_PERMISSION)) {
+    const filtered = (permsObj.allow as unknown[]).filter((p) => p !== OPENLORE_PERMISSION);
+    const localEdits: JsonPathEdit[] = [];
+    if (filtered.length === 0) {
+      localEdits.push({ path: ['permissions', 'allow'], value: undefined });
+      delete permsObj.allow;
+      if (Object.keys(permsObj).length === 0) {
+        localEdits.push({ path: ['permissions'], value: undefined });
+        delete parsedLocal.permissions;
+      }
+    } else {
+      localEdits.push({ path: ['permissions', 'allow'], value: filtered });
+      permsObj.allow = filtered;
+    }
+    // In the user scope this IS the settings file, which Claude Code writes itself —
+    // so the same "not ours to remove" rule applies here as in the hooks pass.
+    const mayDeletePermissionFile = layout.permissions === layout.settings
+      ? layout.mayDeleteSettingsFile
+      : true;
+    if (Object.keys(parsedLocal).length === 0 && mayDeletePermissionFile) {
+      if (!ctx.dryRun) await unlink(localPath);
+      md.changes.push({
+        path: localPath,
+        kind: 'delete',
+        summary: `remove ${layout.permissions} (was OpenLore-only)`,
+      });
+    } else {
+      if (!ctx.dryRun) {
+        const published = await publishManagedFile(ctx, localPath, serializeManaged(rawLocal, parsedLocal, localEdits), rawLocal);
+        if (!published.ok) {
+          refusedWrite(md, localPath, layout.permissions, published.reason);
+          return;
+        }
+      }
+      md.changes.push({
+        path: localPath,
+        kind: 'update',
+        summary: `strip ${OPENLORE_PERMISSION} from ${layout.permissions}`,
+      });
+    }
+  }
+}
+

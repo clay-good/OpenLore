@@ -17,19 +17,18 @@
 
 import { Command } from 'commander';
 import { readFile, writeFile, mkdir, access, unlink, lstat, realpath } from 'node:fs/promises';
-import { join, dirname, relative, isAbsolute, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
+import { join, dirname, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { checkbox } from '@inquirer/prompts';
 import { logger } from '../../utils/logger.js';
-import { installPreCommitHook, uninstallClaudeHook } from './decisions.js';
+import { uninstallClaudeHook } from './decisions.js';
 import { readOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/config-manager.js';
 import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicResponseMode } from '../../types/index.js';
-import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
-import { confinedAtomicWriteFile, readFileConfinedWithStat, recoverConfinedAtomicWriteFile, safeJoin } from '../../utils/path-confinement.js';
+import { confinedAtomicWriteFile, readFileConfinedWithStat, safeJoin } from '../../utils/path-confinement.js';
+import { isGuardedWriteFailure, withGuardedConfigWrite } from '../install/guarded-config-write.js';
 import { classifyPiFile, looksLikeOpenLoreExtension, renderPiShim } from '../install/pi-extension.js';
 
 // ============================================================================
@@ -418,79 +417,21 @@ async function withClaudeSettingsMutationLock(
   settingsPath: string,
   mutate: (recoveryJournalPath: string) => Promise<boolean>,
 ): Promise<boolean> {
-  const lockName = `.openlore-claude-settings-${createHash('sha256').update(settingsPath).digest('hex').slice(0, 24)}.lock`;
-  let coordinationDir: string;
+  // The lock/journal machinery now lives in the install layer, shared with the
+  // user-scope install writes that need the identical guarantee (change:
+  // unify-onboarding-entrypoint). Behavior here is unchanged; only the messages'
+  // wording is assembled from the shared failure reason.
   try {
-    coordinationDir = await verifiedSettingsCoordinationDir();
-  } catch (error) {
-    logger.error(`OpenLore's private hook-settings runtime directory is unavailable — refusing to update ${settingsPath}. ${(error as Error).message}`);
-    return false;
-  }
-  const recoveryJournalPath = join(coordinationDir, `${lockName}.journal`);
-  let lock: Awaited<ReturnType<typeof acquireLockAt>>;
-  try {
-    // Coordination is per-user, private, durable across process crashes, and
-    // outside both the repository and the shared OS temporary namespace.
-    lock = await acquireLockAt(coordinationDir, lockName, {
-      maxWaitMs: 5_000,
-    });
-  } catch (error) {
-    logger.error(`${settingsPath} could not acquire its hook-settings lock — retry the setup. ${(error as Error).message}`);
-    return false;
-  }
-  if (isLockHeld(lock)) {
-    logger.error(`${settingsPath} is being updated by another OpenLore process — retry the hook setup.`);
-    return false;
-  }
-  try {
-    await recoverConfinedAtomicWriteFile(rootPath, settingsPath, recoveryJournalPath);
-    return await mutate(recoveryJournalPath);
+    const result = await withGuardedConfigWrite(rootPath, settingsPath, mutate);
+    if (isGuardedWriteFailure(result)) {
+      logger.error(`Refusing to update ${settingsPath}: ${result.reason}.`);
+      return false;
+    }
+    return result;
   } catch (error) {
     logger.error(`${settingsPath} changed while hook settings were being updated — refusing to overwrite it. ${(error as Error).message}`);
     return false;
-  } finally {
-    await lock.release();
   }
-}
-
-const SETTINGS_RUNTIME_OVERRIDE = 'OPENLORE_SETTINGS_RUNTIME_DIR';
-
-async function verifiedSettingsCoordinationDir(): Promise<string> {
-  const override = process.env[SETTINGS_RUNTIME_OVERRIDE];
-  if (override) {
-    const requested = resolve(override);
-    try { await mkdir(requested, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    const info = await lstat(requested);
-    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${requested} is not a real directory`);
-    const canonical = await realpath(requested);
-    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
-      throw new Error(`${requested} is not owned by the current user`);
-    }
-    if (process.platform !== 'win32' && (info.mode & 0o777) !== 0o700) {
-      throw new Error(`${requested} must already have mode 0700`);
-    }
-    return canonical;
-  }
-
-  const canonicalHome = await realpath(homedir());
-  let current = canonicalHome;
-  for (const segment of ['.openlore', 'runtime', 'settings-writes']) {
-    current = join(current, segment);
-    try { await mkdir(current, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    const info = await lstat(current);
-    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${current} is not a real directory`);
-    if (await realpath(current) !== current) throw new Error(`${current} contains a symbolic-link path component`);
-  }
-  const info = await lstat(current);
-  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
-    throw new Error(`${current} is not owned by the current user`);
-  }
-  if (process.platform !== 'win32' && (info.mode & 0o777) !== 0o700) {
-    throw new Error(`${current} must have mode 0700`);
-  }
-  return current;
 }
 
 /** Install the opt-in enforcement gate in Claude Code's Stop loop. */
@@ -1279,7 +1220,12 @@ export const setupCommand = new Command('setup')
     }
 
     if (tools.includes('claude')) {
-      await installPreCommitHook(projectRoot);
+      // Thin alias for what `openlore install` already does (change:
+      // unify-onboarding-entrypoint): the same non-blocking autopilot gate, so a
+      // user who reaches the trail through `setup` gets the identical posture
+      // rather than a second, stricter one.
+      const { wireGovernanceGate } = await import('../install/index.js');
+      await wireGovernanceGate(projectRoot);
       // Freshness is owned by the MCP server's --watch-auto (Spec 13.1); strip
       // any legacy full-analyze PostToolUse hook a prior version installed (B9).
       await uninstallClaudeHook(projectRoot);

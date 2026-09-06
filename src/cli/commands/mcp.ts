@@ -45,7 +45,9 @@ import {
   enableChildProcessBuilds,
   stopChildProcessBuilds,
   repairStatusFor,
-  REPAIR_REASON_DETAIL,
+  takeFirstTouchNotice,
+  repairDisclosureText,
+  autoInitSuppression,
 } from '../../core/services/cold-start-bootstrap.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { readPanicState, mutatePanicStateLocked, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
@@ -2657,8 +2659,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // (init + structural analyze + BM25 corpus, no API key) so a self-heal restores
   // FULL parity, not just the structural graph. Injected here so the dependency-
   // light read path never imports the analyzer/install layer itself.
-  registerRepairBuilder(async (dir) => {
-    await buildIndexInChildProcess(dir, { repair: true });
+  registerRepairBuilder(async (dir, buildOpts) => {
+    await buildIndexInChildProcess(dir, { repair: true, mode: buildOpts?.mode });
   });
 
   const selectorOpts = { minimal: options.minimal, preset: options.preset, allTools: options.allTools };
@@ -3047,14 +3049,33 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // corrupts a structured result body. Distinct from the freshness (session-age)
       // note above and from the absent-index "run analyze" not-ready result.
       if (directory) {
+        // A repository's FIRST auto-init is disclosed once, before the ordinary
+        // repair note: "no index found" is not a STALE index, and saying so is the
+        // consent half of background auto-init (change: unify-onboarding-entrypoint).
+        const firstTouch = takeFirstTouchNotice(directory);
+        if (firstTouch) {
+          content.push({ type: 'text', text: `\n[openlore index] ${firstTouch} Informational signal.\n` });
+        }
+        // An index-absent conclusion in a repo where auto-init cannot run must name
+        // the suppression, not just the missing index: "no analysis found" alone
+        // reads as a broken install (change: unify-onboarding-entrypoint).
+        const notReady = result as { notReady?: unknown; reason?: unknown } | null;
+        if (notReady && typeof notReady === 'object'
+          && notReady.notReady === true && notReady.reason === 'index-absent') {
+          const suppression = autoInitSuppression(directory);
+          if (suppression) {
+            content.push({
+              type: 'text',
+              text: `\n[openlore index] Background auto-init is off for this directory (${suppression.detail}), `
+                + 'so no index is being built. Run `openlore analyze` to build one. Informational signal.\n',
+            });
+          }
+        }
         const repair = repairStatusFor(directory);
-        if (repair) {
+        if (repair && !(firstTouch && repair.reason === 'index-absent')) {
           content.push({
             type: 'text',
-            text:
-              `\n[openlore index] Served from a stale index (${REPAIR_REASON_DETAIL[repair.reason]}); ` +
-              `a background refresh has started and did not block this call. Re-run for fresh ` +
-              `results once it completes. Informational signal.\n`,
+            text: `\n[openlore index] ${repairDisclosureText(repair.reason)} Informational signal.\n`,
           });
         }
       }

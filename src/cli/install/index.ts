@@ -8,12 +8,13 @@
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Command } from 'commander';
 import { logger } from '../../utils/logger.js';
 import { FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { detect, ALL_AGENTS, type AgentName, type DetectedSurface } from './detect.js';
-import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './adapters/types.js';
+import type { Adapter, ApplyContext, ApplyResult, InstallScope, PlannedChange } from './adapters/types.js';
 import { agentsMdAdapter } from './adapters/agents-md.js';
 import { claudeCodeAdapter } from './adapters/claude-code.js';
 import { cursorAdapter } from './adapters/cursor.js';
@@ -73,6 +74,16 @@ export interface InstallOptions {
    * via `--no-analyze`. Skipped for --dry-run and --uninstall.
    */
   analyze?: boolean;
+  /**
+   * Confine wiring to the current repository — do NOT write the user-scope entries
+   * that make every future repository reach OpenLore (change:
+   * unify-onboarding-entrypoint). The escape hatch for users who want explicit
+   * per-repo scope control; `--uninstall --repo-only` likewise leaves the user
+   * scope alone.
+   */
+  repoOnly?: boolean;
+  /** User-scope root. Defaults to the user's home directory; a test seam, not a flag. */
+  home?: string;
 }
 
 /**
@@ -170,12 +181,151 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
   }
 }
 
+/**
+ * Where the user-scope footprint is written.
+ *
+ * Precedence: an explicit caller root, then `OPENLORE_HOME` (for sandboxes, CI
+ * images, and containers whose real `$HOME` is not the profile to configure),
+ * then the user's home directory.
+ *
+ * The test interlock is deliberate and load-bearing: under a test runner, writing
+ * the user scope without an explicit root is a HARD ERROR rather than a silent
+ * write into the developer's own `~/.claude.json`, `~/.claude/settings.json`, and
+ * `~/.claude/CLAUDE.md`. That is not a hypothetical — it is what the first draft
+ * of this change did, and no assertion in the suite would ever have noticed
+ * (change: unify-onboarding-entrypoint).
+ */
+export function resolveUserScopeRoot(explicit?: string): string {
+  if (explicit) return explicit;
+  const configured = process.env.OPENLORE_HOME;
+  if (configured) return configured;
+  // Keyed on the test RUNNER, deliberately not on NODE_ENV: a devcontainer, CI
+  // image, or Dockerfile that sets NODE_ENV=test and runs `openlore install` is a
+  // real install, and refusing it there would be a crash, not a guardrail.
+  if (process.env.VITEST) {
+    throw new Error(
+      'openlore install: refusing to write user-scope configuration into the real home directory '
+      + 'from a test. Pass `home` to runInstall(), or set OPENLORE_HOME to a temporary directory.',
+    );
+  }
+  return homedir();
+}
+
+/**
+ * Wire the decisions commit gate in AUTOPILOT mode — one entrypoint, both faces.
+ *
+ * Autopilot means the gate records and syncs verified decisions and NEVER blocks a
+ * commit (change: add-decision-autopilot). Blocking human review stays an explicit
+ * opt-in, so a user who runs the one advertised command gains a decision trail and
+ * loses nothing: the doctrine is advisory by default, blocking on request.
+ *
+ * Fail-soft in every direction. Not a git repository, no config yet, an explicit
+ * `autopilot: false`, an unwritable hook path — each is a one-line note, never a
+ * failed install (change: unify-onboarding-entrypoint).
+ */
+export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skipped'> {
+  try {
+    const { isGitRepository } = await import('../../core/drift/git-diff.js');
+    if (!(await isGitRepository(cwd))) {
+      logger.info('Decision trail', 'skipped — not a git repository, so there is no commit gate to wire');
+      return 'skipped';
+    }
+    const { readOpenLoreConfig, writeOpenLoreConfig } = await import('../../core/services/config-manager.js');
+    const config = await readOpenLoreConfig(cwd);
+    // A missing config is not a reason to skip the HOOK — `openlore setup` never
+    // runs `init` and has always installed it. Only the autopilot config write
+    // needs a config to write into (change: unify-onboarding-entrypoint).
+    // Autopilot is the mode for a gate this command is wiring for the FIRST time.
+    //
+    // An absent `autopilot` key means blocking review — that is what every gate
+    // check reads — so writing `true` over it would silently downgrade a gate the
+    // user already had, in a run they started for some unrelated reason (changing
+    // `--preset`, say). A repository that already carries an OpenLore commit gate
+    // keeps whatever mode it was configured with; only a repository with no gate
+    // yet gets the non-blocking default (change: unify-onboarding-entrypoint).
+    const { hasOpenLoreCommitGate } = await import('../commands/decisions.js');
+    const alreadyGated = await hasOpenLoreCommitGate(cwd);
+    if (config?.governance?.autopilot === false) {
+      logger.info('Decision trail', 'governance.autopilot is explicitly false — installing the gate in blocking review mode, as configured');
+    } else if (config && config.governance?.autopilot !== true) {
+      if (alreadyGated) {
+        logger.info(
+          'Decision trail',
+          'this repository already has an OpenLore commit gate — leaving it in blocking review mode. '
+          + 'Set { "governance": { "autopilot": true } } to make it non-blocking.',
+        );
+      } else {
+        await writeOpenLoreConfig(cwd, { ...config, governance: { ...config.governance, autopilot: true } });
+      }
+    } else if (!config) {
+      logger.info(
+        'Decision trail',
+        'installing the gate in blocking review mode — there is no .openlore/config.json to record '
+        + 'the non-blocking default in. Run "openlore install" (which inits) for the autopilot default.',
+      );
+    }
+    const { resolveTrustedHookLauncher } = await import('../git-hooks.js');
+    if (!(await resolveTrustedHookLauncher(cwd))) {
+      // The hook installer would print a security-flavored ERROR here. On the
+      // headline `openlore install` path — where the user asked for none of this —
+      // that reads as a failure. It is a precondition, so state it as one.
+      logger.info(
+        'Decision trail',
+        'skipped — OpenLore resolves inside this repository, and a commit gate must not execute '
+        + 'code the repository can change. Install OpenLore globally, then re-run to wire it.',
+      );
+      return 'skipped';
+    }
+    const { installPreCommitHook } = await import('../commands/decisions.js');
+    const exitCodeBefore = process.exitCode;
+    // The installer REPORTS its own outcome. Inferring it from `process.exitCode`
+    // was wrong in both directions: comparing against the prior value read a
+    // genuine failure as success when something earlier had already failed, and
+    // comparing against zero read a successful install as failed when an earlier
+    // step (a failed index build, which now runs first) had set the code.
+    const installed = await installPreCommitHook(cwd, {
+      autopilot: config?.governance?.autopilot === true
+        || (!!config && !alreadyGated && config.governance?.autopilot !== false),
+    });
+    if (!installed) {
+      // A commit gate that could not be installed must not fail the whole install.
+      process.exitCode = exitCodeBefore;
+      logger.info('Decision trail', 'the commit gate could not be installed — see the message above; everything else is wired');
+      return 'skipped';
+    }
+    return 'wired';
+  } catch (error) {
+    logger.info('Decision trail', `skipped — ${(error as Error).message}`);
+    return 'skipped';
+  }
+}
+
+/** Remove the decisions commit gate on `--uninstall`. Quiet when there is nothing to remove. */
+export async function unwireGovernanceGate(cwd: string): Promise<void> {
+  try {
+    const { isGitRepository } = await import('../../core/drift/git-diff.js');
+    if (!(await isGitRepository(cwd))) return;
+    const { uninstallPreCommitHook } = await import('../commands/decisions.js');
+    await uninstallPreCommitHook(cwd);
+  } catch {
+    // Never fail an uninstall over a hook we may not have installed.
+  }
+}
+
 export interface SurfaceStatus {
   agent: AgentName;
   /** A marker for this agent was found in the project tree. */
   detected: boolean;
   /** OpenLore is already fully wired for this agent (a fresh apply would be a no-op). */
   connected: boolean;
+  /** Does this agent have a user-scope surface OpenLore can wire? */
+  supportsUserScope: boolean;
+  /**
+   * OpenLore's managed footprint is present at the USER scope, so every repository
+   * reaches it (change: unify-onboarding-entrypoint). `false` for an agent with no
+   * user scope.
+   */
+  userScope: boolean;
 }
 
 /**
@@ -184,13 +334,25 @@ export interface SurfaceStatus {
  * has nothing left to create or update — reusing the adapters' own logic instead
  * of duplicating per-agent file knowledge here.
  */
-export async function surfaceStatus(cwd?: string): Promise<SurfaceStatus[]> {
+export async function surfaceStatus(cwd?: string, home?: string): Promise<SurfaceStatus[]> {
   const root = cwd ?? process.cwd();
   const detected = new Set((await detect(root)).map((s) => s.agent));
   const out: SurfaceStatus[] = [];
   for (const agent of ALL_AGENTS) {
-    const connected = await ADAPTERS[agent].isConnected(root);
-    out.push({ agent, detected: detected.has(agent), connected });
+    const adapter = ADAPTERS[agent];
+    const connected = await adapter.isConnected(root);
+    const supportsUserScope = adapter.supportsGlobal === true;
+    let userScope = false;
+    if (supportsUserScope) {
+      // Never resolve (or fail on) a home directory for an agent that has no user
+      // scope to report — and never let a status read throw.
+      try {
+        userScope = await adapter.isConnectedUserScope?.(resolveUserScopeRoot(home)) ?? false;
+      } catch {
+        userScope = false;
+      }
+    }
+    out.push({ agent, detected: detected.has(agent), connected, supportsUserScope, userScope });
   }
   return out;
 }
@@ -262,32 +424,130 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     'This guidance is written for that surface; re-run `openlore install --preset <name>` to change it ' +
     'and regenerate these instructions.\n';
 
-  for (const surface of surfaces) {
-    const adapter = ADAPTERS[surface.agent];
-    const ctx: ApplyContext = {
-      root: surface.root,
-      platform: process.platform,
-      platformCommandRuntime: {
-        nodeExecutable: process.execPath,
-        npmExecPath: process.env.npm_execpath,
-        pathValue: process.env.PATH,
-        cwd: process.cwd(),
-      },
-      instructionTemplate,
-      dryRun: !!opts.dryRun,
-      force: !!opts.force,
-      preset: effectivePreset,
-    };
-    const result: ApplyResult = opts.uninstall
-      ? await adapter.uninstall(ctx)
-      : await adapter.apply(ctx);
+  const contextFor = (root: string, scope: InstallScope): ApplyContext => ({
+    root,
+    scope,
+    platform: process.platform,
+    platformCommandRuntime: {
+      nodeExecutable: process.execPath,
+      npmExecPath: process.env.npm_execpath,
+      pathValue: process.env.PATH,
+      cwd: process.cwd(),
+    },
+    instructionTemplate,
+    dryRun: !!opts.dryRun,
+    force: !!opts.force,
+    preset: effectivePreset,
+  });
 
-    if (result.conflict) conflict = true;
+  /**
+   * Run one adapter in one scope.
+   *
+   * Returns whether the scope came through clean. Two rules, both learned from
+   * adversarial review of this change (change: unify-onboarding-entrypoint):
+   *
+   * - A THROW in the USER scope is reported and contained. That scope writes into a
+   *   home directory this process does not own — a `~/.claude` symlinked into a
+   *   dotfiles repository is enough to make a confined write refuse — and an
+   *   unhandled rejection there used to kill the whole command before the repo was
+   *   wired or indexed. Nothing was written when it throws, so containment is safe.
+   *   A throw in the REPO scope still propagates: a path-confinement refusal on the
+   *   project the user is standing in must abort the command loudly, and the suite
+   *   asserts exactly that.
+   * - A CONFLICT (a hand-edited managed block, an unparseable managed file) fails
+   *   the command only in the REPO scope. A user-scope conflict is machine-wide: if
+   *   it were fatal, one hand-edit in `~/.claude/CLAUDE.md` would break
+   *   `openlore install` in every repository on the machine, index included.
+   */
+  const runAdapter = async (adapter: Adapter, ctx: ApplyContext): Promise<boolean> => {
+    let result: ApplyResult;
+    try {
+      result = opts.uninstall ? await adapter.uninstall(ctx) : await adapter.apply(ctx);
+    } catch (error) {
+      if (ctx.scope !== 'user') throw error;
+      allWarnings.push(
+        `${adapter.name} (user scope) could not be ${opts.uninstall ? 'removed' : 'wired'}: `
+        + `${(error as Error).message}`,
+      );
+      return false;
+    }
     allChanges.push(...result.changes);
     allWarnings.push(...result.warnings);
+    if (result.conflict) {
+      if (ctx.scope === 'user') {
+        // Deliberately NOT "pass --force": most user-scope conflicts are refusals
+        // (an unparseable file, a symlink, a concurrent write) that --force does not
+        // and must not override. The adapter's own warning names the actual cause.
+        allWarnings.push('The user scope was left untouched — see the message(s) above. This repository was still wired.');
+      } else {
+        conflict = true;
+      }
+      return false;
+    }
+    return true;
+  };
+
+  // ── User scope first ───────────────────────────────────────────────────────
+  // One install, every future repository (change: unify-onboarding-entrypoint).
+  // Written BEFORE the repo pass so that a conflict in the user scope is visible
+  // in the same summary; Claude Code resolves project scope over user scope, so
+  // the repo entry written below still wins where both exist.
+  //
+  // The user-scope candidate set is CAPABILITY-driven, not detection-driven.
+  //
+  // Detection answers "which agents does this repository use", which is the right
+  // question for the repo pass and the wrong one for the user pass: the promise is
+  // "install once, and every repository you open works", and a repo that happens to
+  // contain a `.cursor/` marker (which short-circuits the `~/.claude` fallback in
+  // detect()) would silently not get it. An explicit `--agent` / `--agents` still
+  // narrows both passes — including on uninstall, where honoring it matters more,
+  // not less (change: unify-onboarding-entrypoint).
+  const detectedAgents = [...new Set(surfaces.map(surface => surface.agent))];
+  const explicitlySelected = opts.agents?.length ? opts.agents : opts.agent ? [opts.agent] : null;
+  const userScopeCandidates = explicitlySelected ?? ALL_AGENTS;
+  const globalAgents = userScopeCandidates.filter(agent => ADAPTERS[agent]?.supportsGlobal === true);
+  const repoOnlyAgents = detectedAgents.filter(agent => ADAPTERS[agent].supportsGlobal !== true);
+  let wiringUserScope = !opts.repoOnly && globalAgents.length > 0;
+  // Resolved only when the user scope is actually written, so `--repo-only` never
+  // consults (or fails on) a home directory it will not touch. A failure to resolve
+  // it is contained for the same reason every other user-scope failure is: it must
+  // not take the repository wiring down with it.
+  let home = '';
+  if (wiringUserScope) {
+    try {
+      home = resolveUserScopeRoot(opts.home);
+    } catch (error) {
+      allWarnings.push(`User-scope wiring skipped: ${(error as Error).message}`);
+      wiringUserScope = false;
+    }
+  }
+  let userScopeClean = wiringUserScope;
+  if (wiringUserScope) {
+    for (const agent of globalAgents) {
+      const adapter = ADAPTERS[agent];
+      if (!await runAdapter(adapter, contextFor(home, 'user'))) {
+        userScopeClean = false;
+      }
+    }
+  }
+
+  for (const surface of surfaces) {
+    await runAdapter(ADAPTERS[surface.agent], contextFor(surface.root, 'repo'));
   }
 
   printSummary(allChanges, allWarnings, !!opts.dryRun, !!opts.uninstall);
+  reportScopes({
+    uninstall: !!opts.uninstall,
+    dryRun: !!opts.dryRun,
+    repoOnly: !!opts.repoOnly,
+    attemptedUserScope: wiringUserScope,
+    // Report what HAPPENED, not what was intended: a scope that refused or threw
+    // must never be summarized as wired.
+    wiredUserScope: wiringUserScope && userScopeClean,
+    globalAgents,
+    repoOnlyAgents,
+    home,
+  });
 
   if (!opts.uninstall) {
     logger.info(
@@ -303,13 +563,34 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     return 1;
   }
 
+  // The decisions gate belongs to `openlore install`, not to any one agent
+  // surface, so only a WHOLE-install removal takes it out. `connect remove cursor`
+  // has nothing to do with git hooks, and used to delete a decisions gate the user
+  // may have installed years ago through a different command entirely
+  // (change: unify-onboarding-entrypoint).
+  const removingEverything = opts.uninstall && !opts.agent && !opts.agents?.length;
+  if (!opts.dryRun && removingEverything) await unwireGovernanceGate(cwd);
+
   // One-command setup: build the index so orient() works on the first session.
   // Opt out with --no-analyze; never runs for dry-run or uninstall.
   const shouldAnalyze = opts.analyze !== false && !opts.dryRun && !opts.uninstall;
   if (shouldAnalyze) {
     const indexBuilt = await buildIndex(cwd);
+    // AFTER the index build, which is what creates `.openlore/config.json` on a
+    // repository seeing OpenLore for the first time. Wiring the gate before it
+    // meant the headline flow — a bare `openlore install` on a fresh repo — always
+    // reported "no config yet" and silently skipped the decision trail
+    // (change: unify-onboarding-entrypoint).
+    if (await wireGovernanceGate(cwd) === 'wired') {
+      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
+    }
     if (indexBuilt) await printProveGuidance(cwd);
   } else if (!opts.dryRun && !opts.uninstall) {
+    // `--no-analyze` skipped init, so there is no config to wire governance into.
+    // Try anyway: a repository that already has one still gets its trail.
+    if (await wireGovernanceGate(cwd) === 'wired') {
+      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
+    }
     // --no-analyze skipped init too, so a bare "openlore analyze" would fail
     // ("Run openlore init first"). Advise a sequence that actually works.
     logger.info(
@@ -319,6 +600,64 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   }
 
   return 0;
+}
+
+/**
+ * Say, in one or two lines, which scopes were touched and which were not.
+ *
+ * The user-scope write is the behavior change people most need to see: it is what
+ * makes every future repository work without another command, and it is what
+ * `--repo-only` opts out of. An adapter with no user-scope surface is named as
+ * per-repo-only — an honest note, never a failure (change:
+ * unify-onboarding-entrypoint).
+ */
+function reportScopes(info: {
+  uninstall: boolean;
+  dryRun: boolean;
+  repoOnly: boolean;
+  attemptedUserScope: boolean;
+  wiredUserScope: boolean;
+  globalAgents: AgentName[];
+  repoOnlyAgents: AgentName[];
+  home: string;
+}): void {
+  const verb = info.dryRun ? 'would be' : 'was';
+  if (info.wiredUserScope) {
+    logger.info(
+      'User scope',
+      info.uninstall
+        ? `OpenLore-managed ${info.globalAgents.join(', ')} entries under ${info.home} ${info.dryRun ? 'would be' : 'were'} removed`
+        : `${info.globalAgents.join(', ')} ${verb} wired under ${info.home} — every git repository you open from now on reaches OpenLore, `
+          + 'and builds its index in the background on first touch (opt out per repo with `"autoInit": false`)',
+    );
+  } else if (info.attemptedUserScope) {
+    // Attempted and did not come through clean. Never claim it was wired.
+    logger.warning(
+      `User scope NOT ${info.uninstall ? 'removed' : 'wired'} under ${info.home} — see the message(s) above. `
+      + 'Repositories you have not run install in will not reach OpenLore until this is resolved.',
+    );
+  } else if (info.repoOnly) {
+    logger.info(
+      'Repo scope only',
+      info.uninstall
+        ? '--repo-only: user-scope entries were left in place; only this repository was cleaned'
+        : '--repo-only: no user-scope entry was written; only this repository is wired',
+    );
+  } else if (!info.uninstall) {
+    // Only reachable when an explicit --agent named no user-scope-capable adapter.
+    logger.info(
+      'User scope',
+      'not written — the selected agent(s) have no user-scope surface. '
+      + 'Run "openlore install --agent claude-code" to wire it for every repository.',
+    );
+  }
+  if (info.repoOnlyAgents.length > 0 && !info.uninstall) {
+    logger.info(
+      'Per-repo only',
+      `${info.repoOnlyAgents.join(', ')} ${info.repoOnlyAgents.length === 1 ? 'has' : 'have'} no user-scope configuration surface — `
+        + `${info.repoOnlyAgents.length === 1 ? 'it is' : 'they are'} wired for this repository only. Run "openlore install" in each repository you want them in.`,
+    );
+  }
 }
 
 function printSummary(
@@ -401,6 +740,11 @@ export const installCommand = new Command('install')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)
   .option('--uninstall', 'Remove OpenLore-managed blocks and entries', false)
+  .option(
+    '--repo-only',
+    'Wire only this repository — skip the user-scope entries that make every future repository reach OpenLore',
+    false,
+  )
   .option('--analyze', 'Build the index after configuring surfaces (default: true)', true)
   .option('--no-analyze', 'Configure surfaces only; do not run init/analyze (run "openlore analyze" yourself later)')
   .addHelpText(
@@ -412,7 +756,14 @@ Examples:
   $ openlore install --agent pi       Install the Pi extension (.pi/extensions/openlore.js)
   $ openlore install --no-analyze    Wire up surfaces only (skip index build)
   $ openlore install --dry-run       Preview changes without writing
-  $ openlore install --uninstall     Remove OpenLore-managed entries
+  $ openlore install --repo-only     Wire this repository only (no user-scope entries)
+  $ openlore install --uninstall     Remove OpenLore-managed entries (both scopes)
+
+Bare \`openlore install\` wires your USER scope as well as this repository: every
+git repository you open afterwards reaches the OpenLore MCP server and builds its
+index in the background on first touch. That background build never leaves a git
+work tree, discloses itself once per repository, and is disabled per repository
+with \`"autoInit": false\` in .openlore/config.json (or OPENLORE_NO_AUTO_ANALYZE=1).
 
 Pi (pi.dev) loads a JS extension rather than MCP: the \`pi\` surface writes
 \`.pi/extensions/openlore.js\`, which starts \`openlore serve\` on demand and injects

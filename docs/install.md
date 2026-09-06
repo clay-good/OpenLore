@@ -5,13 +5,18 @@ Auto-configure popular AI coding agents to call OpenLore's `orient()` automatica
 ## Quick start
 
 ```bash
+npm i -g openlore
 cd your-project
 openlore install
 ```
 
-That auto-detects which agent surfaces are present (Claude Code, Cursor, Cline, Continue, Pi, plus
-the universal `AGENTS.md` fallback) and writes the minimal config needed for each agent to call
-`orient()` before reading source files.
+Once, ever. That auto-detects which agent surfaces are present (Claude Code, Cursor, Cline,
+Continue, Pi, plus the universal `AGENTS.md` fallback) and writes the minimal config needed for
+each agent to call `orient()` before reading source files — **for this repository and for your
+user account**. Every git repository you open afterwards with a user-scope-wired agent reaches
+the OpenLore MCP server and builds its own index in the background, with no further command.
+
+Use `--repo-only` if you want per-repository scope control instead.
 
 Confirm it worked with `openlore doctor` — it reports your config, index freshness, MCP wiring,
 and LLM/embedding setup, and prints the exact command to fix anything that is missing.
@@ -20,6 +25,59 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 > bundle: `openlore import .openlore/index-bundle.olbundle` — an integrity-checked index in seconds
 > (or a transparent rebuild if it is stale). Producer provenance is verified only for a trusted
 > signature. See [shareable-bundle.md](shareable-bundle.md).
+
+## Scopes: user and repository
+
+| Scope | Files (Claude Code) | Effect |
+|-------|---------------------|--------|
+| **user** (default) | `~/.claude.json` (`mcpServers.openlore`), `~/.claude/settings.json` (hooks + `Bash(openlore:*)`), `~/.claude/CLAUDE.md` | every repository you open reaches OpenLore |
+
+The user scope is written for every adapter that *has* one, not only for adapters detected in the
+current directory — that is what makes "install once" true in a repository whose markers belong to
+some other agent. The practical consequence: a bare `openlore install` creates `~/.claude/` even if
+you do not use Claude Code. `--repo-only`, or `--agent <name>`, avoids that.
+
+`OPENLORE_HOME` and `OPENLORE_SETTINGS_RUNTIME_DIR` relocate the user scope and its lock/journal
+directory respectively.
+| **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
+
+Adapters with no user-scope surface (`cursor`, `cline`, `continue`, `pi`, `agents-md`) are wired
+per repository and named as such in the summary — an honest note, never a failure.
+`openlore connect list` shows both scopes; `openlore install --uninstall` removes OpenLore-managed
+entries from both, and never deletes `~/.claude.json` or `~/.claude/settings.json` themselves. An
+explicit `--agent` narrows both scopes, on install and on uninstall alike, and only a whole-install
+removal takes out the commit gate. `openlore connect remove <agent>` is **repository-scoped by
+default** — pass `--user-scope` to remove the machine-wide entries too.
+
+> **Both scopes wired means both scopes active.** Claude Code resolves *MCP servers* by name, so
+> one server runs. It does not do that for hooks or instructions: user-level and project-level
+> `SessionStart` / `UserPromptSubmit` hooks both fire, and `~/.claude/CLAUDE.md` and the project
+> `CLAUDE.md` are both loaded. A repository wired at both scopes therefore runs `orient` twice per
+> session and `orient --inject` twice per prompt, and carries the instruction block twice. If that
+> matters to you, wire one scope: `openlore install --repo-only` for per-repository control, or
+> `openlore install --agent claude-code` from outside a repository for user scope alone.
+
+`OPENLORE_HOME` overrides where the user scope is written (sandboxes, CI images, containers whose
+`$HOME` is not the profile you mean to configure).
+
+### Background auto-init, and its guardrails
+
+Because user-scope wiring reaches repositories you never ran a command in, the background build is
+consent-guarded:
+
+- **Git work trees only.** A directory that is not inside a git work tree is never indexed.
+- **Disclosed once per repository.** The first background build in a repository adds one line to
+  the tool response naming what was built, where it landed, that the call was not blocked, and
+  both opt-outs.
+- **Opt out per repository** with `"autoInit": false` in `.openlore/config.json`, or per
+  environment with `OPENLORE_NO_AUTO_ANALYZE=1`. An index-absent answer in an opted-out repository
+  names the opt-out rather than reading as a broken install. `openlore features` shows the
+  current state.
+- **Degrades on large trees.** Above the file-count ceiling (`AUTO_INIT_DEGRADED_FILE_CEILING`, currently 5,000 files) the background build sheds its semantic-embedding pass and builds
+  signatures plus the keyword (BM25) index only, and says so. An explicit `openlore analyze` is
+  never degraded — you asked for it.
+- **Writes no git hook.** Auto-init runs `init` and `analyze`, nothing else. The commit gate below
+  is wired only by an explicit `openlore install` in that repository.
 
 ## Zero-interaction onboarding
 
@@ -36,6 +94,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 |------|--------|
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `pi`, `agents-md`. |
 | `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 76 tools. |
+| `--repo-only` | Wire this repository only — write no user-scope entries. |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
 | `--uninstall` | Remove every OpenLore-managed block / entry. Files OpenLore created (and never had non-OpenLore content) are deleted. |
@@ -63,12 +122,17 @@ the block we refuse to overwrite unless you pass `--force`.
 
 | Surface | Marker | Files written |
 |---------|--------|---------------|
-| `claude-code` | `.claude/` or `CLAUDE.md` | append block to `CLAUDE.md`; `mcpServers.openlore` in `.mcp.json`; `SessionStart` + `UserPromptSubmit` hooks in `.claude/settings.json` |
+| `claude-code` | `.claude/` or `CLAUDE.md` | **repo:** append block to `CLAUDE.md`; `mcpServers.openlore` in `.mcp.json`; `SessionStart` + `UserPromptSubmit` hooks in `.claude/settings.json`. **user:** the same entries in `~/.claude/CLAUDE.md`, `~/.claude.json`, `~/.claude/settings.json` |
 | `cursor` | `.cursor/` or `.cursorrules` | append block to `.cursorrules`; write `.cursor/rules/openlore.mdc`; `mcpServers.openlore` in `.cursor/mcp.json` |
 | `cline` | `.clinerules` or `.vscode/settings.json` (`cline.*`) | append block to `.clinerules` |
 | `continue` | `.continue/` | add `/orient` entry to `.continue/config.json` (MCP server registration is TODO — see below) |
 | `pi` | `.pi/` (or `~/.pi/` when the tree has no marker at all) | write `.pi/extensions/openlore.js` — a fingerprinted re-export shim pointing at the extension inside the openlore package. No markdown block, no MCP entry: Pi does not consume MCP; the extension starts `openlore serve` on demand and injects the digest itself. See [Pi](#pi-pidev). |
 | `agents-md` | always applies | append block to `AGENTS.md` (creates if absent) |
+
+Plus, in any git repository, `openlore install` writes `.git/hooks/pre-commit` (the decisions gate,
+non-blocking — see below) and `.git/hooks/post-commit` (its `--no-verify` bypass detector). Both are
+marker-delimited blocks appended to whatever is already there, and `--uninstall` removes exactly
+those blocks.
 
 ## Pi (pi.dev)
 
@@ -95,18 +159,29 @@ caches. Requires Pi ≥ 0.78.1 and one `openlore analyze` beforehand. Full detai
 > carries an `openlore-fingerprint` marker — hand-edit it and install refuses to overwrite it
 > without `--force`.
 
-## Pre-commit hooks (opt-in)
+## Pre-commit hooks
 
-`openlore install` does **not** write any pre-commit gate. The git hooks below are installed
-explicitly, each advisory by default and each coexisting in a single `.git/hooks/pre-commit`
-(every installer appends its own marked block and strips a trailing `exit 0` so the next one
-stays reachable):
+`openlore install` wires **one** gate: the decisions commit gate, in non-blocking **autopilot**
+mode (`governance.autopilot: true`). Verified architectural decisions are recorded and synced to
+specs at commit time, and no commit is ever blocked by it. That is what makes one command yield
+structural navigation *and* a decision trail.
+
+Install sets that mode only when it wires a gate for the **first** time in a repository. A
+repository that already carries an OpenLore commit gate keeps the mode it was configured with —
+an absent `governance.autopilot` means blocking review, and install will not flip it — and an
+explicit `governance.autopilot: false` is never flipped either. `openlore install` also skips the
+gate entirely when OpenLore resolves inside the repository (a local devDependency), because a
+commit gate must not execute code the repository can change.
+
+Every other git hook below is installed explicitly and is advisory by default. All of them coexist
+in a single `.git/hooks/pre-commit` (each installer appends its own marked block and strips a
+trailing `exit 0` so the next one stays reachable):
 
 | Hook | Install | Blocks when |
 |------|---------|-------------|
 | **Enforcement gate** (recommended, unified) | `openlore enforce --install-hook` | a governance finding resolves to `blocking` under [`enforcement.policy`](configuration.md#enforcement-policy) — the single posture over all findings |
 | **Agent-loop enforcement** (opt-in, Claude Code + Codex) | `openlore setup --agent-enforcement-hook all` | a finding resolves to `blocking`; remediation is fed back through each agent's Stop hook |
-| Decisions gate | wired by the decisions workflow (`openlore decisions`) | verified architectural decisions await review/sync |
+| Decisions gate | wired by `openlore install` in autopilot mode (never blocks); `openlore decisions --install-hook` for the explicit route | only in blocking review mode (`governance.autopilot: false`), when verified decisions await review/sync |
 | Blast-radius guard | `openlore blast-radius --install-hook` | the diff triggers a configured `blastRadius.block` pattern |
 | Change-impact certificate | `openlore impact-certificate --install-hook` | the diff opens a new path into a `impactCertificate.block` surface severity |
 

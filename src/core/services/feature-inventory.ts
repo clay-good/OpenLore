@@ -184,6 +184,29 @@ export async function collectFeatureInventory(rootPath: string): Promise<Feature
     docs: 'docs/mcp-tools.md',
   });
 
+  // Background auto-init (on by default; disableable per repo or per environment)
+  // (change: unify-onboarding-entrypoint).
+  const autoInitOff = config?.autoInit === false;
+  const autoInitEnvOff = Boolean(process.env.OPENLORE_NO_AUTO_ANALYZE);
+  features.push({
+    id: 'auto-init',
+    title: 'Background auto-init',
+    group: 'Search & navigation',
+    state: autoInitOff || autoInitEnvOff ? 'inactive' : 'default-on',
+    optIn: false,
+    detail: autoInitOff
+      ? 'disabled for this repo (autoInit = false in .openlore/config.json)'
+      : autoInitEnvOff
+        ? 'disabled for this environment (OPENLORE_NO_AUTO_ANALYZE is set)'
+        : 'on by default — a wired agent builds this git repo\'s index in the background on first touch',
+    activate: autoInitOff
+      ? 'set { "autoInit": true } in .openlore/config.json'
+      : autoInitEnvOff
+        ? 'unset OPENLORE_NO_AUTO_ANALYZE'
+        : 'set { "autoInit": false } in .openlore/config.json to disable',
+    docs: 'docs/install.md',
+  });
+
   // ── Governance & guardrails ────────────────────────────────────────────────
 
   // Architecture invariants (.openlore/architecture.json).
@@ -283,6 +306,10 @@ export async function collectFeatureInventory(rootPath: string): Promise<Feature
     detail: autopilotOn
       ? 'verified decisions auto-accept and sync; commits never block; trail via `openlore decisions log`'
       : 'off — the commit gate blocks for human review of verified decisions',
+    // `openlore install` turns this on when it wires a commit gate for the FIRST
+    // time in a repository, and never changes the mode of a gate that already
+    // exists (change: unify-onboarding-entrypoint). So it reads as opt-in here for
+    // exactly the repositories where it is: ones already gated in review mode.
     activate: autopilotOn ? '' : 'set { "governance": { "autopilot": true } } in .openlore/config.json',
     docs: 'docs/cli-reference.md',
   });
