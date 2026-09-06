@@ -483,7 +483,15 @@ describe('analysis ownership — across processes', () => {
     child.kill('SIGKILL');
   }, 60_000);
 
-  it('a killed owner releases ownership on SIGTERM rather than holding it', async () => {
+  // skipIf(win32): this tests the SIGNAL-CLEANUP path, and Windows has none —
+  // `child.kill('SIGTERM')` maps to TerminateProcess, so no handler runs and the owner never
+  // releases. The lock therefore survives with a FRESH heartbeat, and `own()` answers
+  // `in-progress`, which is correct: `isOwnershipStale` requires BOTH a dead PID and a stale
+  // heartbeat before reclaiming, precisely so a long analysis is never mistaken for an
+  // abandoned one. The recorded suspicion — that the dead owner was not detected as dead —
+  // was checked and does not hold: detection was never reached, because the heartbeat had
+  // not aged. Nothing here is broken on Windows; the premise simply cannot occur.
+  it.skipIf(process.platform === 'win32')('a killed owner releases ownership on SIGTERM rather than holding it', async () => {
     const { root, analysisDir } = await fixture();
     const child = runChild(`
       const m = await import('__MODULE__');

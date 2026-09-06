@@ -23,11 +23,6 @@
   ],
   "exclusions": [
     {
-      "file": "src/api/analysis-status.test.ts",
-      "reason": "`reports no analysis in progress for a stale lock`: got `{inProgress: true}` where the stale lock should classify as not-in-progress. Same neighbourhood as the `analysis-ownership` SIGTERM entry — a Windows-killed owner is still read as alive — and present at commit e8d6c8dd, before this PR touched the ownership module. Not a separator bug; tracked in #452.",
-      "suspectedProductionBug": true
-    },
-    {
       "file": "src/core/decisions/atomic-store.test.ts",
       "reason": "FLAKY on Windows, not deterministically failing — observed failing at commit e8d6c8dd and again on the following run, then PASSING on the next run of the same tree. Surfaced BY this PR rather than caused by it: the failures are the 100-way concurrency cases, and they began once the deny-list stopped skipping ~47 files and the job started doing several times the work. One root cause, not three — the first case times out mid-lock and the next two then fail on the gate it left behind (`NamespaceGateHeldError`). Verified present before this PR touched `atomic-store.ts`, which only exported an existing function. Green on Linux CI and in isolation on macOS. Flaky rather than plain-listed because a file that oscillates fails the build whichever list it sits on. The fix is a longer budget for these cases on Windows or a gate released on timeout; tracked in #452 as a bug, not a state to keep.",
       "suspectedProductionBug": true,
@@ -38,11 +33,6 @@
       "failingTests": 1,
       "reason": "FLAKY on Windows, not deterministically failing: observed passing, then failing on 'rejects invalid UTF-8 corpus bytes', then passing across three consecutive CI runs of the same tree, and failing with ENOENT in an earlier probe. Reads a `git cat-file --batch` child's stdout, so a stream race is the likely cause. Not root-caused: needs a Windows machine to debug, not a 12-minute CI cycle.",
       "flaky": true
-    },
-    {
-      "file": "src/core/runtime/analysis-ownership.test.ts",
-      "reason": "ONE case remains of the two this file had: `a killed owner releases ownership on SIGTERM rather than holding it`. Windows has no SIGTERM delivery — `child.kill('SIGTERM')` maps to `TerminateProcess`, so no handler runs — yet `own()` still returned `in-progress` after the child closed, which means the dead owner was not detected as dead either. That second half is NOT platform-impossible and is the part worth chasing. The file's other Windows failure (a file URL's `.pathname` as a dynamic-import specifier) is fixed in this PR. Tracked in #452.",
-      "suspectedProductionBug": true
     }
   ]
 }
