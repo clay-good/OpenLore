@@ -29,6 +29,7 @@
 import type Parser from 'tree-sitter';
 import { usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
+import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
  *  single authoritative source the language-support registry derives the
@@ -97,10 +98,20 @@ export interface ThrowSite {
  *              method, so a MISSING call-graph edge for it is a true unresolved
  *              in-project callee (not an external), to be disclosed — never
  *              silently assumed exception-free.
+ *  - `self-field` : a CHAINED intra-object call — `this.<field>.x()` /
+ *              `self.<field>.x()` (change: shrink-receiver-resolution-boundary). The
+ *              receiver is a field of the enclosing object, so unlike `self` the callee is
+ *              NOT provably in-project: it is whatever the field's type is. The call graph
+ *              binds it when the per-file receiver registry types the field, and emits
+ *              nothing otherwise — deliberately, since an `external::` leaf would assert
+ *              the callee leaves the project. A missing edge here is therefore an UNKNOWN
+ *              callee, disclosed under its own boundary rather than folded into `self`
+ *              (which would overclaim it as in-project) or `other` (which would imply an
+ *              external leaf exists for it).
  *  - `other` : a member call on some other receiver (`obj.x()`) — resolves to an
  *              internal edge or an `external::obj.x` edge (already disclosable).
  *  - `none`  : a bare call (`x()`) — resolves to an internal or external edge. */
-export type CallReceiver = 'self' | 'other' | 'none' | 'constructor';
+export type CallReceiver = 'self' | 'self-field' | 'other' | 'none' | 'constructor';
 
 /** One call site within a function body, tagged with the guards that enclose it. */
 export interface CallSite {
@@ -614,9 +625,31 @@ function receiverKindOf(callNode: Node, spec: LangSpec, language: string): CallR
     if (obj.type === 'this' || obj.type === 'super') return 'self';
     if ((language === 'C#' || language === 'Java') && (obj.type === 'this_expression' || obj.type === 'base_expression')) return 'self';
     if (obj.type === 'identifier' && PY_SELF_RECEIVERS.has(obj.text)) return 'self';
+    // A chained intra-object receiver: the object is itself a member access rooted at
+    // `this`/`self` (change: shrink-receiver-resolution-boundary).
+    if (isSelfRootedMember(obj, language)) return 'self-field';
     return 'other';
   }
   return 'none';
+}
+
+/** Is `node` a member access whose ROOT is the enclosing object — `this.repo`, `self.repo`,
+ *  `this.a.b`? One hop is the common case; deeper chains root the same way, and the whole chain
+ *  is equally untypeable, so they share one classification.
+ *
+ *  Scoped to the languages whose extractors feed the receiver registry: elsewhere the shape is
+ *  still extracted as an ordinary member call with an `external::` fallback, so calling it a
+ *  `self-field` boundary would disclose a gap that language does not actually have. */
+function isSelfRootedMember(node: Node, language: string): boolean {
+  if (!RECEIVER_REGISTRY_LANGUAGES.has(language)) return false;
+  if (node.type !== 'member_expression' && node.type !== 'attribute' && node.type !== 'member_access_expression') {
+    return false;
+  }
+  const inner = node.childForFieldName('object') ?? node.childForFieldName('expression') ?? node.namedChildren[0] ?? null;
+  if (!inner) return false;
+  if (inner.type === 'this' || inner.type === 'super') return true;
+  if (inner.type === 'identifier' && PY_SELF_RECEIVERS.has(inner.text)) return true;
+  return isSelfRootedMember(inner, language);
 }
 
 // ── Body scan helpers ────────────────────────────────────────────────────────

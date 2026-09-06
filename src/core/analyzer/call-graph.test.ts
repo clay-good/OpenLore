@@ -2369,7 +2369,7 @@ describe('callDistance', () => {
   // breaks compilation of CALL_DISTANCE_COSTS, forcing an explicit cost choice.
   const expected: Record<EdgeConfidence, number> = {
     import: 1, re_export: 1, same_file: 1, self_cls: 1, http_endpoint: 1,
-    type_inference: 2, type_name: 2,
+    type_inference: 2, type_name: 2, receiver_inferred: 2,
     name_only: 3,
     synthesized: 4,
     external: Infinity,
@@ -2387,7 +2387,7 @@ describe('callDistance', () => {
   });
 
   it('costs a synthesized edge more than any directly-resolved confidence', () => {
-    const directConfidences: EdgeConfidence[] = ['import', 'same_file', 'self_cls', 'http_endpoint', 'type_inference', 'type_name', 'name_only'];
+    const directConfidences: EdgeConfidence[] = ['import', 'same_file', 'self_cls', 'http_endpoint', 'type_inference', 'type_name', 'receiver_inferred', 'name_only'];
     for (const c of directConfidences) {
       expect(callDistance(edge('synthesized'))).toBeGreaterThan(callDistance(edge(c)));
     }

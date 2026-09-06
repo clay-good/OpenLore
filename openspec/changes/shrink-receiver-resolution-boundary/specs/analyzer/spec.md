@@ -4,29 +4,64 @@
 
 ### Requirement: IntraObjectReceiverResolutionViaTypeRegistries
 
-The analyzer SHALL resolve intra-object receiver calls (`this.` / `self.` / `super.` / `cls.`)
-where a deterministic per-file type registry — local variable types, class field types, and
-function return types recorded during the single-pass walk — types the receiver unambiguously,
-emitting a resolved edge with a distinct `receiver_inferred` provenance tier (below CHA-certain,
-above name-only). Supported languages SHALL be reported in the capability matrix; unsupported
-languages SHALL be disclosed, not silently left unresolved.
+The analyzer SHALL resolve a CHAINED intra-object receiver call — `this.<field>.<method>()` /
+`self.<field>.<method>()` — when a deterministic per-file type registry types the receiver
+unambiguously, emitting a resolved edge with a distinct `receiver_inferred` provenance tier (below
+a directly-resolved binding, above name-only).
 
-#### Scenario: A field/return-typed receiver call resolves
+The registry SHALL be built from DECLARED types recorded during the Pass-1 walk, with no second
+parse: a field's type annotation, a `new T()` initializer, a constructor parameter property, a
+Python `__init__` parameter annotation forwarded to the field, and the declared return type of a
+function declared in the same file. Local variable types remain the existing receiver type
+inference; this requirement adds the field and return-type dimension it lacked.
 
-- **GIVEN** a `this.helper()` call whose receiver type the per-file registry determines from a
-  field or return type
+Resolution SHALL search only within the receiver's own type (walking the enclosing class chain so
+an inherited field still types), never across the global name space, and SHALL bind only a unique
+candidate.
+
+Supported languages SHALL be reported in the capability matrix as `receiverResolution`;
+unsupported languages SHALL be disclosed there, not silently left unresolved.
+
+#### Scenario: A field-typed receiver call resolves
+
+- **GIVEN** a `this.repo.save()` call whose receiver type the per-file registry determines from a
+  field annotation, a `new T()`, a parameter property, or a local factory's declared return type
 - **WHEN** the call graph is built
-- **THEN** a `receiver_inferred` edge is emitted, raising recall without a guessed binding
+- **THEN** a `receiver_inferred` edge to that type's `save` is emitted, raising recall without a
+  guessed binding
+
+#### Scenario: An inherited field types the receiver
+
+- **GIVEN** a `this.repo.save()` call in a subclass whose `repo` field is declared on an ancestor
+- **WHEN** the call graph is built
+- **THEN** the class chain is walked and the edge is emitted, exactly as for an own-class field
 
 ### Requirement: ResidualReceiverBoundaryStaysDisclosed
 
-A receiver the type registry cannot type unambiguously SHALL remain a disclosed boundary — the
-resolution step SHALL NOT emit a guessed edge, and `analyze_error_propagation` (and peers) SHALL
-continue to disclose the residual unresolved intra-object calls rather than assume them resolved
-or exception-free.
+A receiver the type registry cannot type unambiguously SHALL remain a disclosed boundary. The
+resolution step SHALL NOT emit a guessed edge, SHALL NOT emit an `external::` leaf (which would
+assert the callee leaves the project), and SHALL NOT let a chained receiver reach any resolution
+strategy that keys off the bare receiver token or the last dotted qualifier — including
+class-hierarchy analysis, which would otherwise name-bind `this.repo.save()` inside the CALLER's
+own hierarchy.
 
-#### Scenario: An ambiguous receiver is disclosed, not guessed
+A field observed with two conflicting declared types SHALL be refused rather than resolved to
+either. An ambiguous candidate set after typing SHALL be recorded as an ambiguous call site, never
+bound.
+
+`analyze_error_propagation` SHALL disclose the residual chained intra-object call sites under
+their own boundary — distinct from the unresolved-intra-object boundary, because the callee's
+provenance is unknown rather than merely unreached — and SHALL NOT treat them as exception-free.
+
+#### Scenario: An untypeable receiver is disclosed, not guessed
 
 - **GIVEN** an intra-object call whose receiver type the registry cannot determine unambiguously
 - **WHEN** the call graph is built
-- **THEN** no resolved edge is emitted for it and it remains a disclosed boundary
+- **THEN** no edge of any kind is emitted for it, and `analyze_error_propagation` reports it as a
+  chained-receiver boundary whose callee's exceptions are out of scope
+
+#### Scenario: A conflicting field declaration refuses
+
+- **GIVEN** a field declared with one type and assigned a different type elsewhere in the file
+- **WHEN** the call graph is built
+- **THEN** the registry refuses that field, and the call site stays unresolved and disclosed
