@@ -587,7 +587,9 @@ function childrenOf(n: DynamicBoundaryNode): DynamicBoundaryNode[] {
     }
     return out;
   }
-  return n.children ?? [];
+  // A COPY, never the node's own array: callers push, reverse and slice these, and the plain-object
+  // path would otherwise hand out a live reference and let one walk mutate the tree under another.
+  return n.children ? [...n.children] : [];
 }
 
 /** The node in `field`, or undefined — defensive across bindings and plain test objects. */
@@ -710,6 +712,12 @@ export function triggersFor(spec: { triggers: string[]; diPackages?: string[]; g
     ...(spec.diPackages ?? []),
     ...(spec.gatedMethods ?? []).flatMap(g => g.requires),
   ];
+}
+
+/** Push a node's children so they pop in source order — one definition, so no branch can diverge. */
+function pushChildren(stack: DynamicBoundaryNode[], n: DynamicBoundaryNode): void {
+  const kids = childrenOf(n);
+  for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
 }
 
 /**
@@ -858,7 +866,7 @@ export function matchDynamicBoundaries(
           const innerKind = spec.invokeOnlyKinds[innerName];
           if (innerKind) {
             record(innerKind, n, literalTargetOf(source, fn, spec, spec.selectorIndex?.[innerName]));
-            for (const c of childrenOf(n).reverse()) stack.push(c);
+            pushChildren(stack, n);
             continue;
           }
         }
@@ -895,8 +903,7 @@ export function matchDynamicBoundaries(
       }
     }
 
-    const kids = childrenOf(n);
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    pushChildren(stack, n);
   }
 
   out.sort((a, b) => a.startIndex - b.startIndex);
