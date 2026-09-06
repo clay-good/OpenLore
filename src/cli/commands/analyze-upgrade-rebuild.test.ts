@@ -31,7 +31,11 @@ function writeStoreAtVersion(version: number): void {
 }
 
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'analyze-upgrade-')); });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => {
+  // `force` swallows ENOENT; `maxRetries` covers a Windows handle that is closing asynchronously.
+  // A genuine leak still surfaces — as the explicit delete assertion above, not as a suite crash.
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
 
 describe('readPublishedStoreFault', () => {
   it('reports a stale schema, so the skip cannot strand an upgrading user', async () => {
@@ -51,9 +55,27 @@ describe('readPublishedStoreFault', () => {
     expect(await readPublishedStoreFault(dir)).toBeNull();
   });
 
-  it('never throws on an unreadable file — the probe reports, it does not abort analyze', async () => {
+  it('never throws on an unreadable file, and leaves no handle behind', async () => {
+    const { writeFileSync, rmSync: rm } = await import('node:fs');
+    const dbPath = join(dir, ARTIFACT_CALL_GRAPH_DB);
+    writeFileSync(dbPath, 'not a database', 'utf-8');
+    await expect(readPublishedStoreFault(dir)).resolves.toBeTruthy();
+    // The probe must not hold the file open. On Windows an open handle blocks deletion, which
+    // would jam the rebuild this probe exists to trigger — deleting right here is the assertion.
+    expect(() => rm(dbPath)).not.toThrow();
+  });
+
+  it('does not hand a non-database file to the database driver at all', async () => {
     const { writeFileSync } = await import('node:fs');
+    // A driver asked to open a non-database can leak its handle on the way to throwing, so the
+    // magic-byte check must answer first. The message therefore names the file, not a driver error.
     writeFileSync(join(dir, ARTIFACT_CALL_GRAPH_DB), 'not a database', 'utf-8');
+    await expect(readPublishedStoreFault(dir)).resolves.toContain('not a readable database');
+  });
+
+  it('treats a zero-byte store as unreadable rather than as a valid empty one', async () => {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(join(dir, ARTIFACT_CALL_GRAPH_DB), '', 'utf-8');
     await expect(readPublishedStoreFault(dir)).resolves.toBeTruthy();
   });
 

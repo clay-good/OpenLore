@@ -7,7 +7,7 @@
 
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
@@ -15,6 +15,9 @@ import { safeJoin } from '../../utils/path-confinement.js';
 import { existsSync } from 'node:fs';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
+
+/** SQLite's file header (`SQLite format 3\0`) — every real database starts with these bytes. */
+const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
 import {
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_REPO_STRUCTURE,
@@ -129,12 +132,33 @@ function collect(value: string, previous: string[]): string[] {
 export async function readPublishedStoreFault(outputPath: string): Promise<string | null> {
   const dbPath = join(outputPath, ARTIFACT_CALL_GRAPH_DB);
   if (!existsSync(dbPath)) return null;
+
+  // Check the SQLite magic BEFORE handing the path to a database driver. A driver asked to open a
+  // non-database file can leave the handle open when it throws, and on Windows an open handle
+  // blocks deleting the file — which would jam the very rebuild this probe exists to trigger.
+  // Reading sixteen bytes cannot leak a handle and answers the same question.
+  try {
+    const header = Buffer.alloc(SQLITE_MAGIC.length);
+    const handle = await openFile(dbPath, 'r');
+    try {
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      if (bytesRead < header.length || !header.equals(SQLITE_MAGIC)) {
+        return 'graph index is not a readable database — it will be rebuilt';
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return 'graph index could not be read — it will be rebuilt';
+  }
+
   let store: EdgeStore | undefined;
   try {
     store = EdgeStore.open(dbPath);
     return store.notReady?.message ?? null;
   } catch (error) {
-    // An unreadable file is exactly the case a rebuild fixes; never let the probe itself throw.
+    // A store that opens but faults is still exactly the case a rebuild fixes; the probe reports,
+    // it never aborts analyze.
     return error instanceof Error ? error.message : 'graph index could not be opened';
   } finally {
     try { store?.close(); } catch { /* best-effort */ }
