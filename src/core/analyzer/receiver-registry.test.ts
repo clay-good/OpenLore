@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { CallGraphBuilder } from './call-graph.js';
+import { extractExceptionFactsFromSource } from './exception-flow.js';
 import type { CallEdge, CallGraphResult } from './call-graph.js';
 import {
   buildReceiverFieldRegistry,
@@ -648,6 +649,27 @@ describe('chained receiver shapes', () => {
       `),
     ]);
     expect(anyEdgeNamed(result, 'run', 'map')).toEqual([]);
+  });
+
+  // Declared out of scope, pinned so the claim cannot quietly drift. A receiver rooted at a CLASS
+  // NAME is not rooted at the enclosing object, so neither the registry nor the disclosure covers
+  // it — the same as before this change. Naming it is what keeps "the last silent shape" honest.
+  it('leaves a class-name static-field receiver unbound AND undisclosed', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('holder.ts', 'export class Dep { work() { return 1; } }\nexport class Holder { static shared = new Dep(); }'),
+      ts('svc.ts', `
+        import { Holder } from './holder';
+        export class Service {
+          run() { return Holder.shared.work(); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'work')).toEqual([]);
+    const facts = await extractExceptionFactsFromSource(
+      'class K {\n  m() {\n    Holder.shared.work();\n  }\n}',
+      'TypeScript',
+    );
+    expect(facts.callSites.find(c => c.calleeName === 'work')?.receiver).toBe('other');
   });
 
   it('requires a capitalized type name — a lowercase declaration does not type the field', async () => {
