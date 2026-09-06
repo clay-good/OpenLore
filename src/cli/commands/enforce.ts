@@ -630,7 +630,9 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
       // Strip ONLY the terminator git added. A POSIX directory name may legally end in
       // `\r`, so trimming it there would corrupt a real repository root; Windows forbids
       // control characters in a path component, so the `\r` of a CRLF terminator there is
-      // never part of the root. Matches the `\r?\n` stripping in `resolveGitPath`.
+      // never part of the root. (`resolveGitPath` in `git-hooks.ts` strips `\r?\n` on EVERY
+      // platform; this is deliberately narrower, because the two POSIX cases below assert that
+      // a directory name ending in whitespace or `\r` survives untouched.)
       const resolvedRoot = stdout.replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '');
       if (!resolvedRoot) throw new Error('git returned an empty repository root');
       // git reports a repository root with FORWARD slashes on every platform, so on Windows

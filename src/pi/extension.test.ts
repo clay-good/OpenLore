@@ -66,11 +66,10 @@ it('detaches the Pi daemon on every platform, with its output on a real file han
   // Detaching means no inherited console: stdio:'ignore' (NUL) makes Win10 kill
   // the daemon before it writes .openlore/serve.json.
   expect(source).toContain("stdio: ['ignore', logFd, logFd],");
-});  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+});
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
-
-
 it.skipIf(process.platform === 'win32')('does not create a Pi daemon log through an outbound .openlore symlink', async () => {
   const root = await mkdtemp(join(tmpdir(), 'openlore-pi-root-'));
   const outside = await mkdtemp(join(tmpdir(), 'openlore-pi-outside-'));

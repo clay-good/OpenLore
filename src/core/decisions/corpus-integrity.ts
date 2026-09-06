@@ -19,6 +19,11 @@ import { join, relative, sep } from 'node:path';
  * enforcement policy can match on and which `openlore enforce` reports. With a native
  * separator the same requirement in the same corpus carried a different subject on Windows
  * than on Linux, so a policy written against one silently did not match the other.
+ *
+ * EVERY producer of a `CorpusSource.path` goes through here — requirements, proposals,
+ * spec-domains, change-deltas and durable decision projections alike. Fixing only one of them
+ * leaves the same policy-matching bug for the other subject types, and it reads as closed
+ * because the requirement case is the one with a test.
  */
 function corpusRelPath(rootPath: string, target: string): string {
   return relative(rootPath, target).split(sep).join('/');
@@ -820,7 +825,7 @@ async function readADRDecisions(
       id,
       text.match(/^## Status\s*\n\s*\n([^\n]+)/m)?.[1],
       footerText.match(/^> Supersedes:\s*([0-9a-f]{8})\s*$/m)?.[1],
-      relative(rootPath, path),
+      corpusRelPath(rootPath, path),
       text,
     ));
   }
@@ -1096,7 +1101,7 @@ export async function detectCorpusIntegrity(
         key: `proposal:${change}`,
         type: 'proposal',
         identifier: change,
-        path: relative(rootPath, proposalPath),
+        path: corpusRelPath(rootPath, proposalPath),
         text,
         live: true,
       };
@@ -1107,7 +1112,7 @@ export async function detectCorpusIntegrity(
           key: `new-domain:${change}:${domain}`,
           type: 'spec-domain',
           identifier: domain,
-          path: relative(rootPath, proposalPath),
+          path: corpusRelPath(rootPath, proposalPath),
           live: true,
         });
       }
@@ -1122,7 +1127,7 @@ export async function detectCorpusIntegrity(
         key: `delta:${change}:${domain}`,
         type: 'change-delta',
         identifier: `${change}/${domain}`,
-        path: relative(rootPath, join(changeRoot, 'specs', domain)),
+        path: corpusRelPath(rootPath, join(changeRoot, 'specs', domain)),
         live: true,
       };
       addArtifact(source);

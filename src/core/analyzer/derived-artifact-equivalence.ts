@@ -244,7 +244,15 @@ export function firstSemanticDifference(actual: unknown, expected: unknown): str
     const aObj = !!a && typeof a === 'object';
     const bObj = !!b && typeof b === 'object';
     if (aObj !== bObj) return `${path}: ${describe(a)} vs ${describe(b)}`;
-    if (!aObj) return Object.is(a, b) ? undefined : `${path}: ${describe(a)} vs ${describe(b)}`;
+    // Scalar equality is the CANONICAL FORM's, not `Object.is`: the byte comparison encodes
+    // through `JSON.stringify`, which calls `0` and `-0` equal, so `Object.is` would report a
+    // difference the equality check two lines below does not — contradicting this function's
+    // own promise that it only narrows the report.
+    if (!aObj) {
+      return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+        ? undefined
+        : `${path}: ${describe(a)} vs ${describe(b)}`;
+    }
     const keys = [...new Set([
       ...Object.keys(a as Record<string, unknown>),
       ...Object.keys(b as Record<string, unknown>),

@@ -287,10 +287,10 @@ describe('memory store — durability + concurrency end-to-end', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // decision store quarantine + sequence
 // ════════════════════════════════════════════════════════════════════════════
-describe('decision store — quarantine + sequence', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+describe('decision store — quarantine + sequence', () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
-
   it.skipIf(process.platform === 'win32')('rejects an outbound .openlore directory symlink before writing either store', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'openlore-atomic-outside-'));
     await symlink(outside, join(root, '.openlore'), 'dir');

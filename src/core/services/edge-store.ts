@@ -1587,7 +1587,16 @@ export class EdgeStore {
       // callers; schema inspection on that second handle still executes no DDL.
       if (mode === 'read' && existed && store.notReady === null) {
         store.close();
-        return new EdgeStore(openDatabase(dbPath), 'read');
+        // Through `rawDb` as well. This handle is WRITABLE and enables WAL, and the
+        // constructor then runs two `prepare()` statements — a corruption that first surfaces
+        // on that second read lands in the same catch, where a handle held only in a temporary
+        // would be invisible to the release and Windows would refuse the quarantine rename.
+        // That is the identical silent-empty-store failure this method exists to prevent, one
+        // branch over.
+        rawDb = openDatabase(dbPath);
+        const reopened = new EdgeStore(rawDb, 'read');
+        rawDb = undefined;
+        return reopened;
       }
       return store;
     } catch (err) {
@@ -1600,8 +1609,17 @@ export class EdgeStore {
       // CorruptGraphStoreQuarantineParity: move the unreadable file (+ WAL/SHM) aside.
       const quarantinePath = quarantineCorruptSync(dbPath, (err as Error).message);
       if (mode === 'analyze') {
-        // The corrupt file is aside; analyze repopulates, so open a fresh store here.
-        return new EdgeStore(openDatabase(dbPath), 'analyze');
+        // The corrupt file is aside; analyze repopulates, so open a fresh store here. Held in
+        // `fresh` rather than a temporary so a throw between the open and the constructor
+        // cannot leak it — the quarantine has already run, but a leaked handle on the new file
+        // would block the NEXT one.
+        const fresh = openDatabase(dbPath);
+        try {
+          return new EdgeStore(fresh, 'analyze');
+        } catch (freshErr) {
+          try { fresh.close(); } catch { /* already gone */ }
+          throw freshErr;
+        }
       }
       // Read path: never recreate an empty on-disk store (that would be the silent
       // empty substitute the invariant forbids). Hand back a disclosed not-ready handle

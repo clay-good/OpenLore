@@ -129,8 +129,6 @@ describe('shared analysis index builder', () => {
   // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
-
-
   it.skipIf(process.platform === 'win32')('drops call-graph file symlinks that escape the repository', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openlore-index-root-'));
     const outside = await mkdtemp(join(tmpdir(), 'openlore-index-outside-'));
