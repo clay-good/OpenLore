@@ -1665,7 +1665,7 @@ export class McpWatcher {
       //      must be able to create it, and a repaired file must be able to remove its entry (and the
       //      artifact once empty).
       await this.updateParseHealth(changedFiles);
-    await this.updateDynamicBoundary(changedFiles);
+      await this.updateDynamicBoundary(changedFiles);
       const generationId = await this.republishGeneration();
       if (generationId && graphVerdictInputs.length > 0) {
         const derived = await Promise.all(graphVerdictInputs.map(async input => {
@@ -2658,7 +2658,7 @@ export class McpWatcher {
 
       // 7. Parse health — drop the deleted files' degradation records and re-roll-up.
       await this.updateParseHealth([], rels);
-    await this.updateDynamicBoundary([], rels);
+      await this.updateDynamicBoundary([], rels);
       await this.republishGeneration();
     } finally {
       await releaseAnalysis();

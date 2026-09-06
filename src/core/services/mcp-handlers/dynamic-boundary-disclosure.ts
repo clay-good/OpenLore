@@ -31,6 +31,7 @@ import {
   ARTIFACT_DEPENDENCY_GRAPH,
 } from '../../../constants.js';
 import {
+  DYNAMIC_BOUNDARY_SCHEMA_VERSION,
   DYNAMIC_BOUNDARY_KIND_LABEL,
   DYNAMIC_BOUNDARY_REFUSAL_LABEL,
   type DynamicBoundaryReport,
@@ -96,14 +97,20 @@ function memoized<T>(
   });
 }
 
-/** Is this parsed value a usable site record? Anything else is dropped, never trusted. */
+/**
+ * Is this parsed value a usable site record? Anything else is dropped, never trusted.
+ *
+ * `refusal` is checked alongside `line` and `kind` because it is RENDERED: a record missing it
+ * would print "(undefined)" into a disclosure an agent and a terminal both read.
+ */
 function validRecord(f: unknown): f is FileDynamicBoundary {
   if (!f || typeof f !== 'object') return false;
   const r = f as Partial<FileDynamicBoundary>;
   return typeof r.filePath === 'string' && typeof r.language === 'string' && Array.isArray(r.sites)
     && r.sites.every(site => !!site && typeof site === 'object'
       && typeof (site as DynamicBoundarySite).line === 'number'
-      && typeof (site as DynamicBoundarySite).kind === 'string');
+      && typeof (site as DynamicBoundarySite).kind === 'string'
+      && typeof (site as DynamicBoundarySite).refusal === 'string');
 }
 
 /**
@@ -126,6 +133,10 @@ export async function loadDynamicBoundaryReport(
       if (!read) return null;
       const parsed = JSON.parse(read.text) as Partial<DynamicBoundaryReport>;
       if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.files)) return null;
+      // The schema version is stamped on write, so it must be CHECKED on read — otherwise the
+      // guard exists in name only and a stale artifact from an older shape is served as current.
+      // Fail open to "no boundary", the module's posture everywhere else.
+      if (parsed.version !== DYNAMIC_BOUNDARY_SCHEMA_VERSION) return null;
       const files = parsed.files.filter(validRecord);
       if (files.length === 0) return null;
       return { ...(parsed as DynamicBoundaryReport), files };
@@ -353,7 +364,11 @@ export function buildQualifier(
  */
 export function qualificationReason(hit: QualifyingHit): string {
   const label = DYNAMIC_BOUNDARY_KIND_LABEL[hit.site.kind] ?? hit.site.kind;
-  const why = DYNAMIC_BOUNDARY_REFUSAL_LABEL[hit.site.refusal] ?? hit.site.refusal;
+  // A refusal from a newer or hand-edited artifact echoes its own value, and a blank one falls
+  // back to prose — never to the literal string "undefined" in a user-facing disclosure.
+  const why = DYNAMIC_BOUNDARY_REFUSAL_LABEL[hit.site.refusal]
+    ?? hit.site.refusal
+    ?? 'the resolver did not bind this dispatch';
   return `a ${label} at ${hit.file}:${hit.site.line} can reach this symbol without a graph edge `
     + `(${why}) — absence of a caller is not established here`;
 }

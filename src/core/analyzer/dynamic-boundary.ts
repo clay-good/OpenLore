@@ -721,6 +721,7 @@ export function matchDynamicBoundaries(
     .filter(g => g.requires.some(r => hasImportEvidence(importText, r, spec.importStyle)));
 
   const out: DynamicBoundaryCandidate[] = [];
+  const atOffset = new Map<number, DynamicBoundaryCandidate>();
   const seen = new Set<number>();
   let matched = 0;
   const record = (
@@ -730,7 +731,20 @@ export function matchDynamicBoundaries(
   ): void => {
     // One construct yields at most one candidate: a nested match (`getattr(o, x)()`) must not be
     // counted twice, and double-counting would inflate the density budget as well as the receipt.
-    if (seen.has(node.startIndex)) return;
+    //
+    // But a CHAINED reflective call — `m.getDeclaredMethod("run").invoke(o)`, the idiomatic
+    // spelling in Java, C# and Go — puts the outer and inner calls at the same start offset, and
+    // the walk is pre-order, so the outer one arrives first. The outer callee carries no selector,
+    // so keeping it and discarding the inner would emit `no-static-target` — "the dispatch target
+    // is computed at runtime" — about a target that is a string literal right there in the source.
+    // A false statement, and one that also hides the literal from the sibling change built to
+    // recover it. So a later match at the same offset does not merely lose: it donates the more
+    // specific selector to the candidate already retained.
+    if (seen.has(node.startIndex)) {
+      const existing = atOffset.get(node.startIndex);
+      if (existing && literalTarget && !existing.literalTarget) existing.literalTarget = literalTarget;
+      return;
+    }
     seen.add(node.startIndex);
     matched++;
     // Retained candidates are capped HERE, not at finalize. A generated dispatch table can carry
@@ -740,14 +754,16 @@ export function matchDynamicBoundaries(
     // truncation receipt still reports the true scale.
     if (out.length >= DYNAMIC_BOUNDARY_SITE_CAP) return;
     const { evidence, truncated } = toEvidence(textOf(source, node));
-    out.push({
+    const candidate: DynamicBoundaryCandidate = {
       kind,
       line: node.startPosition.row + 1,
       startIndex: node.startIndex,
       evidence,
       ...(truncated ? { evidenceTruncated: true as const } : {}),
       ...(literalTarget ? { literalTarget } : {}),
-    });
+    };
+    out.push(candidate);
+    atOffset.set(node.startIndex, candidate);
   };
 
   const stack: DynamicBoundaryNode[] = [root];

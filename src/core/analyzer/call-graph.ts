@@ -6405,6 +6405,7 @@ function mergeScriptContainerResults(
   results: FileExtractResult[],
 ): FileExtractResult {
   const merged: FileExtractResult = { nodes: [], rawEdges: [], cfg: new Map() };
+  let containerMatched = 0;
   const styles = results.flatMap(result => result.style ? [result.style] : []);
   const health = results.flatMap(result => result.parseHealth ? [result.parseHealth] : []);
 
@@ -6422,6 +6423,13 @@ function mergeScriptContainerResults(
     }
     if (result.dynamicBoundary?.length) {
       merged.dynamicBoundary = [...(merged.dynamicBoundary ?? []), ...result.dynamicBoundary];
+      // Each script lane matched and capped INDEPENDENTLY, so the container's true scale is the
+      // SUM of the lanes' counts, never the largest one. A lane's own count is its `matchedTotal`
+      // when it was capped, and its retained length when it was not.
+      containerMatched += Math.max(
+        result.dynamicBoundary[0]?.matchedTotal ?? 0,
+        result.dynamicBoundary.length,
+      );
     }
     if (result.httpCalls?.length) merged.httpCalls = [...(merged.httpCalls ?? []), ...result.httpCalls];
     if (result.httpDegradations?.length) {
@@ -6455,6 +6463,12 @@ function mergeScriptContainerResults(
       counters,
       functionsSampled: styles.reduce((sum, style) => sum + style.functionsSampled, 0),
     };
+  }
+
+  // Re-stamp the merged candidate list with the container's summed total, so a two-lane `.vue`
+  // file over the cap reports its real count rather than one lane's.
+  if (merged.dynamicBoundary?.length && containerMatched > merged.dynamicBoundary.length) {
+    for (const c of merged.dynamicBoundary) c.matchedTotal = containerMatched;
   }
 
   if (health.length > 0) {

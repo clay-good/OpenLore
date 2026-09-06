@@ -10,7 +10,11 @@
  *   - a boundary can withhold a negative claim and can never assert a positive one.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DYNAMIC_BOUNDARY } from '../../../constants.js';
 import {
   dynamicBoundaryCrossing,
   buildQualifier,
@@ -20,9 +24,12 @@ import {
   renderCrossing,
   CALLER_HIDING_KINDS,
   DYNAMIC_BOUNDARY_DISCLOSURE_CAP,
+  loadDynamicBoundaryReport,
+  __resetDynamicBoundaryMemo,
 } from './dynamic-boundary-disclosure.js';
 import {
   DYNAMIC_BOUNDARY_KINDS,
+  DYNAMIC_BOUNDARY_SCHEMA_VERSION,
   buildDynamicBoundaryReport,
   type DynamicBoundaryKind,
   type DynamicBoundarySite,
@@ -204,5 +211,94 @@ describe('the disclosure is one-directional', () => {
     const reason = qualificationReason(buildQualifier(report([file('a.py', [site(1)])]), new Map())('a.py', 'Python')!);
     expect(reason).not.toMatch(/\bis (live|tested|reached|unsafe)\b/);
     expect(reason).toContain('not established');
+  });
+});
+
+describe('the loader fails open on anything it cannot trust', () => {
+  let root: string;
+
+  async function write(body: unknown): Promise<void> {
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, ARTIFACT_DYNAMIC_BOUNDARY),
+      typeof body === 'string' ? body : JSON.stringify(body));
+    __resetDynamicBoundaryMemo();
+  }
+  const load = () => loadDynamicBoundaryReport(root);
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-dyn-load-'));
+    __resetDynamicBoundaryMemo();
+  });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  it('an absent artifact is no boundary, not an error', async () => {
+    expect(await load()).toBeNull();
+  });
+
+  it('malformed JSON, a wrong shape, and a null record all fail open', async () => {
+    // A DISCLOSURE sidecar must never be able to take down the conclusions it exists to annotate:
+    // seven handlers read this file on the serving path.
+    for (const body of ['not json', '[]', '{}', { files: 'no' }, { version: 1, files: [null] }]) {
+      await write(body);
+      expect(await load()).toBeNull();
+    }
+  });
+
+  it('a record missing a field it would RENDER is dropped, not printed as undefined', async () => {
+    await write({ version: 1, files: [{ filePath: 'a.py', language: 'Python', sites: [{ line: 1, kind: 'reflective-invoke' }] }] });
+    expect(await load()).toBeNull(); // no `refusal` — it is rendered, so it is required
+  });
+
+  it('a stale schema version is refused rather than served as current', async () => {
+    const record = {
+      filePath: 'a.py', language: 'Python',
+      sites: [{ line: 1, kind: 'reflective-invoke', refusal: 'no-static-target', evidence: 'x' }],
+    };
+    await write({ version: 999, files: [record] });
+    expect(await load()).toBeNull();
+    await write({ version: DYNAMIC_BOUNDARY_SCHEMA_VERSION, files: [record] });
+    expect((await load())?.files).toHaveLength(1);
+  });
+
+  it('one bad record does not discard its valid siblings', async () => {
+    await write({
+      version: DYNAMIC_BOUNDARY_SCHEMA_VERSION,
+      files: [
+        null,
+        { filePath: 'ok.py', language: 'Python', sites: [{ line: 2, kind: 'reflective-invoke', refusal: 'no-static-target', evidence: 'x' }] },
+      ],
+    });
+    expect((await load())?.files.map(f => f.filePath)).toEqual(['ok.py']);
+  });
+
+  it('the report is memoized per directory and released by the reset hook', async () => {
+    const record = {
+      filePath: 'a.py', language: 'Python',
+      sites: [{ line: 1, kind: 'reflective-invoke', refusal: 'no-static-target', evidence: 'x' }],
+    };
+    await write({ version: DYNAMIC_BOUNDARY_SCHEMA_VERSION, files: [record] });
+    const first = await load();
+    expect(first?.files).toHaveLength(1);
+    // Rewritten underneath, but inside the memo window: the composed handlers of one briefing must
+    // not each re-read and re-parse it.
+    await writeFile(
+      join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DYNAMIC_BOUNDARY),
+      JSON.stringify({ version: DYNAMIC_BOUNDARY_SCHEMA_VERSION, files: [] }),
+    );
+    expect(await loadDynamicBoundaryReport(root)).toBe(first);
+    // A later call past the window re-reads.
+    expect(await loadDynamicBoundaryReport(root, Date.now() + 60_000)).toBeNull();
+  });
+});
+
+describe('a qualification never renders a missing value', () => {
+  it('an unrecognised refusal echoes rather than printing undefined', () => {
+    const reason = qualificationReason({
+      file: 'a.py',
+      site: { line: 3, kind: 'reflective-invoke', refusal: 'future-reason' as never, evidence: 'x' },
+    });
+    expect(reason).toContain('future-reason');
+    expect(reason).not.toContain('undefined');
   });
 });

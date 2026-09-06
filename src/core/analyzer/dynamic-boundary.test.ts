@@ -802,3 +802,55 @@ describe('an over-cap file reports its true scale', () => {
     expect(rec!.totalSites).toBe(DYNAMIC_BOUNDARY_SITE_CAP + 12);
   });
 });
+
+describe('a chained reflective call keeps its literal selector', () => {
+  // `m.getDeclaredMethod("run").invoke(o)` is the idiomatic spelling in Java, C# and Go. The outer
+  // and inner calls share a start offset, so the offset dedupe used to keep the outer one — whose
+  // callee carries no selector — and emit `no-static-target`: "the dispatch target is computed at
+  // runtime", about a target that is a string literal right there in the source.
+  it('Java: a chained getDeclaredMethod(...).invoke(...) reports the named target', async () => {
+    const sites = await sitesOf('A.java', 'Java', `
+import java.lang.reflect.Method;
+
+class Dispatcher {
+    void run() {}
+    void go(Object o) throws Exception {
+        o.getClass().getDeclaredMethod("run").invoke(o);
+    }
+}
+`);
+    expect(sites).toHaveLength(1);
+    expect(sites[0].refusal).not.toBe('no-static-target');
+  });
+
+  it('C#: a chained GetMethod(...).Invoke(...) reports the named target', async () => {
+    const sites = await sitesOf('A.cs', 'C#', `
+using System.Reflection;
+
+class Dispatcher {
+    void Run() {}
+    void Go(object o) {
+        o.GetType().GetMethod("Run").Invoke(o, null);
+    }
+}
+`);
+    expect(sites).toHaveLength(1);
+    expect(sites[0].refusal).not.toBe('no-static-target');
+  });
+
+  it('Go: a chained MethodByName(...).Call(...) reports the named target', async () => {
+    const sites = await sitesOf('a.go', 'Go', `
+package main
+
+import "reflect"
+
+func Run() {}
+
+func Go(o any) {
+	reflect.ValueOf(o).MethodByName("Run").Call(nil)
+}
+`);
+    expect(sites).toHaveLength(1);
+    expect(sites[0].refusal).not.toBe('no-static-target');
+  });
+});
