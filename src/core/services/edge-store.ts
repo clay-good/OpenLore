@@ -161,8 +161,18 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
   }
 }
 
-/** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-export const SCHEMA_VERSION = 11;
+/**
+ * Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force.
+ *
+ * v12 adds no column — it marks the `receiver_inferred` confidence value (change:
+ * shrink-receiver-resolution-boundary). `edges.confidence` is an unconstrained TEXT column, so a
+ * NEWER database opened by an OLDER OpenLore would otherwise pass the version gate and then have
+ * every `receiver_inferred` row silently dropped by that build's validator — and, worse, an
+ * `.olbundle` import would recompute its digest through the same dropping reader and reject a
+ * perfectly valid bundle as TAMPERED. A version bump turns both into the honest
+ * `schema-mismatch` + rebuild path this store already documents.
+ */
+export const SCHEMA_VERSION = 12;
 
 /**
  * Bound on the number of bound parameters in one generated `IN (…)` list.

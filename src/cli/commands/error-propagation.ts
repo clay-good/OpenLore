@@ -55,6 +55,7 @@ export interface ErrorPropagationView {
     handledInternally: number;
     functionsAnalyzed: number;
     unresolvedSelfCalls?: number;
+    untypedReceiverCalls?: number;
     returnedErrors?: number;
     panics?: number;
   };
