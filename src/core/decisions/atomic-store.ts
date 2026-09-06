@@ -58,6 +58,23 @@ let tmpCounter = 0;
  *     share-delete still blocks the replace, so there is no share mode a reader can
  *     adopt to make this go away.
  *
+ * The second point is the load-bearing one, so here is how to re-measure it rather than
+ * take it on trust. Hold the destination open with `CreateFileW` called DIRECTLY — the
+ * share flags then are exactly what Win32 receives — while `node` performs the rename, so
+ * the call under test is the real libuv `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`:
+ *
+ * ```
+ * share READ|WRITE (no delete)  -> node rename FAILED EPERM
+ * share READ|WRITE|DELETE       -> node rename FAILED EPERM
+ * share DELETE only             -> node rename FAILED EPERM
+ * no handle at all              -> node rename SUCCEEDED
+ * ```
+ *
+ * Both halves of that harness matter. A first attempt used .NET's `File.Move(overwrite)`
+ * to do the replacing and reported `ACCESS_DENIED` for every arm including the control —
+ * it is not the same call, and it would have "confirmed" the conclusion for the wrong
+ * reason.
+ *
  * That second point is why this ladder is the ARCHITECTURE and not a workaround: with
  * nothing to fix on the read side, waiting for our own reader to close its descriptor
  * is the only way through. Any concurrent read of the artifact — a tool call serving
