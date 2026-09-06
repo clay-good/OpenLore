@@ -124,6 +124,15 @@ export async function readDependencyGraphCached<T>(path: string): Promise<T | nu
 }
 
 /**
+ * Is this repository mid-FIRST build — no published copy of `artifact`, and no published context
+ * either? The precondition for serving anything from a partial index.
+ */
+async function isFirstBuild(analysisDir: string, artifact: string): Promise<boolean> {
+  return await artifactStamp(join(analysisDir, artifact)) === null
+    && await artifactStamp(join(analysisDir, 'llm-context.json')) === null;
+}
+
+/**
  * The parsed dependency graph for a project, falling back to a live partial first-run index
  * when no published one exists yet (change: refine-first-run-partial-serving).
  *
@@ -138,10 +147,13 @@ export async function readDependencyGraphOrPartial<T>(
 ): Promise<T | null> {
   const published = await readDependencyGraphAt<T>(join(analysisDir, artifactName));
   if (published !== null) return published;
-  // ABSENT, not merely unusable. A published artifact that is corrupt, oversized, or a symlink
-  // must keep failing loudly: standing a partial index in for it would turn a problem the
-  // operator needs to see into a quiet downgrade. Same policy as `readCachedContext`.
-  if (await artifactStamp(join(analysisDir, artifactName)) !== null) return null;
+  // ABSENT, not merely unusable — and absent as part of a genuine first build, not on its own.
+  // A published artifact that is corrupt, oversized, or a symlink must keep failing loudly:
+  // standing a partial index in for it would turn a problem the operator needs to see into a
+  // quiet downgrade. And a published CONTEXT beside a missing graph is a broken artifact set,
+  // not a first build: answering it from the partial index would bind one artifact to the
+  // other's generation, which is the mixture the generation manifest exists to refuse.
+  if (!await isFirstBuild(analysisDir, artifactName)) return null;
 
   const stamp = await readPartialIndexStamp(analysisDir);
   if (!stamp) return null;
@@ -163,7 +175,7 @@ export async function readAnalysisArtifactOrPartial(
 ): Promise<string | null> {
   const published = await readArtifactBounded(join(analysisDir, artifact));
   if (published !== null) return published.text;
-  if (await artifactStamp(join(analysisDir, artifact)) !== null) return null;
+  if (!await isFirstBuild(analysisDir, artifact)) return null;
 
   const stamp = await readPartialIndexStamp(analysisDir);
   if (!stamp) return null;

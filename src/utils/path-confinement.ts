@@ -28,7 +28,7 @@ import { OPENSPEC_DIR } from '../constants.js';
  * write target) — the canonical path of its nearest existing ancestor. Used to
  * confine on the REAL filesystem location rather than the lexical path.
  */
-function realPathOrNearestExisting(p: string): string {
+export function realPathOrNearestExisting(p: string): string {
   let cur = p;
   // Bounds a symlink chain (including a cycle) so this can never spin.
   for (let hops = 0; hops < MAX_SYMLINK_HOPS; hops++) {

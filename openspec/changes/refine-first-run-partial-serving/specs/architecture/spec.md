@@ -16,7 +16,9 @@ attestation, or an exported bundle. Export SHALL be refused while a first build 
 
 Every read of a partial index SHALL treat it as untrusted repository content — bounded, refusing
 symlinks and non-regular files, and refusing a file that would block the read — including the
-generation-manifest reads that verify it. Any call-graph-shaped field found in one SHALL be
+generation-manifest reads that verify it. Its directory SHALL be confined to the repository by
+its REAL path before anything is written to it or removed from it, so a symlinked path component
+cannot redirect the flush or the cleanup outside the repository. Any call-graph-shaped field found in one SHALL be
 discarded rather than served, its receipt SHALL be bound to the analysis directory it was written
 for, and no text read from it SHALL be rendered into the server's own voice.
 

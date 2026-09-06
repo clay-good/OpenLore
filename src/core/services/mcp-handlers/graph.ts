@@ -1394,7 +1394,7 @@ export async function handleGetFileDependencies(
     : undefined;
 
   return {
-    filePath: node.file.path,
+    filePath: node.file?.path,
     direction,
     importsCount: imports?.length ?? null,
     importedByCount: importedBy?.length ?? null,

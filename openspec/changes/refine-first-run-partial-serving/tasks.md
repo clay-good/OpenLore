@@ -35,6 +35,9 @@
       `O_NONBLOCK`: `O_NOFOLLOW` refuses a symlink but a FIFO is not a symlink, and opening one
       read-only blocks inside `open()` on a libuv worker that `process.exit` cannot interrupt —
       reproduced as an unkillable hang, now refused. A pre-existing hole in the serving hot path
+- [x] Write and delete confined by REAL path: `.openlore/runtime` can be a committed symlink, and
+      Node resolves symlinked directory components — so the cleanup, which runs after EVERY
+      successful analyze including CI and `--embedded`, deleted recursively wherever it pointed
 - [x] No repository-supplied text in the server's voice: the receipt's "does not yet hold" list
       is owned by the reader, `buildPhase` is validated against a known set, and the stamp is
       bound to the analysis directory it was written for
@@ -74,6 +77,8 @@
       followed, read unbounded, or blocked on
 - [x] Untrusted-text tests: a repository cannot supply the receipt's prose, an out-of-set
       `buildPhase` is refused, and a partial index written for another repository is refused
+- [x] Confinement test: a symlinked `.openlore/runtime` makes the flush refuse and leaves the
+      symlink's target untouched by the cleanup
 - [x] Cold-path tests: `orient` (which refuses BEFORE reading the context, so the request-scoped
       receipt cannot cover it) and a handler returning a bare `{error}` both carry the receipt
 - [x] Verified end to end on a real first run of this repository: 2.5s into a 15s build, the

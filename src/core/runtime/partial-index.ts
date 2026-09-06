@@ -33,7 +33,7 @@
  */
 
 import { rm, mkdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { writeJsonAtomicStreaming } from '../analyzer/json-stream.js';
 import {
@@ -44,7 +44,8 @@ import {
 import { isProcessAlive, runtimeDirOf } from './analysis-ownership.js';
 // The bounded, symlink-refusing, regular-files-only read every `.openlore/` reader in this repo
 // is required to use. A leaf module, so nothing here reaches across a layer boundary for it.
-import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
+import { MAX_ARTIFACT_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
+import { isConfinedPath, realPathOrNearestExisting } from '../../utils/path-confinement.js';
 
 /** Directory name, under the runtime directory, that holds the partial index. */
 export const PARTIAL_INDEX_SUBDIR = 'partial-analysis';
@@ -159,6 +160,32 @@ export function partialIndexDirOf(analysisDir: string): string {
   return join(runtimeDirOf(analysisDir), PARTIAL_INDEX_SUBDIR);
 }
 
+/**
+ * The partial-index directory, but only when it really is inside this repository's `.openlore`.
+ *
+ * Node resolves symlinked DIRECTORY components. `O_NOFOLLOW` protects the final component of a
+ * read, and `rm` unlinks a symlink rather than following it — but neither says anything about
+ * `.openlore/runtime` itself being a symlink. A repository can commit one, git will check it
+ * out, and then {@link clearPartialIndex}'s recursive delete lands wherever it points. That
+ * delete runs after EVERY successful analyze, including CI and `--embedded` builds that never
+ * armed this lane, so it is the most dangerous primitive in this module by some distance.
+ *
+ * Confinement is on the REAL path (of the nearest existing ancestor, since the directory may not
+ * exist yet), because a lexical check is exactly what a symlink defeats. Returns null when the
+ * path escapes; every caller then treats the partial index as unavailable, which is the same
+ * fail-soft outcome as a disk error.
+ */
+function confinedPartialIndexDir(analysisDir: string): string | null {
+  const dir = partialIndexDirOf(analysisDir);
+  try {
+    const realRoot = realPathOrNearestExisting(dirname(resolve(analysisDir)));
+    return isConfinedPath(realRoot, realPathOrNearestExisting(dir)) ? dir : null;
+  } catch {
+    // A resolution failure (including the symlink-hop budget) is a refusal, never a pass.
+    return null;
+  }
+}
+
 export function partialStampPathOf(analysisDir: string): string {
   return join(partialIndexDirOf(analysisDir), PARTIAL_STAMP_FILE);
 }
@@ -219,7 +246,8 @@ export async function flushPartialIndex(
   analysisDir: string,
   flush: PartialIndexFlush,
 ): Promise<boolean> {
-  const dir = partialIndexDirOf(analysisDir);
+  const dir = confinedPartialIndexDir(analysisDir);
+  if (dir === null) return false;
   try {
     await mkdir(dir, { recursive: true });
     await atomicWriteFile(join(dir, 'repo-structure.json'), JSON.stringify(flush.repoStructure, null, 2));
@@ -278,10 +306,9 @@ export async function refreshPartialIndexStamp(
  * what it is: not a partial index.
  */
 async function hasCommittedPartialGeneration(analysisDir: string): Promise<boolean> {
-  const generation = await readCurrentGeneration(
-    partialIndexDirOf(analysisDir),
-    [...PARTIAL_REQUIRED_ARTIFACTS],
-  );
+  const dir = confinedPartialIndexDir(analysisDir);
+  if (dir === null) return false;
+  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS], MAX_ARTIFACT_BYTES);
   // `legacy` is a manifest SYNTHESIZED from mtimes for an analysis predating manifests. A
   // partial index is never legacy — this code always publishes — so a legacy verdict means
   // the manifest is missing and the files on disk are unowned.
@@ -355,10 +382,14 @@ export async function partialArtifactPathIfLive(
 ): Promise<string | null> {
   const stamp = await readPartialIndexStamp(analysisDir);
   if (!stamp) return null;
-  const dir = partialIndexDirOf(analysisDir);
-  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS]);
+  const dir = confinedPartialIndexDir(analysisDir);
+  if (dir === null) return null;
+  // Bounded at the SIBLING-artifact ceiling, not the analysis one. `digestOf` reads and hashes
+  // the whole file, and the bounded read below then refuses anything over 64 MB — so verifying
+  // at 512 MB would hash up to half a gigabyte per call to reject it a moment later.
+  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS], MAX_ARTIFACT_BYTES);
   if (!generation || generation.compatibility !== 'manifest') return null;
-  if (!await artifactMatchesGeneration(dir, generation, artifact)) return null;
+  if (!await artifactMatchesGeneration(dir, generation, artifact, MAX_ARTIFACT_BYTES)) return null;
   return join(dir, artifact);
 }
 
@@ -392,8 +423,10 @@ export async function readPartialArtifact(
  * running until its stamp aged out.
  */
 export async function clearPartialIndex(analysisDir: string): Promise<void> {
+  const dir = confinedPartialIndexDir(analysisDir);
+  if (dir === null) return;
   try {
-    await rm(partialIndexDirOf(analysisDir), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   } catch {
     // Best effort. A surviving directory is superseded by the published analysis on every read
     // path that checks for one, and its stamp ages out on its own.

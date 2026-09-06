@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import {
   PARTIAL_STAMP_MAX_AGE_MS,
   clearPartialIndex,
   PARTIAL_INDEX_ABSENT_FACTS,
+  PARTIAL_INDEX_SUBDIR,
   describePartialIndex,
   flushPartialIndex,
   partialBuildStagePercent,
@@ -217,6 +218,25 @@ describe('partial first-run index', () => {
       'utf8',
     );
 
+    expect(await readPartialIndexStamp(analysisDir)).toBeNull();
+  });
+
+  it('refuses to write or delete through a symlinked runtime directory', async () => {
+    // Node resolves symlinked DIRECTORY components. `O_NOFOLLOW` protects the final component of
+    // a read and `rm` unlinks a symlink rather than following it — but neither says anything
+    // about `.openlore/runtime` itself being a symlink, which a repository can commit and git
+    // will check out. `clearPartialIndex` runs a recursive delete after EVERY successful
+    // analyze, including CI and `--embedded` builds, so an escape there deletes outside the
+    // repository on a plain `openlore analyze`.
+    const outside = join(root, 'outside');
+    await mkdir(join(outside, PARTIAL_INDEX_SUBDIR), { recursive: true });
+    await writeFile(join(outside, PARTIAL_INDEX_SUBDIR, 'precious.txt'), 'user data', 'utf8');
+    await symlink(outside, join(root, '.openlore', 'runtime'));
+
+    expect(await flush()).toBe(false);
+    await clearPartialIndex(analysisDir);
+
+    expect(existsSync(join(outside, PARTIAL_INDEX_SUBDIR, 'precious.txt'))).toBe(true);
     expect(await readPartialIndexStamp(analysisDir)).toBeNull();
   });
 
