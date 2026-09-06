@@ -41,7 +41,8 @@ import { spawn } from 'node:child_process';
 import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
-import { extractFileStyle, extractFileParseHealth } from '../analyzer/call-graph.js';
+import { extractFileStyle, extractFileParseHealth, extractFileDynamicBoundary } from '../analyzer/call-graph.js';
+import { buildDynamicBoundaryReport, type DynamicBoundaryReport, type FileDynamicBoundary } from '../analyzer/dynamic-boundary.js';
 import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '../analyzer/style-fingerprint.js';
 import { invalidateVectorIndexCaches } from '../analyzer/vector-index.js';
 import { isSpecIndexLockTimeoutError, SpecVectorIndex } from '../analyzer/spec-vector-index.js';
@@ -83,6 +84,7 @@ import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_STYLE_FINGERPRINT,
   ARTIFACT_PARSE_HEALTH,
+  ARTIFACT_DYNAMIC_BOUNDARY,
   WATCH_DEBOUNCE_MS,
   WATCH_MAX_BATCH_MS,
   WATCH_BULK_THRESHOLD,
@@ -1663,6 +1665,7 @@ export class McpWatcher {
       //      must be able to create it, and a repaired file must be able to remove its entry (and the
       //      artifact once empty).
       await this.updateParseHealth(changedFiles);
+    await this.updateDynamicBoundary(changedFiles);
       const generationId = await this.republishGeneration();
       if (generationId && graphVerdictInputs.length > 0) {
         const derived = await Promise.all(graphVerdictInputs.map(async input => {
@@ -2375,6 +2378,58 @@ export class McpWatcher {
   }
 
   /**
+   * Keep dynamic-boundary.json live for the changed (and deleted) files (change:
+   * disclose-dynamic-boundary-regions). Same lane shape as {@link updateParseHealth}, and for the
+   * same reason: this artifact is ABSENT on a repository with no site, so the lane must CREATE it
+   * when a save introduces the first one and DELETE it when the last one goes. A newly-added `eval`
+   * is disclosed on the next conclusion without a full re-analyze; removing it clears the
+   * disclosure. Best-effort + atomic; a failure is disclosed on stderr, never thrown into the batch.
+   */
+  private async updateDynamicBoundary(changedFiles: ChangedFile[], deletedRels: string[] = []): Promise<void> {
+    const dbPath = join(this.outputPath, ARTIFACT_DYNAMIC_BOUNDARY);
+    try {
+      const raw = await readFile(dbPath, 'utf-8').catch(() => null);
+      const existing = raw ? (JSON.parse(raw) as DynamicBoundaryReport) : null;
+      const byPath = new Map<string, FileDynamicBoundary>(
+        Array.isArray(existing?.files) ? existing!.files.map(f => [f.filePath, f]) : [],
+      );
+      let touched = false;
+
+      for (const rel of deletedRels) {
+        if (byPath.delete(rel)) touched = true;
+      }
+      for (const f of changedFiles) {
+        const language = detectLanguage(f.rel);
+        let record: FileDynamicBoundary | undefined;
+        try {
+          record = await extractFileDynamicBoundary({ path: f.rel, content: f.content, language });
+        } catch {
+          // A file this lane cannot re-derive keeps whatever the last full build recorded. Dropping
+          // it would turn a parse failure into a claim that the file has no dynamic dispatch.
+          continue;
+        }
+        if (record) {
+          byPath.set(f.rel, record);
+          touched = true;
+        } else if (byPath.delete(f.rel)) {
+          touched = true;
+        }
+      }
+
+      if (!touched) return;
+      const report = buildDynamicBoundaryReport([...byPath.values()]);
+      if (!report) {
+        // The repository now records no site — remove the stale artifact rather than serve it.
+        if (raw !== null) await unlink(dbPath).catch(() => {});
+        return;
+      }
+      await atomicWriteFile(dbPath, JSON.stringify(report, null, 2));
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] dynamic-boundary error: ${(err as Error).message}\n`);
+    }
+  }
+
+  /**
    * Keep parse-health.json live for the changed (and deleted) files (change:
    * add-parse-health-boundary-disclosure). Unlike the style fingerprint (which every supported repo
    * has), this artifact is ABSENT on a clean repo — so this lane must be able to CREATE it when a
@@ -2603,6 +2658,7 @@ export class McpWatcher {
 
       // 7. Parse health — drop the deleted files' degradation records and re-roll-up.
       await this.updateParseHealth([], rels);
+    await this.updateDynamicBoundary([], rels);
       await this.republishGeneration();
     } finally {
       await releaseAnalysis();

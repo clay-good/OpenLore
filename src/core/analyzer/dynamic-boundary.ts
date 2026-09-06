@@ -224,6 +224,24 @@ interface LanguageSpec {
   /** Node types whose text is a string literal, used to read a literal dispatch target. */
   literalTypes: string[];
   /**
+   * How this language spells an import, so a gated or DI rule can require REAL import evidence.
+   *
+   * Load-bearing, not cosmetic: a bare substring scan reads a package name out of a comment, a
+   * string table, or a framework-detection list, and then every `map.get(k)` in that file becomes a
+   * "DI container resolution". This module's own matcher table names six DI packages, so a
+   * substring gate flags the matcher itself. The requirement is a DECLARED BINDING; only an import
+   * is one.
+   */
+  importStyle: ImportStyle;
+  /**
+   * Node types that ARE an import in this grammar. When the tree carries at least one, import
+   * evidence is read from those nodes alone rather than from the whole source — which is what stops
+   * an import spelled inside a string literal (a test fixture, a code sample, a generator template)
+   * from binding a package into the file that merely quotes it. A file with none falls back to the
+   * anchored source scan, so a CommonJS `require` is still recognised.
+   */
+  importNodeTypes?: string[];
+  /**
    * Whether a {@link LanguageSpec.calleeKinds} name still counts when called on an arbitrary
    * receiver (`mailer.send(:deliver)`).
    *
@@ -268,6 +286,8 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     literalTypes: ['string'],
     diPackages: ['dependency_injector', 'injector', 'punq', 'lagom'],
     diMethods: ['resolve', 'provide'],
+    importStyle: 'python',
+    importNodeTypes: ['import_statement', 'import_from_statement'],
   },
   Ruby: {
     triggers: ['send', 'eval', 'define_', 'method_missing', 'const_get',
@@ -291,6 +311,9 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     // `send`, `public_send`, `instance_eval` and friends are Ruby `Object`/`Module` methods: the
     // reflective meaning belongs to the language, not to whatever object is on the left.
     calleeKindsOnAnyReceiver: true,
+    // Ruby declares no gated or DI rule, so no import evidence is consulted; the style is declared
+    // anyway so the field stays total and a future rule cannot forget it.
+    importStyle: 'js',
   },
   PHP: {
     triggers: ['call_user_func', 'eval', 'create_function', '$$', 'ReflectionMethod', 'ReflectionClass'],
@@ -303,6 +326,8 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     },
     computedCalleeTypes: ['variable_name', 'dynamic_variable_name'],
     literalTypes: ['string', 'encapsed_string', 'string_content'],
+    importStyle: 'php',
+    importNodeTypes: ['namespace_use_declaration'],
   },
   Go: {
     triggers: ['reflect.'],
@@ -312,6 +337,8 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       { methods: ['Call', 'CallSlice', 'MethodByName', 'FieldByName'], requires: ['"reflect"'], kind: 'reflective-invoke' },
     ],
     literalTypes: ['interpreted_string_literal', 'raw_string_literal'],
+    importStyle: 'go',
+    importNodeTypes: ['import_declaration'],
   },
   Java: {
     triggers: ['.invoke(', 'Class.forName', 'getBean', 'getDeclaredMethod', 'getMethod('],
@@ -324,6 +351,8 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       { methods: ['getBean'], requires: ['org.springframework'], kind: 'container-resolution' },
     ],
     literalTypes: ['string_literal'],
+    importStyle: 'jvm',
+    importNodeTypes: ['import_declaration'],
   },
   'C#': {
     triggers: ['.Invoke(', 'Activator.CreateInstance', 'GetMethod(', 'GetType().'],
@@ -335,8 +364,44 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       { methods: ['GetService', 'GetRequiredService'], requires: ['Microsoft.Extensions.DependencyInjection'], kind: 'container-resolution' },
     ],
     literalTypes: ['string_literal'],
+    importStyle: 'jvm',
+    importNodeTypes: ['using_directive'],
   },
 };
+
+/** How a language spells the import that binds a package name into a file. */
+type ImportStyle = 'js' | 'python' | 'jvm' | 'go' | 'php';
+
+/** Escape a package/namespace token for embedding in a `RegExp`. */
+function escapeToken(token: string): string {
+  return token.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+}
+
+/**
+ * Does `source` actually IMPORT `token`? Anchored to each language's import syntax, so a package
+ * name mentioned in a comment, a string literal, or a framework-name check is not mistaken for a
+ * binding. Conservative in the false-negative direction, like every other rule here: an import
+ * spelled in a way this does not recognise simply disables the rule for that file.
+ */
+export function hasImportEvidence(source: string, token: string, style: ImportStyle): boolean {
+  const t = escapeToken(token.replace(/^"|"$/g, ''));
+  switch (style) {
+    case 'js':
+      // `from 'pkg'`, `require('pkg')`, `import('pkg')` — the specifier position only. A subpath
+      // (`pkg/sub`) still counts; a comment naming the package does not.
+      return new RegExp(`(?:from|require\\(|import\\()\\s*['"\`]${t}(?:['"\`/])`).test(source);
+    case 'python':
+      return new RegExp(`^[ \\t]*(?:import|from)[ \\t]+${t}\\b`, 'm').test(source);
+    case 'jvm':
+      // Java `import a.b.C;` / C# `using A.B;` — statement position, start of line.
+      return new RegExp(`^[ \\t]*(?:import|using)[ \\t]+(?:static[ \\t]+)?${t}`, 'm').test(source);
+    case 'go':
+      // Inside an import block or a single-line import; the quoted path is the binding.
+      return new RegExp(`^[ \\t]*(?:import[ \\t]+)?(?:[A-Za-z_.]+[ \\t]+)?"${t}(?:/[^"]*)?"`, 'm').test(source);
+    case 'php':
+      return new RegExp(`^[ \\t]*use[ \\t]+\\\\?${t}`, 'm').test(source);
+  }
+}
 
 /** The TS and JS grammars share every rule; declared once so they cannot drift apart. */
 function tsSpec(): LanguageSpec {
@@ -352,8 +417,11 @@ function tsSpec(): LanguageSpec {
       'Reflect.get': 'reflective-invoke',
       'Reflect.apply': 'reflective-invoke',
       'Reflect.construct': 'reflective-invoke',
+      // `Reflect.defineProperty` is part of the reflection API a `Proxy` trap is written against.
+      // `Object.defineProperty` is NOT here: defining a property is ordinary JavaScript — test
+      // setup patches `process.stdout.isTTY` with it constantly — and it hides no dispatch. A rule
+      // that fires on it buries the real sites under setup noise.
       'Reflect.defineProperty': 'metaprogrammed-definition',
-      'Object.defineProperty': 'metaprogrammed-definition',
     },
     constructorKinds: {
       Function: 'code-eval',
@@ -364,6 +432,8 @@ function tsSpec(): LanguageSpec {
     literalTypes: ['string', 'string_fragment', 'template_string'],
     diPackages: ['inversify', 'tsyringe', 'typedi', 'awilix', '@nestjs/common', 'injection-js'],
     diMethods: ['get', 'resolve', 'make', 'cradle'],
+    importStyle: 'js',
+    importNodeTypes: ['import_statement'],
   };
 }
 
@@ -513,6 +583,38 @@ export function triggersFor(spec: { triggers: string[]; diPackages?: string[]; g
 }
 
 /**
+ * The text import evidence is read from: the file's actual import nodes when the grammar declares
+ * them and the tree carries at least one, else the whole source.
+ *
+ * This is what separates "the file imports `inversify`" from "the file CONTAINS the characters
+ * `import { Container } from 'inversify'` — inside a template literal, as a fixture." Both read
+ * identically to a source scan; only one is a binding. The fallback keeps CommonJS `require` and
+ * any import shape the grammar list misses working exactly as the source scan does.
+ */
+function collectImportText(
+  spec: LanguageSpec,
+  root: DynamicBoundaryNode,
+  source: string,
+): string {
+  if (!spec.importNodeTypes?.length) return source;
+  const types = new Set(spec.importNodeTypes);
+  const parts: string[] = [];
+  // Imports live at (or just under) module level in every grammar here, so a shallow scan finds
+  // them without a second full traversal.
+  const stack: Array<{ n: DynamicBoundaryNode; depth: number }> = [{ n: root, depth: 0 }];
+  while (stack.length > 0) {
+    const { n, depth } = stack.pop()!;
+    if (types.has(n.type)) {
+      parts.push(textOf(source, n));
+      continue;
+    }
+    if (depth >= 3) continue;
+    for (const c of childrenOf(n)) stack.push({ n: c, depth: depth + 1 });
+  }
+  return parts.length > 0 ? parts.join('\n') : source;
+}
+
+/**
  * Walk one already-parsed tree and record every candidate the resolver cannot follow.
  *
  * Fail-soft by construction: an unrecognized construct is not recorded, an unsupported language
@@ -534,8 +636,10 @@ export function matchDynamicBoundaries(
   // trigger set — derived from the same table, so the two cannot drift apart.
   if (!triggersFor(spec).some(t => source.includes(t))) return [];
 
-  const diPresent = !!spec.diPackages?.some(p => source.includes(p));
-  const gates = (spec.gatedMethods ?? []).filter(g => g.requires.some(r => source.includes(r)));
+  const importText = collectImportText(spec, root, source);
+  const diPresent = !!spec.diPackages?.some(p => hasImportEvidence(importText, p, spec.importStyle));
+  const gates = (spec.gatedMethods ?? [])
+    .filter(g => g.requires.some(r => hasImportEvidence(importText, r, spec.importStyle)));
 
   const out: DynamicBoundaryCandidate[] = [];
   const seen = new Set<number>();

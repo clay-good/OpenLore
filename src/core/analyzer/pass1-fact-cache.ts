@@ -58,7 +58,7 @@ const NO_FACT_CACHE_ENV = 'OPENLORE_NO_FACT_CACHE';
  * Serialized-payload format version. Bump when {@link serializeFacts} changes shape — it is
  * folded into the stamp, so a bump invalidates every row written by an older format.
  */
-const FACT_FORMAT_VERSION = 5;
+const FACT_FORMAT_VERSION = 6;
 
 /** One file's Pass-1 facts as they are stored. */
 export interface Pass1FactRow {
@@ -152,6 +152,12 @@ interface SerializedFacts {
   d?: FileExtractResult['dynamicDispatch'];
   t?: FileExtractResult['httpCalls'];
   x?: FileExtractResult['httpDegradations'];
+  /**
+   * Dynamic-boundary candidates (change: disclose-dynamic-boundary-regions). Carried through
+   * the cache because a cache hit that dropped them would report a file as having NO dynamic
+   * dispatch — a false clean disclosure, which is worse than no disclosure at all.
+   */
+  b?: FileExtractResult['dynamicBoundary'];
 }
 
 /**
@@ -172,6 +178,7 @@ export function serializeFacts(facts: FileExtractResult | undefined): string {
   if (facts.dynamicDispatch) payload.d = facts.dynamicDispatch;
   if (facts.httpCalls !== undefined) payload.t = facts.httpCalls;
   if (facts.httpDegradations?.length) payload.x = facts.httpDegradations;
+  if (facts.dynamicBoundary?.length) payload.b = facts.dynamicBoundary;
   return JSON.stringify(payload);
 }
 
@@ -200,6 +207,7 @@ export function deserializeFacts(raw: string): { facts: FileExtractResult | unde
   if (p.d) facts.dynamicDispatch = p.d;
   if (p.t !== undefined) facts.httpCalls = p.t;
   if (p.x) facts.httpDegradations = p.x;
+  if (p.b) facts.dynamicBoundary = p.b;
   return { facts };
 }
 
@@ -213,7 +221,12 @@ export function deserializeFacts(raw: string): { facts: FileExtractResult | unde
  * Over-broad on purpose — see the module doc. Kept honest by the import-closure test rather
  * than by anyone remembering to update it.
  */
-const STAMP_ROOTS = ['.', '../scip', '../../utils', '../../types', '../../constants'];
+// `../services/secret-redaction` is reached from the dynamic-boundary matcher, which redacts
+// evidence AT EXTRACTION TIME (change: disclose-dynamic-boundary-regions). It is a stamp root
+// for exactly the reason every other one is: a change to what counts as a credential changes
+// what the extractor computes, and a cached row written under the old rules must not be reused.
+const STAMP_ROOTS = ['.', '../scip', '../../utils', '../../types', '../../constants',
+  '../services/secret-redaction.ts'];
 
 /** Files under a stamp root that cannot affect extraction output. */
 function isStampable(name: string): boolean {

@@ -12,6 +12,7 @@ import {
   DYNAMIC_BOUNDARY_DENSITY_CEILING_PER_KLOC,
   supportsDynamicBoundary,
   triggersFor,
+  hasImportEvidence,
   toEvidence,
   finalizeDynamicBoundarySites,
   buildFileDynamicBoundary,
@@ -541,5 +542,97 @@ func (r *Repo) Load(id string) int { return r.Get(id) }
       expect(density, `${language} fires ${rec?.sites.length ?? 0} times on ordinary code`)
         .toBeLessThanOrEqual(DYNAMIC_BOUNDARY_DENSITY_CEILING_PER_KLOC);
     }
+  });
+});
+
+describe('import evidence, not a substring', () => {
+  it('a package named in a comment or a string is not a binding', () => {
+    expect(hasImportEvidence("// we support inversify and tsyringe\n", 'inversify', 'js')).toBe(false);
+    expect(hasImportEvidence("if (f.includes('inversify')) {}\n", 'inversify', 'js')).toBe(false);
+    expect(hasImportEvidence("import { Container } from 'inversify';\n", 'inversify', 'js')).toBe(true);
+    expect(hasImportEvidence("const c = require('awilix');\n", 'awilix', 'js')).toBe(true);
+    expect(hasImportEvidence("import x from '@nestjs/common/foo';\n", '@nestjs/common', 'js')).toBe(true);
+  });
+
+  it('recognises each language its own way', () => {
+    expect(hasImportEvidence('import injector\n', 'injector', 'python')).toBe(true);
+    expect(hasImportEvidence('# injector is nice\n', 'injector', 'python')).toBe(false);
+    expect(hasImportEvidence('import java.lang.reflect.Method;\n', 'java.lang.reflect', 'jvm')).toBe(true);
+    expect(hasImportEvidence('// java.lang.reflect is used\n', 'java.lang.reflect', 'jvm')).toBe(false);
+    expect(hasImportEvidence('using System.Reflection;\n', 'System.Reflection', 'jvm')).toBe(true);
+    expect(hasImportEvidence('import "reflect"\n', '"reflect"', 'go')).toBe(true);
+    expect(hasImportEvidence('\t"reflect"\n', '"reflect"', 'go')).toBe(true);
+    expect(hasImportEvidence('// uses "reflect" heavily\n', '"reflect"', 'go')).toBe(false);
+    expect(hasImportEvidence('use Psr\\Container;\n', 'Psr', 'php')).toBe(true);
+  });
+
+  it('a file that merely mentions a DI package records no container resolution', async () => {
+    // The exact defect dogfooding found: this repository's own framework-detection code names
+    // `inversify` in a string comparison, which a substring gate read as a DI binding and turned
+    // every `map.get(k)` in the file into a site.
+    const sites = await sitesOf('a.ts', 'TypeScript', `
+export function detect(frameworks: string[], cache: Map<string, number>) {
+  if (frameworks.some(f => f.toLowerCase().includes('inversify'))) return cache.get('di');
+  return cache.get('none');
+}
+`);
+    expect(sites).toEqual([]);
+  });
+
+  it('Object.defineProperty is ordinary JavaScript, not a recorded boundary', async () => {
+    const sites = await sitesOf('a.ts', 'TypeScript', `
+export function stub(target: object) {
+  Object.defineProperty(target, 'isTTY', { value: false, configurable: true });
+}
+`);
+    expect(sites).toEqual([]);
+  });
+});
+
+describe('an import inside a string literal is not a binding', () => {
+  it('a file whose fixture text quotes a DI import records no container resolution', async () => {
+    // The second dogfooding defect: this module's own test file quotes an `inversify` import inside
+    // a template-literal fixture, and a whole-source scan read that as a binding — turning every
+    // `map.get(k)` in the test file into a site.
+    const sites = await sitesOf('a.ts', 'TypeScript', `
+import { readFile } from 'node:fs/promises';
+
+const FIXTURE = \`
+import { Container } from 'inversify';
+const container = new Container();
+\`;
+
+export async function run(cache: Map<string, string>) {
+  await readFile('x');
+  return cache.get('key') + FIXTURE;
+}
+`);
+    expect(sites).toEqual([]);
+  });
+
+  it('a real import in the same file still binds', async () => {
+    const sites = await sitesOf('a.ts', 'TypeScript', `
+import { Container } from 'inversify';
+
+const container = new Container();
+
+export function boot() {
+  return container.get('UserService');
+}
+`);
+    expect(kindsOf(sites)).toEqual(['container-resolution']);
+  });
+
+  it('a CommonJS require still binds, through the source fallback', async () => {
+    const sites = await sitesOf('a.js', 'JavaScript', `
+const { createContainer } = require('awilix');
+
+const container = createContainer();
+
+function boot() {
+  return container.resolve('userService');
+}
+`);
+    expect(kindsOf(sites)).toEqual(['container-resolution']);
   });
 });

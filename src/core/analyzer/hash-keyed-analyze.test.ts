@@ -24,6 +24,7 @@ import { computeExtractorStamp } from './pass1-fact-cache.js';
  */
 const ARTIFACTS = [
   'llm-context.json', 'repo-structure.json', 'style-fingerprint.json', 'parse-health.json',
+  'dynamic-boundary.json',
 ] as const;
 
 let dir: string;
