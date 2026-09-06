@@ -550,9 +550,24 @@ export function buildResolvedImportMap(
   const projectModules = new Set<string>();
   for (const f of files) {
     // `stripModuleExt` knows only the TS/JS extensions; a Python module path needs `.py` off too.
-    projectModules.add(stripModuleExt(f.path).replace(/\.py$/, ''));
+    const base = stripModuleExt(f.path).replace(/\.py$/, '');
+    // Register every path SUFFIX, because an absolute import is written relative to the package
+    // root, not the repository root: `src/myapp/models.py` is imported as `myapp.models`. The
+    // `src/` layout is the packaging default for a large share of Python projects, and matching
+    // only the full path would refuse every intra-project import in them — and refuse it with a
+    // message claiming the source said the type was elsewhere, which would be false.
+    for (let cut = 0; cut !== -1; cut = base.indexOf('/', cut + 1)) {
+      projectModules.add(cut === 0 ? base : base.slice(cut === 0 ? 0 : cut + 1));
+    }
+    projectModules.add(base);
     // A package import (`from pkg import X`) reaches `pkg/__init__.py`.
-    if (f.path.endsWith('/__init__.py')) projectModules.add(f.path.slice(0, -'/__init__.py'.length));
+    if (f.path.endsWith('/__init__.py')) {
+      const pkg = f.path.slice(0, -'/__init__.py'.length);
+      for (let cut = 0; cut !== -1; cut = pkg.indexOf('/', cut + 1)) {
+        projectModules.add(cut === 0 ? pkg : pkg.slice(cut + 1));
+      }
+      projectModules.add(pkg);
+    }
   }
   for (const f of files) {
     let imports;
@@ -576,7 +591,11 @@ export function buildResolvedImportMap(
         const pythonModule = f.language === 'Python'
           ? imp.source.replaceAll('.', '/')
           : undefined;
-        if (!pythonModule || !projectModules.has(pythonModule)) {
+        // A path ALIAS (`@/repo`, `~/lib`, `#internal`) is an in-project specifier this map
+        // simply cannot follow — the source did NOT say the type is external, so refusing on it
+        // would be a false claim and would cost every aliased repo its chained-receiver recall.
+        const aliased = !pythonModule && /^[@~#]/.test(imp.source);
+        if (!aliased && (!pythonModule || !projectModules.has(pythonModule))) {
           for (const name of imp.importedNames) {
             fileMap.set(`${EXTERNAL_IMPORT_PREFIX}${name}`, imp.source);
           }

@@ -5696,11 +5696,15 @@ export class CallGraphBuilder {
     ): AffinityPick => {
       if (cands.length === 0) return { kind: 'none' };
       const fileImports = callImportMap.get(callerFile);
-      // The file imports this name from a specifier that resolved to no in-project file — a
-      // package, or a path alias. The source SAYS the type is not from here, so a repo-wide
-      // namesake is not a fallback, it is a contradiction.
-      if (fileImports?.has(`${EXTERNAL_IMPORT_PREFIX}${typeName}`)) return { kind: 'none' };
       const importedFrom = fileImports?.get(typeName);
+      // The file imports this name from a specifier that resolved to no in-project file — a
+      // package. The source SAYS the type is not from here, so a repo-wide namesake is not a
+      // fallback, it is a contradiction. A CONCRETE binding for the same name wins, though: a
+      // `try: from cjson import X / except ImportError: from local import X` records both, and
+      // the one that resolves is the better evidence.
+      if (!importedFrom && fileImports?.has(`${EXTERNAL_IMPORT_PREFIX}${typeName}`)) {
+        return { kind: 'none' };
+      }
       if (importedFrom) {
         const matched = cands.filter(c => matchesImportedTarget(c.filePath, importedFrom));
         if (matched.length === 1) return { kind: 'unique', node: matched[0] };
@@ -5739,8 +5743,13 @@ export class CallGraphBuilder {
         seen.add(cls);
         const type = receiverFields.get(receiverFieldKey(callerNode.filePath, cls, field));
         if (type) return type;
+        // DEPTH-first, left to right — a field is resolved by the language's own attribute
+        // lookup order, and Python's C3 linearization walks the first base's ancestors before
+        // the second base. A breadth-first queue answers `class C(A, B)` with B's declaration
+        // when A's grandparent declares the field, which is a wrong callee, not a missing one.
         const rel = relationships.get(`${callerNode.filePath}::${cls}`);
-        for (const p of rel?.parentClasses ?? []) if (!seen.has(p)) queue.push(p);
+        const parents = (rel?.parentClasses ?? []).filter(p => !seen.has(p));
+        queue.unshift(...parents);
       }
       return undefined;
     };

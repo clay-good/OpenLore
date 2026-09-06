@@ -659,7 +659,16 @@ function isSelfRootedMember(node: Node, language: string): boolean {
   // Wrappers that change nothing about what the receiver IS. Left un-peeled, `this.dep!.run()`
   // and `(this.dep).run()` fall through to `other`, whose contract promises an edge — and no edge
   // exists for them, which is the silence this whole change removes.
-  const peeled = RECEIVER_WRAPPER_TYPES.has(node.type) ? node.namedChildren[0] ?? null : node;
+  // Peel REPEATEDLY: every one of these wrappers arrives inside a `parenthesized_expression`,
+  // so a single peel yields the cast/await node itself and the member test below then fails.
+  // `type_assertion` (`<Dep>this.dep`) puts its type arguments FIRST, so its expression is the
+  // last named child, not the first.
+  let peeled: Node | null = node;
+  for (let hops = 0; peeled && RECEIVER_WRAPPER_TYPES.has(peeled.type) && hops < 8; hops++) {
+    peeled = peeled.type === 'type_assertion'
+      ? peeled.namedChildren[peeled.namedChildren.length - 1] ?? null
+      : peeled.namedChildren[0] ?? null;
+  }
   if (!peeled) return false;
   // A member access, an index (`this.map['k']`) and a call (`self.get_dep()`) are all still
   // rooted at the enclosing object; none of them is bound by the registry, so all of them are

@@ -15,9 +15,12 @@ Python `__init__` parameter annotation forwarded to the field, and the declared 
 function declared in the same file. Local variable types remain the existing receiver type
 inference; this requirement adds the field and return-type dimension it lacked.
 
-Resolution SHALL search only within the receiver's own type (walking the enclosing class chain so
-an inherited field still types), never across the global name space, and SHALL bind only a unique
-candidate. Where the caller's file carries an import binding for the type name, that binding SHALL
+Resolution SHALL search only within the receiver's own type, never across the global name space,
+and SHALL bind only a unique candidate. The enclosing class chain SHALL be walked in the language's
+own attribute-lookup order (depth-first, left to right, so Python multiple inheritance is not
+answered by the wrong base), so a field inherited from an ancestor declared IN THE CALLER'S OWN
+FILE still types; an ancestor in another file is a MISS, not a guess, because the registry is keyed
+by the caller's path. Where the caller's file carries an import binding for the type name, that binding SHALL
 be decisive: only a candidate from the imported target may bind, and no such candidate SHALL be a
 refusal rather than a fall-through to a same-named definition elsewhere.
 
@@ -42,6 +45,7 @@ unsupported languages SHALL be disclosed there, not silently left unresolved.
 #### Scenario: An inherited field types the receiver
 
 - **GIVEN** a `this.repo.save()` call in a subclass whose `repo` field is declared on an ancestor
+  in the same file
 - **WHEN** the call graph is built
 - **THEN** the class chain is walked and the edge is emitted, exactly as for an own-class field
 
@@ -90,9 +94,30 @@ by the language's builtin-noise filter SHALL NOT be bound — and SHALL still be
 chained intra-object call sites so the disclosure covers them. A type name that does not follow the
 capitalized-class convention SHALL NOT type a field.
 
+Every remaining refusal SHALL be declared rather than left as a silent recall gap. The registry
+reads a PLAIN declared type name only, so a generic (`Map<K, V>`, `Repo<T>`), a union or optional
+annotation, and a namespace-qualified type (`pg.Client`) do not type a field. A field typed by an
+INTERFACE binds to that interface's member, which has no body — the call reaches the declaration,
+not the implementation, and the existing `overrides` edges carry it onward. Per-file facts SHALL be
+capped, and the overflow is a recall loss, never an incorrect binding.
+
+A name the caller's file imports from a specifier that resolves to no in-project file SHALL be
+REFUSED rather than bound to a repository-wide namesake — the source has stated the type is not
+from here. A specifier that is merely unfollowable (a path alias, an absolute intra-project module
+that matches a project file) SHALL NOT be treated as external, because the source stated no such
+thing. A concrete import binding for the same name SHALL win over an unresolvable one.
+
 #### Scenario: An unread shape is disclosed rather than omitted
 
 - **GIVEN** a `this.a.b.m()`, a `this.map['k'].m()`, a `this.dep!.m()` or a `self.get_dep().m()`
 - **WHEN** the call graph is built and `analyze_error_propagation` runs over the caller
 - **THEN** no edge is emitted for it, and the site is reported under the chained-receiver boundary
   rather than being absent from the result
+
+#### Scenario: A package-imported type is refused, an alias is not
+
+- **GIVEN** a field typed `Client` where the caller's file writes `import { Client } from 'pg'`,
+  and an unrelated in-project `Client` declares the called method
+- **WHEN** the call graph is built
+- **THEN** no edge is emitted — but the same shape written `from '@/repo'` or, in Python,
+  `from myapp.models import Repo` against a matching project file still resolves
