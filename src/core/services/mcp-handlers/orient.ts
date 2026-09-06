@@ -21,7 +21,7 @@ import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, 
 import { readJsonArtifactCached, readDependencyGraphCached } from './artifact-cache.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { repairStatusFor, REPAIR_REASON_DETAIL } from '../cold-start-bootstrap.js';
+import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
 import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
@@ -961,7 +961,7 @@ export async function handleOrient(
       ? { indexRepair: {
           inProgress: true as const,
           reason: indexRepair.reason,
-          note: `Serving a stale index (${REPAIR_REASON_DETAIL[indexRepair.reason]}); a background refresh has started and did not block this call. Re-run orient once it completes for fresh results.`,
+          note: repairDisclosureText(indexRepair.reason),
         } }
       : {}),
     relevantFiles,

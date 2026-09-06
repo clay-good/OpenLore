@@ -13,6 +13,11 @@ import {
   _terminateBuildChildForTesting,
   repairInBackground,
   repairStatusFor,
+  repairDisclosureText,
+  takeFirstTouchNotice,
+  isInsideGitWorkTree,
+  autoInitSuppression,
+  countFilesBounded,
   registerRepairBuilder,
   registerRepairHost,
   requestRepairFromHost,
@@ -21,9 +26,15 @@ import {
 import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
 
 const dirs: string[] = [];
-function freshDir(withAnalysis = false): string {
+/**
+ * A temp directory that IS a git work tree by default — auto-init refuses to run
+ * anywhere else (change: unify-onboarding-entrypoint), so every repair test needs
+ * the marker. Pass `git: false` to exercise the guard itself.
+ */
+function freshDir(withAnalysis = false, opts: { git?: boolean } = {}): string {
   const d = mkdtempSync(join(tmpdir(), 'openlore-cold-'));
   dirs.push(d);
+  if (opts.git !== false) mkdirSync(join(d, '.git'), { recursive: true });
   if (withAnalysis) {
     mkdirSync(join(d, OPENLORE_ANALYSIS_REL_PATH), { recursive: true });
     writeFileSync(join(d, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'), '{}');
@@ -159,6 +170,23 @@ describe('buildIndexInChildProcess', () => {
     ]);
   });
 
+  it('sheds the embedding pass for a degraded auto-init build', async () => {
+    const dir = freshDir(true);
+    mkdirSync(join(dir, '.openlore'), { recursive: true });
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
+    const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = [];
+
+    await buildIndexInChildProcess(dir, {
+      mode: 'degraded',
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: spawnHarness(calls),
+    });
+
+    expect(calls.map(call => call.args)).toEqual([
+      ['/openlore/dist/cli/index.js', 'analyze', '--no-embed', '--embedded'],
+    ]);
+  });
+
   it('keeps the parent event loop responsive while the analyzer child is running', async () => {
     const dir = freshDir(true);
     writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
@@ -277,7 +305,7 @@ describe('repairInBackground (make-index-self-healing)', () => {
     });
     expect(p).not.toBeNull();
     // While the build is gated, the repair is disclosed as in-progress with its reason.
-    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'integrity-mismatched' });
+    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'integrity-mismatched', mode: 'full' });
     release();
     await p;
     expect(ran).toBe(1);
@@ -413,5 +441,158 @@ describe('host-scoped cited-file repair handoff', () => {
 
     disposeOld();
     expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(false);
+  });
+});
+
+// ── Auto-init consent guardrails (change: unify-onboarding-entrypoint) ────────
+
+describe('auto-init guardrails', () => {
+  it('never bootstraps a directory that is not inside a git work tree', () => {
+    const dir = freshDir(false, { git: false });
+    let ran = 0;
+    const p = bootstrapAnalysisInBackground(dir, { analyze: async () => { ran++; }, log: () => {} });
+    expect(p).toBeNull();
+    expect(ran).toBe(0);
+    expect(takeFirstTouchNotice(dir)).toBeUndefined();
+  });
+
+  it('does not latch the non-repo refusal — a later `git init` can still bootstrap', async () => {
+    const dir = freshDir(false, { git: false });
+    let ran = 0;
+    const opts = { analyze: async () => { ran++; }, log: () => {} };
+    expect(bootstrapAnalysisInBackground(dir, opts)).toBeNull();
+    mkdirSync(join(dir, '.git'), { recursive: true });
+    await bootstrapAnalysisInBackground(dir, opts);
+    expect(ran).toBe(1);
+  });
+
+  it('bootstraps a subdirectory of a work tree, and refuses inside .git itself', () => {
+    const repo = freshDir(false);
+    const nested = join(repo, 'packages', 'api');
+    mkdirSync(nested, { recursive: true });
+    expect(isInsideGitWorkTree(nested)).toBe(true);
+    expect(isInsideGitWorkTree(join(repo, '.git', 'hooks'))).toBe(false);
+  });
+
+  it('discloses the first touch exactly once per repo, then never again', async () => {
+    const dir = freshDir(false);
+    await bootstrapAnalysisInBackground(dir, { analyze: async () => {}, log: () => {} });
+    const notice = takeFirstTouchNotice(dir);
+    expect(notice).toBeDefined();
+    expect(notice).toContain('First OpenLore touch');
+    expect(notice).toContain('autoInit');
+    expect(notice).toContain('OPENLORE_NO_AUTO_ANALYZE');
+    expect(takeFirstTouchNotice(dir)).toBeUndefined();
+  });
+
+  it('survives a build that finishes before any caller reads the notice', async () => {
+    const dir = freshDir(false);
+    await bootstrapAnalysisInBackground(dir, { analyze: async () => {}, log: () => {} });
+    expect(repairStatusFor(dir)).toBeUndefined(); // build already done
+    expect(takeFirstTouchNotice(dir)).toBeDefined(); // notice still owed
+  });
+
+  it('raises no first-touch notice for a staleness repair over an existing index', async () => {
+    const dir = freshDir(true);
+    await repairInBackground(dir, 'stale-region', { analyze: async () => {}, log: () => {} });
+    expect(takeFirstTouchNotice(dir)).toBeUndefined();
+  });
+
+  it('degrades to a signatures/keyword build above the file-count ceiling, and says so', async () => {
+    const dir = freshDir(false);
+    const modes: Array<string | undefined> = [];
+    const logs: string[] = [];
+    await bootstrapAnalysisInBackground(dir, {
+      analyze: async (_d, o) => { modes.push(o?.mode); },
+      log: m => logs.push(m),
+      degradeAboveFiles: 10,
+      countFiles: () => 11,
+    });
+    expect(modes).toEqual(['degraded']);
+    expect(logs.join('\n')).toContain('signatures + keyword index only');
+    const notice = takeFirstTouchNotice(dir);
+    expect(notice).toContain('semantic-embedding pass was shed');
+  });
+
+  it('takes the full lane at or below the ceiling', async () => {
+    const dir = freshDir(false);
+    const modes: Array<string | undefined> = [];
+    await bootstrapAnalysisInBackground(dir, {
+      analyze: async (_d, o) => { modes.push(o?.mode); },
+      log: () => {},
+      degradeAboveFiles: 10,
+      countFiles: () => 10,
+    });
+    expect(modes).toEqual(['full']);
+    expect(takeFirstTouchNotice(dir)).not.toContain('shed');
+  });
+
+  it('counts files with a bound — it stops as soon as the ceiling is passed', () => {
+    const dir = freshDir(false);
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    for (let i = 0; i < 12; i++) writeFileSync(join(dir, 'src', `f${i}.ts`), 'x');
+    // node_modules and .git are never descended.
+    mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+    writeFileSync(join(dir, 'node_modules', 'pkg', 'index.js'), 'x');
+    expect(countFilesBounded(dir, 5)).toBe(6); // stopped one past the limit
+    expect(countFilesBounded(dir, 1000)).toBe(12);
+  });
+
+  it('sizes the tree once, before the build — a sizing failure takes the full lane', async () => {
+    const dir = freshDir(false);
+    const modes: Array<string | undefined> = [];
+    await bootstrapAnalysisInBackground(dir, {
+      analyze: async (_d, o) => { modes.push(o?.mode); },
+      log: () => {},
+      countFiles: () => { throw new Error('unreadable'); },
+    });
+    expect(modes).toEqual(['full']);
+  });
+
+  it('reports the build mode in the in-progress status', async () => {
+    const dir = freshDir(false);
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const p = bootstrapAnalysisInBackground(dir, {
+      analyze: async () => { await gate; },
+      log: () => {},
+      degradeAboveFiles: 1,
+      countFiles: () => 99,
+    });
+    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'index-absent', mode: 'degraded' });
+    release();
+    await p;
+  });
+
+  it('names the absent case without calling it stale', () => {
+    expect(repairDisclosureText('index-absent')).toContain('No index existed');
+    expect(repairDisclosureText('index-absent')).not.toContain('stale');
+    expect(repairDisclosureText('stale-region')).toContain('stale index');
+  });
+});
+
+describe('autoInitSuppression', () => {
+  it('is undefined for an ordinary git repo with no opt-out', () => {
+    expect(autoInitSuppression(freshDir(false))).toBeUndefined();
+  });
+
+  it('names the config opt-out', () => {
+    const dir = freshDir(false);
+    mkdirSync(join(dir, '.openlore'), { recursive: true });
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), JSON.stringify({ autoInit: false }));
+    expect(autoInitSuppression(dir)).toEqual({
+      reason: 'config',
+      detail: '"autoInit": false in .openlore/config.json',
+    });
+  });
+
+  it('names the environment opt-out ahead of everything else', () => {
+    const dir = freshDir(false);
+    process.env.OPENLORE_NO_AUTO_ANALYZE = '1';
+    expect(autoInitSuppression(dir)?.reason).toBe('env');
+  });
+
+  it('names a non-repository directory', () => {
+    expect(autoInitSuppression(freshDir(false, { git: false }))?.reason).toBe('not-a-git-work-tree');
   });
 });

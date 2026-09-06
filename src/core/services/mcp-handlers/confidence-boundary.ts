@@ -21,7 +21,7 @@ import { extname, join } from 'node:path';
 import { ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../../constants.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import type { IndexIntegrity } from '../../analyzer/index-attestation.js';
-import { repairStatusFor, REPAIR_REASON_DETAIL } from '../cold-start-bootstrap.js';
+import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
 
@@ -144,9 +144,7 @@ export function repairDisclosure(directory: string): RepairInProgressMarker | un
   return {
     inProgress: true,
     reason: status.reason,
-    detail:
-      `A background index refresh has started (${REPAIR_REASON_DETAIL[status.reason]}); this answer ` +
-      `was served from the stale index without waiting. Re-run for fresh results once it completes.`,
+    detail: repairDisclosureText(status.reason),
   };
 }
 
