@@ -182,8 +182,14 @@ describe('serving caches invalidate when another process rewrites the artifact',
     await writeFile(path, '{"v":"OLD"}');
     const read = await _readArtifactBoundedForTesting(path);
     expect(read?.text).toBe('{"v":"OLD"}');
-    // Same length, so only the identity part of the stamp can separate them.
-    await writeFile(path, '{"v":"NEW"}');
+    // A DIFFERENT-length rewrite, deliberately. What this case proves is that the stamp came from
+    // the handle the bytes were read through and not from a fresh look at the path afterwards, and
+    // a size change separates the two on every filesystem. A same-length rewrite left that to the
+    // timestamp resolution, which on Windows can be coarser than two consecutive writes — a flake,
+    // not a signal. The stamp's sensitivity to a same-length rewrite is the subject of
+    // `artifactStamp distinguishes two same-length writes as finely as the filesystem allows`
+    // above, which handles the coarse-clock case explicitly.
+    await writeFile(path, '{"v":"NEW-AND-LONGER"}');
     expect(await artifactStamp(path)).not.toBe(read?.stamp);
   });
 
