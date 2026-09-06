@@ -219,3 +219,51 @@ function canonicalize(value: unknown, path = '$'): unknown {
 export function semanticAnswerBytes(value: unknown): string {
   return JSON.stringify(canonicalize(value));
 }
+
+/**
+ * The first semantic difference between two answers, as a JSON path plus both values — or
+ * `undefined` when they are equal.
+ *
+ * A byte comparison of two canonicalized answers proves equality but says nothing useful when it
+ * fails: the message is two truncated JSON strings that differ somewhere. That is what left the
+ * bundle round-trip's Windows divergence undiagnosed through several passes. Equality is still
+ * decided by the same canonical form, so this narrows the report without widening what counts as
+ * equal.
+ */
+export function firstSemanticDifference(actual: unknown, expected: unknown): string | undefined {
+  const walk = (a: unknown, b: unknown, path: string): string | undefined => {
+    if (Array.isArray(a) || Array.isArray(b)) {
+      if (!Array.isArray(a) || !Array.isArray(b)) return `${path}: ${describe(a)} vs ${describe(b)}`;
+      if (a.length !== b.length) return `${path}.length: ${a.length} vs ${b.length}`;
+      for (let i = 0; i < a.length; i++) {
+        const found = walk(a[i], b[i], `${path}[${i}]`);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    const aObj = !!a && typeof a === 'object';
+    const bObj = !!b && typeof b === 'object';
+    if (aObj !== bObj) return `${path}: ${describe(a)} vs ${describe(b)}`;
+    if (!aObj) return Object.is(a, b) ? undefined : `${path}: ${describe(a)} vs ${describe(b)}`;
+    const keys = [...new Set([
+      ...Object.keys(a as Record<string, unknown>),
+      ...Object.keys(b as Record<string, unknown>),
+    ])].sort();
+    for (const key of keys) {
+      const found = walk(
+        (a as Record<string, unknown>)[key],
+        (b as Record<string, unknown>)[key],
+        `${path}.${key}`,
+      );
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(canonicalize(actual), canonicalize(expected), '$');
+}
+
+function describe(value: unknown): string {
+  if (value === undefined) return '<absent>';
+  const text = JSON.stringify(value) ?? String(value);
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}

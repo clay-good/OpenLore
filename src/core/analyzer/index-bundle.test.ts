@@ -45,7 +45,7 @@ import { clearPartialIndex, flushPartialIndex } from '../runtime/partial-index.j
 import { logger } from '../../utils/logger.js';
 import { getDefaultConfig } from '../services/config-manager.js';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
-import { semanticAnswerBytes } from './derived-artifact-equivalence.js';
+import { semanticAnswerBytes, firstSemanticDifference } from './derived-artifact-equivalence.js';
 import { SpecVectorIndex } from './spec-vector-index.js';
 import { toRepositoryPath } from './file-walker.js';
 import { handleAnalyzeImpact, handleGetSubgraph } from '../services/mcp-handlers/graph.js';
@@ -1357,6 +1357,12 @@ describe('index-bundle: runImport trust boundary', () => {
 
     const importedSubgraph = await handleGetSubgraph(consumer, 'receive', 'downstream', 2);
     const importedImpact = await handleAnalyzeImpact(consumer, 'receive', 2);
+    // Reported as the first differing JSON path, not as two truncated JSON strings: the byte
+    // comparison alone left this failure undiagnosable on Windows through several passes.
+    expect(firstSemanticDifference(importedSubgraph, localSubgraph), 'imported subgraph diverges')
+      .toBeUndefined();
+    expect(firstSemanticDifference(importedImpact, localImpact), 'imported impact diverges')
+      .toBeUndefined();
     expect(semanticAnswerBytes(importedSubgraph)).toBe(semanticAnswerBytes(localSubgraph));
     expect(semanticAnswerBytes(importedImpact)).toBe(semanticAnswerBytes(localImpact));
   });
