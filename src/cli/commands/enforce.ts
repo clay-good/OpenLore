@@ -24,7 +24,7 @@
  */
 
 import { lstat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { Command } from 'commander';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
@@ -633,7 +633,16 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
       // never part of the root. Matches the `\r?\n` stripping in `resolveGitPath`.
       const resolvedRoot = stdout.replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '');
       if (!resolvedRoot) throw new Error('git returned an empty repository root');
-      cwd = resolvedRoot;
+      // git reports a repository root with FORWARD slashes on every platform, so on Windows
+      // it hands back `C:/Users/...` where the rest of this process speaks `C:\Users\...`.
+      // fs accepts either, which is why the gate still ran — but the findings lane compares
+      // and joins this root against native paths, matched nothing, produced no findings, and
+      // the agent hook exited 0 where it had to exit 2. A gate that silently passes.
+      //
+      // Windows only: `resolve` is the platform normaliser, and on POSIX the reported root is
+      // already native. Leaving POSIX untouched also keeps the two cases below intact, where
+      // a directory name legally ends in whitespace or `\r` and must not be rewritten.
+      cwd = process.platform === 'win32' ? resolve(resolvedRoot) : resolvedRoot;
     } catch (error) {
       const message = `repository root unavailable: ${error instanceof Error ? error.message : String(error)}`;
       if (opts.agentHook) {

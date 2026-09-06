@@ -28,13 +28,8 @@
       "suspectedProductionBug": true
     },
     {
-      "file": "src/cli/commands/enforce.test.ts",
-      "reason": "ONE case remains of the six this file had: `resolves the repository root when the agent starts in a subdirectory` still returns 0 where it must return 2. The CRLF hypothesis was tested and DISPROVED — `runEnforceCli` now strips `\\r?\\n` from `git rev-parse --show-toplevel` (a correct change on its own merits, matching every sibling consumer) and this case failed identically afterwards. The other five, and the missing `dist/` build step behind four of them, are fixed in this PR. Do not re-try CRLF; tracked in #452.",
-      "suspectedProductionBug": true
-    },
-    {
       "file": "src/core/decisions/atomic-store.test.ts",
-      "reason": "FLAKY on Windows, not deterministically failing \u2014 observed failing at commit e8d6c8dd and again on the following run, then PASSING on the next run of the same tree. Surfaced BY this PR rather than caused by it: the failures are the 100-way concurrency cases, and they began once the deny-list stopped skipping ~47 files and the job started doing several times the work. One root cause, not three \u2014 the first case times out mid-lock and the next two then fail on the gate it left behind (`NamespaceGateHeldError`). Verified present before this PR touched `atomic-store.ts`, which only exported an existing function. Green on Linux CI and in isolation on macOS. Flaky rather than plain-listed because a file that oscillates fails the build whichever list it sits on. The fix is a longer budget for these cases on Windows or a gate released on timeout; tracked in #452 as a bug, not a state to keep.",
+      "reason": "FLAKY on Windows, not deterministically failing — observed failing at commit e8d6c8dd and again on the following run, then PASSING on the next run of the same tree. Surfaced BY this PR rather than caused by it: the failures are the 100-way concurrency cases, and they began once the deny-list stopped skipping ~47 files and the job started doing several times the work. One root cause, not three — the first case times out mid-lock and the next two then fail on the gate it left behind (`NamespaceGateHeldError`). Verified present before this PR touched `atomic-store.ts`, which only exported an existing function. Green on Linux CI and in isolation on macOS. Flaky rather than plain-listed because a file that oscillates fails the build whichever list it sits on. The fix is a longer budget for these cases on Windows or a gate released on timeout; tracked in #452 as a bug, not a state to keep.",
       "suspectedProductionBug": true,
       "flaky": true
     },
