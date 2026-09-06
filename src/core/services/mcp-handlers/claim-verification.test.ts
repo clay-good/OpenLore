@@ -399,3 +399,97 @@ describe('verify_claim — decision-current', () => {
     expect(r.reason).toMatch(/cite 11111111 instead/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Dynamic-boundary cap (change: disclose-dynamic-boundary-regions)
+// ---------------------------------------------------------------------------
+
+describe('verify_claim — a negative verdict is capped at a dynamic boundary', () => {
+  let root: string;
+
+  /** Write a dynamic-boundary artifact into a real temp repo the handler will read. */
+  async function withSites(files: Array<{ filePath: string; language: string; kind: string; line: number }>) {
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'dynamic-boundary.json'), JSON.stringify({
+      version: 1,
+      totalSites: files.length,
+      totalFiles: files.length,
+      byKind: [],
+      byLanguage: [],
+      files: files.map(f => ({
+        filePath: f.filePath,
+        language: f.language,
+        sites: [{ line: f.line, kind: f.kind, refusal: 'no-static-target', evidence: 'obj[name]()', moduleLevel: true }],
+      })),
+    }));
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-claim-dyn-'));
+    __resetStalenessMemo();
+  });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  it('caps a confirmed "dead" at unverifiable and names the site', async () => {
+    useGraph([MAIN, ORPHAN], []);
+    await withSites([{ filePath: 'src/dead.ts', language: 'TypeScript', kind: 'computed-member', line: 17 }]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'dead', subject: 'orphan' }) as {
+      verdict: string; reason: string; receipt?: unknown;
+      confidenceBoundary: { knownUnknowable?: Array<{ kind: string; sites?: Array<{ file: string; line: number }> }> };
+    };
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.reason).toContain('src/dead.ts:17');
+    const crossing = r.confidenceBoundary.knownUnknowable?.find(c => c.kind === 'dynamic-boundary');
+    expect(crossing?.sites).toEqual([{ file: 'src/dead.ts', line: 17, kind: 'computed-member' }]);
+    // The shipped invariant holds: no receipt is minted for an unverifiable verdict.
+    expect(r.receipt).toBeUndefined();
+  });
+
+  it('caps a confirmed "safe-to-change" the same way', async () => {
+    useGraph([MAIN, ORPHAN], []);
+    await withSites([{ filePath: 'src/dead.ts', language: 'TypeScript', kind: 'reflective-invoke', line: 3 }]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'safe-to-change', subject: 'orphan' }) as
+      { verdict: string; reason: string };
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.reason).toContain('src/dead.ts:3');
+  });
+
+  it('does NOT touch a refuted verdict — a boundary can only reinforce a positive claim', async () => {
+    useGraph([MAIN, HANDLER, HELPER], LIVE_EDGES);
+    await withSites([{ filePath: 'src/app.ts', language: 'TypeScript', kind: 'reflective-invoke', line: 2 }]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'dead', subject: 'helper' }) as { verdict: string };
+    expect(r.verdict).toBe('refuted');
+  });
+
+  it('a site that cannot name the subject leaves the verdict confirmed', async () => {
+    useGraph([MAIN, ORPHAN], []);
+    // A site in an unrelated module, with no dependency graph, so the closure is that file alone.
+    await withSites([{ filePath: 'src/elsewhere.ts', language: 'TypeScript', kind: 'reflective-invoke', line: 1 }]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'dead', subject: 'orphan' }) as { verdict: string };
+    expect(r.verdict).toBe('confirmed');
+  });
+
+  it('a repository with no sites is unaffected', async () => {
+    useGraph([MAIN, ORPHAN], []);
+    const r = await handleVerifyClaim({ directory: root, kind: 'dead', subject: 'orphan' }) as { verdict: string };
+    expect(r.verdict).toBe('confirmed');
+  });
+
+  it('two crossings both survive — neither silently overwrites the other', async () => {
+    // `orphan` is reachable ONLY through a synthesized edge (already unverifiable), AND sits next to
+    // a dynamic-boundary site. The receipt must carry both reasons, not the last one written.
+    useGraph([MAIN, ORPHAN], [
+      edge('src/main.ts::main', 'src/dead.ts::orphan', { confidence: 'synthesized', synthesizedBy: 'event-channel' }),
+    ]);
+    await withSites([{ filePath: 'src/dead.ts', language: 'TypeScript', kind: 'reflective-invoke', line: 8 }]);
+    const r = await handleVerifyClaim({ directory: root, kind: 'safe-to-change', subject: 'orphan' }) as {
+      verdict: string;
+      confidenceBoundary: { knownUnknowable?: Array<{ kind: string }> };
+    };
+    expect(r.verdict).toBe('unverifiable');
+    const kinds = (r.confidenceBoundary.knownUnknowable ?? []).map(c => c.kind).sort();
+    expect(kinds).toContain('synthesized-dispatch');
+    expect(kinds).toContain('dynamic-boundary');
+  });
+});

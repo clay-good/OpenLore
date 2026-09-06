@@ -586,33 +586,32 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
   // ── Dynamic-boundary cap (change: disclose-dynamic-boundary-regions) ─────────
   // `dead` and `safe-to-change` are the two claims that assert an ABSENCE — of a caller, of risk —
   // and this is the tool an agent calls immediately before asserting to a human. A dispatch site
-  // that can name the subject is exactly the evidence the absence is not established, so a
-  // `confirmed` verdict is capped at `unverifiable`.
+  // that can name the subject is exactly the evidence the absence is not established.
   //
-  // Only `confirmed` is capped. `refuted` says the subject IS live / DOES have callers — a positive
-  // claim a hidden caller can only reinforce — and `unverifiable` is already the floor.
-  //
-  // A verdict already unverifiable for another crossing keeps BOTH: the crossings are concatenated,
-  // never overwritten, so the reader sees every reason the answer is undecided.
-  if ((input.kind === 'dead' || input.kind === 'safe-to-change') && result.verdict === 'confirmed') {
+  // `refuted` is untouched: it says the subject IS live / DOES have callers, a positive claim a
+  // hidden caller can only reinforce. `confirmed` is capped to `unverifiable`. A verdict already
+  // `unverifiable` for another crossing keeps its verdict and its reason, and the dynamic crossing
+  // is APPENDED — so a subject that is both reached synthesizedly and sits next to a reflective
+  // dispatch carries both reasons, neither silently overwriting the other.
+  if ((input.kind === 'dead' || input.kind === 'safe-to-change') && result.verdict !== 'refuted') {
     const hit = await dynamicHitFor(absDir, subject);
     if (hit) {
+      const crossing: KnownUnknowableCrossing = {
+        kind: 'dynamic-boundary',
+        count: 1,
+        sites: [{ file: hit.file, line: hit.site.line, kind: hit.site.kind }],
+        detail: 'A dispatch the call graph cannot follow — '
+          + `${describeSite({ file: hit.file, line: hit.site.line, kind: hit.site.kind })} — `
+          + `can reach "${subject.name}" without a graph edge, so its absence of callers is not established.`,
+      };
       result = {
+        ...result,
         verdict: 'unverifiable',
-        reason: `"${subject.name}" cannot be verified ${input.kind === 'dead' ? 'dead' : 'safe to change'}: `
-          + `${qualificationReason(hit)}.`,
-        ...(result.basisEdges ? { basisEdges: result.basisEdges } : {}),
-        extraCrossings: [
-          ...(result.extraCrossings ?? []),
-          {
-            kind: 'dynamic-boundary',
-            count: 1,
-            sites: [{ file: hit.file, line: hit.site.line, kind: hit.site.kind }],
-            detail: `A dispatch the call graph cannot follow — `
-              + `${describeSite({ file: hit.file, line: hit.site.line, kind: hit.site.kind })} — `
-              + `can reach "${subject.name}" without a graph edge, so its absence of callers is not established.`,
-          },
-        ],
+        reason: result.verdict === 'confirmed'
+          ? `"${subject.name}" cannot be verified ${input.kind === 'dead' ? 'dead' : 'safe to change'}: `
+            + `${qualificationReason(hit)}.`
+          : `${result.reason} It is also bounded by ${qualificationReason(hit)}.`,
+        extraCrossings: [...(result.extraCrossings ?? []), crossing],
       };
     }
   }
