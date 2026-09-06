@@ -62,7 +62,7 @@ const mockDetectDrift = vi.mocked(detectDrift);
 // FIXTURES
 // ============================================================================
 
-const ROOT = '/test/project';
+const ROOT = resolve('/test/project');
 const MOCK_CONFIG = { version: '1.0.0', openspecPath: './openspec' };
 const MOCK_CHANGED_FILES = [
   { path: 'src/auth.ts', status: 'modified', additions: 10, deletions: 2, isTest: false, isConfig: false, isGenerated: false, extension: '.ts' },

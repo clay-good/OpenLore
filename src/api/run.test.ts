@@ -8,6 +8,10 @@ import { OpenLoreError, errors } from '../utils/errors.js';
 import { resolve } from 'node:path';
 import { OPENLORE_PACKAGE_VERSION } from '../core/runtime/package-versions.js';
 
+// A POSIX-absolute literal is not a path on Windows: the code under test resolves it, so a
+// mock assertion against the raw string can never match. Resolve once, use everywhere.
+const RUN_ROOT = resolve('/repo');
+
 vi.mock('./init.js', () => ({ openloreInit: vi.fn() }));
 vi.mock('./analyze.js', () => ({ openloreAnalyze: vi.fn() }));
 vi.mock('./generate.js', () => ({ openloreGenerate: vi.fn() }));
@@ -54,7 +58,7 @@ describe('openloreRun', () => {
     vi.mocked(openloreAnalyze).mockImplementation(async () => { order.push('analyze'); return analysisResult as never; });
     vi.mocked(openloreGenerate).mockImplementation(async () => { order.push('generate'); return generationResult as never; });
 
-    const result = await openloreRun({ rootPath: '/repo' });
+    const result = await openloreRun({ rootPath: RUN_ROOT });
 
     expect(order).toEqual(['init', 'analyze', 'generate']);
     expect(result).toMatchObject({
@@ -82,7 +86,7 @@ describe('openloreRun', () => {
     const cause = new Error('sentinel failure');
     vi.mocked(stage as typeof openloreInit).mockRejectedValueOnce(cause);
 
-    await expect(openloreRun({ rootPath: '/repo' })).rejects.toMatchObject({
+    await expect(openloreRun({ rootPath: RUN_ROOT })).rejects.toMatchObject({
       code: 'pipeline-failed',
       cause,
     });
@@ -92,12 +96,12 @@ describe('openloreRun', () => {
     const typed = errors.noConfig('custom.json');
     vi.mocked(openloreInit).mockRejectedValueOnce(typed);
 
-    await expect(openloreRun({ rootPath: '/repo' })).rejects.toBe(typed);
+    await expect(openloreRun({ rootPath: RUN_ROOT })).rejects.toBe(typed);
     expect(typed).toBeInstanceOf(OpenLoreError);
   });
 
   it('passes keyless provider configuration through to generation', async () => {
-    await openloreRun({ rootPath: '/repo', provider: 'codex-cli', model: 'gpt-5-codex' });
+    await openloreRun({ rootPath: RUN_ROOT, provider: 'codex-cli', model: 'gpt-5-codex' });
 
     expect(openloreGenerate).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'codex-cli',
@@ -112,7 +116,7 @@ describe('openloreRun', () => {
     } as never);
     const confirmGeneration = vi.fn(async () => true);
 
-    await openloreRun({ rootPath: '/repo', confirmGeneration });
+    await openloreRun({ rootPath: RUN_ROOT, confirmGeneration });
 
     expect(confirmGeneration).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'codex-cli',
@@ -128,14 +132,14 @@ describe('openloreRun', () => {
     } as never);
 
     await expect(openloreRun({
-      rootPath: '/repo',
+      rootPath: RUN_ROOT,
       confirmGeneration: async () => false,
     })).rejects.toMatchObject({ code: 'pipeline-failed' });
     expect(openloreGenerate).not.toHaveBeenCalled();
   });
 
   it('preserves force as a rebuild across all composed stages', async () => {
-    await openloreRun({ rootPath: '/repo', force: true });
+    await openloreRun({ rootPath: RUN_ROOT, force: true });
 
     expect(openloreInit).toHaveBeenCalledWith(expect.objectContaining({ force: true }));
     expect(openloreAnalyze).toHaveBeenCalledWith(expect.objectContaining({ force: true }));
@@ -148,7 +152,7 @@ describe('openloreRun', () => {
       .mockResolvedValueOnce(degraded as never)
       .mockResolvedValueOnce(analysisResult as never);
 
-    const result = await openloreRun({ rootPath: '/repo' });
+    const result = await openloreRun({ rootPath: RUN_ROOT });
 
     expect(openloreAnalyze).toHaveBeenCalledTimes(2);
     expect(openloreAnalyze).toHaveBeenLastCalledWith(expect.objectContaining({ force: true }));
@@ -158,7 +162,7 @@ describe('openloreRun', () => {
   });
 
   it('preserves honest dry-run results without constructing a pipeline result', async () => {
-    const result = await openloreRun({ rootPath: '/repo', dryRun: true });
+    const result = await openloreRun({ rootPath: RUN_ROOT, dryRun: true });
 
     expect(result).toMatchObject({
       dryRun: true,
@@ -181,9 +185,9 @@ describe('openloreRun', () => {
   it('reads a custom config path without running stages during dry run', async () => {
     vi.mocked(readOpenLoreConfig).mockResolvedValue({ version: '2.5.0' } as never);
 
-    const result = await openloreRun({ rootPath: '/repo', configPath: 'config/openlore.json', dryRun: true });
+    const result = await openloreRun({ rootPath: RUN_ROOT, configPath: 'config/openlore.json', dryRun: true });
 
-    expect(readOpenLoreConfig).toHaveBeenCalledWith('/repo', 'config/openlore.json');
+    expect(readOpenLoreConfig).toHaveBeenCalledWith(RUN_ROOT, 'config/openlore.json');
     expect(result.generation.report.configSchemaVersion).toBe('2.5.0');
     expect(openloreInit).not.toHaveBeenCalled();
     expect(openloreAnalyze).not.toHaveBeenCalled();
@@ -196,7 +200,7 @@ describe('openloreRun', () => {
       if (event.phase === 'run') events.push(`${event.step}:${event.status}`);
     };
 
-    await openloreRun({ rootPath: '/repo', quiet: true, onProgress });
+    await openloreRun({ rootPath: RUN_ROOT, quiet: true, onProgress });
 
     expect(openloreInit).toHaveBeenCalledWith(expect.objectContaining({ quiet: true, onProgress }));
     expect(openloreAnalyze).toHaveBeenCalledWith(expect.objectContaining({ quiet: true, onProgress }));

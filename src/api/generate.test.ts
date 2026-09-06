@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { openloreGenerate } from './generate.js';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 // ============================================================================
 // MOCKS
@@ -118,7 +118,7 @@ const mockCreateLLMService = vi.mocked(createLLMService);
 // FIXTURES
 // ============================================================================
 
-const ROOT = '/test/project';
+const ROOT = resolve('/test/project');
 const MOCK_CONFIG = {
   version: '1.0.0',
   projectType: 'nodejs' as const,
@@ -220,10 +220,10 @@ describe('openloreGenerate', () => {
     });
 
     it('honors an absolute analysis path without rebasing it under root', async () => {
-      await openloreGenerate({ rootPath: ROOT, analysisPath: '/external/analysis', dryRun: true });
+      await openloreGenerate({ rootPath: ROOT, analysisPath: resolve('/external/analysis'), dryRun: true });
 
       expect(readGenerationSnapshot).toHaveBeenCalledWith(
-        '/external/analysis',
+        resolve('/external/analysis'),
         expect.anything(),
         expect.anything(),
         expect.anything(),
@@ -392,9 +392,9 @@ describe('openloreGenerate', () => {
       const semanticSearch = vi.fn();
       vi.mocked(resolveGenerationSemanticSearch).mockResolvedValue(semanticSearch);
 
-      await openloreGenerate({ rootPath: ROOT, analysisPath: '/custom/analysis' });
+      await openloreGenerate({ rootPath: ROOT, analysisPath: resolve('/custom/analysis') });
 
-      expect(resolveGenerationSemanticSearch).toHaveBeenCalledWith('/custom/analysis', MOCK_CONFIG);
+      expect(resolveGenerationSemanticSearch).toHaveBeenCalledWith(resolve('/custom/analysis'), MOCK_CONFIG);
       expect(SpecGenerationPipeline).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ semanticSearch }),
@@ -404,7 +404,7 @@ describe('openloreGenerate', () => {
     it('clears the generation cache inside ownership before a forced pipeline run', async () => {
       await openloreGenerate({ rootPath: ROOT, force: true });
 
-      expect(rm).toHaveBeenCalledWith('/test/project/.openlore/generation', {
+      expect(rm).toHaveBeenCalledWith(join(ROOT, '.openlore', 'generation'), {
         recursive: true,
         force: true,
       });
@@ -563,7 +563,7 @@ describe('openloreGenerate', () => {
 
       expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({
         enableLogging: expected,
-        logDir: '/test/project/.openlore/logs',
+        logDir: join(ROOT, '.openlore', 'logs'),
         logRoot: ROOT,
       }));
     });

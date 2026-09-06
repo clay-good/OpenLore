@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { viewCommand, sanitizeErrorMessage, safePath } from './view.js';
 import { safeJoin } from '../../utils/path-confinement.js';
@@ -291,42 +291,50 @@ describe('sanitizeErrorMessage', () => {
 // safePath — path traversal prevention
 // ============================================================================
 
+// A POSIX-absolute literal is not a path on Windows: safePath resolves it, so the
+// assertion compared 'C:\project\src\foo.ts' against '/project/src/foo.ts'. Resolve the root
+// once and build the expectations with join(), so both sides speak the host's syntax.
+const PROJECT_ROOT = resolve('/project');
+
 describe('safePath', () => {
   it('should allow a path within the project root', () => {
-    const result = safePath('/project', 'src/foo.ts');
-    expect(result).toBe('/project/src/foo.ts');
+    const result = safePath(PROJECT_ROOT, 'src/foo.ts');
+    expect(result).toBe(join(PROJECT_ROOT, 'src', 'foo.ts'));
   });
 
   it('should allow the project root itself', () => {
-    const result = safePath('/project', '.');
-    expect(result).toBe('/project');
+    const result = safePath(PROJECT_ROOT, '.');
+    expect(result).toBe(PROJECT_ROOT);
   });
 
   it('should reject path traversal above root', () => {
-    expect(safePath('/project', '../../../etc/passwd')).toBeNull();
+    expect(safePath(PROJECT_ROOT, '../../../etc/passwd')).toBeNull();
   });
 
   it('should reject absolute paths outside root', () => {
-    expect(safePath('/project', '/etc/passwd')).toBeNull();
+    expect(safePath(PROJECT_ROOT, '/etc/passwd')).toBeNull();
   });
 
   it('should allow nested paths', () => {
-    const result = safePath('/project', 'src/core/deep/file.ts');
-    expect(result).toBe('/project/src/core/deep/file.ts');
+    const result = safePath(PROJECT_ROOT, 'src/core/deep/file.ts');
+    expect(result).toBe(join(PROJECT_ROOT, 'src', 'core', 'deep', 'file.ts'));
   });
 
   it('should reject prefix trick (e.g. /project-evil)', () => {
     // "/project-evil" starts with "/project" but is NOT inside it
-    expect(safePath('/project', '../project-evil/hack.ts')).toBeNull();
+    expect(safePath(PROJECT_ROOT, '../project-evil/hack.ts')).toBeNull();
   });
 
   it('should handle relative paths that resolve inside root', () => {
     // src/../src/file.ts resolves to /project/src/file.ts
-    const result = safePath('/project', 'src/../src/file.ts');
-    expect(result).toBe('/project/src/file.ts');
+    const result = safePath(PROJECT_ROOT, 'src/../src/file.ts');
+    expect(result).toBe(join(PROJECT_ROOT, 'src', 'file.ts'));
   });
 
-  it('rejects an in-root symlink whose target is outside the project root', () => {
+  // skipIf(win32): creating a symlink needs elevated privileges or Developer Mode there, so a
+  // stock runner cannot build the escape this is about. The confinement is platform-independent
+  // and is exercised on Linux.
+  it.skipIf(process.platform === 'win32')('rejects an in-root symlink whose target is outside the project root', () => {
     const base = mkdtempSync(join(tmpdir(), 'openlore-view-path-'));
     const root = join(base, 'repo');
     const outside = join(base, 'outside.txt');
@@ -343,8 +351,8 @@ describe('safePath', () => {
   it('matches the shared MCP confinement guard on the same paths', () => {
     for (const candidate of ['.', 'src/file.ts', '../outside.ts', '/etc/passwd']) {
       let shared: string | null = null;
-      try { shared = safeJoin('/project', candidate); } catch { /* rejected */ }
-      expect(safePath('/project', candidate)).toBe(shared);
+      try { shared = safeJoin(PROJECT_ROOT, candidate); } catch { /* rejected */ }
+      expect(safePath(PROJECT_ROOT, candidate)).toBe(shared);
     }
   });
 });
