@@ -8,6 +8,7 @@
 
 import { readFile, mkdir, rm } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
+import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { logger } from '../../utils/logger.js';
@@ -247,7 +248,7 @@ async function syncDecision(
     if (qualifiesForADR(decision)) {
       if (options.dryRun) {
         const slug = toKebabCase(decision.title);
-        modified.push(join(relative(options.rootPath, options.openspecPath), 'decisions', `adr-XXXX-${slug}.md`));
+        modified.push(toRepositoryPath(join(relative(options.rootPath, options.openspecPath), 'decisions', `adr-XXXX-${slug}.md`)));
       } else {
         const adrPath = await createADR(decision, options);
         if (adrPath) {
@@ -666,7 +667,9 @@ ${constraintMarker ? `${constraintMarker}\n` : ''}
 `;
 
   await atomicWriteFile(adrPath, content);
-  return relative(options.rootPath, adrPath);
+  // Reported and matched against the POSIX spec corpus, so it must not carry the
+  // platform separator (see the same rule in spec-mapper).
+  return toRepositoryPath(relative(options.rootPath, adrPath));
 }
 
 // ============================================================================

@@ -8,6 +8,7 @@
  *   - writeArchitectureMd (async file writer)
  */
 
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   inferClusterRole,
@@ -470,11 +471,14 @@ describe('writeArchitectureMd', () => {
   it('writes ARCHITECTURE.md into the given output dir and returns the path', async () => {
     const { writeFile } = await import('node:fs/promises');
     const overview = makeOverview();
-    const result = await writeArchitectureMd('/my/project/.openlore/analysis', overview);
+    const outputDir = join('/my/project', '.openlore', 'analysis');
+    const result = await writeArchitectureMd(outputDir, overview);
 
-    expect(result).toBe('/my/project/.openlore/analysis/ARCHITECTURE.md');
+    // A real filesystem path, so the NATIVE separator is the correct output — the
+    // expectation is built the same way rather than hard-coding the POSIX form.
+    expect(result).toBe(join(outputDir, 'ARCHITECTURE.md'));
     expect(writeFile).toHaveBeenCalledWith(
-      '/my/project/.openlore/analysis/ARCHITECTURE.md',
+      join(outputDir, 'ARCHITECTURE.md'),
       expect.stringContaining('# Architecture Overview'),
       'utf-8',
     );

@@ -12,6 +12,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import type { ParsedScenario, GeneratedTestFile, TestFramework, FunctionRef } from '../../types/test-generator.js';
 import type { LLMService } from '../services/llm-service.js';
@@ -241,7 +242,11 @@ export async function generateTests(
     );
 
     const relPath = outputFilename(domain, requirement, framework);
-    const outputPath = join(outputDir, relPath);
+    // Repository-relative and POSIX-separated on every platform: the descriptor is
+    // printed, compared, and re-resolved against the root, so a generated plan must not
+    // differ between a Windows and a POSIX run of the same repository. `resolve()`
+    // accepts `/` on Windows, so the write target is unchanged.
+    const outputPath = toRepositoryPath(join(outputDir, relPath));
 
     files.push({
       outputPath,
