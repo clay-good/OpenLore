@@ -132,6 +132,12 @@ function renderHuman(b: BlastRadiusBriefing): string {
   if (b.confidenceBoundary?.staleness?.detail) {
     lines.push(`   ⚠ ${b.confidenceBoundary.staleness.detail}`);
   }
+  // A dispatch the call graph cannot follow is exactly what makes a blast radius a lower bound, so
+  // the terminal reader gets the same disclosure the JSON carries — rendered FROM the structured
+  // crossing, never assembled separately (change: disclose-dynamic-boundary-regions).
+  const dynamicCrossing = b.confidenceBoundary?.knownUnknowable
+    ?.find(c => c.kind === 'dynamic-boundary')?.detail;
+  if (dynamicCrossing) lines.push(`   ⚠ ${dynamicCrossing}`);
   if (b.impact.hubsTouched.length > 0) {
     lines.push('   Hubs: ' + b.impact.hubsTouched.map(h => `${h.symbol} (${h.fanIn} callers)`).join(', '));
   }

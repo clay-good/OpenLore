@@ -10,7 +10,8 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from 'node
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { handleAnalyzeErrorPropagation } from './error-propagation.js';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT, ARTIFACT_DYNAMIC_BOUNDARY } from '../../../constants.js';
+import { __resetDynamicBoundaryMemo } from './dynamic-boundary-disclosure.js';
 
 const HELPER = `function helper() {\n  throw new TypeError("boom");\n}\n`;
 const CALLER = `function caller() {\n  helper();\n}\n`;
@@ -85,6 +86,7 @@ interface Result {
   escapes: Array<{ type: string; kind: string; originFunction: string; path: string[] }>;
   handledInternally: Array<{ type: string; caughtIn: string; fromCallee: string }>;
   boundaries: string[];
+  dynamicBoundaries?: { kind: string; count: number; sites?: Array<{ file: string; line: number; kind: string }>; detail: string };
   externalCalleesNotAnalyzed?: { count: number; sample: string[] };
   unresolvedSelfCalls?: { count: number; sample: string[] };
   ambiguousCallSites?: { count: number; sample: string[] };
@@ -658,5 +660,53 @@ describe('handleAnalyzeErrorPropagation — Go truncation memo safety', () => {
     expect(JSON.parse(snapshots[0]).escapes).toEqual([
       expect.objectContaining({ originFunction: 'd::d.go', path: ['q::q.go', 'c::c.go', 'd::d.go'] }),
     ]);
+  });
+});
+
+describe('analyze_error_propagation discloses the dynamic boundary in scope', () => {
+  /** Write a site artifact into the fixture repo the outer `beforeEach` already built. */
+  function withSite(filePath: string, line = 2, kind = 'reflective-invoke'): void {
+    writeFileSync(
+      join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DYNAMIC_BOUNDARY),
+      JSON.stringify({
+        version: 1, totalSites: 1, totalFiles: 1, byKind: [], byLanguage: [],
+        files: [{
+          filePath, language: 'TypeScript',
+          sites: [{ line, kind, refusal: 'no-static-target', evidence: 'o[n]()', unattributed: true }],
+        }],
+      }),
+      'utf-8',
+    );
+    __resetDynamicBoundaryMemo();
+  }
+
+  it('carries the structured crossing AND renders its free text from that same crossing', async () => {
+    // A callee reached only through a reflective dispatch is not in the escape set at all, which is
+    // exactly why a clean escape set next to a site must not read as "this function throws nothing".
+    withSite('caller.ts');
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'caller' })) as Result;
+
+    expect(res.dynamicBoundaries?.kind).toBe('dynamic-boundary');
+    expect(res.dynamicBoundaries?.sites)
+      .toEqual([{ file: 'caller.ts', line: 2, kind: 'reflective-invoke' }]);
+    // The free-text list is RENDERED FROM the structured crossing — one source, so the two can
+    // never say different things.
+    expect(res.boundaries).toContain(res.dynamicBoundaries!.detail);
+    // …and the answer is still returned.
+    expect(res.summary.escapes).toBeGreaterThan(0);
+  });
+
+  it('discloses nothing for a traversal that crosses no site', async () => {
+    withSite('unrelated.ts');
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'caller' })) as Result;
+    expect(res.dynamicBoundaries).toBeUndefined();
+    expect(res.boundaries.some(b => /cannot follow/.test(b))).toBe(false);
+  });
+
+  it('discloses a site in a callee\'s file, not only the query\'s own', async () => {
+    // `caller` throws through `helper`; a site in `helper.ts` bounds the answer just as much.
+    withSite('helper.ts', 1, 'computed-member');
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'caller' })) as Result;
+    expect(res.dynamicBoundaries?.sites?.[0].file).toBe('helper.ts');
   });
 });

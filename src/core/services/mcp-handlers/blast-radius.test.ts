@@ -5,7 +5,7 @@
  * on a configured high-risk pattern.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('./utils.js', () => ({
   validateDirectory: vi.fn(async (d: string) => d),
@@ -49,6 +49,10 @@ vi.mock('./confidence-boundary.js', async (importActual) => {
   return { ...actual, computeStaleness: vi.fn(async () => undefined) };
 });
 
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DYNAMIC_BOUNDARY } from '../../../constants.js';
+import { __resetDynamicBoundaryMemo } from './dynamic-boundary-disclosure.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js';
 import { triggeredBlockPatterns } from '../../../cli/commands/blast-radius.js';
 import { readCachedContext } from './utils.js';
@@ -428,5 +432,69 @@ describe('triggeredBlockPatterns (opt-in blocking fires only on its pattern)', (
     } as unknown as BlastRadiusBriefing;
     expect(cappedBriefing.decisions.items.some(i => i.kind === 'adr-orphaned')).toBe(false); // the old (buggy) check would miss it
     expect(triggeredBlockPatterns(cappedBriefing, ['orphans-anchored-decision'])).toEqual(['orphans-anchored-decision']);
+  });
+});
+
+describe('blast_radius names the boundary that bounds it', () => {
+  let root: string;
+
+  /** Write a site artifact into a real repo root — the loader reads it through the hardened reader. */
+  async function withSite(filePath: string, line: number, kind: string): Promise<void> {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, ARTIFACT_DYNAMIC_BOUNDARY), JSON.stringify({
+      version: 1, totalSites: 1, totalFiles: 1, byKind: [], byLanguage: [],
+      files: [{
+        filePath, language: 'typescript',
+        sites: [{ line, kind, refusal: 'no-static-target', evidence: 'c.get(x)', unattributed: true }],
+      }],
+    }));
+    __resetDynamicBoundaryMemo();
+  }
+
+  beforeEach(async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    root = await mkdtemp(join(tmpdir(), 'openlore-blast-dyn-'));
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, EDGES) } as never);
+    vi.mocked(handleCheckSpecDrift).mockResolvedValue(driftResult([]));
+    vi.mocked(computeStaleness).mockResolvedValue(undefined);
+  });
+  afterEach(async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("names a site in the CALLER CLOSURE, not only in the changed files", async () => {
+    // The spec's scenario: a changed symbol whose caller closure includes a file with a
+    // `container-resolution` site. `src/caller.ts` is NOT a changed file — it reaches the change
+    // through the impact traversal — so scoping to the diff alone would never disclose it.
+    vi.mocked(handleAnalyzeImpact).mockResolvedValue({
+      symbol: 'validateDirectory', file: 'src/utils.ts',
+      metrics: { fanIn: 1, fanOut: 0, isHub: false },
+      blastRadius: { total: 1, upstream: 1, downstream: 0 },
+      riskLevel: 'low',
+      upstreamChain: [{ name: 'caller', file: 'src/caller.ts', depth: 1 }],
+    } as never);
+    await withSite('src/caller.ts', 12, 'container-resolution');
+
+    const b = await computeBlastRadius({ directory: root }) as BlastRadiusBriefing;
+    const crossing = b.confidenceBoundary?.knownUnknowable?.find(c => c.kind === 'dynamic-boundary');
+    expect(crossing?.sites).toEqual([{ file: 'src/caller.ts', line: 12, kind: 'container-resolution' }]);
+    // …and the briefing is still returned.
+    expect(b.impact.topSymbols.length).toBeGreaterThan(0);
+  });
+
+  it('discloses nothing when the traversal crosses no site', async () => {
+    vi.mocked(handleAnalyzeImpact).mockResolvedValue({
+      symbol: 'validateDirectory', file: 'src/utils.ts',
+      metrics: { fanIn: 0, fanOut: 0, isHub: false },
+      blastRadius: { total: 0, upstream: 0, downstream: 0 },
+      riskLevel: 'low',
+    } as never);
+    await withSite('src/somewhere-else.ts', 3, 'reflective-invoke');
+
+    const b = await computeBlastRadius({ directory: root }) as BlastRadiusBriefing;
+    expect(b.confidenceBoundary?.knownUnknowable?.some(c => c.kind === 'dynamic-boundary')).toBeFalsy();
   });
 });

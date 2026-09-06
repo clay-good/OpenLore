@@ -50,6 +50,7 @@ interface CoverageGapsResult {
   confidenceBoundary?: {
     staleness?: { detail?: string };
     integrity?: { verdict?: string; detail?: string };
+    knownUnknowable?: Array<{ kind: string; detail?: string }>;
   };
 }
 
@@ -74,6 +75,13 @@ function renderHuman(r: CoverageGapsResult): string {
   if (r.confidenceBoundary?.staleness?.detail) {
     lines.push(`   ⚠ ${r.confidenceBoundary.staleness.detail}`);
   }
+  // A dispatch the call graph cannot follow bounds every NEGATIVE conclusion here, and this command
+  // reports nothing but negative conclusions. A terminal reader gets the same disclosure the JSON
+  // carries — rendered FROM the structured crossing, never assembled separately (change:
+  // disclose-dynamic-boundary-regions).
+  const dynamicCrossing = r.confidenceBoundary?.knownUnknowable
+    ?.find(c => c.kind === 'dynamic-boundary')?.detail;
+  if (dynamicCrossing) lines.push(`   ⚠ ${dynamicCrossing}`);
   // When test detection is partial, surface WHICH languages lack detected tests (the
   // precise over-report scope), not just the generic posture caveat below.
   if (r.coverage.testDetection === 'partial') {

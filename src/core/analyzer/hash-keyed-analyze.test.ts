@@ -27,6 +27,11 @@ const ARTIFACTS = [
   'dynamic-boundary.json',
 ] as const;
 
+/** The subset the fixture is built to actually produce — see the non-vacuity check below. */
+const PRESENT_ARTIFACTS = [
+  'llm-context.json', 'repo-structure.json', 'style-fingerprint.json', 'dynamic-boundary.json',
+] as const;
+
 let dir: string;
 let out: string;
 
@@ -42,6 +47,12 @@ async function plantRepo(root: string): Promise<void> {
     'import { Report } from "./core/report.js";\nexport function main(): number { return new Report().render(2); }\n');
   await writeFile(join(root, 'src', 'app.test.ts'),
     'import { main } from "./app.js";\nimport { describe, it, expect } from "vitest";\ndescribe("app", () => { it("runs", () => { expect(main()).toBe(9); }); });\n');
+  // A dynamic construct, so `dynamic-boundary.json` is actually PRESENT in this fixture — without
+  // one the artifact is absent on both lanes and the comparison is '<absent>' vs '<absent>', which
+  // would pass with the feature removed (change: disclose-dynamic-boundary-regions).
+  await writeFile(join(root, 'src', 'dispatch.ts'),
+    'export function dispatch(handlers: Record<string, () => number>, name: string): number {\n'
+    + '  return handlers[name]();\n}\n');
   await writeFile(join(root, 'src', 'helper.py'),
     'def helper(x):\n    if x > 0:\n        return x\n    return -x\n');
   await writeFile(join(root, 'README.md'), '# fixture\n');
@@ -141,6 +152,15 @@ describe('analyze cost scales with the diff', () => {
 
     for (const name of ARTIFACTS) {
       expect(reused[name], `${name} differs between the reused and forced lanes`).toBe(forced[name]);
+    }
+    // Non-vacuity: an artifact absent on BOTH lanes compares '<absent>' to '<absent>', which would
+    // pass with the feature that writes it removed entirely. The fixture is built to produce each
+    // of these, so their absence is a defect in the fixture, not in the repository under test.
+    // `parse-health.json` is deliberately NOT here: the fixture parses cleanly, and a clean repo
+    // legitimately writes no parse-health artifact.
+    for (const name of PRESENT_ARTIFACTS) {
+      expect(reused[name], `${name} was absent — the comparison above proves nothing`)
+        .not.toBe('<absent>');
     }
     // The CFG overlay lives only in SQLite, never in a JSON artifact — and it is the one
     // memoized field with a non-trivial encoding (a `Map`, round-tripped as array-of-entries),

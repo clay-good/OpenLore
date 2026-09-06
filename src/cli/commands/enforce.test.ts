@@ -23,6 +23,7 @@ import {
   blastRadiusFindings,
   blastRadiusAssessmentComplete,
   impactCertificateFindings,
+  dynamicBoundaryFindings,
   corpusIntentGovernanceFindings,
   collectGovernanceFindings,
   renderAgentHook,
@@ -1176,5 +1177,66 @@ describe('decision-bound constraint enforcement and reporting', () => {
     const human = await gateHuman(root);
     expect(human).not.toContain('\u001b');
     expect(human).not.toContain('\u0007');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dynamic-boundary findings (change: disclose-dynamic-boundary-regions)
+// ---------------------------------------------------------------------------
+
+describe('dynamicBoundaryFindings', () => {
+  const crossing = (over: Record<string, unknown> = {}) => ({
+    kind: 'dynamic-boundary' as const,
+    count: 12,
+    sites: [
+      { file: 'src/b.ts', line: 4, kind: 'computed-member' },
+      { file: 'src/a.ts', line: 9, kind: 'reflective-invoke' },
+    ],
+    detail: 'x',
+    ...over,
+  });
+  const cert = (over: Record<string, unknown> = {}) => ({
+    newlyOpenedPaths: [], surfaces: [{ name: 's' }], findings: [], caveats: [],
+    ...over,
+  } as never);
+
+  it('emits nothing when the certificate made no negative claim to qualify', () => {
+    // The spec's emission condition is narrow ON PURPOSE: a finding fires only where a conclusion
+    // qualifies or caps a verdict, never for a purely informational disclosure. A certificate that
+    // carries the crossing but did NOT withhold its claim is informational.
+    expect(dynamicBoundaryFindings(cert({ dynamicBoundaries: crossing() }))).toEqual([]);
+    expect(dynamicBoundaryFindings(cert({ newPathClaimQualified: true }))).toEqual([]);
+  });
+
+  it('emits one advisory finding per capped conclusion, carrying the truncation receipt', () => {
+    const findings = dynamicBoundaryFindings(cert({
+      newPathClaimQualified: true,
+      dynamicBoundaries: crossing({ omittedSites: 3 }),
+    }));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].code).toBe('dynamic-boundary-in-conclusion-scope');
+    // The severity rides the emitted finding, never the registry entry.
+    expect(findings[0].severity).toBe('info');
+    expect(findings[0].subject).toBe('no new paths into any declared surface');
+    expect(findings[0].message).toContain('12 dispatch site(s)');
+    expect(findings[0].message).toContain('src/a.ts:9');
+    expect(findings[0].message).toContain('3 further file/kind group(s)');
+    // Sites are ordered, so the discriminator is stable across re-runs of the same diff and a
+    // frozen baseline adopts it once.
+    expect(findings[0].discriminator).toBe('src/a.ts:9:reflective-invoke,src/b.ts:4:computed-member');
+  });
+
+  it('is advisory by default, and blocks only when a policy says so', () => {
+    const findings = dynamicBoundaryFindings(cert({
+      newPathClaimQualified: true, dynamicBoundaries: crossing(),
+    }));
+    const open = classifyFindings(findings, {});
+    expect(open.classified[0].enforcementClass).toBe('advisory');
+    expect(open.blocking).toHaveLength(0);
+    const policed = classifyFindings(findings, {
+      'dynamic-boundary-in-conclusion-scope': 'blocking',
+    });
+    expect(policed.classified[0].enforcementClass).toBe('blocking');
+    expect(policed.blocking).toHaveLength(1);
   });
 });
