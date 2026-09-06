@@ -134,12 +134,6 @@ export function integrityDisclosure(integrity?: IndexIntegrity): IndexIntegrityD
 }
 
 /**
- * The repair-in-progress marker for a directory, or undefined when no background
- * repair is running. Handlers pass this into {@link assembleBoundary} so a stale
- * answer served during a self-heal is disclosed as *repairing*, not silently stale
- * (change: make-index-self-healing).
- */
-/**
  * Refuse to serve a negative conclusion computed from a partial first-run index
  * (change: refine-first-run-partial-serving).
  *
@@ -174,6 +168,11 @@ export function withheldOnPartialIndex(
   };
 }
 
+/**
+ * The repair-in-progress marker for a directory, or undefined when no background repair is
+ * running. Handlers pass this into {@link assembleBoundary} so a stale answer served during a
+ * self-heal is disclosed as *repairing*, not silently stale (change: make-index-self-healing).
+ */
 export function repairDisclosure(directory: string): RepairInProgressMarker | undefined {
   const status = repairStatusFor(directory);
   if (!status) return undefined;

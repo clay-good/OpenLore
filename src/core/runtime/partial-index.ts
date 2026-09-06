@@ -44,7 +44,7 @@ import {
 import { isProcessAlive, runtimeDirOf } from './analysis-ownership.js';
 // The bounded, symlink-refusing, regular-files-only read every `.openlore/` reader in this repo
 // is required to use. A leaf module, so nothing here reaches across a layer boundary for it.
-import { MAX_ARTIFACT_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { isConfinedPath, realPathOrNearestExisting } from '../../utils/path-confinement.js';
 
 /** Directory name, under the runtime directory, that holds the partial index. */
@@ -308,7 +308,7 @@ export async function refreshPartialIndexStamp(
 async function hasCommittedPartialGeneration(analysisDir: string): Promise<boolean> {
   const dir = confinedPartialIndexDir(analysisDir);
   if (dir === null) return false;
-  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS], MAX_ARTIFACT_BYTES);
+  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS], ANALYSIS_ARTIFACT_MAX_BYTES);
   // `legacy` is a manifest SYNTHESIZED from mtimes for an analysis predating manifests. A
   // partial index is never legacy — this code always publishes — so a legacy verdict means
   // the manifest is missing and the files on disk are unowned.
@@ -327,7 +327,7 @@ async function readPartialStampFile(analysisDir: string): Promise<PartialIndexSt
       || Array.isArray(parsed)
       || parsed.partial !== true
       || typeof parsed.phase !== 'string'
-      || !(parsed.phase in STAGE_PERCENT)
+      || parsed.phase !== 'extractors'
       // A known value, not any short string: `buildPhase` is interpolated into the
       // agent-visible receipt, and an enum cannot carry an escape sequence.
       || typeof parsed.buildPhase !== 'string'
@@ -384,12 +384,14 @@ export async function partialArtifactPathIfLive(
   if (!stamp) return null;
   const dir = confinedPartialIndexDir(analysisDir);
   if (dir === null) return null;
-  // Bounded at the SIBLING-artifact ceiling, not the analysis one. `digestOf` reads and hashes
-  // the whole file, and the bounded read below then refuses anything over 64 MB — so verifying
-  // at 512 MB would hash up to half a gigabyte per call to reject it a moment later.
-  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS], MAX_ARTIFACT_BYTES);
+  // The ANALYSIS ceiling, not the sibling-artifact one: these are the same repository graph the
+  // published path reads, and on the large repositories this feature exists for they legitimately
+  // exceed 64 MB. Verification costs a digest per call, which is what the published path pays for
+  // its own artifacts too — a partial index is not cached, so this is the one place the cost is
+  // visible. The ceiling is what keeps it bounded.
+  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS], ANALYSIS_ARTIFACT_MAX_BYTES);
   if (!generation || generation.compatibility !== 'manifest') return null;
-  if (!await artifactMatchesGeneration(dir, generation, artifact, MAX_ARTIFACT_BYTES)) return null;
+  if (!await artifactMatchesGeneration(dir, generation, artifact, ANALYSIS_ARTIFACT_MAX_BYTES)) return null;
   return join(dir, artifact);
 }
 
@@ -407,7 +409,7 @@ export async function readPartialArtifact(
 ): Promise<string | null> {
   const path = await partialArtifactPathIfLive(analysisDir, artifact);
   if (path === null) return null;
-  const read = await readArtifactBounded(path);
+  const read = await readArtifactBounded(path, ANALYSIS_ARTIFACT_MAX_BYTES);
   return read?.text ?? null;
 }
 

@@ -25,7 +25,7 @@ import {
   partialBuildStagePercent,
   readPartialIndexStamp,
 } from '../runtime/partial-index.js';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from './config-manager.js';
@@ -184,11 +184,14 @@ async function withPartialIndexReceipt(result: unknown, directory: string): Prom
   // produced no answer — so both can afford the one stat that tells the caller the truth.
   const failed = (result as { notReady?: unknown }).notReady === true
     || typeof (result as { error?: unknown }).error === 'string';
+  const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   const stamp = partialReceiptForThisRequest()
-    ?? (failed
-      ? await readPartialIndexStamp(join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR))
-      : null);
-  if (!stamp) return result;
+    ?? (failed ? await readPartialIndexStamp(analysisDir) : null);
+  // The receipt says "THIS repository's first analysis is still running", so it must describe
+  // the repository the caller asked about. A federated read consults a PEER's context, and a
+  // peer mid-build would otherwise stamp a local, complete answer with the peer's file counts.
+  // The stamp names the directory it was written for precisely so this can be checked.
+  if (!stamp || resolve(stamp.analysisDir) !== resolve(analysisDir)) return result;
   return {
     ...(result as Record<string, unknown>),
     partialIndex: {

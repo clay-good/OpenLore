@@ -75,11 +75,20 @@ describe('the flushed facts are actually served, and the receipt rides the resul
     const result = await handleGetArchitectureOverview(root) as {
       error?: string;
       summary?: { totalFiles: number; totalEdges: number };
+      globalEntryPoints?: unknown;
+      criticalHubs?: unknown;
+      omitted?: string[];
     };
 
     expect(result.error).toBeUndefined();
     expect(result.summary?.totalFiles).toBe(3);
     expect(result.summary?.totalEdges).toBe(1);
+    // And the half it CANNOT know is omitted, not reported as empty. `criticalHubs: []` reads as
+    // "this repository has no hubs"; `role: 'internal'` on every cluster reads as an
+    // architectural finding. Both are derived from a call graph that does not exist yet.
+    expect(result.globalEntryPoints).toBeUndefined();
+    expect(result.criticalHubs).toBeUndefined();
+    expect(result.omitted).toContain('criticalHubs');
   });
 
   it('dispatchTool attaches the receipt, so every transport carries it', async () => {
@@ -152,6 +161,23 @@ describe('the flushed facts are actually served, and the receipt rides the resul
 
     expect(typeof result.error).toBe('string');
     expect(result.partialIndex?.detail).toContain('first analysis is still running');
+  });
+
+  it('never stamps an answer with another repository\'s receipt', async () => {
+    // A federated read consults a PEER repository's context. If that peer is mid-build, the
+    // request-scoped note fires for the peer — and without this check the local, complete answer
+    // would carry a receipt reading "this repository's first analysis is still running", with
+    // the peer's file counts.
+    const { notePartialIndexServed, withPartialReceiptScope } = await import('./partial-request.js');
+    const { dispatchTool } = await import('../tool-dispatch.js');
+
+    const foreign = { ...stampOf('/some/other/repo/.openlore/analysis') };
+    const result = await withPartialReceiptScope(async () => {
+      notePartialIndexServed(foreign);
+      return dispatchTool('find_path', { directory: root, from: 'a', to: 'b' }, root);
+    }) as { partialIndex?: unknown };
+
+    expect(result.partialIndex).toBeUndefined();
   });
 
   it('attaches nothing when there is no partial index', async () => {

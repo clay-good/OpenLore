@@ -142,6 +142,31 @@ describe('readCachedContext falls back to a partial first-run index', () => {
     expect(ctx?.phase1_survey?.purpose).toBe('real');
   });
 
+  it('refuses a published artifact that is a named pipe instead of blocking on it', async () => {
+    // `readCachedContext` is the reader almost every tool reaches, and it opened
+    // `llm-context.json` with a bare 'r'. A named pipe there blocks inside `open()` until a
+    // writer appears — on a libuv worker, which `process.exit` cannot interrupt, so the server
+    // could not shut down either. A repository can commit one.
+    if (process.platform === 'win32') return;
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('mkfifo', [join(analysisDir, 'llm-context.json')]);
+
+    const settled = await Promise.race([
+      readCachedContext(root).then(() => 'returned'),
+      new Promise<string>(resolve => setTimeout(() => resolve('HUNG'), 3000)),
+    ]);
+
+    expect(settled).toBe('returned');
+  });
+
+  it('refuses a published artifact that is a symlink', async () => {
+    await writeFile(join(root, 'elsewhere.json'), '{"phase1_survey":{}}', 'utf8');
+    const { symlink } = await import('node:fs/promises');
+    await symlink(join(root, 'elsewhere.json'), join(analysisDir, 'llm-context.json'));
+
+    expect(await readCachedContext(root)).toBeNull();
+  });
+
   it('ignores a partial index whose build died', async () => {
     await plantPartial(stampOf({ pid: 4_194_303 }));
     expect(await readCachedContext(root)).toBeNull();

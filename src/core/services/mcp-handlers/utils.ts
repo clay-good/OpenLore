@@ -3,6 +3,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import { open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
@@ -476,9 +477,20 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       // Keep one descriptor from metadata check through read. A path-based stat
       // followed by a path-based read lets an untrusted repository swap the file
       // between those operations and bypass the size check.
-      const handle = await open(filePath, 'r');
+      // O_NOFOLLOW|O_NONBLOCK, not a bare 'r'. This is the reader almost every tool reaches, and
+      // `.openlore/analysis/llm-context.json` is repository-controlled: a symlink there
+      // redirected the read, and a named pipe blocked inside `open()` until a writer appeared —
+      // on a libuv worker, which `process.exit` cannot interrupt, so the server could not shut
+      // down either. `isFile()` below is what then refuses the pipe; O_NONBLOCK is what lets the
+      // open return so that check can run. (`O_NONBLOCK` is absent on Windows, where these flags
+      // are emulated; `?? 0` keeps the open unchanged there and `isFile()` still refuses.)
+      const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0));
       try {
       const st = await handle.stat();
+      if (!st.isFile()) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'artifact_not_a_regular_file' });
+        return null;
+      }
       const mtime = st.mtimeMs;
       // Key on the committed generation as well as the artifact mtime. An mtime
       // alone cannot distinguish "same file" from "republished with identical

@@ -13,8 +13,9 @@
 - [x] Lane gating: `--partial-serving` (hidden) passed by the background auto-init build,
       default-on for an interactive `openlore analyze`, off under `--embedded`/CI and for the API
 - [x] Serve the facts: `readDependencyGraphOrPartial` / `readAnalysisArtifactOrPartial` fall back
-      to a live partial index only after the published read returns null, so a repository with an
-      index pays nothing. Wired into `get_architecture_overview`, `get_file_dependencies`, and
+      to a live partial index only during a genuine first build — no published artifact AND no
+      published context — so a repository with an index pays nothing and a broken artifact set
+      keeps failing loudly. Wired into `get_architecture_overview`, `get_file_dependencies`, and
       orient's architecture-rule scan
 - [x] Absent-case context serving in `readCachedContext`, only when no analysis artifact is
       present — never masking one that failed a gate — and failing closed by discarding any
@@ -34,7 +35,9 @@
       every later ceiling). The shared bounded reader moved to a leaf module and gained
       `O_NONBLOCK`: `O_NOFOLLOW` refuses a symlink but a FIFO is not a symlink, and opening one
       read-only blocks inside `open()` on a libuv worker that `process.exit` cannot interrupt —
-      reproduced as an unkillable hang, now refused. A pre-existing hole in the serving hot path
+      reproduced as an unkillable hang, now refused. `readCachedContext` — the reader almost every
+      tool reaches — opened `llm-context.json` with a bare `'r'` and had the same hole plus
+      symlink-following; both are closed. Pre-existing on the serving hot path, not regressions
 - [x] Write and delete confined by REAL path: `.openlore/runtime` can be a committed symlink, and
       Node resolves symlinked directory components — so the cleanup, which runs after EVERY
       successful analyze including CI and `--embedded`, deleted recursively wherever it pointed
@@ -49,6 +52,9 @@
       paragraph a third time on a withheld answer and no positive answer ever carried it) and the
       import-side bundle check (a bounded prefix scan cannot decide a question about
       attacker-chosen key order; the structural argument stands on its own)
+- [x] Honest omission: `get_architecture_overview` omits hubs, entry points, layer violations and
+      cluster roles on a partial index instead of reporting `[]`, `0` and "internal", which read as
+      architectural findings rather than as "not known yet"
 - [x] Honest receipt: no completeness percentage (the honest denominator is the call-graph pass,
       which has not started); `phase` describes the FACTS and only `buildPhase` moves with the
       heartbeat, so the index cannot advertise a completeness its bytes do not have
@@ -79,6 +85,14 @@
       `buildPhase` is refused, and a partial index written for another repository is refused
 - [x] Confinement test: a symlinked `.openlore/runtime` makes the flush refuse and leaves the
       symlink's target untouched by the cleanup
+- [x] Precedence tests (their own file, because `graph.test.ts` mocks the readers wholesale): a
+      partial index answers only during a genuine first build, and never stands in for a published
+      artifact that is corrupt, shape-invalid, a symlink, or missing beside a published context.
+      Mutation-tested — deleting the guard fails four of the six
+- [x] Hot-path tests: `readCachedContext` refuses a named pipe rather than blocking on it, and
+      refuses a symlinked artifact
+- [x] Attribution test: a receipt from a federated PEER's partial index is never attached to a
+      local answer
 - [x] Cold-path tests: `orient` (which refuses BEFORE reading the context, so the request-scoped
       receipt cannot cover it) and a handler returning a bare `{error}` both carry the receipt
 - [x] Verified end to end on a real first run of this repository: 2.5s into a 15s build, the

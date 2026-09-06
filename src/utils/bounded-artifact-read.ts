@@ -44,13 +44,13 @@ export async function artifactStamp(path: string): Promise<string | null> {
 }
 
 /**
- * Ceiling on a sibling artifact before it is deserialized.
+ * Default ceiling: for the SIBLING artifacts (parse health, style fingerprint, and the like).
  *
- * These artifacts are repository-controlled input. Real ones are single-digit
- * megabytes; the cap exists so a poisoned or runaway file fails closed instead of
- * being parsed and then RETAINED for the process lifetime, which is what a cache
- * makes newly dangerous. Deliberately lower than the analysis artifact's own ceiling:
- * nothing routed through here is the multi-hundred-megabyte call graph.
+ * These are repository-controlled input. Real ones are single-digit megabytes; the cap exists so
+ * a poisoned or runaway file fails closed instead of being parsed and then RETAINED for the
+ * process lifetime, which is what a cache makes newly dangerous. Deliberately lower than
+ * {@link ANALYSIS_ARTIFACT_MAX_BYTES}, which callers pass explicitly for the graph-sized
+ * artifacts — a reader that needs the larger ceiling asks for it.
  */
 export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
@@ -70,6 +70,28 @@ const READ_CHUNK_BYTES = 64 * 1024;
 export interface StampedArtifact {
   text: string;
   stamp: string;
+}
+
+/**
+ * Whether the open descriptor is the very entry `path` names, rather than something a
+ * link at that path pointed to.
+ *
+ * A comparison, not a pre-flight check: the caller already holds the descriptor it will
+ * read from, so this can only ever reject a read — it cannot be raced into accepting a
+ * substituted file. `lstat` describes the path entry without following it, so a link
+ * reports `isSymbolicLink()`, and where a platform reports usable inode numbers a
+ * mismatch catches the case regardless.
+ */
+async function descriptorIsThePathEntry(handle: FileHandle, path: string): Promise<boolean> {
+  try {
+    const entry = await lstat(path, { bigint: true });
+    if (entry.isSymbolicLink()) return false;
+    const held = await handle.stat({ bigint: true });
+    if (entry.ino === 0n || held.ino === 0n) return true;  // platform reports no usable inode
+    return entry.ino === held.ino && entry.dev === held.dev;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -99,28 +121,6 @@ export interface StampedArtifact {
  *    and directories.
  */
 /**
- * Whether the open descriptor is the very entry `path` names, rather than something a
- * link at that path pointed to.
- *
- * A comparison, not a pre-flight check: the caller already holds the descriptor it will
- * read from, so this can only ever reject a read — it cannot be raced into accepting a
- * substituted file. `lstat` describes the path entry without following it, so a link
- * reports `isSymbolicLink()`, and where a platform reports usable inode numbers a
- * mismatch catches the case regardless.
- */
-async function descriptorIsThePathEntry(handle: FileHandle, path: string): Promise<boolean> {
-  try {
-    const entry = await lstat(path, { bigint: true });
-    if (entry.isSymbolicLink()) return false;
-    const held = await handle.stat({ bigint: true });
-    if (entry.ino === 0n || held.ino === 0n) return true;  // platform reports no usable inode
-    return entry.ino === held.ino && entry.dev === held.dev;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Why a bounded read produced nothing.
  *
  * `absent` and `refused` are deliberately distinguished: a caller that treats "no such file" as
@@ -133,7 +133,7 @@ export type BoundedReadResult =
   | { state: 'absent' }
   | { state: 'refused' };
 
-/** The bytes of an artifact, bounded and descriptor-stamped. See {@link readArtifactBounded}. */
+/** The bytes of an artifact, read under the discipline described above. */
 export async function readArtifactBytesBounded(
   path: string,
   maxBytes: number = MAX_ARTIFACT_BYTES,
@@ -184,7 +184,10 @@ export async function readArtifactBytesBounded(
   }
 }
 
-export async function readArtifactBounded(path: string): Promise<StampedArtifact | null> {
-  const read = await readArtifactBytesBounded(path);
+export async function readArtifactBounded(
+  path: string,
+  maxBytes: number = MAX_ARTIFACT_BYTES,
+): Promise<StampedArtifact | null> {
+  const read = await readArtifactBytesBounded(path, maxBytes);
   return read.state === 'ok' ? { text: read.bytes.toString('utf8'), stamp: read.stamp } : null;
 }

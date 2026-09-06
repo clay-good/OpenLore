@@ -214,6 +214,32 @@ export async function handleGetArchitectureOverview(directory: string): Promise<
       if (raw !== null) domainEvidence = buildDomainEvidence(JSON.parse(raw) as RepoStructure, ctx);
     } catch { /* the architectural summary remains usable when this artifact is absent */ }
   }
+  if (ctx?.partial) {
+    // Hubs, entry points and every cluster's role are derived from the call graph, which a
+    // partial index does not have. Reported as `[]`, `0` and "internal" they read as positive
+    // architectural claims — "this repo has no hubs", "every cluster is an implementation
+    // detail". Omitted, they read as what they are: not known yet. The dependency-graph half
+    // above is real and is served.
+    return {
+      summary: {
+        totalFiles: overview.summary.totalFiles,
+        totalClusters: overview.summary.totalClusters,
+        totalEdges: overview.summary.totalEdges,
+        cycles: overview.summary.cycles,
+      },
+      clusters: overview.clusters.map(cluster => ({
+        id: cluster.id,
+        name: cluster.name,
+        fileCount: cluster.fileCount,
+        dependsOn: cluster.dependsOn,
+      })),
+      omitted: ['globalEntryPoints', 'criticalHubs', 'layerViolations', 'cluster roles',
+        'per-cluster hub and entry-point counts'],
+      omittedBecause: 'they are derived from the call graph, which this first build has not '
+        + 'produced yet; reporting them as empty would state something the index cannot know',
+    };
+  }
+
   return {
     summary: overview.summary,
     clusters: overview.clusters,
