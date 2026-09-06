@@ -602,6 +602,20 @@ function calleeNameOf(callNode: Node, spec: LangSpec): string {
 /** Python receiver identifiers that denote the enclosing object/class. */
 const PY_SELF_RECEIVERS = new Set(['self', 'cls']);
 
+/** Node types that WRAP a receiver without changing what it is. A cast, an assertion, a
+ *  non-null `!`, parentheses and an `await` all leave `this.dep` still `this.dep`; not peeling
+ *  them leaves `(this.dep as Dep).run()` classified `other`, whose contract promises an edge
+ *  that this shape never gets (change: shrink-receiver-resolution-boundary). */
+const RECEIVER_WRAPPER_TYPES = new Set([
+  'non_null_expression',
+  'parenthesized_expression',
+  'as_expression',
+  'satisfies_expression',
+  'type_assertion',
+  'await_expression',
+  'await',
+]);
+
 /** How the callee of a call node is addressed (see {@link CallReceiver}). A
  *  `this.x()` / `super.x()` (TS/JS) or `self.x()` / `cls.x()` (Python) call is
  *  `self` — an intra-object call whose callee is provably in-project. */
@@ -645,9 +659,7 @@ function isSelfRootedMember(node: Node, language: string): boolean {
   // Wrappers that change nothing about what the receiver IS. Left un-peeled, `this.dep!.run()`
   // and `(this.dep).run()` fall through to `other`, whose contract promises an edge — and no edge
   // exists for them, which is the silence this whole change removes.
-  const peeled = node.type === 'non_null_expression' || node.type === 'parenthesized_expression'
-    ? node.namedChildren[0] ?? null
-    : node;
+  const peeled = RECEIVER_WRAPPER_TYPES.has(node.type) ? node.namedChildren[0] ?? null : node;
   if (!peeled) return false;
   // A member access, an index (`this.map['k']`) and a call (`self.get_dep()`) are all still
   // rooted at the enclosing object; none of them is bound by the registry, so all of them are

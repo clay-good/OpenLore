@@ -652,6 +652,91 @@ describe('chained receiver shapes', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Round-2 adversarial findings: three more false-edge sources
+// ---------------------------------------------------------------------------
+
+describe('round-2 refusals', () => {
+  it('never binds a type the file imports from a PACKAGE to an in-project namesake', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('db/client.ts', 'export class Client { query(sql: string) { return sql; } }'),
+      ts('svc.ts', `
+        import { Client } from 'pg';
+        export class Service {
+          private client!: Client;
+          run() { return this.client.query('x'); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'query')).toEqual([]);
+  });
+
+  it('never binds a Python type imported from a third-party package to an in-project namesake', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('db/client.py', 'class Client:\n    def query(self, sql):\n        return sql\n'),
+      py('svc.py', [
+        'from psycopg import Client',
+        '',
+        'class Service:',
+        '    def __init__(self, client: Client):',
+        '        self.client = client',
+        '',
+        '    def run(self):',
+        '        return self.client.query(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'query')).toEqual([]);
+  });
+
+  it('does not let a STATIC-context write type the instance field', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('caches.ts', 'export class GlobalCache { fetch(k: string) { return k; } }'),
+      ts('svc.ts', `
+        import { GlobalCache } from './caches';
+        export class Service {
+          static cache: GlobalCache;
+          static init() { this.cache = new GlobalCache(); }
+          run() { return this.cache.fetch('k'); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'fetch')).toEqual([]);
+  });
+
+  it('does not let a static BLOCK write type the instance field', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('caches.ts', 'export class GlobalCache { fetch(k: string) { return k; } }'),
+      ts('svc.ts', `
+        import { GlobalCache } from './caches';
+        export class Service {
+          static cache: GlobalCache;
+          static { this.cache = new GlobalCache(); }
+          run() { return this.cache.fetch('k'); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'fetch')).toEqual([]);
+  });
+
+  it('reads `super.<field>` from the PARENT slot, never the subclass field of the same name', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('svc.ts', `
+        class A { save() { return 1; } }
+        class B { save() { return 2; } }
+        class Base { protected dep: B = new B(); }
+        export class Service extends Base {
+          protected dep: A = new A();
+          run() { return super.dep.save(); }
+        }
+      `),
+    ]);
+    const edge = edgeTo(result, 'run', 'save');
+    // The parent's slot is a `B`; binding the subclass's `A` would be a wrong edge.
+    if (edge) expect(result.nodes.get(edge.calleeId)?.className).toBe('B');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Additivity & scope
 // ---------------------------------------------------------------------------
 
