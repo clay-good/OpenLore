@@ -163,12 +163,6 @@
       "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
     },
     {
-      "file": "src/core/analyzer/architecture-writer.test.ts",
-      "failingTests": 1,
-      "reason": "architecture artifact records its own path with platform separators",
-      "suspectedProductionBug": true
-    },
-    {
       "file": "src/core/analyzer/artifact-generator.test.ts",
       "failingTests": 1,
       "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
@@ -181,7 +175,7 @@
     {
       "file": "src/core/analyzer/index-bundle.test.ts",
       "failingTests": 1,
-      "reason": "bundle JSON embeds platform separators \u2014 an .olbundle exported on Windows may not match one exported on POSIX",
+      "reason": "runImport trust boundary: the imported answer's confidenceBoundary.basis reports a different directEdges count than the same query against the local index \u2014 an edge-resolution divergence in the round trip, NOT a separator inside a string. Diagnosed from the windows-unit-report artifact; the earlier 'bundle JSON embeds platform separators' reason was wrong.",
       "suspectedProductionBug": true
     },
     {
@@ -210,22 +204,10 @@
       "reason": "POSIX-specific fixture or assertion"
     },
     {
-      "file": "src/core/decisions/syncer.test.ts",
-      "failingTests": 5,
-      "reason": "synced decision references are written with platform separators",
-      "suspectedProductionBug": true
-    },
-    {
       "file": "src/core/drift/git-diff-corpus-materialization.test.ts",
       "failingTests": 1,
       "reason": "FLAKY on Windows, not deterministically failing: observed passing, then failing on 'rejects invalid UTF-8 corpus bytes', then passing across three consecutive CI runs of the same tree, and failing with ENOENT in an earlier probe. Reads a `git cat-file --batch` child's stdout, so a stream race is the likely cause. Not root-caused: needs a Windows machine to debug, not a 12-minute CI cycle.",
       "flaky": true
-    },
-    {
-      "file": "src/core/drift/spec-mapper.test.ts",
-      "failingTests": 1,
-      "reason": "spec-mapper emits decision paths with platform separators",
-      "suspectedProductionBug": true
     },
     {
       "file": "src/core/federation/cross-service-resolver.test.ts",
@@ -276,12 +258,6 @@
       "file": "src/core/services/spec-workflow-skills.test.ts",
       "failingTests": 1,
       "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/test-generator/test-generator.test.ts",
-      "failingTests": 3,
-      "reason": "generated test paths use platform separators",
-      "suspectedProductionBug": true
     },
     {
       "file": "src/pi/extension.test.ts",

@@ -8,6 +8,7 @@
 
 import { readFile, readdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
 import type { SpecMapping, SpecMap } from '../../types/index.js';
 import logger from '../../utils/logger.js';
@@ -326,7 +327,12 @@ export async function buildSpecMap(options: SpecMapperOptions): Promise<SpecMap>
       logger.debug(`Spec path escapes the project root, skipping: ${specPath}`);
       continue;
     }
-    const relativeSpecPath = relative(rootPath, specPath);
+    // A repository-relative path OpenLore SERVES or persists is POSIX-separated on
+    // every platform (the same rule `toRepositoryPath` enforces for the walker's keys).
+    // On Windows `relative()` yields backslashes, which would make `modifiedSpecs`,
+    // spec keys, and the anchors written into a spec differ from the POSIX corpus for
+    // the same repository. Node accepts `/` on Windows, so re-joining still works.
+    const relativeSpecPath = toRepositoryPath(relative(rootPath, specPath));
 
     let content: string;
     try {
@@ -551,7 +557,7 @@ export async function buildADRMap(options: SpecMapperOptions): Promise<ADRMap | 
       if (status === 'superseded' || status === 'deprecated') continue;
 
       const { domains, layers } = parseADRRelated(content);
-      const adrPath = relative(options.rootPath, filePath);
+      const adrPath = toRepositoryPath(relative(options.rootPath, filePath));
 
       const mapping: ADRMapping = {
         id,
