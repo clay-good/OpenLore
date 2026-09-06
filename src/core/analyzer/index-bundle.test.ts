@@ -177,6 +177,23 @@ function ed25519PemPair(): { privateKey: string; publicKey: string } {
   };
 }
 
+/**
+ * Clone a producer fixture WITHOUT letting the machine's git config rewrite the bytes.
+ *
+ * These fixtures write their sources straight to disk with LF, and the exported bundle
+ * records a content hash over exactly those bytes. A bare `git clone` applies the machine's
+ * config, and Git for Windows defaults `core.autocrlf=true` — so the consumer's checkout
+ * came back with CRLF, nine lines became nine extra bytes (215 -> 224), and the recorded
+ * hash could not match. The imported answer then reported the consumer's tree as ahead of
+ * its own index, which reads as an import-round-trip divergence and is nothing of the kind.
+ *
+ * Pinning the flag makes the round trip the thing under test, rather than whichever
+ * line-ending policy the developer's git happens to carry.
+ */
+function cloneFixture(producer: string, consumer: string): void {
+  execFileSync('git', ['-c', 'core.autocrlf=false', 'clone', '-q', producer, consumer]);
+}
+
 let work: string;
 beforeEach(async () => { work = await mkdtemp(join(tmpdir(), 'olbundle-test-')); });
 afterEach(async () => {
@@ -945,7 +962,7 @@ describe('index-bundle: runImport trust boundary', () => {
     const artifact = join(work, 'ancestor.olbundle');
     await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     const currentB = 'export function b(): number { return c(); }\nexport function c(): number { return 2; }\n';
     await writeFile(join(consumer, 'src/b.ts'), currentB);
     git(consumer, 'add', 'src/b.ts');
@@ -1004,7 +1021,7 @@ describe('index-bundle: runImport trust boundary', () => {
     const artifact = join(work, 'legacy-windows.olbundle');
     await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
 
     expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
@@ -1053,7 +1070,7 @@ describe('index-bundle: runImport trust boundary', () => {
     const artifact = join(work, 'zero-node.olbundle');
     await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     await rm(join(consumer, 'src', 'empty.ts'));
     git(consumer, 'add', 'src/empty.ts');
     git(consumer, 'commit', '-q', '-m', 'delete empty');
@@ -1099,7 +1116,7 @@ describe('index-bundle: runImport trust boundary', () => {
     const artifact = join(work, 'test-delta.olbundle');
     await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     await rm(join(consumer, 'src', 'a.test.ts'));
     git(consumer, 'add', 'src/a.test.ts');
     git(consumer, 'commit', '-q', '-m', 'delete test');
@@ -1137,7 +1154,7 @@ describe('index-bundle: runImport trust boundary', () => {
     const artifact = join(work, 'ignore-ancestor.olbundle');
     await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     await writeFile(join(consumer, '.gitignore'), '.openlore/analysis/\nsrc/b.ts\n');
     git(consumer, 'add', '.gitignore');
     git(consumer, 'commit', '-q', '-m', 'ignore b');
@@ -1173,7 +1190,7 @@ describe('index-bundle: runImport trust boundary', () => {
     const artifact = join(work, 'race-ancestor.olbundle');
     await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     await writeFile(join(consumer, 'src/a.ts'), 'export function a(): number { return 2; }\n');
     git(consumer, 'add', 'src/a.ts');
     git(consumer, 'commit', '-q', '-m', 'change a');
@@ -1219,7 +1236,7 @@ describe('index-bundle: runImport trust boundary', () => {
     const artifact = join(work, 'tree-race-ancestor.olbundle');
     await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     const current = 'export function a(): number { return 2; }\n';
     await writeFile(join(consumer, 'src/a.ts'), current);
     git(consumer, 'add', 'src/a.ts');
@@ -1347,7 +1364,7 @@ describe('index-bundle: runImport trust boundary', () => {
       label: 'equivalence-fixture',
     });
 
-    execFileSync('git', ['clone', '-q', producer, consumer]);
+    cloneFixture(producer, consumer);
     const success = vi.spyOn(logger, 'success').mockImplementation(() => {});
     const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
     expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);

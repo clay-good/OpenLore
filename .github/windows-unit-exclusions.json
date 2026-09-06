@@ -1,7 +1,7 @@
 {
   "$comment": [
     "Test files that do not yet pass on Windows. The `windows-unit` CI job runs the ENTIRE unit suite",
-    "on windows-latest \u2014 nothing is filtered \u2014 and scripts/windows-unit-report.mjs judges the result",
+    "on windows-latest — nothing is filtered — and scripts/windows-unit-report.mjs judges the result",
     "against this list (issue #434). Before that job, exactly one test file ran on Windows.",
     "",
     "The list is enforced in BOTH directions from that single run: a failing file that is not listed",
@@ -17,25 +17,19 @@
     "the product PERSISTS or SERVES (an artifact, a spec reference, a generated path) rather than",
     "inside a test expectation. Those are portability questions about the artifact, not test bugs,",
     "and are tracked separately.",
-    "`flaky: true` marks an entry that is NOT deterministically failing \u2014 it is exempt from both rules, because a file that oscillates would otherwise fail the build whichever list it sits on. It is a last resort: it needs observed evidence in its reason, it is reported on every run so it stays visible, and it belongs in the backlog issue as a bug to fix rather than a state to keep.",
+    "`flaky: true` marks an entry that is NOT deterministically failing — it is exempt from both rules, because a file that oscillates would otherwise fail the build whichever list it sits on. It is a last resort: it needs observed evidence in its reason, it is reported on every run so it stays visible, and it belongs in the backlog issue as a bug to fix rather than a state to keep.",
     "",
     "Backlog tracked in https://github.com/clay-good/OpenLore/issues/452"
   ],
   "exclusions": [
     {
       "file": "src/api/analysis-status.test.ts",
-      "reason": "`reports no analysis in progress for a stale lock`: got `{inProgress: true}` where the stale lock should classify as not-in-progress. Same neighbourhood as the `analysis-ownership` SIGTERM entry \u2014 a Windows-killed owner is still read as alive \u2014 and present at commit e8d6c8dd, before this PR touched the ownership module. Not a separator bug; tracked in #452.",
+      "reason": "`reports no analysis in progress for a stale lock`: got `{inProgress: true}` where the stale lock should classify as not-in-progress. Same neighbourhood as the `analysis-ownership` SIGTERM entry — a Windows-killed owner is still read as alive — and present at commit e8d6c8dd, before this PR touched the ownership module. Not a separator bug; tracked in #452.",
       "suspectedProductionBug": true
     },
     {
       "file": "src/cli/commands/enforce.test.ts",
-      "reason": "ONE case remains of the six this file had: `resolves the repository root when the agent starts in a subdirectory` still returns 0 where it must return 2. The CRLF hypothesis was tested and DISPROVED \u2014 `runEnforceCli` now strips `\\r?\\n` from `git rev-parse --show-toplevel` (a correct change on its own merits, matching every sibling consumer) and this case failed identically afterwards. The other five, and the missing `dist/` build step behind four of them, are fixed in this PR. Do not re-try CRLF; tracked in #452.",
-      "suspectedProductionBug": true
-    },
-    {
-      "file": "src/core/analyzer/index-bundle.test.ts",
-      "failingTests": 1,
-      "reason": "runImport round trip: the IMPORTED answer carries an `indexStaleness` note (`$.indexStaleness` present where the local answer has none) \u2014 the consumer judges its freshly-imported index behind the working tree on Windows, where the same import on POSIX does not. Diagnosed from the named-divergence assertion added in this PR; the two earlier reasons \u2014 'bundle JSON embeds platform separators' and then 'a directEdges edge-resolution divergence' \u2014 were both wrong. Freshness compares source mtime against artifact mtime, so the next step is to find which side Windows orders differently. Tracked in #452; not a separator bug and not test-only.",
+      "reason": "ONE case remains of the six this file had: `resolves the repository root when the agent starts in a subdirectory` still returns 0 where it must return 2. The CRLF hypothesis was tested and DISPROVED — `runEnforceCli` now strips `\\r?\\n` from `git rev-parse --show-toplevel` (a correct change on its own merits, matching every sibling consumer) and this case failed identically afterwards. The other five, and the missing `dist/` build step behind four of them, are fixed in this PR. Do not re-try CRLF; tracked in #452.",
       "suspectedProductionBug": true
     },
     {
@@ -52,7 +46,7 @@
     },
     {
       "file": "src/core/runtime/analysis-ownership.test.ts",
-      "reason": "ONE case remains of the two this file had: `a killed owner releases ownership on SIGTERM rather than holding it`. Windows has no SIGTERM delivery \u2014 `child.kill('SIGTERM')` maps to `TerminateProcess`, so no handler runs \u2014 yet `own()` still returned `in-progress` after the child closed, which means the dead owner was not detected as dead either. That second half is NOT platform-impossible and is the part worth chasing. The file's other Windows failure (a file URL's `.pathname` as a dynamic-import specifier) is fixed in this PR. Tracked in #452.",
+      "reason": "ONE case remains of the two this file had: `a killed owner releases ownership on SIGTERM rather than holding it`. Windows has no SIGTERM delivery — `child.kill('SIGTERM')` maps to `TerminateProcess`, so no handler runs — yet `own()` still returned `in-progress` after the child closed, which means the dead owner was not detected as dead either. That second half is NOT platform-impossible and is the part worth chasing. The file's other Windows failure (a file URL's `.pathname` as a dynamic-import specifier) is fixed in this PR. Tracked in #452.",
       "suspectedProductionBug": true
     }
   ]
