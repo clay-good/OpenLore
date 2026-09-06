@@ -143,7 +143,7 @@ const SQLITE_BUSY_RETRY_DELAYS_MS = [50, 150, 450] as const;
  * retry loop: after it, the watcher discloses the drop and — where a graph store
  * exists — records the files as stale, so the staleness outlives the log line.
  */
-const WATCH_MAX_EVENT_RETRIES = 3;
+export const WATCH_MAX_EVENT_RETRIES = 3;
 
 /**
  * The budget for a failure that is TRANSIENT BY CONSTRUCTION, rather than possibly
@@ -164,7 +164,7 @@ const WATCH_MAX_EVENT_RETRIES = 3;
  * Still BOUNDED, so the hot-loop protection the smaller budget buys is not given up: a
  * destination held forever still ends in one loud, stale-recorded drop, just later.
  */
-const WATCH_MAX_CONTENTION_RETRIES = 12;
+export const WATCH_MAX_CONTENTION_RETRIES = 12;
 
 /**
  * Does `reason` name the Windows rename-contention class?
