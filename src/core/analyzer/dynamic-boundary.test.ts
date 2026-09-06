@@ -334,7 +334,10 @@ end
 `);
     expect(sites).toHaveLength(1);
     expect(sites[0].kind).toBe('reflective-invoke');
-    expect(sites[0].refusal).toBe('unresolved-external');
+    // `process` IS defined here, so the honest reason is "resolves, but no edge was bound" — never
+    // "resolves to no symbol in this index", which would be a false statement about a symbol that
+    // is plainly right there.
+    expect(sites[0].refusal).toBe('resolvable-but-unbound');
   });
 });
 
@@ -690,5 +693,112 @@ class Command {
 }
 `);
     expect(without).toEqual([]);
+  });
+});
+
+describe('the refusal reason is never a false statement', () => {
+  it('a target defined in the file reports resolvable-but-unbound, not "resolves to no symbol"', async () => {
+    const sites = await sitesOf('a.py', 'Python', `
+def run():
+    return 1
+
+def dispatch(o):
+    return getattr(o, "run")()
+`);
+    expect(sites[0].refusal).toBe('resolvable-but-unbound');
+  });
+
+  it('a single-file derivation never claims a repository-wide absence', async () => {
+    // `extractFileDynamicBoundary` is the watcher's lane: it sees one file, so it cannot know
+    // whether `handle` exists elsewhere. Saying "resolves to no symbol in this index" would be a
+    // claim it never checked — and one the full build would not make for the same file.
+    const sites = await sitesOf('a.py', 'Python', `
+def dispatch(o):
+    return getattr(o, "handle")()
+`);
+    expect(sites[0].refusal).toBe('unresolved-in-file-scope');
+  });
+
+  it('the dispatch selector is read positionally, not "the first string anywhere"', async () => {
+    // `getattr(o, name, "fallback")` dispatches on a RUNTIME name; the literal is a default value.
+    // Reading it as the target would report a dispatch to a symbol this call never reaches.
+    const sites = await sitesOf('a.py', 'Python', `
+def dispatch(o, name):
+    return getattr(o, name, "fallback")()
+`);
+    expect(sites[0].refusal).toBe('no-static-target');
+  });
+
+  it('an eval body is code, not a dispatch target', async () => {
+    const sites = await sitesOf('a.py', 'Python', 'def f():\n    eval("a + b")\n');
+    expect(sites[0].kind).toBe('code-eval');
+    expect(sites[0].refusal).toBe('no-static-target');
+  });
+});
+
+describe('an ordinary call cannot erase a site', () => {
+  it('a resolved call sharing a line and a name with the selector does not retract it', async () => {
+    // The retraction key must not be caller+line+name: an edge carries no column, so the ordinary
+    // `run()` below would erase the `getattr` and leave NEITHER an edge nor a site — the exact
+    // silence this module exists to remove.
+    const sites = await sitesOf('a.py', 'Python', `
+def run():
+    return 1
+
+def dispatch(o):
+    x = getattr(o, "run"); run()
+    return x
+`);
+    expect(sites.some(s => s.kind === 'reflective-invoke')).toBe(true);
+  });
+});
+
+describe('dynamic import', () => {
+  it('TypeScript: a non-literal specifier is a boundary, a literal one is not', async () => {
+    const dynamic = await sitesOf('a.ts', 'TypeScript', `
+export async function load(spec: string) {
+  return import(spec);
+}
+`);
+    expect(kindsOf(dynamic)).toEqual(['dynamic-import']);
+
+    const staticImport = await sitesOf('b.ts', 'TypeScript', `
+export async function load() {
+  return import('./known.js');
+}
+`);
+    expect(staticImport).toEqual([]);
+  });
+
+  it('JavaScript: require with a computed specifier is a boundary', async () => {
+    const sites = await sitesOf('a.js', 'JavaScript', `
+function load(name) {
+  return require(name);
+}
+`);
+    expect(kindsOf(sites)).toEqual(['dynamic-import']);
+    expect(await sitesOf('b.js', 'JavaScript', "const fs = require('node:fs');\n")).toEqual([]);
+  });
+
+  it('Python: __import__ with a computed name is a boundary', async () => {
+    const sites = await sitesOf('a.py', 'Python', 'def load(n):\n    return __import__(n)\n');
+    expect(kindsOf(sites)).toEqual(['dynamic-import']);
+    expect(await sitesOf('b.py', 'Python', 'def load():\n    return __import__("os")\n')).toEqual([]);
+  });
+});
+
+describe('an over-cap file reports its true scale', () => {
+  it('caps the retained sites and discloses the exact match count', async () => {
+    const body = Array.from({ length: DYNAMIC_BOUNDARY_SITE_CAP + 12 },
+      (_, i) => `    getattr(o, n${i})()`).join('\n');
+    const rec = await extractFileDynamicBoundary({
+      path: 'a.py',
+      language: 'Python',
+      content: `def dispatch(o, ${Array.from({ length: DYNAMIC_BOUNDARY_SITE_CAP + 12 }, (_, i) => `n${i}`).join(', ')}):\n${body}\n`,
+    });
+    expect(rec!.sites).toHaveLength(DYNAMIC_BOUNDARY_SITE_CAP);
+    expect(rec!.truncated).toBe(true);
+    // The exact figure, not the retained length — a bounded list must never read as the whole set.
+    expect(rec!.totalSites).toBe(DYNAMIC_BOUNDARY_SITE_CAP + 12);
   });
 });

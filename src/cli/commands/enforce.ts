@@ -244,34 +244,43 @@ export function impactCertificateFindings(cert: ImpactCertificate): GovernanceFi
 }
 
 /**
- * Map an impact certificate's dynamic-boundary crossing onto a governance finding (change:
+ * Map an impact certificate's QUALIFIED negative claim onto a governance finding (change:
  * disclose-dynamic-boundary-regions).
  *
- * This is a QUALIFICATION, not an informational disclosure — which is the spec's condition for
- * emitting at all. The certificate's central claim is negative ("this change opens no new path into
- * a declared surface"), and a reflective, computed, or container-resolved dispatch in the changed
- * files is precisely the construct that can open one without leaving an edge. The finding says that
- * claim is not established here and names the site.
+ * The spec's emission condition is narrow on purpose: a finding fires only where a conclusion
+ * QUALIFIES or CAPS a verdict because of a site, never for a purely informational disclosure. That
+ * is exactly what `newPathClaimQualified` marks — the certificate claimed "this change opens no new
+ * path into any declared surface", and a reflective, computed, or container-resolved dispatch in
+ * the diff is the construct that can open one without leaving an edge, so the claim is withheld.
+ * A certificate that already reports an opened path, or one over a repository with no declared
+ * surface, made no negative claim and emits nothing.
  *
- * Advisory by default, like every non-corpus code: the gate reports it and does not block until a
- * policy classes it `blocking`. The `info` severity rides the emitted finding, never the registry.
- * Pure; no I/O.
+ * ONE finding per capped conclusion, not one per site: the sites and the truncation receipt are
+ * carried in the message, so a bounded disclosure never reads as the whole set. Advisory by
+ * default, like every non-corpus code; the `info` severity rides the emitted finding, never the
+ * registry. Pure; no I/O.
  */
 export function dynamicBoundaryFindings(cert: ImpactCertificate): GovernanceFinding[] {
+  if (!cert.newPathClaimQualified) return [];
   const crossing = cert.dynamicBoundaries;
   if (!crossing?.sites?.length) return [];
-  return [...crossing.sites]
-    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line
-      || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
-    .map((site) => ({
-      code: 'dynamic-boundary-in-conclusion-scope',
-      severity: 'info' as const,
-      source: 'dynamic-boundary',
-      subject: `${site.file}:${site.line}`,
-      discriminator: site.kind,
-      message: `a ${site.kind} here is dispatch the call graph cannot follow, so "no new path into a `
-        + 'declared surface" is not established for this change.',
-    }));
+  const sites = [...crossing.sites].sort(
+    (a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line
+      || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0),
+  );
+  const listed = sites.map(s => `${s.file}:${s.line} (${s.kind})`).join('; ');
+  const omitted = crossing.omittedSites ?? 0;
+  return [{
+    code: 'dynamic-boundary-in-conclusion-scope',
+    severity: 'info',
+    source: 'dynamic-boundary',
+    subject: 'no new paths into any declared surface',
+    // Stable across re-runs of the same diff, so a frozen baseline adopts it once.
+    discriminator: sites.map(s => `${s.file}:${s.line}:${s.kind}`).join(','),
+    message: `${crossing.count} dispatch site(s) in this change are ones the call graph cannot `
+      + `follow, so "no new path into a declared surface" is NOT established: ${listed}`
+      + `${omitted > 0 ? `, and ${omitted} further file/kind group(s)` : ''}.`,
+  }];
 }
 
 /** Adapt source-rich corpus intent findings to the unified enforcement shape. */

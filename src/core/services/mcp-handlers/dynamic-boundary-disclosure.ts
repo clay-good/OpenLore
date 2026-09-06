@@ -23,7 +23,7 @@
  */
 
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readArtifactBounded, ANALYSIS_ARTIFACT_MAX_BYTES } from '../../../utils/bounded-artifact-read.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -58,15 +58,81 @@ export const CALLER_HIDING_KINDS: readonly DynamicBoundaryKind[] = [
   'container-resolution',
 ];
 
-/** Load the persisted report, or `null` when absent/unreadable (a repository with no site). */
-export async function loadDynamicBoundaryReport(absDir: string): Promise<DynamicBoundaryReport | null> {
-  const path = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DYNAMIC_BOUNDARY);
-  try {
-    const parsed = JSON.parse(await readFile(path, 'utf-8')) as DynamicBoundaryReport;
-    return Array.isArray(parsed.files) ? parsed : null;
-  } catch {
-    return null;
-  }
+/**
+ * Cap on a site-artifact read. A disclosure sidecar is small by construction (bounded sites per
+ * file, bounded evidence); anything approaching this is not one, and reading it would trade a
+ * conclusion's availability for an annotation on it.
+ */
+const DYNAMIC_BOUNDARY_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Per-directory memo, mirroring the confidence boundary's staleness memo and for the same reason: a
+ * single user-facing call fans out into many handlers — `blast_radius` composes `analyze_impact`
+ * once per seed plus `select_tests`, so the same artifact would otherwise be read and parsed a
+ * dozen times for one briefing. The window is short enough that a watcher rewrite is picked up on
+ * the next agent turn.
+ */
+const REPORT_TTL_MS = 5000;
+const reportMemo = new Map<string, { at: number; value: DynamicBoundaryReport | null }>();
+const adjacencyMemo = new Map<string, { at: number; value: Map<string, string[]> }>();
+
+/** Drop the memos — test-only hook, so a rewritten artifact is re-read immediately. */
+export function __resetDynamicBoundaryMemo(): void {
+  reportMemo.clear();
+  adjacencyMemo.clear();
+}
+
+function memoized<T>(
+  cache: Map<string, { at: number; value: T }>,
+  key: string,
+  now: number,
+  compute: () => Promise<T>,
+): Promise<T> {
+  const hit = cache.get(key);
+  if (hit && now - hit.at < REPORT_TTL_MS) return Promise.resolve(hit.value);
+  return compute().then((value) => {
+    cache.set(key, { at: now, value });
+    return value;
+  });
+}
+
+/** Is this parsed value a usable site record? Anything else is dropped, never trusted. */
+function validRecord(f: unknown): f is FileDynamicBoundary {
+  if (!f || typeof f !== 'object') return false;
+  const r = f as Partial<FileDynamicBoundary>;
+  return typeof r.filePath === 'string' && typeof r.language === 'string' && Array.isArray(r.sites)
+    && r.sites.every(site => !!site && typeof site === 'object'
+      && typeof (site as DynamicBoundarySite).line === 'number'
+      && typeof (site as DynamicBoundarySite).kind === 'string');
+}
+
+/**
+ * Load the persisted report, or `null` when absent/unreadable (a repository with no site).
+ *
+ * Every record is validated before it is served. This artifact is read on the serving path by seven
+ * conclusions, and a *disclosure* sidecar must never be able to take down the conclusions it exists
+ * to annotate: a malformed, truncated, hand-edited or hostile file degrades to "no boundary", never
+ * to a thrown handler. The read is bounded and refuses to follow a symlink or block on a FIFO, for
+ * the same reason every other `.openlore` reader on this path does.
+ */
+export async function loadDynamicBoundaryReport(
+  absDir: string,
+  now: number = Date.now(),
+): Promise<DynamicBoundaryReport | null> {
+  return memoized(reportMemo, absDir, now, async () => {
+    const path = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DYNAMIC_BOUNDARY);
+    try {
+      const read = await readArtifactBounded(path, DYNAMIC_BOUNDARY_MAX_BYTES);
+      if (!read) return null;
+      const parsed = JSON.parse(read.text) as Partial<DynamicBoundaryReport>;
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.files)) return null;
+      const files = parsed.files.filter(validRecord);
+      if (files.length === 0) return null;
+      return { ...(parsed as DynamicBoundaryReport), files };
+    } catch {
+      return null;
+    }
+  });
 }
 
 /**
@@ -75,16 +141,26 @@ export async function loadDynamicBoundaryReport(absDir: string): Promise<Dynamic
  * no dependency graph the map is empty and a site qualifies only within its own file — narrower,
  * which is the safe direction.
  *
- * A separate reader from `find_dead_code`'s, which already loads the same artifact for its own
- * signals and passes its adjacency in directly rather than reading it twice.
+ * Memoized per directory like the report above, because `find_dead_code` already reads this same
+ * artifact for its own liveness signals and passes its adjacency in directly; every other caller
+ * would otherwise re-read and re-parse a graph that can be the largest artifact in `.openlore`.
  */
-export async function loadImportAdjacency(absDir: string): Promise<Map<string, string[]>> {
+export async function loadImportAdjacency(
+  absDir: string,
+  now: number = Date.now(),
+): Promise<Map<string, string[]>> {
+  return memoized(adjacencyMemo, absDir, now, () => readImportAdjacency(absDir));
+}
+
+async function readImportAdjacency(absDir: string): Promise<Map<string, string[]>> {
   const out = new Map<string, string[]>();
   try {
-    const raw = await readFile(
-      join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH), 'utf-8',
+    const read = await readArtifactBounded(
+      join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH),
+      ANALYSIS_ARTIFACT_MAX_BYTES,
     );
-    const g = JSON.parse(raw) as {
+    if (!read) return out;
+    const g = JSON.parse(read.text) as {
       nodes?: Array<{ id: string; file?: { path?: string } }>;
       edges?: Array<{ source?: string; target?: string }>;
     };
@@ -156,14 +232,19 @@ export function dynamicBoundaryCrossing(
   const shown = ordered.slice(0, cap);
   const omitted = ordered.length - shown.length;
 
+  // `count` is SITES; the list and `omittedSites` are file+kind GROUPS. Stating both units keeps
+  // the receipt arithmetically checkable — "8 listed + 3 omitted" adds up to the group total, not
+  // to the site total, so a reader who subtracts does not get a nonsense number.
   return {
     kind: 'dynamic-boundary',
     count: exact,
     sites: shown,
     ...(omitted > 0 ? { omittedSites: omitted } : {}),
     detail:
-      `${exact} dispatch site(s) in this answer's scope are ones the call graph cannot follow `
-      + `(${shown.map(describeSite).join('; ')}${omitted > 0 ? `; and ${omitted} more` : ''}). `
+      `${exact} dispatch site(s) in this answer's scope are ones the call graph cannot follow, `
+      + `across ${ordered.length} file/kind group(s); `
+      + `${shown.length} listed (${shown.map(describeSite).join('; ')})`
+      + `${omitted > 0 ? `, ${omitted} group(s) omitted` : ''}. `
       + 'Edges through them are absent from the graph, so this answer is a LOWER BOUND — '
       + 'verify before asserting that nothing else reaches these symbols.',
   };
@@ -191,12 +272,14 @@ export interface QualifyingHit {
 }
 
 /**
- * Maximum files walked when computing what one site file can name. A bound, not a tuning knob: a
- * closure that runs past it stops widening, so the qualification can only ever be NARROWER than the
- * true naming set — the safe direction, since a missed qualification leaves the existing
- * whole-repository caveat carrying the case.
+ * Maximum files walked when computing what one site file can name, and the total the whole index
+ * may retain. Bounds, not tuning knobs: a closure that runs past the first stops widening and an
+ * index that runs past the second stops growing, so the qualification can only ever be NARROWER
+ * than the true naming set — the safe direction, since a missed qualification leaves the existing
+ * whole-repository caveat carrying the case, while a spurious one would cry wolf everywhere.
  */
 const NAMING_CLOSURE_CAP = 2000;
+const NAMING_INDEX_CAP = 50_000;
 
 /**
  * Build the qualifier a negative conclusion consults: given a candidate's file and language, does a
@@ -209,8 +292,13 @@ const NAMING_CLOSURE_CAP = 2000;
  * Sites outside that closure are left to the existing whole-repository caveat rather than silently
  * widening this one into the blanket disclosure it replaces.
  *
- * Closures are computed FROM the site files — of which there are few — and memoized, so the cost is
- * bounded by the number of files that actually contain a site, not by the number of candidates.
+ * The index is INVERTED once, on the first query, rather than walked per candidate: a repository
+ * with thousands of site-bearing files would otherwise pay one BFS per site file for every dead
+ * candidate, and retain a closure set for each. Built once, every lookup is a map read.
+ *
+ * Two ordering rules make the named site the RIGHT one: a site in the candidate's own file always
+ * wins over one merely able to import it, and within a file the lowest-line qualifying site wins —
+ * the same rule the traversal disclosure uses, so the two never name different lines for one file.
  */
 export function buildQualifier(
   report: DynamicBoundaryReport | null,
@@ -220,41 +308,42 @@ export function buildQualifier(
     .map(f => ({
       file: f.filePath,
       language: f.language,
-      site: f.sites.find(s => CALLER_HIDING_KINDS.includes(s.kind)),
+      site: [...f.sites]
+        .filter(s => CALLER_HIDING_KINDS.includes(s.kind))
+        .sort((a, b) => a.line - b.line)[0],
     }))
     .filter((f): f is { file: string; language: string; site: DynamicBoundarySite } => !!f.site)
     .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
 
   if (siteFiles.length === 0) return () => undefined;
 
-  const closures = new Map<string, Set<string>>();
-  const closureOf = (start: string): Set<string> => {
-    const cached = closures.get(start);
-    if (cached) return cached;
-    const seen = new Set<string>([start]);
-    const queue = [start];
-    while (queue.length > 0 && seen.size < NAMING_CLOSURE_CAP) {
-      for (const next of imports.get(queue.shift()!) ?? []) {
-        if (!seen.has(next)) {
+  // `language\u0000file` → the site that qualifies it. Built lazily so a repository whose
+  // conclusions never touch a candidate pays nothing.
+  let index: Map<string, QualifyingHit> | undefined;
+  const build = (): Map<string, QualifyingHit> => {
+    const out = new Map<string, QualifyingHit>();
+    // Own-file attribution first, across every site file, so it can never lose a race to a file
+    // that merely imports the candidate and happens to sort earlier.
+    for (const s of siteFiles) out.set(`${s.language}\u0000${s.file}`, { file: s.file, site: s.site });
+    for (const s of siteFiles) {
+      if (out.size >= NAMING_INDEX_CAP) break;
+      const seen = new Set<string>([s.file]);
+      const queue = [s.file];
+      while (queue.length > 0 && seen.size < NAMING_CLOSURE_CAP) {
+        for (const next of imports.get(queue.shift()!) ?? []) {
+          if (seen.has(next)) continue;
           seen.add(next);
           queue.push(next);
+          const key = `${s.language}\u0000${next}`;
+          // First site file in sorted order wins, and an own-file entry is never displaced.
+          if (!out.has(key) && out.size < NAMING_INDEX_CAP) out.set(key, { file: s.file, site: s.site });
         }
       }
-      if (queue.length === 0) break;
     }
-    closures.set(start, seen);
-    return seen;
+    return out;
   };
 
-  return (file, language) => {
-    for (const candidate of siteFiles) {
-      if (candidate.language !== language) continue;
-      if (candidate.file === file || closureOf(candidate.file).has(file)) {
-        return { file: candidate.file, site: candidate.site };
-      }
-    }
-    return undefined;
-  };
+  return (file, language) => (index ??= build()).get(`${language}\u0000${file}`);
 }
 
 /**

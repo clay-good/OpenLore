@@ -90,7 +90,9 @@ describe('disclosure is bounded, with a receipt', () => {
     const crossing = dynamicBoundaryCrossing(report(files), files.map(f => f.filePath))!;
     expect(crossing.sites).toHaveLength(DYNAMIC_BOUNDARY_DISCLOSURE_CAP);
     expect(crossing.omittedSites).toBe(5);
-    expect(crossing.detail).toContain('and 5 more');
+    expect(crossing.detail).toContain('5 group(s) omitted');
+    // The receipt is arithmetically checkable: listed + omitted equals the group total.
+    expect(crossing.detail).toContain(`across ${DYNAMIC_BOUNDARY_DISCLOSURE_CAP + 5} file/kind group(s)`);
   });
 
   it('a fully-listed set carries no receipt', () => {

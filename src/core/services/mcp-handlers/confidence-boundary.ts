@@ -79,11 +79,16 @@ export interface KnownUnknowableCrossing {
   /** Actionable, human-readable disclosure. */
   detail: string;
   /**
-   * The sites in scope, when kind === 'dynamic-boundary'. Bounded and deduplicated by kind+file;
-   * `omittedSites` is the truncation receipt, so a bounded list never reads as the whole set.
+   * The sites in scope, when kind === 'dynamic-boundary'. Bounded, and deduplicated by kind+file to
+   * one entry per group — a file dispatching reflectively fifty times is one fact about that file.
+   * `count` therefore counts SITES while this list counts GROUPS; `omittedSites` is the truncation
+   * receipt in the same group unit, so a bounded list never reads as the whole set.
    */
   sites?: DisclosedDynamicSite[];
-  /** Sites not listed because the disclosure bound was reached. Absent when nothing was omitted. */
+  /**
+   * File+kind groups not listed because the disclosure bound was reached. Absent when nothing was
+   * omitted. In groups, matching `sites`, NOT in the raw site unit `count` uses.
+   */
   omittedSites?: number;
 }
 

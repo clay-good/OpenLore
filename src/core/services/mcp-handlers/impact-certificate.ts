@@ -147,6 +147,18 @@ export interface ImpactCertificate {
    * Absent when the change touches no site.
    */
   dynamicBoundaries?: KnownUnknowableCrossing;
+  /**
+   * The certificate's negative claim — "this change opens no new path into any declared surface" —
+   * is NOT established, because a dispatch the call graph cannot follow sits in the changed files
+   * (change: disclose-dynamic-boundary-regions). Present only when the certificate actually made
+   * that claim (a declared surface exists and nothing newly opened) AND a site qualifies it: a
+   * certificate that already reports an opened path has no negative claim to qualify, and one over
+   * a repository with no declared surface never made the claim in the first place.
+   *
+   * This is what turns the disclosure into a QUALIFICATION rather than an informational note, and
+   * it is the condition under which the governance finding is emitted at all.
+   */
+  newPathClaimQualified?: true;
   headline: string;
 }
 
@@ -786,7 +798,13 @@ function renderHeadline(cert: ImpactCertificate): string {
     const surfaces = [...new Set(cert.newlyOpenedPaths.map(p => p.surface))];
     parts.push(`${opened} new path(s) into ${surfaces.length} surface(s): ${surfaces.join(', ')}`);
   } else if (cert.surfaces.length > 0) {
-    parts.push('no new paths into any declared surface');
+    parts.push(cert.newPathClaimQualified
+      // The claim is withheld, not softened: a reflective dispatch in the diff can open a path
+      // without leaving an edge, so "no new paths" is not something this certificate established.
+      ? 'no new paths into any declared surface FOUND — not established: '
+        + `${cert.dynamicBoundaries?.count ?? 0} dispatch site(s) in the diff are ones the call `
+        + 'graph cannot follow'
+      : 'no new paths into any declared surface');
   }
   if (cert.highestSurfaceSeverity === 'critical') parts.push('⛔ critical surface newly reached');
   const specs = 'willGoStale' in cert.specs ? cert.specs.willGoStale : 0;
@@ -933,6 +951,12 @@ export async function computeImpactCertificate(
     changedFiles,
   );
   if (dynamicCrossing) caveats.push(dynamicCrossing.detail);
+  // The claim a site can invert is the NEGATIVE one: "nothing newly opened". A certificate that
+  // already reports an opened path, or one with no declared surface, made no such claim and is
+  // therefore not qualified — the crossing stays informational there.
+  const newPathClaimQualified = !!dynamicCrossing
+    && newlyOpenedPaths.length === 0
+    && surfaces.length > 0;
   if (diffError) caveats.push(`The change diff could not be read (base ${baseRef}): ${diffError}. Newly-opened paths were not computed.`);
   // Only reachable when --allow-base-fallback was set (an unresolvable base is otherwise fatal).
   if (baseResolution.fellBack) caveats.push(`Requested base ref "${baseResolution.requested}" did not resolve; certified against "${resolvedBaseRef}" (--allow-base-fallback).`);
@@ -964,6 +988,7 @@ export async function computeImpactCertificate(
     posture: 'advisory',
     caveats,
     ...(dynamicCrossing ? { dynamicBoundaries: dynamicCrossing } : {}),
+    ...(newPathClaimQualified ? { newPathClaimQualified: true as const } : {}),
     headline: '',
   };
   cert.headline = renderHeadline(cert);

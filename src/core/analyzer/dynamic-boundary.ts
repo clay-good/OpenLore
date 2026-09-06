@@ -31,9 +31,13 @@
  *     exactly as today. A language with no declared spec contributes nothing and is reported as
  *     *unsupported* by the capability registry — never as "contains no dynamic dispatch".
  *
- * Cost: no second parse. The walk runs over the tree the extractor already parsed, and only after a
- * cheap substring pre-scan of the source finds at least one of the language's trigger tokens — so a
- * file with no dynamic construct pays a handful of `indexOf` calls and no traversal at all.
+ * Cost: no second parse — the walk runs over the tree the extractor already parsed, gated by a
+ * substring pre-scan of the source. The gate is real but not free, and the honest figures are:
+ * roughly 30% of this repository's TypeScript files trip it (the tokens `eval`, `require(`,
+ * `import(` and `](` occur inside ordinary identifiers and CommonJS), and a triggered file costs
+ * about 30% more extraction time than an untriggered one. An untriggered file pays only the
+ * `indexOf` scans. Retained candidates are capped per file, so a generated dispatch table cannot
+ * grow the payload that crosses the worker and fact-cache boundaries.
  *
  * Deterministic: integer positions over a deterministic walk, sorted output, no clock — so two
  * analyses of unchanged sources produce byte-identical artifacts.
@@ -79,8 +83,23 @@ export const DYNAMIC_BOUNDARY_REFUSALS = [
   'no-static-target',
   /** A static literal selector that names no symbol in this index. */
   'unresolved-external',
+  /**
+   * A static literal selector naming exactly ONE symbol, which the resolver nonetheless did not
+   * bind to an edge. Its own reason because the alternative — folding it into
+   * `unresolved-external` — states "resolves to no symbol" about a target that plainly does, which
+   * is a false statement from the feature whose whole claim is honesty. This is the case the
+   * sibling change `resolve-literal-reflective-dispatch` is built to recover.
+   */
+  'resolvable-but-unbound',
   /** A static literal selector that names more than one symbol; picking one would be a guess. */
   'ambiguous-target',
+  /**
+   * A static literal selector the record could not resolve because it was derived from ONE FILE —
+   * the incremental watcher lane, which sees no repository-wide symbol table. Distinct from
+   * `unresolved-external` so a single-file record never claims a repository-wide absence it did
+   * not check.
+   */
+  'unresolved-in-file-scope',
 ] as const;
 
 export type DynamicBoundaryRefusal = (typeof DYNAMIC_BOUNDARY_REFUSALS)[number];
@@ -89,7 +108,10 @@ export type DynamicBoundaryRefusal = (typeof DYNAMIC_BOUNDARY_REFUSALS)[number];
 export const DYNAMIC_BOUNDARY_REFUSAL_LABEL: Record<DynamicBoundaryRefusal, string> = {
   'no-static-target': 'the dispatch target is computed at runtime',
   'unresolved-external': 'the named target resolves to no symbol in this index',
+  'resolvable-but-unbound': 'the named target resolves to one symbol, but no edge was bound to it',
   'ambiguous-target': 'the named target resolves to more than one symbol',
+  'unresolved-in-file-scope': 'the named target was not resolved within this file, and no '
+    + 'repository-wide lookup was performed for this record',
 };
 
 /**
@@ -173,6 +195,12 @@ export interface DynamicBoundaryCandidate {
   evidenceTruncated?: true;
   /** The static literal the construct dispatches to, when it has one (`getattr(o, "run")`). */
   literalTarget?: string;
+  /**
+   * The EXACT number of constructs matched in this file, present on the first candidate only and
+   * only when the retained list was capped. Keeps a file's reported scale true after the matcher
+   * bounds what it carries across the worker and cache boundaries.
+   */
+  matchedTotal?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +270,18 @@ interface LanguageSpec {
    */
   importNodeTypes?: string[];
   /**
+   * Which ARGUMENT carries the dispatch selector, per rule name — `getattr(o, "run")` is index 1,
+   * `send(:run)` is index 0. A rule absent from this table has no static selector to read, which is
+   * the right answer for `eval`/`exec`/`Proxy`: the argument is code or an object, not a name.
+   */
+  selectorIndex?: Record<string, number>;
+  /**
+   * Rules that fire ONLY when the declared argument is not a static string literal. `import(spec)`
+   * and `require(name)` are dynamic boundaries; `import('./known')` is an ordinary statically
+   * resolvable import and must not be recorded. Keyed by callee name → the argument to inspect.
+   */
+  nonLiteralArg?: Record<string, { index: number; kind: DynamicBoundaryKind }>;
+  /**
    * Whether a {@link LanguageSpec.calleeKinds} name still counts when called on an arbitrary
    * receiver (`mailer.send(:deliver)`).
    *
@@ -272,7 +312,8 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       compile: 'code-eval',
       getattr: 'reflective-invoke',
       setattr: 'metaprogrammed-definition',
-      __import__: 'dynamic-import',
+      // `__import__` is handled by `nonLiteralArg`, not here: `__import__("os")` names its module
+      // statically and is an ordinary resolvable import, so only a computed name is a boundary.
     },
     dottedKinds: {
       'importlib.import_module': 'dynamic-import',
@@ -284,6 +325,8 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     computedCalleeTypes: ['subscript'],
     staticIndexTypes: ['string', 'integer'],
     literalTypes: ['string'],
+    selectorIndex: { getattr: 1, setattr: 1, import_module: 1, methodcaller: 0 },
+    nonLiteralArg: { __import__: { index: 0, kind: 'dynamic-import' } },
     diPackages: ['dependency_injector', 'injector', 'punq', 'lagom'],
     diMethods: ['resolve', 'provide'],
     importStyle: 'python',
@@ -308,6 +351,10 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       define_singleton_method: 'metaprogrammed-definition',
     },
     literalTypes: ['simple_symbol', 'string', 'string_content'],
+    selectorIndex: {
+      send: 0, public_send: 0, __send__: 0, const_get: 0, instance_variable_get: 0,
+      define_method: 0, define_singleton_method: 0,
+    },
     // `send`, `public_send`, `instance_eval` and friends are Ruby `Object`/`Module` methods: the
     // reflective meaning belongs to the language, not to whatever object is on the left.
     calleeKindsOnAnyReceiver: true,
@@ -326,6 +373,7 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     },
     computedCalleeTypes: ['variable_name', 'dynamic_variable_name'],
     literalTypes: ['string', 'encapsed_string', 'string_content'],
+    selectorIndex: { call_user_func: 0, call_user_func_array: 0 },
     importStyle: 'php',
     importNodeTypes: ['namespace_use_declaration'],
   },
@@ -337,6 +385,7 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       { methods: ['Call', 'CallSlice', 'MethodByName', 'FieldByName'], requires: ['"reflect"'], kind: 'reflective-invoke' },
     ],
     literalTypes: ['interpreted_string_literal', 'raw_string_literal'],
+    selectorIndex: { MethodByName: 0, FieldByName: 0 },
     importStyle: 'go',
     importNodeTypes: ['import_declaration'],
   },
@@ -351,6 +400,7 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       { methods: ['getBean'], requires: ['org.springframework'], kind: 'container-resolution' },
     ],
     literalTypes: ['string_literal'],
+    selectorIndex: { getDeclaredMethod: 0, getMethod: 0, getBean: 0, forName: 0 },
     importStyle: 'jvm',
     importNodeTypes: ['import_declaration'],
   },
@@ -364,6 +414,7 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       { methods: ['GetService', 'GetRequiredService'], requires: ['Microsoft.Extensions.DependencyInjection'], kind: 'container-resolution' },
     ],
     literalTypes: ['string_literal'],
+    selectorIndex: { GetMethod: 0, GetService: 0, GetRequiredService: 0 },
     importStyle: 'jvm',
     importNodeTypes: ['using_directive'],
   },
@@ -430,6 +481,15 @@ function tsSpec(): LanguageSpec {
     computedCalleeTypes: ['subscript_expression'],
     staticIndexTypes: ['string', 'number'],
     literalTypes: ['string', 'string_fragment', 'template_string'],
+    selectorIndex: { get: 1, apply: 1, defineProperty: 1, resolve: 0, make: 0 },
+    // `import(spec)` / `require(name)` with a NON-literal specifier is the commonest dynamic import
+    // in the substrate's own primary language, and it was silently absent: `import` is the callee of
+    // a `call_expression`, matched by none of the other rule tables. With a LITERAL specifier it is
+    // an ordinary statically resolvable import and is deliberately not recorded.
+    nonLiteralArg: {
+      import: { index: 0, kind: 'dynamic-import' },
+      require: { index: 0, kind: 'dynamic-import' },
+    },
     diPackages: ['inversify', 'tsyringe', 'typedi', 'awilix', '@nestjs/common', 'injection-js'],
     diMethods: ['get', 'resolve', 'make', 'cradle'],
     importStyle: 'js',
@@ -508,40 +568,50 @@ export function toEvidence(raw: string): { evidence: string; truncated: boolean 
 }
 
 /** Strip the quoting from a literal node's text, so `"run"` / `:run` / `'run'` all read `run`. */
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
 function literalValue(text: string): string | undefined {
   const t = text.trim();
   if (t.length === 0) return undefined;
-  if (t.startsWith(':')) return t.slice(1) || undefined;
-  const q = t[0];
-  if ((q === '"' || q === "'" || q === '`') && t.length >= 2 && t.endsWith(q)) {
-    const inner = t.slice(1, -1);
-    return inner.length > 0 ? inner : undefined;
-  }
-  // Ruby's `string_content` / TS's `string_fragment` arrive already unquoted.
-  return /^[A-Za-z_$][\w$]*$/.test(t) ? t : undefined;
+  const inner = t.startsWith(':') ? t.slice(1)
+    : ((t[0] === '"' || t[0] === "'" || t[0] === '`') && t.length >= 2 && t.endsWith(t[0]))
+      ? t.slice(1, -1)
+      // Ruby's `string_content` / TS's `string_fragment` arrive already unquoted.
+      : t;
+  // The identifier test applies to the UNQUOTED value too. Without it a quoted string is accepted
+  // verbatim, so `eval("a + b")` would be reported as a dispatch to a symbol named `a + b`.
+  return IDENTIFIER.test(inner) ? inner : undefined;
 }
 
 /**
- * The literal dispatch target of a call, when it has one: the first string/symbol argument whose
- * value looks like an identifier. `getattr(o, "run")` → `run`; `getattr(o, name)` → undefined.
+ * The literal dispatch target of a call, read from the ARGUMENT POSITION the rule declares.
+ * `getattr(o, "run")` → `run` (selector at index 1); `getattr(o, name)` → undefined.
+ *
+ * Positional on purpose. Scanning for "the first string anywhere in the arguments" reads the wrong
+ * thing twice over: `getattr(o, name, "fallback")` would report the DEFAULT VALUE as the dispatch
+ * target — turning a genuinely runtime-computed dispatch into a named one, with a refusal reason
+ * about a symbol it never dispatches to — and `eval("a + b")` would report an arbitrary code string
+ * as a target name. A rule with no declared selector position (`eval`, `exec`) has no literal
+ * target at all, which is correct: there is nothing there to resolve.
  */
 function literalTargetOf(
   source: string,
   call: DynamicBoundaryNode,
   spec: LanguageSpec,
+  selectorIndex: number | undefined,
 ): string | undefined {
+  if (selectorIndex === undefined) return undefined;
   const args = field(call, 'arguments') ?? childrenOf(call).find(c => /argument/.test(c.type));
   if (!args) return undefined;
-  const stack = [...childrenOf(args)];
-  let depth = 0;
-  while (stack.length > 0 && depth++ < 64) {
-    const n = stack.shift()!;
-    if (spec.literalTypes.includes(n.type)) {
-      const v = literalValue(textOf(source, n));
-      if (v) return v;
-    }
-    // A quoted literal wraps its content in a child node in several grammars.
-    if (/^(string|encapsed)/.test(n.type)) stack.push(...childrenOf(n));
+  // Argument lists carry punctuation children in several grammars; count only real arguments.
+  const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
+  const selector = actual[selectorIndex];
+  if (!selector) return undefined;
+  if (spec.literalTypes.includes(selector.type)) return literalValue(textOf(source, selector));
+  // A quoted literal wraps its content in a child node in several grammars; look exactly one level
+  // in, never across siblings.
+  for (const c of childrenOf(selector)) {
+    if (spec.literalTypes.includes(c.type)) return literalValue(textOf(source, c));
   }
   return undefined;
 }
@@ -652,6 +722,7 @@ export function matchDynamicBoundaries(
 
   const out: DynamicBoundaryCandidate[] = [];
   const seen = new Set<number>();
+  let matched = 0;
   const record = (
     kind: DynamicBoundaryKind,
     node: DynamicBoundaryNode,
@@ -661,6 +732,13 @@ export function matchDynamicBoundaries(
     // counted twice, and double-counting would inflate the density budget as well as the receipt.
     if (seen.has(node.startIndex)) return;
     seen.add(node.startIndex);
+    matched++;
+    // Retained candidates are capped HERE, not at finalize. A generated dispatch table can carry
+    // thousands, and every one of them would otherwise be structured-cloned out of an extraction
+    // worker, held for the whole build, and JSON-serialized into a fact-cache row — megabytes per
+    // file, for a set the artifact caps at fifty anyway. `matched` keeps the count exact so the
+    // truncation receipt still reports the true scale.
+    if (out.length >= DYNAMIC_BOUNDARY_SITE_CAP) return;
     const { evidence, truncated } = toEvidence(textOf(source, node));
     out.push({
       kind,
@@ -704,22 +782,28 @@ export function matchDynamicBoundaries(
         const bareApplies = !text.includes('.')
           || isSelfDotted(text)
           || !!spec.calleeKindsOnAnyReceiver;
-        const kind = dotted ?? (bareApplies ? spec.calleeKinds[lastSegment(text)] : undefined);
-        if (kind) {
-          record(kind, n, literalTargetOf(source, n, spec));
+        const bare = lastSegment(text);
+        // 2. A rule that fires only on a NON-literal argument: `import(spec)` is a boundary,
+        //    `import('./known')` is an ordinary statically resolvable import.
+        const dyn = bareApplies ? spec.nonLiteralArg?.[bare] : undefined;
+        const kind = dotted ?? (bareApplies ? spec.calleeKinds[bare] : undefined);
+        if (dyn && !kind) {
+          if (literalTargetOfAnyShape(source, n, spec, dyn.index) === undefined) record(dyn.kind, n);
+        } else if (kind) {
+          record(kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[bare]));
         } else {
           // 2. Gated member rules — `.invoke(`, `.Call(`, `.getBean(` — which fire only when the
           //    file imports the framework that gives the name its reflective meaning.
           const method = lastSegment(text);
           const gate = gates.find(g => g.methods.includes(method));
           if (gate) {
-            record(gate.kind, n, literalTargetOf(source, n, spec));
+            record(gate.kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[method]));
           } else if (
             // 3. DI container resolution — grounded in a declared DI package import, never on the
             //    bare method name. `this.cache.get(key)` in a file with no DI import is not a site.
             diPresent && spec.diMethods?.includes(method) && text.includes('.')
           ) {
-            record('container-resolution', n, literalTargetOf(source, n, spec));
+            record('container-resolution', n, literalTargetOf(source, n, spec, spec.selectorIndex?.[method]));
           }
         }
       }
@@ -730,7 +814,35 @@ export function matchDynamicBoundaries(
   }
 
   out.sort((a, b) => a.startIndex - b.startIndex);
+  // The exact match count rides the FIRST candidate, so the file record can report its true scale
+  // even when the retained list is capped. Carrying it here rather than changing the return type
+  // keeps the fact-cache and worker payloads plain arrays.
+  if (out.length > 0 && matched > out.length) out[0].matchedTotal = matched;
   return out;
+}
+
+/**
+ * Is there ANY literal at the given argument position — quoted or not, identifier-shaped or not?
+ * Distinct from {@link literalTargetOf}, which asks for a usable dispatch NAME. `import('./a/b')`
+ * has a literal specifier (so it is statically resolvable and not a boundary) but no
+ * identifier-shaped target, and conflating the two questions would record every static import.
+ */
+function literalTargetOfAnyShape(
+  source: string,
+  call: DynamicBoundaryNode,
+  spec: LanguageSpec,
+  selectorIndex: number,
+): string | undefined {
+  const args = field(call, 'arguments') ?? childrenOf(call).find(c => /argument/.test(c.type));
+  if (!args) return undefined;
+  const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
+  const selector = actual[selectorIndex];
+  if (!selector) return undefined;
+  if (spec.literalTypes.includes(selector.type)) return textOf(source, selector);
+  for (const c of childrenOf(selector)) {
+    if (spec.literalTypes.includes(c.type)) return textOf(source, c);
+  }
+  return undefined;
 }
 
 /**
@@ -748,11 +860,36 @@ function isSelfDotted(text: string): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** What the resolver did with a candidate's literal target. Supplied by the caller after Pass 2. */
+/**
+ * The synthesis rule a reflective-resolution edge carries. Declared here, next to the partition it
+ * governs, so the recovering change (`resolve-literal-reflective-dispatch`) and the disclosing one
+ * cannot drift apart on the name.
+ *
+ * Nothing emits it yet, which is the correct state: today's resolver really does bind no edge for
+ * any of these constructs, so today every candidate becomes a site.
+ */
+export const REFLECTIVE_RESOLUTION_RULE = 'literal-reflective';
+
 export interface ResolutionProbe {
-  /** True when the resolver emitted an edge for this exact construct — the candidate is retracted. */
-  resolvedToEdge(candidate: { symbolId?: string; line: number; literalTarget?: string }): boolean;
-  /** How many internal symbols carry this name. 0 → unresolved-external, >1 → ambiguous-target. */
-  countSymbolsNamed(name: string): number;
+  /**
+   * True when the resolver emitted a REFLECTIVE-RESOLUTION edge for this construct — the candidate
+   * is retracted.
+   *
+   * Gated on the synthesis rule, not on a position key, because a resolved edge carries no byte
+   * offset and no column: a caller+line+name key cannot tell two calls apart, so in
+   * `x = getattr(o, "run"); run()` the ordinary `run()` edge would erase the `getattr` site,
+   * leaving neither an edge NOR a site — a silence indistinguishable from "no dynamic dispatch
+   * here", which is the exact outcome this module exists to prevent. Only an edge the reflective
+   * resolver itself produced means "the resolver followed this".
+   */
+  resolvedToEdge(candidate: { symbolId?: string; startIndex: number; literalTarget?: string }): boolean;
+  /**
+   * How many internal symbols carry this name: 0 → `unresolved-external`, 1 →
+   * `resolvable-but-unbound`, >1 → `ambiguous-target`. `null` means the count could not be taken at
+   * all — a single-file derivation with no repository-wide symbol table — which yields
+   * `unresolved-in-file-scope` rather than a repository-wide claim the probe never checked.
+   */
+  countSymbolsNamed(name: string): number | null;
 }
 
 /** A candidate with its enclosing-symbol attribution filled in by the extractor. */
@@ -782,9 +919,11 @@ export function finalizeDynamicBoundarySites(
     if (probe.resolvedToEdge(c)) continue;
     let refusal: DynamicBoundaryRefusal = 'no-static-target';
     if (c.literalTarget) {
-      refusal = probe.countSymbolsNamed(c.literalTarget) > 1
-        ? 'ambiguous-target'
-        : 'unresolved-external';
+      const count = probe.countSymbolsNamed(c.literalTarget);
+      refusal = count === null ? 'unresolved-in-file-scope'
+        : count === 0 ? 'unresolved-external'
+        : count === 1 ? 'resolvable-but-unbound'
+        : 'ambiguous-target';
     }
     sites.push({
       line: c.line,
@@ -795,29 +934,39 @@ export function finalizeDynamicBoundarySites(
       ...(c.evidenceTruncated ? { evidenceTruncated: true as const } : {}),
     });
   }
+  // Every site is returned, uncapped. Bounding belongs to `buildFileDynamicBoundary`, which is the
+  // only place that can also RECORD the truncation — slicing here silently made `totalSites` and
+  // `truncated` unreachable on every real pipeline path, so an over-cap file under-reported its own
+  // scale with no receipt.
   sites.sort((a, b) => a.line - b.line || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
-  if (sites.length <= DYNAMIC_BOUNDARY_SITE_CAP) return sites;
-  return sites.slice(0, DYNAMIC_BOUNDARY_SITE_CAP);
+  return sites;
 }
 
-/** Build one file's record from its finalized sites, or `undefined` when it has none. */
+/**
+ * Build one file's record from its finalized sites, or `undefined` when it has none.
+ *
+ * `matchedTotal` is the count the MATCHER saw before it bounded what it carried; without it a file
+ * with 800 reflective calls would report `sites: 50` and no truncation at all, because everything
+ * downstream only ever sees the 50 that survived. The bound is disclosed at whichever layer
+ * actually applied it.
+ */
 export function buildFileDynamicBoundary(
   filePath: string,
   language: string,
   allSites: DynamicBoundarySite[],
+  matchedTotal?: number,
 ): FileDynamicBoundary | undefined {
   if (allSites.length === 0) return undefined;
   const sorted = [...allSites].sort(
     (a, b) => a.line - b.line || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0),
   );
   const kept = sorted.slice(0, DYNAMIC_BOUNDARY_SITE_CAP);
+  const total = Math.max(matchedTotal ?? 0, sorted.length);
   return {
     filePath,
     language,
     sites: kept,
-    ...(sorted.length > kept.length
-      ? { totalSites: sorted.length, truncated: true as const }
-      : {}),
+    ...(total > kept.length ? { totalSites: total, truncated: true as const } : {}),
   };
 }
 

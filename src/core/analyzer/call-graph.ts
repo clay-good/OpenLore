@@ -60,6 +60,7 @@ import {
   matchDynamicBoundaries,
   finalizeDynamicBoundarySites,
   buildFileDynamicBoundary,
+  REFLECTIVE_RESOLUTION_RULE,
   type AttributedCandidate,
   type DynamicBoundaryNode,
   type FileDynamicBoundary,
@@ -5046,25 +5047,40 @@ function finalizeDynamicBoundaries(
     if (n.isExternal) continue;
     nameCounts.set(n.name, (nameCounts.get(n.name) ?? 0) + 1);
   }
-  // Keyed on caller + line + the name the edge actually resolved, so a retraction requires the
-  // resolver to have emitted an edge for THIS construct — not merely for something on the same line.
+  // A candidate is retracted ONLY by an edge the reflective resolver itself produced — never by
+  // one that merely shares a caller and a name. A resolved edge carries no byte offset and no
+  // column, so a caller+line+name key cannot tell two calls apart: in
+  // `x = getattr(o, "run"); run()` the ordinary `run()` edge would erase the `getattr` site,
+  // leaving neither an edge nor a site — the exact silence this feature exists to remove.
+  //
+  // Nothing emits the rule yet (the sibling change `resolve-literal-reflective-dispatch` owns it),
+  // so today nothing retracts — which is the honest answer, because today's graph really does carry
+  // no edge for any of these constructs. The key set is built only over callers that carry a
+  // candidate, so a repository with one reflective file does not allocate a string per graph edge.
+  const callersWithCandidates = new Set<string>();
+  for (const { candidates } of byFile.values()) {
+    for (const c of candidates) if (c.symbolId) callersWithCandidates.add(c.symbolId);
+  }
   const resolvedKeys = new Set<string>();
-  for (const e of edges) {
-    if (e.line === undefined) continue;
-    resolvedKeys.add(`${e.callerId}\u0000${e.line}\u0000${e.calleeName}`);
+  if (callersWithCandidates.size > 0) {
+    for (const e of edges) {
+      if (e.synthesizedBy !== REFLECTIVE_RESOLUTION_RULE) continue;
+      if (!callersWithCandidates.has(e.callerId)) continue;
+      resolvedKeys.add(`${e.callerId}\u0000${e.calleeName}`);
+    }
   }
 
   const probe: ResolutionProbe = {
     resolvedToEdge: (c) =>
       !!c.symbolId && !!c.literalTarget
-      && resolvedKeys.has(`${c.symbolId}\u0000${c.line}\u0000${c.literalTarget}`),
+      && resolvedKeys.has(`${c.symbolId}\u0000${c.literalTarget}`),
     countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
   };
 
   const out = new Map<string, FileDynamicBoundary>();
   for (const [filePath, { language, candidates }] of byFile) {
     const sites = finalizeDynamicBoundarySites(candidates, probe);
-    const record = buildFileDynamicBoundary(filePath, language, sites);
+    const record = buildFileDynamicBoundary(filePath, language, sites, candidates[0]?.matchedTotal);
     if (record) out.set(filePath, record);
   }
   return out.size > 0 ? out : undefined;
@@ -6482,23 +6498,21 @@ export async function extractFileDynamicBoundary(
   const result = await dispatchFileExtract(file);
   const candidates = result?.dynamicBoundary;
   if (!candidates?.length) return undefined;
-  const nameCounts = new Map<string, number>();
-  for (const n of result!.nodes) {
-    if (n.isExternal) continue;
-    nameCounts.set(n.name, (nameCounts.get(n.name) ?? 0) + 1);
-  }
-  const resolvedKeys = new Set(
-    (result!.rawEdges ?? [])
-      .filter(e => e.line !== undefined)
-      .map(e => `${e.callerId}\u0000${e.line}\u0000${e.calleeName}`),
-  );
+  const localNames = new Set<string>();
+  for (const n of result!.nodes) if (!n.isExternal) localNames.add(n.name);
   const sites = finalizeDynamicBoundarySites(candidates, {
-    resolvedToEdge: (c) =>
-      !!c.symbolId && !!c.literalTarget
-      && resolvedKeys.has(`${c.symbolId}\u0000${c.line}\u0000${c.literalTarget}`),
-    countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
+    // Pass-1 raw edges predate resolution entirely — no reflective-resolution edge can exist here,
+    // so nothing retracts on this lane. Deliberate and sound in the disclosing direction: a
+    // single-file re-derive can only ever report MORE boundaries than the full build, never fewer,
+    // and an extra disclosed boundary is never a false claim of absence.
+    resolvedToEdge: () => false,
+    // A single-file derivation has no repository-wide symbol table. Reporting 0 here would write
+    // "resolves to no symbol in this index" for a target that resolves perfectly well one file
+    // over — a false claim, and one the full build would not make for the same file. Only a name
+    // this file itself defines can be counted; anything else refuses as file-scoped.
+    countSymbolsNamed: (name) => (localNames.has(name) ? 1 : null),
   });
-  return buildFileDynamicBoundary(file.path, file.language, sites);
+  return buildFileDynamicBoundary(file.path, file.language, sites, candidates[0]?.matchedTotal);
 }
 
 export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph {

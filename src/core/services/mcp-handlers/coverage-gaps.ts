@@ -273,7 +273,15 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // (evidence), then a stable file+name tiebreak. Still label-based and
   // deterministic — no composite score, no new tuning constant.
   const isLoadBearing = (g: CoverageGap) => g.signals.some(s => s.label === 'hub' || s.label === 'chokepoint');
-  const isLive = (g: CoverageGap) => !g.alsoFlaggedDead;
+  // A gap whose dead label was WITHHELD at a dynamic boundary is not live — it is UNDECIDED, which
+  // is strictly less decided than a plain dead flag (change: disclose-dynamic-boundary-regions).
+  // Partitioning on the label alone would promote it into the live tier: it would rank above
+  // genuinely-live-and-untested gaps, displace them out of the returned page, and be counted as
+  // `live` in the composition — the system reporting a symbol as live because a boundary is nearby,
+  // which is exactly what the one-directionality rule forbids. The partition is on "reachability
+  // established", not on which label happens to be set.
+  const isReachabilityUndecided = (g: CoverageGap) => !!g.alsoFlaggedDead || !!g.deadLabelWithheld;
+  const isLive = (g: CoverageGap) => !isReachabilityUndecided(g);
   gaps.sort((a, b) => {
     const al = isLive(a) ? 1 : 0;
     const bl = isLive(b) ? 1 : 0;
@@ -293,17 +301,20 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // AND the omitted remainder, so a 264-gap set discloses its shape without the
   // caller re-deriving it.
   const liveOf = (list: CoverageGap[]) => list.filter(isLive).length;
+  const withheldOf = (list: CoverageGap[]) => list.filter(g => !!g.deadLabelWithheld).length;
+  // Three buckets, not two: a withheld gap is folded into neither `live` nor `deadFlagged`, so the
+  // published counts never absorb an undecided symbol into a decided one. `deadFlagged` keeps its
+  // exact previous meaning — the symbols still carrying the label.
+  const bucket = (list: CoverageGap[], size: number) => {
+    const live = liveOf(list);
+    const boundaryWithheld = withheldOf(list);
+    return { live, deadFlagged: size - live - boundaryWithheld, ...(boundaryWithheld > 0 ? { boundaryWithheld } : {}) };
+  };
+  const remainder = gaps.filter(g => !returned.includes(g));
   const composition = {
-    returned: { live: liveOf(returned), deadFlagged: returned.length - liveOf(returned) },
-    ...(omitted > 0
-      ? {
-          omittedRemainder: {
-            live: liveOf(gaps) - liveOf(returned),
-            deadFlagged: omitted - (liveOf(gaps) - liveOf(returned)),
-          },
-        }
-      : {}),
-    total: { live: liveOf(gaps), deadFlagged: gaps.length - liveOf(gaps) },
+    returned: bucket(returned, returned.length),
+    ...(omitted > 0 ? { omittedRemainder: bucket(remainder, omitted) } : {}),
+    total: bucket(gaps, gaps.length),
   };
 
   // ── Honest coverage posture (mirrors select_tests' testDetection) ───────────

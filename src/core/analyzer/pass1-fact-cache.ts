@@ -226,7 +226,7 @@ export function deserializeFacts(raw: string): { facts: FileExtractResult | unde
 // for exactly the reason every other one is: a change to what counts as a credential changes
 // what the extractor computes, and a cached row written under the old rules must not be reused.
 const STAMP_ROOTS = ['.', '../scip', '../../utils', '../../types', '../../constants',
-  '../services/secret-redaction.ts'];
+  '../services/secret-redaction'];
 
 /** Files under a stamp root that cannot affect extraction output. */
 function isStampable(name: string): boolean {

@@ -78,6 +78,14 @@ interface ImpactResult {
   blastRadius: { total: number; upstream: number; downstream: number; infrastructure?: number };
   riskLevel: RiskLevel;
   crossDomain?: { ecosystems: string[] };
+  /**
+   * The caller and callee closures this impact analysis traversed. Read here only for their FILES,
+   * to scope the dynamic-boundary disclosure to the closure the briefing actually computed
+   * (change: disclose-dynamic-boundary-regions) — a site in an upstream caller's file is precisely
+   * what bounds a blast radius, and scoping to the changed files alone would never disclose it.
+   */
+  upstreamChain?: Array<{ file?: string }>;
+  downstreamCriticalPath?: Array<{ file?: string }>;
   governingDecisions?: Array<{ id?: string; title: string; affectedDomains?: string[]; provenance?: ServedContentProvenance }>;
 }
 
@@ -224,6 +232,9 @@ export async function computeBlastRadius(
   // Symbols whose impact analysis threw. `analyzedSymbolCount` is documented below as
   // authoritative, so it must count symbols actually ANALYZED, not merely attempted.
   let impactFailures = 0;
+  // Every file the composed impact analyses traversed — the caller/callee closure, not just the
+  // diff. Accumulated as the loop runs so the boundary disclosure covers what the briefing saw.
+  const traversedFiles = new Set<string>(changedFiles);
 
   for (const seed of analyzed) {
     // Per-symbol best-effort: one symbol whose impact analysis throws must not
@@ -242,6 +253,9 @@ export async function computeBlastRadius(
     const isHub = r.metrics?.isHub ?? false;
     topSymbols.push({ symbol: r.symbol, file: r.file, riskLevel: risk, affectedCallers: callers, fanIn: r.metrics?.fanIn ?? 0, isHub });
     if (isHub) hubsTouched.push({ symbol: r.symbol, fanIn: r.metrics?.fanIn ?? 0 });
+    if (r.file) traversedFiles.add(r.file);
+    for (const n of r.upstreamChain ?? []) if (n.file) traversedFiles.add(n.file);
+    for (const n of r.downstreamCriticalPath ?? []) if (n.file) traversedFiles.add(n.file);
     for (const e of r.crossDomain?.ecosystems ?? []) layers.add(e);
     for (const d of r.governingDecisions ?? []) {
       governing.set(d.title, d.provenance ?? 'local-unreviewed');
@@ -380,7 +394,7 @@ export async function computeBlastRadius(
   // (change: disclose-dynamic-boundary-regions) — the constructs that make the radius a lower bound.
   const dynamicCrossing = dynamicBoundaryCrossing(
     await loadDynamicBoundaryReport(absDir),
-    [...changedFiles, ...seeds.map(s => s.filePath)],
+    traversedFiles,
   );
   const confidenceBoundary = assembleBoundary({
     staleness,

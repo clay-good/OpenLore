@@ -58,9 +58,9 @@ interface GapResult {
     deadLabelWithheld?: { reason: string; site: { file: string; line: number; kind: string } };
   }>;
   composition?: {
-    returned: { live: number; deadFlagged: number };
-    omittedRemainder?: { live: number; deadFlagged: number };
-    total: { live: number; deadFlagged: number };
+    returned: { live: number; deadFlagged: number; boundaryWithheld?: number };
+    omittedRemainder?: { live: number; deadFlagged: number; boundaryWithheld?: number };
+    total: { live: number; deadFlagged: number; boundaryWithheld?: number };
   };
   omitted?: number;
   note?: string;
@@ -390,14 +390,27 @@ describe('the also-dead label is withheld behind a dynamic boundary', () => {
         site: { file: 'src/a.ts', line: 12, kind: 'computed-member' },
       });
     }
-    // One-directional: withholding a label never removes the gap, and never implies the symbol is
-    // tested or reached. The gap count is unchanged from the no-artifact run.
+    // One-directional: withholding a label never removes the gap, never implies the symbol is
+    // tested or reached, AND never promotes it into the live bucket or the live ranking tier —
+    // an undecided symbol is strictly less decided than a plain dead-flagged one.
     const clean = await mkdtemp(join(tmpdir(), 'openlore-gaps-clean-'));
     try {
       setFixture();
       const baseline = await handleReportCoverageGaps({ directory: clean }) as GapResult;
       expect(r.gapCount).toBe(baseline.gapCount);
       expect(r.reachableFromTest).toBe(baseline.reachableFromTest);
+      // The live count must NOT grow: the withheld symbols came out of the dead bucket, and they
+      // land in their own, never in `live`.
+      expect(r.composition!.total.live).toBe(baseline.composition!.total.live);
+      expect(r.composition!.total.boundaryWithheld).toBe(withheld.length);
+      expect(r.composition!.total.live + r.composition!.total.deadFlagged
+        + (r.composition!.total.boundaryWithheld ?? 0)).toBe(r.gapCount);
+      // …and they must not have jumped the ranking: every live gap still precedes every withheld one.
+      const names = r.coverageGaps.map(g => g.name);
+      const lastLive = Math.max(...r.coverageGaps
+        .map((g, i) => (!g.alsoFlaggedDead && !g.deadLabelWithheld ? i : -1)));
+      const firstWithheld = names.findIndex((_, i) => !!r.coverageGaps[i].deadLabelWithheld);
+      if (lastLive >= 0 && firstWithheld >= 0) expect(firstWithheld).toBeGreaterThan(lastLive);
     } finally {
       await rm(clean, { recursive: true, force: true });
     }
