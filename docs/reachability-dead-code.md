@@ -26,6 +26,33 @@ registries), reflection, or public API consumed *outside* the repo. All of these
 Every response carries `soundness.posture: "candidates-not-authority"` and explicit caveats. Treat
 it as a lead generator for a human/agent to verify — not a delete list.
 
+### The blind spot is now named per answer, not per README
+
+The paragraph above is a *standing* caveat: it cannot say which answer is affected. The analyzer now
+records each construct the resolver cannot follow — a **dynamic-boundary site** — during the same
+parse that builds the graph, so a conclusion can name the specific line that bounds it:
+
+- a candidate with a site that can **name** it is capped at `low`, and the stated reason is
+  `a computed member dispatch at src/cli/commands/doctor.ts:742 can reach this symbol without a
+  graph edge` rather than only "dynamic language";
+- the answer's `confidenceBoundary.knownUnknowable` carries a `dynamic-boundary` crossing listing
+  the file, line and kind of every site inside the subgraph the answer traversed — bounded,
+  deduplicated by kind and file, with the omitted count stated;
+- `report_coverage_gaps` **withholds** its `also-dead` label for such a symbol (that label asserts
+  the absence of any caller), and `verify_claim` resolves a `dead` or `safe-to-change` claim to
+  `unverifiable` instead of `confirmed`.
+
+Scope is computable, not repository-wide: a site qualifies a candidate only in the candidate's own
+file or in a file whose transitive import closure can name it, in the candidate's own language, and
+only for the kinds that can hide a *caller* (`reflective-invoke`, `computed-member`,
+`container-resolution`). Sites outside that closure are left to the standing caveat above.
+
+It is **disclosure only** — never resolution, and never the opposite conclusion. A boundary can
+withhold a negative claim; it can never report a symbol as live, tested, or unsafe. Recovering the
+statically-decidable subset is a separate change (`resolve-literal-reflective-dispatch`). A language
+with no matcher records no site and is reported as *unsupported* by the capability registry, never as
+containing no dynamic dispatch.
+
 ## How roots and confidence work
 
 A node is a **root** (assumed live) if it is a test, is imported by name from another file, is a
@@ -37,7 +64,7 @@ Confidence is deliberately conservative — the bias is toward **false-live over
 |------------|------|
 | `high` | static language · no internal caller · not imported by name · **and its module is not imported anywhere** |
 | `medium` | reachable only from other dead code, or no dependency-graph signal available |
-| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve) |
+| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve), **or a dynamic-boundary site can name it** |
 
 That last rule matters: on a real repo it cut high-confidence candidates from ~470 to ~35 — a
 symbol living in a module something else imports is never flagged `high`, because the specific
