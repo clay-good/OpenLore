@@ -14,6 +14,7 @@ import {
   atomicWriteFile,
   casUpdate,
   quarantineCorrupt,
+  renameRetryDelaysMs,
   type SequencedStore,
 } from './atomic-store.js';
 import {
@@ -391,5 +392,31 @@ describe('decision store — concurrent CAS writers across mutation kinds', () =
     // The consolidation's rejects also applied.
     expect(byId.get('draftA')?.status).toBe('rejected');
     expect(byId.get('draftB')?.status).toBe('rejected');
+  });
+});
+
+describe('rename contention ladder (issue #457)', () => {
+  const total = (delays: readonly number[]): number => delays.reduce((sum, d) => sum + d, 0);
+
+  it('gives Windows a longer window than the platform where the failure cannot happen', () => {
+    // The holder is external (a scanner opening a just-published artifact), measured as a
+    // clean negative: on a CI runner the contention path never fires, while the reporting
+    // machine fails ~1 run in 5 on identical code.
+    const windows = renameRetryDelaysMs('win32');
+    const posix = renameRetryDelaysMs('linux');
+    expect(total(windows)).toBeGreaterThan(total(posix));
+    expect(windows.length).toBeGreaterThan(posix.length);
+    expect(windows.slice(0, posix.length)).toEqual([...posix]);
+  });
+
+  it('stays under the commit lock\'s 10s stale-candidate threshold', () => {
+    // The binding ceiling is the lock's, not the scanner's: a writer that spends its whole
+    // budget must not become a stale-lock candidate or trip a waiter's 30s timeout.
+    expect(total(renameRetryDelaysMs('win32'))).toBeLessThan(10_000);
+  });
+
+  it('leaves POSIX unchanged, where an EPERM on rename is a real permission error', () => {
+    expect(renameRetryDelaysMs('darwin')).toEqual(renameRetryDelaysMs('linux'));
+    expect(total(renameRetryDelaysMs('linux'))).toBeLessThan(4_000);
   });
 });

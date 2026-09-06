@@ -62,7 +62,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-const { atomicWriteFile } = await import('./atomic-store.js');
+const { atomicWriteFile, renameRetryDelaysMs } = await import('./atomic-store.js');
 
 let dir: string;
 let target: string;
@@ -120,8 +120,10 @@ describe('atomicWriteFile — a contended rename (issue #451)', () => {
       message: expect.stringContaining('rename'),
     });
     // Bounded: one try plus one per backoff step. A permanently unwritable
-    // destination must fail, not retry forever.
-    expect(renameCalls).toBe(9);
+    // destination must fail, not retry forever. Derived from the ladder rather than
+    // hard-coded — the Windows ladder is longer than the POSIX one (#457), and a literal
+    // here asserts the platform the suite happens to run on, not the property.
+    expect(renameCalls).toBe(renameRetryDelaysMs().length + 1);
     // A failed write leaves no litter behind in the store directory.
     expect(await leftoverTempFiles()).toEqual([]);
   });
