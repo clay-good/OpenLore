@@ -317,19 +317,26 @@ jobs:
             throw 'Windows analyze did not produce llm-context.json'
           }
 
-      - name: Exercise a real branch switch on Windows
+      - name: Exercise a real branch switch, and --watch-auto, on Windows
         shell: pwsh
         run: |
           # Real git + real chokidar + real filesystem. This is the only place the chain
           # `git checkout` -> .git/HEAD -> rebuild lane runs on any platform in CI: the
           # existing unit test injects the trigger instead of performing it.
           #
+          # watch-auto.integration.test.ts joins it because the mechanism it covers - the
+          # first tool call arming a watcher - is the one an agent on Windows depends on for
+          # a fresh index, and every Windows defect in this area so far (the npx console
+          # shim, the libuv 8.3 abort) surfaced only on the platform.
+          #
           # The watcher's UNIT files are not run here: the `windows-unit` job (#450) already
           # runs the whole unit suite on windows-latest. Integration files are not - the
           # default vitest config excludes `**/*.integration.test.ts` - so this step covers
           # exactly the gap that job leaves.
           $ErrorActionPreference = 'Stop'
-          npx vitest run --config vitest.integration.config.ts src/core/services/mcp-watcher.integration.test.ts
+          npx vitest run --config vitest.integration.config.ts `
+            src/core/services/mcp-watcher.integration.test.ts `
+            src/cli/commands/watch-auto.integration.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'Windows watcher integration tests failed' }
 
       - name: Exercise the MCP transport and the serve daemon
