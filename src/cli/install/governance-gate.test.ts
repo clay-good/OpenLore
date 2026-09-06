@@ -110,3 +110,31 @@ describe('install wires the decision trail', () => {
     expect(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8')).toBe(before);
   });
 });
+
+describe('the gate reports honestly when it cannot be installed', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-gate-fail-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    process.exitCode = undefined;
+  });
+
+  it('does not read a hook failure as success when an earlier step already failed', async () => {
+    await execFileAsync('git', ['init', '-q'], { cwd: dir });
+    await writeConfig(dir);
+    // Make the hook path unwritable so installPreCommitHook fails, and set the
+    // exit code first: a delta comparison would see "1 before, 1 after" and call
+    // that success.
+    await rm(join(dir, '.git', 'hooks'), { recursive: true, force: true });
+    await writeFile(join(dir, '.git', 'hooks'), 'not a directory');
+    process.exitCode = 1;
+
+    expect(await wireGovernanceGate(dir)).toBe('skipped');
+    // And the failure did not leak out as the command's exit code.
+    expect(process.exitCode).toBe(1);
+  });
+});

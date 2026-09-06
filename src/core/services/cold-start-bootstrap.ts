@@ -26,8 +26,9 @@
  * Deterministic, no LLM, no new dependency.
  */
 
-import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep, win32 } from 'node:path';
 import {
   AUTO_INIT_DEGRADED_FILE_CEILING,
@@ -198,7 +199,7 @@ function autoInitDisabled(directory: string): boolean {
  * a directory the user never asked about) is the exact harm the guard exists to
  * prevent (change: unify-onboarding-entrypoint).
  */
-export function isInsideGitWorkTree(directory: string): boolean {
+export function isInsideGitWorkTree(directory: string, home = homedir()): boolean {
   let dir: string;
   try {
     dir = resolve(directory);
@@ -207,15 +208,39 @@ export function isInsideGitWorkTree(directory: string): boolean {
   }
   // Never treat the repository's own metadata directory as a work tree.
   if (dir.split(sep).includes('.git')) return false;
+  const homeRoot = (() => {
+    try { return resolve(home); } catch { return null; }
+  })();
   for (;;) {
-    try {
-      if (existsSync(join(dir, '.git'))) return true;
-    } catch {
-      return false;
+    if (isGitDirEntry(join(dir, '.git'))) {
+      // A dotfiles repository rooted at the home directory makes EVERY directory
+      // under it — Downloads, Desktop, a scratch folder — pass a plain work-tree
+      // test, which would let one wired agent auto-index the user's whole home.
+      // A repository whose root IS the home directory is out of scope for
+      // auto-init; an explicit `openlore analyze` there still works.
+      return homeRoot === null || dir !== homeRoot;
     }
     const parent = dirname(dir);
     if (parent === dir) return false;
     dir = parent;
+  }
+}
+
+/**
+ * Is `path` a real `.git` entry — a directory, or the `gitdir: …` pointer file a
+ * linked worktree or submodule uses? A plain file called `.git` with arbitrary
+ * content (an extracted archive, a stray artifact) is not a repository, and this
+ * guard is the one thing standing between "an agent opened a directory" and "we
+ * indexed it".
+ */
+function isGitDirEntry(path: string): boolean {
+  try {
+    const info = statSync(path);
+    if (info.isDirectory()) return true;
+    if (!info.isFile()) return false;
+    return readFileSync(path, 'utf-8').trimStart().startsWith('gitdir:');
+  } catch {
+    return false;
   }
 }
 
@@ -477,38 +502,51 @@ export function repairInBackground(
   if (!directory) return null;
   if (seen.has(directory)) return null; // at-most-once per process per repo
   if (autoInitDisabled(directory)) return null;
-  // Git work trees only. Deliberately NOT latched in `seen`: a directory that is
-  // not a repository today may be one after `git init`, and the next tool call
-  // should be able to bootstrap it (change: unify-onboarding-entrypoint).
-  if (!isInsideGitWorkTree(directory)) return null;
+  // Git work trees only — but ONLY for auto-init. `index-absent` is the case where
+  // OpenLore would start indexing a directory nobody asked it to; every other
+  // reason repairs an index the user already chose to build, and refusing there
+  // would silently kill self-healing for an imported bundle, a vendored tree, or
+  // any checkout that is not itself a work tree. Deliberately NOT latched in
+  // `seen`: a directory that is not a repository today may be one after
+  // `git init`, and the next tool call should be able to bootstrap it
+  // (change: unify-onboarding-entrypoint).
+  if (reason === 'index-absent' && !isInsideGitWorkTree(directory)) return null;
 
   const build = opts.analyze ?? registeredBuilder;
   if (!build) return null; // no builder registered (CLI/tests) — detection unchanged, repair skipped
 
-  // Size the tree ONCE, before latching: above the ceiling the build sheds its
-  // embedding pass rather than pinning a laptop on a monorepo. Bounded — it stops
-  // counting as soon as the ceiling is passed.
   const ceiling = opts.degradeAboveFiles ?? AUTO_INIT_DEGRADED_FILE_CEILING;
   const countFiles = opts.countFiles ?? countFilesBounded;
-  let mode: RepairBuildMode = 'full';
-  let sizedFiles = 0;
-  try {
-    sizedFiles = countFiles(directory, ceiling);
-    if (sizedFiles > ceiling) mode = 'degraded';
-  } catch {
-    // Sizing is advisory; an unreadable tree simply takes the ordinary lane.
-  }
 
   seen.add(directory);
   const now = opts.now ?? Date.now;
-  inFlight.set(directory, { reason, startedAt: now(), mode });
+  inFlight.set(directory, { reason, startedAt: now(), mode: 'full' });
   const log = opts.log ?? ((m: string) => process.stderr.write(m + '\n'));
-  if (reason === 'index-absent') {
-    firstTouchNotices.set(directory, firstTouchNotice(directory, mode, sizedFiles, ceiling));
-  }
 
   const run = async (): Promise<void> => {
+    // Yield before doing ANY work. An async function body runs synchronously up to
+    // its first await, so without this the tree sizing below would still execute on
+    // the read path's stack — the exact thing moving it here was meant to avoid.
+    await Promise.resolve();
     try {
+      // Size the tree HERE, not on the caller's stack. `repairInBackground` is
+      // called from the read path, and a synchronous walk of a cold or
+      // network-mounted tree would stall the very tool call this service promises
+      // never to block. Bounded either way — it stops counting one past the
+      // ceiling.
+      let mode: RepairBuildMode = 'full';
+      let sizedFiles = 0;
+      try {
+        sizedFiles = countFiles(directory, ceiling);
+        if (sizedFiles > ceiling) mode = 'degraded';
+      } catch {
+        // Sizing is advisory; an unreadable tree simply takes the ordinary lane.
+      }
+      const record = inFlight.get(directory);
+      if (record) record.mode = mode;
+      if (reason === 'index-absent') {
+        firstTouchNotices.set(directory, firstTouchNotice(directory, mode, sizedFiles, ceiling));
+      }
       log(
         `[openlore] Index repair (${reason}) — rebuilding in the background (non-blocking, no API key)…`
         + (mode === 'degraded'

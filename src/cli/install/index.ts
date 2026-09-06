@@ -243,9 +243,14 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     const { installPreCommitHook } = await import('../commands/decisions.js');
     const exitCodeBefore = process.exitCode;
     await installPreCommitHook(cwd);
-    if (process.exitCode !== undefined && process.exitCode !== 0 && process.exitCode !== exitCodeBefore) {
-      // installPreCommitHook reports its own failures by setting exitCode. A commit
-      // gate that could not be installed must not fail the whole install.
+    // installPreCommitHook reports its own failures by setting a nonzero exitCode.
+    // Compare against SUCCESS, not against the prior value: if something earlier had
+    // already set 1 and the hook install also fails with 1, a delta comparison reads
+    // the failure as success and prints "Decision trail on" for a gate that was
+    // never installed.
+    const failed = process.exitCode !== undefined && process.exitCode !== 0;
+    if (failed) {
+      // A commit gate that could not be installed must not fail the whole install.
       process.exitCode = exitCodeBefore;
       logger.info('Decision trail', 'the commit gate could not be installed — see the message above; everything else is wired');
       return 'skipped';
@@ -398,13 +403,51 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     preset: effectivePreset,
   });
 
-  const runAdapter = async (adapter: Adapter, ctx: ApplyContext): Promise<void> => {
-    const result: ApplyResult = opts.uninstall
-      ? await adapter.uninstall(ctx)
-      : await adapter.apply(ctx);
-    if (result.conflict) conflict = true;
+  /**
+   * Run one adapter in one scope.
+   *
+   * Returns whether the scope came through clean. Two rules, both learned from
+   * adversarial review of this change (change: unify-onboarding-entrypoint):
+   *
+   * - A THROW in the USER scope is reported and contained. That scope writes into a
+   *   home directory this process does not own — a `~/.claude` symlinked into a
+   *   dotfiles repository is enough to make a confined write refuse — and an
+   *   unhandled rejection there used to kill the whole command before the repo was
+   *   wired or indexed. Nothing was written when it throws, so containment is safe.
+   *   A throw in the REPO scope still propagates: a path-confinement refusal on the
+   *   project the user is standing in must abort the command loudly, and the suite
+   *   asserts exactly that.
+   * - A CONFLICT (a hand-edited managed block, an unparseable managed file) fails
+   *   the command only in the REPO scope. A user-scope conflict is machine-wide: if
+   *   it were fatal, one hand-edit in `~/.claude/CLAUDE.md` would break
+   *   `openlore install` in every repository on the machine, index included.
+   */
+  const runAdapter = async (adapter: Adapter, ctx: ApplyContext): Promise<boolean> => {
+    let result: ApplyResult;
+    try {
+      result = opts.uninstall ? await adapter.uninstall(ctx) : await adapter.apply(ctx);
+    } catch (error) {
+      if (ctx.scope !== 'user') throw error;
+      allWarnings.push(
+        `${adapter.name} (user scope) could not be ${opts.uninstall ? 'removed' : 'wired'}: `
+        + `${(error as Error).message}`,
+      );
+      return false;
+    }
     allChanges.push(...result.changes);
     allWarnings.push(...result.warnings);
+    if (result.conflict) {
+      if (ctx.scope === 'user') {
+        allWarnings.push(
+          `The user scope was left untouched (pass --force to overwrite it). This repository was `
+          + 'still wired.',
+        );
+      } else {
+        conflict = true;
+      }
+      return false;
+    }
+    return true;
   };
 
   // ── User scope first ───────────────────────────────────────────────────────
@@ -412,18 +455,26 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   // Written BEFORE the repo pass so that a conflict in the user scope is visible
   // in the same summary; Claude Code resolves project scope over user scope, so
   // the repo entry written below still wins where both exist.
-  const globalAgents = [...new Set(surfaces.map(surface => surface.agent))]
+  //
+  // On UNINSTALL the candidate set is every user-scope-capable adapter, not just
+  // the detected ones: a previous install wrote those entries from some other
+  // directory, and "remove OpenLore from both scopes" must not depend on which
+  // markers happen to sit in the directory the user runs the removal from.
+  const detectedAgents = [...new Set(surfaces.map(surface => surface.agent))];
+  const globalAgents = (opts.uninstall ? ALL_AGENTS : detectedAgents)
     .filter(agent => ADAPTERS[agent].supportsGlobal === true);
-  const repoOnlyAgents = [...new Set(surfaces.map(surface => surface.agent))]
-    .filter(agent => ADAPTERS[agent].supportsGlobal !== true);
+  const repoOnlyAgents = detectedAgents.filter(agent => ADAPTERS[agent].supportsGlobal !== true);
   const wiringUserScope = !opts.repoOnly && globalAgents.length > 0;
   // Resolved only when the user scope is actually written, so `--repo-only` never
   // consults (or fails on) a home directory it will not touch.
   const home = wiringUserScope ? resolveUserScopeRoot(opts.home) : '';
+  let userScopeClean = wiringUserScope;
   if (wiringUserScope) {
     for (const agent of globalAgents) {
       const adapter = ADAPTERS[agent];
-      await runAdapter(adapter, contextFor(adapter.userRoot?.(home) ?? home, 'user'));
+      if (!await runAdapter(adapter, contextFor(adapter.userRoot?.(home) ?? home, 'user'))) {
+        userScopeClean = false;
+      }
     }
   }
 
@@ -436,7 +487,10 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     uninstall: !!opts.uninstall,
     dryRun: !!opts.dryRun,
     repoOnly: !!opts.repoOnly,
-    wiredUserScope: wiringUserScope,
+    attemptedUserScope: wiringUserScope,
+    // Report what HAPPENED, not what was intended: a scope that refused or threw
+    // must never be summarized as wired.
+    wiredUserScope: wiringUserScope && userScopeClean,
     globalAgents,
     repoOnlyAgents,
     home,
@@ -498,6 +552,7 @@ function reportScopes(info: {
   uninstall: boolean;
   dryRun: boolean;
   repoOnly: boolean;
+  attemptedUserScope: boolean;
   wiredUserScope: boolean;
   globalAgents: AgentName[];
   repoOnlyAgents: AgentName[];
@@ -506,16 +561,33 @@ function reportScopes(info: {
   const verb = info.dryRun ? 'would be' : 'was';
   if (info.wiredUserScope) {
     logger.info(
-      info.uninstall ? 'User scope' : 'User scope',
+      'User scope',
       info.uninstall
         ? `OpenLore-managed ${info.globalAgents.join(', ')} entries under ${info.home} ${verb} removed`
         : `${info.globalAgents.join(', ')} ${verb} wired under ${info.home} — every git repository you open from now on reaches OpenLore, `
           + 'and builds its index in the background on first touch (opt out per repo with `"autoInit": false`)',
     );
+  } else if (info.attemptedUserScope) {
+    // Attempted and did not come through clean. Never claim it was wired.
+    logger.warning(
+      `User scope NOT ${info.uninstall ? 'removed' : 'wired'} under ${info.home} — see the message(s) above. `
+      + 'Repositories you have not run install in will not reach OpenLore until this is resolved.',
+    );
   } else if (info.repoOnly) {
     logger.info(
       'Repo scope only',
-      '--repo-only: no user-scope entry was written; only this repository is wired',
+      info.uninstall
+        ? '--repo-only: user-scope entries were left in place; only this repository was cleaned'
+        : '--repo-only: no user-scope entry was written; only this repository is wired',
+    );
+  } else if (!info.uninstall) {
+    // No user-scope-capable surface was detected here, so the headline promise
+    // ("install once, every repo works") did not happen. Say so rather than
+    // leaving the user to infer it from silence.
+    logger.info(
+      'User scope',
+      'not written — no agent with a user-scope surface was detected here. '
+      + 'Run "openlore install --agent claude-code" to wire it for every repository.',
     );
   }
   if (info.repoOnlyAgents.length > 0 && !info.uninstall) {

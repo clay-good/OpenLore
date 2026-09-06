@@ -8,6 +8,8 @@ import { mkdtemp, rm, readFile, writeFile, mkdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInstall, resolveUserScopeRoot } from './index.js';
+import { claudeCodeAdapter } from './adapters/claude-code.js';
+import type { ApplyContext } from './adapters/types.js';
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -155,6 +157,37 @@ describe('user-scope wiring', () => {
     expect(await install({ dryRun: true })).toBe(0);
     expect(await exists(join(home, '.claude.json'))).toBe(false);
     expect(await exists(join(dir, '.mcp.json'))).toBe(false);
+  });
+
+  it('--dry-run plans each user-scope file exactly once, and plans it correctly', async () => {
+    const ctx: ApplyContext = {
+      root: home,
+      scope: 'user',
+      platform: process.platform,
+      platformCommandRuntime: {
+        nodeExecutable: process.execPath,
+        npmExecPath: undefined,
+        pathValue: process.env.PATH,
+        cwd: process.cwd(),
+      },
+      instructionTemplate: '# test\n',
+      dryRun: true,
+      force: false,
+    };
+    const result = await claudeCodeAdapter.apply(ctx);
+
+    const settingsPath = join(home, '.claude', 'settings.json');
+    const forSettings = result.changes.filter(change => change.path === settingsPath);
+    // One plan entry per file. Two would mean two writes of the same path, the
+    // second describing a file that clobbers the first — and a dry-run that does
+    // not describe the real outcome is worse than no dry-run.
+    expect(forSettings).toHaveLength(1);
+    // The single plan covers BOTH things that file carries in the user scope.
+    expect(forSettings[0].summary).toContain('hooks');
+    expect(forSettings[0].summary).toContain('Bash(openlore:*)');
+    const preview = forSettings[0].preview ?? '';
+    expect(preview).toContain('SessionStart');
+    expect(preview).toContain('Bash(openlore:*)');
   });
 });
 

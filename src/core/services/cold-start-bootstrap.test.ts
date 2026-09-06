@@ -538,15 +538,66 @@ describe('auto-init guardrails', () => {
     expect(countFilesBounded(dir, 1000)).toBe(12);
   });
 
-  it('sizes the tree once, before the build — a sizing failure takes the full lane', async () => {
+  it('sizes the tree exactly once, before the build — a sizing failure takes the full lane', async () => {
     const dir = freshDir(false);
     const modes: Array<string | undefined> = [];
+    const order: string[] = [];
     await bootstrapAnalysisInBackground(dir, {
-      analyze: async (_d, o) => { modes.push(o?.mode); },
+      analyze: async (_d, o) => { order.push('build'); modes.push(o?.mode); },
       log: () => {},
-      countFiles: () => { throw new Error('unreadable'); },
+      countFiles: () => { order.push('size'); throw new Error('unreadable'); },
     });
     expect(modes).toEqual(['full']);
+    expect(order).toEqual(['size', 'build']);
+  });
+
+  it('sizes the tree once per repair, not once per call', async () => {
+    const dir = freshDir(false);
+    let sizings = 0;
+    const opts = {
+      analyze: async () => {},
+      log: () => {},
+      countFiles: () => { sizings++; return 0; },
+    };
+    await bootstrapAnalysisInBackground(dir, opts);
+    // The at-most-once latch means the second call starts no repair at all.
+    expect(bootstrapAnalysisInBackground(dir, opts)).toBeNull();
+    expect(sizings).toBe(1);
+  });
+
+  it('keeps healing a NON-git directory that already has an index', async () => {
+    // The git guard exists to stop auto-init from indexing directories nobody
+    // asked about. A repo with an index the user built deliberately — an imported
+    // bundle, a vendored tree — must still self-heal.
+    const dir = freshDir(true, { git: false });
+    let ran = 0;
+    const p = repairInBackground(dir, 'integrity-mismatched', {
+      analyze: async () => { ran++; },
+      log: () => {},
+    });
+    expect(p).not.toBeNull();
+    await p;
+    expect(ran).toBe(1);
+  });
+
+  it('refuses a directory whose .git is neither a directory nor a gitdir pointer', () => {
+    const dir = freshDir(false, { git: false });
+    writeFileSync(join(dir, '.git'), 'this is not a git pointer\n');
+    expect(isInsideGitWorkTree(dir)).toBe(false);
+    writeFileSync(join(dir, '.git'), 'gitdir: /elsewhere/.git/worktrees/x\n');
+    expect(isInsideGitWorkTree(dir)).toBe(true);
+  });
+
+  it('refuses to auto-init a home directory that is itself a git repository', () => {
+    const home = freshDir(false); // a dotfiles repo rooted at $HOME
+    const under = join(home, 'Downloads');
+    mkdirSync(under, { recursive: true });
+    expect(isInsideGitWorkTree(home, home)).toBe(false);
+    expect(isInsideGitWorkTree(under, home)).toBe(false);
+    // A real project below it is still fine.
+    const project = join(home, 'code', 'project');
+    mkdirSync(join(project, '.git'), { recursive: true });
+    expect(isInsideGitWorkTree(project, home)).toBe(true);
   });
 
   it('reports the build mode in the in-progress status', async () => {
@@ -559,9 +610,27 @@ describe('auto-init guardrails', () => {
       degradeAboveFiles: 1,
       countFiles: () => 99,
     });
+    // The repair is disclosed immediately; the MODE is known once the background
+    // task has sized the tree, which deliberately happens off the caller's stack.
+    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'index-absent', mode: 'full' });
+    await Promise.resolve();
     expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'index-absent', mode: 'degraded' });
     release();
     await p;
+  });
+
+  it('does no filesystem sizing on the caller\'s stack', () => {
+    const dir = freshDir(false);
+    let sized = false;
+    const p = bootstrapAnalysisInBackground(dir, {
+      analyze: async () => {},
+      log: () => {},
+      countFiles: () => { sized = true; return 0; },
+    });
+    // repairInBackground returned; the walk has not run yet. A synchronous walk
+    // here would stall the tool call this service promises never to block.
+    expect(sized).toBe(false);
+    return p;
   });
 
   it('names the absent case without calling it stale', () => {
