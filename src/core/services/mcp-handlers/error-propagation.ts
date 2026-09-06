@@ -422,6 +422,12 @@ export async function handleAnalyzeErrorPropagation(
   // resolved nor an `external::` edge, so without this it would be silently
   // assumed exception-free. Disclosed, never dropped. Keyed by caller+line+name.
   const unresolvedSelfCalls = new Map<string, string>();
+  // Chained intra-object call sites (`this.<field>.x()` / `self.<field>.x()`) whose receiver the
+  // per-file type registry could not type (change: shrink-receiver-resolution-boundary). Kept
+  // SEPARATE from `unresolvedSelfCalls`: there the callee is provably an in-project method we
+  // failed to reach, here the callee's very provenance is unknown, so folding them together would
+  // overclaim. Both are boundaries; only one of them is about resolution failure.
+  const untypedReceiverCalls = new Map<string, string>();
   // Unresolved-ambiguous call sites reached during the traversal (change:
   // harden-call-resolution-ambiguity). Keyed by caller+line+name so a site is
   // disclosed once regardless of how often the node is revisited.
@@ -577,6 +583,17 @@ export async function handleAnalyzeErrorPropagation(
     const myEdges = calleesByCaller.get(n.id) ?? [];
     const resolvedHere = new Set(myEdges.map(e => `${e.calleeName}@${e.line ?? -1}`));
     for (const cs of facts.callSites) {
+      if (cs.receiver === 'self-field') {
+        // Resolved by the receiver registry ⇒ an edge exists and the callee is analyzed
+        // normally. No edge ⇒ the field's type is unknown, which is a boundary, never a clean
+        // absence (change: shrink-receiver-resolution-boundary).
+        if (resolvedHere.has(`${cs.calleeName}@${cs.line}`)) continue;
+        untypedReceiverCalls.set(
+          `${n.id}@${cs.line}@${cs.calleeName}`,
+          `${selfLabel}:${cs.line} (${cs.calleeName})`,
+        );
+        continue;
+      }
       if (cs.receiver !== 'self' && cs.receiver !== 'constructor') continue;
       if (resolvedHere.has(`${cs.calleeName}@${cs.line}`)) continue;
       unresolvedSelfCalls.set(`${n.id}@${cs.line}@${cs.calleeName}`, `${selfLabel}:${cs.line} (${cs.calleeName})`);
@@ -698,6 +715,15 @@ export async function handleAnalyzeErrorPropagation(
         'scope, NEVER assumed none. A clean escape set does not clear these paths.',
     );
   }
+  const untypedReceiverSample = [...untypedReceiverCalls.values()].sort();
+  if (untypedReceiverCalls.size > 0) {
+    boundaries.add(
+      `${untypedReceiverCalls.size} chained intra-object call site(s) (\`this.<field>.m()\`) whose ` +
+        'receiver type the per-file registry could not determine — the callee is of UNKNOWN ' +
+        'provenance (in-project or external), so its exceptions are out of scope, NEVER assumed ' +
+        'none. A clean escape set does not clear these paths.',
+    );
+  }
   const ambiguousSample = [...ambiguousCallSites.values()].sort();
   if (ambiguousCallSites.size > 0) {
     boundaries.add(
@@ -737,6 +763,7 @@ export async function handleAnalyzeErrorPropagation(
       functionsAnalyzed: parsedCount,
       externalCalleesNotAnalyzed: externalCallees.size,
       unresolvedSelfCalls: unresolvedSelfCalls.size,
+      untypedReceiverCalls: untypedReceiverCalls.size,
       ambiguousCallSites: ambiguousCallSites.size,
     },
     escapes: escapeList,
@@ -748,6 +775,9 @@ export async function handleAnalyzeErrorPropagation(
       : {}),
     ...(unresolvedSelfCalls.size > 0
       ? { unresolvedSelfCalls: { count: unresolvedSelfCalls.size, sample: unresolvedSelfSample.slice(0, 15) } }
+      : {}),
+    ...(untypedReceiverCalls.size > 0
+      ? { untypedReceiverCalls: { count: untypedReceiverCalls.size, sample: untypedReceiverSample.slice(0, 15) } }
       : {}),
     ...(ambiguousCallSites.size > 0
       ? { ambiguousCallSites: { count: ambiguousCallSites.size, sample: ambiguousSample.slice(0, 15) } }
