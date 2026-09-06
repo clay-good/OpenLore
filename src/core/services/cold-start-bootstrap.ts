@@ -61,7 +61,16 @@ export const REPAIR_REASON_DETAIL: Record<RepairReason, string> = {
 const attempted = new Set<string>();
 
 /** In-flight repairs, keyed by directory, so a read can disclose "refresh started". */
-const inFlight = new Map<string, { reason: RepairReason; startedAt: number; mode: RepairBuildMode }>();
+const inFlight = new Map<string, {
+  reason: RepairReason;
+  startedAt: number;
+  mode: RepairBuildMode;
+  ceiling: number;
+  sizedFiles: number;
+}>();
+
+/** How a repository's first build is described once its lane is known. */
+const firstTouchLanes = new Map<string, { mode: RepairBuildMode; sizedFiles: number; ceiling: number }>();
 
 /**
  * First-touch notices not yet delivered to a caller, keyed by directory.
@@ -72,7 +81,7 @@ const inFlight = new Map<string, { reason: RepairReason; startedAt: number; mode
  * user never saw disclosed is precisely the silent auto-indexing this guardrail
  * exists to prevent (change: unify-onboarding-entrypoint).
  */
-const firstTouchNotices = new Map<string, string>();
+const firstTouchNotices = new Set<string>();
 
 /** Analyzer children owned by the MCP transport lifetime. */
 const activeBuildChildren = new Set<ChildProcess>();
@@ -549,8 +558,13 @@ export function repairInBackground(
 
   seen.add(directory);
   const now = opts.now ?? Date.now;
-  inFlight.set(directory, { reason, startedAt: now(), mode: 'full' });
+  inFlight.set(directory, { reason, startedAt: now(), mode: 'full', ceiling, sizedFiles: 0 });
   const log = opts.log ?? ((m: string) => process.stderr.write(m + '\n'));
+  // Registered SYNCHRONOUSLY, so the very response that triggered this build can
+  // carry the disclosure. Registered before sizing, the notice is rendered from the
+  // in-flight record when it is taken, so it always describes the lane actually
+  // chosen (change: unify-onboarding-entrypoint).
+  if (reason === 'index-absent') firstTouchNotices.add(directory);
 
   const run = async (): Promise<void> => {
     // Yield before doing ANY work. An async function body runs synchronously up to
@@ -572,9 +586,9 @@ export function repairInBackground(
         // Sizing is advisory; an unreadable tree simply takes the ordinary lane.
       }
       const record = inFlight.get(directory);
-      if (record) record.mode = mode;
-      if (reason === 'index-absent') {
-        firstTouchNotices.set(directory, firstTouchNotice(directory, mode, sizedFiles, ceiling));
+      if (record) {
+        record.mode = mode;
+        record.sizedFiles = sizedFiles;
       }
       log(
         `[openlore] Index repair (${reason}) — rebuilding in the background (non-blocking, no API key)…`
@@ -605,6 +619,14 @@ export function repairInBackground(
       seen.delete(directory);
       log(`[openlore] Background index repair skipped: ${(err as Error).message}`);
     } finally {
+      const record = inFlight.get(directory);
+      if (record && firstTouchNotices.has(directory)) {
+        firstTouchLanes.set(directory, {
+          mode: record.mode,
+          sizedFiles: record.sizedFiles,
+          ceiling: record.ceiling,
+        });
+      }
       inFlight.delete(directory);
     }
   };
@@ -664,10 +686,17 @@ export function repairDisclosureText(reason: RepairReason): string {
  * no auto-init ever started for it.
  */
 export function takeFirstTouchNotice(directory: string): string | undefined {
-  const notice = firstTouchNotices.get(directory);
-  if (notice === undefined) return undefined;
+  if (!firstTouchNotices.has(directory)) return undefined;
   firstTouchNotices.delete(directory);
-  return notice;
+  // Rendered at delivery time from whichever record still knows the lane: the
+  // in-flight one while the build runs, the retained one once it has finished.
+  const lane = inFlight.get(directory) ?? firstTouchLanes.get(directory);
+  return firstTouchNotice(
+    directory,
+    lane?.mode ?? 'full',
+    lane?.sizedFiles ?? 0,
+    lane?.ceiling ?? AUTO_INIT_DEGRADED_FILE_CEILING,
+  );
 }
 
 /**
@@ -677,9 +706,9 @@ export function takeFirstTouchNotice(directory: string): string | undefined {
  */
 export function repairStatusFor(
   directory: string,
-): { inProgress: true; reason: RepairReason; mode: RepairBuildMode } | undefined {
+): { inProgress: true; reason: RepairReason } | undefined {
   const rec = inFlight.get(directory);
-  return rec ? { inProgress: true, reason: rec.reason, mode: rec.mode } : undefined;
+  return rec ? { inProgress: true, reason: rec.reason } : undefined;
 }
 
 /**
@@ -707,6 +736,7 @@ export function _resetRepairServiceForTesting(): void {
   attempted.clear();
   inFlight.clear();
   firstTouchNotices.clear();
+  firstTouchLanes.clear();
   repairHosts.clear();
   registeredBuilder = null;
   activeBuildChildren.clear();

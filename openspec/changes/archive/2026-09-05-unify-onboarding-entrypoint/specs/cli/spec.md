@@ -102,12 +102,15 @@ user-authored content (merge, not clobber).
 
 The zero-interaction path SHALL further extend from "one command per repo" to "one command per
 user": the postinstall hint SHALL stay exactly `openlore install` (which now wires the user
-scope by default), and every EXPLICIT repo wiring SHALL include the decisions pre-commit hook
-in autopilot (non-blocking, trail-only) mode, so the single entrypoint yields structural
-navigation and the governance trail with no additional command or flag. A repository
-whose config already sets `governance.autopilot: false` SHALL keep blocking review mode —
-an explicit choice is never flipped — and blocking review mode SHALL remain an explicit
-opt-in everywhere else.
+scope by default), and every EXPLICIT repo wiring SHALL include the decisions pre-commit hook,
+so the single entrypoint yields structural navigation and the governance trail with no
+additional command or flag. Autopilot (non-blocking, trail-only) mode SHALL be set only when
+install wires a gate for the FIRST time in a repository: an absent `governance.autopilot` means
+blocking review, so a repository that already carries an OpenLore commit gate SHALL keep the
+mode it was configured with, and an explicit `governance.autopilot: false` SHALL never be
+flipped. Install SHALL skip the gate entirely, with a stated reason and without failing, when
+OpenLore resolves inside the repository — a commit gate must not execute code the repository
+can change.
 
 #### Scenario: Installing the package does not touch the project
 
@@ -137,3 +140,10 @@ opt-in everywhere else.
 - **WHEN** the user runs `openlore install`
 - **THEN** agents are wired, the index builds, and the decisions hook is installed in
   autopilot mode — and no subsequent commit is blocked by default
+
+#### Scenario: An existing commit gate keeps its mode
+
+- **GIVEN** a repository that already carries an OpenLore decisions commit gate, configured
+  for blocking human review
+- **WHEN** `openlore install` runs there again for any reason
+- **THEN** the gate is refreshed but its mode is unchanged, and the run says so

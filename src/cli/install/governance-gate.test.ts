@@ -81,9 +81,14 @@ describe('install wires the decision trail', () => {
     expect(await exists(join(dir, '.git'))).toBe(false);
   });
 
-  it('skips when there is no config yet', async () => {
+  it('still installs the gate when there is no config yet, in blocking review mode', async () => {
+    // `openlore setup --tools claude` never runs init, and has always installed the
+    // gate. A missing config only means there is nowhere to record the non-blocking
+    // default — not that the gate should be skipped.
     await initGit();
-    expect(await wireGovernanceGate(dir)).toBe('skipped');
+    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await exists(join(dir, '.git', 'hooks', 'pre-commit'))).toBe(true);
+    expect(await exists(join(dir, OPENLORE_CONFIG_REL_PATH))).toBe(false);
   });
 
   it('bare install wires the gate, and a whole-install uninstall removes it', async () => {

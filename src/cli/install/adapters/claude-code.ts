@@ -85,13 +85,17 @@ function layoutFor(ctx: ApplyContext): ClaudeLayout {
 /**
  * Write options for a managed file in this scope.
  *
- * An existing file keeps its own mode (`preserveMode`). A file OpenLore CREATES in
- * the user scope is `0600`, not the umask default: `~/.claude.json` and
+ * An existing file keeps its own mode (`preserveMode`). A user-scope JSON config
+ * OpenLore CREATES is `0600`, not the umask default: `~/.claude.json` and
  * `~/.claude/settings.json` are where Claude Code keeps account state, it creates
  * them `0600` itself, and `open(O_CREAT)` never lowers the mode of a file that
  * already exists — so whoever creates the file first decides. On a shared host,
  * OpenLore getting there first must not be the reason that state is world-readable
  * (change: unify-onboarding-entrypoint).
+ *
+ * Scope note: this covers the JSON configs written here. `~/.claude/CLAUDE.md` goes
+ * through the shared markdown-block helper and keeps the default mode — it holds
+ * generated instructions, not account state.
  */
 function writeOptionsFor(ctx: ApplyContext): { preserveMode: true; mode?: number } {
   return ctx.scope === 'user' ? { preserveMode: true, mode: 0o600 } : { preserveMode: true };
@@ -123,35 +127,44 @@ async function publishManagedFile(
     return { ok: true };
   }
 
-  // lstat, not stat: the confinement layer checks identity with lstat, and a
-  // SYMLINKED target is a confinement problem, not a concurrency one. Diagnosing it
-  // as "another process changed it" sent a user whose ~/.claude.json is symlinked
-  // into a dotfiles repository into a retry loop that could never succeed.
-  let identity: Awaited<ReturnType<typeof lstat>> | null = null;
-  try {
-    identity = await lstat(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  if (identity !== null && !identity.isFile()) {
-    return { ok: false, reason: 'it is a symbolic link or another non-regular file, which OpenLore will not write through' };
-  }
-  // A file we never observed cannot be compare-and-swapped against its bytes.
-  if ((identity === null) !== (observedRaw === null)) {
-    return { ok: false, reason: 'it appeared or vanished between being read and being written' };
-  }
-
   // The compare-and-swap branch of confinedAtomicWriteFile moves the target aside
   // before republishing it, so it REQUIRES the caller to serialize and to leave a
   // recovery journal — otherwise a crash in that window leaves ~/.claude.json
   // missing and nothing ever puts it back. `openlore setup` already had this right;
   // the machinery is now shared (change: unify-onboarding-entrypoint).
   const result = await withGuardedConfigWrite(ctx.root, path, async recoveryJournalPath => {
+    // Re-observe INSIDE the lock. The caller's snapshot was taken before it, and
+    // the recovery step above can legitimately change the file — completing an
+    // interrupted publication is its whole job. Comparing against a pre-lock
+    // snapshot reported "another process changed it" for OpenLore's own recovery.
+    //
+    // lstat, not stat: the confinement layer checks identity with lstat, and a
+    // SYMLINKED target is a confinement problem, not a concurrency one. Diagnosing
+    // it as contention sent a user whose ~/.claude.json is symlinked into a
+    // dotfiles repository into a retry loop that could never succeed.
+    let identity: Awaited<ReturnType<typeof lstat>> | null = null;
+    try {
+      identity = await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (identity !== null && !identity.isFile()) {
+      return { ok: false as const, reason: 'it is a symbolic link or another non-regular file, which OpenLore will not write through' };
+    }
+    const currentRaw = identity === null ? null : await readRawOrNull(path);
+    if (currentRaw !== observedRaw) {
+      return {
+        ok: false as const,
+        reason: currentRaw === null || observedRaw === null
+          ? 'it appeared or vanished between being read and being written'
+          : 'it changed between being read and being written',
+      };
+    }
     try {
       await confinedAtomicWriteFile(ctx.root, path, data, {
         ...options,
         expectedIdentity: identity,
-        ...(observedRaw !== null ? { expectedContent: observedRaw } : {}),
+        ...(currentRaw !== null ? { expectedContent: currentRaw } : {}),
         recoveryJournalPath,
       });
       return { ok: true as const };
@@ -523,7 +536,9 @@ export const claudeCodeAdapter: Adapter = {
         summary: `${layout.mcp}: refused to overwrite hand-edited OpenLore entries (use --force)`,
       });
       mdResult.warnings.push(
-        `${layout.mcp} has hand-edits in OpenLore-managed paths — pass --force to overwrite`
+        `${layout.mcp} has hand-edits in OpenLore-managed paths — pass --force to overwrite. `
+        + 'Nothing else in this scope was written: an instruction block naming tools no '
+        + 'registration wired would be worse than no block at all.',
       );
       mdResult.conflict = true;
       return mdResult;

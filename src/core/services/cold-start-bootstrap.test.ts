@@ -305,7 +305,7 @@ describe('repairInBackground (make-index-self-healing)', () => {
     });
     expect(p).not.toBeNull();
     // While the build is gated, the repair is disclosed as in-progress with its reason.
-    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'integrity-mismatched', mode: 'full' });
+    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'integrity-mismatched' });
     release();
     await p;
     expect(ran).toBe(1);
@@ -624,23 +624,33 @@ describe('auto-init guardrails', () => {
     expect(isInsideGitWorkTree(join(home, 'projects'), home)).toBe(false);
   });
 
-  it('reports the build mode in the in-progress status', async () => {
+  it('discloses the first touch on the very call that triggered the build', async () => {
     const dir = freshDir(false);
     let release!: () => void;
     const gate = new Promise<void>(r => { release = r; });
     const p = bootstrapAnalysisInBackground(dir, {
       analyze: async () => { await gate; },
       log: () => {},
+    });
+    // Synchronously after the trigger, with the build still running: the response
+    // that started this must be the one that carries the consent disclosure.
+    const notice = takeFirstTouchNotice(dir);
+    expect(notice).toContain('First OpenLore touch');
+    expect(notice).toContain('autoInit');
+    release();
+    await p;
+  });
+
+  it('describes the lane actually chosen, even when the notice is taken late', async () => {
+    const dir = freshDir(false);
+    await bootstrapAnalysisInBackground(dir, {
+      analyze: async () => {},
+      log: () => {},
       degradeAboveFiles: 1,
       countFiles: () => 99,
     });
-    // The repair is disclosed immediately; the MODE is known once the background
-    // task has sized the tree, which deliberately happens off the caller's stack.
-    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'index-absent', mode: 'full' });
-    await Promise.resolve();
-    expect(repairStatusFor(dir)).toEqual({ inProgress: true, reason: 'index-absent', mode: 'degraded' });
-    release();
-    await p;
+    // Build already finished; the retained lane still renders the degraded wording.
+    expect(takeFirstTouchNotice(dir)).toContain('semantic-embedding pass was shed');
   });
 
   it('does no filesystem sizing on the caller\'s stack', () => {

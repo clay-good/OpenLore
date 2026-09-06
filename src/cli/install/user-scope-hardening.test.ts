@@ -196,7 +196,7 @@ describe('user-scope hardening', () => {
       );
 
       expect(result.ok).toBe(false);
-      expect(result.ok === false && result.reason).toMatch(/another process changed it/);
+      expect(result.ok === false && result.reason).toMatch(/changed between being read and being written/);
       // The concurrent write survives intact — that is the whole point.
       expect(await readFile(path, 'utf8')).toBe(live);
     });

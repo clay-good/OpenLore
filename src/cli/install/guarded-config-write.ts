@@ -111,6 +111,10 @@ export async function withGuardedConfigWrite<T>(
     // Complete any publication a previous run was interrupted mid-way through,
     // BEFORE reading or writing. Without this, a crash in the guarded window
     // leaves the target missing and nothing ever puts it back.
+    //
+    // NOTE for callers: this can CHANGE the target — that is its whole job — so any
+    // snapshot taken before the lock may be stale by the time `mutate` runs.
+    // `mutate` must re-observe the file itself.
     await recoverConfinedAtomicWriteFile(root, targetPath, recoveryJournalPath);
     return await mutate(recoveryJournalPath);
   } finally {

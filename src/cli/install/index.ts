@@ -232,10 +232,9 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     }
     const { readOpenLoreConfig, writeOpenLoreConfig } = await import('../../core/services/config-manager.js');
     const config = await readOpenLoreConfig(cwd);
-    if (!config) {
-      logger.info('Decision trail', 'skipped — no .openlore/config.json yet; run "openlore install" again after init');
-      return 'skipped';
-    }
+    // A missing config is not a reason to skip the HOOK — `openlore setup` never
+    // runs `init` and has always installed it. Only the autopilot config write
+    // needs a config to write into (change: unify-onboarding-entrypoint).
     // Autopilot is the mode for a gate this command is wiring for the FIRST time.
     //
     // An absent `autopilot` key means blocking review — that is what every gate
@@ -246,9 +245,9 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     // yet gets the non-blocking default (change: unify-onboarding-entrypoint).
     const { hasOpenLoreCommitGate } = await import('../commands/decisions.js');
     const alreadyGated = await hasOpenLoreCommitGate(cwd);
-    if (config.governance?.autopilot === false) {
+    if (config?.governance?.autopilot === false) {
       logger.info('Decision trail', 'governance.autopilot is explicitly false — installing the gate in blocking review mode, as configured');
-    } else if (config.governance?.autopilot !== true) {
+    } else if (config && config.governance?.autopilot !== true) {
       if (alreadyGated) {
         logger.info(
           'Decision trail',
@@ -258,6 +257,12 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
       } else {
         await writeOpenLoreConfig(cwd, { ...config, governance: { ...config.governance, autopilot: true } });
       }
+    } else if (!config) {
+      logger.info(
+        'Decision trail',
+        'installing the gate in blocking review mode — there is no .openlore/config.json to record '
+        + 'the non-blocking default in. Run "openlore install" (which inits) for the autopilot default.',
+      );
     }
     const { resolveTrustedHookLauncher } = await import('../git-hooks.js');
     if (!(await resolveTrustedHookLauncher(cwd))) {
@@ -279,7 +284,8 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     // comparing against zero read a successful install as failed when an earlier
     // step (a failed index build, which now runs first) had set the code.
     const installed = await installPreCommitHook(cwd, {
-      autopilot: config.governance?.autopilot === true || (!alreadyGated && config.governance?.autopilot !== false),
+      autopilot: config?.governance?.autopilot === true
+        || (!!config && !alreadyGated && config.governance?.autopilot !== false),
     });
     if (!installed) {
       // A commit gate that could not be installed must not fail the whole install.
@@ -341,8 +347,7 @@ export async function surfaceStatus(cwd?: string, home?: string): Promise<Surfac
       // Never resolve (or fail on) a home directory for an agent that has no user
       // scope to report — and never let a status read throw.
       try {
-        const userRoot = adapter.userRoot?.(resolveUserScopeRoot(home)) ?? resolveUserScopeRoot(home);
-        userScope = await adapter.isConnectedUserScope?.(userRoot) ?? false;
+        userScope = await adapter.isConnectedUserScope?.(resolveUserScopeRoot(home)) ?? false;
       } catch {
         userScope = false;
       }
@@ -470,10 +475,10 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     allWarnings.push(...result.warnings);
     if (result.conflict) {
       if (ctx.scope === 'user') {
-        allWarnings.push(
-          `The user scope was left untouched (pass --force to overwrite it). This repository was `
-          + 'still wired.',
-        );
+        // Deliberately NOT "pass --force": most user-scope conflicts are refusals
+        // (an unparseable file, a symlink, a concurrent write) that --force does not
+        // and must not override. The adapter's own warning names the actual cause.
+        allWarnings.push('The user scope was left untouched — see the message(s) above. This repository was still wired.');
       } else {
         conflict = true;
       }
@@ -520,7 +525,7 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   if (wiringUserScope) {
     for (const agent of globalAgents) {
       const adapter = ADAPTERS[agent];
-      if (!await runAdapter(adapter, contextFor(adapter.userRoot?.(home) ?? home, 'user'))) {
+      if (!await runAdapter(adapter, contextFor(home, 'user'))) {
         userScopeClean = false;
       }
     }
