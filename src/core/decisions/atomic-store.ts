@@ -71,6 +71,35 @@ let tmpCounter = 0;
  */
 const RENAME_CONTENTION_DELAYS_MS = [10, 25, 50, 100, 200, 400, 800, 1600] as const;
 
+/**
+ * Windows keeps retrying past the shared ladder; every other platform stops at it.
+ *
+ * MEASURED (issue #457, probe run 34043412177): the same code, the same test, on a clean
+ * `windows-latest` CI runner — 10 consecutive runs, and the contention path did not fire
+ * ONCE. On the reporting Windows 11 machine it fails about 1 run in 5. Identical code on
+ * both, so the handle blocking the rename cannot be one of ours: it is the environment
+ * (Defender's first-touch scan, the Search Indexer, a backup agent) opening a
+ * just-published artifact. That is the arbitrary-third-party case the shared ladder's own
+ * comment says it is NOT sized for, and `llm-context.json` is exactly the kind of file
+ * those tools open — a freshly written artifact in a watched tree.
+ *
+ * Extended to ~6.4s rather than `graceful-fs`'s 60s: the ceiling that matters is the commit
+ * lock's, not the scanner's. 10s is when a lock becomes a stale candidate and 30s is when a
+ * waiter gives up, so a writer that spends its whole budget must still finish well inside
+ * both. This doubles the tolerated hold while keeping that property.
+ *
+ * POSIX is unchanged: there is no share-mode conflict there, so an `EPERM` on rename is a
+ * genuine permission error, and spending seconds retrying it only delays a real failure.
+ */
+const WINDOWS_EXTRA_RENAME_DELAYS_MS = [3200] as const;
+
+/** The rename retry ladder for `platform`, longest-first-failure last. */
+export function renameRetryDelaysMs(platform: NodeJS.Platform = process.platform): readonly number[] {
+  return platform === 'win32'
+    ? [...RENAME_CONTENTION_DELAYS_MS, ...WINDOWS_EXTRA_RENAME_DELAYS_MS]
+    : RENAME_CONTENTION_DELAYS_MS;
+}
+
 const isRenameContention = (err: unknown): boolean => {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
@@ -92,12 +121,13 @@ const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => { setTim
 
 /** {@link rename}, retried while the destination is briefly held by another handle. */
 async function renameWithContentionRetry(tmp: string, path: string): Promise<void> {
+  const delays = renameRetryDelaysMs();
   for (let attempt = 0; ; attempt++) {
     try {
       await rename(tmp, path);
       return;
     } catch (err) {
-      const delay = RENAME_CONTENTION_DELAYS_MS[attempt];
+      const delay = delays[attempt];
       if (delay === undefined || !isRenameContention(err)) throw err;
       await sleepMs(delay);
     }
