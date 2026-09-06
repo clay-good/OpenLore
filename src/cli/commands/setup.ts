@@ -17,7 +17,7 @@
 
 import { Command } from 'commander';
 import { readFile, writeFile, mkdir, access, unlink, lstat, realpath } from 'node:fs/promises';
-import { join, dirname, relative, isAbsolute, resolve } from 'node:path';
+import { join, dirname, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { checkbox } from '@inquirer/prompts';
