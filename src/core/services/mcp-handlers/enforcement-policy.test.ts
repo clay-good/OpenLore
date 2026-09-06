@@ -91,6 +91,16 @@ describe('FINDING_CODE_REGISTRY', () => {
     }
     expect(sourceDefaultClass('not-a-real-code')).toBe('advisory');
   });
+  it('registers the dynamic-boundary code advisory and policy-governable (disclose-dynamic-boundary-regions)', () => {
+    const code = 'dynamic-boundary-in-conclusion-scope';
+    expect(isKnownFindingCode(code)).toBe(true);
+    // Advisory is the registry's invariant — blocking is always opt-in. The `info` severity rides
+    // the EMITTED finding, never this entry, and so plays no part in classing it.
+    expect(FINDING_CODE_REGISTRY[code].defaultClass).toBe('advisory');
+    expect(sourceDefaultClass(code)).toBe('advisory');
+    expect(FINDING_CODE_REGISTRY[code].source).toBe('dynamic-boundary');
+    expect(FINDING_CODE_REGISTRY[code].remediation).toBeDefined();
+  });
   it('registers the footprint-escape codes so a policy can govern them (add-footprint-escape-detection)', () => {
     for (const code of ['footprint-escape', 'footprint-escape-new-conflict', 'mis-declared-append']) {
       expect(isKnownFindingCode(code)).toBe(true);

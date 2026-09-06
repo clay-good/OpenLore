@@ -548,6 +548,15 @@ function literalTargetOf(
 
 /** The dotted text of a call's callee (`Reflect.get`), or undefined when it is not a member access. */
 function calleeText(source: string, call: DynamicBoundaryNode): string | undefined {
+  // Java's `method_invocation` and its kin split the receiver and the method into separate
+  // `object`/`name` fields rather than giving one dotted callee node, so `Class.forName(...)`
+  // would otherwise read as a bare `forName` and no dotted rule could ever match it. Compose the
+  // dotted text where the grammar splits it; every other grammar returns its callee node whole.
+  const object = field(call, 'object');
+  const name = field(call, 'name');
+  if (object && name) {
+    return `${textOf(source, object).trim()}.${textOf(source, name).trim()}`;
+  }
   const fn = calleeNode(call);
   if (!fn) return undefined;
   return textOf(source, fn).trim();

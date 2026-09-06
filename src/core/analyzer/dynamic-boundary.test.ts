@@ -635,3 +635,60 @@ function boot() {
     expect(kindsOf(sites)).toEqual(['container-resolution']);
   });
 });
+
+describe('the remaining declared languages match', () => {
+  it('PHP: call_user_func, eval, and a variable callee', async () => {
+    const sites = await sitesOf('a.php', 'PHP', `<?php
+function dispatch($fn, $name) {
+    call_user_func($fn);
+    eval('$x = 1;');
+    $fn();
+}
+`);
+    expect(kindsOf(sites)).toEqual(['code-eval', 'computed-member', 'reflective-invoke']);
+  });
+
+  it('Java: Method.invoke and Class.forName, gated on the reflection import', async () => {
+    const withImport = await sitesOf('A.java', 'Java', `
+import java.lang.reflect.Method;
+
+class Dispatcher {
+    void run(Method m, Object target) throws Exception {
+        m.invoke(target);
+        Class.forName("com.example.Plugin");
+    }
+}
+`);
+    expect(kindsOf(withImport)).toEqual(['dynamic-import', 'reflective-invoke']);
+
+    // The same `.invoke(` with no reflection import is an ordinary method call.
+    const without = await sitesOf('B.java', 'Java', `
+class Task {
+    void invoke() {}
+    void run(Task t) { t.invoke(); }
+}
+`);
+    expect(without.some(s => s.kind === 'reflective-invoke')).toBe(false);
+  });
+
+  it('C#: MethodInfo.Invoke gated on System.Reflection', async () => {
+    const sites = await sitesOf('A.cs', 'C#', `
+using System.Reflection;
+
+class Dispatcher {
+    void Run(MethodInfo m, object target) {
+        m.Invoke(target, null);
+    }
+}
+`);
+    expect(kindsOf(sites)).toEqual(['reflective-invoke']);
+
+    const without = await sitesOf('B.cs', 'C#', `
+class Command {
+    void Invoke() {}
+    void Run(Command c) { c.Invoke(); }
+}
+`);
+    expect(without).toEqual([]);
+  });
+});
