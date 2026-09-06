@@ -1082,6 +1082,39 @@ describe('doctor command', () => {
       expect(mcp.status).toBe('ok');
     });
 
+    // The wired entry names an absolute launcher since fix-windows-console-flash-from-npx-shim.
+    // That buys a console window fewer per agent turn on Windows, and costs a path that a
+    // moved install can invalidate — where the only other symptom is a silent hook failure.
+    const DIRECT_SERVER = {
+      mcpServers: {
+        openlore: {
+          command: '/usr/local/bin/node',
+          args: ['/usr/local/lib/node_modules/openlore/dist/cli/index.js', 'mcp', '--preset', 'substrate'],
+        },
+      },
+    };
+
+    it('warns when the wired launcher path no longer exists', async () => {
+      await mockMcpFiles({ '.mcp.json': DIRECT_SERVER });
+      const { access } = await import('node:fs/promises');
+      vi.mocked(access).mockRejectedValue(new Error('ENOENT'));
+
+      const checks = await runDoctorJson();
+      const mcp = checks.find(c => c.name === 'MCP wiring')!;
+      expect(mcp.status).toBe('warn');
+      expect(mcp.detail).toContain('dist/cli/index.js');
+      expect(mcp.fix).toContain('--force');
+    });
+
+    it('passes when the wired launcher is still on disk', async () => {
+      await mockMcpFiles({ '.mcp.json': DIRECT_SERVER });
+      const { access } = await import('node:fs/promises');
+      vi.mocked(access).mockResolvedValue(undefined);
+
+      const checks = await runDoctorJson();
+      expect(checks.find(c => c.name === 'MCP wiring')!.status).toBe('ok');
+    });
+
     it('warns about a stale settings.json entry when both files have it', async () => {
       await mockMcpFiles({ '.claude/settings.json': OPENLORE_SERVER, '.mcp.json': OPENLORE_SERVER });
       const checks = await runDoctorJson();

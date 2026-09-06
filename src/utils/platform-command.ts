@@ -87,11 +87,58 @@ export function resolvePlatformCommand(
   return { command, args: [...args] };
 }
 
-/** Format a resolved fixed-argv invocation for dry-run output and config command fields. */
-export function formatPlatformCommand(invocation: PlatformCommand): string {
-  return [invocation.command, ...invocation.args]
+/**
+ * Quote one argv element for a POSIX shell.
+ *
+ * Double quotes are NOT enough here: `$`, a backtick and `\` keep their meaning
+ * inside them, so a home directory containing any of those would turn a hook
+ * command into a substitution. Single quotes suppress every expansion, and the
+ * embedded-quote case closes, escapes, and reopens.
+ */
+function quotePosix(part: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(part)) return part;
+  return `'${part.split("'").join(`'\\''`)}'`;
+}
+
+/**
+ * Format a resolved fixed-argv invocation for dry-run output and config command fields.
+ *
+ * The result is a STRING a host runs through a shell (an agent hook command), so the
+ * quoting has to match that shell. Since fix-windows-console-flash-from-npx-shim these
+ * strings carry absolute filesystem paths on every platform — including the user's home
+ * directory — so a path is no longer safely assumed to be free of shell metacharacters.
+ *
+ * `platform` is REQUIRED, not defaulted: a caller that resolved an invocation FOR another
+ * platform must format it for that same platform, and a default silently got that wrong.
+ */
+export function formatPlatformCommand(
+  invocation: PlatformCommand,
+  platform: NodeJS.Platform,
+): string {
+  const parts = [invocation.command, ...invocation.args];
+  if (platform !== 'win32') return parts.map(quotePosix).join(' ');
+  // cmd.exe: double quotes are the only grouping it understands, and a literal `"`
+  // cannot appear in a path there at all.
+  return parts
     .map((part) => /[\s&|<>^%!()]/.test(part) ? `"${part}"` : part)
     .join(' ');
+}
+
+/**
+ * Does `value` look like OpenLore's own CLI entry point — the path
+ * `resolveOpenloreCommand` writes into a host config?
+ *
+ * Kept beside the emitter on purpose: uninstall identifies a marker-less entry by
+ * this shape, and the two must never drift apart.
+ */
+export function isOpenloreCliEntryPath(value: string): boolean {
+  const normalized = value.split('\\').join('/');
+  if (!normalized.endsWith('/cli/index.js')) return false;
+  // A containing directory has to NAME OpenLore. `node_modules/openlore` covers a real
+  // install; the looser substring also matches a checkout or worktree directory, which a
+  // strict `=== 'openlore'` segment test missed — found by running a real uninstall from
+  // a development worktree, where nothing was removed.
+  return normalized.split('/').slice(0, -2).some((segment) => segment.toLowerCase().includes('openlore'));
 }
 
 /**

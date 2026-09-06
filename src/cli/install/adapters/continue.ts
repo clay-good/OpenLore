@@ -25,7 +25,7 @@ function slashCommand(
   return {
     name: 'orient',
     description: 'Call openlore orient() for the current task context',
-    run: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime)),
+    run: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime), platform),
   };
 }
 

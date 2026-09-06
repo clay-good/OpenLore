@@ -1,6 +1,6 @@
 import { win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { formatPlatformCommand, resolvePlatformCommand, resolveOpenloreCommand } from './platform-command.js';
+import { formatPlatformCommand, isOpenloreCliEntryPath, resolvePlatformCommand, resolveOpenloreCommand } from './platform-command.js';
 
 describe('resolvePlatformCommand', () => {
   const windowsRuntime = {
@@ -38,7 +38,7 @@ describe('resolvePlatformCommand', () => {
   it('formats the exact argv that will be executed', () => {
     expect(formatPlatformCommand(resolvePlatformCommand(
       'npm', ['install', '-g', 'openlore@latest'], 'win32', windowsRuntime,
-    ))).toBe('"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" install -g openlore@latest');
+    ), 'win32')).toBe('"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" install -g openlore@latest');
   });
 
   it('requires an absolute Windows Node executable', () => {
@@ -157,5 +157,65 @@ describe('resolveOpenloreCommand', () => {
       pathValue: NPM_PREFIX,
       fileExists: (p) => p === NPX_CLI,
     })).toThrow('absolute Node executable');
+  });
+});
+
+describe('formatPlatformCommand quotes for the shell that will run it', () => {
+  // Since the wired command carries absolute filesystem paths on EVERY platform, the
+  // user's home directory is now part of the string a host hook runs through a shell.
+  it('suppresses POSIX expansion in a path that contains shell metacharacters', () => {
+    const line = formatPlatformCommand({
+      command: '/usr/bin/node',
+      args: ['/Users/a$b/`whoami`/openlore/dist/cli/index.js', 'orient', '--inject'],
+    }, 'linux');
+    expect(line).toBe(
+      "/usr/bin/node '/Users/a$b/`whoami`/openlore/dist/cli/index.js' orient --inject",
+    );
+  });
+
+  it("escapes an embedded single quote rather than ending the quoted run", () => {
+    const line = formatPlatformCommand({ command: '/usr/bin/node', args: ["/Users/o'brien/x.js"] }, 'darwin');
+    expect(line).toBe(`/usr/bin/node '/Users/o'\\''brien/x.js'`);
+  });
+
+  it('leaves an ordinary POSIX path unquoted', () => {
+    expect(formatPlatformCommand({
+      command: '/usr/local/bin/node',
+      args: ['/usr/local/lib/node_modules/openlore/dist/cli/index.js', 'orient', '--json'],
+    }, 'linux')).toBe(
+      '/usr/local/bin/node /usr/local/lib/node_modules/openlore/dist/cli/index.js orient --json',
+    );
+  });
+
+  it('keeps the cmd.exe double-quote form on Windows', () => {
+    expect(formatPlatformCommand({
+      command: 'C:\\Program Files\\nodejs\\node.exe',
+      args: ['C:\\npm\\openlore\\dist\\cli\\index.js', 'orient'],
+    }, 'win32')).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe" C:\\npm\\openlore\\dist\\cli\\index.js orient',
+    );
+  });
+});
+
+describe('isOpenloreCliEntryPath', () => {
+  it.each([
+    '/usr/local/lib/node_modules/openlore/dist/cli/index.js',
+    'C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\openlore\\dist\\cli\\index.js',
+    '/home/a/project/node_modules/openlore/dist/cli/index.js',
+    // A development checkout or worktree, where the directory names OpenLore without
+    // being exactly `openlore`.
+    '/Users/a/dev/OpenLore/.claude/worktrees/openlore-fix-123/dist/cli/index.js',
+  ])('recognises the entry this version wires: %s', (path) => {
+    expect(isOpenloreCliEntryPath(path)).toBe(true);
+  });
+
+  it.each([
+    '/usr/local/lib/node_modules/some-other-tool/dist/cli/index.js',
+    '/home/a/my-own-server.js',
+    'openlore',
+    '/home/a/openlore/dist/cli/other.js',
+    '/home/a/openlore-notes/README.md',
+  ])('does not claim an unrelated path: %s', (path) => {
+    expect(isOpenloreCliEntryPath(path)).toBe(false);
   });
 });

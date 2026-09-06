@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeCodeAdapter } from './claude-code.js';
@@ -108,5 +108,76 @@ describe('Windows-generated agent launch commands', () => {
 
     ctx.platform = 'linux';
     expect((await claudeCodeAdapter.uninstall(ctx)).conflict).toBe(false);
+  });
+});
+
+/**
+ * The direct form (change: fix-windows-console-flash-from-npx-shim). Every test above
+ * runs from TypeScript source, where no built CLI sits beside the module, so all of them
+ * exercise the `npx` FALLBACK. Injecting the entry is the only way to assert what a real,
+ * built install actually writes — the shape users get.
+ */
+describe('a built install wires OpenLore\'s own CLI, never the npx shim', () => {
+  const WIN_ENTRY = 'C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\openlore\\dist\\cli\\index.js';
+  const POSIX_ENTRY = '/usr/local/lib/node_modules/openlore/dist/cli/index.js';
+
+  async function builtContext(platform: NodeJS.Platform): Promise<ApplyContext> {
+    const ctx = await context(platform);
+    const posix = platform !== 'win32';
+    ctx.platformCommandRuntime = {
+      ...ctx.platformCommandRuntime,
+      nodeExecutable: posix ? '/usr/local/bin/node' : 'C:\\Program Files\\nodejs\\node.exe',
+      openloreCliEntry: posix ? POSIX_ENTRY : WIN_ENTRY,
+    };
+    return ctx;
+  }
+
+  it.each(['win32', 'linux'] as const)('wires every Claude Code surface directly on %s', async (platform) => {
+    const ctx = await builtContext(platform);
+    expect((await claudeCodeAdapter.apply(ctx)).conflict).toBe(false);
+
+    const mcp = await readFile(join(ctx.root, '.mcp.json'), 'utf8');
+    const settings = await readFile(join(ctx.root, '.claude/settings.json'), 'utf8');
+    // The regression this whole change exists to prevent: npx resolves the target bin to
+    // openlore.cmd, and a .cmd can only start through cmd.exe — one console window per
+    // agent turn for the UserPromptSubmit hook.
+    for (const written of [mcp, settings]) {
+      expect(written).not.toContain('npx');
+      expect(written).not.toContain('.cmd');
+    }
+    expect(JSON.parse(mcp).mcpServers.openlore.args[0]).toBe(platform === 'win32' ? WIN_ENTRY : POSIX_ENTRY);
+    for (const key of ['SessionStart', 'UserPromptSubmit']) {
+      expect(JSON.parse(settings).hooks[key][0].hooks[0].command).toContain('cli');
+    }
+  });
+
+  it.each(['win32', 'linux'] as const)('wires Cursor and Continue directly on %s', async (platform) => {
+    const ctx = await builtContext(platform);
+    expect((await cursorAdapter.apply(ctx)).conflict).toBe(false);
+    expect((await continueAdapter.apply(ctx)).conflict).toBe(false);
+
+    for (const file of ['.cursor/mcp.json', '.continue/config.json']) {
+      const written = await readFile(join(ctx.root, file), 'utf8');
+      expect(written).not.toContain('npx');
+      expect(written).not.toContain('.cmd');
+    }
+  });
+
+  it('removes the entry it wrote even after the managed marker is gone', async () => {
+    // `isOurMcpEntry` identifies a marker-less entry by its argv. The direct form dropped
+    // the literal `openlore` argument the old check keyed on; without the path shape, every
+    // entry written by this version would be stranded in the user scope.
+    const ctx = await builtContext('linux');
+    ctx.scope = 'user';
+    expect((await claudeCodeAdapter.apply(ctx)).conflict).toBe(false);
+
+    const mcpPath = join(ctx.root, '.claude.json');
+    const parsed = JSON.parse(await readFile(mcpPath, 'utf8'));
+    expect(parsed.mcpServers.openlore).toBeDefined();
+    delete parsed._openlore; // any tool that rewrites this file and drops unknown keys
+    await writeFile(mcpPath, JSON.stringify(parsed, null, 2));
+
+    expect((await claudeCodeAdapter.uninstall(ctx)).conflict).toBe(false);
+    expect(JSON.parse(await readFile(mcpPath, 'utf8')).mcpServers?.openlore).toBeUndefined();
   });
 });

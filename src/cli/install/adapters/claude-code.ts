@@ -17,7 +17,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreserving
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
-import { formatPlatformCommand, resolveOpenloreCommand } from '../../../utils/platform-command.js';
+import { formatPlatformCommand, isOpenloreCliEntryPath, resolveOpenloreCommand } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 import { isGuardedWriteFailure, withGuardedConfigWrite } from '../guarded-config-write.js';
 
@@ -221,11 +221,11 @@ function managedHooks(
   return [
     {
       key: 'SessionStart',
-      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime)),
+      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime), platform),
     },
     {
       key: 'UserPromptSubmit',
-      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--inject'], platform, runtime)),
+      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--inject'], platform, runtime), platform),
     },
   ];
 }
@@ -401,7 +401,14 @@ function isOurMcpEntry(entry: unknown): boolean {
   const args = (entry as { args?: unknown }).args;
   if (!Array.isArray(args)) return false;
   const flat = args.filter((a): a is string => typeof a === 'string');
-  return flat.includes('openlore') && flat.includes('mcp');
+  if (!flat.includes('mcp')) return false;
+  // Two shapes, because the wired form changed. `npx --yes openlore mcp …` carries
+  // the package name as its own argument; the direct form this version writes
+  // (change: fix-windows-console-flash-from-npx-shim) is
+  // `<node> …/openlore/dist/cli/index.js mcp …`, where that literal argument is gone.
+  // Matching only the first shape would strand every entry written by this version —
+  // the exact failure this fallback exists to prevent.
+  return flat.includes('openlore') || flat.some(isOpenloreCliEntryPath);
 }
 
 /** Record a refused write, naming the cause the code actually observed. */
