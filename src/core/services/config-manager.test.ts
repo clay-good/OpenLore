@@ -487,7 +487,12 @@ describe('config-manager', () => {
     it('rejects an empty config with an attributable file and remedy', async () => {
       await writeRawConfig({});
 
-      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/\.openlore\/config\.json/);
+      // The message attributes a HOST filesystem path the reader can open in their own
+      // shell, so it is correctly rendered with the platform separator (unlike a
+      // repository-relative path OpenLore SERVES, which is POSIX everywhere). Assert the
+      // same thing — the config file is named, inside its `.openlore` directory —
+      // separator-agnostically.
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/[\\/]\.openlore[\\/]config\.json/);
       await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/analysis/);
       await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/openlore init/);
     });

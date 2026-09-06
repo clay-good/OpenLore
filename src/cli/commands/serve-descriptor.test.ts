@@ -22,15 +22,25 @@ import {
   validateServeHealth,
   readServeDescriptor,
   serveHttpBaseUrl,
+  canonicalServeRoot,
   SERVE_PROTOCOL_VERSION,
 } from './serve-descriptor.js';
+
+// The health root is a filesystem identity, not a string: validateServeHealth compares and
+// PROJECTS it through canonicalServeRoot (resolve + realpath, lower-cased on Windows). A
+// POSIX literal is therefore not the value that comes back on Windows — `/tmp/project`
+// resolves to `c:\tmp\project` there — and the round-trip assertions below would fail on a
+// difference the validator is supposed to erase. Canonicalising the FIXTURE once keeps the
+// projection an identity on every platform, without relaxing any comparison.
+const ROOT = canonicalServeRoot('/tmp/project');
+const OTHER_ROOT = canonicalServeRoot('/tmp/other');
 
 const HEALTHY = { port: 8080, pid: 4242, host: '127.0.0.1', token: 't', protocolVersion: SERVE_PROTOCOL_VERSION, startedAt: 's', version: 'v' } as const;
 const HEALTH = {
   ok: true,
   protocolVersion: SERVE_PROTOCOL_VERSION,
   presetDispatchEnforced: true,
-  root: '/tmp/project',
+  root: ROOT,
   pid: 4242,
   preset: 'full',
   tools: ['orient'],
@@ -41,26 +51,26 @@ const HEALTH = {
 
 describe('optional watcher field (change: extend-api-for-supervising-hosts)', () => {
   it('projects a valid watcher value through', () => {
-    const health = validateServeHealth({ ...HEALTH, watcher: 'stopped' }, '/tmp/project');
+    const health = validateServeHealth({ ...HEALTH, watcher: 'stopped' }, ROOT);
     expect(health?.watcher).toBe('stopped');
   });
 
   it('validates a payload that omits watcher, and reports it absent rather than guessing', () => {
-    const health = validateServeHealth(HEALTH, '/tmp/project');
+    const health = validateServeHealth(HEALTH, ROOT);
     expect(health).not.toBeNull();
     expect(health?.watcher).toBeUndefined();
   });
 
   it('drops an ill-typed watcher instead of passing it through', () => {
-    const health = validateServeHealth({ ...HEALTH, watcher: 'sort-of-ok' }, '/tmp/project');
+    const health = validateServeHealth({ ...HEALTH, watcher: 'sort-of-ok' }, ROOT);
     expect(health).not.toBeNull(); // an advisory field must not make a valid daemon unreadable
     expect(health?.watcher).toBeUndefined();
   });
 
   it('did not tighten or loosen any security-critical field', () => {
-    expect(validateServeHealth({ ...HEALTH, tokenAuthenticated: false }, '/tmp/project')).toBeNull();
-    expect(validateServeHealth({ ...HEALTH, root: '/tmp/other' }, '/tmp/project')).toBeNull();
-    expect(validateServeHealth({ ...HEALTH, protocolVersion: 999 }, '/tmp/project')).toBeNull();
+    expect(validateServeHealth({ ...HEALTH, tokenAuthenticated: false }, ROOT)).toBeNull();
+    expect(validateServeHealth({ ...HEALTH, root: OTHER_ROOT }, ROOT)).toBeNull();
+    expect(validateServeHealth({ ...HEALTH, protocolVersion: 999 }, ROOT)).toBeNull();
   });
 });
 
@@ -71,10 +81,10 @@ it('formats IPv4 and IPv6 loopback origins safely', () => {
 
 describe('validateServeHealth', () => {
   it('requires an authenticated enforced surface bound to the expected root', () => {
-    expect(validateServeHealth(HEALTH, '/tmp/project')).toEqual(HEALTH);
+    expect(validateServeHealth(HEALTH, ROOT)).toEqual(HEALTH);
     for (const bad of [
       { ...HEALTH, presetDispatchEnforced: false },
-      { ...HEALTH, root: '/tmp/other' },
+      { ...HEALTH, root: OTHER_ROOT },
       { ...HEALTH, pid: 0 },
       { ...HEALTH, tools: [1] },
       { ...HEALTH, tokenProtected: 'yes' },
@@ -82,16 +92,16 @@ describe('validateServeHealth', () => {
       { ...HEALTH, draining: 'false' },
       (({ draining: _, ...withoutDraining }) => withoutDraining)(HEALTH),
     ]) {
-      expect(validateServeHealth(bad, '/tmp/project')).toBeNull();
+      expect(validateServeHealth(bad, ROOT)).toBeNull();
     }
   });
 
   it('binds daemon identity and token posture to the discovery descriptor', () => {
-    expect(validateServeHealth(HEALTH, '/tmp/project', HEALTHY)).toEqual(HEALTH);
-    expect(validateServeHealth({ ...HEALTH, pid: 4243 }, '/tmp/project', HEALTHY)).toBeNull();
+    expect(validateServeHealth(HEALTH, ROOT, HEALTHY)).toEqual(HEALTH);
+    expect(validateServeHealth({ ...HEALTH, pid: 4243 }, ROOT, HEALTHY)).toBeNull();
     expect(validateServeHealth(
       { ...HEALTH, tokenProtected: false },
-      '/tmp/project',
+      ROOT,
       HEALTHY,
     )).toBeNull();
   });
@@ -136,7 +146,7 @@ describe('validateServeDescriptor', () => {
   it('rejects legacy or incompatible daemon protocols', () => {
     expect(validateServeDescriptor({ ...HEALTHY, protocolVersion: undefined })).toBeNull();
     expect(validateServeDescriptor({ ...HEALTHY, protocolVersion: SERVE_PROTOCOL_VERSION + 1 })).toBeNull();
-    expect(validateServeHealth({ ...HEALTH, protocolVersion: SERVE_PROTOCOL_VERSION + 1 }, '/tmp/project', HEALTHY)).toBeNull();
+    expect(validateServeHealth({ ...HEALTH, protocolVersion: SERVE_PROTOCOL_VERSION + 1 }, ROOT, HEALTHY)).toBeNull();
   });
 
   it('accepts only the ready/draining lifecycle states', () => {

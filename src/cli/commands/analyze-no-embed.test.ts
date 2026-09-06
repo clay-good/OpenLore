@@ -8,6 +8,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolve } from 'node:path';
+
+// A NATIVE absolute root. `process.cwd()` is always native, and `safeJoin()` compares the
+// root it is given against `resolve()`d children with the platform separator — a bare
+// `'/fake/root'` literal resolves to `C:\fake\root` on Windows, fails that comparison, and
+// aborts analyze with "Path traversal blocked" before it ever reaches the index step.
+// Resolve the root ONCE here; it is `/fake/root` on POSIX and `C:\fake\root` on Windows.
+const FAKE_ROOT = resolve('/fake/root');
 
 // Hoisted so the vi.mock factories below (which are hoisted to the top of the
 // module) can safely reference these spies.
@@ -215,7 +223,7 @@ describe('analyze --no-embed builds a keyword (BM25) index', () => {
     fromConfigMock.mockReset().mockReturnValue(null);
     const cfgMod = await import('../../core/services/config-manager.js');
     vi.mocked(cfgMod.readOpenLoreConfig).mockResolvedValue(FAKE_CONFIG);
-    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/fake/root');
+    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(FAKE_ROOT);
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     process.exitCode = undefined;
     // analyzeCommand is a module-level singleton; commander retains --embed

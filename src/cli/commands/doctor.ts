@@ -56,6 +56,7 @@ import { detectCorpusIntegrity } from '../../core/decisions/corpus-integrity.js'
 import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
 import { redactSecretTextWithKnownValues } from '../../core/services/secret-redaction.js';
 import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
+import { toRepositoryPath } from '../../core/analyzer/file-walker.js';
 import {
   hookManagerWarning,
   isResolvedGitRepository,
@@ -336,9 +337,14 @@ export async function checkServedContentTrust(
   rootPath: string,
   explicitFiles?: string[],
 ): Promise<CheckResult> {
+  // POSIX, because `candidate` becomes a governance finding's `subject` — a value an operator's
+  // enforcement policy matches on (#458). The other branch of this same set, harvested from
+  // `git status --porcelain`, is POSIX on every platform, so a native `join` here made ONE result
+  // array carry two separator conventions at once, and only on Windows. The read below re-joins
+  // against `rootPath`, and Node accepts `/` there.
   const candidates = new Set<string>(explicitFiles ?? [
-    join(OPENLORE_DIR, 'memory', 'notes.json'),
-    join(OPENLORE_DIR, 'decisions', 'pending.json'),
+    toRepositoryPath(join(OPENLORE_DIR, 'memory', 'notes.json')),
+    toRepositoryPath(join(OPENLORE_DIR, 'decisions', 'pending.json')),
   ]);
   if (!explicitFiles) {
     try {

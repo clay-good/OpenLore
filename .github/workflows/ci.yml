@@ -213,6 +213,13 @@ jobs:
 
       - run: npm ci
 
+      # Same prerequisite as the Linux unit job: the hook-installation tests pin the same
+      # built, external OpenLore launcher that production installs, so `dist/` must exist
+      # before they run. Without it `resolveTrustedHookLauncher()` returns null, the
+      # installer refuses to pin a launcher, and every hook test fails on ANY platform.
+      - name: Build trusted hook launcher
+        run: npm run build
+
       # Before this job, exactly ONE test file ran on Windows in CI, so every path, filesystem and
       # subprocess suite — where a Windows-only defect actually lives — went unexercised on the
       # platform (issue #434).

@@ -627,7 +627,11 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   if (opts.gitRoot) {
     try {
       const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd });
-      const resolvedRoot = stdout.endsWith('\n') ? stdout.slice(0, -1) : stdout;
+      // Strip ONLY the terminator git added. A POSIX directory name may legally end in
+      // `\r`, so trimming it there would corrupt a real repository root; Windows forbids
+      // control characters in a path component, so the `\r` of a CRLF terminator there is
+      // never part of the root. Matches the `\r?\n` stripping in `resolveGitPath`.
+      const resolvedRoot = stdout.replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '');
       if (!resolvedRoot) throw new Error('git returned an empty repository root');
       cwd = resolvedRoot;
     } catch (error) {

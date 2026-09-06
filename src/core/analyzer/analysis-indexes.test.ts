@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const { vectorBuild, textBuild, specBuild, readSourceCapped, resolveEmbedder } = vi.hoisted(() => ({
   vectorBuild: vi.fn(), textBuild: vi.fn(), specBuild: vi.fn(), readSourceCapped: vi.fn(), resolveEmbedder: vi.fn(),
@@ -21,6 +21,13 @@ vi.mock('./bounded-file-scan.js', () => ({
 import { buildAnalysisIndexes } from './analysis-indexes.js';
 import { FileWalker } from './file-walker.js';
 
+// A root literal has to be resolved for the HOST platform, then composed with `join`.
+// A bare "/repo" is not a fully-qualified Windows path, and the product's path
+// confinement (`safeJoin`) rejects every child of it there, so the index build would
+// be asserted against a root no read could ever pass.
+const ROOT = resolve('/repo');
+const OUTPUT = join(ROOT, '.openlore', 'analysis');
+
 describe('shared analysis index builder', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -34,7 +41,7 @@ describe('shared analysis index builder', () => {
   it('falls back to keyword indexes and discloses resolver failure', async () => {
     resolveEmbedder.mockRejectedValueOnce(new Error('endpoint unavailable'));
     const result = await buildAnalysisIndexes({
-      rootPath: '/repo', outputPath: '/repo/.openlore/analysis', config: null,
+      rootPath: ROOT, outputPath: OUTPUT, config: null,
       llmContext: { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] }, callGraph: { nodes: [{ id: 'f', name: 'f', filePath: 'src/f.ts' }], edges: [], stats: { totalNodes: 1, totalEdges: 0 }, hubFunctions: [], entryPoints: [] } } as never,
     });
     expect(vectorBuild.mock.calls[0][5]).toBeNull();
@@ -44,7 +51,7 @@ describe('shared analysis index builder', () => {
   it('treats an empty OpenSpec directory as an expected skip for every frontend', async () => {
     specBuild.mockRejectedValueOnce(new Error('OpenSpec specs directory exists but contains no spec.md files'));
     const result = await buildAnalysisIndexes({
-      rootPath: '/repo', outputPath: '/repo/.openlore/analysis', config: null, keywordOnly: true,
+      rootPath: ROOT, outputPath: OUTPUT, config: null, keywordOnly: true,
       llmContext: { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] } } as never,
     });
     expect(result.degraded).not.toContainEqual(expect.objectContaining({ index: 'spec' }));
@@ -52,20 +59,20 @@ describe('shared analysis index builder', () => {
 
   it('indexes specs and decisions under the configured confined OpenSpec root', async () => {
     await buildAnalysisIndexes({
-      rootPath: '/repo', outputPath: '/repo/.openlore/analysis',
+      rootPath: ROOT, outputPath: OUTPUT,
       config: { openspecPath: 'docs/specs' } as never, keywordOnly: true,
       llmContext: { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] } } as never,
     });
     expect(specBuild).toHaveBeenCalledWith(
-      '/repo/.openlore/analysis', '/repo/docs/specs/specs', null,
-      '/repo/.openlore/analysis/mapping.json', '/repo/docs/specs/decisions',
+      OUTPUT, join(ROOT, 'docs', 'specs', 'specs'), null,
+      join(OUTPUT, 'mapping.json'), join(ROOT, 'docs', 'specs', 'decisions'),
     );
   });
 
   it('builds function, literal-text, and spec keyword indexes from one shared entry point', async () => {
     const result = await buildAnalysisIndexes({
-      rootPath: '/repo',
-      outputPath: '/repo/.openlore/analysis',
+      rootPath: ROOT,
+      outputPath: OUTPUT,
       config: null,
       keywordOnly: true,
       llmContext: {
@@ -80,7 +87,7 @@ describe('shared analysis index builder', () => {
     });
     expect(vectorBuild).toHaveBeenCalledOnce();
     expect(vectorBuild.mock.calls[0][5]).toBeNull();
-    expect(readSourceCapped).toHaveBeenCalledWith('/repo/src/f.ts', expect.any(Number));
+    expect(readSourceCapped).toHaveBeenCalledWith(join(ROOT, 'src', 'f.ts'), expect.any(Number));
     expect(textBuild).toHaveBeenCalledOnce();
     expect(specBuild).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ functionIndex: 'built', textIndex: 'built', specIndex: 'built', degraded: [] });
@@ -88,12 +95,12 @@ describe('shared analysis index builder', () => {
 
   it('propagates the effective analysis corpus to the literal-text walker', async () => {
     await buildAnalysisIndexes({
-      rootPath: '/repo', outputPath: '/repo/.openlore/analysis', keywordOnly: true,
+      rootPath: ROOT, outputPath: OUTPUT, keywordOnly: true,
       config: { analysis: { includePatterns: ['generated/keep.ts'], excludePatterns: ['private/**'] } } as never,
       include: ['vendor/keep.ts'], exclude: ['tmp/**'],
       llmContext: { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] } } as never,
     });
-    expect(FileWalker).toHaveBeenCalledWith('/repo', {
+    expect(FileWalker).toHaveBeenCalledWith(ROOT, {
       includePatterns: ['vendor/keep.ts'],
       restrictedIncludePatterns: ['generated/keep.ts'],
       excludePatterns: ['private/**', 'tmp/**'],
@@ -104,7 +111,7 @@ describe('shared analysis index builder', () => {
   it('omits an oversized function body without skipping the symbol index', async () => {
     readSourceCapped.mockResolvedValue(null);
     await buildAnalysisIndexes({
-      rootPath: '/repo', outputPath: '/repo/.openlore/analysis', config: null, keywordOnly: true,
+      rootPath: ROOT, outputPath: OUTPUT, config: null, keywordOnly: true,
       llmContext: { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] }, callGraph: { nodes: [{ id: 'f', name: 'f', filePath: 'src/huge.ts' }], edges: [], stats: { totalNodes: 1, totalEdges: 0 }, hubFunctions: [], entryPoints: [] } } as never,
     });
     expect(vectorBuild).toHaveBeenCalledOnce();
@@ -113,12 +120,13 @@ describe('shared analysis index builder', () => {
 
   it('drops call-graph file paths that escape the repository', async () => {
     await buildAnalysisIndexes({
-      rootPath: '/repo', outputPath: '/repo/.openlore/analysis', config: null, keywordOnly: true,
+      rootPath: ROOT, outputPath: OUTPUT, config: null, keywordOnly: true,
       llmContext: { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] }, callGraph: { nodes: [{ id: 'f', name: 'f', filePath: '../../secret.ts' }], edges: [], stats: { totalNodes: 1, totalEdges: 0 }, hubFunctions: [], entryPoints: [] } } as never,
     });
     expect(readSourceCapped).not.toHaveBeenCalled();
     expect((vectorBuild.mock.calls[0][6] as Map<string, string>).size).toBe(0);
-  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  });
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 

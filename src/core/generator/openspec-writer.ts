@@ -23,6 +23,7 @@ import {
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
+import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { detectOpenSpecPackageVersion, OPENLORE_PACKAGE_VERSION } from '../runtime/package-versions.js';
 import {
   OpenSpecConfigManager,
@@ -242,7 +243,7 @@ export class OpenSpecWriter {
             join(OPENLORE_BACKUPS_SUBDIR, timestamp, OPENSPEC_SPECS_SUBDIR, stale.name),
           );
           await cp(stale.domainDir, backupDir, { recursive: true });
-          report.filesBackedUp.push(relative(this.rootPath, backupDir));
+          report.filesBackedUp.push(toRepositoryPath(relative(this.rootPath, backupDir)));
         }
       }
 
@@ -489,8 +490,11 @@ export class OpenSpecWriter {
     await mkdir(dirname(backupPath), { recursive: true });
     await copyFile(fullPath, backupPath);
 
+    // SERVED, so POSIX on every host (#458). `filesWritten`/`filesMerged` in the same report come
+    // from `spec.path`, which is always POSIX — a native `filesBackedUp` made one report carry two
+    // separator conventions at once, and only on Windows.
     logger.discovery(`Backed up ${relativePath} to ${relative(this.rootPath, backupPath)}`);
-    return relative(this.rootPath, backupPath);
+    return toRepositoryPath(relative(this.rootPath, backupPath));
   }
 
   /**

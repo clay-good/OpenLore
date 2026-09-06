@@ -394,7 +394,8 @@ describe('FileWalker — truncation receipt details & interactions', () => {
   });
 });
 
-describe('FileWalker — symlink × include × truncation cross-interactions', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+describe('FileWalker — symlink × include × truncation cross-interactions', () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 
@@ -413,7 +414,8 @@ describe('FileWalker — symlink × include × truncation cross-interactions', (
     expect(paths.some((p) => p.endsWith('secret.ts'))).toBe(false);
     expect(paths).toContain('src/mine.ts');
     expect(Object.keys(result.summary.skippedReasons ?? {})).toContain('symlink:outside-root');
-  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  });
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 
@@ -435,7 +437,8 @@ describe('FileWalker — symlink × include × truncation cross-interactions', (
   });
 });
 
-describe('FileWalker — followed-symlink disclosure', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+describe('FileWalker — followed-symlink disclosure', () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 
@@ -522,7 +525,14 @@ describe('FileWalker — .openlore-ignore (root)', () => {
 });
 
 describe('FileWalker — permission errors are disclosed distinctly', () => {
-  it('records an unreadable directory under error:permission, not a bare error', async () => {
+  // skipIf(win32): the premise is an UNREADABLE directory, and `chmod` cannot build one there —
+  // Node maps a Windows chmod onto the read-only attribute, which is a no-op for a directory, so
+  // the walk would list `secret/` normally and the test would assert against a fixture that never
+  // denied anything. Denying it for real needs an ACL edit (`icacls`) whose outcome depends on the
+  // runner's token. What is under test — that an EACCES/EPERM listing failure is disclosed as
+  // `error:permission` rather than a bare read error — is platform-independent and is exercised on
+  // the POSIX runners.
+  it.skipIf(process.platform === 'win32')('records an unreadable directory under error:permission, not a bare error', async () => {
     // root bypasses filesystem permissions, so chmod 000 would not block the read there — the
     // assertion is only meaningful for a non-root user (the CI runner is non-root).
     if (process.getuid?.() === 0) return;

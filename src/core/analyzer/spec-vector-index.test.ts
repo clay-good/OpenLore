@@ -201,10 +201,14 @@ describe('SpecVectorIndex', () => {
         auth: SAMPLE_SPEC_AUTH,
         oversized: 'x'.repeat(4 * 1024 * 1024 + 1),
       });
+      // The message embeds `relative(specsDir, specFile)` — a HOST filesystem path, where
+      // the native separator is correct — so the expectation is built the same way rather
+      // than hard-coding the POSIX form.
       await expect(SpecVectorIndex.build(tmpDir, specsDir, null)).rejects.toThrow(
-        /Cannot read authoritative spec artifact oversized\/spec\.md/,
+        `Cannot read authoritative spec artifact ${join('oversized', 'spec.md')}`,
       );
-    });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+    });
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 
@@ -230,7 +234,8 @@ describe('SpecVectorIndex', () => {
 
       await expect(SpecVectorIndex.build(tmpDir, specsDir, null, undefined, decisionsDir))
         .rejects.toThrow(/Cannot read authoritative decision artifact adr-0001-oversized\.md/);
-    });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+    });
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 

@@ -353,9 +353,10 @@ describe('AnalysisArtifactGenerator', () => {
       expect(artifacts.summaryMarkdown).toContain('scripts/report.py');
     });
 
-    it('does not mistake a real external-prefixed path for a synthetic node', async () => {
-      const relativePath = 'external::report\n## forged.py';
-      const absolutePath = join(tempDir, relativePath);
+    // One repository-authored file name, asserted twice. Both cases share the same
+    // premise — a REAL walked file whose name is shaped like an artifact-generator
+    // internal — and differ only in which bytes the platform lets a file name hold.
+    async function undomainedArtifactsFor(relativePath: string, absolutePath: string) {
       await writeFile(absolutePath, 'def report():\n    return 1\n');
       const file = createScoredFile({
         name: relativePath, path: relativePath, absolutePath, extension: '.py',
@@ -367,9 +368,30 @@ describe('AnalysisArtifactGenerator', () => {
           byLayer: { presentation: [], business: [], data: [], infrastructure: [] },
         },
       });
-      const artifacts = await generateArtifacts(repoMap, createMockDepGraph({ nodes: [], edges: [], clusters: [] }), {
+      return generateArtifacts(repoMap, createMockDepGraph({ nodes: [], edges: [], clusters: [] }), {
         rootDir: tempDir, outputDir,
       });
+    }
+
+    it('escapes markdown metacharacters in a real repository file name', async () => {
+      // Every byte here is legal in a file name on both POSIX and Windows, so the
+      // premise (a REAL file on disk, not a synthetic record) holds on both.
+      const relativePath = 'external.report ## forged.py';
+      const artifacts = await undomainedArtifactsFor(relativePath, join(tempDir, relativePath));
+      expect(artifacts.repoStructure.undomained).toContain(relativePath);
+      expect(artifacts.summaryMarkdown).not.toContain('## forged.py');
+      expect(artifacts.summaryMarkdown).toContain('\\#\\# forged.py');
+    });
+
+    // skipIf(win32): `:` and a newline are ILLEGAL in a Windows file name, so the
+    // `external::` synthetic-node prefix and the heading-forging line break cannot
+    // exist on a real Windows path at all — the premise is unbuildable there, and
+    // writing the fixture fails with ENOENT rather than testing anything. The
+    // platform-independent half (metacharacter escaping of a real walked file) is
+    // asserted on both platforms by the test above.
+    it.skipIf(process.platform === 'win32')('does not mistake a real external-prefixed path for a synthetic node', async () => {
+      const relativePath = 'external::report\n## forged.py';
+      const artifacts = await undomainedArtifactsFor(relativePath, join(tempDir, relativePath));
       expect(artifacts.repoStructure.undomained).toContain(relativePath);
       expect(artifacts.summaryMarkdown).not.toContain('\n## forged.py');
       expect(artifacts.summaryMarkdown).toContain('\\u000a\\#\\# forged.py');

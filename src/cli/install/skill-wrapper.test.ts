@@ -9,7 +9,11 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFile, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { resolve } from 'node:path';
+
+const execFileAsync = promisify(execFile);
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..');
 const HELPER = resolve(REPO_ROOT, 'skills/openlore-orient/scripts/orient-via-mcp.mjs');
@@ -40,7 +44,11 @@ describe('openlore-orient skill bundle', () => {
   });
 
   it('SKILL.md has portable Agent Skills frontmatter', async () => {
-    const src = await readFile(SKILL_MD, 'utf8');
+    // Line endings normalised at the read: the frontmatter fences and the `^…$`
+    // field patterns below are spelled with `\n`, and a CRLF checkout (the Windows
+    // default) makes every one of them miss. The property is which keys the
+    // frontmatter declares, not how the repository stores its newlines.
+    const src = (await readFile(SKILL_MD, 'utf8')).split('\r\n').join('\n');
     const frontmatter = src.match(/^---\n([\s\S]*?)\n---/)?.[1];
     expect(frontmatter).toBeDefined();
     expect(src).toMatch(/^name:\s*openlore-orient$/m);
@@ -53,6 +61,24 @@ describe('openlore-orient skill bundle', () => {
   });
 
   it('orient.sh and orient.ps1 are executable', async () => {
+    // Windows has no POSIX execute bit — `stat().mode` there reports a synthesised
+    // value with no `0o111` information at all, so the working-copy check cannot
+    // exist. The property that actually ships is the mode RECORDED IN GIT (`100755`),
+    // which is what a POSIX checkout and the npm tarball both take their bit from,
+    // and git records it identically on every platform. Assert that instead of
+    // skipping, so the guard still runs on Windows.
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['ls-files', '--stage', '--', 'skills/openlore-orient/scripts/orient.sh',
+          'skills/openlore-orient/scripts/orient.ps1'],
+        { cwd: REPO_ROOT },
+      );
+      const modes = stdout.trim().split(/\r?\n/).map((line) => line.split(' ')[0]);
+      expect(modes).toHaveLength(2);
+      for (const mode of modes) expect(mode).toBe('100755');
+      return;
+    }
     const sh = await stat(SH);
     expect(sh.mode & 0o111).not.toBe(0);
     const ps1 = await stat(PS1);
