@@ -9,7 +9,7 @@ import {
   clearPartialIndex,
   describePartialIndex,
   flushPartialIndex,
-  partialCompletenessPercent,
+  partialBuildStagePercent,
   partialIndexDirOf,
   partialStampPathOf,
   readPartialArtifact,
@@ -24,7 +24,8 @@ let analysisDir: string;
 function stampOf(overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp {
   return {
     partial: true,
-    phase: 'dependency-graph',
+    phase: 'extractors',
+    buildPhase: 'extractors',
     filesExtracted: 0,
     filesTotal: 120,
     filesMapped: 118,
@@ -81,7 +82,7 @@ describe('partial first-run index', () => {
 
     const live = await readPartialIndexStamp(analysisDir);
     expect(live?.phase).toBe('extractors');
-    expect(partialCompletenessPercent(live!)).toBe(50);
+    expect(partialBuildStagePercent(live!)).toBe(50);
 
     const raw = await readPartialArtifact(analysisDir, 'llm-context.json');
     expect(JSON.parse(raw!).partial.partial).toBe(true);
@@ -103,9 +104,34 @@ describe('partial first-run index', () => {
     }
     await writeFile(partialStampPathOf(analysisDir), JSON.stringify(stampOf()), 'utf8');
 
-    // The stamp parses, but no generation was published: the bytes are unattested.
-    expect(await readPartialIndexStamp(analysisDir)).not.toBeNull();
+    // The stamp parses, but no generation stands behind it: not a partial index.
+    expect(await readPartialIndexStamp(analysisDir)).toBeNull();
     expect(await readPartialArtifact(analysisDir, 'llm-context.json')).toBeNull();
+  });
+
+  it('cannot be resurrected by a late stamp refresh after cleanup', async () => {
+    // `atomicWriteFile` creates missing directories, so a fire-and-forget refresh landing
+    // after the build published would otherwise recreate a stamp with nothing behind it —
+    // and the repository would keep claiming a build was running, refusing exports, until
+    // the stamp aged out ten minutes later.
+    await flush();
+    await clearPartialIndex(analysisDir);
+
+    await refreshPartialIndexStamp(analysisDir, { buildPhase: 'artifacts' });
+
+    expect(await readPartialIndexStamp(analysisDir)).toBeNull();
+    expect(existsSync(partialStampPathOf(analysisDir))).toBe(false);
+  });
+
+  it('writes no stamp when the commit fails, so a half-flush is unobservable', async () => {
+    // A directory where an artifact file must go: the write fails, nothing is committed, and
+    // no stamp is left claiming otherwise.
+    const dir = partialIndexDirOf(analysisDir);
+    await mkdir(join(dir, 'llm-context.json'), { recursive: true });
+
+    expect(await flush()).toBe(false);
+    expect(existsSync(partialStampPathOf(analysisDir))).toBe(false);
+    expect(await readPartialIndexStamp(analysisDir)).toBeNull();
   });
 
   it('abandons a partial index whose owning process is gone', async () => {
@@ -126,21 +152,24 @@ describe('partial first-run index', () => {
     expect(await readPartialIndexStamp(analysisDir)).toBeNull();
   });
 
-  it('re-stamps the phase without invalidating the published commit', async () => {
+  it('advances the build phase without inflating what the index claims to hold', async () => {
     await flush();
     const before = await readPartialArtifact(analysisDir, 'llm-context.json');
 
-    await refreshPartialIndexStamp(analysisDir, { phase: 'artifacts' });
+    await refreshPartialIndexStamp(analysisDir, { buildPhase: 'artifacts' });
 
     const after = await readPartialIndexStamp(analysisDir);
-    expect(after?.phase).toBe('artifacts');
-    expect(partialCompletenessPercent(after!)).toBe(75);
+    expect(after?.buildPhase).toBe('artifacts');
+    // The FACTS are still the extractors flush. If the heartbeat advanced `phase` too, the
+    // index would advertise a completeness its bytes do not have.
+    expect(after?.phase).toBe('extractors');
+    expect(partialBuildStagePercent(after!)).toBe(75);
     // The stamp is not part of the generation, so the artifacts stay committed.
     expect(await readPartialArtifact(analysisDir, 'llm-context.json')).toBe(before);
   });
 
   it('does not resurrect a stamp for an index that was never flushed', async () => {
-    await refreshPartialIndexStamp(analysisDir, { phase: 'artifacts' });
+    await refreshPartialIndexStamp(analysisDir, { buildPhase: 'artifacts' });
     expect(existsSync(partialStampPathOf(analysisDir))).toBe(false);
   });
 
@@ -154,13 +183,36 @@ describe('partial first-run index', () => {
     expect(await readPartialIndexStamp(analysisDir)).toBeNull();
   });
 
-  it('discloses completeness, the ordering, and invisible-not-absent', async () => {
-    const text = describePartialIndex(stampOf({ phase: 'extractors', filesMapped: 90, filesTotal: 100 }));
-    expect(text).toContain('50% complete');
-    expect(text).toContain('90 of 100 files mapped');
-    expect(text).toContain('significance-ordered');
+  it('discloses what the index holds, what it does not, and invisible-not-absent', async () => {
+    const text = describePartialIndex(stampOf({ filesMapped: 90, filesTotal: 100 }));
+
+    expect(text).toContain('first analysis is still running');
+    expect(text).toContain('90 analyzed files (10 more were permanently skipped)');
+    expect(text).toContain('It does NOT yet hold: the call graph');
     expect(text).toContain('INVISIBLE to this answer, not absent from the repository');
     expect(text).toContain('not authoritative');
+    // No completeness percentage. The honest denominator is the call-graph pass, which has
+    // not started, and a percentage in that position reads as "how much of the index exists".
+    expect(text).not.toMatch(/%/);
+  });
+
+  it('bounds and cleans the writer-supplied absent list before it is rendered', async () => {
+    // This text is rendered into an agent-visible `[openlore index]` line, which reads as
+    // OpenLore's own voice; the file it comes from is untrusted repository content.
+    await flush(stampOf({ absent: ['ok', 'esc\u001b[31mape', 'x'.repeat(500), ...Array(20).fill('flood')] }));
+
+    const stamp = await readPartialIndexStamp(analysisDir);
+
+    expect(stamp!.absent.length).toBeLessThanOrEqual(8);
+    expect([...stamp!.absent.join('')].some(ch => ch.codePointAt(0)! < 0x20)).toBe(false);
+    expect(Math.max(...stamp!.absent.map(entry => entry.length))).toBeLessThanOrEqual(200);
+  });
+
+  it('refuses a stamp dated in the future, which would otherwise never age out', async () => {
+    // With no lower bound the age is negative, finite and under the max — accepted forever.
+    // Pair that with `pid: 1` and a checked-in partial index is permanently "mid-build".
+    await flush(stampOf({ updatedAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() }));
+    expect(await readPartialIndexStamp(analysisDir)).toBeNull();
   });
 
   it('is fail-soft: an unwritable location produces no index and no throw', async () => {

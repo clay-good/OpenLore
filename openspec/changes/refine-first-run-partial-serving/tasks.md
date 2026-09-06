@@ -1,42 +1,68 @@
 # Tasks — refine-first-run-partial-serving
 
 ## Implementation
-- [x] Partial index module (`src/core/runtime/partial-index.ts`): flush, re-stamp, read,
-      clear, and the completeness receipt. Written OUTSIDE the analysis directory (under
-      `.openlore/runtime/partial-analysis/`) so no artifact reader, exporter, attester, or
-      fingerprint can see it; commits each flush through the same `publishGeneration`
-      content-digest primitive the real analysis uses
-- [x] Flush lane in `analysis-core.ts`: flush at the dependency-graph and extractors phase
-      boundaries, re-stamp on the artifacts-phase heartbeat, armed only when the caller opts
-      in AND no published generation exists. Wholly fail-soft — no flush failure can reach the
-      analysis it is a side effect of
+- [x] Partial index module (`src/core/runtime/partial-index.ts`): flush, re-stamp, read, clear,
+      and the receipt. Written OUTSIDE the analysis directory (`.openlore/runtime/partial-analysis/`)
+      so no artifact reader, exporter, attester, or fingerprint can see it; each flush commits
+      through the same `publishGeneration` content-digest primitive the real analysis uses, and
+      the receipt is written AFTER the commit so a half-written flush is unobservable
+- [x] Flush lane in `analysis-core.ts`: one flush at the extractors boundary, `buildPhase`
+      re-stamped on the artifacts heartbeat, armed only when the caller opts in AND neither a
+      published generation nor an analysis artifact exists. Wholly fail-soft — composing the
+      flush is inside the boundary, not just writing it
 - [x] Lane gating: `--partial-serving` (hidden) passed by the background auto-init build,
-      default-on for an interactive `openlore analyze`, off under `--embedded`/CI
-- [x] Absent-case serving in `readCachedContext`: fall back to the partial index only when no
-      analysis artifact is present, never to mask one that failed a gate
-- [x] Completeness receipt on every response (`partialDisclosureForResponse`), for both an
-      answer computed from the partial index and a not-ready result during a live build
+      default-on for an interactive `openlore analyze`, off under `--embedded`/CI and for the API
+- [x] Serve the facts: `readDependencyGraphOrPartial` / `readAnalysisArtifactOrPartial` fall back
+      to a live partial index only after the published read returns null, so a repository with an
+      index pays nothing. Wired into `get_architecture_overview`, `get_file_dependencies`, and
+      orient's architecture-rule scan
+- [x] Absent-case context serving in `readCachedContext`, only when no analysis artifact is
+      present — never masking one that failed a gate — and failing closed by discarding any
+      call-graph-shaped field a partial context carries
+- [x] Receipt attached in `dispatchTool`, below the handlers and above the transports, so stdio
+      MCP, the serve daemon, every CLI wrapper and the API all carry it. Request-scoped
+      (`AsyncLocalStorage`), so a concurrent daemon can never attribute one request's partial
+      answer to another request's complete one
+- [x] Not-ready results consult the receipt too: a tool that cannot answer says the build is
+      running rather than telling the caller to start it
 - [x] `ConfidenceBoundary.partial` marker, folded into `complete`
 - [x] Negative-conclusion guard: `find_dead_code` and `report_coverage_gaps` withhold and cite
       the partial boundary
 - [x] Export/bundle/import guards refuse a partial index explicitly (`BundleError`
-      `partial-index`), on top of the structural isolation
-- [x] Completion path: publish first, then clear the partial index — a failed publish keeps it
+      `partial-index`), keyed on "live partial AND nothing published" so a failed cleanup cannot
+      block export of a complete index; the import-side check is a bounded prefix scan, not a
+      full parse of the largest bundle member
+- [x] Read as untrusted repository content: every partial read goes through the bounded,
+      symlink-refusing, regular-files-only descriptor path, and the writer-supplied `absent`
+      strings are bounded and stripped of control characters before they reach agent-visible text
+- [x] Honest receipt: no completeness percentage (the honest denominator is the call-graph pass,
+      which has not started); `phase` describes the FACTS and only `buildPhase` moves with the
+      heartbeat, so the index cannot advertise a completeness its bytes do not have
+- [x] Completion path: publish first, then clear — a failed publish keeps the partial index
 
 ## Verification
-- [x] Serving test: an index-absent repository with a live partial index answers from it with
-      the receipt; one without still gets the guidance path
-- [x] Integrity tests: tampered bytes, uncommitted bytes, a dead owner, a stale stamp, and a
-      malformed stamp are each refused rather than served
+- [x] Facts test: `get_architecture_overview` mid-build answers with the real file, cluster and
+      edge counts from the flushed graph — the regression guard for the zeroed answer
+- [x] Transport test: `dispatchTool` attaches the receipt to an answered call and to a
+      not-ready call, and attaches nothing when no partial index exists
+- [x] Integrity tests: tampered bytes, uncommitted bytes, a dead owner, an unrefreshed stamp, a
+      future-dated stamp, a malformed stamp, and a failed commit are each refused
+- [x] Hardening tests: graph-shaped fields are discarded from a partial context; the `absent`
+      list is bounded and control-character-free
 - [x] Precedence test: a present analysis artifact is never masked by a partial index
-- [x] Negative-guard test: `find_dead_code` / `report_coverage_gaps` withhold on a partial
-      index and mark the boundary incomplete
-- [x] Convergence test: flushing and non-flushing builds of the same tree produce
-      byte-identical artifacts, and no partial index survives the publish
-- [x] Guard test: `buildBundle` refuses while a build is in flight; `parseBundle` refuses a
-      bundle whose context carries a partial stamp
-- [x] Fail-soft test: an unwritable partial location produces no index, no throw, and a
-      normally published analysis
+- [x] Resurrection test: a late stamp refresh after cleanup cannot recreate a live partial index
+- [x] Negative-guard test: `find_dead_code` / `report_coverage_gaps` withhold and mark the
+      boundary incomplete
+- [x] Convergence test: flushing and non-flushing builds produce byte-identical artifacts, with
+      a NON-VACUITY assertion that the flushing run actually flushed
+- [x] Guard tests: export refused mid-first-build, allowed for a published index even when a
+      partial one survived cleanup, import refused for a partial-stamped bundle
+- [x] Fail-soft test: an unwritable partial location produces no index, no throw, and a normally
+      published analysis
+- [x] Verified end to end on a real first run of this repository: 2.5s into a 15s build, the
+      architecture overview answered with 1293 files / 82 clusters / 4285 edges and the full
+      receipt, the not-ready call carried the same receipt, and the partial index was gone on
+      completion
 - [x] Full suite green (unit, equivalence, integration, lint, typecheck)
 
 ## Spec
@@ -45,7 +71,8 @@
 ## Deliberately not built
 - [x] A partial CALL GRAPH. Pass 1 extracts every file before the merge and resolution passes
       run, so a mid-pass flush would have to re-run merge+resolution over a prefix — extra work
-      on every build, and a second code path through the machinery the determinism oracle
-      guards. The partial index therefore carries repository structure and the dependency
-      graph, and names the call graph and the search index as not yet built rather than
-      implying it has them. Recorded here so a later change starts from the reason, not the gap.
+      on every build, and a second code path through the machinery the determinism oracle guards.
+      The receipt therefore NAMES the call graph and the search index as not yet built rather
+      than implying it has them, and `orient` (which gates on the search index) keeps returning
+      not-ready — now with the build's progress instead of a dead end. Recorded here so a later
+      change starts from the reason, not the gap.

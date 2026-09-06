@@ -18,7 +18,8 @@ import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
-import { readPartialArtifact, readPartialIndexStamp, type PartialIndexStamp } from '../../runtime/partial-index.js';
+import { readPartialArtifact, readPartialIndexStamp } from '../../runtime/partial-index.js';
+import { notePartialIndexServed } from './partial-request.js';
 import { FileWalker } from '../../analyzer/file-walker.js';
 import { artifactStamp, readJsonArtifactCached, _resetJsonArtifactCacheForTesting } from './artifact-cache.js';
 
@@ -340,67 +341,6 @@ function contextCacheKey(directory: string): string {
   return process.platform === 'win32' ? directory.toLowerCase() : directory;
 }
 
-/**
- * The last partial first-run index actually SERVED for a directory, with the moment it was
- * served (change: refine-first-run-partial-serving).
- *
- * The response path needs to know whether the answer it is about to return was computed
- * from a partial index, and asking the filesystem on every tool call would put an
- * unconditional stat on the hot path for a state that is rare and short-lived. Recording it
- * where the partial context is loaded is both cheaper and stricter: the receipt then
- * accompanies exactly the responses that used one, never a response that did not.
- *
- * Time-bounded rather than cleared on completion, because nothing tells this map when the
- * build finished — once the published artifact exists, `loadPartialFirstRun` is never
- * reached again and the record simply ages out.
- */
-const _partialServed = new Map<string, { stamp: PartialIndexStamp; at: number }>();
-
-/** How long a served-partial record stays answerable to the response path. */
-const PARTIAL_SERVED_TTL_MS = 5_000;
-
-/**
- * The partial index this directory was last served from, if that was recent enough to
- * describe the response now being assembled. Non-destructive: two concurrent requests
- * against the same repository must both disclose.
- */
-export function partialServingReceipt(directory: string): PartialIndexStamp | undefined {
-  const record = _partialServed.get(contextCacheKey(directory));
-  if (!record) return undefined;
-  if (Date.now() - record.at > PARTIAL_SERVED_TTL_MS) {
-    _partialServed.delete(contextCacheKey(directory));
-    return undefined;
-  }
-  return record.stamp;
-}
-
-/**
- * The partial-index receipt a response should disclose, if any.
- *
- * Two ways a response can be partial-index-shaped, and both must disclose:
- *
- *   - it was COMPUTED FROM a partial index — {@link partialServingReceipt} already knows,
- *     at no I/O cost, because the read path recorded it;
- *   - it could not answer at all. Today a not-ready result says "run openlore analyze",
- *     which during a first build is advice to run the command that is already running. A
- *     not-ready result is a cold path by definition, so it can afford to ask the filesystem
- *     whether a build is in flight — and this is the case where the answer matters most.
- *
- * Anything else pays nothing: no stat, no read.
- */
-export async function partialDisclosureForResponse(
-  directory: string,
-  result: unknown,
-): Promise<PartialIndexStamp | undefined> {
-  const served = partialServingReceipt(directory);
-  if (served) return served;
-  const notReady = result as { notReady?: unknown } | null;
-  if (!notReady || typeof notReady !== 'object' || notReady.notReady !== true) return undefined;
-  return (await readPartialIndexStamp(
-    join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
-  )) ?? undefined;
-}
-
 /** Grace period before closing an evicted EdgeStore so concurrent in-flight
  * requests holding the old handle across an await can drain first. */
 const STALE_STORE_CLOSE_DELAY_MS = 30_000;
@@ -412,7 +352,6 @@ const ARTIFACT_MAX_BYTES = 512 * 1024 * 1024;
 
 /** Test-only: clear in-memory context cache to force cold path. */
 export function _resetContextCacheForTesting(): void {
-  _partialServed.clear();
   // Swallow a double-close: a test may already have closed a cached store by hand
   // (as releaseContextCache does on the production path).
   for (const entry of _contextCache.values()) {
@@ -499,15 +438,28 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
     }
     const stamp = await readPartialIndexStamp(analysisDir);
     if (!stamp) return null;
+    // Read through the bounded, symlink-refusing, regular-files-only descriptor path: this
+    // file is untrusted repository content, and a partial index is served precisely when the
+    // repository shipped one and no analysis exists.
     const raw = await readPartialArtifact(analysisDir, ARTIFACT_LLM_CONTEXT);
-    if (raw === null || Buffer.byteLength(raw) > ARTIFACT_MAX_BYTES) return null;
+    if (raw === null) return null;
     try {
       const parsed = JSON.parse(raw) as CachedContext;
-      if (!parsed || typeof parsed !== 'object' || parsed.partial?.partial !== true) return null;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      if (parsed.partial?.partial !== true) return null;
+      // Fail closed on the graph-shaped fields. A partial index carries none of them BY
+      // DEFINITION, so anything present here came from a file this process did not write — and
+      // a handler doing `cg.nodes.map(...)` over an attacker-chosen shape is the failure mode
+      // the published path's normalization exists to prevent. Deleting them is stricter than
+      // normalizing and needs no schema to stay correct.
+      delete parsed.callGraph;
+      delete parsed.signatures;
+      delete parsed.cfgs;
+      delete parsed.graphDigest;
       // The live receipt wins over the copy frozen into the artifact: the artifact was
       // committed at a phase boundary, the receipt is re-stamped while the build runs.
       parsed.partial = stamp;
-      _partialServed.set(contextCacheKey(directory), { stamp, at: Date.now() });
+      notePartialIndexServed(stamp);
       emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'partial_first_run_index' });
       return parsed;
     } catch {

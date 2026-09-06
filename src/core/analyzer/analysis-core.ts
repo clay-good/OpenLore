@@ -1,5 +1,6 @@
 import { join, relative, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_FINGERPRINT,
@@ -167,8 +168,13 @@ export async function runAnalysisCore(
   // only when the caller asked for it AND this repository has no published generation to
   // serve instead — so an ordinary re-analysis, which always has something better on disk,
   // pays nothing and writes nothing.
+  // Both conditions matter. `readCurrentGeneration` returns null for a present-but-MALFORMED
+  // manifest as well as an absent one, so on a re-analysis of a repo with a corrupt manifest it
+  // alone would arm the lane and write a partial index beside a complete artifact set. The
+  // artifact check is the same predicate the read path uses to decide precedence.
   const partialArmed = options.partialServing === true
-    && (await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS])) === null;
+    && (await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS])) === null
+    && !existsSync(join(outputPath, ARTIFACT_LLM_CONTEXT));
   const partialStartedAt = new Date().toISOString();
   let partialFlushed = false;
 
@@ -291,7 +297,16 @@ export async function runAnalysisCore(
   const flushPartial = async (phase: PartialPhase, enrichment?: EnrichmentData): Promise<void> => {
     if (!partialArmed) return;
     try {
-      partialFlushed = await buildPartialFlush(phase, enrichment) || partialFlushed;
+      const written = await buildPartialFlush(phase, enrichment);
+      partialFlushed = written || partialFlushed;
+      if (written) {
+        emit({
+          stage: 'extractors',
+          status: 'info',
+          detail: 'Partial index available: tool calls are answered from the repository '
+            + 'structure and dependency graph, with a disclosure, while the call graph builds.',
+        });
+      }
     } catch {
       // The flush is a side effect on the first-run EXPERIENCE. Nothing it does may reach
       // the analysis it is a side effect of, so the whole lane — including composing the
@@ -303,6 +318,7 @@ export async function runAnalysisCore(
     const stamp: PartialIndexStamp = {
       partial: true,
       phase,
+      buildPhase: phase,
       filesExtracted: 0,
       filesTotal: repoMap.summary.totalFiles,
       filesMapped: repoMap.allFiles.length,
@@ -327,8 +343,6 @@ export async function runAnalysisCore(
       stamp,
     });
   };
-
-  await flushPartial('dependency-graph');
 
   await stage('extractors', 50, 'Extracting UI components, schemas, routes, middleware, and env vars');
   // Inventory extractors read their path argument directly. Absolute mapper paths keep the
@@ -355,12 +369,15 @@ export async function runAnalysisCore(
   }
   emit({ stage: 'extractors', status: 'complete' });
 
+  const inventories = { uiComponents, schemas, routeInventory, middleware, envVars };
+  // The one flush. Taken here because everything before it is fast and everything after it is
+  // the call-graph pass, which produces nothing servable until it finishes and then publishes.
+  // Flushing earlier as well bought half a second of timeliness for a second full domain
+  // reconciliation — the wrong trade on exactly the large repositories this is for.
+  await flushPartial('extractors', inventories);
+
   await stage('artifacts', 75, 'Generating analysis artifacts');
   const oldNodeSnapshot = snapshotOldNodes(outputPath);
-  const inventories = { uiComponents, schemas, routeInventory, middleware, envVars };
-  // The second and last flush of new facts: the inventories are now real, and everything
-  // after this point is the call-graph pass, which ends in the real publish.
-  await flushPartial('extractors', inventories);
   const artifactStartedAt = Date.now();
   const heartbeat = setInterval(() => {
     const detail = `Generating analysis artifacts (${Math.round((Date.now() - artifactStartedAt) / 1000)}s elapsed)`;
@@ -369,7 +386,7 @@ export async function runAnalysisCore(
     // Keep the partial receipt current. No new facts are flushed here — the call-graph
     // pass produces nothing servable until it finishes — but a reader must be able to tell
     // "this build is alive and in the artifacts phase" from "this build died mid-flush".
-    if (partialFlushed) void refreshPartialIndexStamp(outputPath, { phase: 'artifacts' });
+    if (partialFlushed) void refreshPartialIndexStamp(outputPath, { buildPhase: 'artifacts' });
   }, PROGRESS_INTERVAL_MS);
   heartbeat.unref?.();
   let artifacts: AnalysisArtifacts;
@@ -418,7 +435,7 @@ export async function runAnalysisCore(
   // index stops being merely redundant and becomes wrong. Removed AFTER the publish, never
   // before: a failed publish must leave the partial index in place, because it is then still
   // the best thing this repository has to serve.
-  if (partialFlushed) await clearPartialIndex(outputPath);
+  if (partialArmed) await clearPartialIndex(outputPath);
 
   if (artifacts.extractionLaneNote) emit({ stage: 'artifacts', status: 'warning', detail: artifacts.extractionLaneNote });
   if (artifacts.pass1CacheNote) emit({ stage: 'artifacts', status: 'info', detail: artifacts.pass1CacheNote });

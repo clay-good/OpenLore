@@ -29,6 +29,14 @@
 
 import { constants } from 'node:fs';
 import { lstat, open, stat, type FileHandle } from 'node:fs/promises';
+import { join } from 'node:path';
+import {
+  partialArtifactPathIfLive,
+  readPartialArtifact,
+  readPartialIndexStamp,
+  type PartialArtifactName,
+} from '../../runtime/partial-index.js';
+import { notePartialIndexServed } from './partial-request.js';
 
 /** Format an identity stamp from a stat result: `dev:ino:mtimeNs:ctimeNs:size`. */
 function stampOf(s: { dev: bigint; ino: bigint; mtimeNs: bigint; ctimeNs: bigint; size: bigint }): string {
@@ -125,7 +133,7 @@ async function descriptorIsThePathEntry(handle: FileHandle, path: string): Promi
   }
 }
 
-async function readArtifactBounded(path: string): Promise<StampedArtifact | null> {
+export async function readArtifactBounded(path: string): Promise<StampedArtifact | null> {
   let handle: FileHandle | undefined;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -233,6 +241,54 @@ export async function readJsonArtifactCached<T>(
  * (change: optimize-serving-hot-path-caches)
  */
 export async function readDependencyGraphCached<T>(path: string): Promise<T | null> {
+  return readDependencyGraphAt<T>(path);
+}
+
+/**
+ * The parsed dependency graph for a project, falling back to a live partial first-run index
+ * when no published one exists yet (change: refine-first-run-partial-serving).
+ *
+ * Ordered so a repository with a published index pays nothing: the published read runs exactly
+ * as before, and only its `null` — meaning the artifact is absent or unusable — reaches for the
+ * partial one. When the fallback answers, the request is marked so `dispatchTool` attaches the
+ * completeness receipt; a caller can never receive these bytes without being told what they are.
+ */
+export async function readDependencyGraphOrPartial<T>(
+  analysisDir: string,
+  artifactName: string,
+): Promise<T | null> {
+  const published = await readDependencyGraphAt<T>(join(analysisDir, artifactName));
+  if (published !== null) return published;
+
+  const stamp = await readPartialIndexStamp(analysisDir);
+  if (!stamp) return null;
+  const partialPath = await partialArtifactPathIfLive(analysisDir, 'dependency-graph.json');
+  if (partialPath === null) return null;
+  const partial = await readDependencyGraphAt<T>(partialPath);
+  if (partial !== null) notePartialIndexServed(stamp);
+  return partial;
+}
+
+/**
+ * The raw text of one analysis artifact, falling back to a live partial index the same way.
+ *
+ * Used by readers that parse an artifact themselves rather than through the shared cache.
+ */
+export async function readAnalysisArtifactOrPartial(
+  analysisDir: string,
+  artifact: PartialArtifactName,
+): Promise<string | null> {
+  const published = await readArtifactBounded(join(analysisDir, artifact));
+  if (published !== null) return published.text;
+
+  const stamp = await readPartialIndexStamp(analysisDir);
+  if (!stamp) return null;
+  const text = await readPartialArtifact(analysisDir, artifact);
+  if (text !== null) notePartialIndexServed(stamp);
+  return text;
+}
+
+function readDependencyGraphAt<T>(path: string): Promise<T | null> {
   return readJsonArtifactCached<T>(path, 'dependency-graph', (parsed) => {
     if (!parsed || typeof parsed !== 'object') return null;
     const g = parsed as { nodes?: unknown; edges?: unknown };

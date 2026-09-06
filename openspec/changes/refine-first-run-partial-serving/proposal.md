@@ -54,8 +54,10 @@ that already exists.
 
 ## What this does NOT do (settled during implementation)
 
-The partial index carries repository structure and the dependency graph. It does **not** carry a
-partial call graph. Pass 1 extracts every file before the merge and resolution passes run, so
+The partial index carries repository structure and the dependency graph, and those are SERVED:
+`get_architecture_overview`, `get_file_dependencies` and orient's architecture-rule scan read
+them through a fallback that fires only after the published read returns null, so a repository
+with an index pays nothing. It does **not** carry a partial call graph. Pass 1 extracts every file before the merge and resolution passes run, so
 flushing a servable graph mid-pass would mean re-running merge and resolution over a prefix:
 extra work on every build, and a second path through exactly the machinery the determinism
 oracle exists to protect. The receipt therefore NAMES the call graph and the search index as not

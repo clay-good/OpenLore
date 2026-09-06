@@ -14,7 +14,7 @@ import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runAnalysis } from '../../cli/commands/analyze.js';
+import { runAnalysisCore } from './analysis-core.js';
 import { partialIndexDirOf, partialStampPathOf } from '../runtime/partial-index.js';
 
 /** Artifacts whose bytes are the analysis's observable output. */
@@ -41,13 +41,23 @@ async function plantRepo(dir: string): Promise<void> {
   await writeFile(join(dir, 'README.md'), '# demo\n');
 }
 
+/** Analysis reports seen by the last {@link analyze} call. */
+let reports: string[] = [];
+
 async function analyze(partialServing: boolean): Promise<void> {
-  await runAnalysis(root, out, {
+  reports = [];
+  await runAnalysisCore(root, out, {
     maxFiles: 200,
     include: [],
     exclude: [],
     partialServing,
+    reporter: { report: (event) => { if (event.detail) reports.push(event.detail); } },
   });
+}
+
+/** Did the run actually flush a partial index? The convergence claim is vacuous without this. */
+function flushed(): boolean {
+  return reports.some(detail => detail.startsWith('Partial index available'));
 }
 
 async function artifactBytes(): Promise<Record<string, string>> {
@@ -71,6 +81,9 @@ afterEach(async () => {
 describe('a flushing build converges to the single-write output', () => {
   it('produces byte-identical artifacts with and without the flush lane', async () => {
     await analyze(true);
+    // Non-vacuity: if the lane never armed, the byte comparison below would compare two
+    // identical single-write builds and prove nothing.
+    expect(flushed(), 'the flushing lane never actually flushed').toBe(true);
     const flushing = await artifactBytes();
 
     // Remove the whole `.openlore` tree, not just the artifacts: the walker skips that
@@ -89,6 +102,7 @@ describe('a flushing build converges to the single-write output', () => {
 
   it('leaves no partial index behind once the analysis publishes', async () => {
     await analyze(true);
+    expect(flushed()).toBe(true);
 
     expect(existsSync(partialStampPathOf(out))).toBe(false);
     expect(existsSync(partialIndexDirOf(out))).toBe(false);
@@ -96,6 +110,7 @@ describe('a flushing build converges to the single-write output', () => {
 
   it('writes no partial index at all when the lane is off', async () => {
     await analyze(false);
+    expect(flushed()).toBe(false);
     expect(existsSync(partialIndexDirOf(out))).toBe(false);
   });
 
@@ -118,6 +133,7 @@ describe('a flushing build converges to the single-write output', () => {
     // Second run WITH the lane requested: a published generation exists, so the lane must
     // not arm — there is something strictly better than a partial index to answer from.
     await analyze(true);
+    expect(flushed()).toBe(false);
     expect(existsSync(partialIndexDirOf(out))).toBe(false);
   });
 });

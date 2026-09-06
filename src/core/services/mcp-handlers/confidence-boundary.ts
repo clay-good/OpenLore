@@ -24,7 +24,7 @@ import type { IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
 import {
   describePartialIndex,
-  partialCompletenessPercent,
+  partialBuildStagePercent,
   type PartialIndexStamp,
 } from '../../runtime/partial-index.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
@@ -118,10 +118,10 @@ export interface RepairInProgressMarker {
  */
 export interface PartialIndexMarker {
   partial: true;
-  /** Coarse completeness of the in-flight build, 0-100. */
-  percent: number;
-  /** The build phase the served flush was taken at. */
-  phase: string;
+  /** How far through the BUILD its owner has got, 0-100. Not a fraction of the index. */
+  buildStagePercent: number;
+  /** What the build is doing now. */
+  buildPhase: string;
   detail: string;
 }
 
@@ -176,8 +176,8 @@ export function partialDisclosure(
   if (!ctx?.partial) return undefined;
   return {
     partial: true,
-    percent: partialCompletenessPercent(ctx.partial),
-    phase: ctx.partial.phase,
+    buildStagePercent: partialBuildStagePercent(ctx.partial),
+    buildPhase: ctx.partial.buildPhase,
     detail: describePartialIndex(ctx.partial),
   };
 }

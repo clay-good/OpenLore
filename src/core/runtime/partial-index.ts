@@ -1,41 +1,51 @@
 /**
  * The partial first-run index (change: refine-first-run-partial-serving).
  *
- * Until this existed, the first `analyze` on a repository was all-or-nothing: every
- * tool answered "no index found" for the whole build, even though the pipeline
- * finishes mapping, the dependency graph, and the inventory extractors long before
- * the call-graph pass — the phase that dominates the wall clock. OpenLore already
- * had the right contract for a STALE index (serve what exists, disclose that a
- * refresh is running, never present it as fresh); this module extends that contract
- * to the ABSENT case, which is also the onboarding case.
+ * Until this existed, the first `analyze` on a repository was all-or-nothing: every tool
+ * answered "no index found" for the whole build, even though the pipeline finishes mapping,
+ * the dependency graph, and the inventory extractors long before the call-graph pass — the
+ * phase that dominates the wall clock. OpenLore already had the right contract for a STALE
+ * index (serve what exists, disclose that a refresh is running, never present it as fresh);
+ * this module extends that contract to the ABSENT case, which is also the onboarding case.
  *
- * Two properties decide the whole design:
+ * Three properties decide the whole design:
  *
- *   1. **A partial index is never an analysis artifact.** It is written to its own
- *      directory under `.openlore/runtime/`, never into `.openlore/analysis/`. So the
- *      published generation, the fingerprint, the SQLite store, the build attestation,
- *      and every exporter/importer/attester that reads the analysis directory cannot
- *      see it — not by remembering to check, but because it is not there. The explicit
- *      refusals elsewhere are a second lock on a door that is already shut.
+ *   1. **A partial index is never an analysis artifact.** It is written to its own directory
+ *      under `.openlore/runtime/`, never into `.openlore/analysis/`. So the published
+ *      generation, the fingerprint, the SQLite store, the build attestation, and every
+ *      exporter/importer/attester that reads the analysis directory cannot see it — not by
+ *      remembering to check, but because it is not there. The explicit refusals elsewhere are
+ *      a second lock on a door that is already shut.
  *
  *   2. **It carries its own integrity commit.** The partial directory publishes its own
  *      generation manifest through the same {@link publishGeneration} primitive the real
  *      analysis uses, so a reader binds to a content digest rather than to whatever bytes
  *      happen to be on disk mid-write.
  *
- * A partial index is local serving state and nothing else. It is deleted when the build
- * that owns it completes, and a reader ignores one whose owner is gone.
+ *   3. **It is read as untrusted repository content, like every other `.openlore/` artifact.**
+ *      A hostile repository can ship a `.openlore/runtime/partial-analysis/` directory and no
+ *      `.openlore/analysis/`, which is precisely the state this module serves in. Every read
+ *      here therefore goes through the same bounded, no-symlink, regular-files-only descriptor
+ *      path the analysis-artifact caches use.
+ *
+ * A partial index is local serving state and nothing else. It is deleted when the build that
+ * owns it completes, and a reader ignores one whose owner is gone.
  */
 
-import { readFile, rm, mkdir } from 'node:fs/promises';
+import { rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { writeJsonAtomicStreaming } from '../analyzer/json-stream.js';
 import {
   publishGeneration,
   readCurrentGeneration,
   artifactMatchesGeneration,
 } from './analysis-generation.js';
 import { isProcessAlive, runtimeDirOf } from './analysis-ownership.js';
+// The bounded, symlink-refusing, regular-files-only read every `.openlore/` reader in this
+// repo is required to use. Imported across the layer boundary rather than duplicated: a
+// second implementation of this is exactly how one of them ends up without the FIFO check.
+import { readArtifactBounded } from '../services/mcp-handlers/artifact-cache.js';
 
 /** Directory name, under the runtime directory, that holds the partial index. */
 export const PARTIAL_INDEX_SUBDIR = 'partial-analysis';
@@ -44,11 +54,15 @@ export const PARTIAL_INDEX_SUBDIR = 'partial-analysis';
 export const PARTIAL_STAMP_FILE = 'partial-index.json';
 
 /**
- * The artifacts a partial index must contain to be served.
+ * The artifacts a partial index holds.
  *
  * Deliberately a SUBSET of `REQUIRED_ANALYSIS_ARTIFACTS`, and deliberately without
- * `fingerprint.json`: the fingerprint is the freshness key that says "this tree is
- * analyzed". A partial index must never be able to answer that question.
+ * `fingerprint.json`: the fingerprint is the freshness key that says "this tree is analyzed".
+ * A partial index must never be able to answer that question.
+ *
+ * Every entry here is READ by something — see {@link partialArtifactPathIfLive}'s callers.
+ * An artifact nothing reads is cost with no benefit, paid by exactly the large first builds
+ * this feature exists to improve.
  */
 export const PARTIAL_REQUIRED_ARTIFACTS = [
   'repo-structure.json',
@@ -56,23 +70,42 @@ export const PARTIAL_REQUIRED_ARTIFACTS = [
   'dependency-graph.json',
 ] as const;
 
+export type PartialArtifactName = (typeof PARTIAL_REQUIRED_ARTIFACTS)[number];
+
 /**
- * How long a partial index whose owning process is still alive may go unrefreshed
- * before a reader stops trusting it. The writer re-stamps on every phase boundary and
- * on the artifact-phase heartbeat (15s), so ten minutes of silence means the build is
- * wedged, not slow.
+ * How long a partial index whose owning process is still alive may go unrefreshed before a
+ * reader stops trusting it. The writer re-stamps on the artifact-phase heartbeat (15s), so
+ * ten minutes of silence means the build is wedged, not slow.
  */
 export const PARTIAL_STAMP_MAX_AGE_MS = 10 * 60 * 1000;
 
 /**
- * The build phase a flush was taken at. A strict subset of `AnalysisStage`: nothing is
- * flushed before the dependency graph exists (there is no useful structure yet), and
- * nothing is flushed after `artifacts`, because that phase ends in the real publish.
+ * How far in the FUTURE a stamp may be dated before it is refused.
+ *
+ * Without a lower bound, `Date.now() - Date.parse(updatedAt)` is negative for a
+ * future-dated stamp — finite, under the max age, and therefore accepted forever. A
+ * repository can ship a `partial-index.json` dated 2099 with `pid: 1` (always alive) and be
+ * permanently "mid-build". A minute of tolerance covers real clock skew between the analyzing
+ * process and the serving one; anything beyond it is not skew.
  */
-export type PartialPhase = 'dependency-graph' | 'extractors' | 'artifacts';
+export const PARTIAL_STAMP_MAX_SKEW_MS = 60 * 1000;
 
-/** Coarse completeness, in the same 0–100 frame the analysis progress sidecar uses. */
-const PHASE_PERCENT: Record<PartialPhase, number> = {
+/** Bounds on the writer-supplied `absent` list, which is rendered into agent-visible text. */
+const MAX_ABSENT_ENTRIES = 8;
+const MAX_ABSENT_ENTRY_CHARS = 200;
+
+/**
+ * The build phase a set of facts was flushed at.
+ *
+ * `phase` describes the FACTS in the index. It is deliberately separate from
+ * {@link PartialIndexStamp.buildPhase}, which describes what the build is doing now: the
+ * heartbeat advances the latter, and if it advanced the former the index would advertise a
+ * completeness its bytes do not have.
+ */
+export type PartialPhase = 'dependency-graph' | 'extractors';
+
+/** Coarse build-stage progress, in the same 0-100 frame the analysis progress sidecar uses. */
+const STAGE_PERCENT: Record<string, number> = {
   'dependency-graph': 25,
   extractors: 50,
   artifacts: 75,
@@ -81,20 +114,23 @@ const PHASE_PERCENT: Record<PartialPhase, number> = {
 /**
  * What a partial index knows about itself.
  *
- * `filesExtracted` counts files whose CALL-GRAPH facts are in this index — zero for
- * every flush this lane currently takes, because the call-graph pass is the phase still
- * running. It is reported rather than omitted precisely so the gap is legible: a reader
- * that sees `filesExtracted: 0` against a four-figure `filesTotal` cannot mistake the
- * index for one that merely missed a few files.
+ * `filesExtracted` counts files whose CALL-GRAPH facts are in this index — zero for every
+ * flush this lane currently takes, because the call-graph pass is the phase still running. It
+ * is reported rather than omitted precisely so the gap is legible: a reader that sees
+ * `filesExtracted: 0` against a four-figure `filesTotal` cannot mistake this for an index that
+ * merely missed a few files.
  */
 export interface PartialIndexStamp {
   partial: true;
+  /** The phase whose facts are in this index. Fixed at flush time. */
   phase: PartialPhase;
+  /** What the build is doing now. Advanced by the heartbeat; never feeds a completeness claim. */
+  buildPhase: string;
   /** Files whose call-graph facts are present in this index. */
   filesExtracted: number;
-  /** Files in the analyzed corpus, as the completed mapping phase counted them. */
+  /** Files the mapping phase saw, including the ones it permanently skipped. */
   filesTotal: number;
-  /** Files present in the flushed repository structure (mapped and scored). */
+  /** Files in the analyzed corpus, and so in the flushed structure. */
   filesMapped: number;
   startedAt: string;
   updatedAt: string;
@@ -112,33 +148,42 @@ export function partialStampPathOf(analysisDir: string): string {
   return join(partialIndexDirOf(analysisDir), PARTIAL_STAMP_FILE);
 }
 
-/** Completeness as a percentage, derived from the phase — never from a tuned constant. */
-export function partialCompletenessPercent(stamp: PartialIndexStamp): number {
-  return PHASE_PERCENT[stamp.phase] ?? 0;
+/**
+ * How far through the BUILD this index's owner has got, 0-100.
+ *
+ * Named for what it is. It is the pipeline's stage number, not a fraction of the index that
+ * exists: the call-graph pass is one stage and most of the wall clock. Nothing renders this as
+ * "N% complete" — see {@link describePartialIndex}, which says what the index holds instead.
+ */
+export function partialBuildStagePercent(stamp: PartialIndexStamp): number {
+  return STAGE_PERCENT[stamp.buildPhase] ?? STAGE_PERCENT[stamp.phase] ?? 0;
 }
 
 /**
- * The one sentence a partial answer is disclosed with.
+ * The one paragraph a partial answer is disclosed with.
  *
- * Says three things and nothing else: how complete the index is, that the ordering put
- * the highest-value files first, and that what is missing is INVISIBLE to this answer
- * rather than absent from the repository. The last clause is the whole point — a
- * partial index that reads as complete is worse than no index at all.
+ * Says what the index HOLDS, what it does not hold, and that the difference is invisible to
+ * this answer rather than absent from the repository. It deliberately does NOT report a
+ * completeness percentage: the honest denominator would be the call-graph pass, which has not
+ * started, and any percentage in that position reads as "how much of the index exists".
  */
 export function describePartialIndex(stamp: PartialIndexStamp): string {
-  const absent = stamp.absent.length > 0 ? ` Not yet built: ${stamp.absent.join(', ')}.` : '';
+  const absent = stamp.absent.length > 0 ? ` It does NOT yet hold: ${stamp.absent.join('; ')}.` : '';
+  const skipped = stamp.filesTotal - stamp.filesMapped;
+  const corpus = skipped > 0
+    ? `${stamp.filesMapped} analyzed files (${skipped} more were permanently skipped)`
+    : `${stamp.filesMapped} analyzed files`;
   return (
-    `Served from a partial first-run index — ${partialCompletenessPercent(stamp)}% complete `
-    + `(phase: ${stamp.phase}; ${stamp.filesMapped} of ${stamp.filesTotal} files mapped, `
-    + `${stamp.filesExtracted} with call-graph facts). Input is significance-ordered, so the `
-    + `highest-value files are covered first.${absent} Files this index has not reached are `
-    + 'INVISIBLE to this answer, not absent from the repository; a negative conclusion drawn '
-    + 'from it is not authoritative. The build was not blocked and is still running — re-run '
-    + 'once it completes for results computed from the full graph.'
+    "Served from a partial first-run index: this repository's first analysis is still running "
+    + `(build stage: ${stamp.buildPhase}). The index holds repository structure and the `
+    + `dependency graph for ${corpus}.${absent} Facts this index has not reached are INVISIBLE `
+    + 'to this answer, not absent from the repository, so a negative conclusion drawn from it '
+    + 'is not authoritative. This call was not blocked — re-run once the build completes for '
+    + 'results computed from the full graph.'
   );
 }
 
-/** The artifact set a flush writes, already serialized by the caller's own shapes. */
+/** The artifact set a flush writes, in the caller's own shapes. */
 export interface PartialIndexFlush {
   repoStructure: unknown;
   llmContext: unknown;
@@ -149,11 +194,11 @@ export interface PartialIndexFlush {
 /**
  * Write one partial index and commit it.
  *
- * Every write is atomic (temp + rename) and the generation manifest is published LAST,
- * so a concurrent reader sees either the previous partial commit or this one, never a
- * half-written set. Fail-soft by contract: a partial index is an optimization on the
- * first-run experience, and no failure to produce one may disturb the analysis that is
- * actually running. The caller does not need a try/catch.
+ * Every write is atomic (temp + rename); the generation manifest is published before the
+ * stamp, so "a stamp exists" implies "the artifacts it describes are committed" — every reader
+ * keys on the stamp, which is what makes a half-written flush unobservable rather than merely
+ * unlikely. Fail-soft by contract: a partial index is an optimization on the first-run
+ * experience, and no failure to produce one may disturb the analysis that is actually running.
  */
 export async function flushPartialIndex(
   analysisDir: string,
@@ -164,34 +209,40 @@ export async function flushPartialIndex(
     await mkdir(dir, { recursive: true });
     await atomicWriteFile(join(dir, 'repo-structure.json'), JSON.stringify(flush.repoStructure, null, 2));
     await atomicWriteFile(join(dir, 'llm-context.json'), JSON.stringify(flush.llmContext, null, 2));
-    await atomicWriteFile(join(dir, 'dependency-graph.json'), JSON.stringify(flush.dependencyGraph, null, 2));
-    await atomicWriteFile(join(dir, PARTIAL_STAMP_FILE), JSON.stringify(flush.stamp, null, 2));
+    // Streamed, not `JSON.stringify`d: the dependency graph of a large repository is exactly
+    // the artifact that hits V8's 536,870,888-character string ceiling, and this flush happens
+    // during the build's memory peak. The real publish path streams it for the same reason.
+    await writeJsonAtomicStreaming(join(dir, 'dependency-graph.json'), flush.dependencyGraph);
     const published = await publishGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS]);
-    return published !== null;
+    if (!published) return false;
+    await atomicWriteFile(join(dir, PARTIAL_STAMP_FILE), JSON.stringify(flush.stamp, null, 2));
+    return true;
   } catch {
-    // A partial index that cannot be written simply does not exist; the caller keeps
-    // building and the reader keeps returning today's guidance.
+    // A partial index that cannot be written simply does not exist; the caller keeps building
+    // and the reader keeps returning today's guidance.
     return false;
   }
 }
 
 /**
- * Refresh only the stamp on an already-flushed partial index.
+ * Refresh only the stamp on an already-committed partial index.
  *
- * Used by the artifact-phase heartbeat: the facts have not changed, but the receipt
- * must keep saying which phase is running and that the owner is alive. The stamp is not
- * part of the published generation, so re-stamping cannot invalidate the commit.
+ * Used by the artifact-phase heartbeat: the facts have not changed, but the receipt must keep
+ * saying what the build is doing and that its owner is alive. The stamp is not part of the
+ * published generation, so re-stamping cannot invalidate the commit — and it advances
+ * `buildPhase` only, never `phase`, so it cannot inflate what the index claims to hold.
  */
 export async function refreshPartialIndexStamp(
   analysisDir: string,
-  update: Pick<PartialIndexStamp, 'phase'> & Partial<PartialIndexStamp>,
+  update: { buildPhase: string },
 ): Promise<void> {
   try {
     const existing = await readPartialStampFile(analysisDir);
     if (!existing) return;
+    if (!await hasCommittedPartialGeneration(analysisDir)) return;
     const next: PartialIndexStamp = {
       ...existing,
-      ...update,
+      buildPhase: update.buildPhase,
       partial: true,
       updatedAt: new Date().toISOString(),
     };
@@ -201,28 +252,68 @@ export async function refreshPartialIndexStamp(
   }
 }
 
+/**
+ * Is there a committed partial generation in this directory?
+ *
+ * The stamp alone is not evidence. `atomicWriteFile` creates missing directories, so a
+ * fire-and-forget stamp refresh landing after {@link clearPartialIndex} would otherwise
+ * recreate the directory with nothing but a stamp in it — and a repository that had just
+ * finished analyzing would go on reporting "a first build is running", refusing exports until
+ * the stamp aged out. Requiring the commit makes a stamp with no artifacts behind it exactly
+ * what it is: not a partial index.
+ */
+async function hasCommittedPartialGeneration(analysisDir: string): Promise<boolean> {
+  const generation = await readCurrentGeneration(
+    partialIndexDirOf(analysisDir),
+    [...PARTIAL_REQUIRED_ARTIFACTS],
+  );
+  // `legacy` is a manifest SYNTHESIZED from mtimes for an analysis predating manifests. A
+  // partial index is never legacy — this code always publishes — so a legacy verdict means
+  // the manifest is missing and the files on disk are unowned.
+  return generation?.compatibility === 'manifest';
+}
+
+/**
+ * Bound and clean one writer-supplied `absent` entry.
+ *
+ * These strings are rendered into an agent-visible `[openlore index]` line, which reads as
+ * OpenLore's own voice — the highest-trust channel the server has. The file they come from is
+ * untrusted repository content, so they are truncated, capped in number, and stripped of
+ * control characters (this repo has shipped a terminal-escape fix before).
+ */
+function sanitizeAbsent(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .slice(0, MAX_ABSENT_ENTRIES)
+    // eslint-disable-next-line no-control-regex
+    .map(entry => entry.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, MAX_ABSENT_ENTRY_CHARS))
+    .map(entry => entry.trim())
+    .filter(entry => entry.length > 0);
+}
+
 /** Parse the stamp file without judging whether the index behind it is still live. */
 async function readPartialStampFile(analysisDir: string): Promise<PartialIndexStamp | null> {
-  let raw: string;
+  const read = await readArtifactBounded(partialStampPathOf(analysisDir));
+  if (read === null) return null;
   try {
-    raw = await readFile(partialStampPathOf(analysisDir), 'utf8');
-  } catch {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw) as PartialIndexStamp;
+    const parsed = JSON.parse(read.text) as PartialIndexStamp;
     if (
-      parsed?.partial !== true
+      !parsed
+      || typeof parsed !== 'object'
+      || Array.isArray(parsed)
+      || parsed.partial !== true
       || typeof parsed.phase !== 'string'
-      || !(parsed.phase in PHASE_PERCENT)
+      || !(parsed.phase in STAGE_PERCENT)
+      || typeof parsed.buildPhase !== 'string'
+      || parsed.buildPhase.length > 40
       || !Number.isSafeInteger(parsed.filesExtracted)
       || !Number.isSafeInteger(parsed.filesTotal)
       || !Number.isSafeInteger(parsed.filesMapped)
       || !Number.isInteger(parsed.pid)
       || typeof parsed.updatedAt !== 'string'
-      || !Array.isArray(parsed.absent)
     ) return null;
-    return parsed;
+    return { ...parsed, absent: sanitizeAbsent(parsed.absent) };
   } catch {
     return null;
   }
@@ -231,59 +322,79 @@ async function readPartialStampFile(analysisDir: string): Promise<PartialIndexSt
 /**
  * The live partial index for this analysis directory, or null.
  *
- * Null covers four distinct situations, all of which mean the same thing to a caller —
- * there is nothing trustworthy to serve: no partial index exists, its stamp is
- * unparseable, its owning process is gone, or its owner is alive but has not re-stamped
- * within {@link PARTIAL_STAMP_MAX_AGE_MS}. An abandoned partial index is never served,
- * because "the build is still running" is half of what the receipt promises.
+ * Null covers six distinct situations, all of which mean the same thing to a caller — there is
+ * nothing trustworthy to serve: no partial index exists, its stamp is unparseable, no committed
+ * generation stands behind it, its owning process is gone, its owner is alive but has not
+ * re-stamped within {@link PARTIAL_STAMP_MAX_AGE_MS}, or the stamp is dated in the future
+ * beyond ordinary clock skew. An abandoned partial index is never served, because "the build is
+ * still running" is half of what the receipt promises.
  */
 export async function readPartialIndexStamp(analysisDir: string): Promise<PartialIndexStamp | null> {
   const stamp = await readPartialStampFile(analysisDir);
   if (!stamp) return null;
+  if (!await hasCommittedPartialGeneration(analysisDir)) return null;
   if (!isProcessAlive(stamp.pid)) return null;
   const age = Date.now() - Date.parse(stamp.updatedAt);
-  if (!Number.isFinite(age) || age > PARTIAL_STAMP_MAX_AGE_MS) return null;
+  if (!Number.isFinite(age)) return null;
+  if (age > PARTIAL_STAMP_MAX_AGE_MS || age < -PARTIAL_STAMP_MAX_SKEW_MS) return null;
   return stamp;
+}
+
+/**
+ * The path to read `artifact` from, when — and only when — a live partial index holds it.
+ *
+ * The one seam through which a reader that ordinarily reads `.openlore/analysis/<name>` can be
+ * answered from the partial index instead. Returning a PATH rather than the bytes keeps every
+ * caller on its own existing bounded reader and its own cache, so nothing about how these
+ * artifacts are read changes — only where the bytes come from while a first build runs.
+ */
+export async function partialArtifactPathIfLive(
+  analysisDir: string,
+  artifact: PartialArtifactName,
+): Promise<string | null> {
+  const stamp = await readPartialIndexStamp(analysisDir);
+  if (!stamp) return null;
+  const dir = partialIndexDirOf(analysisDir);
+  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS]);
+  if (!generation || generation.compatibility !== 'manifest') return null;
+  if (!await artifactMatchesGeneration(dir, generation, artifact)) return null;
+  return join(dir, artifact);
 }
 
 /**
  * Read one committed artifact out of a live partial index.
  *
- * Bound to the partial directory's own generation manifest and to that manifest's
- * content digest, so a read that lands mid-flush is refused rather than parsed. Returns
- * the raw text; the caller owns parsing and any size policy of its own.
+ * Bound to the partial directory's own generation manifest and to that manifest's content
+ * digest, so a read that lands mid-flush is refused rather than parsed, and read through the
+ * bounded no-symlink descriptor path so a hostile repository cannot redirect it, stall it with
+ * a FIFO, or make it allocate without limit.
  */
 export async function readPartialArtifact(
   analysisDir: string,
-  artifact: (typeof PARTIAL_REQUIRED_ARTIFACTS)[number],
+  artifact: PartialArtifactName,
 ): Promise<string | null> {
-  const dir = partialIndexDirOf(analysisDir);
-  const generation = await readCurrentGeneration(dir, [...PARTIAL_REQUIRED_ARTIFACTS]);
-  // `compatibility: 'legacy'` is a manifest SYNTHESIZED from mtimes for an analysis
-  // predating manifests. A partial index is never legacy — it is written by this code,
-  // which always publishes — so a legacy verdict means the manifest is missing and the
-  // files on disk are unowned. Refuse rather than serve unattested bytes.
-  if (!generation || generation.compatibility !== 'manifest') return null;
-  if (!await artifactMatchesGeneration(dir, generation, artifact)) return null;
-  try {
-    return await readFile(join(dir, artifact), 'utf8');
-  } catch {
-    return null;
-  }
+  const path = await partialArtifactPathIfLive(analysisDir, artifact);
+  if (path === null) return null;
+  const read = await readArtifactBounded(path);
+  return read?.text ?? null;
 }
 
 /**
  * Remove the partial index.
  *
- * Called once the real analysis has published its generation: from that moment the
- * partial index is not merely redundant but wrong, and leaving it would let a reader
- * that consults it first serve a worse answer than the one on disk.
+ * Called once the real analysis has published its generation: from that moment the partial
+ * index is not merely redundant but wrong, and leaving it would let a reader that consults it
+ * serve a worse answer than the one on disk.
+ *
+ * `maxRetries` covers Windows, where a reader still holding a descriptor makes the unlink fail
+ * with EBUSY/EPERM. A survivor there is not cosmetic: it would go on telling callers a build is
+ * running until its stamp aged out.
  */
 export async function clearPartialIndex(analysisDir: string): Promise<void> {
   try {
-    await rm(partialIndexDirOf(analysisDir), { recursive: true, force: true });
+    await rm(partialIndexDirOf(analysisDir), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   } catch {
-    // Best effort. A surviving directory is superseded by the published analysis on
-    // every read path, and its stamp ages out on its own.
+    // Best effort. A surviving directory is superseded by the published analysis on every read
+    // path that checks for one, and its stamp ages out on its own.
   }
 }

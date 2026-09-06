@@ -23,6 +23,7 @@ function stampOf(overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp 
   return {
     partial: true,
     phase: 'extractors',
+    buildPhase: 'extractors',
     filesExtracted: 0,
     filesTotal: 240,
     filesMapped: 238,
@@ -50,14 +51,12 @@ async function plantPartial(stamp = stampOf()): Promise<void> {
 
 describe('readCachedContext falls back to a partial first-run index', () => {
   let readCachedContext: typeof import('./utils.js').readCachedContext;
-  let partialServingReceipt: typeof import('./utils.js').partialServingReceipt;
   let reset: typeof import('./utils.js')._resetContextCacheForTesting;
 
   beforeEach(async () => {
     vi.resetModules();
     const utils = await import('./utils.js');
     readCachedContext = utils.readCachedContext;
-    partialServingReceipt = utils.partialServingReceipt;
     reset = utils._resetContextCacheForTesting;
     reset();
     root = await mkdtemp(join(tmpdir(), 'openlore-partial-serve-'));
@@ -83,18 +82,50 @@ describe('readCachedContext falls back to a partial first-run index', () => {
     expect(ctx!.edgeStore).toBeUndefined();
   });
 
-  it('records the served partial so the response path discloses it without a disk read', async () => {
+  it('records the served partial in the request scope so the dispatcher can disclose it', async () => {
+    const { withPartialReceiptScope, partialReceiptForThisRequest } = await import('./partial-request.js');
     await plantPartial();
-    expect(partialServingReceipt(root)).toBeUndefined();
 
-    await readCachedContext(root);
+    const seen = await withPartialReceiptScope(async () => {
+      await readCachedContext(root);
+      return partialReceiptForThisRequest();
+    });
 
-    expect(partialServingReceipt(root)?.filesMapped).toBe(238);
+    expect(seen?.filesMapped).toBe(238);
   });
 
-  it('discloses nothing for a repository that never served a partial index', async () => {
-    expect(partialServingReceipt(root)).toBeUndefined();
-    expect(await readCachedContext(root)).toBeNull();
+  it('discloses nothing for a repository with no partial index', async () => {
+    const { withPartialReceiptScope, partialReceiptForThisRequest } = await import('./partial-request.js');
+
+    const seen = await withPartialReceiptScope(async () => {
+      await readCachedContext(root);
+      return partialReceiptForThisRequest();
+    });
+
+    expect(seen).toBeUndefined();
+  });
+
+  it('strips graph-shaped fields a partial index cannot legitimately carry', async () => {
+    // A hostile repository can ship a partial index and no analysis directory. Handlers do
+    // `cg.nodes.map(...)`; an attacker-chosen shape there is the failure the published path's
+    // normalization exists to prevent, so the partial path deletes these outright.
+    await flushPartialIndex(analysisDir, {
+      repoStructure: {}, dependencyGraph: {},
+      llmContext: {
+        partial: stampOf(),
+        callGraph: { nodes: 'not-an-array', edges: 7 },
+        signatures: 'nope',
+        graphDigest: 'forged',
+      },
+      stamp: stampOf(),
+    });
+
+    const ctx = await readCachedContext(root);
+
+    expect(ctx?.partial?.partial).toBe(true);
+    expect(ctx?.callGraph).toBeUndefined();
+    expect(ctx?.signatures).toBeUndefined();
+    expect(ctx?.graphDigest).toBeUndefined();
   });
 
   it('never lets a partial index stand in for a present analysis artifact', async () => {
@@ -109,27 +140,6 @@ describe('readCachedContext falls back to a partial first-run index', () => {
 
     expect(ctx?.partial).toBeUndefined();
     expect(ctx?.phase1_survey?.purpose).toBe('real');
-    expect(partialServingReceipt(root)).toBeUndefined();
-  });
-
-  it('tells a not-ready tool the build is running instead of "run analyze"', async () => {
-    const { partialDisclosureForResponse } = await import('./utils.js');
-    await plantPartial();
-
-    const stamp = await partialDisclosureForResponse(root, {
-      error: 'No analysis found. Run "openlore analyze" first.',
-      notReady: true,
-      reason: 'index-absent',
-    });
-
-    expect(stamp?.phase).toBe('extractors');
-  });
-
-  it('costs nothing on an ordinary answer from a repository with no build in flight', async () => {
-    const { partialDisclosureForResponse } = await import('./utils.js');
-    expect(await partialDisclosureForResponse(root, { functions: [] })).toBeUndefined();
-    // Not-ready with no partial index: still nothing to disclose, still no claim made.
-    expect(await partialDisclosureForResponse(root, { notReady: true })).toBeUndefined();
   });
 
   it('ignores a partial index whose build died', async () => {
@@ -152,7 +162,7 @@ describe('negative conclusions are withheld on a partial index', () => {
 
     const result = await handleFindDeadCode({ directory: '/repo' }) as {
       error: string; withheld: boolean; reason: string;
-      confidenceBoundary: { complete: boolean; partial?: { percent: number } };
+      confidenceBoundary: { complete: boolean; partial?: { buildStagePercent: number } };
     };
 
     expect(result.withheld).toBe(true);
@@ -160,7 +170,7 @@ describe('negative conclusions are withheld on a partial index', () => {
     expect(result.error).toContain('dead-code candidates');
     expect(result.error).toContain('partial first-run index');
     expect(result.confidenceBoundary.complete).toBe(false);
-    expect(result.confidenceBoundary.partial?.percent).toBe(50);
+    expect(result.confidenceBoundary.partial?.buildStagePercent).toBe(50);
   });
 
   it('report_coverage_gaps refuses and cites the partial boundary', async () => {

@@ -64,6 +64,7 @@ import {
   REQUIRED_ANALYSIS_ARTIFACTS,
   markGenerationUnavailable,
   publishGeneration,
+  readCurrentGeneration,
 } from '../runtime/analysis-generation.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { readPartialIndexStamp } from '../runtime/partial-index.js';
@@ -227,6 +228,12 @@ export interface Bundle {
 export interface ImportedBundle extends Bundle {
   provenance: 'imported';
 }
+
+/**
+ * How much of a bundled `llm-context.json` is scanned for a partial stamp before deciding a
+ * full parse is warranted. 64 KiB of base64 is ~48 KiB of JSON — far past any top-level key.
+ */
+const PARTIAL_STAMP_SCAN_B64_CHARS = 64 * 1024;
 
 /** A structured, recoverable bundle error with a stable code for the CLI to branch on. */
 export class BundleError extends Error {
@@ -531,7 +538,12 @@ export async function buildBundle(
   // it cannot be swept into the bundle by accident — but its PRESENCE means a first build is
   // still running against this directory, and whatever is here is mid-publication. Refuse
   // with a reason rather than exporting an index nobody promised was complete.
-  if (await readPartialIndexStamp(analysisDir)) {
+  // Keyed on "a partial index is live AND no generation has been published", not on the stamp
+  // alone. A cleanup that failed (Windows EBUSY while a reader holds a descriptor) leaves a
+  // stamp whose pid is still alive, and refusing on that would block `openlore export` for ten
+  // minutes after a successful analyze. A published generation settles it: the index is complete.
+  if (await readPartialIndexStamp(analysisDir)
+    && await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]) === null) {
     throw new BundleError(
       'partial-index',
       `A first analysis of ${analysisDir} is still running, so this index is incomplete. `
@@ -729,13 +741,20 @@ export function parseBundle(raw: Buffer): ImportedBundle {
   // current one.
   const contextEntry = parsed.payload[ARTIFACT_LLM_CONTEXT];
   if (contextEntry !== undefined) {
+    // A prefix scan, not a full parse. The context is the largest bundle member (double-digit
+    // megabytes on a real repository), and decoding and parsing all of it to read one boolean
+    // would put that cost on every import. The writer emits `partial` as a top-level key, so a
+    // bounded window off the front is enough to decide whether a full parse is even warranted.
     type BundledContextShape = { partial?: { partial?: unknown } };
     let bundledContext: BundledContextShape | null = null;
-    try {
-      bundledContext = JSON.parse(Buffer.from(contextEntry, 'base64').toString('utf-8')) as BundledContextShape;
-    } catch {
-      // Shape problems in the context are diagnosed by the importer's own validation; this
-      // guard only ever ADDS a refusal, so an unparseable context is not its business.
+    const prefix = Buffer.from(contextEntry.slice(0, PARTIAL_STAMP_SCAN_B64_CHARS), 'base64').toString('utf-8');
+    if (prefix.includes('"partial"')) {
+      try {
+        bundledContext = JSON.parse(Buffer.from(contextEntry, 'base64').toString('utf-8')) as BundledContextShape;
+      } catch {
+        // Shape problems in the context are diagnosed by the importer's own validation; this
+        // guard only ever ADDS a refusal, so an unparseable context is not its business.
+      }
     }
     if (bundledContext?.partial?.partial === true) {
       throw new BundleError(
