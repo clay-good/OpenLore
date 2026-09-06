@@ -205,6 +205,7 @@ export interface AmbiguousCallSite {
    *  naming a call that does not exist in the source
    *  (change: shrink-receiver-resolution-boundary). */
   receiverField?: string;
+  /** Which strategy hit the ambiguity. */
   strategy: AmbiguousStrategy;
   /** Candidate node ids (id-sorted, bounded to {@link AMBIGUOUS_CANDIDATE_CAP}). */
   candidateIds: string[];

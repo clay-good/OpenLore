@@ -163,7 +163,7 @@ function byteCompare(left: string, right: string): number {
 }
 
 /** Deduplicate and order facts so two analyses of an unchanged file emit byte-identical payloads. */
-export function finalize(facts: ReceiverFieldFact[]): ReceiverFieldFact[] {
+export function finalizeReceiverFieldFacts(facts: ReceiverFieldFact[]): ReceiverFieldFact[] {
   const seen = new Set<string>();
   const out: ReceiverFieldFact[] = [];
   for (const fact of facts) {
@@ -183,13 +183,28 @@ export function finalize(facts: ReceiverFieldFact[]): ReceiverFieldFact[] {
 /** Does a `required_parameter` declare a parameter PROPERTY (`constructor(private repo: Repo)`)?
  *  A plain constructor parameter declares a local, not a field, and must not enter the registry. */
 function isParameterProperty(parameter: RegistryNode): boolean {
-  return /^\s*(?:public|private|protected|readonly)\b/.test(parameter.text);
+  // Decorators only — the modifier is exactly what this asks about, so it must survive the peel.
+  return /^(?:public|private|protected|readonly)\b/.test(strip(parameter.text, [DECORATOR]));
 }
 
-/** Member modifiers that may PRECEDE `static` in a declaration. The grammar orders
- *  `accessibility_modifier` before `static`, so `private static repo: Repo` hides the keyword
- *  from a naive prefix test — and hiding it fabricates an edge, because `this.repo` in an
- *  instance method is undefined when the only declaration is a static slot. */
+/** Strip every leading occurrence of `patterns`, in any order, so the keyword that matters is first. */
+function strip(text: string, patterns: readonly RegExp[]): string {
+  let out = text;
+  for (let prior = ''; out !== prior;) {
+    prior = out;
+    for (const pattern of patterns) out = out.replace(pattern, '');
+  }
+  return out;
+}
+
+/** Anything that may PRECEDE the meaningful keyword in a member declaration — a decorator or any
+ *  modifier. The grammar orders these before `static`, so `private static repo: Repo` and
+ *  `@Inject() static repo: Repo` both hide the keyword from a naive prefix test, and hiding it
+ *  fabricates an edge: `this.repo` in an instance method is undefined when the only declaration
+ *  is a static slot. The same peel makes `@Inject() private repo: Repo` — the canonical
+ *  NestJS/Angular injection shape, and the most common real chained receiver in TypeScript —
+ *  recognizable as the parameter property it is. */
+const DECORATOR = /^\s*@[\w$.]+(?:\([^)]*\))?\s*/;
 const MEMBER_MODIFIER = /^\s*(?:public|private|protected|readonly|override|abstract|declare|accessor)\b\s*/;
 
 /** Is this member declared `static`? A static slot is a different one from the instance member of
@@ -198,12 +213,7 @@ const MEMBER_MODIFIER = /^\s*(?:public|private|protected|readonly|override|abstr
  *  The grammar uses one node type for both, so the modifier is read off the declaration text;
  *  leading modifiers are stripped first, in either order (`private static`, `static readonly`). */
 function isStaticMember(declaration: RegistryNode): boolean {
-  let text = declaration.text;
-  for (let prior = ''; text !== prior;) {
-    prior = text;
-    text = text.replace(MEMBER_MODIFIER, '');
-  }
-  return /^static\b/.test(text);
+  return /^static\b/.test(strip(declaration.text, [DECORATOR, MEMBER_MODIFIER]));
 }
 
 function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): ReceiverFieldFact[] {
@@ -287,7 +297,7 @@ function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): 
     }
   }
 
-  return finalize(facts);
+  return finalizeReceiverFieldFacts(facts);
 }
 
 /** `functionName → declared return type`, for functions declared in THIS file. A name declared
@@ -387,7 +397,7 @@ function collectPythonFacts(runQuery: (source: string) => RegistryMatch[]): Rece
     }
   }
 
-  return finalize(facts);
+  return finalizeReceiverFieldFacts(facts);
 }
 
 /** Every `def` name declared anywhere in this file. A capitalized one is a function, not a class,

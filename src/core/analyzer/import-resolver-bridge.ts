@@ -65,6 +65,10 @@ export const IMPORT_QUALIFIER_PREFIX = '\0qualifier:';
  * never collide with a real identifier.
  */
 export const EXTERNAL_IMPORT_PREFIX = '\0external:';
+
+/** Conventional directories a package root sits under, stripped when deciding whether an absolute
+ *  import names an in-project module. Declared and shallow — see {@link EXTERNAL_IMPORT_PREFIX}. */
+const PACKAGE_ROOT_PREFIXES = ['src/', 'lib/', 'app/'] as const;
 export const IMPORT_TOP_LEVEL_QUALIFIER = '\0top-level';
 
 type TargetIndex = Map<string, Set<string>>;
@@ -548,26 +552,27 @@ export function buildResolvedImportMap(
   // Extensionless paths of every file in the analysis, so a Python absolute import can be told
   // apart from a third-party one (`from repo import Repo` vs `from psycopg import Client`).
   const projectModules = new Set<string>();
+  const addModulePath = (path: string): void => {
+    projectModules.add(path);
+    // An absolute import is written relative to the PACKAGE root, not the repository root:
+    // `src/myapp/models.py` is imported as `myapp.models`, and the `src/` layout is the
+    // packaging default for a large share of Python projects. Matching only the full path would
+    // refuse every intra-project import in them — with a message claiming the source said the
+    // type was elsewhere, which would be false.
+    //
+    // The prefix list is DECLARED and shallow on purpose. Registering every path suffix instead
+    // would make any file whose basename collides with a real module look in-project — a
+    // `vendor/shims/logging.py` would vouch for `import logging` — which reopens exactly the
+    // namesake door this marker exists to close.
+    for (const prefix of PACKAGE_ROOT_PREFIXES) {
+      if (path.startsWith(prefix)) projectModules.add(path.slice(prefix.length));
+    }
+  };
   for (const f of files) {
     // `stripModuleExt` knows only the TS/JS extensions; a Python module path needs `.py` off too.
-    const base = stripModuleExt(f.path).replace(/\.py$/, '');
-    // Register every path SUFFIX, because an absolute import is written relative to the package
-    // root, not the repository root: `src/myapp/models.py` is imported as `myapp.models`. The
-    // `src/` layout is the packaging default for a large share of Python projects, and matching
-    // only the full path would refuse every intra-project import in them — and refuse it with a
-    // message claiming the source said the type was elsewhere, which would be false.
-    for (let cut = 0; cut !== -1; cut = base.indexOf('/', cut + 1)) {
-      projectModules.add(cut === 0 ? base : base.slice(cut === 0 ? 0 : cut + 1));
-    }
-    projectModules.add(base);
+    addModulePath(stripModuleExt(f.path).replace(/\.py$/, ''));
     // A package import (`from pkg import X`) reaches `pkg/__init__.py`.
-    if (f.path.endsWith('/__init__.py')) {
-      const pkg = f.path.slice(0, -'/__init__.py'.length);
-      for (let cut = 0; cut !== -1; cut = pkg.indexOf('/', cut + 1)) {
-        projectModules.add(cut === 0 ? pkg : pkg.slice(cut + 1));
-      }
-      projectModules.add(pkg);
-    }
+    if (f.path.endsWith('/__init__.py')) addModulePath(f.path.slice(0, -'/__init__.py'.length));
   }
   for (const f of files) {
     let imports;

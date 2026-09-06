@@ -31,9 +31,15 @@ type looking uncalled.
 2. **Bottom-up receiver resolution as its own strategy.** Type the field (walking the class chain,
    so an inherited field still types), then resolve the method **within that one type** through the
    existing affinity ladder. A unique candidate becomes a `receiver_inferred` edge — a distinct
-   provenance tier, below a directly-resolved binding and above name-only, so downstream tools can
-   weigh it.
-3. **The residue is disclosed, never papered over.** An untypeable field, a field observed with two
+   provenance tier, below a directly-resolved binding and above name-only. Today that tier's value
+   is PROVENANCE LABELLING, not weighting: it costs the same as `type_inference` in `callDistance`
+   and nothing branches on it. Keeping it distinct anyway is the point — a declared FIELD type is a
+   different kind of inference from a local variable's, and collapsing the two is the silent
+   flattening this substrate exists to refuse.
+3. **The residue is disclosed, never papered over** — by `analyze_error_propagation`, which is the
+   only surface that discloses it. `blast_radius`, `select_tests` and `find_dead_code` still see
+   nothing at an untypeable chained site; they saw nothing before either, so this is not a
+   regression, but the shape is now *partly* disclosed rather than fully. An untypeable field, a field observed with two
    conflicting types, an ambiguous candidate set, or a typed receiver with no such member emits
    **nothing** — not a guessed edge, and deliberately not an `external::` leaf, which would assert
    the callee leaves the project. `exception-flow.ts` gains a `self-field` receiver kind and
