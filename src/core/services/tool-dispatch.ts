@@ -19,7 +19,12 @@ import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import type { DecisionScope } from '../../types/index.js';
 import { resolveCanonicalToolName, enforceConclusionContract } from './mcp-handlers/tool-contract.js';
 import { withPartialReceiptScope, partialReceiptForThisRequest } from './mcp-handlers/partial-request.js';
-import { describePartialIndex, partialBuildStagePercent, readPartialIndexStamp } from '../runtime/partial-index.js';
+import {
+  PARTIAL_INDEX_ABSENT_FACTS,
+  describePartialIndex,
+  partialBuildStagePercent,
+  readPartialIndexStamp,
+} from '../runtime/partial-index.js';
 import { join } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
@@ -173,9 +178,14 @@ async function withPartialIndexReceipt(result: unknown, directory: string): Prom
   // analyze", which during a first build is advice to run the command that is already running.
   // A not-ready result is the cold path by definition, so it can afford to ask the filesystem
   // whether a build is in flight — and that is the case where the answer matters most.
-  const notReady = (result as { notReady?: unknown }).notReady === true;
+  // `notReady` OR a bare `{error}`: about eighteen handlers report an unusable index with a
+  // plain error string rather than the structured not-ready shape, and every one of them says
+  // "run analyze" during a build that is already running. Both are cold paths — the handler
+  // produced no answer — so both can afford the one stat that tells the caller the truth.
+  const failed = (result as { notReady?: unknown }).notReady === true
+    || typeof (result as { error?: unknown }).error === 'string';
   const stamp = partialReceiptForThisRequest()
-    ?? (notReady
+    ?? (failed
       ? await readPartialIndexStamp(join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR))
       : null);
   if (!stamp) return result;
@@ -186,7 +196,7 @@ async function withPartialIndexReceipt(result: unknown, directory: string): Prom
       buildPhase: stamp.buildPhase,
       buildStagePercent: partialBuildStagePercent(stamp),
       filesMapped: stamp.filesMapped,
-      absent: stamp.absent,
+      absent: [...PARTIAL_INDEX_ABSENT_FACTS],
       detail: describePartialIndex(stamp),
     },
   };

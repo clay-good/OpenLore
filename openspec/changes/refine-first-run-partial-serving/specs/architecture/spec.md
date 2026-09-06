@@ -11,10 +11,14 @@ content-digest commit before its receipt, and SHALL be stamped
 `{filesExtracted, filesTotal, phase, partial: true}`.
 
 A partial index SHALL NOT be an analysis artifact: it SHALL be written outside the analysis
-directory, and SHALL therefore never enter the published generation, the fingerprint, or the
-build attestation. It SHALL never be exported, bundled, attested, or imported. It SHALL be read
-as untrusted repository content — bounded, refusing symlinks and non-regular files — and any
-call-graph-shaped field found in one SHALL be discarded rather than served.
+directory, and SHALL therefore never enter the published generation, the fingerprint, the build
+attestation, or an exported bundle. Export SHALL be refused while a first build is running.
+
+Every read of a partial index SHALL treat it as untrusted repository content — bounded, refusing
+symlinks and non-regular files, and refusing a file that would block the read — including the
+generation-manifest reads that verify it. Any call-graph-shaped field found in one SHALL be
+discarded rather than served, its receipt SHALL be bound to the analysis directory it was written
+for, and no text read from it SHALL be rendered into the server's own voice.
 
 Reads during the build SHALL adopt the stale case's serving contract rather than the
 index-absent dead end. A read whose facts the partial index holds SHALL be answered from it. A

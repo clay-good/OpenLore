@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { flushPartialIndex, type PartialIndexStamp } from '../../runtime/partial-index.js';
 
-function stampOf(overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp {
+function stampOf(analysisDir: string, overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp {
   return {
     partial: true,
     phase: 'extractors',
@@ -23,7 +23,7 @@ function stampOf(overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp 
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     pid: process.pid,
-    absent: ['the call graph'],
+    analysisDir,
     ...overrides,
   };
 }
@@ -45,7 +45,7 @@ describe('the flushed facts are actually served, and the receipt rides the resul
 
   /** A partial index holding a real dependency graph, as a first build would flush. */
   async function plantWithGraph(): Promise<void> {
-    const stamp = stampOf({ filesMapped: 3, filesTotal: 3 });
+    const stamp = stampOf(analysisDir, { filesMapped: 3, filesTotal: 3 });
     await flushPartialIndex(analysisDir, {
       repoStructure: { projectName: 'demo', domains: [{ name: 'core', files: ['src/a.ts'] }] },
       llmContext: { phase1_survey: { purpose: 'partial', files: [] }, partial: stamp },
@@ -115,6 +115,42 @@ describe('the flushed facts are actually served, and the receipt rides the resul
     };
 
     expect(result.notReady).toBe(true);
+    expect(result.partialIndex?.detail).toContain('first analysis is still running');
+  });
+
+  it('orient — which refuses before ever reading the context — still carries the receipt', async () => {
+    // The headline path, and the one the ALS receipt CANNOT cover: `orient` returns not-ready
+    // on a missing search index before it calls `readCachedContext`, so nothing marks the
+    // request. It is the cold-path disk check in `dispatchTool` that must answer here — without
+    // it, the first tool a new user reaches for during their first build still says
+    // "run openlore analyze".
+    const { _resetContextCacheForTesting } = await import('./utils.js');
+    const { dispatchTool } = await import('../tool-dispatch.js');
+    _resetContextCacheForTesting();
+    await plantWithGraph();
+
+    const result = await dispatchTool('orient', { directory: root, task: 'anything' }, root) as {
+      notReady?: boolean;
+      partialIndex?: { detail: string };
+    };
+
+    expect(result.notReady).toBe(true);
+    expect(result.partialIndex?.detail).toContain('first analysis is still running');
+  });
+
+  it('a handler that reports a bare error, with no not-ready shape, still carries it', async () => {
+    // About eighteen handlers report an unusable index as a plain `{error}` string rather than
+    // the structured not-ready shape. Every one of them says "re-run analyze" during a build
+    // that is already running unless the cold-path check covers bare errors too.
+    const { dispatchTool } = await import('../tool-dispatch.js');
+    await plantWithGraph();
+
+    const result = await dispatchTool('get_refactor_report', { directory: root }, root) as {
+      error?: string;
+      partialIndex?: { detail: string };
+    };
+
+    expect(typeof result.error).toBe('string');
     expect(result.partialIndex?.detail).toContain('first analysis is still running');
   });
 

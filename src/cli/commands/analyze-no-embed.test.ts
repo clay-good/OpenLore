@@ -38,11 +38,30 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     // artifact writer (`json-stream.ts`), which writes via a temp file handle + rename rather
     // than `writeFile` — without them analyze aborts at the artifact write and never reaches
     // what these cases actually assert.
-    open: vi.fn().mockResolvedValue({
-      write: vi.fn().mockResolvedValue({ bytesWritten: 0 }),
-      writeFile: vi.fn().mockResolvedValue(undefined),
-      sync: vi.fn().mockResolvedValue(undefined),
-      close: vi.fn().mockResolvedValue(undefined),
+    // A numeric read-only flag set is the bounded artifact reader
+    // (`bounded-artifact-read.ts`), which stats and reads the DESCRIPTOR rather than the path —
+    // where the `readFile` stub above sufficed, it now needs a handle-shaped stand-in, or
+    // generation publication fails on artifacts these cases never meant to exercise.
+    lstat: vi.fn().mockResolvedValue({ isSymbolicLink: () => false, ino: 1n, dev: 1n }),
+    open: vi.fn().mockImplementation((_path, flags) => {
+      if (typeof flags === 'number' && (flags & 0o3) === 0) {
+        let drained = false;
+        return Promise.resolve({
+          stat: async () => ({ isFile: () => true, size: 2n, dev: 1n, ino: 1n, mtimeNs: 1n, ctimeNs: 1n }),
+          read: async (buffer: Buffer) => {
+            if (drained) return { bytesRead: 0 };
+            drained = true;
+            return { bytesRead: buffer.write('{}', 0, 'utf8') };
+          },
+          close: async () => {},
+        });
+      }
+      return Promise.resolve({
+        write: vi.fn().mockResolvedValue({ bytesWritten: 0 }),
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        sync: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+      });
     }),
     rename: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),

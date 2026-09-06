@@ -33,7 +33,7 @@
  */
 
 import { rm, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { writeJsonAtomicStreaming } from '../analyzer/json-stream.js';
 import {
@@ -42,10 +42,9 @@ import {
   artifactMatchesGeneration,
 } from './analysis-generation.js';
 import { isProcessAlive, runtimeDirOf } from './analysis-ownership.js';
-// The bounded, symlink-refusing, regular-files-only read every `.openlore/` reader in this
-// repo is required to use. Imported across the layer boundary rather than duplicated: a
-// second implementation of this is exactly how one of them ends up without the FIFO check.
-import { readArtifactBounded } from '../services/mcp-handlers/artifact-cache.js';
+// The bounded, symlink-refusing, regular-files-only read every `.openlore/` reader in this repo
+// is required to use. A leaf module, so nothing here reaches across a layer boundary for it.
+import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 
 /** Directory name, under the runtime directory, that holds the partial index. */
 export const PARTIAL_INDEX_SUBDIR = 'partial-analysis';
@@ -90,9 +89,20 @@ export const PARTIAL_STAMP_MAX_AGE_MS = 10 * 60 * 1000;
  */
 export const PARTIAL_STAMP_MAX_SKEW_MS = 60 * 1000;
 
-/** Bounds on the writer-supplied `absent` list, which is rendered into agent-visible text. */
-const MAX_ABSENT_ENTRIES = 8;
-const MAX_ABSENT_ENTRY_CHARS = 200;
+/**
+ * What a partial index does not hold, named by the READER rather than read from the file.
+ *
+ * These strings are rendered into an `[openlore index]` line, which reads to an agent as
+ * OpenLore's own voice — the highest-trust channel the server has. The stamp is untrusted
+ * repository content, so taking this text from it would let a repository put words in that
+ * voice. The writer produces exactly this list anyway, so nothing is lost by owning it here.
+ */
+export const PARTIAL_INDEX_ABSENT_FACTS = [
+  'the call graph (function-to-function edges, fan-in/fan-out, hubs)',
+  'function signatures and the searchable symbol corpus',
+  'cross-file call edges synthesized for languages without explicit imports — the dependency '
+    + 'graph is import-derived only, so its edges are a lower bound',
+] as const;
 
 /**
  * The build phase a set of facts was flushed at.
@@ -102,11 +112,10 @@ const MAX_ABSENT_ENTRY_CHARS = 200;
  * heartbeat advances the latter, and if it advanced the former the index would advertise a
  * completeness its bytes do not have.
  */
-export type PartialPhase = 'dependency-graph' | 'extractors';
+export type PartialPhase = 'extractors';
 
 /** Coarse build-stage progress, in the same 0-100 frame the analysis progress sidecar uses. */
 const STAGE_PERCENT: Record<string, number> = {
-  'dependency-graph': 25,
   extractors: 50,
   artifacts: 75,
 };
@@ -136,8 +145,14 @@ export interface PartialIndexStamp {
   updatedAt: string;
   /** The analyzing process. A partial index outliving its owner is abandoned. */
   pid: number;
-  /** Facts a completed index carries that this one does not. */
-  absent: string[];
+  /**
+   * The analysis directory this index was written for, resolved.
+   *
+   * Nothing else binds a partial index to the tree it describes — it has no fingerprint by
+   * design. A `.openlore` copied between repositories (a template repo, `cp -r`, a shared home)
+   * would otherwise serve one tree's structure as another's for the whole liveness window.
+   */
+  analysisDir: string;
 }
 
 export function partialIndexDirOf(analysisDir: string): string {
@@ -168,7 +183,7 @@ export function partialBuildStagePercent(stamp: PartialIndexStamp): number {
  * started, and any percentage in that position reads as "how much of the index exists".
  */
 export function describePartialIndex(stamp: PartialIndexStamp): string {
-  const absent = stamp.absent.length > 0 ? ` It does NOT yet hold: ${stamp.absent.join('; ')}.` : '';
+  const absent = ` It does NOT yet hold: ${PARTIAL_INDEX_ABSENT_FACTS.join('; ')}.`;
   const skipped = stamp.filesTotal - stamp.filesMapped;
   const corpus = skipped > 0
     ? `${stamp.filesMapped} analyzed files (${skipped} more were permanently skipped)`
@@ -273,25 +288,6 @@ async function hasCommittedPartialGeneration(analysisDir: string): Promise<boole
   return generation?.compatibility === 'manifest';
 }
 
-/**
- * Bound and clean one writer-supplied `absent` entry.
- *
- * These strings are rendered into an agent-visible `[openlore index]` line, which reads as
- * OpenLore's own voice — the highest-trust channel the server has. The file they come from is
- * untrusted repository content, so they are truncated, capped in number, and stripped of
- * control characters (this repo has shipped a terminal-escape fix before).
- */
-function sanitizeAbsent(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((entry): entry is string => typeof entry === 'string')
-    .slice(0, MAX_ABSENT_ENTRIES)
-    // eslint-disable-next-line no-control-regex
-    .map(entry => entry.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, MAX_ABSENT_ENTRY_CHARS))
-    .map(entry => entry.trim())
-    .filter(entry => entry.length > 0);
-}
-
 /** Parse the stamp file without judging whether the index behind it is still live. */
 async function readPartialStampFile(analysisDir: string): Promise<PartialIndexStamp | null> {
   const read = await readArtifactBounded(partialStampPathOf(analysisDir));
@@ -305,15 +301,20 @@ async function readPartialStampFile(analysisDir: string): Promise<PartialIndexSt
       || parsed.partial !== true
       || typeof parsed.phase !== 'string'
       || !(parsed.phase in STAGE_PERCENT)
+      // A known value, not any short string: `buildPhase` is interpolated into the
+      // agent-visible receipt, and an enum cannot carry an escape sequence.
       || typeof parsed.buildPhase !== 'string'
-      || parsed.buildPhase.length > 40
+      || !(parsed.buildPhase in STAGE_PERCENT)
       || !Number.isSafeInteger(parsed.filesExtracted)
       || !Number.isSafeInteger(parsed.filesTotal)
       || !Number.isSafeInteger(parsed.filesMapped)
       || !Number.isInteger(parsed.pid)
       || typeof parsed.updatedAt !== 'string'
+      || typeof parsed.analysisDir !== 'string'
+      // The index must be the one written FOR this directory.
+      || resolve(parsed.analysisDir) !== resolve(analysisDir)
     ) return null;
-    return { ...parsed, absent: sanitizeAbsent(parsed.absent) };
+    return parsed;
   } catch {
     return null;
   }

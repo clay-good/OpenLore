@@ -22,7 +22,7 @@ let analysisDir: string;
 function stampOf(overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp {
   return {
     partial: true,
-    phase: 'extractors',
+    phase: 'extractors' as const,
     buildPhase: 'extractors',
     filesExtracted: 0,
     filesTotal: 240,
@@ -30,7 +30,7 @@ function stampOf(overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp 
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     pid: process.pid,
-    absent: ['the call graph'],
+    analysisDir,
     ...overrides,
   };
 }
@@ -162,15 +162,14 @@ describe('negative conclusions are withheld on a partial index', () => {
 
     const result = await handleFindDeadCode({ directory: '/repo' }) as {
       error: string; withheld: boolean; reason: string;
-      confidenceBoundary: { complete: boolean; partial?: { buildStagePercent: number } };
     };
 
     expect(result.withheld).toBe(true);
     expect(result.reason).toBe('partial-index');
     expect(result.error).toContain('dead-code candidates');
     expect(result.error).toContain('partial first-run index');
-    expect(result.confidenceBoundary.complete).toBe(false);
-    expect(result.confidenceBoundary.partial?.buildStagePercent).toBe(50);
+    // No boundary of its own: `dispatchTool` attaches the receipt to every response, so a
+    // second copy here would send the same paragraph twice.
   });
 
   it('report_coverage_gaps refuses and cites the partial boundary', async () => {
@@ -183,13 +182,11 @@ describe('negative conclusions are withheld on a partial index', () => {
 
     const result = await handleReportCoverageGaps({ directory: '/repo' }) as {
       error: string; withheld: boolean; reason: string;
-      confidenceBoundary: { complete: boolean };
     };
 
     expect(result.withheld).toBe(true);
     expect(result.reason).toBe('partial-index');
     expect(result.error).toContain('test-coverage gaps');
-    expect(result.confidenceBoundary.complete).toBe(false);
   });
 
   it('a complete index is unaffected by the guard', async () => {

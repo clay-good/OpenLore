@@ -21,7 +21,6 @@ import {
   flushPartialIndex,
   refreshPartialIndexStamp,
   type PartialIndexStamp,
-  type PartialPhase,
 } from '../runtime/partial-index.js';
 import { PROGRESS_INTERVAL_MS, type AnalysisOwnership } from '../runtime/analysis-ownership.js';
 import { readOpenLoreConfig } from '../services/config-manager.js';
@@ -294,10 +293,10 @@ export async function runAnalysisCore(
    * whole call is fail-soft — a partial index that cannot be written must never be able to
    * disturb the analysis it is a side effect of.
    */
-  const flushPartial = async (phase: PartialPhase, enrichment?: EnrichmentData): Promise<void> => {
+  const flushPartial = async (enrichment: EnrichmentData): Promise<void> => {
     if (!partialArmed) return;
     try {
-      const written = await buildPartialFlush(phase, enrichment);
+      const written = await buildPartialFlush(enrichment);
       partialFlushed = written || partialFlushed;
       if (written) {
         emit({
@@ -314,22 +313,24 @@ export async function runAnalysisCore(
     }
   };
 
-  const buildPartialFlush = async (phase: PartialPhase, enrichment?: EnrichmentData): Promise<boolean> => {
+  const buildPartialFlush = async (enrichment: EnrichmentData): Promise<boolean> => {
+    // Nothing to serve, and serving it would fabricate a negative: on a repository whose
+    // dependency graph is built entirely from synthesized call edges (Swift, C, C++ — see
+    // `injectCallGraphEdges`, which runs later, inside `generate()`), the import-derived graph
+    // at this point is empty, and `get_file_dependencies` would answer "no dependencies" for
+    // every file as an ordinary positive result.
+    if (depGraph.edges.length === 0) return false;
     const stamp: PartialIndexStamp = {
       partial: true,
-      phase,
-      buildPhase: phase,
+      phase: 'extractors',
+      buildPhase: 'extractors',
       filesExtracted: 0,
       filesTotal: repoMap.summary.totalFiles,
       filesMapped: repoMap.allFiles.length,
       startedAt: partialStartedAt,
       updatedAt: new Date().toISOString(),
       pid: process.pid,
-      absent: [
-        'the call graph (function-to-function edges, fan-in/fan-out, hubs)',
-        'function signatures and the searchable symbol corpus',
-        ...(enrichment ? [] : ['route, schema, UI, middleware, and environment inventories']),
-      ],
+      analysisDir: resolve(outputPath),
     };
     return flushPartialIndex(outputPath, {
       repoStructure: generator.generateStructureOnly(repoMap, depGraph, enrichment),
@@ -374,7 +375,7 @@ export async function runAnalysisCore(
   // the call-graph pass, which produces nothing servable until it finishes and then publishes.
   // Flushing earlier as well bought half a second of timeliness for a second full domain
   // reconciliation — the wrong trade on exactly the large repositories this is for.
-  await flushPartial('extractors', inventories);
+  await flushPartial(inventories);
 
   await stage('artifacts', 75, 'Generating analysis artifacts');
   const oldNodeSnapshot = snapshotOldNodes(outputPath);
@@ -435,7 +436,11 @@ export async function runAnalysisCore(
   // index stops being merely redundant and becomes wrong. Removed AFTER the publish, never
   // before: a failed publish must leave the partial index in place, because it is then still
   // the best thing this repository has to serve.
-  if (partialArmed) await clearPartialIndex(outputPath);
+  // Unconditional, not `if (partialArmed)`. A run that was killed mid-build leaves its partial
+  // index behind, and a later CI or `--embedded` analyze — which never arms the lane — would
+  // otherwise never collect it. Any published generation supersedes every partial index for
+  // this directory, whoever wrote it.
+  await clearPartialIndex(outputPath);
 
   if (artifacts.extractionLaneNote) emit({ stage: 'artifacts', status: 'warning', detail: artifacts.extractionLaneNote });
   if (artifacts.pass1CacheNote) emit({ stage: 'artifacts', status: 'info', detail: artifacts.pass1CacheNote });

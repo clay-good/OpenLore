@@ -29,15 +29,22 @@
 
 ## What changes
 
-1. **Periodic partial flush during an index-absent build.** During a first-run build, the
-   pipeline flushes partial artifacts at phase boundaries and every N files (atomic writes via
-   the existing `atomicWriteFile` + analysis-lock discipline), each stamped with a completeness
-   receipt: `{filesExtracted, filesTotal, phase, partial: true}`. Because input is
-   significance-ordered, the first flush already contains the hubs.
+1. **A partial flush during an index-absent build.** The pipeline flushes a partial index once
+   the repository structure and dependency graph exist — before the call-graph pass, which is
+   most of the wall clock — with an atomic write, its own content-digest commit, and a receipt
+   stamped `{filesExtracted, filesTotal, phase, partial: true}`.
+
+   *(As built: one flush at the extractors boundary, not a per-file cadence. A per-file flush
+   would have to re-run merge and resolution over a prefix — see "What this does NOT do".)*
 2. **The absent case adopts the stale case's serving contract.** Reads during an index-absent
-   build serve from the newest partial artifact with a disclosed boundary through the epistemic
-   lease: "index N% complete (significance-ordered: hubs and entry points first); unindexed
-   files are invisible to this answer, not absent from the repo." Negative conclusions that
+   build serve from the partial index with a disclosed boundary naming what it holds, what it
+   does not yet hold, and that unreached facts are invisible to the answer rather than absent
+   from the repo.
+
+   *(As built: no completeness percentage. The honest denominator would be the call-graph pass,
+   which has not started, so any percentage in that position reads as "how much of the index
+   exists". The receipt names the build stage instead. The significance-ordering clause is gone
+   too: the flush contains every mapped file, so it was ordering nothing.)* Negative conclusions that
    partiality can invert — dead-code candidates, coverage gaps, "no callers" — are withheld or
    explicitly downgraded while `partial: true`; navigation and positive lookups serve normally.
 3. **Completion erases partiality.** The final write is byte-identical to today's

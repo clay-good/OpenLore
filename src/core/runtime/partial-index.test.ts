@@ -7,6 +7,7 @@ import {
   PARTIAL_REQUIRED_ARTIFACTS,
   PARTIAL_STAMP_MAX_AGE_MS,
   clearPartialIndex,
+  PARTIAL_INDEX_ABSENT_FACTS,
   describePartialIndex,
   flushPartialIndex,
   partialBuildStagePercent,
@@ -32,7 +33,7 @@ function stampOf(overrides: Partial<PartialIndexStamp> = {}): PartialIndexStamp 
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     pid: process.pid,
-    absent: ['the call graph'],
+    analysisDir,
     ...overrides,
   };
 }
@@ -196,16 +197,35 @@ describe('partial first-run index', () => {
     expect(text).not.toMatch(/%/);
   });
 
-  it('bounds and cleans the writer-supplied absent list before it is rendered', async () => {
-    // This text is rendered into an agent-visible `[openlore index]` line, which reads as
-    // OpenLore's own voice; the file it comes from is untrusted repository content.
-    await flush(stampOf({ absent: ['ok', 'esc\u001b[31mape', 'x'.repeat(500), ...Array(20).fill('flood')] }));
-
+  it('never renders text supplied by the repository', async () => {
+    // The receipt is printed as `[openlore index] …`, which reads to an agent as OpenLore's own
+    // voice. The stamp is untrusted repository content, so the reader OWNS this prose: a
+    // repository cannot put words in that voice, escape sequences or otherwise.
+    await flush();
     const stamp = await readPartialIndexStamp(analysisDir);
 
-    expect(stamp!.absent.length).toBeLessThanOrEqual(8);
-    expect([...stamp!.absent.join('')].some(ch => ch.codePointAt(0)! < 0x20)).toBe(false);
-    expect(Math.max(...stamp!.absent.map(entry => entry.length))).toBeLessThanOrEqual(200);
+    expect(describePartialIndex(stamp!)).toContain(PARTIAL_INDEX_ABSENT_FACTS[0]);
+    expect(Object.keys(stamp!)).not.toContain('absent');
+  });
+
+  it('refuses a build phase outside the known set, which could carry an escape sequence', async () => {
+    await flush();
+    const raw = JSON.parse(await readFile(partialStampPathOf(analysisDir), 'utf8'));
+    await writeFile(
+      partialStampPathOf(analysisDir),
+      JSON.stringify({ ...raw, buildPhase: '\u001b[2J\u001b[Hpwned' }),
+      'utf8',
+    );
+
+    expect(await readPartialIndexStamp(analysisDir)).toBeNull();
+  });
+
+  it('refuses a partial index written for a different repository', async () => {
+    // Nothing else binds a partial index to the tree it describes — it has no fingerprint by
+    // design — so a `.openlore` copied between repositories would otherwise serve one tree's
+    // structure as another's for the whole liveness window.
+    await flush(stampOf({ analysisDir: '/somewhere/else/.openlore/analysis' }));
+    expect(await readPartialIndexStamp(analysisDir)).toBeNull();
   });
 
   it('refuses a stamp dated in the future, which would otherwise never age out', async () => {

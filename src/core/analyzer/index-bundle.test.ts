@@ -1377,7 +1377,7 @@ describe('a partial first-run index is never shareable (change: refine-first-run
       stamp: {
         partial: true, phase: 'extractors' as const, buildPhase: 'extractors', filesExtracted: 0, filesTotal: 10, filesMapped: 9,
         startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        pid: process.pid, absent: ['the call graph'],
+        pid: process.pid, analysisDir: src,
       },
     });
 
@@ -1398,7 +1398,7 @@ describe('a partial first-run index is never shareable (change: refine-first-run
       stamp: {
         partial: true, phase: 'extractors' as const, buildPhase: 'extractors', filesExtracted: 0, filesTotal: 10, filesMapped: 9,
         startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        pid: process.pid, absent: ['the call graph'],
+        pid: process.pid, analysisDir: src,
       },
     });
     await expect(buildBundle(src, VERSION)).resolves.toBeTruthy();
@@ -1408,22 +1408,11 @@ describe('a partial first-run index is never shareable (change: refine-first-run
     await expect(buildBundle(src, VERSION)).resolves.toBeTruthy();
   });
 
-  it('refuses to import a bundle whose context carries a partial stamp', async () => {
-    const src = join(work, 'partial-import');
-    await buildAnalysisDir(src, 'c0');
-    // A bundle built from a complete index, then rewritten to carry a partial context —
-    // exactly what a hand-edited or foreign artifact could present on the import side.
-    await writeFile(
-      join(src, 'llm-context.json'),
-      JSON.stringify({ callGraph: { nodes: [] }, partial: { partial: true, phase: 'extractors' } }),
-    );
-    const { buffer } = await buildBundle(src, VERSION);
+  // There is deliberately no import-side test, because there is deliberately no import-side
+  // check. A partial index is never written into the analysis directory, so it cannot reach a
+  // bundle this code produces; and on the untrusted side a scan of the bundled context could
+  // only be a bounded prefix scan (the context is the largest member by far), which cannot
+  // decide a question about attacker-chosen key order. A guard that looks like a check but is
+  // not is worse than the structural argument standing on its own.
 
-    expect(() => parseBundle(buffer)).toThrow(/partial first-run index/);
-    try {
-      parseBundle(buffer);
-    } catch (err) {
-      expect((err as BundleError).code).toBe('partial-index');
-    }
-  });
 });
