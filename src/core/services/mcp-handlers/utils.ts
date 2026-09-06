@@ -413,6 +413,87 @@ export async function primeContextCache(directory: string, ctx: CachedContext): 
   _contextCache.set(key, { ctx, mtime, generation });
 }
 
+/** Why a published index could not be served. `absent` is the ordinary first-run case. */
+export type IndexUnservableReason =
+  | 'absent'
+  | 'generation-unavailable'
+  | 'generation-mismatch'
+  | 'unreadable';
+
+export interface IndexUnservableDiagnosis {
+  reason: IndexUnservableReason;
+  /** One sentence naming what was observed and what to do — safe to serve to an agent. */
+  message: string;
+}
+
+/**
+ * Name why {@link readCachedContext} returned null.
+ *
+ * `readCachedContext` already DISTINGUISHES these cases — it emits a different telemetry
+ * `reason` for each — and then returns a bare `null`, so every caller collapses them into
+ * "No analysis found. Run analyze_codebase first." That message is right for exactly one of
+ * them, and actively misleading for the rest: it reports a FAILED INTEGRITY CHECK as an
+ * absent index, which is the quiet downgrade `loadPartialFirstRun`'s docstring says this lane
+ * exists to prevent. It also hides the incident — a user reads "no analysis", runs analyze,
+ * it works, and the lost publish is never reported.
+ *
+ * Called ONLY on the null path, so the ordinary read pays nothing for it. It re-derives
+ * rather than threading state through 56 call sites: the cost is a stat and a hash on a path
+ * that is already returning an error.
+ */
+export async function diagnoseIndexUnservable(directory: string): Promise<IndexUnservableDiagnosis> {
+  const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const contextPath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
+
+  try {
+    const st = await stat(contextPath);
+    if (!st.isFile()) {
+      return {
+        reason: 'unreadable',
+        message: `The analysis artifact at ${ARTIFACT_LLM_CONTEXT} is not a regular file and was refused. Run analyze to rebuild it.`,
+      };
+    }
+  } catch {
+    return {
+      reason: 'absent',
+      message: 'No analysis found. Run analyze_codebase first.',
+    };
+  }
+
+  const manifest = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+  if (!manifest) {
+    return {
+      reason: 'generation-unavailable',
+      // Deliberately NOT "missing": an absent manifest is a legitimate legacy analysis and is
+      // synthesized, so it never reaches here. Reaching here means the manifest is PRESENT and
+      // was REFUSED — a symlink, a FIFO, an oversized or malformed file — which
+      // `readCurrentGeneration` fails closed on rather than synthesizing around.
+      message:
+        'An analysis exists but its generation manifest was refused (it is malformed, oversized, '
+        + 'or not a regular file), so the artifacts cannot be vouched for and are not served. '
+        + 'This is a damaged publish, not a missing index — re-run analyze to republish it.',
+    };
+  }
+
+  if (!await artifactMatchesGeneration(analysisDir, manifest, ARTIFACT_LLM_CONTEXT)) {
+    return {
+      reason: 'generation-mismatch',
+      message:
+        'An analysis exists but does NOT match its published generation '
+        + `(${manifest.generationId}): the artifacts were rewritten and the manifest was not `
+        + 'republished, so serving them would serve unverified bytes. Re-run analyze to '
+        + 'republish. If this recurs without a crash, a publish is being lost and is worth reporting.',
+    };
+  }
+
+  return {
+    reason: 'unreadable',
+    message:
+      'An analysis exists and matches its generation, but could not be read into a usable '
+      + 'context. Re-run analyze; if it recurs, the artifact is likely malformed.',
+  };
+}
+
 export async function readCachedContext(directory: string, timeout?: number): Promise<CachedContext | null> {
   const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   const filePath = join(analysisDir, ARTIFACT_LLM_CONTEXT);

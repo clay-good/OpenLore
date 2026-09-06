@@ -65,7 +65,7 @@ import {
   validateGitRef,
 } from '../../drift/index.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { validateDirectory, readCachedContext, isCacheFresh, safeJoin, safeOpenspecDir } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable, isCacheFresh, safeJoin, safeOpenspecDir } from './utils.js';
 import { buildWeightedAdjacency, weightedBfs } from './graph.js';
 import { personalizedPageRank } from '../../analyzer/personalized-pagerank.js';
 import { applyTokenBudget, normalizeResponseFormat, truncationReceipt, summarizeListInventory, type ResponseFormat } from './progressive.js';
@@ -203,7 +203,11 @@ export async function handleGetArchitectureOverview(directory: string): Promise<
   const ctx = await readCachedContext(absDir);
 
   if (!depGraph && !ctx) {
-    return { error: 'No analysis found. Run analyze_codebase first.' };
+    // Name WHY rather than always reporting absence: an index that failed its integrity
+    // check is a different situation from one that was never built, and only one of them
+    // is fixed by "run analyze first" without anything else being wrong.
+    const { reason, message } = await diagnoseIndexUnservable(absDir);
+    return { error: message, indexUnservable: reason };
   }
 
   const overview = buildArchitectureOverview(depGraph, ctx, absDir);
@@ -256,7 +260,10 @@ export async function handleGetRefactorReport(directory: string): Promise<unknow
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) {
+    const { reason, message } = await diagnoseIndexUnservable(absDir);
+    return { error: message, indexUnservable: reason };
+  }
   if (!ctx.callGraph) return { error: 'Call graph not available in cached analysis. Re-run analyze_codebase.' };
 
   return analyzeForRefactoring(ctx.callGraph as SerializedCallGraph);
