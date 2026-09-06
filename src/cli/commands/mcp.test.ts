@@ -45,7 +45,7 @@ vi.mock('../../core/analyzer/embedding-service.js', () => ({
   },
 }));
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import {
@@ -79,6 +79,27 @@ import {
   detectDrift,
 } from '../../core/drift/index.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+
+/**
+ * Remove a fixture directory, tolerating a handle Windows will not let us delete around.
+ *
+ * POSIX unlinks an open file happily; Windows refuses with EBUSY/EPERM until the last
+ * handle closes. These fixtures contain call-graph.db, and the handlers under test keep a
+ * cached store open by design (that cache is the point of the serving hot path), so a
+ * plain rm raced it and 58 tests in this file failed in teardown rather than on an
+ * assertion — the failure said EBUSY and named a temp path, which reads as nothing to do
+ * with the behaviour being tested.
+ *
+ * Deletion is not what any test here asserts, so it retries briefly and then gives up
+ * quietly: a leftover temp directory is the OS's problem, a failing afterEach is ours.
+ * SQLite's -shm/-wal siblings clear the same way once the connection goes.
+ */
+async function removeFixture(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { await rm(dir, { recursive: true, force: true }); return; }
+    catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+}
 
 describe('spec workflow composite presets', () => {
   it('exposes both composites by default and in full, but not in navigation-only', () => {
@@ -227,7 +248,7 @@ describe('validateDirectory', () => {
   });
 
   afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await removeFixture(testDir);
   });
 
   it('returns the resolved absolute path for a valid directory', async () => {
@@ -237,7 +258,9 @@ describe('validateDirectory', () => {
 
   it('resolves relative paths to absolute', async () => {
     const result = await validateDirectory('.');
-    expect(result).toMatch(/^\//);
+    // isAbsolute(), not /^\//: an absolute path on Windows starts with a drive letter, so the
+    // POSIX-shaped regex asserted the separator rather than the property in the test's title.
+    expect(isAbsolute(result)).toBe(true);
   });
 
   it('throws when the path does not exist', async () => {
@@ -256,7 +279,12 @@ describe('validateDirectory', () => {
   });
 
   it('blocks path traversal that resolves to a file (e.g. /etc/hosts)', async () => {
-    await expect(validateDirectory('/etc/hosts')).rejects.toThrow('Not a directory');
+    // The property is that an existing FILE is refused, so the fixture must be a file that
+    // exists. '/etc/hosts' is not one on Windows — it resolves to C:\etc\hosts, which is
+    // absent, so the guard answered "Directory not found" and the test proved nothing.
+    const file = join(await mkdtemp(join(tmpdir(), 'mcp-notadir-')), 'a-file.txt');
+    await writeFile(file, 'x', 'utf-8');
+    await expect(validateDirectory(file)).rejects.toThrow('Not a directory');
   });
 });
 
@@ -321,7 +349,7 @@ describe('handleGetRefactorReport', () => {
     testDir = join(tmpdir(), `openlore-refactor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error when no cache exists', async () => {
     const r = await handleGetRefactorReport(testDir) as { error: string };
@@ -364,7 +392,7 @@ describe('handleGetCallGraph', () => {
     testDir = join(tmpdir(), `openlore-cg-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error when no cache exists', async () => {
     const r = await handleGetCallGraph(testDir) as { error: string };
@@ -422,7 +450,7 @@ describe('handleGetSignatures', () => {
     testDir = join(tmpdir(), `openlore-sigs-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error string when no cache exists', async () => {
     const r = await handleGetSignatures(testDir);
@@ -476,7 +504,7 @@ describe('handleGetMapping', () => {
     await mkdir(testDir, { recursive: true });
     vi.mocked(readOpenLoreConfig).mockResolvedValue({ openspecPath: 'openspec' } as never);
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('reports the missing input rather than a missing cache', async () => {
     const r = await handleGetMapping(testDir) as { error: string; reason: string };
@@ -537,7 +565,7 @@ describe('handleGetSubgraph', () => {
     testDir = join(tmpdir(), `openlore-subgraph-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error when no cache exists', async () => {
     const r = await handleGetSubgraph(testDir, 'hub') as { error: string };
@@ -631,7 +659,7 @@ describe('handleAnalyzeImpact', () => {
     testDir = join(tmpdir(), `openlore-impact-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error when no cache exists', async () => {
     const r = await handleAnalyzeImpact(testDir, 'hub') as { error: string };
@@ -739,7 +767,7 @@ describe('handleGetLowRiskRefactorCandidates', () => {
     testDir = join(tmpdir(), `openlore-lowrisk-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error when no cache exists', async () => {
     const r = await handleGetLowRiskRefactorCandidates(testDir) as { error: string };
@@ -824,7 +852,7 @@ describe('handleGetLeafFunctions', () => {
     testDir = join(tmpdir(), `openlore-leaves-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error when no cache exists', async () => {
     const r = await handleGetLeafFunctions(testDir) as { error: string };
@@ -919,7 +947,7 @@ describe('handleGetCriticalHubs', () => {
     testDir = join(tmpdir(), `openlore-hubs-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
   });
-  afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
+  afterEach(async () => { await removeFixture(testDir); });
 
   it('returns error when no cache exists', async () => {
     const r = await handleGetCriticalHubs(testDir) as { error: string };
@@ -1057,7 +1085,7 @@ describe('handleCheckSpecDrift', () => {
   });
 
   afterEach(async () => {
-    await rm(driftDir, { recursive: true, force: true });
+    await removeFixture(driftDir);
     vi.clearAllMocks();
   });
 
@@ -1260,7 +1288,7 @@ describe('handleSuggestInsertionPoints', () => {
   });
 
   afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await removeFixture(testDir);
     vi.clearAllMocks();
   });
 
@@ -1413,7 +1441,7 @@ describe('handleGetArchitectureOverview', () => {
   });
 
   afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
+    await removeFixture(testDir);
   });
 
   it('throws McpError when directory does not exist', async () => {

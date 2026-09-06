@@ -1619,7 +1619,7 @@ export function buildClusterView(cg: SerializedCallGraph, absDir: string, commun
   const clusterDensity = m > 1 ? Math.round((uniqueInternalCount / (m * (m - 1))) * 1000) / 1000 : 0;
 
   // Files the community spans
-  const files = [...new Set(members.map(n => relative(absDir, n.filePath)))].sort();
+  const files = [...new Set(members.map(n => servedRelPath(absDir, n.filePath)))].sort();
 
   return {
     communityLabel: members[0].communityLabel,
@@ -1635,7 +1635,7 @@ export function buildClusterView(cg: SerializedCallGraph, absDir: string, commun
     internalCallGraph: callEdges,
     functions: members.map(n => ({
       name: n.name,
-      file: relative(absDir, n.filePath),
+      file: servedRelPath(absDir, n.filePath),
       signature: n.signature ?? n.name,
       fanIn: n.fanIn,
       fanOut: n.fanOut,
@@ -1817,7 +1817,10 @@ export async function handleDetectChanges(
 
   // Node filePaths are repo-root-relative, but tolerate an absolute path defensively
   // (older analyses, or a future builder change) by normalising to the diff's relative form.
-  const relPath = (p: string) => (p.startsWith(absDir) ? relative(absDir, p) : p);
+  // servedRelPath, not relative(): the right-hand side of the comparison below is a path
+  // from a git diff, which is POSIX on every platform. A native `src\a.ts` never matches
+  // `src/a.ts`, so on Windows no changed line would map to any function.
+  const relPath = (p: string) => (p.startsWith(absDir) ? servedRelPath(absDir, p) : p);
 
   // Map changed line ranges to function nodes; track overlapping line count per function
   const changedFnIds = new Set<string>();

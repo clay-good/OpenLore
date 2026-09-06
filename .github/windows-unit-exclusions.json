@@ -68,11 +68,6 @@
       "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
     },
     {
-      "file": "src/cli/commands/mcp.test.ts",
-      "failingTests": 61,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
       "file": "src/cli/commands/optional-features.test.ts",
       "failingTests": 1,
       "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
