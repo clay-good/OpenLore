@@ -600,7 +600,7 @@ describe('auto-init guardrails', () => {
     expect(isInsideGitWorkTree(project, home)).toBe(true);
   });
 
-  it('recognizes the home directory through a symbolic link, not just by string equality', () => {
+  it.skipIf(process.platform === 'win32')('recognizes the home directory through a symbolic link, not just by string equality', () => {
     // A home on another volume (/home/u -> /mnt/data/u) or reached through any
     // symlink would compare unequal under a naive `resolve()` check, and the
     // dotfiles-repo refusal above would silently stop applying.

@@ -199,7 +199,10 @@ export function resolveUserScopeRoot(explicit?: string): string {
   if (explicit) return explicit;
   const configured = process.env.OPENLORE_HOME;
   if (configured) return configured;
-  if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+  // Keyed on the test RUNNER, deliberately not on NODE_ENV: a devcontainer, CI
+  // image, or Dockerfile that sets NODE_ENV=test and runs `openlore install` is a
+  // real install, and refusing it there would be a crash, not a guardrail.
+  if (process.env.VITEST) {
     throw new Error(
       'openlore install: refusing to write user-scope configuration into the real home directory '
       + 'from a test. Pass `home` to runInstall(), or set OPENLORE_HOME to a temporary directory.',
@@ -233,12 +236,40 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
       logger.info('Decision trail', 'skipped — no .openlore/config.json yet; run "openlore install" again after init');
       return 'skipped';
     }
+    // Autopilot is the mode for a gate this command is wiring for the FIRST time.
+    //
+    // An absent `autopilot` key means blocking review — that is what every gate
+    // check reads — so writing `true` over it would silently downgrade a gate the
+    // user already had, in a run they started for some unrelated reason (changing
+    // `--preset`, say). A repository that already carries an OpenLore commit gate
+    // keeps whatever mode it was configured with; only a repository with no gate
+    // yet gets the non-blocking default (change: unify-onboarding-entrypoint).
+    const { hasOpenLoreCommitGate } = await import('../commands/decisions.js');
+    const alreadyGated = await hasOpenLoreCommitGate(cwd);
     if (config.governance?.autopilot === false) {
-      // An explicit false is a considered choice for blocking human review. Wire
-      // the hook, but never flip the mode out from under it.
       logger.info('Decision trail', 'governance.autopilot is explicitly false — installing the gate in blocking review mode, as configured');
     } else if (config.governance?.autopilot !== true) {
-      await writeOpenLoreConfig(cwd, { ...config, governance: { ...config.governance, autopilot: true } });
+      if (alreadyGated) {
+        logger.info(
+          'Decision trail',
+          'this repository already has an OpenLore commit gate — leaving it in blocking review mode. '
+          + 'Set { "governance": { "autopilot": true } } to make it non-blocking.',
+        );
+      } else {
+        await writeOpenLoreConfig(cwd, { ...config, governance: { ...config.governance, autopilot: true } });
+      }
+    }
+    const { resolveTrustedHookLauncher } = await import('../git-hooks.js');
+    if (!(await resolveTrustedHookLauncher(cwd))) {
+      // The hook installer would print a security-flavored ERROR here. On the
+      // headline `openlore install` path — where the user asked for none of this —
+      // that reads as a failure. It is a precondition, so state it as one.
+      logger.info(
+        'Decision trail',
+        'skipped — OpenLore resolves inside this repository, and a commit gate must not execute '
+        + 'code the repository can change. Install OpenLore globally, then re-run to wire it.',
+      );
+      return 'skipped';
     }
     const { installPreCommitHook } = await import('../commands/decisions.js');
     const exitCodeBefore = process.exitCode;
@@ -248,7 +279,7 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     // comparing against zero read a successful install as failed when an earlier
     // step (a failed index build, which now runs first) had set the code.
     const installed = await installPreCommitHook(cwd, {
-      autopilot: config.governance?.autopilot !== false,
+      autopilot: config.governance?.autopilot === true || (!alreadyGated && config.governance?.autopilot !== false),
     });
     if (!installed) {
       // A commit gate that could not be installed must not fail the whole install.
@@ -471,10 +502,20 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   const userScopeCandidates = explicitlySelected ?? ALL_AGENTS;
   const globalAgents = userScopeCandidates.filter(agent => ADAPTERS[agent]?.supportsGlobal === true);
   const repoOnlyAgents = detectedAgents.filter(agent => ADAPTERS[agent].supportsGlobal !== true);
-  const wiringUserScope = !opts.repoOnly && globalAgents.length > 0;
+  let wiringUserScope = !opts.repoOnly && globalAgents.length > 0;
   // Resolved only when the user scope is actually written, so `--repo-only` never
-  // consults (or fails on) a home directory it will not touch.
-  const home = wiringUserScope ? resolveUserScopeRoot(opts.home) : '';
+  // consults (or fails on) a home directory it will not touch. A failure to resolve
+  // it is contained for the same reason every other user-scope failure is: it must
+  // not take the repository wiring down with it.
+  let home = '';
+  if (wiringUserScope) {
+    try {
+      home = resolveUserScopeRoot(opts.home);
+    } catch (error) {
+      allWarnings.push(`User-scope wiring skipped: ${(error as Error).message}`);
+      wiringUserScope = false;
+    }
+  }
   let userScopeClean = wiringUserScope;
   if (wiringUserScope) {
     for (const agent of globalAgents) {
@@ -517,7 +558,13 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     return 1;
   }
 
-  if (!opts.dryRun && opts.uninstall) await unwireGovernanceGate(cwd);
+  // The decisions gate belongs to `openlore install`, not to any one agent
+  // surface, so only a WHOLE-install removal takes it out. `connect remove cursor`
+  // has nothing to do with git hooks, and used to delete a decisions gate the user
+  // may have installed years ago through a different command entirely
+  // (change: unify-onboarding-entrypoint).
+  const removingEverything = opts.uninstall && !opts.agent && !opts.agents?.length;
+  if (!opts.dryRun && removingEverything) await unwireGovernanceGate(cwd);
 
   // One-command setup: build the index so orient() works on the first session.
   // Opt out with --no-analyze; never runs for dry-run or uninstall.

@@ -89,7 +89,9 @@ Examples:
   $ openlore connect cursor --preset memory
   $ openlore connect pi                   Connect Pi (.pi/extensions/openlore.js — no MCP)
   $ openlore connect list                 Show supported agents and their status
-  $ openlore connect remove claude-code   Disconnect Claude Code
+  $ openlore connect remove claude-code   Disconnect Claude Code from this repository
+  $ openlore connect remove claude-code --user-scope
+                                          … and from every repository on this machine
 `
   )
   .action(async (agent: string | undefined, opts: ConnectOpts) => {
@@ -119,14 +121,24 @@ connectCommand
 
 connectCommand
   .command('remove [agent]')
-  .description('Disconnect OpenLore from an agent (or all detected agents)')
+  .description('Disconnect OpenLore from an agent in THIS repository (add --user-scope to remove it everywhere)')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
-  .action(async (agent: string | undefined, opts: { dryRun?: boolean }) => {
+  .option(
+    '--user-scope',
+    'Also remove the user-scope entries, which un-wires OpenLore for every repository on this machine',
+    false,
+  )
+  .action(async (agent: string | undefined, opts: { dryRun?: boolean; userScope?: boolean }) => {
     const code = await runInstall({
       agent: agent as AgentName | undefined,
       uninstall: true,
       analyze: false,
       dryRun: opts.dryRun,
+      // Repo-scoped by DEFAULT. `connect remove claude-code` reads as "disconnect
+      // this project"; inheriting `install --uninstall`'s both-scopes semantics
+      // would silently un-wire every repository on the machine from inside one
+      // (change: unify-onboarding-entrypoint).
+      repoOnly: !opts.userScope,
     });
     if (code !== 0) process.exit(code);
   });

@@ -86,19 +86,51 @@ describe('install wires the decision trail', () => {
     expect(await wireGovernanceGate(dir)).toBe('skipped');
   });
 
-  it('bare install wires the gate, and --uninstall removes it', async () => {
+  it('bare install wires the gate, and a whole-install uninstall removes it', async () => {
     await initGit();
     await writeConfig(dir);
 
     expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home })).toBe(0);
     expect(await exists(join(dir, '.git', 'hooks', 'pre-commit'))).toBe(true);
 
-    expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home, uninstall: true })).toBe(0);
+    expect(await runInstall({ cwd: dir, analyze: false, home, uninstall: true })).toBe(0);
     const stillThere = await exists(join(dir, '.git', 'hooks', 'pre-commit'));
     if (stillThere) {
       expect(await readFile(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'))
         .not.toContain('openlore-decisions-hook');
     }
+  });
+
+  it('an agent-scoped removal leaves the commit gate alone', async () => {
+    // The gate belongs to `openlore install`, not to any one agent surface.
+    // `connect remove cursor` has nothing to do with git hooks, and must not
+    // delete a decisions gate the user may have installed by another route.
+    await initGit();
+    await writeConfig(dir);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+
+    expect(await runInstall({ cwd: dir, agent: 'cursor', analyze: false, home, uninstall: true })).toBe(0);
+
+    expect(await readFile(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'))
+      .toContain('openlore-decisions-hook');
+  });
+
+  it('never downgrades a commit gate that is already installed', async () => {
+    // An absent `governance.autopilot` means BLOCKING review. A later install run
+    // (to change a preset, say) must not silently flip an existing gate to
+    // auto-accept.
+    await initGit();
+    await writeConfig(dir);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    // Simulate a gate configured for blocking review before this feature existed.
+    await writeConfig(dir);
+    expect(JSON.parse(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8')).governance)
+      .toBeUndefined();
+
+    expect(await wireGovernanceGate(dir)).toBe('wired');
+
+    const config = JSON.parse(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8'));
+    expect(config.governance?.autopilot).not.toBe(true);
   });
 
   it('--dry-run writes no hook and no config change', async () => {

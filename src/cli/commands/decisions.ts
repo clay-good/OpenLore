@@ -292,6 +292,23 @@ export async function runPostCommitDecisionCheck(rootPath: string): Promise<void
   logger.warning('openlore: pre-commit gate was bypassed (--no-verify). Architectural decisions were not reviewed for this commit. Run: openlore decisions --consolidate --gate');
 }
 
+/**
+ * Does this repository already carry an OpenLore decisions commit gate?
+ *
+ * Read by `openlore install` so it never changes the mode of a gate someone else
+ * configured: an absent `governance.autopilot` means blocking review, so writing
+ * the non-blocking default over an EXISTING gate would silently downgrade it
+ * (change: unify-onboarding-entrypoint).
+ */
+export async function hasOpenLoreCommitGate(rootPath: string): Promise<boolean> {
+  try {
+    const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
+    return (await readFile(hookPath, 'utf-8')).includes(HOOK_MARKER);
+  } catch {
+    return false; // no hook, or unreadable — either way, no gate we must preserve
+  }
+}
+
 export async function installPreCommitHook(
   rootPath: string,
   /**

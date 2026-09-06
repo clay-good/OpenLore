@@ -147,6 +147,21 @@ describe('user-scope wiring', () => {
     expect(await exists(join(dir, '.mcp.json'))).toBe(false);
   });
 
+  it('bare install (no --agent) writes the user scope even when only another agent is detected', async () => {
+    // The promise is "install once, every repository works", so the user-scope
+    // candidate set is CAPABILITY-driven. Detection answers a different question:
+    // a repo containing a `.cursor/` marker short-circuits detect()'s ~/.claude
+    // probe, and a detection-driven set would silently skip the user scope here.
+    await mkdir(join(dir, '.cursor'), { recursive: true });
+
+    expect(await runInstall({ cwd: dir, analyze: false, home })).toBe(0);
+
+    const mcp = await readJson(join(home, '.claude.json'));
+    expect((mcp.mcpServers as Record<string, unknown>).openlore).toBeDefined();
+    // …and the detected agent is still wired for this repository.
+    expect(await exists(join(dir, '.cursor', 'mcp.json'))).toBe(true);
+  });
+
   it('an adapter with no user scope is wired per-repo only, and the command still exits 0', async () => {
     expect(await runInstall({ cwd: dir, agent: 'cursor', analyze: false, home })).toBe(0);
     expect(await exists(join(home, '.cursor'))).toBe(false);
@@ -211,6 +226,26 @@ describe('resolveUserScopeRoot', () => {
       expect(() => resolveUserScopeRoot()).toThrow(/refusing to write user-scope configuration/);
     } finally {
       if (previous !== undefined) process.env.OPENLORE_HOME = previous;
+    }
+  });
+});
+
+describe('connect remove is repository-scoped by default', () => {
+  it('leaves the user scope wired unless --user-scope is passed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-cr-repo-'));
+    const home = await mkdtemp(join(tmpdir(), 'openlore-cr-home-'));
+    try {
+      await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+
+      // What `connect remove claude-code` now passes.
+      await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home, uninstall: true, repoOnly: true });
+
+      const mcp = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8'));
+      expect((mcp.mcpServers as Record<string, unknown>).openlore).toBeDefined();
+      expect(await exists(join(dir, '.mcp.json'))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
     }
   });
 });

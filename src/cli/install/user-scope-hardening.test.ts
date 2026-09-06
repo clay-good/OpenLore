@@ -87,7 +87,7 @@ describe('user-scope hardening', () => {
       expect(await exists(join(dir, '.mcp.json'))).toBe(true);
     });
 
-    it('a symlinked ~/.claude does not abort the command, and nothing escapes through it', async () => {
+    it.skipIf(process.platform === 'win32')('a symlinked ~/.claude does not abort the command, and nothing escapes through it', async () => {
       const outside = await mkdtemp(join(tmpdir(), 'openlore-outside-'));
       try {
         await symlink(outside, join(home, '.claude'), 'dir');
@@ -112,7 +112,9 @@ describe('user-scope hardening', () => {
       expect(await exists(join(home, '.claude.json'))).toBe(true);
     });
 
-    it('creates user-scope config readable only by its owner', async () => {
+    // POSIX mode bits only: Windows reports 0o666/0o444 regardless of ACLs, so the
+    // assertion would be false there without saying anything about permissions.
+    it.skipIf(process.platform === 'win32')('creates user-scope config readable only by its owner', async () => {
       await install();
       for (const p of [join(home, '.claude.json'), join(home, '.claude', 'settings.json')]) {
         expect((await stat(p)).mode & 0o077).toBe(0);
@@ -211,7 +213,7 @@ describe('user-scope hardening', () => {
       expect(await readFile(path, 'utf8')).toBe(next);
     });
 
-    it('refuses a symlink that points outside the scope root, and does not write through it', async () => {
+    it.skipIf(process.platform === 'win32')('refuses a symlink that points outside the scope root, and does not write through it', async () => {
       const outside = await mkdtemp(join(tmpdir(), 'openlore-symlink-target-'));
       try {
         const victim = join(outside, 'real.json');
@@ -229,7 +231,7 @@ describe('user-scope hardening', () => {
       }
     });
 
-    it('refuses a symlink that stays inside the scope root, naming it as a link', async () => {
+    it.skipIf(process.platform === 'win32')('refuses a symlink that stays inside the scope root, naming it as a link', async () => {
       const victim = join(home, 'real.json');
       await writeFile(victim, JSON.stringify({ notOurs: true }, null, 2));
       await symlink(victim, join(home, '.claude.json'));

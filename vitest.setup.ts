@@ -19,7 +19,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const sandboxHome = mkdtempSync(join(tmpdir(), 'openlore-test-home-'));
-process.env.OPENLORE_HOME = sandboxHome;
+// Never clobber a root an operator supplied deliberately (a container image, a CI
+// job that wants its own).
+process.env.OPENLORE_HOME ??= sandboxHome;
+// The user-scope write path also takes advisory locks and writes recovery journals
+// under a private coordination directory derived from `homedir()` — which
+// OPENLORE_HOME does not redirect. Without this pin, the suite creates directories
+// and takes real locks in the developer's actual home.
+process.env.OPENLORE_SETTINGS_RUNTIME_DIR ??= join(sandboxHome, 'settings-writes');
 
 process.on('exit', () => {
   try {

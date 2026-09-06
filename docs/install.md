@@ -31,13 +31,23 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 | Scope | Files (Claude Code) | Effect |
 |-------|---------------------|--------|
 | **user** (default) | `~/.claude.json` (`mcpServers.openlore`), `~/.claude/settings.json` (hooks + `Bash(openlore:*)`), `~/.claude/CLAUDE.md` | every repository you open reaches OpenLore |
+
+The user scope is written for every adapter that *has* one, not only for adapters detected in the
+current directory — that is what makes "install once" true in a repository whose markers belong to
+some other agent. The practical consequence: a bare `openlore install` creates `~/.claude/` even if
+you do not use Claude Code. `--repo-only`, or `--agent <name>`, avoids that.
+
+`OPENLORE_HOME` and `OPENLORE_SETTINGS_RUNTIME_DIR` relocate the user scope and its lock/journal
+directory respectively.
 | **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
 
 Adapters with no user-scope surface (`cursor`, `cline`, `continue`, `pi`, `agents-md`) are wired
 per repository and named as such in the summary — an honest note, never a failure.
-`openlore connect list` shows both scopes; `--uninstall` removes OpenLore-managed entries from
-both, and never deletes `~/.claude.json` or `~/.claude/settings.json` themselves. An explicit
-`--agent` narrows both scopes, on install and on uninstall alike.
+`openlore connect list` shows both scopes; `openlore install --uninstall` removes OpenLore-managed
+entries from both, and never deletes `~/.claude.json` or `~/.claude/settings.json` themselves. An
+explicit `--agent` narrows both scopes, on install and on uninstall alike, and only a whole-install
+removal takes out the commit gate. `openlore connect remove <agent>` is **repository-scoped by
+default** — pass `--user-scope` to remove the machine-wide entries too.
 
 > **Both scopes wired means both scopes active.** Claude Code resolves *MCP servers* by name, so
 > one server runs. It does not do that for hooks or instructions: user-level and project-level
@@ -154,8 +164,14 @@ caches. Requires Pi ≥ 0.78.1 and one `openlore analyze` beforehand. Full detai
 `openlore install` wires **one** gate: the decisions commit gate, in non-blocking **autopilot**
 mode (`governance.autopilot: true`). Verified architectural decisions are recorded and synced to
 specs at commit time, and no commit is ever blocked by it. That is what makes one command yield
-structural navigation *and* a decision trail. Set `governance.autopilot: false` before installing
-to keep the gate in blocking human-review mode instead; an explicit `false` is never flipped.
+structural navigation *and* a decision trail.
+
+Install sets that mode only when it wires a gate for the **first** time in a repository. A
+repository that already carries an OpenLore commit gate keeps the mode it was configured with —
+an absent `governance.autopilot` means blocking review, and install will not flip it — and an
+explicit `governance.autopilot: false` is never flipped either. `openlore install` also skips the
+gate entirely when OpenLore resolves inside the repository (a local devDependency), because a
+commit gate must not execute code the repository can change.
 
 Every other git hook below is installed explicitly and is advisory by default. All of them coexist
 in a single `.git/hooks/pre-commit` (each installer appends its own marked block and strips a

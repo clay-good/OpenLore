@@ -693,7 +693,13 @@ export const claudeCodeAdapter: Adapter = {
       const parsedMcp = JSON.parse(rawMcp) as Record<string, unknown>;
       let { next, removed } = removeManaged(parsedMcp);
       let removalEdits = managedRemovalEdits(parsedMcp);
-      if (!removed && isOurMcpEntry((parsedMcp.mcpServers as Record<string, unknown>)?.openlore)) {
+      // User scope ONLY. The rationale is specific to a file OpenLore does not own
+      // (`~/.claude.json`, whose unrecognized top-level keys another tool may drop).
+      // In a repository, a hand-written `.mcp.json` with an `openlore` entry and no
+      // managed marker is the user's own file — removing that entry, and deleting
+      // the file when it was the only one, is not ours to do.
+      if (!removed && !layout.mayDeleteMcpFile
+        && isOurMcpEntry((parsedMcp.mcpServers as Record<string, unknown>)?.openlore)) {
         // The `_openlore` meta is how removal normally identifies our entries — but
         // this file belongs to Claude Code, not to us, and any tool that rewrites it
         // may drop an unrecognized top-level key. Without this fallback the meta's

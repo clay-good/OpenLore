@@ -222,7 +222,10 @@ export function isInsideGitWorkTree(directory: string, home = homedir()): boolea
       // pathological one. Both are out of scope for auto-init; an explicit
       // `openlore analyze` there still works.
       if (homeRoot === null) return true;
-      return !(homeRoot === dir || homeRoot.startsWith(dir + sep));
+      // `dir` may already end in the separator at a filesystem root ("/", "C:\\"),
+      // where a naive `dir + sep` yields "//" and matches nothing.
+      const prefix = dir.endsWith(sep) ? dir : dir + sep;
+      return !(homeRoot === dir || homeRoot.startsWith(prefix));
     }
     const parent = dirname(dir);
     if (parent === dir) return false;
@@ -238,31 +241,35 @@ export function isInsideGitWorkTree(directory: string, home = homedir()): boolea
  * indexed it".
  */
 function isGitDirEntry(path: string): boolean {
-  try {
-    if (statSync(path).isDirectory()) return true;
-  } catch {
-    return false;
-  }
-  // Everything below reads through ONE open descriptor and stats THAT descriptor,
-  // not the path. Stat-then-read of a path is a time-of-check/time-of-use race: the
-  // entry can become something else — a directory, a device, a symlink to
-  // elsewhere — between the two calls, so the bytes we classify would not be the
-  // bytes we checked.
-  let fd: number | undefined;
+  // Open ONCE, then answer every question from that descriptor. Any
+  // stat-the-path-then-use-the-path pair is a time-of-check/time-of-use race: the
+  // entry can become a directory, a device, or a link to elsewhere in between, so
+  // what gets classified is not what got checked.
+  let fd: number;
   try {
     fd = openSync(path, 'r');
-    if (!fstatSync(fd).isFile()) return false;
-    // A `gitdir:` pointer is one short line; reading a fixed prefix bounds the read
-    // regardless of what the entry turns out to be.
+  } catch (error) {
+    // Windows cannot open a directory for reading. There is nothing to race here:
+    // this answers and returns without touching the path again.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EISDIR' || code === 'EPERM' || code === 'EACCES') {
+      try { return statSync(path).isDirectory(); } catch { return false; }
+    }
+    return false;
+  }
+  try {
+    const info = fstatSync(fd);
+    if (info.isDirectory()) return true;
+    if (!info.isFile()) return false;
+    // A `gitdir:` pointer is one short line; a fixed prefix bounds the read
+    // whatever the entry turns out to be.
     const head = Buffer.alloc(64);
     const bytes = readSync(fd, head, 0, head.length, 0);
     return head.subarray(0, bytes).toString('utf-8').trimStart().startsWith('gitdir:');
   } catch {
     return false;
   } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* already closed */ }
-    }
+    try { closeSync(fd); } catch { /* already closed */ }
   }
 }
 

@@ -306,6 +306,10 @@ export async function collectFeatureInventory(rootPath: string): Promise<Feature
     detail: autopilotOn
       ? 'verified decisions auto-accept and sync; commits never block; trail via `openlore decisions log`'
       : 'off — the commit gate blocks for human review of verified decisions',
+    // `openlore install` turns this on when it wires a commit gate for the FIRST
+    // time in a repository, and never changes the mode of a gate that already
+    // exists (change: unify-onboarding-entrypoint). So it reads as opt-in here for
+    // exactly the repositories where it is: ones already gated in review mode.
     activate: autopilotOn ? '' : 'set { "governance": { "autopilot": true } } in .openlore/config.json',
     docs: 'docs/cli-reference.md',
   });
