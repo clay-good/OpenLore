@@ -273,16 +273,6 @@
       "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
     },
     {
-      "file": "src/core/services/mcp-watcher-parity.test.ts",
-      "failingTests": 1,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/services/mcp-watcher.test.ts",
-      "failingTests": 5,
-      "reason": "POSIX-absolute fixture root resolves onto another drive, tripping path confinement"
-    },
-    {
       "file": "src/core/services/spec-workflow-skills.test.ts",
       "failingTests": 1,
       "reason": "POSIX-specific fixture or assertion"
