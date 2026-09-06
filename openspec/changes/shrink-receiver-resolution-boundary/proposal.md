@@ -91,6 +91,29 @@ The imprecision is pre-existing and honestly labelled `synthesized` — this cha
 sites the cap happens to hide. Left alone deliberately: suppressing it would mean re-tuning CHA's
 cap semantics, which is a different change.
 
+## Upgrade notes
+
+Audited by running the real upgrade, not by reasoning about it. One true break was found and
+fixed (analyze answering "up to date" on a store it could not read — see `tasks.md`). What remains
+is disclosed rather than silent:
+
+- **First analyze after upgrading is a cold build.** `FACT_FORMAT_VERSION` 6→7 invalidates the
+  per-file extraction cache once: measured `re-extracted 4 file(s), reused 0 cached`. On a
+  1,000-file repo that is roughly 19–30s instead of 11–14s, once.
+- **Downgrading needs `openlore analyze --force`.** An older build reads a schema-12 store,
+  discloses the mismatch correctly in `doctor` and `orient --json`, and falls back cleanly on
+  bundle import — but its own `analyze` still answers "up to date" (it predates the fix above).
+- **Two OpenLore builds sharing one repository will flap the store 11↔12.** Bounded and
+  non-corrupting — no quarantine files, no data loss beyond the `receiver_inferred` edges the old
+  build cannot represent, and the new build heals it — but the OLD side reports success with no
+  signal that it downgraded the graph, and its watcher goes inert after spending its repair budget.
+  Not fixable from this side; worth knowing before pinning two versions in one CI.
+- **Two visible metric shifts, both improvements:** `report_coverage_gaps` moves (796 → 761 gaps
+  on this repository) because fewer functions are falsely "unreached", and
+  `analyze_error_propagation` gains a chained-receiver boundary. On a low-bind repository that
+  boundary is mostly builtin-shaped receivers (`this.map.get`, `this.items.push`) — bounded to one
+  summary line plus a 15-item sample, and confined to that one tool.
+
 ## Decisions to record
 
 Two choices here set precedent beyond this change and should be captured as ADRs through

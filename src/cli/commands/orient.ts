@@ -143,6 +143,11 @@ function printHuman(result: Record<string, unknown>): void {
   // State the honest, served retrieval mode (keyword / local-semantic /
   // remote-semantic) — not the internal score-scale token.
   console.log(`Retrieval mode: ${safe(String(result.retrievalMode ?? result.searchMode))}`);
+  // A degraded graph index has to be said OUT LOUD on the human surface too. Without this the
+  // JSON caller learns the call paths were omitted and the terminal caller does not — they just
+  // see a briefing with no callers, which reads as "nothing calls this" rather than "I could not
+  // look" (change: shrink-receiver-resolution-boundary).
+  if (result.graphIndexNote) logger.warning(safe(String(result.graphIndexNote)));
 
   if (fns.length > 0) {
     console.log('\nRelevant functions:');

@@ -90,6 +90,24 @@
       the external-import refusal itself; fixed the false Ruby claim in the capability text and
       completed the five-step "add a language" checklist (two of its steps fail SILENTLY if missed)
 
+- [x] Round 5 — upgrade safety, found by dogfooding the real upgrade: after the schema bump every
+      graph tool said "run `openlore analyze`" and `analyze` answered "up to date — source
+      unchanged" and did nothing, stranding the user with no call graph. The skip is now gated on
+      the published store being READABLE by this build, not only on source freshness — a gap that
+      was general and would have bitten on any future bump
+- [x] Round 5 — disclosure reach: the human `orient` and `orient --inject` (the SessionStart hook
+      every Claude Code user runs) never printed `graphIndexNote`, so 100% of upgraders would see a
+      briefing with no callers and no way to tell "nothing calls this" from "I could not look".
+      Both surfaces now say it, and the injected line rides the mandatory-line path so a tight
+      budget cannot drop the boundary while keeping the detail it qualifies
+- [x] Round 5 — blast-radius guard: the chained alternative was added to the SHARED `TS_CALL_QUERY`,
+      where a compile failure empties the entire TS/JS call graph (the Python side uses a separate
+      soft query and risks only the alternative). Pinned by a per-grammar compile test
+- [x] Round 5 — value audit: measured the ANSWERS, not the edge counts. `main` answered six
+      "how does A reach B" questions on a stock NestJS app with `path: null` AND
+      `confidenceBoundary.complete: true`; all six now resolve. 19 functions `main` called "no
+      internal caller" demonstrably had one. Four of my own claims were measured wrong and corrected
+
 ## Spec
 - [x] `analyzer` delta: ADD IntraObjectReceiverResolutionViaTypeRegistries,
       ResidualReceiverBoundaryStaysDisclosed, ChainedReceiverResidueIsScopedAndDeclared

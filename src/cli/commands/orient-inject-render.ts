@@ -213,6 +213,13 @@ export interface LeanOrientResult {
   error?: string;
   /** Set by `notReadyResult` when the index is absent/unbuilt (reason `index-absent`). */
   notReady?: boolean;
+  /**
+   * Set when the graph index exists but THIS build cannot read it — after a schema bump, until
+   * the next analyze. The briefing then carries no call paths, provenance, decisions or
+   * change-coupling, and without saying so a reader cannot tell "nothing calls this" from
+   * "I could not look" (change: shrink-receiver-resolution-boundary).
+   */
+  graphIndexNote?: string;
   reason?: string;
   relevantFiles?: string[];
   relevantFunctions?: OrientFn[];
@@ -355,6 +362,11 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
     ?? 'local-unreviewed';
   const baseProvenances: ServedContentProvenance[] = ['local-unreviewed', sourceProvenance];
   const mandatory = [`Task: ${task}`];
+  // A graph index this build cannot read is a boundary on everything below it, so it rides the
+  // same mandatory-line path as staleness rather than being dropped at the first budget squeeze.
+  if (typeof result.graphIndexNote === 'string' && result.graphIndexNote.trim()) {
+    mandatory.push(`⚠ ${result.graphIndexNote.replace(/\s+/g, ' ').trim()}`);
+  }
   if (typeof result.indexStaleness?.note === 'string') {
     // Mandatory-line priority (change: disclose-stale-serving-on-cold-reads):
     // this factual boundary must survive before any function/caller/spec detail.
