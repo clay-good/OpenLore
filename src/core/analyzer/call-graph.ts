@@ -5018,6 +5018,18 @@ export async function synthesizeDynamicDispatchEdges(
 }
 
 /**
+ * The largest exact match count any of this file's candidates carries, or `undefined`.
+ *
+ * Read across the whole array rather than off the first element: a script container merges several
+ * lanes' candidate arrays into one, so which element is first is an accident of merge order.
+ */
+function maxMatchedTotal(candidates: AttributedCandidate[]): number | undefined {
+  let max = 0;
+  for (const c of candidates) if (c.matchedTotal && c.matchedTotal > max) max = c.matchedTotal;
+  return max > 0 ? max : undefined;
+}
+
+/**
  * Decide the dynamic-boundary partition once Pass-2 resolution has run (change:
  * disclose-dynamic-boundary-regions).
  *
@@ -5080,7 +5092,7 @@ function finalizeDynamicBoundaries(
   const out = new Map<string, FileDynamicBoundary>();
   for (const [filePath, { language, candidates }] of byFile) {
     const sites = finalizeDynamicBoundarySites(candidates, probe);
-    const record = buildFileDynamicBoundary(filePath, language, sites, candidates[0]?.matchedTotal);
+    const record = buildFileDynamicBoundary(filePath, language, sites, maxMatchedTotal(candidates));
     if (record) out.set(filePath, record);
   }
   return out.size > 0 ? out : undefined;
@@ -6512,7 +6524,7 @@ export async function extractFileDynamicBoundary(
     // this file itself defines can be counted; anything else refuses as file-scoped.
     countSymbolsNamed: (name) => (localNames.has(name) ? 1 : null),
   });
-  return buildFileDynamicBoundary(file.path, file.language, sites, candidates[0]?.matchedTotal);
+  return buildFileDynamicBoundary(file.path, file.language, sites, maxMatchedTotal(candidates));
 }
 
 export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph {

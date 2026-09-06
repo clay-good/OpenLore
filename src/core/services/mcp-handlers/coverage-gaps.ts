@@ -310,7 +310,9 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     const boundaryWithheld = withheldOf(list);
     return { live, deadFlagged: size - live - boundaryWithheld, ...(boundaryWithheld > 0 ? { boundaryWithheld } : {}) };
   };
-  const remainder = gaps.filter(g => !returned.includes(g));
+  // `returned` is a prefix slice, so the remainder is the rest of the same array — no membership
+  // scan, and no dependence on object identity.
+  const remainder = gaps.slice(returned.length);
   const composition = {
     returned: bucket(returned, returned.length),
     ...(omitted > 0 ? { omittedRemainder: bucket(remainder, omitted) } : {}),

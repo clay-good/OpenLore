@@ -814,10 +814,13 @@ export function matchDynamicBoundaries(
   }
 
   out.sort((a, b) => a.startIndex - b.startIndex);
-  // The exact match count rides the FIRST candidate, so the file record can report its true scale
-  // even when the retained list is capped. Carrying it here rather than changing the return type
-  // keeps the fact-cache and worker payloads plain arrays.
-  if (out.length > 0 && matched > out.length) out[0].matchedTotal = matched;
+  // The exact match count rides on a candidate rather than the return type, so the fact-cache and
+  // worker payloads stay plain arrays. It is stamped on EVERY retained candidate, not just the
+  // first: a script container merges several lanes' candidate arrays, and the finalizer can drop a
+  // candidate, so a count carried by one element alone is one array concatenation away from being
+  // silently lost — and a lost count means an over-cap file quietly reports the capped length as
+  // its true scale.
+  if (matched > out.length) for (const c of out) c.matchedTotal = matched;
   return out;
 }
 
