@@ -29,15 +29,22 @@
 
 ## What changes
 
-1. **Periodic partial flush during an index-absent build.** During a first-run build, the
-   pipeline flushes partial artifacts at phase boundaries and every N files (atomic writes via
-   the existing `atomicWriteFile` + analysis-lock discipline), each stamped with a completeness
-   receipt: `{filesExtracted, filesTotal, phase, partial: true}`. Because input is
-   significance-ordered, the first flush already contains the hubs.
+1. **A partial flush during an index-absent build.** The pipeline flushes a partial index once
+   the repository structure and dependency graph exist — before the call-graph pass, which is
+   most of the wall clock — with an atomic write, its own content-digest commit, and a receipt
+   stamped `{filesExtracted, filesTotal, phase, partial: true}`.
+
+   *(As built: one flush at the extractors boundary, not a per-file cadence. A per-file flush
+   would have to re-run merge and resolution over a prefix — see "What this does NOT do".)*
 2. **The absent case adopts the stale case's serving contract.** Reads during an index-absent
-   build serve from the newest partial artifact with a disclosed boundary through the epistemic
-   lease: "index N% complete (significance-ordered: hubs and entry points first); unindexed
-   files are invisible to this answer, not absent from the repo." Negative conclusions that
+   build serve from the partial index with a disclosed boundary naming what it holds, what it
+   does not yet hold, and that unreached facts are invisible to the answer rather than absent
+   from the repo.
+
+   *(As built: no completeness percentage. The honest denominator would be the call-graph pass,
+   which has not started, so any percentage in that position reads as "how much of the index
+   exists". The receipt names the build stage instead. The significance-ordering clause is gone
+   too: the flush contains every mapped file, so it was ordering nothing.)* Negative conclusions that
    partiality can invert — dead-code candidates, coverage gaps, "no callers" — are withheld or
    explicitly downgraded while `partial: true`; navigation and positive lookups serve normally.
 3. **Completion erases partiality.** The final write is byte-identical to today's
@@ -52,6 +59,23 @@ parsing (answers come only from flushed facts — the deterministic artifact sta
 source of truth), and no background prioritization scheduler beyond the significance order
 that already exists.
 
+## What this does NOT do (settled during implementation)
+
+The partial index carries repository structure and the dependency graph, and those are SERVED:
+`get_architecture_overview`, `get_file_dependencies` and orient's architecture-rule scan read
+them through a fallback that fires only after the published read returns null, so a repository
+with an index pays nothing. It does **not** carry a partial call graph. Pass 1 extracts every file before the merge and resolution passes run, so
+flushing a servable graph mid-pass would mean re-running merge and resolution over a prefix:
+extra work on every build, and a second path through exactly the machinery the determinism
+oracle exists to protect. The receipt therefore NAMES the call graph and the search index as not
+yet built rather than implying the index has them, and `orient` — which gates on the search index
+— keeps returning not-ready, now with the build's progress instead of "run openlore analyze".
+
+The measured shape of the build is what makes this worth doing anyway: on this repository the
+mapping, dependency-graph and extractor phases finish in 2.2s of a 15.4s build, so the partial
+index exists for ~85% of the wall clock. On a repository of real size that is minutes during
+which the answer changes from a dead end to a disclosed partial one.
+
 ## Why this is in scope
 
 First impressions are the product's conversion funnel, and "structural answers within seconds
@@ -61,11 +85,22 @@ stale-serving disclosure contract, the determinism oracle — extended to one un
 
 ## Impact
 
-- Files: `src/core/analyzer/artifact-generator.ts` (partial flush + completeness stamp),
-  `src/cli/commands/analyze.ts` (flush cadence, interactive-path gating),
-  `src/core/services/cold-start-bootstrap.ts` (absent-case serving + `repairStatusFor`
-  extension), `src/core/services/mcp-handlers/epistemic-lease.ts` (partial-boundary note),
-  negative-conclusion guards in `reachability.ts` / `coverage-gaps.ts`.
+- Files: `src/core/runtime/partial-index.ts` (new — the whole partial-index lifecycle),
+  `src/core/analyzer/analysis-core.ts` (flush cadence + clear on publish),
+  `src/core/analyzer/artifact-generator.ts` (the `partial` stamp on `LLMContext`, a
+  structure-only accessor), `src/cli/commands/analyze.ts` and
+  `src/core/services/cold-start-bootstrap.ts` (lane gating),
+  `src/core/services/mcp-handlers/utils.ts` (absent-case serving + the response receipt),
+  `confidence-boundary.ts` (the `partial` marker and the withhold guard),
+  `reachability.ts` / `coverage-gaps.ts` (negative-conclusion guards),
+  `src/cli/commands/mcp.ts` (one disclosure point for every tool),
+  `src/core/analyzer/index-bundle.ts` (export/import refusals).
+
+  The partial index is written OUTSIDE the analysis directory rather than into it. That was
+  the load-bearing decision: `hasAnalysis`, the fingerprint, the published generation, the
+  attestation and every exporter read the analysis directory, so keeping the partial index out
+  of it makes "a partial index is never an artifact" structural instead of a rule five call
+  sites have to remember.
 - Specs: `architecture` — 1 ADDED requirement (FirstRunServesPartialWithACompletenessReceipt).
 - No new tool. Risk: medium — the hazard is a partial answer read as complete; mitigated by the
   `partial` stamp riding the lease into every response, the negative-conclusion withhold rule,

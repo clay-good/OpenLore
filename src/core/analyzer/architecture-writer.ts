@@ -144,10 +144,10 @@ export function buildArchitectureOverview(
   return {
     generatedAt: new Date().toISOString(),
     summary: {
-      totalFiles: depGraph?.statistics.nodeCount ?? 0,
+      totalFiles: depGraph?.statistics?.nodeCount ?? 0,
       totalClusters: clusters.length,
-      totalEdges: depGraph?.statistics.edgeCount ?? 0,
-      cycles: depGraph?.cycles.length ?? 0,
+      totalEdges: depGraph?.statistics?.edgeCount ?? 0,
+      cycles: depGraph?.cycles?.length ?? 0,
       layerViolations: ctx?.callGraph?.layerViolations?.length ?? 0,
     },
     clusters,

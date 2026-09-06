@@ -41,6 +41,7 @@ import {
   runImport,
 } from '../../cli/commands/import.js';
 import { ANALYSIS_LOCK_FILE } from '../runtime/advisory-lock.js';
+import { clearPartialIndex, flushPartialIndex } from '../runtime/partial-index.js';
 import { logger } from '../../utils/logger.js';
 import { getDefaultConfig } from '../services/config-manager.js';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
@@ -1359,4 +1360,59 @@ describe('index-bundle: runImport trust boundary', () => {
     expect(semanticAnswerBytes(importedSubgraph)).toBe(semanticAnswerBytes(localSubgraph));
     expect(semanticAnswerBytes(importedImpact)).toBe(semanticAnswerBytes(localImpact));
   });
+});
+
+describe('a partial first-run index is never shareable (change: refine-first-run-partial-serving)', () => {
+  it('refuses to export while a first analysis is still running', async () => {
+    const src = join(work, 'partial-export');
+    await buildAnalysisDir(src, 'c0');
+    // Mid-first-build: the graph store exists but no generation has been published, so there
+    // is nothing complete to export. (A COMPLETE index alongside a partial one — a cleanup
+    // that failed, say — must still export; the next test covers that.)
+    for (const name of ['llm-context.json', 'repo-structure.json', 'dependency-graph.json', ARTIFACT_FINGERPRINT]) {
+      await rm(join(src, name), { force: true });
+    }
+    await flushPartialIndex(src, {
+      repoStructure: {}, llmContext: {}, dependencyGraph: {},
+      stamp: {
+        partial: true, phase: 'extractors' as const, buildPhase: 'extractors', filesExtracted: 0, filesTotal: 10, filesMapped: 9,
+        startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        pid: process.pid, analysisDir: src,
+      },
+    });
+
+    await expect(buildBundle(src, VERSION)).rejects.toMatchObject({
+      name: 'BundleError',
+      code: 'partial-index',
+    });
+  });
+
+  it('exports a published index even if a partial one survived cleanup', async () => {
+    // A `clearPartialIndex` that failed (Windows EBUSY while a reader holds a descriptor)
+    // leaves a stamp with a live pid. Refusing on the stamp alone would block `openlore export`
+    // for ten minutes after a perfectly successful analyze.
+    const src = join(work, 'partial-export-cleared');
+    await buildAnalysisDir(src, 'c0');
+    await flushPartialIndex(src, {
+      repoStructure: {}, llmContext: {}, dependencyGraph: {},
+      stamp: {
+        partial: true, phase: 'extractors' as const, buildPhase: 'extractors', filesExtracted: 0, filesTotal: 10, filesMapped: 9,
+        startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        pid: process.pid, analysisDir: src,
+      },
+    });
+    await expect(buildBundle(src, VERSION)).resolves.toBeTruthy();
+
+    // And of course once it is actually gone.
+    await clearPartialIndex(src);
+    await expect(buildBundle(src, VERSION)).resolves.toBeTruthy();
+  });
+
+  // There is deliberately no import-side test, because there is deliberately no import-side
+  // check. A partial index is never written into the analysis directory, so it cannot reach a
+  // bundle this code produces; and on the untrusted side a scan of the bundled context could
+  // only be a bounded prefix scan (the context is the largest member by far), which cannot
+  // decide a question about attacker-chosen key order. A guard that looks like a check but is
+  // not is worse than the structural argument standing on its own.
+
 });

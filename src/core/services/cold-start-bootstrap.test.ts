@@ -146,7 +146,7 @@ describe('buildIndexInChildProcess', () => {
 
     expect(calls.map(call => call.args)).toEqual([
       ['/openlore/dist/cli/index.js', 'init'],
-      ['/openlore/dist/cli/index.js', 'analyze', '--embedded'],
+      ['/openlore/dist/cli/index.js', 'analyze', '--embedded', '--partial-serving'],
     ]);
     expect(calls.every(call => call.command === process.execPath)).toBe(true);
     expect(calls.every(call => (call.options as { detached: boolean }).detached)).toBe(true);
@@ -166,7 +166,7 @@ describe('buildIndexInChildProcess', () => {
     });
 
     expect(calls.map(call => call.args)).toEqual([
-      ['/openlore/dist/cli/index.js', 'analyze', '--reanalyze', '--embedded'],
+      ['/openlore/dist/cli/index.js', 'analyze', '--reanalyze', '--embedded', '--partial-serving'],
     ]);
   });
 
@@ -183,7 +183,7 @@ describe('buildIndexInChildProcess', () => {
     });
 
     expect(calls.map(call => call.args)).toEqual([
-      ['/openlore/dist/cli/index.js', 'analyze', '--no-embed', '--embedded'],
+      ['/openlore/dist/cli/index.js', 'analyze', '--no-embed', '--embedded', '--partial-serving'],
     ]);
   });
 

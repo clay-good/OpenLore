@@ -33,7 +33,7 @@ import { deadCodeIds } from './reachability.js';
 import { seedsFromSymbols, seedsFromFiles } from './test-impact.js';
 import { computeLandmarkSignals, type LandmarkSignal } from '../../analyzer/landmark-signals.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
-import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
+import { assembleBoundary, computeStaleness, edgeBasisWithinSet, withheldOnPartialIndex } from './confidence-boundary.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 
 export interface ReportCoverageGapsInput {
@@ -104,6 +104,10 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
   if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  // A partial first-run index cannot ground a negative conclusion (change:
+  // refine-first-run-partial-serving).
+  const withheld = withheldOnPartialIndex(ctx, 'test-coverage gaps');
+  if (withheld) return withheld;
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

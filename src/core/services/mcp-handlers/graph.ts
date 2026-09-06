@@ -6,12 +6,12 @@
  */
 
 import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
-import { readDependencyGraphCached } from './artifact-cache.js';
+import { readDependencyGraphOrPartial } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
 import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
 import type { CachedContext } from './utils.js';
-import { join, resolve, isAbsolute } from 'node:path';
+import { basename, dirname, join, resolve, isAbsolute } from 'node:path';
 import {
   RISK_SCORE_FAN_IN_WEIGHT,
   RISK_SCORE_FAN_OUT_WEIGHT,
@@ -1353,7 +1353,9 @@ export async function handleGetFileDependencies(
   // Shares `readDependencyGraphCached` with orient's architecture-rule scan, so the
   // artifact is parsed, validated and retained once for both.
   // (change: optimize-serving-hot-path-caches)
-  const graph = await readDependencyGraphCached<DepGraph>(depGraphPath);
+  // Falls back to a live partial first-run index, so this tool answers from the flushed graph
+  // during a first build instead of a dead end (change: refine-first-run-partial-serving).
+  const graph = await readDependencyGraphOrPartial<DepGraph>(dirname(depGraphPath), basename(depGraphPath));
   if (!graph) {
     return notReadyResult('No dependency graph found. Run "openlore analyze" first.', 'index-absent');
   }
@@ -1392,7 +1394,7 @@ export async function handleGetFileDependencies(
     : undefined;
 
   return {
-    filePath: node.file.path,
+    filePath: node.file?.path,
     direction,
     importsCount: imports?.length ?? null,
     importedByCount: importedBy?.length ?? null,

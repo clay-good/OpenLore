@@ -3,6 +3,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
+import { descriptorIsThePathEntry } from '../../../utils/bounded-artifact-read.js';
 import { open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
@@ -18,6 +20,8 @@ import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
+import { readPartialArtifact, readPartialIndexStamp } from '../../runtime/partial-index.js';
+import { notePartialIndexServed } from './partial-request.js';
 import { FileWalker } from '../../analyzer/file-walker.js';
 import { artifactStamp, readJsonArtifactCached, _resetJsonArtifactCacheForTesting } from './artifact-cache.js';
 
@@ -413,14 +417,87 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
   const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   const filePath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
 
+  /**
+   * The fallback for an index-ABSENT repository whose first build is still running
+   * (change: refine-first-run-partial-serving).
+   *
+   * Reached only when there is NO published analysis artifact at all. A published
+   * artifact that failed an integrity gate above must keep failing: masking a corrupt
+   * or mid-rewrite index with a partial one would turn a loud problem into a quiet
+   * downgrade, which is the opposite of what this lane is for.
+   *
+   * The returned context carries no `edgeStore` and no `callGraph`, so graph tools go on
+   * answering `graph-unavailable` — an honest "not yet", not a fabricated empty graph.
+   * What it does carry is `partial`, the receipt every disclosure and every
+   * negative-conclusion guard keys on.
+   */
+  async function loadPartialFirstRun(): Promise<CachedContext | null> {
+    try {
+      await stat(filePath);
+      return null;
+    } catch {
+      // No published artifact — the one situation a partial index may answer in.
+    }
+    const stamp = await readPartialIndexStamp(analysisDir);
+    if (!stamp) return null;
+    // Read through the bounded, symlink-refusing, regular-files-only descriptor path: this
+    // file is untrusted repository content, and a partial index is served precisely when the
+    // repository shipped one and no analysis exists.
+    const raw = await readPartialArtifact(analysisDir, ARTIFACT_LLM_CONTEXT);
+    if (raw === null) return null;
+    try {
+      const parsed = JSON.parse(raw) as CachedContext;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      if (parsed.partial?.partial !== true) return null;
+      // Fail closed on the graph-shaped fields. A partial index carries none of them BY
+      // DEFINITION, so anything present here came from a file this process did not write — and
+      // a handler doing `cg.nodes.map(...)` over an attacker-chosen shape is the failure mode
+      // the published path's normalization exists to prevent. Deleting them is stricter than
+      // normalizing and needs no schema to stay correct.
+      delete parsed.callGraph;
+      delete parsed.signatures;
+      delete parsed.cfgs;
+      delete parsed.graphDigest;
+      // The live receipt wins over the copy frozen into the artifact: the artifact was
+      // committed at a phase boundary, the receipt is re-stamped while the build runs.
+      parsed.partial = stamp;
+      notePartialIndexServed(stamp);
+      emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'partial_first_run_index' });
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
   async function load(): Promise<CachedContext | null> {
+    return (await loadPublished()) ?? await loadPartialFirstRun();
+  }
+
+  async function loadPublished(): Promise<CachedContext | null> {
     try {
       // Keep one descriptor from metadata check through read. A path-based stat
       // followed by a path-based read lets an untrusted repository swap the file
       // between those operations and bypass the size check.
-      const handle = await open(filePath, 'r');
+      // O_NOFOLLOW|O_NONBLOCK, not a bare 'r'. This is the reader almost every tool reaches, and
+      // `.openlore/analysis/llm-context.json` is repository-controlled: a symlink there
+      // redirected the read, and a named pipe blocked inside `open()` until a writer appeared —
+      // on a libuv worker, which `process.exit` cannot interrupt, so the server could not shut
+      // down either. `isFile()` below is what then refuses the pipe; O_NONBLOCK is what lets the
+      // open return so that check can run. (`O_NONBLOCK` is absent on Windows, where these flags
+      // are emulated; `?? 0` keeps the open unchanged there and `isFile()` still refuses.)
+      const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0));
       try {
       const st = await handle.stat();
+      // `O_NOFOLLOW` above is the race-free refusal, and it is what POSIX honours — but libuv
+      // does NOT implement it on Windows, where the flag is silently ignored and the link is
+      // followed. So the open is VERIFIED too: the descriptor's identity is compared against the
+      // path entry's, and a path that is a link (or resolves to a different inode) is refused.
+      // Checking after the open rather than before it is what makes this sound — the bytes come
+      // from the descriptor, so an entry swapped afterwards cannot redirect the read.
+      if (!st.isFile() || !await descriptorIsThePathEntry(handle, filePath)) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'artifact_not_a_regular_file' });
+        return null;
+      }
       const mtime = st.mtimeMs;
       // Key on the committed generation as well as the artifact mtime. An mtime
       // alone cannot distinguish "same file" from "republished with identical
