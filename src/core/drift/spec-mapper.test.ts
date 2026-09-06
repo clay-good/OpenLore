@@ -348,7 +348,9 @@ describe('buildSpecMap', () => {
     const map = await buildSpecMap({ rootPath: tempDir, openspecPath });
 
     const authMapping = map.byDomain.get('auth');
-    expect(authMapping!.specPath).toBe(join(OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, 'auth', 'spec.md'));
+    // POSIX-separated on every platform: `specPath` is a served key matched against the
+    // spec corpus, not a filesystem call, so it must not carry the platform separator.
+    expect(authMapping!.specPath).toBe([OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, 'auth', 'spec.md'].join('/'));
   });
 
   it('should produce correct relative spec paths for custom openspec directory', async () => {
@@ -363,7 +365,7 @@ describe('buildSpecMap', () => {
 
     const billingMapping = map.byDomain.get('billing');
     expect(billingMapping).toBeDefined();
-    expect(billingMapping!.specPath).toBe(join('my-specs', 'specs', 'billing', 'spec.md'));
+    expect(billingMapping!.specPath).toBe('my-specs/specs/billing/spec.md');
   });
 });
 
