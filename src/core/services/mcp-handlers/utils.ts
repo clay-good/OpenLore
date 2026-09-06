@@ -4,6 +4,7 @@
 
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
+import { descriptorIsThePathEntry } from '../../../utils/bounded-artifact-read.js';
 import { open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
@@ -487,7 +488,13 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0));
       try {
       const st = await handle.stat();
-      if (!st.isFile()) {
+      // `O_NOFOLLOW` above is the race-free refusal, and it is what POSIX honours — but libuv
+      // does NOT implement it on Windows, where the flag is silently ignored and the link is
+      // followed. So the open is VERIFIED too: the descriptor's identity is compared against the
+      // path entry's, and a path that is a link (or resolves to a different inode) is refused.
+      // Checking after the open rather than before it is what makes this sound — the bytes come
+      // from the descriptor, so an entry swapped afterwards cannot redirect the read.
+      if (!st.isFile() || !await descriptorIsThePathEntry(handle, filePath)) {
         emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'artifact_not_a_regular_file' });
         return null;
       }

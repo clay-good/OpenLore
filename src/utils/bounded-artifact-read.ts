@@ -82,7 +82,7 @@ export interface StampedArtifact {
  * reports `isSymbolicLink()`, and where a platform reports usable inode numbers a
  * mismatch catches the case regardless.
  */
-async function descriptorIsThePathEntry(handle: FileHandle, path: string): Promise<boolean> {
+export async function descriptorIsThePathEntry(handle: FileHandle, path: string): Promise<boolean> {
   try {
     const entry = await lstat(path, { bigint: true });
     if (entry.isSymbolicLink()) return false;
