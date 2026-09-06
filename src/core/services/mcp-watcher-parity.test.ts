@@ -23,6 +23,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, mkdir, readFile, realpath, rename, rm, symlink } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -1020,7 +1021,13 @@ describe('incremental-full-repair semantic-answer parity gate', () => {
           onGraphStale: () => coordinator.schedule(),
         });
         await watcher.start();
-        const sourceWatch = chokidarHarness.watches.find((watch) => watch.target === root);
+        // The watcher hands chokidar the RESOLVED root, never the caller's spelling: an 8.3
+        // short root (a Windows temp dir) or a symlinked one aborts libuv outright. Match on
+        // the same resolution rather than on the spelling this fixture happens to hold.
+        const watchTarget = (() => {
+          try { return realpathSync.native(root); } catch { return root; }
+        })();
+        const sourceWatch = chokidarHarness.watches.find((watch) => watch.target === watchTarget);
         expect(sourceWatch).toBeDefined();
         const emit = (event: 'change' | 'add' | 'unlink', path: string): void => {
           for (const handler of sourceWatch!.handlers.get(event) ?? []) handler(path);

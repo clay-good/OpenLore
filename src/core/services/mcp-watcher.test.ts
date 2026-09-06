@@ -939,11 +939,15 @@ describe('McpWatcher — real chokidar prunes build dirs (does not FD-storm targ
   // chokidar (not the module mock above) via a fresh dynamic import in an
   // isolated module registry.
   it('watches source but never opens target/ children', async () => {
-    const { mkdtemp: mkdtempReal, writeFile: writeFileReal, mkdir: mkdirReal } = await import('node:fs/promises');
+    const { mkdtemp: mkdtempReal, writeFile: writeFileReal, mkdir: mkdirReal, realpath: realpathReal } = await import('node:fs/promises');
     const { tmpdir: tmpdirReal } = await import('node:os');
     const { join: pjoin } = await import('node:path');
 
-    const root = await mkdtempReal(pjoin(tmpdirReal(), 'mcp-prune-'));
+    // realpath, because this test drives chokidar DIRECTLY rather than through McpWatcher, so
+    // the watcher's own root resolution does not cover it. On a Windows volume with 8.3 names
+    // the temp dir is a short path, and watching one aborts the process inside libuv
+    // (src\win\fs-event.c:72) - taking the whole vitest worker with it, not just this test.
+    const root = await realpathReal(await mkdtempReal(pjoin(tmpdirReal(), 'mcp-prune-')));
     await mkdirReal(pjoin(root, 'src'), { recursive: true });
     await mkdirReal(pjoin(root, 'target', 'debug', 'deps'), { recursive: true });
     await writeFileReal(pjoin(root, 'src', 'main.rs'), 'fn main() {}');

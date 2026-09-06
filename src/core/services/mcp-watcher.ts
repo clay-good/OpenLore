@@ -25,6 +25,7 @@
  */
 
 import { readFile, readdir, realpath, unlink } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireAnalysisLock } from '../runtime/advisory-lock.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
@@ -35,7 +36,7 @@ import {
   readCurrentGeneration,
 } from '../runtime/analysis-generation.js';
 import { createHash } from 'node:crypto';
-import { join, relative, resolve, posix } from 'node:path';
+import { join, relative, resolve, isAbsolute, posix } from 'node:path';
 import { spawn } from 'node:child_process';
 import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
@@ -324,10 +325,44 @@ export function isIgnoredRelPath(relPath: string): boolean {
   return false;
 }
 
+/**
+ * Resolve a watch root to its canonical form, fail-soft.
+ *
+ * On Windows a root reached through an 8.3 short path (C:\Users\RUNNER~1\...) ABORTS the
+ * process from inside libuv: ReadDirectoryChangesW reports long filenames, and fs-event.c
+ * asserts that each one starts with the directory it was handed —
+ *
+ *   Assertion failed: !_wcsnicmp(filename, dir, dirlen), file src\win\fs-event.c, line 72
+ *
+ * That is a native assert, so it is not catchable, logs no stack, and takes the whole MCP
+ * server down rather than degrading one watch. A short path is not exotic: the OS temp
+ * directory on a GitHub windows-latest runner IS one, which is where this was found. 8.3
+ * generation is a per-volume NTFS setting, so the abort reproduces on any volume that has it
+ * enabled - mcp-watcher.integration.test.ts obtains a real short name and watches through it.
+ *
+ * realpathSync.native is required, not realpathSync: the JS implementation resolves symlinks
+ * but leaves an 8.3 component short, while the native one goes through
+ * GetFinalPathNameByHandle and returns the long form.
+ *
+ * The result is used ONLY where libuv sees it - chokidar.watch(), its ignore predicate, and
+ * the .git ref paths - and event paths are mapped back onto rootPath at the boundary. It is
+ * deliberately NOT this watcher's identity: rootPath is what every artifact path, graph node
+ * id and relative() is derived from, and re-spelling it would silently rewrite the identity
+ * of every caller that passed a symlinked or aliased root.
+ *
+ * Falls back to the given path when it cannot be resolved (it may not exist yet): a watcher
+ * that starts on a slightly-off root is better than one that refuses to construct.
+ */
+function canonicalWatchRoot(rootPath: string): string {
+  try { return realpathSync.native(rootPath); } catch { return rootPath; }
+}
+
 // ── McpWatcher ────────────────────────────────────────────────────────────────
 
 export class McpWatcher {
   private readonly rootPath: string;
+  /** rootPath as libuv must see it. Equal to rootPath unless the caller passed an alias. */
+  private readonly watchRoot: string;
   private readonly outputPath: string;
   private readonly openspecRoot: string;
   private readonly contextPath: string;
@@ -378,7 +413,11 @@ export class McpWatcher {
   private lastEmbedContext?: CachedContext;
 
   constructor(options: McpWatcherOptions) {
+    // rootPath stays EXACTLY as the caller spelled it: it is this watcher's identity, and
+    // every artifact path, graph node id and relative() in this file is derived from it.
+    // Only watchRoot is canonicalised, and only libuv ever sees it — see canonicalWatchRoot.
     this.rootPath   = options.rootPath;
+    this.watchRoot  = canonicalWatchRoot(options.rootPath);
     this.outputPath = options.outputPath
       ?? join(options.rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
     this.openspecRoot = resolveOpenspecDir(options.rootPath, options.openspecPath);
@@ -415,7 +454,9 @@ export class McpWatcher {
 
     await new Promise<void>((resolve, reject) => {
       const extraIgnore = this.extraIgnore;
-      const rootPath = this.rootPath;
+      // watchRoot, not rootPath: an 8.3 or symlinked root aborts libuv (canonicalWatchRoot).
+      // Everything chokidar hands back is mapped to rootPath by fromWatchRoot below.
+      const rootPath = this.watchRoot;
       this.fsWatcher = chokidar.watch(rootPath, {
         // Resolve each candidate to a root-relative path first, then prune by
         // directory name. This prunes the ignored directory itself (chokidar
@@ -434,19 +475,22 @@ export class McpWatcher {
       const watched = (p: string): boolean =>
         SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p) || isIndexedOpenSpecFile(this.openspecRoot, p);
       this.fsWatcher.on('change', (absPath: string) => {
-        if (watched(absPath)) this.enqueue(absPath);
+        const p = this.fromWatchRoot(absPath);
+        if (watched(p)) this.enqueue(p);
       });
       // A new file is indexed via the same change pipeline (insert is a no-op
       // delete + add). ignoreInitial:true means only files created AFTER start
       // fire 'add', so the initial scan never storms this.
       this.fsWatcher.on('add', (absPath: string) => {
-        if (watched(absPath)) this.enqueue(absPath);
+        const p = this.fromWatchRoot(absPath);
+        if (watched(p)) this.enqueue(p);
       });
       // A deleted file must be removed from every lane (call graph, signatures,
       // text-line index, vector index, dependency graph) — otherwise its symbols/
       // edges/lines linger as phantom results until the next full analyze.
       this.fsWatcher.on('unlink', (absPath: string) => {
-        if (watched(absPath)) this.enqueueDeletion(absPath);
+        const p = this.fromWatchRoot(absPath);
+        if (watched(p)) this.enqueueDeletion(p);
       });
 
       let watcherReady = false;
@@ -474,7 +518,9 @@ export class McpWatcher {
     // bumps these refs. We never recurse into .git (it stays ignored above); we
     // watch only these specific files, then collapse the churn into one refresh.
     try {
-      const gitDir = join(this.rootPath, '.git');
+      // watchRoot for the same reason as the source watcher: these are paths handed to libuv.
+      // Only the basename is read back, so no mapping is needed here.
+      const gitDir = join(this.watchRoot, '.git');
       const refs = ['HEAD', 'index', 'MERGE_HEAD', 'ORIG_HEAD'].map((f) => join(gitDir, f));
       this.gitWatcher = chokidar.watch(refs, {
         persistent: true,
@@ -592,6 +638,25 @@ export class McpWatcher {
   }
 
   // ── Coalescing (Step 1) ──────────────────────────────────────────────────────
+
+  /**
+   * Re-spell a path chokidar reported under watchRoot back onto rootPath.
+   *
+   * The whole rest of this class computes relative(this.rootPath, ...) and derives node ids
+   * from the result. When watchRoot differs (an 8.3 or symlinked root — see
+   * canonicalWatchRoot) an unmapped event path escapes the root: relative() returns a
+   * `..\..\` walk, isConfinedPath rejects it, and the change is silently dropped.
+   *
+   * A no-op in the ordinary case, where the two roots are the same string.
+   */
+  private fromWatchRoot(absPath: string): string {
+    if (this.watchRoot === this.rootPath) return absPath;
+    const rel = relative(this.watchRoot, absPath);
+    // Outside watchRoot (`..`) or not relativisable (another drive): leave it alone and let
+    // the normal confinement check reject it, rather than inventing a path inside the root.
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) return absPath;
+    return join(this.rootPath, rel);
+  }
 
   /**
    * Add a changed path to the pending set and (re)arm a single debounce timer,

@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, writeFile, readFile, mkdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
@@ -16,6 +16,7 @@ import { McpWatcher } from './mcp-watcher.js';
 import * as utils from './mcp-handlers/utils.js';
 import { readCachedContext, _resetContextCacheForTesting } from './mcp-handlers/utils.js';
 import { execFileGit } from '../../utils/git-exec.js';
+import { execFileSync } from 'node:child_process';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 //   stabilityThreshold 100ms  +  debounce 100ms
@@ -433,6 +434,63 @@ describe('McpWatcher — real fs watcher', () => {
     const afterRead = await readCachedContext(rootPath);
     expect(afterRead, 'post-save read must be the primed object, not a fresh disk parse').toBe(primed);
   }, 10_000);
+
+  // The Windows half of this pair is the 8.3 test below; this one covers POSIX, where the
+  // equivalent alias is a symlink. skipIf(win32) because creating a symlink there needs
+  // elevated privileges or Developer Mode.
+  it.skipIf(process.platform === 'win32')('hands libuv the resolved root while keeping the caller\'s spelling as identity', async () => {
+    const { rootPath } = await setupProject();
+    const aliasParent = await mkdtemp(join(tmpdir(), 'mcp-watcher-alias-'));
+    const aliasRoot = join(aliasParent, 'alias');
+    await symlink(rootPath, aliasRoot, 'dir');
+    try {
+      const w = new McpWatcher({ rootPath: aliasRoot, debounceMs: DEBOUNCE_MS }) as unknown as
+        { rootPath: string; watchRoot: string };
+      expect(w.watchRoot, 'libuv must be given the resolved root').toBe(rootPath);
+      // The caller's spelling stays the identity: artifact paths and graph node ids are
+      // derived from it, so re-spelling it would silently rename every node.
+      expect(w.rootPath, 'identity must remain what the caller passed').toBe(aliasRoot);
+    } finally {
+      await rm(aliasParent, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  // The real defect, on the real platform: watching through an 8.3 short root used to ABORT
+  // the process inside libuv (src\win\fs-event.c:72) the moment a file event arrived - no
+  // catchable error, no stack, the whole MCP server gone. A symlink proxy on Linux does not
+  // exercise that; only a genuine short path does.
+  //
+  // 8.3 generation is a per-volume NTFS setting, so a short name is obtained rather than
+  // assumed: when the volume has it off, GetFolder().ShortPath returns the long name and the
+  // test skips with that stated, instead of passing vacuously on a premise it never built.
+  it.skipIf(process.platform !== 'win32')('does not abort libuv when the watch root is an 8.3 short path', async () => {
+    const { rootPath, outputPath } = await setupProject();
+
+    const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${rootPath}').ShortPath`,
+    ], { encoding: 'utf-8', windowsHide: true }).trim();
+
+    if (short === rootPath) {
+      // Not a failure: this volume has 8.3 generation disabled, so the premise cannot exist.
+      expect(short).toBe(rootPath);
+      return;
+    }
+
+    const srcFile = join(rootPath, 'shortpath.ts');
+    await writeFile(srcFile, 'export function before() {}\n', 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath: short, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+
+    // The abort fired on the first event, not on start(), so the write is the assertion.
+    await writeFile(srcFile, 'export function after() {}\n', 'utf-8');
+    await settle(join(outputPath, 'llm-context.json'));
+
+    const ctx = JSON.parse(await readFile(join(outputPath, 'llm-context.json'), 'utf-8')) as LLMContext;
+    const entry = ctx.signatures?.find(s => s.path === 'shortpath.ts');
+    expect(entry?.entries.some(e => e.name === 'after'), 'a short-path root must still index').toBe(true);
+  }, 30_000);
 
   it('ignores .test.ts files', async () => {
     const { rootPath, outputPath, contextPath } = await setupProject();
