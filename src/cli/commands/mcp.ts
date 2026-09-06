@@ -35,7 +35,8 @@ import {
   classifyToolError,
 } from '../../core/services/mcp-handlers/tool-guard.js';
 
-import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { partialDisclosureForResponse, sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { describePartialIndex } from '../../core/runtime/partial-index.js';
 import { createTracker, updateTracker, updatePanic, resetPanicOnOrient, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import {
@@ -3076,6 +3077,19 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           content.push({
             type: 'text',
             text: `\n[openlore index] ${repairDisclosureText(repair.reason)} Informational signal.\n`,
+          });
+        }
+        // The completeness receipt for a partial first-run index (change:
+        // refine-first-run-partial-serving). Emitted from the RESPONSE path, not from each
+        // handler, so no tool can serve a partial answer without it — including tools that
+        // return a plain object with no boundary of their own. Sourced from the read path's
+        // own record, so it describes the index this response was actually computed from and
+        // puts no filesystem call on the hot path of a repository that has a real index.
+        const partialStamp = await partialDisclosureForResponse(directory, result);
+        if (partialStamp) {
+          content.push({
+            type: 'text',
+            text: `\n[openlore index] ${describePartialIndex(partialStamp)} Informational signal.\n`,
           });
         }
       }

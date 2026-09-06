@@ -22,6 +22,11 @@ import { ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '..
 import { gitPathArgs } from '../../../utils/git-args.js';
 import type { IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
+import {
+  describePartialIndex,
+  partialCompletenessPercent,
+  type PartialIndexStamp,
+} from '../../runtime/partial-index.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
 
@@ -102,6 +107,24 @@ export interface RepairInProgressMarker {
   detail: string;
 }
 
+/**
+ * The answer was computed from a partial FIRST-RUN index — the repository's first build is
+ * still running, and this index is what had been flushed when the call arrived (change:
+ * refine-first-run-partial-serving).
+ *
+ * Categorically different from `staleness` (an index built from an older tree) and from
+ * `repair` (a stale index being refreshed): here there has never been a complete index, so
+ * a file this answer does not mention may simply not have been reached yet.
+ */
+export interface PartialIndexMarker {
+  partial: true;
+  /** Coarse completeness of the in-flight build, 0-100. */
+  percent: number;
+  /** The build phase the served flush was taken at. */
+  phase: string;
+  detail: string;
+}
+
 export interface ConfidenceBoundary {
   /** How the traversal was grounded. Omitted for non-traversal answers (recall). */
   basis?: EdgeBasis;
@@ -113,6 +136,8 @@ export interface ConfidenceBoundary {
   integrity?: IndexIntegrityDisclosure;
   /** A background repair is healing this index right now. Absent when none is running. */
   repair?: RepairInProgressMarker;
+  /** The index serving this answer is a partial first-run index. Absent otherwise. */
+  partial?: PartialIndexMarker;
   /**
    * True iff the computation crossed no boundary: no synthesized-edge reliance, no
    * known-unknowable crossing, a current index, AND a reconciled (non-degraded,
@@ -138,6 +163,59 @@ export function integrityDisclosure(integrity?: IndexIntegrity): IndexIntegrityD
  * answer served during a self-heal is disclosed as *repairing*, not silently stale
  * (change: make-index-self-healing).
  */
+/**
+ * The partial-index marker for a context, or undefined when the index is complete.
+ *
+ * Takes the stamp off the context rather than re-reading disk: the context a handler is
+ * answering from IS the evidence, so the disclosure can never describe a different index
+ * than the one that produced the answer.
+ */
+export function partialDisclosure(
+  ctx: { partial?: PartialIndexStamp } | null | undefined,
+): PartialIndexMarker | undefined {
+  if (!ctx?.partial) return undefined;
+  return {
+    partial: true,
+    percent: partialCompletenessPercent(ctx.partial),
+    phase: ctx.partial.phase,
+    detail: describePartialIndex(ctx.partial),
+  };
+}
+
+/**
+ * Refuse to serve a negative conclusion computed from a partial first-run index.
+ *
+ * A partial index is a SOUND LOWER BOUND on what exists: it can prove a caller is there,
+ * never that one is not. "This function is dead", "no test reaches this", "nothing calls
+ * it" are exactly the claims partiality inverts — the file holding the only caller may
+ * simply not have been reached yet — so they are withheld rather than downgraded. Positive
+ * lookups and navigation are unaffected and keep answering.
+ *
+ * Returns null when the index is complete, so a handler reads as a one-line guard.
+ */
+export function withheldOnPartialIndex(
+  ctx: { partial?: PartialIndexStamp } | null | undefined,
+  conclusion: string,
+): {
+  error: string;
+  withheld: true;
+  reason: 'partial-index';
+  remedy: string;
+  confidenceBoundary: ConfidenceBoundary;
+} | null {
+  const partial = partialDisclosure(ctx);
+  if (!partial) return null;
+  return {
+    error: `Withheld: ${conclusion} cannot be computed from a partial first-run index. `
+      + `${partial.detail} A negative conclusion drawn now could be inverted by a file this `
+      + 'index has not reached, so none is served.',
+    withheld: true,
+    reason: 'partial-index',
+    remedy: 'Re-run this tool once the first analysis completes.',
+    confidenceBoundary: assembleBoundary({ partial }),
+  };
+}
+
 export function repairDisclosure(directory: string): RepairInProgressMarker | undefined {
   const status = repairStatusFor(directory);
   if (!status) return undefined;
@@ -357,6 +435,7 @@ export function assembleBoundary(parts: {
   staleness?: StalenessMarker;
   integrity?: IndexIntegrity;
   repair?: RepairInProgressMarker;
+  partial?: PartialIndexMarker;
 }): ConfidenceBoundary {
   const crossings = [
     ...(parts.basis ? crossingsFromBasis(parts.basis) : []),
@@ -364,13 +443,14 @@ export function assembleBoundary(parts: {
   ];
   const integrity = integrityDisclosure(parts.integrity);
   const boundary: ConfidenceBoundary = {
-    complete: crossings.length === 0 && !parts.staleness && !integrity && !parts.repair,
+    complete: crossings.length === 0 && !parts.staleness && !integrity && !parts.repair && !parts.partial,
   };
   if (parts.basis) boundary.basis = parts.basis;
   if (crossings.length > 0) boundary.knownUnknowable = crossings;
   if (parts.staleness) boundary.staleness = parts.staleness;
   if (integrity) boundary.integrity = integrity;
   if (parts.repair) boundary.repair = parts.repair;
+  if (parts.partial) boundary.partial = parts.partial;
   return boundary;
 }
 

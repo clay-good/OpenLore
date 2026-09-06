@@ -521,6 +521,12 @@ export async function buildIndexInChildProcess(
     ...(opts.repair ? ['--reanalyze'] : []),
     ...(opts.mode === 'degraded' ? ['--no-embed'] : []),
     '--embedded',
+    // This is the build the first-run partial index exists for: the caller was NOT blocked,
+    // so somebody is making tool calls right now against a repository with no index. The
+    // lane has to be named explicitly because `--embedded` above would otherwise class this
+    // build with CI (change: refine-first-run-partial-serving). It is a no-op on a repository
+    // that already has a published generation.
+    '--partial-serving',
   ]);
 }
 

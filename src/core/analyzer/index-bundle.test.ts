@@ -41,6 +41,7 @@ import {
   runImport,
 } from '../../cli/commands/import.js';
 import { ANALYSIS_LOCK_FILE } from '../runtime/advisory-lock.js';
+import { clearPartialIndex, flushPartialIndex } from '../runtime/partial-index.js';
 import { logger } from '../../utils/logger.js';
 import { getDefaultConfig } from '../services/config-manager.js';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
@@ -1358,5 +1359,60 @@ describe('index-bundle: runImport trust boundary', () => {
     const importedImpact = await handleAnalyzeImpact(consumer, 'receive', 2);
     expect(semanticAnswerBytes(importedSubgraph)).toBe(semanticAnswerBytes(localSubgraph));
     expect(semanticAnswerBytes(importedImpact)).toBe(semanticAnswerBytes(localImpact));
+  });
+});
+
+describe('a partial first-run index is never shareable (change: refine-first-run-partial-serving)', () => {
+  it('refuses to export while a first analysis is still running', async () => {
+    const src = join(work, 'partial-export');
+    await buildAnalysisDir(src, 'c0');
+    await flushPartialIndex(src, {
+      repoStructure: {}, llmContext: {}, dependencyGraph: {},
+      stamp: {
+        partial: true, phase: 'extractors', filesExtracted: 0, filesTotal: 10, filesMapped: 9,
+        startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        pid: process.pid, absent: ['the call graph'],
+      },
+    });
+
+    await expect(buildBundle(src, VERSION)).rejects.toMatchObject({
+      name: 'BundleError',
+      code: 'partial-index',
+    });
+  });
+
+  it('exports normally once the partial index is gone', async () => {
+    const src = join(work, 'partial-export-cleared');
+    await buildAnalysisDir(src, 'c0');
+    await flushPartialIndex(src, {
+      repoStructure: {}, llmContext: {}, dependencyGraph: {},
+      stamp: {
+        partial: true, phase: 'extractors', filesExtracted: 0, filesTotal: 10, filesMapped: 9,
+        startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        pid: process.pid, absent: ['the call graph'],
+      },
+    });
+    await clearPartialIndex(src);
+
+    await expect(buildBundle(src, VERSION)).resolves.toBeTruthy();
+  });
+
+  it('refuses to import a bundle whose context carries a partial stamp', async () => {
+    const src = join(work, 'partial-import');
+    await buildAnalysisDir(src, 'c0');
+    // A bundle built from a complete index, then rewritten to carry a partial context —
+    // exactly what a hand-edited or foreign artifact could present on the import side.
+    await writeFile(
+      join(src, 'llm-context.json'),
+      JSON.stringify({ callGraph: { nodes: [] }, partial: { partial: true, phase: 'extractors' } }),
+    );
+    const { buffer } = await buildBundle(src, VERSION);
+
+    expect(() => parseBundle(buffer)).toThrow(/partial first-run index/);
+    try {
+      parseBundle(buffer);
+    } catch (err) {
+      expect((err as BundleError).code).toBe('partial-index');
+    }
   });
 });

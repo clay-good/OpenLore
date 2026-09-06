@@ -14,12 +14,19 @@ import type { OpenLoreConfig } from '../../types/index.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { snapshotOldNodes, carryForwardContinuity } from '../decisions/continuity-carry-forward.js';
 import { withAnalysisLock } from '../runtime/advisory-lock.js';
-import { publishGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../runtime/analysis-generation.js';
+import { publishGeneration, readCurrentGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../runtime/analysis-generation.js';
+import {
+  clearPartialIndex,
+  flushPartialIndex,
+  refreshPartialIndexStamp,
+  type PartialIndexStamp,
+  type PartialPhase,
+} from '../runtime/partial-index.js';
 import { PROGRESS_INTERVAL_MS, type AnalysisOwnership } from '../runtime/analysis-ownership.js';
 import { readOpenLoreConfig } from '../services/config-manager.js';
 import { computeProjectFingerprint, fingerprintHashOfConfiguration } from '../services/mcp-handlers/utils.js';
 import { writeAnalysisContentProvenance } from '../services/served-content.js';
-import { AnalysisArtifactGenerator, type AnalysisArtifacts } from './artifact-generator.js';
+import { AnalysisArtifactGenerator, type AnalysisArtifacts, type EnrichmentData } from './artifact-generator.js';
 import { isScannedByEnrichment, type OversizedFileObserver } from './bounded-file-scan.js';
 import { DependencyGraphBuilder, type DependencyGraphResult } from './dependency-graph.js';
 import { extractEnvVars } from './env-extractor.js';
@@ -78,6 +85,16 @@ export interface AnalysisCoreOptions {
   config?: OpenLoreConfig | null;
   /** Explicit workspace shard names. Omit for the legacy full-analysis path. */
   shards?: string[];
+  /**
+   * Flush a partial index at phase boundaries so reads during an index-ABSENT first build
+   * are answered from what exists instead of "no index found"
+   * (change: refine-first-run-partial-serving).
+   *
+   * Opt-in, and honoured only when this really is a first build: a repository that already
+   * has a published generation has something better to serve, so the lane stays off. CI and
+   * embedded hosts leave it off and keep today's single-write behaviour.
+   */
+  partialServing?: boolean;
 }
 
 export function mergeAnalysisPatterns(
@@ -145,6 +162,15 @@ export async function runAnalysisCore(
   );
   const protectedExcludePatterns = analysisGeneratedExcludes(rootPath, outputPath, config?.openspecPath);
   const fingerprintConfig = analysisConfigFingerprintInput(config?.analysis, options.include ?? [], options.exclude ?? [], options.maxFiles, protectedExcludePatterns);
+
+  // Partial first-run serving (change: refine-first-run-partial-serving). The lane is armed
+  // only when the caller asked for it AND this repository has no published generation to
+  // serve instead — so an ordinary re-analysis, which always has something better on disk,
+  // pays nothing and writes nothing.
+  const partialArmed = options.partialServing === true
+    && (await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS])) === null;
+  const partialStartedAt = new Date().toISOString();
+  let partialFlushed = false;
 
   await stage('mapping', 0, 'Scanning directory structure');
   const mapper = new RepositoryMapper(rootPath, {
@@ -246,6 +272,64 @@ export async function runAnalysisCore(
     detail: `${depGraph.statistics.nodeCount} nodes, ${depGraph.statistics.edgeCount} edges`,
   });
 
+  const generator = new AnalysisArtifactGenerator({
+    rootDir: rootPath,
+    outputDir: outputPath,
+    maxDeepAnalysisFiles: Math.min(MAX_DEEP_ANALYSIS_FILES, Math.ceil(repoMap.highValueFiles.length * DEEP_ANALYSIS_FILE_RATIO)),
+    maxValidationFiles: MAX_VALIDATION_FILES,
+    reExtract: options.reExtract ?? false,
+  });
+
+  /**
+   * Flush one partial index.
+   *
+   * Structure and inventories only: the call-graph pass has not run, so `filesExtracted`
+   * is zero and `absent` names what is missing rather than letting a reader infer it. The
+   * whole call is fail-soft — a partial index that cannot be written must never be able to
+   * disturb the analysis it is a side effect of.
+   */
+  const flushPartial = async (phase: PartialPhase, enrichment?: EnrichmentData): Promise<void> => {
+    if (!partialArmed) return;
+    try {
+      partialFlushed = await buildPartialFlush(phase, enrichment) || partialFlushed;
+    } catch {
+      // The flush is a side effect on the first-run EXPERIENCE. Nothing it does may reach
+      // the analysis it is a side effect of, so the whole lane — including composing the
+      // structure to flush — is contained here rather than only inside the writer.
+    }
+  };
+
+  const buildPartialFlush = async (phase: PartialPhase, enrichment?: EnrichmentData): Promise<boolean> => {
+    const stamp: PartialIndexStamp = {
+      partial: true,
+      phase,
+      filesExtracted: 0,
+      filesTotal: repoMap.summary.totalFiles,
+      filesMapped: repoMap.allFiles.length,
+      startedAt: partialStartedAt,
+      updatedAt: new Date().toISOString(),
+      pid: process.pid,
+      absent: [
+        'the call graph (function-to-function edges, fan-in/fan-out, hubs)',
+        'function signatures and the searchable symbol corpus',
+        ...(enrichment ? [] : ['route, schema, UI, middleware, and environment inventories']),
+      ],
+    };
+    return flushPartialIndex(outputPath, {
+      repoStructure: generator.generateStructureOnly(repoMap, depGraph, enrichment),
+      llmContext: {
+        phase1_survey: { purpose: 'Partial first-run index: repository structure only', files: [] },
+        phase2_deep: { purpose: 'Not built yet', files: [] },
+        phase3_validation: { purpose: 'Not built yet', files: [] },
+        partial: stamp,
+      },
+      dependencyGraph: depGraph,
+      stamp,
+    });
+  };
+
+  await flushPartial('dependency-graph');
+
   await stage('extractors', 50, 'Extracting UI components, schemas, routes, middleware, and env vars');
   // Inventory extractors read their path argument directly. Absolute mapper paths keep the
   // shared core independent of process.cwd(), which differs between CLI and API consumers.
@@ -272,20 +356,20 @@ export async function runAnalysisCore(
   emit({ stage: 'extractors', status: 'complete' });
 
   await stage('artifacts', 75, 'Generating analysis artifacts');
-  const generator = new AnalysisArtifactGenerator({
-    rootDir: rootPath,
-    outputDir: outputPath,
-    maxDeepAnalysisFiles: Math.min(MAX_DEEP_ANALYSIS_FILES, Math.ceil(repoMap.highValueFiles.length * DEEP_ANALYSIS_FILE_RATIO)),
-    maxValidationFiles: MAX_VALIDATION_FILES,
-    reExtract: options.reExtract ?? false,
-  });
   const oldNodeSnapshot = snapshotOldNodes(outputPath);
   const inventories = { uiComponents, schemas, routeInventory, middleware, envVars };
+  // The second and last flush of new facts: the inventories are now real, and everything
+  // after this point is the call-graph pass, which ends in the real publish.
+  await flushPartial('extractors', inventories);
   const artifactStartedAt = Date.now();
   const heartbeat = setInterval(() => {
     const detail = `Generating analysis artifacts (${Math.round((Date.now() - artifactStartedAt) / 1000)}s elapsed)`;
     void options.ownership?.update('artifacts', { percent: 75, detail }).catch(() => {});
     emit({ stage: 'artifacts', status: 'progress', percent: 75, detail });
+    // Keep the partial receipt current. No new facts are flushed here — the call-graph
+    // pass produces nothing servable until it finishes — but a reader must be able to tell
+    // "this build is alive and in the artifacts phase" from "this build died mid-flush".
+    if (partialFlushed) void refreshPartialIndexStamp(outputPath, { phase: 'artifacts' });
   }, PROGRESS_INTERVAL_MS);
   heartbeat.unref?.();
   let artifacts: AnalysisArtifacts;
@@ -329,6 +413,12 @@ export async function runAnalysisCore(
     }
     generationId = generation.generationId;
   });
+
+  // The published generation supersedes the partial index in every respect, so the partial
+  // index stops being merely redundant and becomes wrong. Removed AFTER the publish, never
+  // before: a failed publish must leave the partial index in place, because it is then still
+  // the best thing this repository has to serve.
+  if (partialFlushed) await clearPartialIndex(outputPath);
 
   if (artifacts.extractionLaneNote) emit({ stage: 'artifacts', status: 'warning', detail: artifacts.extractionLaneNote });
   if (artifacts.pass1CacheNote) emit({ stage: 'artifacts', status: 'info', detail: artifacts.pass1CacheNote });

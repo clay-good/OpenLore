@@ -47,6 +47,7 @@ import {
   ARTIFACT_ANALYSIS_ORIGIN,
   ARTIFACT_FINGERPRINT,
   ARTIFACT_INDEX_ATTESTATION,
+  ARTIFACT_LLM_CONTEXT,
   ARTIFACT_TRAVERSAL_INDEX,
 } from '../../constants.js';
 import {
@@ -65,6 +66,7 @@ import {
   publishGeneration,
 } from '../runtime/analysis-generation.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { readPartialIndexStamp } from '../runtime/partial-index.js';
 
 /** Artifact format version. Bump only on a shape change of the envelope below. */
 export const BUNDLE_VERSION = 2;
@@ -228,7 +230,7 @@ export interface ImportedBundle extends Bundle {
 
 /** A structured, recoverable bundle error with a stable code for the CLI to branch on. */
 export class BundleError extends Error {
-  constructor(public readonly code: 'no-index' | 'unreadable', message: string) {
+  constructor(public readonly code: 'no-index' | 'unreadable' | 'partial-index', message: string) {
     super(message);
     this.name = 'BundleError';
   }
@@ -524,6 +526,19 @@ export async function buildBundle(
     );
   }
 
+  // A partial first-run index is local serving state, never a shareable artifact
+  // (change: refine-first-run-partial-serving). It lives outside the analysis directory, so
+  // it cannot be swept into the bundle by accident — but its PRESENCE means a first build is
+  // still running against this directory, and whatever is here is mid-publication. Refuse
+  // with a reason rather than exporting an index nobody promised was complete.
+  if (await readPartialIndexStamp(analysisDir)) {
+    throw new BundleError(
+      'partial-index',
+      `A first analysis of ${analysisDir} is still running, so this index is incomplete. `
+      + 'Wait for it to finish, then export.',
+    );
+  }
+
   const attestation = attestExportedStore(dbPath);
   const { sourceCommit, sourceTreeState } = await readSourceIdentity(analysisDir);
 
@@ -704,6 +719,31 @@ export function parseBundle(raw: Buffer): ImportedBundle {
     const decoded = Buffer.from(parsed.payload[file.name], 'base64');
     if (decoded.byteLength !== file.bytes) {
       throw new BundleError('unreadable', `Bundle manifest byte count does not match ${JSON.stringify(file.name)}.`);
+    }
+  }
+  // Import-side refusal of a partial first-run index (change:
+  // refine-first-run-partial-serving). Structurally unreachable from an export produced by
+  // this code — `buildBundle` refuses first, and a partial index is not written into the
+  // analysis directory at all — but the bundle is UNTRUSTED input on this side, and a
+  // partial index that arrived by any route must not be promoted into a repository as its
+  // current one.
+  const contextEntry = parsed.payload[ARTIFACT_LLM_CONTEXT];
+  if (contextEntry !== undefined) {
+    type BundledContextShape = { partial?: { partial?: unknown } };
+    let bundledContext: BundledContextShape | null = null;
+    try {
+      bundledContext = JSON.parse(Buffer.from(contextEntry, 'base64').toString('utf-8')) as BundledContextShape;
+    } catch {
+      // Shape problems in the context are diagnosed by the importer's own validation; this
+      // guard only ever ADDS a refusal, so an unparseable context is not its business.
+    }
+    if (bundledContext?.partial?.partial === true) {
+      throw new BundleError(
+        'partial-index',
+        'Refusing a bundle built from a partial first-run index: it is a lower bound on the '
+        + 'exporting repository, not a complete index, and importing it would present an '
+        + 'incomplete graph as current.',
+      );
     }
   }
   return { ...parsed, provenance: 'imported' };

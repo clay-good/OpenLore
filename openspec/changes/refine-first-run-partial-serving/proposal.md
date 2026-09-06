@@ -52,6 +52,21 @@ parsing (answers come only from flushed facts — the deterministic artifact sta
 source of truth), and no background prioritization scheduler beyond the significance order
 that already exists.
 
+## What this does NOT do (settled during implementation)
+
+The partial index carries repository structure and the dependency graph. It does **not** carry a
+partial call graph. Pass 1 extracts every file before the merge and resolution passes run, so
+flushing a servable graph mid-pass would mean re-running merge and resolution over a prefix:
+extra work on every build, and a second path through exactly the machinery the determinism
+oracle exists to protect. The receipt therefore NAMES the call graph and the search index as not
+yet built rather than implying the index has them, and `orient` — which gates on the search index
+— keeps returning not-ready, now with the build's progress instead of "run openlore analyze".
+
+The measured shape of the build is what makes this worth doing anyway: on this repository the
+mapping, dependency-graph and extractor phases finish in 2.2s of a 15.4s build, so the partial
+index exists for ~85% of the wall clock. On a repository of real size that is minutes during
+which the answer changes from a dead end to a disclosed partial one.
+
 ## Why this is in scope
 
 First impressions are the product's conversion funnel, and "structural answers within seconds
@@ -61,11 +76,22 @@ stale-serving disclosure contract, the determinism oracle — extended to one un
 
 ## Impact
 
-- Files: `src/core/analyzer/artifact-generator.ts` (partial flush + completeness stamp),
-  `src/cli/commands/analyze.ts` (flush cadence, interactive-path gating),
-  `src/core/services/cold-start-bootstrap.ts` (absent-case serving + `repairStatusFor`
-  extension), `src/core/services/mcp-handlers/epistemic-lease.ts` (partial-boundary note),
-  negative-conclusion guards in `reachability.ts` / `coverage-gaps.ts`.
+- Files: `src/core/runtime/partial-index.ts` (new — the whole partial-index lifecycle),
+  `src/core/analyzer/analysis-core.ts` (flush cadence + clear on publish),
+  `src/core/analyzer/artifact-generator.ts` (the `partial` stamp on `LLMContext`, a
+  structure-only accessor), `src/cli/commands/analyze.ts` and
+  `src/core/services/cold-start-bootstrap.ts` (lane gating),
+  `src/core/services/mcp-handlers/utils.ts` (absent-case serving + the response receipt),
+  `confidence-boundary.ts` (the `partial` marker and the withhold guard),
+  `reachability.ts` / `coverage-gaps.ts` (negative-conclusion guards),
+  `src/cli/commands/mcp.ts` (one disclosure point for every tool),
+  `src/core/analyzer/index-bundle.ts` (export/import refusals).
+
+  The partial index is written OUTSIDE the analysis directory rather than into it. That was
+  the load-bearing decision: `hasAnalysis`, the fingerprint, the published generation, the
+  attestation and every exporter read the analysis directory, so keeping the partial index out
+  of it makes "a partial index is never an artifact" structural instead of a rule five call
+  sites have to remember.
 - Specs: `architecture` — 1 ADDED requirement (FirstRunServesPartialWithACompletenessReceipt).
 - No new tool. Risk: medium — the hazard is a partial answer read as complete; mitigated by the
   `partial` stamp riding the lease into every response, the negative-conclusion withhold rule,
