@@ -21,8 +21,22 @@ export interface PlannedChange {
   preview?: string;
 }
 
+/**
+ * Which configuration scope an apply/uninstall targets (change:
+ * unify-onboarding-entrypoint).
+ *
+ * `repo` is the per-project footprint OpenLore has always written. `user` is the
+ * per-user footprint that makes EVERY future repository reach the MCP server
+ * without another command — same managed, marker-identified entries, different
+ * files. `ctx.root` is the target root for the scope: the project root for
+ * `repo`, the user's home directory for `user`.
+ */
+export type InstallScope = 'repo' | 'user';
+
 export interface ApplyContext {
   root: string;
+  /** Configuration scope this apply targets. Absent = `repo` (the historical default). */
+  scope?: InstallScope;
   /** Platform on which generated launch commands will execute. */
   platform: NodeJS.Platform;
   /** Trusted executable roots used when emitting Windows command wrappers. */
@@ -50,6 +64,14 @@ export interface ApplyResult {
 
 export interface Adapter {
   name: AgentName;
+  /**
+   * Does this agent have a USER-scope configuration surface OpenLore can write?
+   * When false (the default), bare `openlore install` wires it per-repo only and
+   * says so — an adapter without a user scope degrades honestly, never fails.
+   */
+  supportsGlobal?: boolean;
+  /** Absolute root for this adapter's user scope (defaults to the user's home directory). */
+  userRoot?(home: string): string;
   apply(ctx: ApplyContext): Promise<ApplyResult>;
   uninstall(ctx: ApplyContext): Promise<ApplyResult>;
   /**

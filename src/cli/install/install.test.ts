@@ -16,13 +16,25 @@ async function exists(p: string): Promise<boolean> {
 
 describe('openlore install (end-to-end)', () => {
   let dir: string;
+  // Bare install now writes a USER-scope footprint too (change:
+  // unify-onboarding-entrypoint). Every test in this file pins that scope to a
+  // throwaway directory: without it the suite would edit the developer's real
+  // ~/.claude.json, ~/.claude/settings.json, and ~/.claude/CLAUDE.md. OPENLORE_HOME
+  // is the same override production honors, so this exercises the real path.
+  let home: string;
+  const previousHome = process.env.OPENLORE_HOME;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openlore-install-'));
+    home = await mkdtemp(join(tmpdir(), 'openlore-home-'));
+    process.env.OPENLORE_HOME = home;
   });
 
   afterEach(async () => {
+    if (previousHome === undefined) delete process.env.OPENLORE_HOME;
+    else process.env.OPENLORE_HOME = previousHome;
     await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   });
 
   it('--dry-run writes nothing', async () => {

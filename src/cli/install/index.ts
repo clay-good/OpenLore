@@ -8,12 +8,13 @@
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Command } from 'commander';
 import { logger } from '../../utils/logger.js';
 import { FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { detect, ALL_AGENTS, type AgentName, type DetectedSurface } from './detect.js';
-import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './adapters/types.js';
+import type { Adapter, ApplyContext, ApplyResult, InstallScope, PlannedChange } from './adapters/types.js';
 import { agentsMdAdapter } from './adapters/agents-md.js';
 import { claudeCodeAdapter } from './adapters/claude-code.js';
 import { cursorAdapter } from './adapters/cursor.js';
@@ -73,6 +74,16 @@ export interface InstallOptions {
    * via `--no-analyze`. Skipped for --dry-run and --uninstall.
    */
   analyze?: boolean;
+  /**
+   * Confine wiring to the current repository — do NOT write the user-scope entries
+   * that make every future repository reach OpenLore (change:
+   * unify-onboarding-entrypoint). The escape hatch for users who want explicit
+   * per-repo scope control; `--uninstall --repo-only` likewise leaves the user
+   * scope alone.
+   */
+  repoOnly?: boolean;
+  /** User-scope root. Defaults to the user's home directory; a test seam, not a flag. */
+  home?: string;
 }
 
 /**
@@ -170,6 +181,33 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
   }
 }
 
+/**
+ * Where the user-scope footprint is written.
+ *
+ * Precedence: an explicit caller root, then `OPENLORE_HOME` (for sandboxes, CI
+ * images, and containers whose real `$HOME` is not the profile to configure),
+ * then the user's home directory.
+ *
+ * The test interlock is deliberate and load-bearing: under a test runner, writing
+ * the user scope without an explicit root is a HARD ERROR rather than a silent
+ * write into the developer's own `~/.claude.json`, `~/.claude/settings.json`, and
+ * `~/.claude/CLAUDE.md`. That is not a hypothetical — it is what the first draft
+ * of this change did, and no assertion in the suite would ever have noticed
+ * (change: unify-onboarding-entrypoint).
+ */
+export function resolveUserScopeRoot(explicit?: string): string {
+  if (explicit) return explicit;
+  const configured = process.env.OPENLORE_HOME;
+  if (configured) return configured;
+  if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+    throw new Error(
+      'openlore install: refusing to write user-scope configuration into the real home directory '
+      + 'from a test. Pass `home` to runInstall(), or set OPENLORE_HOME to a temporary directory.',
+    );
+  }
+  return homedir();
+}
+
 export interface SurfaceStatus {
   agent: AgentName;
   /** A marker for this agent was found in the project tree. */
@@ -262,32 +300,65 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     'This guidance is written for that surface; re-run `openlore install --preset <name>` to change it ' +
     'and regenerate these instructions.\n';
 
-  for (const surface of surfaces) {
-    const adapter = ADAPTERS[surface.agent];
-    const ctx: ApplyContext = {
-      root: surface.root,
-      platform: process.platform,
-      platformCommandRuntime: {
-        nodeExecutable: process.execPath,
-        npmExecPath: process.env.npm_execpath,
-        pathValue: process.env.PATH,
-        cwd: process.cwd(),
-      },
-      instructionTemplate,
-      dryRun: !!opts.dryRun,
-      force: !!opts.force,
-      preset: effectivePreset,
-    };
+  const contextFor = (root: string, scope: InstallScope): ApplyContext => ({
+    root,
+    scope,
+    platform: process.platform,
+    platformCommandRuntime: {
+      nodeExecutable: process.execPath,
+      npmExecPath: process.env.npm_execpath,
+      pathValue: process.env.PATH,
+      cwd: process.cwd(),
+    },
+    instructionTemplate,
+    dryRun: !!opts.dryRun,
+    force: !!opts.force,
+    preset: effectivePreset,
+  });
+
+  const runAdapter = async (adapter: Adapter, ctx: ApplyContext): Promise<void> => {
     const result: ApplyResult = opts.uninstall
       ? await adapter.uninstall(ctx)
       : await adapter.apply(ctx);
-
     if (result.conflict) conflict = true;
     allChanges.push(...result.changes);
     allWarnings.push(...result.warnings);
+  };
+
+  // ── User scope first ───────────────────────────────────────────────────────
+  // One install, every future repository (change: unify-onboarding-entrypoint).
+  // Written BEFORE the repo pass so that a conflict in the user scope is visible
+  // in the same summary; Claude Code resolves project scope over user scope, so
+  // the repo entry written below still wins where both exist.
+  const globalAgents = [...new Set(surfaces.map(surface => surface.agent))]
+    .filter(agent => ADAPTERS[agent].supportsGlobal === true);
+  const repoOnlyAgents = [...new Set(surfaces.map(surface => surface.agent))]
+    .filter(agent => ADAPTERS[agent].supportsGlobal !== true);
+  const wiringUserScope = !opts.repoOnly && globalAgents.length > 0;
+  // Resolved only when the user scope is actually written, so `--repo-only` never
+  // consults (or fails on) a home directory it will not touch.
+  const home = wiringUserScope ? resolveUserScopeRoot(opts.home) : '';
+  if (wiringUserScope) {
+    for (const agent of globalAgents) {
+      const adapter = ADAPTERS[agent];
+      await runAdapter(adapter, contextFor(adapter.userRoot?.(home) ?? home, 'user'));
+    }
+  }
+
+  for (const surface of surfaces) {
+    await runAdapter(ADAPTERS[surface.agent], contextFor(surface.root, 'repo'));
   }
 
   printSummary(allChanges, allWarnings, !!opts.dryRun, !!opts.uninstall);
+  reportScopes({
+    uninstall: !!opts.uninstall,
+    dryRun: !!opts.dryRun,
+    repoOnly: !!opts.repoOnly,
+    wiredUserScope: wiringUserScope,
+    globalAgents,
+    repoOnlyAgents,
+    home,
+  });
 
   if (!opts.uninstall) {
     logger.info(
@@ -319,6 +390,48 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   }
 
   return 0;
+}
+
+/**
+ * Say, in one or two lines, which scopes were touched and which were not.
+ *
+ * The user-scope write is the behavior change people most need to see: it is what
+ * makes every future repository work without another command, and it is what
+ * `--repo-only` opts out of. An adapter with no user-scope surface is named as
+ * per-repo-only — an honest note, never a failure (change:
+ * unify-onboarding-entrypoint).
+ */
+function reportScopes(info: {
+  uninstall: boolean;
+  dryRun: boolean;
+  repoOnly: boolean;
+  wiredUserScope: boolean;
+  globalAgents: AgentName[];
+  repoOnlyAgents: AgentName[];
+  home: string;
+}): void {
+  const verb = info.dryRun ? 'would be' : 'was';
+  if (info.wiredUserScope) {
+    logger.info(
+      info.uninstall ? 'User scope' : 'User scope',
+      info.uninstall
+        ? `OpenLore-managed ${info.globalAgents.join(', ')} entries under ${info.home} ${verb} removed`
+        : `${info.globalAgents.join(', ')} ${verb} wired under ${info.home} — every git repository you open from now on reaches OpenLore, `
+          + 'and builds its index in the background on first touch (opt out per repo with `"autoInit": false`)',
+    );
+  } else if (info.repoOnly) {
+    logger.info(
+      'Repo scope only',
+      '--repo-only: no user-scope entry was written; only this repository is wired',
+    );
+  }
+  if (info.repoOnlyAgents.length > 0 && !info.uninstall) {
+    logger.info(
+      'Per-repo only',
+      `${info.repoOnlyAgents.join(', ')} ${info.repoOnlyAgents.length === 1 ? 'has' : 'have'} no user-scope configuration surface — `
+        + `${info.repoOnlyAgents.length === 1 ? 'it is' : 'they are'} wired for this repository only. Run "openlore install" in each repository you want them in.`,
+    );
+  }
 }
 
 function printSummary(
@@ -401,6 +514,11 @@ export const installCommand = new Command('install')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)
   .option('--uninstall', 'Remove OpenLore-managed blocks and entries', false)
+  .option(
+    '--repo-only',
+    'Wire only this repository — skip the user-scope entries that make every future repository reach OpenLore',
+    false,
+  )
   .option('--analyze', 'Build the index after configuring surfaces (default: true)', true)
   .option('--no-analyze', 'Configure surfaces only; do not run init/analyze (run "openlore analyze" yourself later)')
   .addHelpText(
@@ -412,7 +530,14 @@ Examples:
   $ openlore install --agent pi       Install the Pi extension (.pi/extensions/openlore.js)
   $ openlore install --no-analyze    Wire up surfaces only (skip index build)
   $ openlore install --dry-run       Preview changes without writing
-  $ openlore install --uninstall     Remove OpenLore-managed entries
+  $ openlore install --repo-only     Wire this repository only (no user-scope entries)
+  $ openlore install --uninstall     Remove OpenLore-managed entries (both scopes)
+
+Bare \`openlore install\` wires your USER scope as well as this repository: every
+git repository you open afterwards reaches the OpenLore MCP server and builds its
+index in the background on first touch. That background build never leaves a git
+work tree, discloses itself once per repository, and is disabled per repository
+with \`"autoInit": false\` in .openlore/config.json (or OPENLORE_NO_AUTO_ANALYZE=1).
 
 Pi (pi.dev) loads a JS extension rather than MCP: the \`pi\` surface writes
 \`.pi/extensions/openlore.js\`, which starts \`openlore serve\` on demand and injects
