@@ -12,6 +12,7 @@
 import type { FunctionCfg } from './cfg.js';
 import type { FileStyleRaw } from './style-fingerprint.js';
 import type { FileParseHealth, GrammarUnavailableBoundary } from './parse-health.js';
+import type { AttributedCandidate, FileDynamicBoundary } from './dynamic-boundary.js';
 import type { ExtractionLaneDisclosure } from './extraction-pool.js';
 import type { Pass1CacheDisclosure } from './pass1-fact-cache.js';
 
@@ -386,6 +387,13 @@ export type FileExtractResult = {
   cfg?: Map<string, FunctionCfg>;
   style?: FileStyleRaw;
   parseHealth?: FileParseHealth;
+  /**
+   * Dynamic-dispatch constructs the resolver cannot follow, as CANDIDATES (change:
+   * disclose-dynamic-boundary-regions). Not yet sites: the partition between "resolved" and
+   * "refused" is decided after Pass-2 resolution, so what crosses this boundary is the matched
+   * construct plus its enclosing symbol, never a verdict. Plain data, like everything else here.
+   */
+  dynamicBoundary?: AttributedCandidate[];
   /** Survives worker structured-clone and persistent fact-cache JSON boundaries. */
   classRelationships?: ClassRelationshipFact[];
   /** Unresolved handler references are resolved only after all repository nodes exist. */
@@ -454,6 +462,14 @@ export interface CallGraphResult {
    * {@link SerializedCallGraph}.
    */
   parseHealthByFile?: Map<string, FileParseHealth>;
+  /**
+   * Per-file dynamic-boundary sites (change: disclose-dynamic-boundary-regions), keyed by file
+   * path — finalized against Pass-2 resolution, so a construct the resolver bound to a symbol has
+   * already been retracted. Present ONLY for a file with at least one site. Transient build-time
+   * data: rolled up into the persisted `dynamic-boundary.json` by the artifact generator, never
+   * carried into {@link SerializedCallGraph} and never a node or an edge.
+   */
+  dynamicBoundaryByFile?: Map<string, FileDynamicBoundary>;
   /** Optional HTTP client projection failures. The primary graph parse may still
    * be healthy, so these are disclosed separately from whole-file parse health. */
   httpClientDegradations?: Array<{
