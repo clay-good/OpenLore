@@ -47,7 +47,7 @@
     "test:openspec-compat": "vitest run --grep 'openspec' || echo 'No OpenSpec compat tests yet'",
     "test:e2e": "vitest run --config vitest.integration.config.ts --reporter=verbose",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:integration:ci": "vitest run --config vitest.integration.config.ts src/api/analyze-parity.integration.test.ts src/api/generate.integration.test.ts src/api/run-dry-run.integration.test.ts src/api/verify.e2e.integration.test.ts src/cli/commands/analyze.integration.test.ts src/core/analyzer/html-asset-edges.integration.test.ts src/core/analyzer/html-inline-script.e2e.integration.test.ts src/core/services/mcp-watcher.integration.test.ts src/core/services/mcp-handlers/spec-reconciliation-workflow.e2e.integration.test.ts src/core/verifier/verification-engine.e2e.integration.test.ts",
+    "test:integration:ci": "vitest run --config vitest.integration.config.ts src/api/analyze-parity.integration.test.ts src/api/generate.integration.test.ts src/api/run-dry-run.integration.test.ts src/api/verify.e2e.integration.test.ts src/cli/commands/analyze.integration.test.ts src/core/analyzer/html-asset-edges.integration.test.ts src/core/analyzer/html-inline-script.e2e.integration.test.ts src/core/services/mcp-watcher.integration.test.ts src/cli/commands/watch-auto.integration.test.ts src/core/services/mcp-handlers/spec-reconciliation-workflow.e2e.integration.test.ts src/core/verifier/verification-engine.e2e.integration.test.ts",
     "test:api-consumer": "npm run build && node scripts/api-consumer-smoke.mjs",
     "test:live": "vitest run --config vitest.integration.config.ts live-data --reporter=verbose",
     "build:watch": "tsc --watch",
