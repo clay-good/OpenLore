@@ -40,8 +40,9 @@
     },
     {
       "file": "src/core/decisions/atomic-store.test.ts",
-      "reason": "LOAD-SENSITIVE, and surfaced BY this PR rather than caused by it: the three failures are the 100-way concurrency cases, and they appeared once the deny-list stopped skipping ~47 files, i.e. once the Windows job started doing several times the work. The first times out mid-lock and the next two then fail on the gate it left behind (`NamespaceGateHeldError`), so there is one root cause, not three. Verified present at commit e8d6c8dd, before this PR touched `atomic-store.ts` at all \u2014 that commit only exported an existing function. Green on Linux CI and in isolation on macOS. Needs either a longer budget for these cases on Windows or a gate that is released on timeout; tracked in #452.",
-      "suspectedProductionBug": true
+      "reason": "FLAKY on Windows, not deterministically failing \u2014 observed failing at commit e8d6c8dd and again on the following run, then PASSING on the next run of the same tree. Surfaced BY this PR rather than caused by it: the failures are the 100-way concurrency cases, and they began once the deny-list stopped skipping ~47 files and the job started doing several times the work. One root cause, not three \u2014 the first case times out mid-lock and the next two then fail on the gate it left behind (`NamespaceGateHeldError`). Verified present before this PR touched `atomic-store.ts`, which only exported an existing function. Green on Linux CI and in isolation on macOS. Flaky rather than plain-listed because a file that oscillates fails the build whichever list it sits on. The fix is a longer budget for these cases on Windows or a gate released on timeout; tracked in #452 as a bug, not a state to keep.",
+      "suspectedProductionBug": true,
+      "flaky": true
     },
     {
       "file": "src/core/drift/git-diff-corpus-materialization.test.ts",
