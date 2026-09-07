@@ -194,7 +194,7 @@
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@lancedb/lancedb": "0.37.1",
+    "@lancedb/lancedb": "0.38.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@vitejs/plugin-react": "^6.1.1",
     "apache-arrow": "^21.1.0",
