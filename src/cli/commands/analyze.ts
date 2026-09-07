@@ -12,7 +12,6 @@ import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
-import { existsSync } from 'node:fs';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
 
@@ -131,15 +130,25 @@ function collect(value: string, previous: string[]): string[] {
  */
 export async function readPublishedStoreFault(outputPath: string): Promise<string | null> {
   const dbPath = join(outputPath, ARTIFACT_CALL_GRAPH_DB);
-  if (!existsSync(dbPath)) return null;
 
   // Check the SQLite magic BEFORE handing the path to a database driver. A driver asked to open a
   // non-database file can leave the handle open when it throws, and on Windows an open handle
   // blocks deleting the file — which would jam the very rebuild this probe exists to trigger.
   // Reading sixteen bytes cannot leak a handle and answers the same question.
+  //
+  // Absence is derived from the open itself rather than a prior `existsSync`: a separate check
+  // would be a time-of-check/time-of-use split, and the open already reports ENOENT precisely.
+  let handle;
   try {
-    const header = Buffer.alloc(SQLITE_MAGIC.length);
-    const handle = await openFile(dbPath, 'r');
+    handle = await openFile(dbPath, 'r');
+  } catch (error) {
+    // An absent store is not a fault — a first run has nothing to read.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return 'graph index could not be read — it will be rebuilt';
+  }
+
+  const header = Buffer.alloc(SQLITE_MAGIC.length);
+  try {
     try {
       const { bytesRead } = await handle.read(header, 0, header.length, 0);
       if (bytesRead < header.length || !header.equals(SQLITE_MAGIC)) {
