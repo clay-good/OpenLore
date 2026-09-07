@@ -41,6 +41,18 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
+      # Runs BEFORE `npm ci`: it only reads package-lock.json, so it is the cheapest
+      # possible failure, and it names its own remedy.
+      #
+      # A dependency that ships its own npm-shrinkwrap.json can pin nested tarballs with
+      # no `integrity` field (@earendil-works/pi-* does, in every release so far). npm
+      # copies those entries verbatim, and `npm ci` then installs bytes it cannot verify.
+      # `src/workflow-security.test.ts` catches the result, but it catches it three jobs
+      # and ten minutes later, in a Unit Tests failure that does not look like a lockfile
+      # problem. This step is the same assertion, said in the place where it is actionable.
+      - name: Check lockfile integrity digests
+        run: npm run lock:integrity:check
+
       - run: npm ci
 
       - name: Audit dependencies

@@ -29,8 +29,18 @@ if (gaps.length === 0) {
 }
 
 if (checkOnly) {
-  console.error(`lock-integrity: ${gaps.length} entries missing an SRI digest:`);
-  for (const [path] of gaps) console.error(`  ${path}`);
+  const subject = gaps.length === 1 ? 'entry carries' : 'entries carry';
+  console.error(`lock-integrity: ${gaps.length} registry ${subject} no SRI digest in package-lock.json:`);
+  for (const [path, pkg] of gaps) console.error(`  ${path}@${pkg.version ?? '?'}`);
+  console.error('');
+  console.error('This is what a dependency shipping its own digest-less npm-shrinkwrap.json does to');
+  console.error('the lockfile (@earendil-works/pi-* is the recurring source). npm copies those entries');
+  console.error('verbatim, so `npm ci` would install bytes it cannot verify.');
+  console.error('');
+  console.error('Fix it locally and commit the lockfile:');
+  console.error('');
+  console.error('    npm run lock:integrity');
+  console.error('');
   process.exit(1);
 }
 
