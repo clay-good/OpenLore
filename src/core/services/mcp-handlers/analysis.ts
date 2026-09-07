@@ -205,9 +205,9 @@ export async function handleGetArchitectureOverview(directory: string): Promise<
   if (!depGraph && !ctx) {
     // Name WHY rather than always reporting absence: an index that failed its integrity
     // check is a different situation from one that was never built, and only one of them
-    // is fixed by "run analyze first" without anything else being wrong.
-    const { reason, message } = await diagnoseIndexUnservable(absDir);
-    return { error: message, indexUnservable: reason };
+    // is fixed by "run analyze first" without anything else being wrong. The verdict is the
+    // ordinary `NotReadyResult` shape, so an agent reads one `reason` taxonomy everywhere.
+    return await diagnoseIndexUnservable(absDir);
   }
 
   const overview = buildArchitectureOverview(depGraph, ctx, absDir);
@@ -260,10 +260,7 @@ export async function handleGetRefactorReport(directory: string): Promise<unknow
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx) {
-    const { reason, message } = await diagnoseIndexUnservable(absDir);
-    return { error: message, indexUnservable: reason };
-  }
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available in cached analysis. Re-run analyze_codebase.' };
 
   return analyzeForRefactoring(ctx.callGraph as SerializedCallGraph);

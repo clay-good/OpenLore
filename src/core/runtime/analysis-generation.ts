@@ -335,6 +335,29 @@ export async function discardGeneration(analysisDir: string): Promise<void> {
 export async function markGenerationUnavailable(analysisDir: string): Promise<void> {
   await atomicWriteFile(
     manifestPathOf(analysisDir),
-    JSON.stringify({ version: GENERATION_MANIFEST_VERSION, state: 'publishing' }),
+    JSON.stringify({ version: GENERATION_MANIFEST_VERSION, state: PUBLISHING_SENTINEL_STATE }),
   );
+}
+
+/** The `state` value {@link markGenerationUnavailable} writes. */
+const PUBLISHING_SENTINEL_STATE = 'publishing';
+
+/**
+ * Is the present manifest the deliberate in-flight-publish sentinel?
+ *
+ * {@link readCurrentGeneration} answers `null` for it BY DESIGN, and callers that only
+ * see that null cannot tell a healthy publish in progress from a damaged manifest. This
+ * is the narrow read that recovers the distinction: it returns true only for the exact
+ * well-formed sentinel {@link markGenerationUnavailable} writes, and false for an absent,
+ * refused, malformed, or ordinary manifest. Diagnostic only — never a permission to serve.
+ */
+export async function generationPublishInProgress(analysisDir: string): Promise<boolean> {
+  const read = await readArtifactBytesBounded(manifestPathOf(analysisDir), ANALYSIS_ARTIFACT_MAX_BYTES);
+  if (read.state !== 'ok') return false;
+  try {
+    const parsed = JSON.parse(read.bytes.toString('utf8')) as { version?: unknown; state?: unknown };
+    return parsed?.version === GENERATION_MANIFEST_VERSION && parsed?.state === PUBLISHING_SENTINEL_STATE;
+  } catch {
+    return false;
+  }
 }
