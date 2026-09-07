@@ -24,6 +24,7 @@ import { TYPE_INFERENCE_LANGUAGES as TI, inferTypesFromSource } from './type-inf
 import { SIGNATURE_LANGUAGES as SIG, extractSignatures, detectLanguage as detectLanguageReexport } from './signature-extractor.js';
 import { IMPORT_RESOLUTION_LANGUAGES as IMP, buildBaseImportMap } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES as STY } from './style-fingerprint.js';
+import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
 import {
   ERROR_PROPAGATION_LANGUAGES as ERRP,
   extractExceptionFactsFromSource,
@@ -297,6 +298,54 @@ describe('every capability-set member is exercised against the real extractor (n
     expect(TI.has('Bash')).toBe(false);
     expect(inferTypesFromSource('x=Foo', 'Bash').size).toBe(0);
   });
+
+  it('receiverResolution: every member binds a chained intra-object receiver; a non-member does not', async () => {
+    // change: shrink-receiver-resolution-boundary. Each fixture declares a field with a
+    // DECLARED type and calls a method on it; only a language whose extractor feeds the
+    // receiver registry may produce a `receiver_inferred` edge.
+    const fixtures: Record<string, Array<{ path: string; content: string; language: string }>> = {
+      TypeScript: [
+        { path: 'repo.ts', content: 'export class Repo { save(x: number) { return x; } }', language: 'TypeScript' },
+        {
+          path: 'svc.ts',
+          content: "import { Repo } from './repo';\nexport class Svc { constructor(private repo: Repo) {}\n run() { return this.repo.save(1); } }",
+          language: 'TypeScript',
+        },
+      ],
+      JavaScript: [
+        { path: 'repo.js', content: 'export class Repo { save(x) { return x; } }', language: 'JavaScript' },
+        {
+          path: 'svc.js',
+          content: "import { Repo } from './repo';\nexport class Svc { constructor() { this.repo = new Repo(); }\n run() { return this.repo.save(1); } }",
+          language: 'JavaScript',
+        },
+      ],
+      Python: [
+        { path: 'repo.py', content: 'class Repo:\n    def save(self, x):\n        return x\n', language: 'Python' },
+        {
+          path: 'svc.py',
+          content: 'from repo import Repo\n\nclass Svc:\n    def __init__(self):\n        self.repo = Repo()\n\n    def run(self):\n        return self.repo.save(1)\n',
+          language: 'Python',
+        },
+      ],
+    };
+    const receiverEdges = async (files: Array<{ path: string; content: string; language: string }>) => {
+      const result = await new CallGraphBuilder().build(files);
+      return result.edges.filter(e => e.confidence === 'receiver_inferred');
+    };
+    for (const lang of RECEIVER_REGISTRY_LANGUAGES) {
+      const fx = fixtures[lang];
+      expect(fx, `missing receiverResolution fixture for set member ${lang}`).toBeDefined();
+      expect((await receiverEdges(fx)).length, `${lang} resolves a chained receiver`).toBeGreaterThan(0);
+      expect(languageSupport(lang).capabilities).toContain('receiverResolution');
+    }
+    expect(RECEIVER_REGISTRY_LANGUAGES.has('Go')).toBe(false);
+    expect(languageSupport('Go').capabilities).not.toContain('receiverResolution');
+    expect((await receiverEdges([
+      { path: 'repo.go', content: 'package m\ntype Repo struct{}\nfunc (r *Repo) Save(x int) int { return x }', language: 'Go' },
+      { path: 'svc.go', content: 'package m\ntype Svc struct{ repo *Repo }\nfunc (s *Svc) Run() int { return s.repo.Save(1) }', language: 'Go' },
+    ])).length).toBe(0);
+  }, 60_000);
 
   it('signatures: every member produces ≥1 dedicated entry', () => {
     for (const lang of SIG) {

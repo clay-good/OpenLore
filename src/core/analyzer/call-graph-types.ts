@@ -15,10 +15,12 @@ import type { FileParseHealth, GrammarUnavailableBoundary } from './parse-health
 import type { AttributedCandidate, FileDynamicBoundary } from './dynamic-boundary.js';
 import type { ExtractionLaneDisclosure } from './extraction-pool.js';
 import type { Pass1CacheDisclosure } from './pass1-fact-cache.js';
+import type { ReceiverFieldFact } from './receiver-registry.js';
 
 export type EdgeConfidence =
   | 'self_cls'       // intra-class call via self/cls
   | 'type_inference' // receiver type resolved via type inference
+  | 'receiver_inferred' // chained intra-object receiver (`this.repo.save()`) typed by the per-file field/return registry (change: shrink-receiver-resolution-boundary)
   | 'import'         // callee was imported from a known file
   | 're_export'      // callee resolved through a re-export/barrel chain to its true definition (change: add-call-resolution-recall)
   | 'http_endpoint'  // cross-language HTTP route match
@@ -55,6 +57,16 @@ export interface RawEdge {
   offset?: number;
   /** Receiver variable name in `obj.method()` calls */
   calleeObject?: string;
+  /**
+   * Field name of a CHAINED intra-object receiver — `repo` in `this.repo.save()` /
+   * `self.repo.save()` (change: shrink-receiver-resolution-boundary). Set only for that shape, and
+   * always alongside a `calleeObject` of `this` / `super` / `self` / `cls`. It is a separate field
+   * rather than a dotted `calleeObject` on purpose: the resolution ladder keys behaviour off the
+   * exact receiver token (`=== 'this'`), and the import strategy falls back to the LAST dotted
+   * segment as a qualifier, which would bind `this.parser.parse()` to an unrelated imported
+   * `parser`.
+   */
+  receiverField?: string;
   /** Call type detected from AST shape at extraction time */
   callType?: CallType;
   /** Number of arguments known to be present at the call site. */
@@ -165,7 +177,7 @@ export type ExternalKind = 'http' | 'database' | 'filesystem' | 'stdlib' | 'unkn
 export const AMBIGUOUS_CANDIDATE_CAP = 8;
 
 /** Which resolution strategy refused to bind because the candidate set was ambiguous. */
-export type AmbiguousStrategy = 'name_only' | 'self_cls' | 'type_name' | 'type_inference' | 'overload';
+export type AmbiguousStrategy = 'name_only' | 'self_cls' | 'type_name' | 'type_inference' | 'receiver_inferred' | 'overload';
 
 /**
  * A call site the resolution ladder refused to bind because more than one candidate
@@ -187,6 +199,12 @@ export interface AmbiguousCallSite {
   calleeObject?: string;
   /** 1-based call-site line, when known. */
   line?: number;
+  /** Which strategy hit the ambiguity. */
+  /** Field name of a chained intra-object receiver, when the refused site was one
+   *  (`repo` in `this.repo.save()`). Without it a disclosure renders the site as `this.save`,
+   *  naming a call that does not exist in the source
+   *  (change: shrink-receiver-resolution-boundary). */
+  receiverField?: string;
   /** Which strategy hit the ambiguity. */
   strategy: AmbiguousStrategy;
   /** Candidate node ids (id-sorted, bounded to {@link AMBIGUOUS_CANDIDATE_CAP}). */
@@ -241,6 +259,9 @@ export const CALL_DISTANCE_COSTS: Record<EdgeConfidence, number> = {
   // Moderately resolved — receiver type inferred or treated as a type name.
   type_inference: 2,
   type_name: 2,
+  // A chained intra-object receiver typed by the per-file field/return registry: a DECLARED type,
+  // not a guessed one, but still one hop weaker than resolving the callee's own qualified name.
+  receiver_inferred: 2,
   // Heuristic — last-resort first-candidate-by-name match.
   name_only: 3,
   // Synthesized dynamic-dispatch edge — deliberately costlier than ANY directly-
@@ -250,6 +271,19 @@ export const CALL_DISTANCE_COSTS: Record<EdgeConfidence, number> = {
   // Unresolved external/stdlib leaf — excluded from internal traversal.
   external: Infinity,
 };
+
+/**
+ * Every {@link EdgeConfidence} value, DERIVED from {@link CALL_DISTANCE_COSTS} rather than restated.
+ *
+ * Three runtime validators used to carry their own hand-written copy of this set, and a new tier
+ * (`receiver_inferred`) was added to the union without them: the edges were written to SQLite and
+ * then silently dropped on every read, with one path declaring the freshly-written artifact
+ * invalid. `CALL_DISTANCE_COSTS` is a `Record<EdgeConfidence, number>`, so the compiler already
+ * forces it to be exhaustive — deriving from it makes that guarantee reach the validators too
+ * (change: shrink-receiver-resolution-boundary).
+ */
+export const EDGE_CONFIDENCE_VALUES: ReadonlySet<EdgeConfidence> =
+  new Set(Object.keys(CALL_DISTANCE_COSTS) as EdgeConfidence[]);
 
 /** Fallback cost for a malformed/legacy confidence value not in the enum. */
 const CALL_DISTANCE_FALLBACK = 3;
@@ -271,6 +305,7 @@ export function callDistance(edge: CallEdge): number {
       return 1;
     case 'type_inference':
     case 'type_name':
+    case 'receiver_inferred':
       return 2;
     case 'name_only':
       return 3;
@@ -396,6 +431,14 @@ export type FileExtractResult = {
   dynamicBoundary?: AttributedCandidate[];
   /** Survives worker structured-clone and persistent fact-cache JSON boundaries. */
   classRelationships?: ClassRelationshipFact[];
+  /**
+   * `Class.field → Type` observations used to type a CHAINED intra-object receiver
+   * (`this.repo.save()`) — change: shrink-receiver-resolution-boundary. Observations, not a
+   * decided registry: a field observed with two types is refused in Pass 2, and refusing there
+   * (rather than at extraction) keeps the decision correct for a file merged from several script
+   * lanes. Plain data, like everything else here.
+   */
+  receiverFields?: ReceiverFieldFact[];
   /** Unresolved handler references are resolved only after all repository nodes exist. */
   dynamicDispatch?: DynamicDispatchFacts;
   /** Plain outbound HTTP call-site facts, reused by Pass 2 without reparsing the file. */

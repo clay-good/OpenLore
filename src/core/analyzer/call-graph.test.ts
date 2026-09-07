@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { CallGraphBuilder, callDistance, CALL_DISTANCE_COSTS, layerOf, classifyLayerEdge } from './call-graph.js';
+import { EDGE_CONFIDENCE_VALUES } from './call-graph-types.js';
 import type { CallEdge, EdgeConfidence } from './call-graph.js';
 import * as barrel from './call-graph.js';
 import * as cgTypes from './call-graph-types.js';
@@ -2369,7 +2370,7 @@ describe('callDistance', () => {
   // breaks compilation of CALL_DISTANCE_COSTS, forcing an explicit cost choice.
   const expected: Record<EdgeConfidence, number> = {
     import: 1, re_export: 1, same_file: 1, self_cls: 1, http_endpoint: 1,
-    type_inference: 2, type_name: 2,
+    type_inference: 2, type_name: 2, receiver_inferred: 2,
     name_only: 3,
     synthesized: 4,
     external: Infinity,
@@ -2382,12 +2383,23 @@ describe('callDistance', () => {
     });
   }
 
+  // change: shrink-receiver-resolution-boundary. Three runtime validators used to carry their own
+  // hand-written copy of the confidence set. Adding `receiver_inferred` to the union without them
+  // meant the edges were written to SQLite and silently dropped on every read, and one path called
+  // the freshly-written artifact invalid. The set is now DERIVED; this pins that it stays derived.
+  it('exposes every confidence value to the runtime validators', () => {
+    for (const confidence of Object.keys(expected) as EdgeConfidence[]) {
+      expect(EDGE_CONFIDENCE_VALUES.has(confidence), `${confidence} must be accepted on read`).toBe(true);
+    }
+    expect(EDGE_CONFIDENCE_VALUES.size).toBe(Object.keys(expected).length);
+  });
+
   it('ranks strongly-resolved edges nearer than heuristic ones', () => {
     expect(callDistance(edge('import'))).toBeLessThan(callDistance(edge('name_only')));
   });
 
   it('costs a synthesized edge more than any directly-resolved confidence', () => {
-    const directConfidences: EdgeConfidence[] = ['import', 'same_file', 'self_cls', 'http_endpoint', 'type_inference', 'type_name', 'name_only'];
+    const directConfidences: EdgeConfidence[] = ['import', 'same_file', 'self_cls', 'http_endpoint', 'type_inference', 'type_name', 'receiver_inferred', 'name_only'];
     for (const c of directConfidences) {
       expect(callDistance(edge('synthesized'))).toBeGreaterThan(callDistance(edge(c)));
     }

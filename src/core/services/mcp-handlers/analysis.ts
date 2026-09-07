@@ -51,7 +51,7 @@ import { formatSignatureMaps } from '../../analyzer/signature-extractor.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from '../../analyzer/code-shaper.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
 import { cfgSupportsLanguage, variableSliceLines, type FunctionCfg } from '../../analyzer/cfg.js';
-import type { EdgeConfidence } from '../../analyzer/call-graph-types.js';
+import { EDGE_CONFIDENCE_VALUES, type EdgeConfidence } from '../../analyzer/call-graph-types.js';
 import { buildArchitectureOverview } from '../../analyzer/architecture-writer.js';
 import { buildDomainEvidence } from '../../generator/domain-evidence.js';
 import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
@@ -65,7 +65,7 @@ import {
   validateGitRef,
 } from '../../drift/index.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { validateDirectory, readCachedContext, isCacheFresh, safeJoin, safeOpenspecDir } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable, isCacheFresh, safeJoin, safeOpenspecDir } from './utils.js';
 import { buildWeightedAdjacency, weightedBfs } from './graph.js';
 import { personalizedPageRank } from '../../analyzer/personalized-pagerank.js';
 import { applyTokenBudget, normalizeResponseFormat, truncationReceipt, summarizeListInventory, type ResponseFormat } from './progressive.js';
@@ -203,7 +203,11 @@ export async function handleGetArchitectureOverview(directory: string): Promise<
   const ctx = await readCachedContext(absDir);
 
   if (!depGraph && !ctx) {
-    return { error: 'No analysis found. Run analyze_codebase first.' };
+    // Name WHY rather than always reporting absence: an index that failed its integrity
+    // check is a different situation from one that was never built, and only one of them
+    // is fixed by "run analyze first" without anything else being wrong. The verdict is the
+    // ordinary `NotReadyResult` shape, so an agent reads one `reason` taxonomy everywhere.
+    return await diagnoseIndexUnservable(absDir);
   }
 
   const overview = buildArchitectureOverview(depGraph, ctx, absDir);
@@ -256,7 +260,7 @@ export async function handleGetRefactorReport(directory: string): Promise<unknow
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available in cached analysis. Re-run analyze_codebase.' };
 
   return analyzeForRefactoring(ctx.callGraph as SerializedCallGraph);
@@ -650,10 +654,7 @@ interface FocusSliceAccumulator {
 
 const FOCUS_EVIDENCE_LIMIT = 50;
 const FOCUS_OVERLAY_EDGE_LIMIT = 20_000;
-const EDGE_CONFIDENCES = new Set<EdgeConfidence>([
-  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
-  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
-]);
+const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 
 function isFocusNode(value: unknown): value is FocusNode {
   if (!value || typeof value !== 'object') return false;

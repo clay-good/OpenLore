@@ -34,6 +34,10 @@ export const MAX_EDIT_VERDICT_BASIS_TOTAL_BYTES = 64_000_000;
 const MAX_PATH_LENGTH = 1024;
 const MAX_TEXT_LENGTH = 4096;
 const MAX_PATH_STEPS = 64;
+/** The cost-1 confidence tiers — the ones a precise verdict may rest on. Everything costlier is
+ *  excluded by that rule, including `receiver_inferred` (cost 2, alongside `type_inference` and
+ *  `type_name`): a declared field type is strong evidence, but it is still one inference removed
+ *  from resolving the callee's own qualified name. Costs recall on this tier, never correctness. */
 const PRECISE_CALL_CONFIDENCES = new Set<CallEdge['confidence']>([
   'import', 're_export', 'same_file', 'self_cls',
 ]);

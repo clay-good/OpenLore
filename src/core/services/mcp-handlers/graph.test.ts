@@ -946,6 +946,30 @@ describe('handleAnalyzeImpact — edgeStore fast path', () => {
     expect(result.ambiguousCallSites?.sample[0]).toMatchObject({ caller: 'entry', callee: 'run', strategy: 'name_only', candidates: 2 });
   });
 
+  // change: shrink-receiver-resolution-boundary. A chained intra-object site carries the bare
+  // `this` as its receiver plus the field separately. Rendering only the bare token names a call
+  // site the source does not contain — a fabricated structural claim on a governance surface.
+  it('renders a chained intra-object site with its field, not the bare receiver token', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      edgeStore: store,
+      callGraph: {
+        ambiguousSites: [
+          {
+            callerId: 'src/a.ts::entry', calleeName: 'save', calleeObject: 'this', receiverField: 'repo',
+            line: 4, strategy: 'receiver_inferred', candidateIds: ['x.ts::Repo.save', 'y.ts::Repo.save'], candidateCount: 2,
+          },
+        ],
+      },
+    } as never);
+    const result = await handleAnalyzeImpact(dir, 'entry', 2) as {
+      ambiguousCallSites?: { sample: Array<{ callee: string; strategy: string }> };
+    };
+    expect(result.ambiguousCallSites?.sample[0]).toMatchObject({
+      callee: 'this.repo.save',
+      strategy: 'receiver_inferred',
+    });
+  });
+
   it('omits the ambiguous block when no ambiguous site touches the impact set', async () => {
     vi.mocked(readCachedContext).mockResolvedValueOnce({
       edgeStore: store,

@@ -7,11 +7,16 @@
 
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
+import { ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
+
+/** SQLite's file header (`SQLite format 3\0`) — every real database starts with these bytes. */
+const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
 import {
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_REPO_STRUCTURE,
@@ -113,6 +118,60 @@ interface AnalysisResult {
  */
 function collect(value: string, previous: string[]): string[] {
   return previous.concat([value]);
+}
+
+/**
+ * Why the published graph store cannot be served by THIS build, or null when it can.
+ *
+ * Read-only and non-destructive: `EdgeStore.open` records a lifecycle fault and touches nothing
+ * on a schema mismatch, so probing here cannot damage an index the caller has not yet decided to
+ * rebuild. An absent store is not a fault — a first run has nothing to read, and the normal
+ * freshness logic already governs that case.
+ */
+export async function readPublishedStoreFault(outputPath: string): Promise<string | null> {
+  const dbPath = join(outputPath, ARTIFACT_CALL_GRAPH_DB);
+
+  // Check the SQLite magic BEFORE handing the path to a database driver. A driver asked to open a
+  // non-database file can leave the handle open when it throws, and on Windows an open handle
+  // blocks deleting the file — which would jam the very rebuild this probe exists to trigger.
+  // Reading sixteen bytes cannot leak a handle and answers the same question.
+  //
+  // Absence is derived from the open itself rather than a prior `existsSync`: a separate check
+  // would be a time-of-check/time-of-use split, and the open already reports ENOENT precisely.
+  let handle;
+  try {
+    handle = await openFile(dbPath, 'r');
+  } catch (error) {
+    // An absent store is not a fault — a first run has nothing to read.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return 'graph index could not be read — it will be rebuilt';
+  }
+
+  const header = Buffer.alloc(SQLITE_MAGIC.length);
+  try {
+    try {
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      if (bytesRead < header.length || !header.equals(SQLITE_MAGIC)) {
+        return 'graph index is not a readable database — it will be rebuilt';
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return 'graph index could not be read — it will be rebuilt';
+  }
+
+  let store: EdgeStore | undefined;
+  try {
+    store = EdgeStore.open(dbPath);
+    return store.notReady?.message ?? null;
+  } catch (error) {
+    // A store that opens but faults is still exactly the case a rebuild fixes; the probe reports,
+    // it never aborts analyze.
+    return error instanceof Error ? error.message : 'graph index could not be opened';
+  } finally {
+    try { store?.close(); } catch { /* best-effort */ }
+  }
 }
 
 export function formatIndexedFunctionPopulation(result: {
@@ -432,10 +491,25 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // freshness window; an unchanged tree skips regardless of age. (isCacheFresh
       // falls back to the TTL only for a legacy analysis written without a fingerprint.)
       const cacheFresh = analysisAge !== null && (await isAnalysisCacheFresh(rootPath, outputPath, fingerprintConfig));
+      // Source freshness is not the only precondition for skipping. The published graph store
+      // must also be READABLE by this build: after a SCHEMA_VERSION bump every graph tool
+      // refuses with "run `openlore analyze` to rebuild it", and if that command then answered
+      // "up to date — source unchanged" the user would be stuck in a loop, told to run a command
+      // that declines to act, with no working call graph until they guessed at `--force`.
+      // Rebuild-on-bump lives on this write path, so reaching it IS the remedy
+      // (change: shrink-receiver-resolution-boundary).
+      const storeFault = await readPublishedStoreFault(outputPath);
       // `--reanalyze` and `--force` both defeat the skip; they differ only in whether the
       // per-file extraction cache is also thrown away (change: optimize-hash-keyed-analyze).
       const skipSuppressed = (opts.force ?? false) || (opts.reanalyze ?? false) || (opts.shard?.length ?? 0) > 0;
-      if (analysisAge !== null && !skipSuppressed) {
+      if (analysisAge !== null && !skipSuppressed && storeFault !== null) {
+        logger.discovery(
+          `Rebuilding the graph index — ${storeFault} (source is unchanged, but the published ` +
+          'index cannot be read by this version)',
+        );
+        logger.blank();
+      }
+      if (analysisAge !== null && !skipSuppressed && storeFault === null) {
         if (cacheFresh) {
           logger.discovery(`Analysis is up to date — source unchanged (${formatAge(analysisAge)})`);
           logger.info('Tip', 'Use --reanalyze to run anyway, or --force to also re-extract every file');

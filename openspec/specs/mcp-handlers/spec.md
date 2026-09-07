@@ -1519,6 +1519,55 @@ an agent can decide to proceed on the disclosed-stale answer or retry.
 - **THEN** the responses respectively carry `reason: index-absent`, the staleness verdict
   with a repair-in-progress marker and reason, and no freshness caveat at all
 
+### Requirement: AnUnservableIndexNamesWhyRatherThanReportingAbsence
+
+A tool that cannot serve an index SHALL report WHY in the same machine-readable not-ready
+shape and the same `reason` taxonomy as `ReadyOrHonestFirstUse` — never a second, parallel
+vocabulary — and SHALL NOT report a present-but-refused index as an absent one. Beyond
+`index-absent` and `graph-unavailable`, the taxonomy SHALL distinguish at least: an artifact
+the reader refused as not a regular file, a generation manifest present and refused, a
+publish currently in flight, and artifacts that no longer match their published generation.
+
+The verdict SHALL be derived from what was OBSERVED, not from what a path-following read
+would infer:
+
+- The artifact's kind SHALL be determined without following links, because the production
+  reader refuses a symlinked artifact outright. A symlinked or dangling-symlinked artifact is
+  therefore refused, never reported as a generation mismatch or as an absent index.
+- The deliberate in-flight-publish manifest sentinel — the well-formed
+  `{version, state:'publishing'}` a writer commits before its first artifact replacement, for
+  which the manifest reader answers "unavailable" BY DESIGN — SHALL be reported as a transient
+  publish in progress whose remedy is to retry, never as a damaged publish.
+- An artifact/generation mismatch SHALL NOT be asserted as a lost publish while a writer is
+  observed inside the artifact-write critical section, because a writer rewrites artifacts in
+  place and publishes the manifest last, making a mismatch the EXPECTED state for the duration
+  of any concurrent write. The incident claim SHALL be conditional on no such writer being
+  observed.
+
+#### Scenario: A refused symlinked artifact is not reported as a mismatch or as absence
+
+- **GIVEN** an analysis whose `llm-context.json` is a symbolic link, whether to a valid
+  generation-matching artifact or to nothing at all
+- **WHEN** a tool that cannot serve it reports why
+- **THEN** the verdict names the artifact as not a regular file, and is neither
+  `index-absent` nor `index-generation-mismatch`
+
+#### Scenario: A publish in flight is transient, not damage
+
+- **GIVEN** a writer that has committed the in-flight-publish manifest sentinel and not yet
+  published the new generation
+- **WHEN** a tool that cannot serve the index reports why
+- **THEN** the verdict names a publish in progress, its remedy is to retry rather than to
+  rebuild, and it does not claim the publish is damaged
+
+#### Scenario: A mismatch is an incident only when no writer is running
+
+- **GIVEN** two repositories with byte-identical rewritten-but-unrepublished artifacts, one
+  with the artifact-write lock held by a live writer and one with no writer at all
+- **WHEN** each reports why the index is unservable
+- **THEN** the first names the expected mid-write window and asks the caller to retry, and
+  only the second claims a publish was lost
+
 ### Requirement: PriorChurnIsMeasuredBeforeTheBriefedRange
 
 The system SHALL compute `briefing_since`'s prior-churn evidence — `priorChurn`, its

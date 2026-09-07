@@ -29,6 +29,7 @@
 import type Parser from 'tree-sitter';
 import { usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
+import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
  *  single authoritative source the language-support registry derives the
@@ -97,10 +98,20 @@ export interface ThrowSite {
  *              method, so a MISSING call-graph edge for it is a true unresolved
  *              in-project callee (not an external), to be disclosed — never
  *              silently assumed exception-free.
+ *  - `self-field` : a CHAINED intra-object call — `this.<field>.x()` /
+ *              `self.<field>.x()` (change: shrink-receiver-resolution-boundary). The
+ *              receiver is a field of the enclosing object, so unlike `self` the callee is
+ *              NOT provably in-project: it is whatever the field's type is. The call graph
+ *              binds it when the per-file receiver registry types the field, and emits
+ *              nothing otherwise — deliberately, since an `external::` leaf would assert
+ *              the callee leaves the project. A missing edge here is therefore an UNKNOWN
+ *              callee, disclosed under its own boundary rather than folded into `self`
+ *              (which would overclaim it as in-project) or `other` (which would imply an
+ *              external leaf exists for it).
  *  - `other` : a member call on some other receiver (`obj.x()`) — resolves to an
  *              internal edge or an `external::obj.x` edge (already disclosable).
  *  - `none`  : a bare call (`x()`) — resolves to an internal or external edge. */
-export type CallReceiver = 'self' | 'other' | 'none' | 'constructor';
+export type CallReceiver = 'self' | 'self-field' | 'other' | 'none' | 'constructor';
 
 /** One call site within a function body, tagged with the guards that enclose it. */
 export interface CallSite {
@@ -591,6 +602,20 @@ function calleeNameOf(callNode: Node, spec: LangSpec): string {
 /** Python receiver identifiers that denote the enclosing object/class. */
 const PY_SELF_RECEIVERS = new Set(['self', 'cls']);
 
+/** Node types that WRAP a receiver without changing what it is. A cast, an assertion, a
+ *  non-null `!`, parentheses and an `await` all leave `this.dep` still `this.dep`; not peeling
+ *  them leaves `(this.dep as Dep).run()` classified `other`, whose contract promises an edge
+ *  that this shape never gets (change: shrink-receiver-resolution-boundary). */
+const RECEIVER_WRAPPER_TYPES = new Set([
+  'non_null_expression',
+  'parenthesized_expression',
+  'as_expression',
+  'satisfies_expression',
+  'type_assertion',
+  'await_expression',
+  'await',
+]);
+
 /** How the callee of a call node is addressed (see {@link CallReceiver}). A
  *  `this.x()` / `super.x()` (TS/JS) or `self.x()` / `cls.x()` (Python) call is
  *  `self` — an intra-object call whose callee is provably in-project. */
@@ -614,9 +639,55 @@ function receiverKindOf(callNode: Node, spec: LangSpec, language: string): CallR
     if (obj.type === 'this' || obj.type === 'super') return 'self';
     if ((language === 'C#' || language === 'Java') && (obj.type === 'this_expression' || obj.type === 'base_expression')) return 'self';
     if (obj.type === 'identifier' && PY_SELF_RECEIVERS.has(obj.text)) return 'self';
+    // A chained intra-object receiver: the object is itself a member access rooted at
+    // `this`/`self` (change: shrink-receiver-resolution-boundary).
+    if (isSelfRootedMember(obj, language)) return 'self-field';
     return 'other';
   }
   return 'none';
+}
+
+/** Is `node` a member access whose ROOT is the enclosing object — `this.repo`, `self.repo`,
+ *  `this.a.b`? One hop is the common case; deeper chains root the same way, and the whole chain
+ *  is equally untypeable, so they share one classification.
+ *
+ *  Scoped to the languages whose extractors feed the receiver registry, because only there does a
+ *  `self-field` verdict correspond to this change's binding rules. Other languages keep their own
+ *  pre-existing handling for the shape, which this change did not touch. */
+function isSelfRootedMember(node: Node, language: string): boolean {
+  if (!RECEIVER_REGISTRY_LANGUAGES.has(language)) return false;
+  // Wrappers that change nothing about what the receiver IS. Left un-peeled, `this.dep!.run()`
+  // and `(this.dep).run()` fall through to `other`, whose contract promises an edge — and no edge
+  // exists for them, which is the silence this whole change removes.
+  // Peel REPEATEDLY: every one of these wrappers arrives inside a `parenthesized_expression`,
+  // so a single peel yields the cast/await node itself and the member test below then fails.
+  // `type_assertion` (`<Dep>this.dep`) puts its type arguments FIRST, so its expression is the
+  // last named child, not the first.
+  // The hop budget only guards against a pathological tree; real code never nests wrappers
+  // deeply, and exhausting it falls back to `other`, the pre-existing classification.
+  let peeled: Node | null = node;
+  for (let hops = 0; peeled && RECEIVER_WRAPPER_TYPES.has(peeled.type) && hops < 64; hops++) {
+    peeled = peeled.type === 'type_assertion'
+      ? peeled.namedChildren[peeled.namedChildren.length - 1] ?? null
+      : peeled.namedChildren[0] ?? null;
+  }
+  if (!peeled) return false;
+  // A member access, an index (`this.map['k']`) and a call (`self.get_dep()`) are all still
+  // rooted at the enclosing object; none of them is bound by the registry, so all of them are
+  // residue to disclose rather than shapes to omit.
+  if (
+    peeled.type !== 'member_expression' && peeled.type !== 'attribute' &&
+    peeled.type !== 'member_access_expression' && peeled.type !== 'subscript_expression' &&
+    peeled.type !== 'subscript' && peeled.type !== 'call_expression' && peeled.type !== 'call'
+  ) {
+    return false;
+  }
+  const inner = peeled.childForFieldName('object') ?? peeled.childForFieldName('function')
+    ?? peeled.childForFieldName('expression') ?? peeled.namedChildren[0] ?? null;
+  if (!inner) return false;
+  if (inner.type === 'this' || inner.type === 'super') return true;
+  if (inner.type === 'identifier' && PY_SELF_RECEIVERS.has(inner.text)) return true;
+  return isSelfRootedMember(inner, language);
 }
 
 // ── Body scan helpers ────────────────────────────────────────────────────────

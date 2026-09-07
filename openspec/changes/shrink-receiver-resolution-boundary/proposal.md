@@ -1,61 +1,171 @@
 # Shrink the intra-object receiver boundary with deterministic per-file type registries
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 4, enhancement). OpenLore honestly *discloses* the
-> one call shape its resolver can't bind: an intra-object `this.` / `self.` / `super.` / `cls.` call
-> whose method the call graph couldn't resolve gets neither a resolved edge nor an `external::`
-> edge, and tools like `analyze_error_propagation` surface it as a boundary rather than assume it
-> exception-free. codebase-memory-mcp (the strongest new 2026 competitor) resolves exactly these
-> with a deterministic, no-LSP technique: per-file type registries built during the tree walk —
-> variable scopes, field types, return-type propagation — a bottom-up receiver evaluation. Adopting
-> it shrinks the disclosed boundary with more resolved edges, keeping the honest disclosure for
-> what still can't be resolved. This is the one competitive feature worth borrowing; it's higher
-> effort than the other pass-4 enhancements, so it's staged and boundary-preserving.
+> Status: PROPOSED (2026-07-03, e2e audit pass 4) — **re-scoped 2026-09-06 after measuring this
+> repository's own graph.** The original draft aimed at `this.helper()`, assuming it was the
+> unresolved shape. It is not: direct intra-object calls already resolve through the class chain
+> (522 `self_cls` edges here). The shape that resolves to *nothing* is the CHAINED receiver.
 
 ## The gap
 
-- The resolver already runs CHA (class-hierarchy analysis) and lightweight type inference, but an
-  intra-object receiver whose type it can't pin stays unresolved and is disclosed as a boundary
-  (correct, and better than guessing). The cost is recall: a `this.helper()` that a per-file type
-  registry could bind is left as a boundary, so `analyze_error_propagation`, `analyze_impact`, and
-  call-path tools under-report those edges.
-- The technique to bind them deterministically exists and is proven (codebase-memory-mcp,
-  158-language static registry approach); OpenLore just doesn't build the registry.
+`this.<field>.<method>()` / `self.<field>.<method>()` produces **no edge of any kind**. The call
+queries only ever captured an `(identifier)`, `(this)` or `(super)` receiver, and a chained
+receiver is a nested member expression, so it matched no alternative: no resolved edge, no
+`external::` leaf, and — because `exception-flow.ts` classified it `other`, a kind documented as
+"resolves to an internal edge or an `external::obj.x` edge" — nothing any conclusion could
+disclose either. It is the last silently-absent shape rooted at `this`/`self` — a claim now bounded
+by measurement rather than assertion: a class-name static-field receiver (`Holder.shared.work()`)
+is still both unbound and undisclosed, identically before and after this change.
+
+It is not rare. Counted with the extractor itself over this repository's `src/`: **327 chained
+intra-object call sites against 544 direct ones — 38% of all intra-object calls**, concentrated
+exactly where dependencies are held as fields (`this.store.…`, `this.logger.…`, `this.spinner.…`).
+Every one of them silently NARROWED `analyze_error_propagation`'s escape set — an unreachable
+callee contributes no exceptions, so a clean result was under-reporting rather than proof — and
+left the field's type looking uncalled.
 
 ## What changes
 
-1. **Per-file type registries during the Pass-1 walk.** As the extractor walks a file, record
-   local variable declared/inferred types, field types from the enclosing class, and function
-   return types, in a file-scoped registry. This rides the walk that
-   `optimize-analyze-pipeline-passes` makes single-pass — no extra parse. Reuse the existing type
-   inference and CHA class model; the registry is the missing lookup surface, not a new engine.
-2. **Bottom-up receiver resolution.** When binding a `this.` / `self.` / `super.` / `cls.` call,
-   consult the registry to resolve the receiver's type and thus the method, emitting a resolved
-   edge with an appropriate confidence tier (below CHA-certain, above name-only — a distinct
-   `receiver_inferred` provenance so downstream tools can weigh it).
-3. **The boundary stays honest.** A receiver the registry still can't type remains a disclosed
-   boundary — the change shrinks the boundary, it does not paper over it. `analyze_error_propagation`
-   continues to disclose the residual unresolved intra-object calls.
+1. **A per-file receiver registry, built during the Pass-1 walk.** `Class.field → Type` from
+   DECLARED types only: a field's type annotation, a `new T()` initializer, a constructor parameter
+   property, a Python `__init__` annotation forwarded to the field, and the declared return type of
+   a function declared in the same file (for `this.repo = makeRepo()`). No second parse — the same
+   fail-soft query runner the inheritance collector already uses. Local *variable* types stay where
+   they are, in `type-inference-engine.ts`; this adds the field and return-type dimension it lacked.
+2. **Bottom-up receiver resolution as its own strategy.** Type the field (walking the class chain,
+   so an inherited field still types), then resolve the method **within that one type** through the
+   existing affinity ladder. A unique candidate becomes a `receiver_inferred` edge — a distinct
+   provenance tier, below a directly-resolved binding and above name-only. Today that tier's value
+   is PROVENANCE LABELLING, not weighting: it costs the same as `type_inference` in `callDistance`
+   and nothing branches on it. Keeping it distinct anyway is the point — a declared FIELD type is a
+   different kind of inference from a local variable's, and collapsing the two is the silent
+   flattening this substrate exists to refuse.
+3. **The residue is disclosed, never papered over** — by `analyze_error_propagation`, which is the
+   only surface that discloses it. `blast_radius`, `select_tests` and `find_dead_code` still see
+   nothing at an untypeable chained site; they saw nothing before either, so this is not a
+   regression, but the shape is now *partly* disclosed rather than fully. An untypeable field, a field observed with two
+   conflicting types, an ambiguous candidate set, or a typed receiver with no such member emits
+   **nothing** — not a guessed edge, and deliberately not an `external::` leaf, which would assert
+   the callee leaves the project. `exception-flow.ts` gains a `self-field` receiver kind and
+   `analyze_error_propagation` discloses those sites under their own boundary, distinct from the
+   unresolved-intra-object one: here the callee's *provenance* is unknown, not merely unreached.
+
+**Explicitly NOT built:** flow-sensitive or cross-file type inference; typing a field from its
+usage; reassignment analysis; imported-factory return types (unreadable from this tree); deeper
+chains (`this.a.b.m()`), computed receivers (`this.map['k'].m()`) and receivers obtained from a
+call (`self.get_dep().m()`), all of which stay disclosed rather than bound; callees dropped by the
+language's builtin-noise filter; and non-registry languages, which keep today's behaviour. Go is
+named as an open gap: its call query captures no chained receiver at all, so it records nothing for
+the shape — the capability matrix says so rather than implying every other language discloses it.
+
+## Measured on real code
+
+Four external repositories, `analyze --force` with both builds, full edge-row diff:
+
+| repo | files | new `receiver_inferred` | pre-existing edges removed or changed |
+|---|---:|---:|---:|
+| python-poetry/poetry (Python) | 447 | 29 | 0 |
+| nestjs/nest (TS) | 1,835 | 530 | 0 |
+| nestjs/nest @`39fbddae` (re-measured) | 1,925 | 397 | 0 |
+| typeorm/typeorm (TS) | 3,596 | 530 | 0 |
+| mikro-orm/mikro-orm (TS) | ~3,900 | 419 | 0 |
+
+The two `nest` rows are different clones, and the count moves with the tree; `poetry`'s 29
+reproduced exactly across both runs, so the method is stable even though the figure is not.
+
+**Zero false positives.** 55 edges hand-verified against source, plus 12 more on the re-measure; a whole-population automated
+check over all 1,508 new edges; and for every edge whose callee class name is duplicated in the
+repository, the binding was checked against the caller's own import — 126 of 126 correct in
+`nest` alone. No new edge points at an external, synthetic or dangling node.
+
+The disclosure side works on real code too: `insert::ClosureSubjectExecutor.ts` in typeorm reports
+16 chained-receiver boundary sites where `main` reports none, including
+`this.queryRunner.dataSource.driver.escape(...)` — a three-level chain the resolver deliberately
+does not read, disclosed rather than guessed.
+
+**A second-order effect worth naming:** in `mikro-orm`, one call site gained 6 imprecise
+`cha-name-only` edges the branch did not create. `EntityLoader.findChildren`'s `children.find(…)`
+is an `Array.prototype.find` that CHA fans out over every `find` in the repository; `main` drops
+that fan-out whole because it exceeds `CHA_FANOUT_CAP`. Two of those candidates are now directly
+resolved elsewhere and filtered out, pushing the site *under* the cap so the remainder are emitted.
+The imprecision is pre-existing and honestly labelled `synthesized` — this change only alters which
+sites the cap happens to hide. Left alone deliberately: suppressing it would mean re-tuning CHA's
+cap semantics, which is a different change.
+
+## Upgrade notes
+
+Audited by running the real upgrade, not by reasoning about it. One true break was found and
+fixed (analyze answering "up to date" on a store it could not read — see `tasks.md`). What remains
+is disclosed rather than silent:
+
+- **First analyze after upgrading is a cold build.** `FACT_FORMAT_VERSION` 6→7 invalidates the
+  per-file extraction cache once: measured `re-extracted 4 file(s), reused 0 cached`. On a
+  1,000-file repo that is roughly 19–30s instead of 11–14s, once.
+- **Downgrading needs `openlore analyze --force`.** An older build reads a schema-12 store,
+  discloses the mismatch correctly in `doctor` and `orient --json`, and falls back cleanly on
+  bundle import — but its own `analyze` still answers "up to date" (it predates the fix above).
+- **Two OpenLore builds sharing one repository will flap the store 11↔12.** Bounded and
+  non-corrupting — no quarantine files, no data loss beyond the `receiver_inferred` edges the old
+  build cannot represent, and the new build heals it — but the OLD side reports success with no
+  signal that it downgraded the graph, and its watcher goes inert after spending its repair budget.
+  Not fixable from this side; worth knowing before pinning two versions in one CI.
+- **Two visible metric shifts, both improvements:** `report_coverage_gaps` moves (796 → 761 gaps
+  on this repository) because fewer functions are falsely "unreached", and
+  `analyze_error_propagation` gains a chained-receiver boundary. On a low-bind repository that
+  boundary is mostly builtin-shaped receivers (`this.map.get`, `this.items.push`) — bounded to one
+  summary line plus a 15-item sample, and confined to that one tool.
+
+## Decisions to record
+
+Two choices here set precedent beyond this change and should be captured as ADRs through
+`openlore decisions --consolidate` when a provider key is available (the consolidation path
+requires an LLM, so this change could not record them itself — they are written out here so the
+reasoning is not lost):
+
+1. **A new `EdgeConfidence` tier, `receiver_inferred`, at cost 2.** It sits with `type_inference`
+   and `type_name`: a DECLARED field type is strong evidence, but still one inference removed from
+   resolving the callee's own qualified name. Everything that enumerates confidences now derives
+   the set from `CALL_DISTANCE_COSTS`, so adding a tier can no longer silently bypass a validator.
+2. **An import binding is decisive, and a name from an unresolvable specifier is refused.** This
+   contradicts the last rung of the pre-existing affinity ladder (bind a single repository-wide
+   definition) wherever the source has said where the name comes from. It will govern future
+   resolution strategies, and it is why `SCHEMA_VERSION` moved.
 
 ## Why this is in scope
 
-Call-graph recall is the substrate's foundation; every conclusion tool inherits it. Shrinking the
-one honestly-disclosed resolver boundary with a deterministic, local, no-LSP technique — while
-keeping the disclosure for the residue — is squarely on the "deepen what's differentiated" line, and
-closes a concrete recall gap a live competitor already closes. Staged behind the single-pass walk so
-it adds a lookup, not a parse.
+Call-graph recall is the substrate every conclusion inherits, and this closes the `this`-rooted
+family of shapes that were *silent* rather than disclosed. The technique is deterministic, local, and needs no
+LSP or type checker — the same posture as the rest of the analyzer.
 
 ## Impact
 
-- Files: `src/core/analyzer/call-graph.ts` (registry construction in the walk, receiver resolution
-  step), `src/core/analyzer/type-inference-engine.ts` / `cha.ts` (reuse the type model), the
-  confidence/provenance tiers (add `receiver_inferred`); `analyze_error_propagation` and the
-  language-capability matrix (report where receiver resolution is supported: TS/JS/Python first,
-  others disclosed unsupported).
-- Specs: `analyzer` — 2 ADDED (IntraObjectReceiverResolutionViaTypeRegistries,
-  ResidualReceiverBoundaryStaysDisclosed).
-- No new tool. Risk: medium — a wrong receiver type produces a wrong edge, so the confidence tier
-  and language scoping matter: only emit a resolved edge when the registry types the receiver
-  unambiguously, else keep the boundary. Best sequenced after `optimize-analyze-pipeline-passes`
-  (shares the single-pass walk). Verify: a `this.helper()` resolvable by field/return type gets a
-  `receiver_inferred` edge; an ambiguous receiver stays a disclosed boundary; recall rises on the
-  fixture without new false edges.
+- **Files:** `receiver-registry.ts` (new), the TS/JS and Python call queries and their extractors,
+  the Pass-2 resolution ladder and the CHA feed (`call-graph.ts`), `RawEdge`/`EdgeConfidence`/
+  `AmbiguousStrategy`/`EDGE_CONFIDENCE_VALUES` and the call-distance costs (`call-graph-types.ts`),
+  the Pass-1 fact cache (`FACT_FORMAT_VERSION` 6→7, so a pre-change cached row cannot silently
+  un-resolve a file), `import-resolver-bridge.ts` (the unresolvable-specifier marker),
+  `exception-flow.ts`, `error-propagation.ts`, `language-support.ts`, and the three runtime
+  validators whose hand-written confidence sets are now derived (`edge-store.ts`, `graph.ts`,
+  `analysis.ts`), plus `edit-verdict.ts` (a comment), `cli/commands/error-propagation.ts` (a view
+  type), `docs/language-support.md`, `docs/mcp-tools.md`, `CLAUDE.md`.
+- **`SCHEMA_VERSION` 11 → 12 — a one-time rebuild for every existing database.** `edges.confidence`
+  is unconstrained TEXT, so without the bump a NEWER database opened by an OLDER OpenLore would
+  pass the version gate and then have every `receiver_inferred` row dropped by that build's own
+  validator, and an `.olbundle` import would recompute its digest through that same dropping reader
+  and reject a valid bundle as *tampered*. The bump turns both into the honest `schema-mismatch`
+  rebuild path. This is the highest-impact consequence of the change and is recorded in an ADR.
+- **Specs:** `analyzer` — 3 ADDED (IntraObjectReceiverResolutionViaTypeRegistries,
+  ResidualReceiverBoundaryStaysDisclosed, ChainedReceiverResidueIsScopedAndDeclared).
+- **Tool surface:** no tool added or removed. `analyze_error_propagation`'s RESPONSE shape gains
+  `summary.untypedReceiverCalls` and an optional top-level `untypedReceiverCalls` block — additive,
+  but consumers read that shape.
+- **Risk:** a wrong receiver type produces a wrong edge. Mitigated by binding only DECLARED types,
+  by treating an import binding for the type name as DECISIVE where one exists, by attributing a
+  field only to the class that provably owns it (no `this`-rebinding construct, no unnameable class
+  expression, no `static` slot, no plain constructor parameter, no capitalized local function), by
+  refusing a field with conflicting declarations, by searching within one type rather than the
+  global name space, by requiring a unique candidate, and by keeping the chained shape out of every
+  strategy that keys off the bare receiver token — including CHA, which would otherwise name-bind
+  `this.repo.save()` inside the caller's own hierarchy. The one inference that remains is binding a
+  single repository-wide definition when no import binding exists — the same unique-name step the
+  rest of the ladder already makes, and unavoidable because Python's absolute intra-project imports
+  resolve to nothing.

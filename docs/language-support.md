@@ -17,6 +17,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `imports` | Import/package resolution into the `import`-confidence cross-file edge path. TS/JS follows re-export/barrel chains; Python resolves leading-dot modules; Go resolves imported packages and same-package siblings; Java/Kotlin/C#/PHP resolve statically bindable `import`/`using`/`use` bindings from package or namespace declarations. Ruby remains name-only because its load forms do not statically bind names. | `IMPORT_RESOLUTION_LANGUAGES` (`import-resolver-bridge.ts`) |
 | `cfgOverlay` | A control-flow-graph overlay (branches/loops) via the data-driven CFG language table and grammar-shape adapters. | `cfgSupportsLanguage()` (`cfg.ts`) |
 | `typeInference` | Lightweight receiver-type inference, used to resolve method calls to their class. | `TYPE_INFERENCE_LANGUAGES` (`type-inference-engine.ts`) |
+| `receiverResolution` | Chained intra-object receiver resolution — `this.<field>.m()` / `self.<field>.m()` — through a per-file registry of declared field types (annotation, `new T()`, constructor parameter property, Python `__init__` annotation, class-body annotation, or `self.x = T()` construction — where a capitalized name the file declares as a `def` is a factory, not a class, and is refused) and locally-declared return types. A resolved call becomes a `receiver_inferred` edge; a receiver the registry cannot bind emits NO edge and is disclosed as a boundary by `analyze_error_propagation`, never guessed. Backed for TypeScript/JavaScript/Python. A language without it does not bind the shape; what it records instead is its own call query's business, and the three outcomes differ: Java/C# capture the chained receiver and fall through to ordinary member-call handling; **Go captures no chained receiver at all**, so it records nothing (a known open gap); and **Ruby is worse than either** — its call query matches only the receiverless alternative, so `self.repo.save` / `@repo.save` emit a raw edge carrying NO receiver, which then binds by `name_only` to any same-named method in the repository. All three are pre-existing and untouched here. | `RECEIVER_REGISTRY_LANGUAGES` (`receiver-registry.ts`) |
 | `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
 | `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-capability.ts`) |
@@ -30,7 +31,8 @@ The declarative registry (`src/core/analyzer/language-support.ts`) is the single
 consult at run time (the table above), never hand-maintained in parallel. So the coverage matrix
 cannot silently drift from what the analyzer actually does. `language-support.test.ts` behaviorally
 cross-checks **every member** of the `signatures`, `callGraph`, `complexity`, `imports`, `typeInference`,
-`cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, `errorPropagation`, and `dynamicBoundary` sets by running the real extractor on a per-language fixture and asserting it produces
+`receiverResolution`, `cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, `errorPropagation`, and
+`dynamicBoundary` sets by running the real extractor on a per-language fixture and asserting it produces
 output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
 `cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
 (`cfgSupportsLanguage`, `isIacLanguage`) for every language, and `iacProjection`'s per-ecosystem node
@@ -151,6 +153,19 @@ an existing one to a new capability:
    - `signatures`: add a case to `extractSignatures` (or an `EXTRA_LANG_PATTERNS` row) and add `L` to
      `SIGNATURE_LANGUAGES`.
    - `typeInference`: add a case to `inferTypesFromSource` and add `L` to `TYPE_INFERENCE_LANGUAGES`.
+   - `receiverResolution` (FIVE steps — the first two are easy to miss, and missing either fails
+     silently rather than loudly):
+     1. capture the chained receiver in `L`'s call query, setting `RawEdge.receiverField`;
+     2. add an `L` branch to `collectReceiverFieldFacts` (`receiver-registry.ts`). Its dispatch is
+        currently two-way (`Python` vs everything else), so a new language would otherwise fall
+        into the **TypeScript** collector and be silently mis-parsed;
+     3. add an `L` branch to `enclosingClassName` in the same file — its receiver-rebinding rules
+        are TS-shaped and Python-shaped only, and a wrong owner is a FALSE EDGE, not a miss;
+     4. teach `isSelfRootedMember` (`exception-flow.ts`) `L`'s member/wrapper node types, or the
+        residue goes back to being silent while the matrix claims support;
+     5. add `L` to `RECEIVER_REGISTRY_LANGUAGES` and drop a fixture into the `receiverResolution`
+        behavioral test — and assert the BOUNDARY fires for an untypeable receiver, not only that
+        a resolved edge appears.
    - `imports`: extend the live `buildBaseImportMap` path and add `L` to `IMPORT_RESOLUTION_LANGUAGES`.
    - `iacProjection`: add the ecosystem to `IAC_LANGUAGES` and its projector under `analyzer/iac/`.
    - `crossServiceHttp`: add a client idiom to `extractHttpCalls` and/or a route framework to the
