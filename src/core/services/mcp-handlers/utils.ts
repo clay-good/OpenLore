@@ -5,15 +5,17 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { descriptorIsThePathEntry } from '../../../utils/bounded-artifact-read.js';
-import { open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { lstat, open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
 import {
   REQUIRED_ANALYSIS_ARTIFACTS,
   artifactMatchesGeneration,
+  generationPublishInProgress,
   readCurrentGeneration,
 } from '../../runtime/analysis-generation.js';
+import { isAnalysisLockHeld } from '../../runtime/advisory-lock.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
@@ -286,8 +288,29 @@ export function queryTooLongError(query: unknown, field = 'query'): { error: str
  *  - `graph-unavailable`— an analysis exists but its call-graph/edge index is missing,
  *                         typically because a version upgrade reset the graph index
  *                         until the next `analyze`.
+ *
+ * The remaining reasons name an index that EXISTS and could not be served — the cases
+ * every caller used to flatten into "No analysis found", which is the one sentence that
+ * is wrong for all of them (change: name-the-reason-an-index-is-unservable). They are
+ * reasons of the SAME taxonomy deliberately: an agent branches on one `reason` field,
+ * never on two parallel vocabularies.
+ *  - `index-publish-in-progress`   — a writer is mid-publish RIGHT NOW. Expected and
+ *                                    transient; the remedy is to retry, not to rebuild.
+ *  - `index-generation-unavailable`— the generation manifest is present and was REFUSED
+ *                                    (malformed, oversized, not a regular file).
+ *  - `index-generation-mismatch`   — the artifacts no longer hash to their published
+ *                                    generation and NO writer was observed. A publish was
+ *                                    lost; serving would serve unverified bytes.
+ *  - `index-unreadable`            — present and coherent, and still not loadable (a
+ *                                    symlinked/irregular artifact, or a malformed one).
  */
-export type NotReadyReason = 'index-absent' | 'graph-unavailable';
+export type NotReadyReason =
+  | 'index-absent'
+  | 'graph-unavailable'
+  | 'index-publish-in-progress'
+  | 'index-generation-unavailable'
+  | 'index-generation-mismatch'
+  | 'index-unreadable';
 
 /** A structured "not ready" conclusion — see {@link notReadyResult}. */
 export interface NotReadyResult {
@@ -307,8 +330,12 @@ export interface NotReadyResult {
  * `reason` discriminator, and exact `remedy` command are added so an agent can act
  * on the cause deterministically and consistently across every tool.
  */
-export function notReadyResult(error: string, reason: NotReadyReason): NotReadyResult {
-  return { error, notReady: true, reason, remedy: 'openlore analyze' };
+export function notReadyResult(
+  error: string,
+  reason: NotReadyReason,
+  remedy = 'openlore analyze',
+): NotReadyResult {
+  return { error, notReady: true, reason, remedy };
 }
 
 interface ContextCacheEntry {
@@ -411,6 +438,123 @@ export async function primeContextCache(directory: string, ctx: CachedContext): 
   bindArtifactMtime(ctx, mtime);
   const generation = (await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]))?.generationId ?? null;
   _contextCache.set(key, { ctx, mtime, generation });
+}
+
+/**
+ * Name why {@link readCachedContext} returned null.
+ *
+ * `readCachedContext` already DISTINGUISHES these cases — it emits a different telemetry
+ * `reason` for each — and then returns a bare `null`, so every caller collapses them into
+ * "No analysis found. Run analyze_codebase first." That message is right for exactly one of
+ * them, and actively misleading for the rest: it reports a FAILED INTEGRITY CHECK as an
+ * absent index, which is the quiet downgrade `loadPartialFirstRun`'s docstring says this lane
+ * exists to prevent. It also hides the incident — a user reads "no analysis", runs analyze,
+ * it works, and the lost publish is never reported.
+ *
+ * The verdict is a {@link NotReadyResult}, the SAME shape and the same `reason` taxonomy every
+ * other not-ready conclusion already uses, so an agent branches on one field rather than on a
+ * parallel vocabulary.
+ *
+ * Called ONLY on the null path, so the ordinary read pays nothing for it. It re-derives
+ * rather than threading state through 56 call sites: the cost is a stat and a hash on a path
+ * that is already returning an error.
+ */
+export async function diagnoseIndexUnservable(directory: string): Promise<NotReadyResult> {
+  const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const contextPath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
+
+  try {
+    // `lstat`, not `stat`. The production reader opens `O_NOFOLLOW` and verifies the
+    // descriptor against the path entry, so it refuses a SYMLINK outright
+    // (`artifact_not_a_regular_file`). A path-following `stat` here would report a
+    // symlink-to-a-regular-file as an ordinary artifact and then diagnose the read failure as
+    // a lost publish, and a DANGLING symlink as an absent index — restating, as a diagnosis,
+    // the exact lie this function exists to remove. `lstat` describes the entry the reader
+    // actually refused. (It does not open the file, so the FIFO-blocking concern that forces
+    // the reader's `O_NONBLOCK` does not arise here.)
+    const entry = await lstat(contextPath);
+    if (!entry.isFile()) {
+      return notReadyResult(
+        `The analysis artifact at ${ARTIFACT_LLM_CONTEXT} is not a regular file `
+        + `(it is a ${describeEntryKind(entry)}) and was refused. Run analyze to rebuild it.`,
+        'index-unreadable',
+      );
+    }
+  } catch {
+    return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  }
+
+  // Ask BEFORE concluding damage. `markGenerationUnavailable` deliberately writes a
+  // well-formed `{version, state:'publishing'}` manifest before the first artifact
+  // replacement of a NORMAL, healthy publish, and `readCurrentGeneration` answers null for it
+  // by design. Reporting that as a damaged publish would call the commit protocol working
+  // exactly as specified a fault.
+  if (await generationPublishInProgress(analysisDir)) {
+    return notReadyResult(
+      'An analysis exists but a publish is in progress: the writer has marked the previous '
+      + 'generation unavailable and has not yet published the new one, so no generation can '
+      + 'currently be vouched for. This is the normal commit protocol, not damage — retry '
+      + 'shortly. If it persists, a writer died mid-publish and `openlore analyze` republishes.',
+      'index-publish-in-progress',
+      'retry shortly',
+    );
+  }
+
+  const manifest = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+  if (!manifest) {
+    return notReadyResult(
+      // Deliberately NOT "missing": an absent manifest is a legitimate legacy analysis and is
+      // synthesized, so it never reaches here. Nor "in progress": the sentinel is answered
+      // above. Reaching here means the manifest is PRESENT, is not the sentinel, and was
+      // REFUSED — a symlink, a FIFO, an oversized or malformed file — which
+      // `readCurrentGeneration` fails closed on rather than synthesizing around.
+      'An analysis exists but its generation manifest is present and was refused (it is '
+      + 'malformed, oversized, or not a regular file — an in-flight publish is reported '
+      + 'separately), so the artifacts cannot be vouched for and are not served. Re-run '
+      + 'analyze to republish.',
+      'index-generation-unavailable',
+    );
+  }
+
+  if (!await artifactMatchesGeneration(analysisDir, manifest, ARTIFACT_LLM_CONTEXT)) {
+    // A mismatch alone proves nothing. A writer updates artifacts IN PLACE and publishes the
+    // manifest LAST, so this is the EXPECTED state throughout any concurrent `analyze` or
+    // watcher persist — the very window `readCachedContext`'s own guard comment describes.
+    // Only the absence of a writer makes it an incident, so ask the writer lock instead of
+    // asserting one and hedging with "if this recurs".
+    if (await isAnalysisLockHeld(analysisDir)) {
+      return notReadyResult(
+        'An analysis exists but does not currently match its published generation '
+        + `(${manifest.generationId}) because a writer holds the analysis lock: a publish is `
+        + 'in progress and the manifest is published last. This is the expected mid-write '
+        + 'window, not damage — retry shortly.',
+        'index-publish-in-progress',
+        'retry shortly',
+      );
+    }
+    return notReadyResult(
+      'An analysis exists but does NOT match its published generation '
+      + `(${manifest.generationId}): the artifacts were rewritten and the manifest was not `
+      + 'republished, so serving them would serve unverified bytes. No writer holds the '
+      + 'analysis lock, so this is not an ordinary mid-write window — a publish was lost. '
+      + 'Re-run analyze to republish, and a recurrence without a crash is worth reporting.',
+      'index-generation-mismatch',
+    );
+  }
+
+  return notReadyResult(
+    'An analysis exists and matches its generation, but could not be read into a usable '
+    + 'context. Re-run analyze; if it recurs, the artifact is likely malformed.',
+    'index-unreadable',
+  );
+}
+
+/** Name the entry kind a refused artifact actually is, without guessing beyond what stat saw. */
+function describeEntryKind(entry: { isSymbolicLink(): boolean; isDirectory(): boolean; isFIFO(): boolean }): string {
+  if (entry.isSymbolicLink()) return 'symbolic link';
+  if (entry.isDirectory()) return 'directory';
+  if (entry.isFIFO()) return 'named pipe';
+  return 'special file';
 }
 
 export async function readCachedContext(directory: string, timeout?: number): Promise<CachedContext | null> {

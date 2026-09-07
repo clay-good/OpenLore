@@ -521,7 +521,25 @@ export async function withAnalysisLock<T>(analysisDir: string, fn: () => Promise
  * `record_decision` spawns against the run already underway.
  */
 export async function isDecisionsLockHeld(rootPath: string): Promise<boolean> {
-  const lockPath = join(decisionsDir(rootPath), DECISIONS_LOCK_FILE);
+  return isLockHeldAt(decisionsDir(rootPath), DECISIONS_LOCK_FILE);
+}
+
+/**
+ * Non-blocking check: is a writer currently inside the artifact-write critical section
+ * for this analysis directory?
+ *
+ * The one honest way to tell an ORDINARY mid-write window apart from a genuine incident.
+ * A writer rewrites artifacts in place and publishes the manifest LAST, so an
+ * artifact/manifest mismatch is the EXPECTED state while `analyze` or a watcher persist is
+ * running — and an incident only when nobody is writing. Never acquires, steals, or waits.
+ */
+export async function isAnalysisLockHeld(analysisDir: string): Promise<boolean> {
+  return isLockHeldAt(analysisDir, ANALYSIS_LOCK_FILE);
+}
+
+/** Shared body of the non-blocking lock peeks: present, a regular file, and not stale. */
+async function isLockHeldAt(dir: string, lockFile: string): Promise<boolean> {
+  const lockPath = join(dir, lockFile);
   try {
     const handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
