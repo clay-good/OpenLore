@@ -190,12 +190,12 @@
     "minimatch": "^10.2.6",
     "ora": "^9.4.1",
     "tree-sitter-wasms": "0.1.13",
-    "web-tree-sitter": "0.25.10",
+    "web-tree-sitter": "0.27.0",
     "yaml": "^2.6.1"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@lancedb/lancedb": "0.37.1",
+    "@lancedb/lancedb": "0.38.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@vitejs/plugin-react": "^6.1.1",
     "apache-arrow": "^21.1.0",
