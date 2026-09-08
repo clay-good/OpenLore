@@ -59,6 +59,7 @@
     "audit:gate": "node scripts/audit-gate.mjs",
     "audit:packlist": "node scripts/audit-packlist.mjs",
     "lock:integrity": "node scripts/backfill-lock-integrity.mjs",
+    "lock:integrity:check": "node scripts/backfill-lock-integrity.mjs --check",
     "audit:deps": "node scripts/audit-dependencies.mjs",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/postinstall.mjs",
