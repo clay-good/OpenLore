@@ -34,6 +34,17 @@ updates:
           - 'tree-sitter-*'
           - 'web-tree-sitter'
           - '@lancedb/lancedb'
+      # The Pi host packages, in their own PR — same reasoning as parser-stack, a
+      # different cause. Every `@earendil-works/pi-*` release so far ships an
+      # npm-shrinkwrap.json whose nested entries carry no `integrity` field. npm copies
+      # them verbatim, the lockfile loses those SRI digests, and CI fails until someone
+      # runs `npm run lock:integrity` — which Dependabot cannot do. While these sat in
+      # dev-dependencies, every pi bump held four unrelated harmless updates hostage
+      # behind that fixup. Separated, the fixup is one small PR; the rest lands untouched.
+      pi-host:
+        applies-to: version-updates
+        patterns:
+          - '@earendil-works/pi-*'
       # One PR for routine dev-tooling drift (eslint, vitest, tsx, types).
       dev-dependencies:
         applies-to: version-updates
