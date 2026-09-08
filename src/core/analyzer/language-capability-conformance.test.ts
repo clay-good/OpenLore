@@ -100,10 +100,9 @@ describe('language conformance — grammar availability (diagnostic, runs first)
     ).toEqual([]);
   });
 
-  // Dart and Lua have no host-ABI-compatible native build, so they are the only two
-  // languages that reach the WASM lane: `tree-sitter-wasms` binaries loaded through
-  // `web-tree-sitter`. Those two packages are versioned independently and are NOT
-  // freely upgradable together.
+  // Dart and Lua are the only two languages that reach the WASM lane: `tree-sitter-wasms`
+  // binaries loaded through `web-tree-sitter`. Those two packages are versioned
+  // independently and are NOT freely upgradable together.
   //
   // Measured 2026-09-05: `web-tree-sitter` 0.25.10 loads them; 0.26.0 and every version
   // after it reject them outright. The binaries in `tree-sitter-wasms@0.1.13` — the
@@ -113,7 +112,14 @@ describe('language conformance — grammar availability (diagnostic, runs first)
   // them. That is exactly the over-claim this file exists to prevent, and it cost a day
   // to trace, so the constraint is asserted here rather than left as a comment.
   //
-  // Lift this only when `tree-sitter-wasms` publishes binaries built for the new loader.
+  // Note the fault is in these BINARIES, not in the 0.26+ loader: measured 2026-09-07,
+  // web-tree-sitter 0.27.0 loads other grammars' WASM (e.g. the maintained Lua and Dart
+  // grammar packages' own builds) without complaint. So there are two ways out, not one:
+  //   1. `tree-sitter-wasms` publishes binaries built for the new loader, or
+  //   2. Dart and Lua move off this lane entirely — native grammars for both now exist
+  //      (issue #472), which would delete the lane and drop both packages. Evaluated and
+  //      declined on supply-chain grounds, not for lack of a working option.
+  // Lift this pin when either lands, and re-run this suite to confirm Dart and Lua load.
   it('keeps web-tree-sitter on a version whose loader accepts the pinned tree-sitter-wasms binaries', () => {
     const pkg = createRequire(import.meta.url)('../../../package.json') as {
       dependencies: Record<string, string>;

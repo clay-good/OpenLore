@@ -101,8 +101,14 @@ losing templates and namespaces.
 
 If a native grammar is unavailable or ABI-incompatible, OpenLore warns once, keeps the file in
 keyword search, and skips graph extraction for that language without aborting analysis. Lua and
-Dart use portable WASM grammars because their native builds do not match the pinned host binding.
-Each uses an isolated WASM module; if that backend is unavailable, they degrade in the same way.
+Dart are the only two languages served by portable WASM grammars rather than the native lane, each
+in an isolated WASM module; if that backend is unavailable, they degrade in the same way.
+
+Keeping those two on WASM is a deliberate hold rather than an absence of alternatives. Native Dart
+and Lua grammars now exist and were evaluated (issue #472); adopting them would remove the WASM lane
+entirely and unpin `web-tree-sitter`, but the only fitting native Dart package is a single-maintainer
+fork with negligible download volume, so the swap was declined on supply-chain grounds. The pin is
+enforced by a guard test, so a silent capability regression cannot slip through.
 
 ### Out of scope
 

@@ -2659,8 +2659,9 @@ async function loadGrammarSoft(
 }
 
 /**
- * WASM grammar loader via web-tree-sitter (ABI-agnostic, portable). Used for
- * grammars with no host-ABI-compatible native build (Dart, Lua). Soft-fails.
+ * WASM grammar loader via web-tree-sitter (ABI-agnostic, portable). The only
+ * two callers are Dart and Lua; every other language takes the native lane.
+ * Soft-fails. See the Dart block below for why this lane is still here.
  */
 async function loadWasmGrammarSoft(
   language: string,
@@ -3038,7 +3039,7 @@ const SCALA_SPEC: QueryLangSpec = {
   `,
 };
 
-// ── Lua (via bundled WASM — no ABI-compatible native build for the host) ─────
+// ── Lua (via bundled WASM — see the Dart block for why this lane stays) ────
 const LUA_SPEC: QueryLangSpec = {
   language: 'Lua',
   loader: () => loadWasmGrammarSoft('Lua', 'tree-sitter-wasms/out/tree-sitter-lua.wasm'),
@@ -3104,10 +3105,17 @@ const RECOVERED_RECEIVER_LANGUAGES: ReadonlySet<string> = new Set(['Kotlin', 'C#
 
 // ── Dart (via portable WASM + web-tree-sitter) ───────────────────────────────
 //
-// No ABI-compatible native Dart grammar exists for the pinned host binding, so
 // Dart loads the portable `tree-sitter-wasms` WASM through web-tree-sitter
 // (ABI-agnostic, pure JS/WASM, builds on every platform) — each WASM grammar in
-// its own module instance (see loadWasmGrammarSoft). Dart's grammar places the
+// its own module instance (see loadWasmGrammarSoft).
+//
+// This is a deliberate hold, not an absence. Native grammars for Dart and Lua
+// DO now exist and were evaluated (issue #472): the native Dart grammar parses
+// byte-identically to this one, and migrating both would delete this lane, drop
+// `web-tree-sitter` + `tree-sitter-wasms` from dependencies, and unpin
+// web-tree-sitter 0.26+. It was declined on supply-chain grounds — the only
+// fitting native Dart package is a single-maintainer fork with negligible
+// download volume. Revisit if a well-supported build appears. Dart's grammar places the
 // `function_body` as a SIBLING of `function_signature` (not a child), so a
 // generic query extractor would attribute no calls — hence a custom walk that
 // spans signature+body.
