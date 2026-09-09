@@ -3,6 +3,33 @@
 All notable changes to OpenLore are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-09-07
+
+**The release where the first run stops being the worst run — and Windows joins CI.**
+
+- **Install once, and every repository you open works.** `install` wires OpenLore at user scope and
+  points at OpenLore's own CLI instead of an `npx` shim, so no console window flashes on Windows and
+  a second repository needs no second setup.
+- **Answer during the first build, instead of "no index found".** A partially built index serves what
+  it already has, and an index that genuinely cannot be served says *why* rather than reporting absence.
+- **The call graph names where it stops seeing.** Chained intra-object receivers resolve instead of
+  going silent, and unresolved call shapes are disclosed as boundaries rather than assumed empty.
+- **Windows is a tested platform, not a hope.** The unit suite runs on Windows in CI and ten defects
+  it surfaced are fixed; the deny-list dropped from 49 tests to 2. Repository-relative paths OpenLore
+  serves are POSIX on every platform.
+- **The watcher and the serving path stop wasting work.** A flush can no longer skip silently, a
+  deterministic-failure budget is not spent on a wait, per-call serving work is bounded, and serving
+  caches invalidate on external writes.
+- **Dependency and supply-chain upkeep.** Native tree-sitter grammars, LanceDB 0.38.0, Vitest 5, and
+  the dev-dependency group are current; the `sharp` override moves to ^0.35.4 to clear the libheif
+  advisory (GHSA-rgj7-g3m4-5g8c); CI now fails on a digest-less lockfile at the point it is fixable.
+
+No breaking changes. No public API or configuration schema change from 3.1.0.
+
+**Upgrade:** `npm i -g openlore@3.1.1` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.1.0...v3.1.1
+
 ## [3.1.0] - 2026-08-30
 
 **The release where OpenLore learns the shape and vocabulary of a whole workspace.**
