@@ -87,6 +87,26 @@ describe('FileWalker — symlinked directories', () => {
     expect(Object.keys(result.summary.skippedReasons ?? {})).toContain('symlink:outside-root');
   });
 
+  it('refuses to index a FILE symlinked out of the repository, and says so', async () => {
+    // The file-level twin of the case above, and the one that was missing: only the DIRECTORY
+    // branch checked confinement, so a repo committing `src/config.ts -> <host file>` put a file
+    // the user never checked in into the corpus with no skip reason — read by the extractors and
+    // the text index, and enough on its own to abort the analysis in the fingerprinter.
+    const repo = makeDir('ol-sym-file-esc-');
+    const outside = makeDir('ol-sym-file-out-');
+    writeFileSync(join(outside, 'secrets.ts'), 'export const token = "leaked";\n');
+    mkdirSync(join(repo, 'src'));
+    writeFileSync(join(repo, 'src', 'mine.ts'), 'export function mine() {}\n');
+    symlinkSync(join(outside, 'secrets.ts'), join(repo, 'src', 'config.ts'));
+
+    const result = await new FileWalker(repo).walk();
+    const names = result.files.map(f => f.path);
+
+    expect(names.some(p => p.endsWith('config.ts')), 'indexed a file outside the repository').toBe(false);
+    expect(names.some(p => p.endsWith('mine.ts'))).toBe(true);
+    expect(Object.keys(result.summary.skippedReasons ?? {})).toContain('symlink:outside-root');
+  });
+
   it('terminates on a symlink cycle instead of walking forever', async () => {
     const repo = makeDir('ol-sym-loop-');
     mkdirSync(join(repo, 'src'));

@@ -546,7 +546,7 @@ export class McpWatcher {
           return;
         }
         process.stderr.write(
-          `[mcp-watcher] source watcher error (${(err as Error)?.message ?? String(err)}); ` +
+          `[mcp-watcher] source watcher error (${sanitizeForTerminal((err as Error)?.message ?? String(err))}); ` +
           `continuing — changes may lag until the next analyze\n`
         );
       });
@@ -585,7 +585,7 @@ export class McpWatcher {
       // fallback the catch block below promises when setup fails).
       this.gitWatcher.on('error', (err: unknown) => {
         process.stderr.write(
-          `[mcp-watcher] .git ref watcher error (${(err as Error)?.message ?? String(err)}); ` +
+          `[mcp-watcher] .git ref watcher error (${sanitizeForTerminal((err as Error)?.message ?? String(err))}); ` +
           `VCS-flood detection falling back to the batch-size threshold\n`
         );
         const failed = this.gitWatcher;
@@ -598,7 +598,7 @@ export class McpWatcher {
     }
 
     process.stderr.write(
-      `[mcp-watcher] watching ${this.rootPath}` +
+      `[mcp-watcher] watching ${sanitizeForTerminal(this.rootPath)}` +
       `${this.embed && !this.embedDegraded ? '' : ' (signatures-only)'}\n`
     );
   }
@@ -655,7 +655,7 @@ export class McpWatcher {
       try {
         await this.flushBatchWithBusyRetry(shutdownBatch, shutdownDeletions, { syncFlush: true });
       } catch (err) {
-        process.stderr.write(`[mcp-watcher] shutdown flush error: ${(err as Error).message}\n`);
+        process.stderr.write(`[mcp-watcher] shutdown flush error: ${sanitizeForTerminal((err as Error).message)}\n`);
         // Put the work back before the disclosure below counts it. Dropping it
         // here made the "still deferred" line read an empty queue and stay silent
         // in exactly the case where it mattered most: the batch was not deferred,
@@ -854,7 +854,7 @@ export class McpWatcher {
     deletions: readonly string[],
     reason: string,
   ): Promise<void> {
-    process.stderr.write(`[mcp-watcher] error: ${reason}\n`);
+    process.stderr.write(`[mcp-watcher] error: ${sanitizeForTerminal(reason)}\n`);
     const budget = isTransientContention(reason) ? WATCH_MAX_CONTENTION_RETRIES : WATCH_MAX_EVENT_RETRIES;
     const requeued: string[] = [];
     const abandoned: string[] = [];
@@ -987,7 +987,7 @@ export class McpWatcher {
       // named the drop, and failing here must not mask it with a second error.
       process.stderr.write(
         `[mcp-watcher] could not record ${staleFiles.length} abandoned change(s) as stale: ` +
-        `${(err as Error).message}\n`,
+        `${sanitizeForTerminal((err as Error).message)}\n`,
       );
     }
   }
@@ -1286,7 +1286,7 @@ export class McpWatcher {
       ))?.generationId;
       const loaded = await this.loadContext();
       if (!loaded) {
-        process.stderr.write(`[mcp-watcher] no context at ${this.contextPath} — run analyze first\n`);
+        process.stderr.write(`[mcp-watcher] no context at ${sanitizeForTerminal(this.contextPath)} — run analyze first\n`);
         return;
       }
       // 2. Incremental edge update (CGC _handle_modification algorithm), one open
@@ -1300,7 +1300,7 @@ export class McpWatcher {
         // changed file's nodes), so skip it — a full `analyze` must rebuild.
         if (store.notReady) {
           process.stderr.write(
-            `[mcp-watcher] graph index not ready (${store.notReady.reason}) — scheduling a background rebuild. ` +
+            `[mcp-watcher] graph index not ready (${sanitizeForTerminal(store.notReady.reason)}) — scheduling a background rebuild. ` +
             'Skipping incremental update to avoid a partial graph.\n'
           );
           this.scheduleBackgroundRebuild();
@@ -1700,7 +1700,7 @@ export class McpWatcher {
           // The generation already advanced, so any previous verdict is rejected
           // as stale by readers. Preserve graph freshness and disclose the missing
           // optional delivery artifact rather than rolling back committed analysis.
-          process.stderr.write(`[mcp-watcher] edit-verdict write error: ${(err as Error).message}\n`);
+          process.stderr.write(`[mcp-watcher] edit-verdict write error: ${sanitizeForTerminal((err as Error).message)}\n`);
         }
       }
       context = loaded;
@@ -1790,12 +1790,12 @@ export class McpWatcher {
         if (code === 0) invalidateVectorIndexCaches(this.outputPath);
       });
       child.on('error', (err) => {
-        process.stderr.write(`[mcp-watcher] background rebuild failed to start (${err.message}) — run "openlore analyze".\n`);
+        process.stderr.write(`[mcp-watcher] background rebuild failed to start (${sanitizeForTerminal(err.message)}) — run "openlore analyze".\n`);
       });
       child.unref();
       process.stderr.write('[mcp-watcher] background "openlore analyze --reanalyze" started; the graph will self-heal shortly.\n');
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] background rebuild could not be spawned (${(err as Error).message}) — run "openlore analyze".\n`);
+      process.stderr.write(`[mcp-watcher] background rebuild could not be spawned (${sanitizeForTerminal((err as Error).message)}) — run "openlore analyze".\n`);
     }
   }
 
@@ -1901,7 +1901,7 @@ export class McpWatcher {
       });
       child.on('error', (err) => {
         this.graphRebuildRunning = false;
-        process.stderr.write(`[mcp-watcher] background graph rebuild failed to start (${err.message}) — run "openlore analyze".\n`);
+        process.stderr.write(`[mcp-watcher] background graph rebuild failed to start (${sanitizeForTerminal(err.message)}) — run "openlore analyze".\n`);
       });
       child.on('exit', () => {
         this.graphRebuildRunning = false;
@@ -1911,7 +1911,7 @@ export class McpWatcher {
       process.stderr.write(`[mcp-watcher] background "openlore analyze --reanalyze" started (${reason}); the graph will refresh shortly.\n`);
     } catch (err) {
       this.graphRebuildRunning = false;
-      process.stderr.write(`[mcp-watcher] background graph rebuild could not be spawned (${(err as Error).message}) — run "openlore analyze".\n`);
+      process.stderr.write(`[mcp-watcher] background graph rebuild could not be spawned (${sanitizeForTerminal((err as Error).message)}) — run "openlore analyze".\n`);
     }
   }
 
@@ -2013,7 +2013,7 @@ export class McpWatcher {
       try {
         await this.updateVectors(context, changedFiles, nodes);
       } catch (err) {
-        process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
+        process.stderr.write(`[mcp-watcher] embed error: ${sanitizeForTerminal((err as Error).message)}\n`);
       }
     })();
     this.embedPromise = operation;
@@ -2095,7 +2095,7 @@ export class McpWatcher {
         );
       }
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] embed error: ${sanitizeForTerminal((err as Error).message)}\n`);
     }
   }
 
@@ -2113,7 +2113,7 @@ export class McpWatcher {
         process.stderr.write(`[mcp-watcher] text-line index: updated ${changed.length} file(s)\n`);
       }
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] text-line error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] text-line error: ${sanitizeForTerminal((err as Error).message)}\n`);
     }
   }
 
@@ -2327,7 +2327,7 @@ export class McpWatcher {
         );
       }
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] dependency-graph error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] dependency-graph error: ${sanitizeForTerminal((err as Error).message)}\n`);
     }
     return breakages;
   }
@@ -2376,7 +2376,7 @@ export class McpWatcher {
         process.stderr.write(`[mcp-watcher] style fingerprint: refreshed ${changedFiles.length} changed / ${deletedRels.length} deleted\n`);
       }
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] style-fingerprint error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] style-fingerprint error: ${sanitizeForTerminal((err as Error).message)}\n`);
     }
   }
 
@@ -2433,7 +2433,7 @@ export class McpWatcher {
       }
       await atomicWriteFile(dbPath, JSON.stringify(report, null, 2));
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] dynamic-boundary error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] dynamic-boundary error: ${sanitizeForTerminal((err as Error).message)}\n`);
     }
   }
 
@@ -2552,7 +2552,7 @@ export class McpWatcher {
         process.stderr.write(`[mcp-watcher] parse health: refreshed ${changedFiles.length} changed / ${deletedRels.length} deleted\n`);
       }
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] parse-health error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] parse-health error: ${sanitizeForTerminal((err as Error).message)}\n`);
     }
   }
 
@@ -2612,7 +2612,7 @@ export class McpWatcher {
         }
       } catch (err) {
         if (isSqliteBusyError(err)) throw err;
-        process.stderr.write(`[mcp-watcher] delete (graph) error: ${(err as Error).message}\n`);
+        process.stderr.write(`[mcp-watcher] delete (graph) error: ${sanitizeForTerminal((err as Error).message)}\n`);
       } finally {
         store.close();
       }
@@ -2642,7 +2642,7 @@ export class McpWatcher {
           await TextLineIndex.updateFiles(this.outputPath, [], rels);
         }
       } catch (err) {
-        process.stderr.write(`[mcp-watcher] delete (text) error: ${(err as Error).message}\n`);
+        process.stderr.write(`[mcp-watcher] delete (text) error: ${sanitizeForTerminal((err as Error).message)}\n`);
       }
 
       // 4. Vector index — delete the deleted files' rows (no nodes to add).
@@ -2655,7 +2655,7 @@ export class McpWatcher {
           );
         }
       } catch (err) {
-        process.stderr.write(`[mcp-watcher] delete (vector) error: ${(err as Error).message}\n`);
+        process.stderr.write(`[mcp-watcher] delete (vector) error: ${sanitizeForTerminal((err as Error).message)}\n`);
       }
 
       // 5. Dependency graph — remove the deleted nodes and every edge touching them.
@@ -2711,7 +2711,7 @@ export class McpWatcher {
       }
       return manifest.generationId;
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] generation republish error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] generation republish error: ${sanitizeForTerminal((err as Error).message)}\n`);
       return null;
     }
   }
@@ -2758,7 +2758,7 @@ export class McpWatcher {
 
       await atomicWriteFile(graphPath, JSON.stringify(graph));
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] delete (dep-graph) error: ${(err as Error).message}\n`);
+      process.stderr.write(`[mcp-watcher] delete (dep-graph) error: ${sanitizeForTerminal((err as Error).message)}\n`);
     }
   }
 

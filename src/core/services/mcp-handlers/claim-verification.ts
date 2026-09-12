@@ -35,8 +35,8 @@
  * `add-confidence-boundary-disclosure`, rather than fabricating a decisive answer.
  */
 
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { traversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
@@ -151,8 +151,10 @@ function resolveSymbol(cg: SerializedCallGraph, name: string): Resolution {
 /** Read the build commit the index was analyzed at, if it was captured. */
 async function readIndexCommit(absDir: string): Promise<string | null> {
   try {
-    const raw = await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT), 'utf-8');
-    const fp = JSON.parse(raw) as { commit?: string | null };
+    // Bounded read: repository-controlled artifact (symlink / FIFO / oversized all fail closed).
+    const raw = await readArtifactBounded(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT));
+    if (!raw) return null;
+    const fp = JSON.parse(raw.text) as { commit?: string | null };
     return fp.commit ?? null;
   } catch {
     return null;
@@ -374,6 +376,16 @@ function shortTitle(s: string, max = 80): string {
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
 
+/**
+ * The statuses under which a recorded decision is actually in force, and may
+ * therefore be cited as current. `verified`/`approved` is the blocking-gate
+ * definition (`isBlockingStatus`); `auto-approved`/`synced` are already written to
+ * the specs (autopilot acceptance is disclosed in the reason). `draft`,
+ * `consolidated` and `phantom` are work-in-progress, not authority.
+ */
+const AUTHORITATIVE_FOR_CITATION: ReadonlySet<PendingDecision['status']> =
+  new Set<PendingDecision['status']>(['verified', 'approved', 'auto-approved', 'synced']);
+
 /** A citation for a decision-claim verdict — the decision-store analogue of {@link Receipt}. */
 interface DecisionReceipt {
   indexCommit: string | null;
@@ -406,12 +418,14 @@ interface DecisionReceipt {
  * two never disagree about what counts as superseded.
  *
  * Verdicts:
- *  - `confirmed`   — the id resolves to a recorded decision that is neither
- *                    superseded nor rejected; citing it as current is sound.
+ *  - `confirmed`   — the id resolves to a recorded decision that is in force
+ *                    ({@link AUTHORITATIVE_FOR_CITATION}) and neither superseded
+ *                    nor rejected; citing it as current is sound.
  *  - `refuted`     — the decision has been superseded (reason names the live
  *                    superseder) or was rejected; citing it is stale/unsound.
- *  - `unverifiable` — the id is malformed or no such decision is recorded here;
- *                    the agent should hedge or read the source.
+ *  - `unverifiable` — the id is malformed, no such decision is recorded here, or
+ *                    the decision is recorded but not in force; the agent should
+ *                    hedge or read the source.
  *
  * Pure decision-store read, no LLM (north star `c6d1ad07`).
  */
@@ -489,10 +503,29 @@ async function verifyDecisionCurrent(absDir: string, subject: string): Promise<u
     };
   }
 
+  // Fail CLOSED on the status, in both directions. The status is repo content:
+  //  (a) it is bounded before interpolation, exactly as the title is — a crafted
+  //      multi-line status would otherwise forge its own lines inside the receipt
+  //      this tool tells the agent to cite, under `verdict: 'confirmed'`.
+  //  (b) only a status that actually puts the decision IN FORCE may confirm. "not
+  //      rejected and not superseded" is not authority: a `draft` an attacker
+  //      committed, a `phantom` with no matching code, or a `consolidated`
+  //      intermediate would all have confirmed. Everything else is `unverifiable`
+  //      — hedge or read the source — matching the rest of this module.
+  const status = shortTitle(target.status);
+  if (!AUTHORITATIVE_FOR_CITATION.has(target.status)) {
+    return {
+      claim,
+      verdict: 'unverifiable' as Verdict,
+      reason: `decision ${id} ("${shortTitle(target.title)}") is recorded with status "${status}", which is not an authoritative status (${[...AUTHORITATIVE_FOR_CITATION].join(', ')}). It is not superseded, but it is not in force either — do not cite it as governing code until it is.`,
+      confidenceBoundary: cleanBoundary,
+    };
+  }
+
   const provenance = target.approvedBy === 'autopilot' && !target.humanReviewedAt
     ? ' (auto-accepted by decision autopilot, not yet human-reviewed — disclose this provenance when citing it)'
     : '';
-  const evidence = `decision ${id} ("${shortTitle(target.title)}") is recorded with status "${target.status}"${provenance} and is not superseded by any recorded decision`;
+  const evidence = `decision ${id} ("${shortTitle(target.title)}") is recorded with status "${status}"${provenance} and is not superseded by any recorded decision`;
   return {
     claim,
     verdict: 'confirmed' as Verdict,

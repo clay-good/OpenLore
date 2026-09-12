@@ -6,11 +6,30 @@
  */
 export const TOKENIZER_VERSION = 2;
 
-/** Split one alphanumeric chunk on camelCase / PascalCase boundaries. */
+/**
+ * Split one alphanumeric chunk on camelCase / PascalCase boundaries.
+ *
+ * The acronym rule captures ONE capital, not `([A-Z]+)`. The `+` was pure waste and it
+ * was quadratic: it ate the whole run of capitals, then required `[A-Z][a-z]`, then gave
+ * the run back one character at a time — from every start offset. `tokenize` splits on
+ * `[^A-Za-z0-9]+`, so an all-capitals identifier arrives here as ONE unbounded chunk
+ * (`buildText` appends a function's skeleton body straight out of the source), and a
+ * 200,000-character uppercase identifier is legal JavaScript. Measured on the real
+ * `tokenize`: 7.5 s at 50 KB of `A`, 129 s at 200 KB — paid over the whole indexed corpus.
+ *
+ * Byte-identical output, not merely equivalent: both forms insert the space in the same
+ * place and end the match at the same offset, so the `/g` scan continues identically.
+ * Old `([A-Z]+)` matched the maximal capital run and backtracked so the last capital fell
+ * into group 2; the space therefore landed immediately before that last capital, which is
+ * exactly where matching a single capital puts it. The leading capitals old consumed are
+ * copied through unchanged either way. Hence `TOKENIZER_VERSION` does NOT need bumping —
+ * no persisted index becomes stale. (Checked on `HTTPServer`, `XMLHttpRequest`, `ABCd`,
+ * `parseJSONData`, `ABc`, `ABCDe`, `A`, `AB`, and every line of every TS file in the repo.)
+ */
 function splitCompound(chunk: string): string[] {
   return chunk
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
     .split(' ')
     .filter(Boolean);
 }

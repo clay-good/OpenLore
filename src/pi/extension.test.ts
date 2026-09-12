@@ -1282,3 +1282,115 @@ describe('NAV_TOOLS surface', () => {
     expect(piKinds.has('decision-current'), 'Pi verify_claim must express decision-current').toBe(true);
   });
 });
+
+/**
+ * The wizard reads the ANALYZED REPO's config. Opening a row must not turn an
+ * attacker-authored endpoint into an outbound request: the Model row sends
+ * `Authorization: Bearer <operator key>`, and the embedding row probes whatever host the
+ * repo named (an instance-metadata / internal-host scanner on its behalf). Pi renders
+ * nothing written to stdout, so the refusal has to reach ctx.ui.notify, not logger.warning.
+ */
+describe('Pi config wizard — repo-configured endpoints', () => {
+  let dir: string;
+  const savedEnv = { ...process.env };
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-pi-endpoint-trust-'));
+    delete process.env.OPENAI_COMPAT_BASE_URL;
+    process.env.OPENAI_COMPAT_API_KEY = 'operator-compat-key-value';
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    process.env = { ...savedEnv };
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const wizardCtx = (
+    dirPath: string,
+    rowPicker: (choices: string[]) => string | undefined,
+    notify: ReturnType<typeof vi.fn>,
+  ) => {
+    let menuVisits = 0;
+    const select = vi.fn(async (title: string, choices: string[]) => {
+      if (title === 'openlore config') {
+        menuVisits += 1;
+        return menuVisits === 1 ? rowPicker(choices) : '✓ Save & close';
+      }
+      return undefined;
+    });
+    return {
+      cwd: dirPath,
+      mode: 'tui',
+      hasUI: true,
+      ui: { select, input: vi.fn(async () => undefined), confirm: vi.fn(async () => false), notify },
+    } as unknown as ExtensionContext;
+  };
+
+  it('does not send the operator key to a repo-supplied compat base URL', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const notify = vi.fn();
+    await runConfigWizard(
+      wizardCtx(dir, (choices) => choices.find((c) => c.startsWith('Model')), notify),
+      {
+        version: '1.0.0',
+        projectType: 'nodejs',
+        openspecPath: 'openspec',
+        generation: { provider: 'openai-compat', openaiCompatBaseUrl: 'https://evil.example/v1' },
+        createdAt: '2026-08-16T00:00:00.000Z',
+        lastRun: null,
+      } as unknown as Parameters<typeof runConfigWizard>[1],
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(notify.mock.calls.map(([message]) => String(message)).join('\n'))
+      .toMatch(/evil\.example/);
+  });
+
+  it('does not probe a repo-supplied embedding base URL', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const notify = vi.fn();
+    await runConfigWizard(
+      wizardCtx(
+        dir,
+        (choices) => choices.filter((c) => c.startsWith('Model'))[0],
+        notify,
+      ),
+      {
+        version: '1.0.0',
+        projectType: 'nodejs',
+        openspecPath: 'openspec',
+        embedding: { baseUrl: 'http://169.254.169.254', model: 'm' },
+        createdAt: '2026-08-16T00:00:00.000Z',
+        lastRun: null,
+      } as unknown as Parameters<typeof runConfigWizard>[1],
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(notify.mock.calls.map(([message]) => String(message)).join('\n'))
+      .toMatch(/169\.254\.169\.254/);
+  });
+
+  it('still lists models from a loopback endpoint the repo may legitimately commit', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 'local-model' }] }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await runConfigWizard(
+      wizardCtx(dir, (choices) => choices.filter((c) => c.startsWith('Model'))[0], vi.fn()),
+      {
+        version: '1.0.0',
+        projectType: 'nodejs',
+        openspecPath: 'openspec',
+        embedding: { baseUrl: 'http://localhost:11434', model: 'm' },
+        createdAt: '2026-08-16T00:00:00.000Z',
+        lastRun: null,
+      } as unknown as Parameters<typeof runConfigWizard>[1],
+    );
+
+    expect(fetchMock).toHaveBeenCalled();
+  });
+});
+

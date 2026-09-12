@@ -1,4 +1,5 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
@@ -74,7 +75,14 @@ function describePopulation(result: { total: number; productionFunctions: number
 
 async function loadContext(outputPath: string, supplied: LLMContext | null | undefined): Promise<LLMContext> {
   if (supplied) return supplied;
-  return JSON.parse(await readFile(join(outputPath, 'llm-context.json'), 'utf-8')) as LLMContext;
+  // The bounded reader, not `readFile`: every `.openlore/analysis/` artifact is
+  // repository-controlled input, and a committed FIFO at this path blocks inside `open()` on a
+  // libuv worker for good — a hang no `process.exit` can interrupt. It also refuses a symlink
+  // (which would redirect the read out of the analysis directory) and an oversized file.
+  const path = join(outputPath, 'llm-context.json');
+  const read = await readArtifactBounded(path, ANALYSIS_ARTIFACT_MAX_BYTES);
+  if (!read) throw new Error(`Unreadable analysis artifact: ${path}`);
+  return JSON.parse(read.text) as LLMContext;
 }
 
 async function buildTextIndex(
@@ -184,7 +192,9 @@ function indexExists(index: 'function' | 'text' | 'spec', status: string, output
 async function readReusableIndexes(options: BuildAnalysisIndexesOptions): Promise<IndexGenerationReceipt | null> {
   if (!options.generationId || options.force) return null;
   try {
-    const receipt = JSON.parse(await readFile(join(options.outputPath, INDEX_GENERATION_FILE), 'utf8')) as IndexGenerationReceipt;
+    const raw = await readArtifactBounded(join(options.outputPath, INDEX_GENERATION_FILE), ANALYSIS_ARTIFACT_MAX_BYTES);
+    if (!raw) return null;
+    const receipt = JSON.parse(raw.text) as IndexGenerationReceipt;
     if (receipt.generationId !== options.generationId || receipt.configurationHash !== indexConfigurationHash(options)) return null;
     if (!indexExists('function', receipt.result.functionIndex, options.outputPath)
       || !indexExists('text', receipt.result.textIndex, options.outputPath)

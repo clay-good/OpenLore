@@ -82,6 +82,22 @@ export interface StampedArtifact {
  * reports `isSymbolicLink()`, and where a platform reports usable inode numbers a
  * mismatch catches the case regardless.
  */
+/**
+ * Is the entry AT this path a symlink?
+ *
+ * Split out of {@link descriptorIsThePathEntry} because it is the half that must hold
+ * even for a file being republished under the reader, and because on Windows it is the
+ * only symlink refusal in the stack — `O_NOFOLLOW` is a no-op there. A path that cannot
+ * be `lstat`ed is treated as a symlink, i.e. refused, since the point is to fail closed.
+ */
+async function pathEntryIsSymlink(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isSymbolicLink();
+  } catch {
+    return true;
+  }
+}
+
 export async function descriptorIsThePathEntry(handle: FileHandle, path: string): Promise<boolean> {
   try {
     const entry = await lstat(path, { bigint: true });
@@ -99,6 +115,17 @@ export async function descriptorIsThePathEntry(handle: FileHandle, path: string)
  * that same descriptor.
  *
  * Three properties the obvious `stat(path)` + `readFile(path)` form does not have:
+ *
+ * Pass `republishedConcurrently` for a file its own writer rewrites continuously (the
+ * analysis progress sidecar). The identity checks exist so the returned bytes and the
+ * returned stamp describe the same entry, which is the right contract for a write-once
+ * artifact — but a hot file is republished by write-temp-then-rename, so those checks fail
+ * as a matter of course and a caller reading "refused" as "not there" reports no analysis
+ * running while one is (measured: 234 false absences in 400 reads). The option relaxes ONLY
+ * the inode-identity comparison. The explicit symlink refusal, O_NONBLOCK and the
+ * isFile/size ceiling still apply, so a symlink, a FIFO and an oversized file are refused
+ * on every platform; the stamp is then taken from the opened descriptor, which is the entry
+ * actually read.
  *
  *  - **The ceiling bounds the READ.** A prior stat only describes the file at that
  *    instant; a file that grows afterwards is still read to EOF. Reading in chunks up
@@ -137,6 +164,7 @@ export type BoundedReadResult =
 export async function readArtifactBytesBounded(
   path: string,
   maxBytes: number = MAX_ARTIFACT_BYTES,
+  options: { republishedConcurrently?: boolean } = {},
 ): Promise<BoundedReadResult> {
   let handle: FileHandle | undefined;
   try {
@@ -157,7 +185,21 @@ export async function readArtifactBytesBounded(
   try {
     const opened = await handle.stat({ bigint: true });
     if (!opened.isFile() || opened.size > BigInt(maxBytes)) return { state: 'refused' };
-    if (!(await descriptorIsThePathEntry(handle, path))) return { state: 'refused' };
+    // Two DIFFERENT properties live in `descriptorIsThePathEntry`, and a republishing
+    // writer only invalidates one of them.
+    //
+    //  - "the path is not a symlink" is stable, and on Windows it is the ONLY symlink
+    //    defense there is: O_NOFOLLOW is a documented no-op on that platform, so the
+    //    open above happily follows a link. Skipping this check there followed a
+    //    committed symlink and served the target's bytes — caught by the Windows job.
+    //    It is therefore always enforced.
+    //  - "the descriptor is still the entry at that path" is an identity/stability
+    //    check. A file republished by write-temp-then-rename fails it as a matter of
+    //    course, which is what turned a normal concurrent rename into a reported
+    //    ABSENCE. Only that half is relaxed.
+    if (await pathEntryIsSymlink(path)) return { state: 'refused' };
+    if (!options.republishedConcurrently
+      && !(await descriptorIsThePathEntry(handle, path))) return { state: 'refused' };
 
     const chunks: Buffer[] = [];
     let total = 0;
@@ -172,6 +214,9 @@ export async function readArtifactBytesBounded(
 
     // The file must not have moved underneath the read, or the stamp would describe
     // something other than what was returned.
+    if (options.republishedConcurrently) {
+      return { state: 'ok', bytes: Buffer.concat(chunks, total), stamp: stampOf(opened) };
+    }
     const after = await handle.stat({ bigint: true });
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
       || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) return { state: 'refused' };

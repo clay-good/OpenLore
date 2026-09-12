@@ -115,14 +115,34 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Same split the CI unit job uses, and it must cover the same FILES that
+      # `test:run` did: `test:unit` excludes both the equivalence set and the budget
+      # set, so each needs its own step or a release would silently test less than CI.
+      - name: Certify derived-artifact answer equivalence
+        run: npm run test:equivalence
+
+      # Wall-clock ceilings on hostile inputs: run without file parallelism so runner
+      # contention cannot fail a release over a timing bound rather than a real defect.
+      - name: Certify extractor cost budgets
+        run: npm run test:budgets
+
       - name: Run tests
-        run: npm run test:run
+        run: npm run test:unit
 
       - name: Run deterministic integration tests
         run: npm run test:integration:ci
 
       - name: Audit dependencies
         run: npm run audit:gate
+
+      # The required CI lane checks both of these; a release must not be the weaker
+      # path. `prepublishOnly` nominally covers them, but it never executes here --
+      # the tarball is built with `npm pack` and published with `--ignore-scripts`.
+      - name: Check lockfile integrity digests
+        run: npm run lock:integrity:check
+
+      - name: Audit for unreferenced dependencies
+        run: npm run audit:deps
 
       - name: Verify published API consumer contract
         run: npm run test:api-consumer

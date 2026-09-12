@@ -163,6 +163,26 @@ function getLineNumber(content: string, position: number): number {
 }
 
 /**
+ * Whitespace separating the two halves of an `X as Y` rename.
+ *
+ * BOUNDED deliberately. The brace body feeding these helpers is unbounded by design
+ * (see the rationale on `namedImportRegex` below), so an unbounded `\s+` here is a
+ * quadratic blow-up on attacker-controlled source: in `a<N spaces>b`, `\s+` eats the
+ * whole run, fails to find `a`, and gives back one character at a time — from every
+ * start offset. Measured on the real `parseJSImports`: 50,000 spaces cost 7.3 s and
+ * 200,000 spaces 322 s, on a regex that runs on EVERY JS/TS file in the repo.
+ *
+ * 200 is far past any real formatting (`X as Y` is normally one space, at most a line
+ * of alignment padding). A rename separated by more than 200 whitespace characters is
+ * simply not recognized as a rename — it falls through to the same handling as an
+ * unparseable name, which is what the `!name.includes(' ')` / identifier-shape filters
+ * already do for junk. That is the only behavioral difference, and it is unreachable
+ * from code a human wrote.
+ */
+const AS_SEPARATOR = /\s{1,200}as\s{1,200}/;
+const AS_RENAME = /(\w+)\s{1,200}as\s{1,200}(\w+)/;
+
+/**
  * Parse named imports from a string like "X, Y as Z, W"
  */
 function parseNamedImports(namesStr: string): string[] {
@@ -171,7 +191,7 @@ function parseNamedImports(namesStr: string): string[] {
     .map(name => {
       const trimmed = name.trim();
       // Handle "X as Y" - we want the local name Y
-      const asMatch = trimmed.match(/(\w+)\s+as\s+(\w+)/);
+      const asMatch = trimmed.match(AS_RENAME);
       if (asMatch) {
         return asMatch[2];
       }
@@ -188,7 +208,7 @@ function parseNamedImports(namesStr: string): string[] {
 function parseNamedImportSources(namesStr: string): string[] {
   return namesStr
     .split(',')
-    .map(name => name.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0]?.trim())
+    .map(name => name.trim().replace(/^type\s+/, '').split(AS_SEPARATOR)[0]?.trim())
     .filter((name): name is string => !!name && /^[$A-Z_a-z][$\w]*$/.test(name));
 }
 
@@ -600,7 +620,18 @@ export function parsePythonImports(content: string): ImportInfo[] {
     .replace(
       /^([ \t]*from\s+[\w.]+\s+import\s*)\(([\s\S]*?)\)/gm,
       (whole, prefix, inner) => {
-        const joined = prefix + inner.replace(/\s*\n\s*/g, ', ');
+        // Linear string ops, not `inner.replace(/\s*\n\s*/g, ', ')`. `inner` is the
+        // whole parenthesised import list and is unbounded, and that regex is quadratic
+        // on a whitespace run containing no newline: the leading `\s*` eats the run,
+        // fails on `\n`, and backs off one character at a time — from every offset.
+        // Measured on the real `parsePythonImports` with `from a import (<N spaces>)`:
+        // 9.1 s at 50 KB, 129 s at 200 KB.
+        //
+        // The one difference is that this DROPS leading/trailing empty segments
+        // (`"\n a \n b \n"` → `"a, b"`, where the regex gave `", a, b, "`) and trims a
+        // segment's own outer whitespace. Both are invisible: the result is re-split on
+        // `,` and `trim()`ed below, so those segments were discarded downstream anyway.
+        const joined = prefix + inner.split('\n').map((s: string) => s.trim()).filter(Boolean).join(', ');
         const consumedNewlines = (whole.match(/\n/g) ?? []).length;
         return joined + '\n'.repeat(consumedNewlines);
       },
@@ -615,13 +646,13 @@ export function parsePythonImports(content: string): ImportInfo[] {
   while ((match = importRegex.exec(cleanContent)) !== null) {
     const modules = match[1].split(',').map(m => m.trim()).filter(Boolean);
     for (const mod of modules) {
-      const source = mod.split(/\s+as\s+/)[0].trim();
+      const source = mod.split(AS_SEPARATOR)[0].trim();
       imports.push({
         source,
         isRelative: source.startsWith('.'),
         isPackage: !source.startsWith('.'),
         isBuiltin: PYTHON_BUILTINS.has(source.split('.')[0]),
-        importedNames: [mod.includes(' as ') ? mod.split(/\s+as\s+/)[1].trim() : source.split('.').pop()!],
+        importedNames: [mod.includes(' as ') ? mod.split(AS_SEPARATOR)[1].trim() : source.split('.').pop()!],
         isTopLevel: !/^[ \t]/.test(match[0]),
         hasDefault: false,
         hasNamespace: true,
@@ -658,7 +689,7 @@ export function parsePythonImports(content: string): ImportInfo[] {
       const parts = importsPart.split(',');
       const names = parts.map(n => {
         const trimmed = n.trim();
-        return trimmed.includes(' as ') ? trimmed.split(/\s+as\s+/)[1].trim() : trimmed;
+        return trimmed.includes(' as ') ? trimmed.split(AS_SEPARATOR)[1].trim() : trimmed;
       }).filter(Boolean);
 
       imports.push({
@@ -667,7 +698,7 @@ export function parsePythonImports(content: string): ImportInfo[] {
         isPackage: !source.startsWith('.'),
         isBuiltin: PYTHON_BUILTINS.has(source.split('.')[0]),
         importedNames: names,
-        importedSourceNames: parts.map(n => n.trim().split(/\s+as\s+/)[0]?.trim()).filter(Boolean),
+        importedSourceNames: parts.map(n => n.trim().split(AS_SEPARATOR)[0]?.trim()).filter(Boolean),
         isTopLevel: !/^[ \t]/.test(match[0]),
         hasDefault: false,
         hasNamespace: false,

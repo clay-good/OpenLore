@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import logger from '../../utils/logger.js';
-import { redactSecretsWithReport } from './secret-redaction.js';
+import { redactSecretsWithReport, redactSecretTextWithKnownValues } from './secret-redaction.js';
 import { protectPrompt } from '../../utils/prompt-boundary.js';
 import { LLM_TLS_ENV, announceInsecureTls, envTlsOptOut, withRelaxedTls } from './tls-scope.js';
 import { safeJoin } from '../../utils/path-confinement.js';
@@ -149,6 +149,40 @@ export function sanitizeCliPrompt(prompt: string): string {
   return prompt.includes('\0') ? prompt.replace(/\0/g, '') : prompt;
 }
 
+/**
+ * Env vars that can hold the credential this process sends to a provider. Enumerated so a
+ * provider's own diagnostic can be matched against the EXACT value we hold, not only
+ * against a provider-shaped pattern.
+ */
+const PROVIDER_CREDENTIAL_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_COMPAT_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'COPILOT_API_KEY',
+] as const;
+
+/**
+ * Redact a provider-supplied diagnostic before it becomes an error message or a line in
+ * `.openlore/llm-logs/*.json`.
+ *
+ * Pattern-only redaction is not enough here: a gateway that answers
+ * `unknown credential corp-gw-9f21c` carries no `sk-` / `AIza` / `Bearer` framing at all,
+ * so the credential we just sent it went verbatim into a file on disk and onto stderr.
+ * Passing the value we HOLD closes that, the way `doctor` already does for its checks
+ * (mcp-security: Secret Confinement Across All Output Paths).
+ *
+ * Values shorter than 8 characters are not matched: `CopilotProvider`'s placeholder key is
+ * the literal `copilot`, and redacting a word that common would corrupt the diagnostic
+ * without protecting anything.
+ */
+function redactProviderDetail(text: string, heldCredential?: string): string {
+  const known = [...PROVIDER_CREDENTIAL_ENV_VARS.map(name => process.env[name]), heldCredential]
+    .filter((value): value is string => typeof value === 'string' && value.length >= 8);
+  return redactSecretTextWithKnownValues(text, known).value;
+}
+
 function withIsolatedCliCwd<T>(run: (cwd: string) => T): T {
   const cwd = mkdtempSync(join(tmpdir(), 'openlore-llm-'));
   try {
@@ -218,7 +252,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       }));
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string; status?: number };
-      const detail = e.stderr || e.stdout || e.message || String(err);
+      const detail = redactProviderDetail(e.stderr || e.stdout || e.message || String(err));
       throw Object.assign(new Error(`claude CLI failed: ${detail}`), { retryable: false });
     }
 
@@ -297,7 +331,7 @@ export class CodexCLIProvider implements LLMProvider {
       });
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
-      const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
+      const detail = redactProviderDetail(e.stderr ?? e.stdout ?? e.message ?? String(err));
       throw Object.assign(new Error(`codex CLI failed: ${detail}`), { retryable: false });
     }
 
@@ -364,7 +398,7 @@ export class MistralVibeProvider implements LLMProvider {
       }));
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string; status?: number };
-      const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
+      const detail = redactProviderDetail(e.stderr ?? e.stdout ?? e.message ?? String(err));
       throw Object.assign(new Error(`mistral-vibe CLI failed: ${detail}`), { retryable: false });
     }
 
@@ -838,6 +872,13 @@ export class AnthropicProvider implements LLMProvider {
         stop_sequences: request.stopSequences,
       }),
       signal,
+      // Never follow a redirect. The fetch spec strips only Authorization, Cookie and
+      // Proxy-Authorization when a redirect crosses origins — `x-api-key` survives, and a
+      // 307/308 replays the body as well. A followed redirect would therefore hand the
+      // operator's key (and the prompt built from their source) to whatever host the first
+      // one names, which is exactly what repo-config-trust's loopback exemption assumes
+      // cannot happen: a loopback listener would otherwise be a one-hop redirector.
+      redirect: 'error',
     }), this.relaxTls);
 
     if (!response.ok) {
@@ -874,7 +915,7 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   private parseError(error: string, status: number, retryAfterHeader?: string | null): Error & { status?: number; retryable?: boolean; retryAfterMs?: number } {
-    const detail = error.trim() || '(empty response body)';
+    const detail = redactProviderDetail(error, this.apiKey).trim() || '(empty response body)';
     const err = new Error(`HTTP ${status}: ${detail}`) as Error & { status?: number; retryable?: boolean; retryAfterMs?: number };
     err.status = status;
     err.retryable = status === 429 || status >= 500;
@@ -1050,6 +1091,10 @@ export class OpenAIProvider implements LLMProvider {
       // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
+      // Never follow a redirect: the credential travels in a header (or, for Gemini, the
+      // URL) that a cross-origin redirect does not strip, and a 307/308 replays this body.
+      // Same reason as AnthropicProvider.generateCompletion above.
+      redirect: 'error',
     }), this.relaxTls);
 
     if (!response.ok) {
@@ -1079,7 +1124,7 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   private parseError(error: string, status: number, retryAfterHeader?: string | null): Error & { status?: number; retryable?: boolean; retryAfterMs?: number } {
-    const detail = error.trim() || '(empty response body)';
+    const detail = redactProviderDetail(error, this.apiKey).trim() || '(empty response body)';
     const err = new Error(`HTTP ${status}: ${detail}`) as Error & { status?: number; retryable?: boolean; retryAfterMs?: number };
     err.status = status;
     err.retryable = status === 429 || status >= 500;
@@ -1144,6 +1189,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
+        // Never follow a redirect: a cross-origin hop would re-send this request, and the
+        // bearer token with it on a same-site redirect. Same reason as generateCompletion.
+        redirect: 'error',
       }), this.relaxTls);
 
       if (!response.ok) {
@@ -1202,11 +1250,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
       // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
+      // Never follow a redirect: the credential travels in a header (or, for Gemini, the
+      // URL) that a cross-origin redirect does not strip, and a 307/308 replays this body.
+      // Same reason as AnthropicProvider.generateCompletion above.
+      redirect: 'error',
     }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
-      const detail = error.trim() || '(empty response body)';
+      const detail = redactProviderDetail(error, this.apiKey).trim() || '(empty response body)';
       const err = new Error(`HTTP ${response.status}: ${detail}`) as Error & { status?: number; retryable?: boolean; retryAfterMs?: number };
       err.status = response.status;
       err.retryable = response.status === 429 || response.status >= 500;
@@ -1356,11 +1408,15 @@ export class CopilotProvider implements LLMProvider {
       // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
+      // Never follow a redirect: the credential travels in a header (or, for Gemini, the
+      // URL) that a cross-origin redirect does not strip, and a 307/308 replays this body.
+      // Same reason as AnthropicProvider.generateCompletion above.
+      redirect: 'error',
     }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
-      const detail = error.trim() || '(empty response body)';
+      const detail = redactProviderDetail(error, this.apiKey).trim() || '(empty response body)';
       const err = new Error(`HTTP ${response.status}: ${detail}`) as Error & { status?: number; retryable?: boolean; retryAfterMs?: number };
       err.status = response.status;
       err.retryable = response.status === 429 || response.status >= 500;
@@ -1448,7 +1504,7 @@ export class GeminiCLIProvider implements LLMProvider {
       });
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
-      const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
+      const detail = redactProviderDetail(e.stderr ?? e.stdout ?? e.message ?? String(err));
       throw Object.assign(new Error(`gemini CLI failed: ${detail}`), { retryable: false });
     }
 
@@ -1529,7 +1585,7 @@ export class AntigravityCLIProvider implements LLMProvider {
       }).trim());
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
-      const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
+      const detail = redactProviderDetail(e.stderr ?? e.stdout ?? e.message ?? String(err));
       throw Object.assign(new Error(`antigravity CLI failed: ${detail}`), { retryable: false });
     }
 
@@ -1594,7 +1650,7 @@ export class CursorAgentProvider implements LLMProvider {
       }));
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string; status?: number };
-      const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
+      const detail = redactProviderDetail(e.stderr ?? e.stdout ?? e.message ?? String(err));
       throw Object.assign(new Error(`cursor-agent CLI failed: ${detail}`), { retryable: false });
     }
 
@@ -1697,11 +1753,15 @@ export class GeminiProvider implements LLMProvider {
       // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
+      // Never follow a redirect: the credential travels in a header (or, for Gemini, the
+      // URL) that a cross-origin redirect does not strip, and a 307/308 replays this body.
+      // Same reason as AnthropicProvider.generateCompletion above.
+      redirect: 'error',
     }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
-      const detail = error.trim() || '(empty response body)';
+      const detail = redactProviderDetail(error, this.apiKey).trim() || '(empty response body)';
       const err = new Error(`HTTP ${response.status}: ${detail}`) as Error & { status?: number; retryable?: boolean; retryAfterMs?: number };
       err.status = response.status;
       err.retryable = response.status === 429 || response.status >= 500;
@@ -2168,11 +2228,15 @@ export class LLMService {
     // disk. This is the channel mcp-security's "Secret Confinement Across All Output
     // Paths" names ("or written artifact"), so it uses the shared redactor rather
     // than a private, request-only copy that had drifted from it.
+    // The deep walker matches PATTERNS only, so it cannot recognise a credential the
+    // gateway echoed in its own vocabulary (`unknown credential corp-gw-9f21c`). Run the
+    // provider text through the known-value redactor first — it matches the exact key this
+    // process holds — and let the walker scrub the rest of the entry as before.
     const { value, redactions } = redactSecretsWithReport({
       timestamp: new Date().toISOString(),
       request,
       response,
-      error,
+      error: error === undefined ? undefined : redactProviderDetail(error),
     }, false);
 
     this.requestLog.push({ ...value, redactions });

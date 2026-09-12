@@ -26,8 +26,8 @@ import { partitionEvidenceFiles } from '../domain-evidence.js';
  */
 export function routeKey(method: string, path: string): string {
   const normalized = String(path ?? '').trim()
-    .replace(/\{[^}]*\}/g, ':param')             // {id}
-    .replace(/<[^>]*>/g, ':param')               // <id>
+    .replace(/\{[^}]{0,200}\}/g, ':param')        // {id}
+    .replace(/<[^>]{0,200}>/g, ':param')          // <id>
     .replace(/:[A-Za-z_$][\w$]*/g, ':param')     // :id
     .replace(/\/+$/, '');
   return `${String(method ?? '').trim().toUpperCase()} ${normalized || '/'}`;

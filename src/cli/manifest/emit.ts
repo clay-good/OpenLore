@@ -10,8 +10,10 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { confinedAtomicWriteFile } from '../../utils/path-confinement.js';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { createRequire } from 'node:module';
 import { logger } from '../../utils/logger.js';
 import { readCachedContext } from '../../core/services/mcp-handlers/utils.js';
@@ -105,12 +107,17 @@ interface DependencyGraphNode {
 }
 
 /** repo-relative file path → its top-level exports (from dependency-graph.json). */
-function loadExportsByFile(analysisDir: string): Map<string, ExportEntry[]> {
+async function loadExportsByFile(analysisDir: string): Promise<Map<string, ExportEntry[]>> {
   const map = new Map<string, ExportEntry[]>();
   const file = join(analysisDir, ARTIFACT_DEPENDENCY_GRAPH);
   if (!existsSync(file)) return map;
   try {
-    const data = JSON.parse(readFileSync(file, 'utf-8')) as { nodes?: DependencyGraphNode[] };
+    // The bounded reader, not `readFileSync`: these artifacts are repository-controlled, and a
+    // committed FIFO at this path blocks inside `open()` on a libuv worker forever (a hang
+    // `process.exit` cannot interrupt). It also refuses a symlink and an oversized file.
+    const raw = await readArtifactBounded(file, ANALYSIS_ARTIFACT_MAX_BYTES);
+    if (!raw) return map;
+    const data = JSON.parse(raw.text) as { nodes?: DependencyGraphNode[] };
     for (const node of data.nodes ?? []) {
       const path = node.file?.path;
       if (path && Array.isArray(node.exports)) map.set(path, node.exports);
@@ -121,11 +128,13 @@ function loadExportsByFile(analysisDir: string): Map<string, ExportEntry[]> {
   return map;
 }
 
-function loadRoutes(analysisDir: string): RouteInventoryEntry[] {
+async function loadRoutes(analysisDir: string): Promise<RouteInventoryEntry[]> {
   const file = join(analysisDir, ARTIFACT_ROUTE_INVENTORY);
   if (!existsSync(file)) return [];
   try {
-    const data = JSON.parse(readFileSync(file, 'utf-8')) as { routes?: RouteInventoryEntry[] };
+    const raw = await readArtifactBounded(file, ANALYSIS_ARTIFACT_MAX_BYTES);
+    if (!raw) return [];
+    const data = JSON.parse(raw.text) as { routes?: RouteInventoryEntry[] };
     return data.routes ?? [];
   } catch {
     return [];
@@ -324,8 +333,8 @@ export async function runManifestEmit(opts: ManifestEmitOptions): Promise<number
     {
       projectRoot,
       graph,
-      exportsByFile: loadExportsByFile(analysisDir),
-      routes: loadRoutes(analysisDir),
+      exportsByFile: await loadExportsByFile(analysisDir),
+      routes: await loadRoutes(analysisDir),
       pkg: readPackageJson(projectRoot),
       specCount: countSpecs(projectRoot),
       git: {
@@ -349,7 +358,11 @@ export async function runManifestEmit(opts: ManifestEmitOptions): Promise<number
     logger.success(`Dry run — would write ${outPath} (${Buffer.byteLength(bytes)} bytes); nothing written`);
   } else {
     await mkdir(dirname(outPath), { recursive: true });
-    await writeFile(outPath, bytes);
+    // Confined atomic publish, like every other file OpenLore writes into a repository: a
+    // committed `.well-known/openlore.json -> <somewhere else>` must not redirect the write, and a
+    // reader must never see a half-written manifest. Confinement is taken against the destination
+    // directory so an explicit `--out` outside the project still works.
+    await confinedAtomicWriteFile(dirname(outPath), outPath, bytes);
     logger.success(`Wrote ${outPath} (${Buffer.byteLength(bytes)} bytes)`);
   }
   logger.info('public symbols', manifest.exports.public_symbols.length + (manifest.exports.truncated ? ' (truncated)' : ''));

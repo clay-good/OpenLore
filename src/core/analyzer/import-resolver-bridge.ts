@@ -134,13 +134,28 @@ function sanitizeForRegex(
   return out;
 }
 
+/*
+ * INDENT IS `[ \t]`, NEVER `\s` (see classify-yaml.ts for the full rationale). `\s`
+ * matches `\n`, so `^\s*KEYWORD` under /m rescans every remaining newline to EOF from
+ * each of O(n) line starts and gives them back one at a time — quadratic on a file of
+ * blank lines, which costs the attacker nothing. Measured in isolation at 50 KB of
+ * newlines: `^\s*package\s+…` 8.0 s, the Java import form 7.1 s, the Kotlin `fun` form
+ * 6.9 s, all now 0-1 ms. Narrowing the INDENT is a no-op — a newline there means a
+ * different line, which `^` under /m already anchors. The keyword-to-value run in a
+ * DECLARATION keeps `\s` (a `package\ncom.example;` really is legal, and
+ * `parseJavaPackage` accepts it) and is length-bounded instead, which is linear without
+ * narrowing what matches.
+ *
+ * Hardening, not a demonstrated exploit: the audit measured these quadratic in isolation
+ * but could not reach them end to end with a newline payload through `extractSignatures`.
+ */
 function declaredNamespace(content: string, language: string): string | undefined {
   const code = sanitizeForRegex(content, false, language === 'Kotlin');
   if (language === 'PHP') {
-    return code.match(/^\s*namespace\s+([\\\w]+)\s*[;{]/m)?.[1].replaceAll('\\', '.');
+    return code.match(/^[ \t]*namespace\s{1,80}([\\\w]+)[ \t]*[;{]/m)?.[1].replaceAll('\\', '.');
   }
-  if (language === 'C#') return code.match(/^\s*namespace\s+([\w.]+)\s*[;{]/m)?.[1];
-  return code.match(/^\s*package\s+([\w.]+)\s*;?/m)?.[1];
+  if (language === 'C#') return code.match(/^[ \t]*namespace\s{1,80}([\w.]+)[ \t]*[;{]/m)?.[1];
+  return code.match(/^[ \t]*package\s{1,80}([\w.]+)[ \t]*;?/m)?.[1];
 }
 
 function declaredTypes(content: string, language: string): string[] {
@@ -185,15 +200,15 @@ function goImportSpecs(content: string): GoImportSpec[] {
   const code = sanitizeForRegex(content, true);
   let inBlock = false;
   const add = (text: string): void => {
-    const m = text.match(/^\s*(?:([A-Za-z_]\w*|[._])\s+)?"([^"]+)"/);
+    const m = text.match(/^[ \t]*(?:([A-Za-z_]\w*|[._])[ \t]+)?"([^"]+)"/);
     if (!m || m[1] === '_' || m[1] === '.') return;
     specs.push({ alias: m[1], source: m[2] });
   };
   for (const line of code.split('\n')) {
     if (!inBlock) {
-      const single = line.match(/^\s*import\s+(?!\()(.+)$/);
+      const single = line.match(/^[ \t]*import[ \t]+(?!\()(.+)$/);
       if (single) add(single[1]);
-      const open = line.match(/^\s*import\s*\((.*)$/);
+      const open = line.match(/^[ \t]*import[ \t]*\((.*)$/);
       if (open) {
         inBlock = true;
         const close = open[1].indexOf(')');
@@ -221,7 +236,7 @@ function buildStaticLanguageImportMaps(
   for (const f of files.filter(f => f.language === 'Go')) {
     const dir = posix.dirname(f.path);
     goFileDirs.add(dir);
-    const pkg = sanitizeForRegex(f.content, false).match(/^\s*package\s+([A-Za-z_]\w*)\b/m)?.[1];
+    const pkg = sanitizeForRegex(f.content, false).match(/^[ \t]*package\s{1,80}([A-Za-z_]\w*)\b/m)?.[1];
     if (!pkg) continue;
     const packages = goPackageSetsByDir.get(dir) ?? new Set<string>();
     packages.add(pkg);
@@ -254,7 +269,7 @@ function buildStaticLanguageImportMaps(
     const fileMap = new Map<string, string>();
     const ownDir = posix.dirname(f.path);
     const ownPackage = sanitizeForRegex(f.content, false).match(
-      /^\s*package\s+([A-Za-z_]\w*)\b/m,
+      /^[ \t]*package\s{1,80}([A-Za-z_]\w*)\b/m,
     )?.[1];
     if (ownPackage) {
       fileMap.set(PACKAGE_SCOPE_IMPORT, ownDir);
@@ -285,7 +300,7 @@ function buildStaticLanguageImportMaps(
     const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
     const symbols = declaredTypes(f.content, f.language);
     if (f.language === 'Kotlin') {
-      for (const m of sanitizeForRegex(f.content, false, true).matchAll(/^\s*fun\s+([A-Za-z_]\w*)\s*\(/gm)) symbols.push(m[1]);
+      for (const m of sanitizeForRegex(f.content, false, true).matchAll(/^[ \t]*fun\s{1,80}([A-Za-z_]\w*)[ \t]*\(/gm)) symbols.push(m[1]);
     } else if (f.language === 'PHP') {
       symbols.push(...declaredTopLevelFunctions(f.content));
     }
@@ -329,7 +344,7 @@ function buildStaticLanguageImportMaps(
     }
 
     if (f.language === 'Java' || f.language === 'Kotlin') {
-      for (const m of code.matchAll(/^\s*import\s+(?:(static)\s+)?([\w.]+)(?:\s+as\s+(\w+))?\s*;?/gm)) {
+      for (const m of code.matchAll(/^[ \t]*import\s{1,80}(?:(static)\s{1,80})?([\w.]+)(?:\s{1,80}as\s{1,80}(\w+))?[ \t]*;?/gm)) {
         const fqn = m[2];
         const local = m[3] ?? fqn.split('.').pop()!;
         const target = resolveImportedFqn(fqnIndex, fqn, m[1] === 'static');
@@ -337,7 +352,7 @@ function buildStaticLanguageImportMaps(
         if (target) bind(local, target, qualifier);
       }
     } else if (f.language === 'C#') {
-      for (const m of code.matchAll(/^\s*using\s+(?:(\w+)\s*=\s*)?([\w.]+)\s*;/gm)) {
+      for (const m of code.matchAll(/^[ \t]*using\s{1,80}(?:(\w+)[ \t]*=[ \t]*)?([\w.]+)[ \t]*;/gm)) {
         const alias = m[1];
         const imported = m[2];
         const direct = resolveImportedFqn(fqnIndex, imported);
@@ -350,7 +365,7 @@ function buildStaticLanguageImportMaps(
         }
       }
     } else {
-      for (const m of code.matchAll(/^\s*use\s+(?:(function)\s+)?([\\\w]+)(?:\s+as\s+(\w+))?\s*;/gm)) {
+      for (const m of code.matchAll(/^[ \t]*use\s{1,80}(?:(function)\s{1,80})?([\\\w]+)(?:\s{1,80}as\s{1,80}(\w+))?[ \t]*;/gm)) {
         const fqn = m[2].replaceAll('\\', '.');
         const local = m[3] ?? fqn.split('.').pop()!;
         const target = resolveImportedFqn(fqnIndex, fqn);

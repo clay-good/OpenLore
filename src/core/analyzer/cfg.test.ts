@@ -992,3 +992,53 @@ describe('language contract: supported set + fail-soft for everything else', () 
     }
   });
 });
+
+describe('reaching-definitions work budget', () => {
+  /** A function of N nested try/catch blocks, each assigning the same variable. */
+  function nestedTry(depth: number): string {
+    let src = 'function f() {\n  let x = 0;\n';
+    for (let i = 0; i < depth; i++) src += `  try { x = ${i};\n`;
+    for (let i = depth - 1; i >= 0; i--) src += `  } catch (e${i}) { x = -${i}; }\n`;
+    return `${src}  return x;\n}\n`;
+  }
+
+  it('bounds the fixpoint on nested try blocks instead of going cubic', async () => {
+    // The sweep CAP alone did not bound this: one sweep costs O(edges x |OUT|), and
+    // nested try/catch grows blocks, edges and definitions together. Measured on the
+    // real builder before the work budget: 61ms at 3.5KB, 428ms at 7.2KB, 5,053ms at
+    // 18.5KB, and 27,598ms at 37.2KB — cubic-ish, on a file three orders of magnitude
+    // below the 4MB cap. MAX_CFG_BLOCKS does not help; it bounds the region ABOVE this
+    // window, so the worst case sits just under it. Same input now costs ~1.3s.
+    const source = nestedTry(800);
+    const tree = parse(source, await tsLang());
+    const fn = firstOfType(tree.rootNode, TS_FN)!;
+
+    const started = Date.now();
+    const cfg = buildFunctionCfg(fn as unknown as CfgNode, 'TypeScript');
+    const elapsed = Date.now() - started;
+
+    // The STRUCTURAL assertion is the real one, and it is load-independent: past the
+    // budget the overlay is refused for this function, which is exactly what a
+    // non-converging fixpoint already did. The overlay is advisory, so omitting it is a
+    // disclosed lower bound rather than wrong data.
+    //
+    // It is THIS budget firing and not MAX_CFG_BLOCKS: this shape yields ~3 blocks per
+    // nesting level (603 blocks at depth 200), so depth 800 is ~2,400 — well under the
+    // 4,000-block cap, which would otherwise refuse the overlay for its own reason.
+    expect(cfg, 'the overlay must be refused, not computed cubically').toBeUndefined();
+    // Backstop, generous so it cannot flake under CI contention: the unfixed builder
+    // took 27.6s on this input, so anything near that is the regression, not load.
+    expect(elapsed, 'must not return to cubic').toBeLessThan(15_000);
+  }, 60_000);
+
+  it('leaves an ordinary function its def-use overlay', async () => {
+    // Non-vacuity: the budget must not be so tight that normal code loses the overlay.
+    // The most expensive function in this repository's own src/ costs 764,040 element
+    // visits against a 20,000,000 ceiling.
+    const cfg = cfgFor(
+      'function g(a) {\n  let x = a;\n  if (a) { x = 1; }\n  return x;\n}\n',
+      await tsLang(), 'TypeScript', TS_FN,
+    );
+    expect(cfg.defUse?.length ?? 0).toBeGreaterThan(0);
+  });
+});

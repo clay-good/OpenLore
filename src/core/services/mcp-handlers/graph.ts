@@ -5,13 +5,13 @@
  * trace_execution_path.
  */
 
-import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
+import { validateDirectory, readCachedContext, notReadyResult, safeJoin } from './utils.js';
 import { readDependencyGraphOrPartial } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
 import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
 import type { CachedContext } from './utils.js';
-import { basename, dirname, join, resolve, isAbsolute } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   RISK_SCORE_FAN_IN_WEIGHT,
   RISK_SCORE_FAN_OUT_WEIGHT,
@@ -1130,7 +1130,16 @@ async function deriveSeedRoutes(
     byFile.get(s.filePath)!.add(s.name);
   }
   for (const [file, names] of byFile) {
-    const abs = isAbsolute(file) ? file : resolve(absDir, file);
+    // `file` is a call-graph node path — a value the analyzed repository controls via
+    // its committed `.openlore/analysis` artifacts (the index attestation is advisory).
+    // It must be confined, and the old `isAbsolute(file) ? file : resolve(...)` branch
+    // skipped confinement BY CONSTRUCTION. There is nothing to preserve: an absolute
+    // path recorded for an in-root file still resolves through safeJoin (which resolves
+    // an absolute `filePath` against the root and then checks containment), and one
+    // pointing outside the root is precisely the escape to refuse.
+    let abs: string;
+    try { abs = safeJoin(absDir, file); }
+    catch { continue; }
     let routes;
     try { routes = await extractRoutesFromFile(abs); }
     catch { continue; }

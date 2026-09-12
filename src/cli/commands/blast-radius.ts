@@ -12,7 +12,7 @@
  */
 
 import { Command } from 'commander';
-import { writeStdout } from '../output.js';
+import { writeStdout, writeStderr } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
@@ -211,7 +211,11 @@ export async function runBlastRadiusCli(opts: BlastRadiusCliOptions): Promise<nu
   } else {
     // Hook mode prints to stderr so it never pollutes scripted stdout.
     const out = renderHuman(result);
-    if (opts.hook) process.stderr.write(out + '\n');
+    // Through writeStderr, not process.stderr: the hook branch renders the SAME
+    // repository-derived report (hub symbols, spec messages, test paths) that the
+    // stdout branch sanitizes, so writing it raw here would reopen the hole for
+    // exactly the commit-gate run whose verdict matters most.
+    if (opts.hook) await writeStderr(out + '\n');
     else await writeStdout(out + '\n');
   }
 
@@ -228,7 +232,9 @@ export async function runBlastRadiusCli(opts: BlastRadiusCliOptions): Promise<nu
     } catch { block = []; }
     const fired = triggeredBlockPatterns(result, block);
     if (fired.length > 0) {
-      process.stderr.write(
+      // `fired` echoes pattern names read from .openlore/config.json, which is
+      // repository content like any other — sanitized sink, not a raw one.
+      await writeStderr(
         `\n⛔ blast-radius: commit blocked by configured high-risk pattern(s): ${fired.join(', ')}.\n` +
         `   Resolve the flagged risk, or commit with --no-verify to override.\n\n`,
       );

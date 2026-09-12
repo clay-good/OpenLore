@@ -74,7 +74,7 @@ export async function runStage3(
       // are captured and reconciled below rather than silently dropped.
       const availableFunctions = new Set(
         signaturesSection.split('\n').flatMap(line =>
-          [...line.matchAll(/\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(/g)].map(match => match[1])),
+          [...line.matchAll(/\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*){0,8})[ \t]*\(/g)].map(match => match[1])),
       );
       const signaturesNote = signaturesSection
         ? `\n\nFunctions available in this file:\n${signaturesSection}\n\nFor each operation you extract, set functionName to exactly match one of the above.`

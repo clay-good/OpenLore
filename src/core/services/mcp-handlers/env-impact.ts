@@ -23,6 +23,7 @@
 
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
+import { readFileConfined } from '../../../utils/path-confinement.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
 import { computeStaleness } from './confidence-boundary.js';
@@ -127,7 +128,11 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     const ext = rel.includes('.') ? rel.slice(rel.lastIndexOf('.')).toLowerCase() : '';
     let source: string;
     try {
-      source = await readFile(join(absDir, rel), 'utf-8');
+      // `rel` comes from the env inventory — a repository-committed artifact, so the
+      // path is attacker-controlled (the index attestation is advisory). Confine it:
+      // the re-scan's read sites are returned to the caller, so an escape leaks the
+      // contents of a file outside the root (compare symbol-span.ts:102).
+      source = await readFileConfined(absDir, rel);
     } catch {
       boundaries.add(`source unreadable since analysis — re-run analyze_codebase (${rel})`);
       continue;

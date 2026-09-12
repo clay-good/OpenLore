@@ -60,6 +60,19 @@ describe('decisions rendering', () => {
     expect(out).toContain('Verification evidence: none');
   });
 
+  it('strips terminal controls smuggled through verification evidence', () => {
+    // The field's `'git-diff' | 'none'` type is a compile-time claim: the decision store
+    // is only validated as an array, so this is a reachable value. Printed raw, the
+    // cursor-up would rewrite the review warning printed above it.
+    const out = capture(() => displayDecision({
+      ...decision('verified'),
+      verificationEvidence: 'git-diff\x1b[3A' as unknown as 'git-diff',
+    }, true));
+    expect(out).toContain('Verification evidence: git-diff[3A');
+    // eslint-disable-next-line no-control-regex
+    expect(out).not.toMatch(/\x1b/);
+  });
+
   it('warns when approval text was extracted by an LLM from repository content', () => {
     const out = capture(() => displayDecision({
       ...decision('verified'),

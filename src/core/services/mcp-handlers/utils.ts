@@ -4,8 +4,8 @@
 
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { descriptorIsThePathEntry } from '../../../utils/bounded-artifact-read.js';
-import { lstat, open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { descriptorIsThePathEntry, readArtifactBytesBounded } from '../../../utils/bounded-artifact-read.js';
+import { lstat, open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
@@ -965,11 +965,13 @@ export function fingerprintHashOfConfiguration(configuration: unknown): string {
 
 /** Content-hash freshness for any analysis output directory. */
 export async function isAnalysisCacheFresh(directory: string, analysisDir: string, configuration?: unknown): Promise<boolean> {
-  let raw: string;
-  try {
-    raw = await readFile(join(analysisDir, ARTIFACT_FINGERPRINT), 'utf-8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  // Bounded read: the fingerprint is repository-controlled, so a committed FIFO here would block
+  // inside `open()` on a libuv worker forever. `absent` and `refused` are kept apart on purpose —
+  // only a genuinely MISSING fingerprint may fall back to the mtime heuristic; a refused one (FIFO,
+  // symlink, oversized) is not evidence of freshness and fails closed.
+  const read = await readArtifactBytesBounded(join(analysisDir, ARTIFACT_FINGERPRINT));
+  if (read.state === 'refused') return false;
+  if (read.state === 'absent') {
     try {
       const s = await stat(join(analysisDir, ARTIFACT_LLM_CONTEXT));
       return Date.now() - s.mtimeMs < ANALYSIS_STALE_THRESHOLD_MS;
@@ -977,6 +979,7 @@ export async function isAnalysisCacheFresh(directory: string, analysisDir: strin
       return false;
     }
   }
+  const raw = read.bytes.toString('utf8');
   try {
     const stored = JSON.parse(raw) as { hash?: unknown; analysisConfigHash?: unknown };
     if (typeof stored.hash !== 'string') return false;

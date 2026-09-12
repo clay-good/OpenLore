@@ -12,9 +12,20 @@ vi.mock('./utils.js', () => ({
 }));
 vi.mock('node:fs/promises', () => ({ readFile: vi.fn(async () => { throw new Error('ENOENT'); }) }));
 
+// `parse-health.json` is a repository-controlled artifact, so the boundary module reads it
+// through the bounded reader (O_NOFOLLOW / O_NONBLOCK / size-capped), not `readFile`. The
+// wholesale `node:fs/promises` mock above supplies no `open`, so faking the BYTES here would
+// only test the mock. Stub the loader instead — the test's subject is what the handler does
+// with a report, not how the report is read.
+vi.mock('./parse-health-boundary.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./parse-health-boundary.js')>();
+  return { ...actual, loadParseHealthReport: vi.fn(async () => null) };
+});
+
 import { handleFindDeadCode } from './reachability.js';
 import { readCachedContext } from './utils.js';
 import { readFile } from 'node:fs/promises';
+import { loadParseHealthReport } from './parse-health-boundary.js';
 import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
 
 function node(over: Partial<FunctionNode> & { id: string }): FunctionNode {
@@ -126,19 +137,15 @@ describe('handleFindDeadCode', () => {
   it('caps script-container candidates because framework entrypoints are unanalyzed', async () => {
     const vueNode = node({ id: 'src/App.vue::save', filePath: 'src/App.vue', language: 'TypeScript' });
     vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph([vueNode], []) } as never);
-    vi.mocked(readFile).mockImplementation(async path => {
-      if (String(path).endsWith('parse-health.json')) {
-        return JSON.stringify({
-          version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
-          scriptContainers: [{
-            format: 'Vue', extension: '.vue', fileCount: 1, scriptBlockCount: 1,
-            extractedScriptBlockCount: 1, limitations: ['template expressions'],
-            files: [{ filePath: 'src/App.vue', format: 'Vue', scriptBlockCount: 1, extractedScriptBlockCount: 1 }],
-          }],
-        });
-      }
-      return JSON.stringify({ edges: [] });
-    });
+    vi.mocked(loadParseHealthReport).mockResolvedValueOnce({
+      version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+      scriptContainers: [{
+        format: 'Vue', extension: '.vue', fileCount: 1, scriptBlockCount: 1,
+        extractedScriptBlockCount: 1, limitations: ['template expressions'],
+        files: [{ filePath: 'src/App.vue', format: 'Vue', scriptBlockCount: 1, extractedScriptBlockCount: 1 }],
+      }],
+    } as never);
+    vi.mocked(readFile).mockImplementation(async () => JSON.stringify({ edges: [] }));
 
     const result = await handleFindDeadCode({ directory: '/p' }) as {
       candidateDead: Array<{ name: string; confidence: string; reason: string }>;

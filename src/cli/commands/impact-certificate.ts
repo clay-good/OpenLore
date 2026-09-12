@@ -14,7 +14,7 @@
  */
 
 import { Command } from 'commander';
-import { writeStdout } from '../output.js';
+import { writeStdout, writeStderr } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
@@ -206,7 +206,8 @@ export async function runImpactCertificateCli(opts: ImpactCertificateCliOptions)
     await writeStdout(JSON.stringify(result, null, 2) + '\n');
   } else {
     const out = renderHuman(result);
-    if (opts.hook) process.stderr.write(out + '\n');
+    // writeStderr, not process.stderr: same sanitized report either way (see blast-radius).
+    if (opts.hook) await writeStderr(out + '\n');
     else await writeStdout(out + '\n');
   }
 
@@ -220,7 +221,7 @@ export async function runImpactCertificateCli(opts: ImpactCertificateCliOptions)
     } catch { block = []; }
     const fired = triggeredBlockSeverities(result, block);
     if (fired.length > 0) {
-      process.stderr.write(
+      await writeStderr(
         `\n⛔ impact-certificate: commit blocked — the change opens a new path into a ${fired.join('/')} surface.\n` +
         `   Confirm the new cross-boundary reach is intended, or commit with --no-verify to override.\n\n`,
       );

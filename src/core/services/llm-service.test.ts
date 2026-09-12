@@ -2199,3 +2199,78 @@ describe('LLMService.completeJSON — array unwrapping', () => {
     expect(provider.callHistory[0].systemPrompt).toContain('valid JSON');
   });
 });
+
+// ============================================================================
+// Credential confinement — redirect refusal + known-value redaction
+// ============================================================================
+
+describe('credentialed fetches refuse redirects', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const initFor = (fetchMock: ReturnType<typeof vi.fn>): RequestInit =>
+    (fetchMock.mock.calls[0][1] ?? {}) as RequestInit;
+
+  it('AnthropicProvider sets redirect: error (x-api-key is not stripped cross-origin)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+      model: 'm',
+      stop_reason: 'end_turn',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new AnthropicProvider('key').generateCompletion({ systemPrompt: '', userPrompt: 'x' });
+    expect(initFor(fetchMock).redirect).toBe('error');
+  });
+
+  it('OpenAIProvider sets redirect: error (a 307/308 replays the prompt body)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      model: 'm',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new OpenAIProvider('key').generateCompletion({ systemPrompt: '', userPrompt: 'x' });
+    expect(initFor(fetchMock).redirect).toBe('error');
+  });
+
+  it('OpenAICompatibleProvider sets redirect: error (a loopback base may not one-hop elsewhere)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      model: 'm',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new OpenAICompatibleProvider('key', 'http://localhost:11434/v1')
+      .generateCompletion({ systemPrompt: '', userPrompt: 'x' });
+    expect(initFor(fetchMock).redirect).toBe('error');
+  });
+
+  it('GeminiProvider sets redirect: error (the key rides in the URL)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse({
+      candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new GeminiProvider('key').generateCompletion({ systemPrompt: '', userPrompt: 'x' });
+    expect(initFor(fetchMock).redirect).toBe('error');
+  });
+});
+
+describe('provider error text redaction', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('redacts the credential it holds from a gateway diagnostic with no token framing', async () => {
+    // A gateway echoing an unframed credential ("unknown credential corp-gw-9f21c")
+    // defeats pattern-only redaction; the value we sent is what closes it.
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockErrorResponse('unknown credential corp-gw-9f21caa1 for tenant 4', 401),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new OpenAICompatibleProvider('corp-gw-9f21caa1', 'http://localhost:11434/v1');
+    const error = await provider
+      .generateCompletion({ systemPrompt: '', userPrompt: 'x' })
+      .then(() => null, (err: Error) => err);
+    expect(error?.message).toContain('[REDACTED:api-key]');
+    expect(error?.message).not.toContain('corp-gw-9f21caa1');
+  });
+});

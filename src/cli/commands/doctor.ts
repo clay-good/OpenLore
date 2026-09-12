@@ -868,6 +868,10 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ model, input: 'ping' }),
       signal: controller.signal,
+      // Never follow a redirect: `Authorization` is dropped on a cross-origin hop but the
+      // probe would still be replayed, and a repo-selected loopback endpoint could use one
+      // to point the check (and any non-standard header) at an internal host. Refuse instead.
+      redirect: 'error',
     }), relaxTls).finally(() => clearTimeout(timeout));
 
     const ms = Date.now() - t0;

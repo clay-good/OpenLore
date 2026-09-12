@@ -245,6 +245,19 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     // yet gets the non-blocking default (change: unify-onboarding-entrypoint).
     const { hasOpenLoreCommitGate } = await import('../commands/decisions.js');
     const alreadyGated = await hasOpenLoreCommitGate(cwd);
+    // `governance.*` is read out of the CLONED repository's `.openlore/config.json`, so
+    // the repository — not the operator — is choosing whether its own commit gate can
+    // ever block. That is an advisory choice OpenLore honors, but it must be VISIBLE:
+    // an operator who wires a gate is entitled to know the non-blocking mode came with
+    // the checkout rather than from them.
+    if (config?.governance?.autopilot === true) {
+      logger.info(
+        'Decision trail',
+        'this repository\'s .openlore/config.json requests autopilot — the gate records and syncs '
+        + 'decisions but NEVER blocks a commit. That choice came from the repository, not from you; '
+        + 'set { "governance": { "autopilot": false } } to require blocking review here.',
+      );
+    }
     if (config?.governance?.autopilot === false) {
       logger.info('Decision trail', 'governance.autopilot is explicitly false — installing the gate in blocking review mode, as configured');
     } else if (config && config.governance?.autopilot !== true) {

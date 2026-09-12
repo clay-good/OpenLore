@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { redactSecretText, redactSecretTextWithKnownValues, redactSecretsWithReport } from './secret-redaction.js';
+import {
+  redactLocalPaths,
+  redactSecretText,
+  redactSecretTextWithKnownValues,
+  redactSecrets,
+  redactSecretsWithReport,
+} from './secret-redaction.js';
 
 describe('repository secret redaction', () => {
   it('redacts an exact known credential without treating benign config as secret', () => {
@@ -83,5 +89,71 @@ describe('repository secret redaction', () => {
       value,
       redactions: { count: 0, kinds: [] },
     });
+  });
+});
+
+describe('gaps closed by the red-team pass', () => {
+  it('redacts a user:pass@ URL on a scheme the enumeration never listed', () => {
+    const result = redactSecretText('gateway https://svc:S3cr3tPw@internal/api refused');
+    expect(result.value).not.toContain('S3cr3tPw');
+    expect(result.redactions.kinds).toContain('connection-string');
+  });
+
+  it('redacts a NON-string value under a secret-named key', () => {
+    // `{"apiKey":{"value":"…"}}` is an ordinary shape for a credential read out of a
+    // config or echoed by a provider; the string-only test walked straight past the key
+    // and left the nested value to the pattern matcher, which a short key escapes.
+    expect(redactSecrets({ apiKey: { value: 'short' } })).toEqual({ apiKey: '[REDACTED]' });
+    expect(redactSecrets({ token: ['a', 'b'] })).toEqual({ token: '[REDACTED]' });
+    expect(redactSecretsWithReport({ apiKey: { value: 'short' } }).value)
+      .toEqual({ apiKey: '[REDACTED:secret-field]' });
+  });
+
+  it('leaves a null/undefined secret field alone (it invents no credential)', () => {
+    expect(redactSecrets({ apiKey: null })).toEqual({ apiKey: null });
+    expect(redactSecretsWithReport({ apiKey: null }).redactions.count).toBe(0);
+  });
+
+  it.each(['auth', 'pat', 'webhook', 'webhookUrl', 'signingKey', 'cookie', 'sessionId'])(
+    'treats %s as a secret key name',
+    (key) => {
+      expect(redactSecrets({ [key]: 'value-here' })).toEqual({ [key]: '[REDACTED]' });
+    },
+  );
+
+  it('does not redact keys that merely contain a secret word', () => {
+    expect(redactSecrets({ tokenBudget: 600, pathPrefix: 'src' }))
+      .toEqual({ tokenBudget: 600, pathPrefix: 'src' });
+  });
+
+  it('redacts absolute filesystem paths only through the explicit path helper', () => {
+    // Paths are disclosure, not credentials: they must not inflate a redaction receipt.
+    expect(redactSecretText('/Users/alice/project/foo.ts').redactions.count).toBe(0);
+    expect(redactLocalPaths('/Users/alice/project/foo.ts')).toBe('[path]');
+    expect(redactLocalPaths('/home/deploy/app')).toBe('[path]');
+    expect(redactLocalPaths('C:\\Users\\bob\\file.ts')).toBe('[path]');
+  });
+
+  it('stays linear on a long dotted token (connection-string ReDoS)', () => {
+    // The scheme class contains `.`, so an ORDINARY long member chain is the payload:
+    // unbounded, the scan eats it, requires `://`, and backtracks from every offset.
+    // Measured 16,620 ms before the `{0,40}` bound, 11 ms after. Repo content reaches
+    // this module, and stalling the redactor is what lets a credential through.
+    const payload = 'a.'.repeat(50_000);
+    const started = Date.now();
+    expect(redactSecretText(payload).redactions.count).toBe(0);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('still redacts every connection-string shape the bound must not break', () => {
+    for (const url of [
+      'https://svc:S3cr3tPw@internal/api',
+      'postgres://u:p@h/db',
+      'redis://a:b@h:6379',
+      'x+y.z-1://a:b@c',
+    ]) {
+      expect(redactSecretText(url).value).not.toContain('S3cr3tPw');
+      expect(redactSecretText(url).redactions.count).toBeGreaterThan(0);
+    }
   });
 });

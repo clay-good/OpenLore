@@ -847,7 +847,11 @@ Respond in JSON:
       const words = name
         .replace(/_+/g, ' ')
         .replace(/([a-z])([A-Z])/g, '$1 $2')
-        .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+        // One capital, not `([A-Z]+)`: the `+` ate the whole run of capitals, then
+        // required `[A-Z][a-z]`, then gave it back one character at a time — quadratic
+        // on an unbounded export name. Byte-identical output (see the rationale on
+        // `splitCompound` in bm25-tokenizer.ts): both insert the space in the same place.
+        .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
         .toLowerCase()
         .split(/\s+/)
         .filter(w => w.length > 2);

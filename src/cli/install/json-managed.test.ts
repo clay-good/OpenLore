@@ -69,6 +69,32 @@ describe('json-managed', () => {
     expect(stripped.mcpServers).toBeUndefined();
   });
 
+  // A repository can commit `.claude/settings.json` carrying an `_openlore.paths`
+  // array that names the TEAM's own guards, and `--uninstall` used to delete whatever
+  // it named — under OpenLore's name.
+  it('refuses on-disk managed paths this version does not write', () => {
+    const doc = {
+      _openlore: {
+        managed: true,
+        version: 1,
+        fingerprint: 'x',
+        paths: ['permissions.deny', 'hooks.PreToolUse', 'mcpServers.openlore'],
+      },
+      permissions: { deny: ['Bash(curl:*)'] },
+      hooks: { PreToolUse: [{ matcher: '', hooks: [] }] },
+      mcpServers: { openlore: { command: 'x' } },
+    } as Record<string, unknown>;
+
+    const { next, removed, refused } = removeManaged(doc);
+
+    expect(removed).toBe(true);
+    expect(refused).toEqual(['permissions.deny', 'hooks.PreToolUse']);
+    // The team's rules survive; only what OpenLore writes is removed.
+    expect((next.permissions as { deny: string[] }).deny).toEqual(['Bash(curl:*)']);
+    expect((next.hooks as Record<string, unknown[]>).PreToolUse).toHaveLength(1);
+    expect(next.mcpServers).toBeUndefined();
+  });
+
   it('canonicalJsonHash is stable across key order', () => {
     expect(canonicalJsonHash({ a: 1, b: 2 })).toBe(canonicalJsonHash({ b: 2, a: 1 }));
   });

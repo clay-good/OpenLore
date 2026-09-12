@@ -17,6 +17,7 @@
 
 import { readFile, readdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
@@ -148,7 +149,9 @@ export async function loadSpecCorpus(
 
 async function loadGraph(rootPath: string): Promise<DependencyGraphResult | null> {
   try {
-    return JSON.parse(await readFile(join(analysisDirOf(rootPath), ARTIFACT_DEPENDENCY_GRAPH), 'utf-8')) as DependencyGraphResult;
+    // Bounded read: repository-controlled artifact (a committed FIFO here would hang this call).
+    const raw = await readArtifactBounded(join(analysisDirOf(rootPath), ARTIFACT_DEPENDENCY_GRAPH), ANALYSIS_ARTIFACT_MAX_BYTES);
+    return raw ? JSON.parse(raw.text) as DependencyGraphResult : null;
   } catch {
     return null;
   }

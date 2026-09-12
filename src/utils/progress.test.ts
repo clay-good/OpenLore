@@ -86,31 +86,6 @@ describe('ProgressIndicator', () => {
     });
   });
 
-  describe('updateFileDiscovery', () => {
-    it('should format file discovery progress', () => {
-      const progress = new ProgressIndicator({ enabled: false });
-      progress.updateFileDiscovery({
-        found: 100,
-        directories: 10,
-        currentFile: 'src/index.ts',
-      });
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Discovering files... (100 found, 10 directories) (src/index.ts)'
-      );
-    });
-
-    it('should work without current file', () => {
-      const progress = new ProgressIndicator({ enabled: false });
-      progress.updateFileDiscovery({
-        found: 50,
-        directories: 5,
-      });
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Discovering files... (50 found, 5 directories)'
-      );
-    });
-  });
-
   describe('updateAnalysis', () => {
     it('should format imports phase', () => {
       const progress = new ProgressIndicator({ enabled: false });

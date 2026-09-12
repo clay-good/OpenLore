@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
-import { writeStdout } from './output.js';
+import { writeStdout, writeStderr } from './output.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -86,5 +86,29 @@ describe('writeStdout — untrusted control sequences', () => {
     const { out, restore } = capture();
     try { await writeStdout(payload); } finally { restore(); }
     expect(out.join('')).toBe(payload);
+  });
+});
+
+describe('writeStderr — the same sanitized sink for the stderr twins', () => {
+  const ESC = String.fromCharCode(27);
+
+  it('strips escapes, so a --hook / TTY render cannot forge a verdict', async () => {
+    // blast-radius --hook, impact-certificate --hook and review's TTY summary render the
+    // SAME report the stdout branch sanitizes. Writing it to process.stderr directly was
+    // how that identical string went out raw.
+    const written: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as { write: unknown }).write = ((c: string, cb?: (e?: Error) => void) => {
+      written.push(String(c));
+      if (typeof cb === 'function') cb();
+      return true;
+    }) as never;
+    try {
+      await writeStderr(`  risk: high\n${ESC}[2K${ESC}[1A  risk: none\n`);
+    } finally { (process.stderr as { write: unknown }).write = orig as never; }
+    const out = written.join('');
+    expect(out).not.toContain(ESC);
+    expect(out).toContain('risk: high');
+    expect(out.split('\n').length).toBe(3); // structure preserved, no line erased
   });
 });

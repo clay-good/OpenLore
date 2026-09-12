@@ -23,7 +23,8 @@
  */
 
 import { statSync, unlinkSync } from 'node:fs';
-import { open, readFile, mkdir, unlink } from 'node:fs/promises';
+import { open, mkdir, unlink } from 'node:fs/promises';
+import { readArtifactBytesBounded } from '../../utils/bounded-artifact-read.js';
 import { renameWithContentionRetry } from '../decisions/atomic-store.js';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -40,6 +41,7 @@ import {
 /** Runtime state directory. Sibling of the analysis output, never inside it. */
 export const RUNTIME_SUBDIR = 'runtime';
 export const PROGRESS_FILE = 'analysis-progress.json';
+
 
 /** Owner refresh cadence. The CLI heartbeat runs at twice this interval. */
 export const PROGRESS_INTERVAL_MS = 15_000;
@@ -489,9 +491,25 @@ export async function acquireAnalysisOwnership(
 
 /** Read the current progress sidecar, or `null` when no analysis is publishing. */
 export async function readAnalysisProgress(analysisDir: string): Promise<AnalysisProgress | null> {
+  // Bounded read: the sidecar lives under the repository's `.openlore/`, so a committed
+  // symlink must not be followed and a committed FIFO must not block inside `open()`.
+  //
+  // `republishedConcurrently`, unlike every other artifact this reader serves: the
+  // heartbeat rewrites this sidecar continuously, so the reader's identity checks fail as a
+  // matter of course and a plain bounded read reports `refused` — which this function would
+  // return as `null`, i.e. "no analysis is running" while one is. Measured 234 false
+  // absences in 400 reads against a republishing writer. The symlink, FIFO and size
+  // refusals still apply.
+  const read = await readArtifactBytesBounded(
+    progressPathOf(analysisDir),
+    undefined,
+    { republishedConcurrently: true },
+  );
+  if (read.state !== 'ok') return null;
   try {
-    return JSON.parse(await readFile(progressPathOf(analysisDir), 'utf8')) as AnalysisProgress;
+    return JSON.parse(read.bytes.toString('utf8')) as AnalysisProgress;
   } catch {
+    // A torn or malformed sidecar is not an analysis we can report on.
     return null;
   }
 }

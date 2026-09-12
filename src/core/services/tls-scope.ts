@@ -31,6 +31,13 @@
  * that window is also unverified. The window is now one request rather than the
  * process lifetime, which is a large reduction but not elimination. Eliminating it
  * requires per-request TLS options, i.e. one of the two migrations above.
+ *
+ * CHILD PROCESSES were the worst part of that exposure, and are closed. A child
+ * spawned while a scope is open inherits `NODE_TLS_REJECT_UNAUTHORIZED=0` for its
+ * WHOLE LIFETIME — not for one request — so a background index build or a detached
+ * consolidation started in that window ran entirely unverified. Spawn sites pass
+ * `childEnvWithoutScopedTlsRelaxation()` so the child sees the operator's own value
+ * instead of this module's temporary one.
  */
 
 const ENV_KEY = 'NODE_TLS_REJECT_UNAUTHORIZED';
@@ -169,6 +176,25 @@ export async function withRelaxedTls<T>(fn: () => Promise<T>, enabled = insecure
       savedValue = undefined;
     }
   }
+}
+
+/**
+ * `base` with this module's TEMPORARY relaxation removed, for handing to a child process.
+ *
+ * The distinction that matters: an operator who exported
+ * `NODE_TLS_REJECT_UNAUTHORIZED` themselves keeps it (that is their machine's
+ * setting, and `savedValue` is exactly it); only the value an open scope wrote is
+ * stripped. With no scope open this returns `base` untouched, so it is safe to call
+ * unconditionally at any spawn site.
+ */
+export function childEnvWithoutScopedTlsRelaxation(
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (openScopes === 0) return base;
+  const env = { ...base };
+  if (savedValue === undefined) delete env[ENV_KEY];
+  else env[ENV_KEY] = savedValue;
+  return env;
 }
 
 /** Test-only: clear module state between cases. */

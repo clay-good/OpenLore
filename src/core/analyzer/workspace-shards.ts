@@ -207,7 +207,10 @@ function goWorkMembers(source: string): string[] {
   if (block !== undefined) {
     return block.split(/\r?\n/).map(line => line.replace(/\/\/.*$/, '').trim()).filter(Boolean);
   }
-  return [...source.matchAll(/^\s*use\s+([^\s/][^\s]*)\s*$/gm)].map(match => match[1]);
+  // Indent is `[ \t]`, not `\s`: `^\s*use` under /m rescanned every remaining newline to
+  // EOF from each line start (6.7 s isolated at 50 KB of newlines, 0 ms after). A no-op —
+  // `^` under /m already anchors each line, and the captured crate path is unchanged.
+  return [...source.matchAll(/^[ \t]*use[ \t]+([^\s/][^\s]*)[ \t]*$/gm)].map(match => match[1]);
 }
 
 function gradleMembers(source: string): string[] {

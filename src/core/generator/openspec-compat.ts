@@ -508,7 +508,7 @@ export class OpenSpecValidator {
     const malformed: string[] = [];
 
     // Find all markdown links
-    const linkPattern = /\[([^\]]*)\]\(([^)]*)\)/g;
+    const linkPattern = /\[([^\]]{0,1000})\]\(([^)]{0,1000})\)/g;
     let match;
 
     while ((match = linkPattern.exec(content)) !== null) {

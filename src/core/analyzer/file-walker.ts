@@ -11,7 +11,7 @@
  * (change: harden-walker-corpus-boundary).
  */
 
-import { opendir, readFile, realpath, stat } from 'node:fs/promises';
+import { open, opendir, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join, relative, basename, extname, dirname, sep } from 'node:path';
 import ignoreModule from 'ignore';
 import { isConfinedPath } from '../../utils/path-confinement.js';
@@ -320,13 +320,27 @@ async function hasShebang(filePath: string): Promise<boolean> {
  * Count lines in a file. Returns -1 for files larger than MAX_READ_SIZE.
  */
 async function countLines(filePath: string): Promise<number> {
+  // One descriptor for both the size check and the bytes. `stat` then `readFile` described two
+  // possibly DIFFERENT files: the analyzed repository controls this path, so a file that grew (or
+  // was replaced) between the two calls passed the ceiling and was then read whole anyway. The
+  // fstat and the read here cannot disagree, and the read stops at the size that was admitted.
+  let handle: FileHandle | undefined;
   try {
-    const s = await stat(filePath);
-    if (s.size > MAX_READ_SIZE) return -1;
-    const content = await readFile(filePath, 'utf-8');
-    return content.split('\n').length;
+    handle = await open(filePath, 'r');
+    const size = (await handle.stat()).size;
+    if (size > MAX_READ_SIZE) return -1;
+    const buffer = Buffer.allocUnsafe(size);
+    let total = 0;
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, total, buffer.length - total, total);
+      if (bytesRead === 0) break; // truncated under us: count what the admitted size held
+      total += bytesRead;
+    }
+    return buffer.subarray(0, total).toString('utf-8').split('\n').length;
   } catch {
     return 0;
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
 
@@ -935,6 +949,27 @@ export class FileWalker {
         if (this.shouldSkipFile(posixPath)) {
           this.recordSkip('pattern');
           continue;
+        }
+
+        // A symlinked FILE gets the SAME canonical confinement check the directory branch above
+        // applies. It did not, and the asymmetry mattered: `src/x.ts -> /Users/victim/secrets.ts`
+        // entered the corpus with no skip reason at all, so a host file the user never checked in
+        // was handed to the extractors and the text index. (The fingerprinter re-checks and aborts
+        // the whole analysis, which turned the same repo into a denial of service.) Confinement is
+        // decided on the real path, exactly as for a directory, and the omission is DISCLOSED
+        // under the existing symlink skip reasons rather than being silently smaller.
+        if (entry.isSymlink) {
+          let realFilePath: string;
+          try {
+            realFilePath = await realpath(filePath);
+          } catch {
+            this.recordSkip('symlink:unresolvable');
+            continue;
+          }
+          if (!isConfinedPath(this.realRootPath, realFilePath)) {
+            this.recordSkip('symlink:outside-root');
+            continue;
+          }
         }
 
         // This file WOULD be analyzed — but the corpus is already full. That is a real

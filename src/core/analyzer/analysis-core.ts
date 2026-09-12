@@ -1,5 +1,12 @@
 import { join, relative, resolve } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
+
+/** One retained repo-wide artifact, read under the untrusted-artifact rules. Throws on refusal. */
+async function readRetainedArtifact(path: string): Promise<string> {
+  const read = await readArtifactBounded(path, ANALYSIS_ARTIFACT_MAX_BYTES);
+  if (!read) throw new Error(`Unreadable analysis artifact: ${path}`);
+  return read.text;
+}
 import { existsSync } from 'node:fs';
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
@@ -233,12 +240,16 @@ export async function runAnalysisCore(
       // Scoped publication deliberately retains repo-wide JSON artifacts. Load them
       // for API compatibility; callers use shardReceipt to avoid presenting them as
       // freshly re-aggregated results.
+      // Bounded reads: every `.openlore/analysis/` artifact is repository-controlled, so a
+      // committed FIFO here would block inside `open()` on a libuv worker forever (uninterruptible
+      // even by `process.exit`), and a symlink would redirect the read out of the analysis
+      // directory. A refusal throws rather than being silently read as an empty artifact.
       const [depGraphRaw, repoStructureRaw, llmContextRaw, summaryMarkdown, dependencyDiagram] = await Promise.all([
-        readFile(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), 'utf8'),
-        readFile(join(outputPath, ARTIFACT_REPO_STRUCTURE), 'utf8'),
-        readFile(join(outputPath, ARTIFACT_LLM_CONTEXT), 'utf8'),
-        readFile(join(outputPath, 'SUMMARY.md'), 'utf8'),
-        readFile(join(outputPath, 'dependencies.mermaid'), 'utf8'),
+        readRetainedArtifact(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH)),
+        readRetainedArtifact(join(outputPath, ARTIFACT_REPO_STRUCTURE)),
+        readRetainedArtifact(join(outputPath, ARTIFACT_LLM_CONTEXT)),
+        readRetainedArtifact(join(outputPath, 'SUMMARY.md')),
+        readRetainedArtifact(join(outputPath, 'dependencies.mermaid')),
       ]);
       emit({
         stage: 'complete',

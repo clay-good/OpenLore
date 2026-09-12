@@ -26,12 +26,16 @@ import {
   parseJavaPackage,
   parseJSExports,
   parseJSImports,
+  parsePythonImports,
 } from './import-parser.js';
 import { extractMiddleware } from './middleware-extractor.js';
 import { extractHtmlScripts } from './html-script-extractor.js';
 import { extractUIComponents } from './ui-component-extractor.js';
 import { extractSignatures } from './signature-extractor.js';
 import { extractJavaRouteDefinitions } from './http-route-parser.js';
+import { tokenize } from './bm25-tokenizer.js';
+import { classifyYaml } from './iac/classify-yaml.js';
+import { extractTerraform } from './iac/terraform.js';
 
 /** An opening token repeated with no closer — the whole attack. */
 function payload(token: string, bytes: number): string {
@@ -526,6 +530,29 @@ describe('language extractors are not quadratic on a whitespace/token flood', ()
     expect(routes).toEqual([]);
   });
 
+  it('extractSignatures(C++) survives unterminated parameter lists with no brace', async () => {
+    // A chain of optional groups each ending in an unbounded `\s*`, followed by a
+    // REQUIRED `[{:]` that never arrives: the optional-group x whitespace split points
+    // multiplied. 4.5 s at 50 KB before the bounds, ~0.9 s at 240 KB after.
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.cpp', 'void f' + '(a'.repeat(Math.floor(b / 2))); }),
+      'C++ unterminated parameters',
+    );
+  }, TIMEOUT_MS);
+
+  it('still extracts real C++ declarations across the qualifier chain', () => {
+    const names = (src: string): string[] => extractSignatures('a.cpp', src).entries.map(e => e.name);
+    expect(names('class Widget {\n  int load() {\n')).toEqual(expect.arrayContaining(['Widget', 'load']));
+    expect(names('int   compute  ( int x, int y )   {\n')).toContain('compute');
+    expect(names('int size() const {\n')).toContain('size');
+    expect(names('void run() const noexcept override final {\n')).toContain('run');
+    expect(names('auto make() -> std::vector<int> {\n')).toContain('make');
+    expect(names('Widget::Widget(int n) : count_(n) {\n')).toContain('Widget');
+    expect(names('void tabbed\t(\tint x\t)\t{\n')).toContain('tabbed');
+    // CRLF: `trimmed` is one line, so the class is `[ \t\r]`, not `\s`.
+    expect(names('int crlf() {\r\n')).toContain('crlf');
+  });
+
   it('ImportParser rejects a Java file above the analyzer source-size cap', async () => {
     const oversized = join(dir, 'Oversized.java');
     await writeFile(oversized, ' '.repeat(4 * 1024 * 1024 + 1));
@@ -533,5 +560,382 @@ describe('language extractors are not quadratic on a whitespace/token flood', ()
     expect(analysis.imports).toEqual([]);
     expect(analysis.exports).toEqual([]);
     expect(analysis.parseErrors).toContain('File exceeds the analyzer source-size limit');
+  });
+});
+
+/**
+ * `\s` matches `\n` — the systemic root cause, and a whitespace flood with no
+ * declaration in it.
+ *
+ * `^\s*LITERAL` under /m (and its sibling `(^|\n)\s*LITERAL`) is quadratic on a file of
+ * blank lines: at each of the n line starts, `\s*` greedily eats every remaining newline
+ * to end-of-file, fails on LITERAL, then gives them back one character at a time. The
+ * payload is a file of newlines — zero attacker effort, and it looks like whitespace in a
+ * diff. The same shape appears with a space run wherever an unbounded `\s+`/`\s*` sits in
+ * front of a required literal (`\s+as\s+`, `\s*\n\s*`, `^\s*\{?\s*"`).
+ *
+ * A per-file size cap is NOT a defence against a quadratic, and neither is
+ * `MAX_SIGS_PER_FILE`: these payloads produce ZERO matches, so the capping loop never
+ * runs and the whole cost is the regex engine's failed scans. Measured on the real
+ * extractors at 50 KB — `classifyYaml` 55.6 s, `parsePythonImports` 9.1 s,
+ * `extractSignatures('a.tf')` 7.9 s, `tokenize` 7.5 s, `extractTerraform` 7.5 s,
+ * `parseJSImports` 7.3 s, `extractJavaRouteDefinitions` 8.3 s — and the source cap is
+ * 4 MB, 80x that size, for 6,400x the time.
+ *
+ * Same PROPERTY assertion as the suites above: linear growth where the ratio is
+ * measurable, and an absolute ceiling that also catches an over-generous bound.
+ */
+describe('extractors are not quadratic on a whitespace-run or blank-line flood', () => {
+  const newlines = (bytes: number): string => '\n'.repeat(bytes);
+  const spaces = (bytes: number): string => ' '.repeat(bytes);
+
+  it('parseJSImports survives a giant whitespace run inside a named-import body', async () => {
+    // The brace body is unbounded BY DESIGN (a 600-name generated barrel must not be
+    // dropped), and it was handed straight to `split(/\s+as\s+/)`. The body is valid-looking
+    // ES module syntax, so nothing upstream rejects it.
+    expectLinearAndFast(
+      await measure(b => { parseJSImports(`import { a${spaces(b)}b } from 'x'`); }),
+      'parseJSImports as-separator',
+    );
+  }, TIMEOUT_MS);
+
+  it('still resolves `X as Y` renames, and still resolves a wide barrel', () => {
+    const imports = parseJSImports(
+      `import { readFile as read, writeFile, type Stats as S } from 'node:fs/promises';\n`,
+    );
+    expect(imports).toHaveLength(1);
+    expect(imports[0].importedNames).toEqual(['read', 'writeFile', 'S']);
+    // The source-side identity must still strip the alias and the `type` modifier.
+    expect(imports[0].importedSourceNames).toEqual(['readFile', 'writeFile', 'Stats']);
+    // Alignment padding inside the bound still parses.
+    const padded = parseJSImports(`import { readFile${spaces(40)}as${spaces(40)}read } from 'x';\n`);
+    expect(padded[0].importedNames).toEqual(['read']);
+    // And the unbounded brace body is still unbounded.
+    const names = Array.from({ length: 600 }, (_, i) => `Icon${i} as I${i}`).join(', ');
+    expect(parseJSImports(`import { ${names} } from './icons';\n`)[0].importedNames).toHaveLength(600);
+  });
+
+  it('extractSignatures(Terraform) survives a .tf file of blank lines', async () => {
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.tf', newlines(b)); }),
+      'Terraform signatures (newlines)',
+    );
+  }, TIMEOUT_MS);
+
+  it('still extracts indented and multi-label Terraform block headers', () => {
+    const entries = extractSignatures('main.tf', [
+      'resource "aws_s3_bucket" "b" {',
+      '  variable_like = 1',
+      '}',
+      '\tdata\t"aws_ami"\t"a" {',
+      '}',
+      '  module "m" {',
+      '  }',
+      'variable "v" {}',
+      'output "o" {}',
+      'provider aws {}',
+    ].join('\n')).entries;
+    expect(entries.map(e => e.name)).toEqual([
+      'aws_s3_bucket.b', 'aws_ami.a', 'm', 'v', 'o', 'aws',
+    ]);
+  });
+
+  it('classifyYaml survives a YAML file of blank lines', async () => {
+    // Five quadratic probes over the same whole-file content, back to back — the worst
+    // cost-per-byte in the audit (50 KB bought 94 s).
+    expectLinearAndFast(await measure(b => { classifyYaml('hostile.yaml', newlines(b)); }), 'classifyYaml');
+    // A space flood exercises the value-position runs, which stayed `\s` and are bounded.
+    expectLinearAndFast(
+      await measure(b => { classifyYaml('hostile.yaml', `Resources:\n  Type:${spaces(b)}x\n`); }),
+      'classifyYaml value run',
+    );
+  }, TIMEOUT_MS);
+
+  it('still classifies every YAML flavour it used to, at any indentation', () => {
+    const c = classifyYaml;
+    expect(c('t.yaml', 'AWSTemplateFormatVersion: "2010-09-09"\n')).toBe('CloudFormation');
+    expect(c('t.yaml', '  AWSTemplateFormatVersion : "2010-09-09"\n')).toBe('CloudFormation');
+    expect(c('t.yaml', '\tAWSTemplateFormatVersion:x\n')).toBe('CloudFormation');
+    expect(c('t.yaml', 'Transform: "AWS::Serverless-2016-10-31"\n')).toBe('CloudFormation');
+    // Value on the next line: kept working because value-position runs stayed `\s`.
+    expect(c('t.yaml', 'Transform:\n  AWS::Serverless-2016-10-31\n')).toBe('CloudFormation');
+    expect(c('t.yaml', 'Resources:\n  B:\n    Type: AWS::S3::Bucket\n')).toBe('CloudFormation');
+    expect(c('t.yaml', 'Resources:\n  S:\n    Type: "Alexa::ASK::Skill"\n')).toBe('CloudFormation');
+    expect(c('t.yaml', 'apiVersion: v1\nkind: Service\n')).toBe('Kubernetes');
+    expect(c('t.yaml', '  apiVersion : v1\n  kind : Service\n')).toBe('Kubernetes');
+    expect(c('t.yaml', 'apiVersion: v1\r\nkind: Service\r\n')).toBe('Kubernetes');
+    expect(c('t.yaml', 'a: 1\n---\napiVersion: v1\nkind: Pod\n')).toBe('Kubernetes');
+    expect(c('.github/workflows/ci.yml', 'on: push\njobs:\n  b:\n    runs-on: x\n')).toBe('GitHub Actions');
+    expect(c('action.yml', 'runs:\n  using: node20\n')).toBe('GitHub Actions');
+    expect(c('docker-compose.yml', 'services:\n  web:\n    image: nginx\n')).toBe('Docker Compose');
+    expect(c('play.yaml', '- hosts: all\n  tasks: []\n')).toBe('Ansible');
+    expect(c('tasks.yaml', '- name: x\n  become: true\n')).toBe('Ansible');
+    // …and still refuses to classify generic YAML.
+    expect(c('app.yaml', 'foo: bar\nbaz:\n  - 1\n')).toBeNull();
+    expect(c('empty.yaml', newlines(200))).toBeNull();
+  });
+
+  it('the BM25 tokenizer survives one giant all-capitals identifier', async () => {
+    // `tokenize` splits on `[^A-Za-z0-9]+`, so a run of capitals arrives as ONE unbounded
+    // chunk, and this runs over every indexed record's text.
+    expectLinearAndFast(
+      await measure(b => { tokenize('A'.repeat(b)); }),
+      'bm25 tokenize',
+    );
+  }, TIMEOUT_MS);
+
+  it('the BM25 tokenizer still splits acronym boundaries identically', () => {
+    // The token set must be UNCHANGED: `TOKENIZER_VERSION` was not bumped, so a persisted
+    // index built before the fix must still agree with a query tokenized after it.
+    const t = (s: string): string => tokenize(s).join('|');
+    expect(t('HTTPServer')).toBe('httpserver|http|server');
+    expect(t('XMLHttpRequest')).toBe('xmlhttprequest|xml|http|request');
+    expect(t('ABCd')).toBe('abcd|ab|cd');
+    expect(t('parseJSONData')).toBe('parsejsondata|parse|json|data');
+    expect(t('ABCDe')).toBe('abcde|abc|de');
+    expect(t('ABc')).toBe('abc|bc');
+    expect(t('IOError')).toBe('ioerror|io|error');
+    expect(t('A')).toBe('');
+    expect(t('AB')).toBe('ab');
+    expect(t('ABC')).toBe('abc');
+    expect(t('getURLFor')).toBe('geturlfor|get|url|for');
+  });
+
+  it('parsePythonImports survives a giant whitespace run in a parenthesised import', async () => {
+    expectLinearAndFast(
+      await measure(b => { parsePythonImports(`from a import (${spaces(b)})`); }),
+      'parsePythonImports',
+    );
+    expectLinearAndFast(
+      await measure(b => { parsePythonImports(newlines(b)); }),
+      'parsePythonImports newlines',
+    );
+  }, TIMEOUT_MS);
+
+  it('still collapses a multi-line Python import and keeps its line numbers', () => {
+    const imports = parsePythonImports(
+      ['import os', 'from a.b import (', '    c,', '    d as e,', ')', 'import sys'].join('\n'),
+    );
+    expect(imports.map(i => [i.source, i.importedNames.join(','), i.line])).toEqual([
+      ['os', 'os', 1],
+      ['sys', 'sys', 6],
+      ['a.b', 'c,e', 2],
+    ]);
+    expect(imports.find(i => i.source === 'a.b')?.importedSourceNames).toEqual(['c', 'd']);
+    // Blank lines and ragged indentation inside the parens still collapse to one line.
+    const ragged = parsePythonImports('from x import (\n\n\tp ,\n\n        q\n\n)\n');
+    expect(ragged[0].importedNames).toEqual(['p', 'q']);
+    // KNOWN, DELIBERATE DIFFERENCE: an import of NOTHING (`from a import ()`, which is a
+    // Python syntax error) no longer yields a name-less import record. The regex form
+    // turned a whitespace-only body into a phantom `", "`, so the whitespace-and-newline
+    // spelling produced a record while `from a import ()` produced none. Both spellings
+    // now agree, and the record it dropped carried no imported names.
+    expect(parsePythonImports('from a import ()\n')).toEqual([]);
+    expect(parsePythonImports('from a import (\n\n)\n')).toEqual([]);
+  });
+
+  it('extractTerraform survives a giant identifier run in a .tf and a .tf.json', async () => {
+    expectLinearAndFast(
+      await measure(b => {
+        extractTerraform([{ path: 'a.tf', content: `resource "a" "b" {\n x = ${'a'.repeat(b)}\n}\n` }]);
+      }),
+      'extractTerraform hcl refs',
+    );
+    expectLinearAndFast(
+      await measure(b => {
+        extractTerraform([{
+          path: 'a.tf.json',
+          content: JSON.stringify({ resource: { aws_s3_bucket: { b: { x: '${' + 'a'.repeat(b) + '}' } } } }),
+        }]);
+      }),
+      'extractTerraform json refs',
+    );
+  }, TIMEOUT_MS);
+
+  it('still records Terraform references and still ignores dotless tokens', () => {
+    const graph = extractTerraform([
+      {
+        path: 'main.tf',
+        content: [
+          'resource "aws_s3_bucket" "b" {',
+          '  other = aws_s3_bucket.src.arn',
+          '  plain = var.x',
+          '  dotless = abc',
+          '}',
+          'resource "aws_s3_bucket" "src" {}',
+          'variable "x" {}',
+        ].join('\n'),
+      },
+      {
+        path: 'j.tf.json',
+        content: JSON.stringify({
+          resource: { aws_s3_bucket: { c: { x: '${aws_s3_bucket.src.arn} plain ${var.x}' } } },
+        }),
+      },
+    ]);
+    const edges = graph.references
+      .filter(r => r.kind === 'references')
+      .map(r => `${r.fromAddress} -> ${r.toAddress}`)
+      .sort();
+    expect(edges).toEqual([
+      'aws_s3_bucket.b -> aws_s3_bucket.src',
+      'aws_s3_bucket.b -> var.x',
+      'aws_s3_bucket.c -> aws_s3_bucket.src',
+      'aws_s3_bucket.c -> var.x',
+    ]);
+  });
+
+  it('extractSignatures(TS/JS/Java) survives a file of blank lines and stray comment tokens', async () => {
+    // The WIDEST-REACH finding of this pass and not a regex at all: the JSDoc/Javadoc
+    // lookups ran for EVERY line and each walked BACKWARDS to find where the block above
+    // ended and began, reaching line 0 on a file of blank lines. O(n^2) `trim()` calls on
+    // the hottest extractor in the repo. Measured on 200 KB of newlines: `a.ts` 240 s
+    // (`.js`/`.tsx`/`.jsx`/`.mts` alike), now ~0.16 s. Both backscans are now one forward
+    // pass, memoized against the `lines` array.
+    for (const ext of ['ts', 'java']) {
+      expectLinearAndFast(
+        await measure(b => { extractSignatures(`hostile.${ext}`, newlines(b)); }),
+        `${ext} signatures (newlines)`,
+      );
+    }
+    // The block-open backscan needs its own payload: blanks alone stop at the `*/` check.
+    for (const [label, token] of [['star-slash', '*/\n'], ['open-then-stars', '/**\n*\n']] as const) {
+      expectLinearAndFast(
+        await measure(b => { extractSignatures('hostile.ts', payload(token, b)); }),
+        `ts signatures (${label})`,
+      );
+      expectLinearAndFast(
+        await measure(b => { extractSignatures('hostile.java', payload(token, b)); }),
+        `java signatures (${label})`,
+      );
+    }
+  }, TIMEOUT_MS);
+
+  it('still attaches JSDoc and Javadoc across blanks, annotations and earlier blocks', () => {
+    // The memo must not confuse two files, and the index must agree with the rescan it
+    // replaced: a blank gap, an intervening annotation, and an EARLIER unrelated block are
+    // exactly the cases where a wrong "nearest preceding" index silently attaches the wrong
+    // comment — a corruption no timing assertion would catch.
+    const ts = extractSignatures('a.ts', [
+      '/** An earlier, unrelated block. */',
+      'export const x = 1;',
+      '',
+      '/**',
+      ' * Loads the thing.',
+      ' * @param n count',
+      ' */',
+      '',
+      '',
+      'export function load(n: number) {}',
+      'export function undocumented() {}',
+    ].join('\n')).entries;
+    expect(ts.find(e => e.name === 'load')?.docstring).toBe('Loads the thing.');
+    expect(ts.find(e => e.name === 'undocumented')?.docstring).toBeUndefined();
+
+    const java = extractSignatures('A.java', [
+      '/**',
+      ' * Handles it.',
+      ' */',
+      '@Override',
+      '@Deprecated',
+      'public void handle() {}',
+      'public void bare() {}',
+    ].join('\n')).entries;
+    expect(java.find(e => e.name === 'handle')?.docstring).toBe('Handles it.');
+    expect(java.find(e => e.name === 'bare')?.docstring).toBeUndefined();
+
+    // A second file must not inherit the first file's index.
+    expect(extractSignatures('b.ts', 'export function fresh() {}\n').entries[0]?.docstring).toBeUndefined();
+  });
+
+  it('extractSignatures(Swift) survives a file of blank lines', async () => {
+    // NOT a regex: the doc-comment lookup walked backwards over blank lines from EVERY
+    // line, so a file of blank lines cost O(n^2) `trim()` calls. 291 s on 200 KB before
+    // carrying the nearest non-blank line forward. The one quadratic here that a regex
+    // audit cannot see.
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.swift', newlines(b)); }),
+      'Swift signatures (newlines)',
+    );
+  }, TIMEOUT_MS);
+
+  it('still attaches a Swift /// doc comment across intervening blank lines', () => {
+    const entries = extractSignatures('a.swift', [
+      '/// Loads the thing.',
+      '',
+      '',
+      'func load() {}',
+      '',
+      '/// A type.',
+      'class Widget {}',
+      'func undocumented() {}',
+    ].join('\n')).entries;
+    expect(entries.map(e => [e.name, e.docstring])).toEqual([
+      ['load', 'Loads the thing.'],
+      ['Widget', 'A type.'],
+      ['undocumented', undefined],
+    ]);
+  });
+
+  it('the generic fallback extractor survives a single line of pure whitespace', async () => {
+    // `^\s*(?:MOD)?\s*KW` — two whitespace runs separated by an OPTIONAL group, so a
+    // whitespace-only line partitions n x n ways. This fallback serves every extension
+    // without a dedicated extractor, so a one-line `.pl` / `.erl` file reached it:
+    // 127 s / 133 s on 200 KB before moving the run inside the group.
+    for (const ext of ['pl', 'erl']) {
+      expectLinearAndFast(
+        await measure(b => { extractSignatures(`hostile.${ext}`, spaces(b)); }),
+        `generic fallback .${ext}`,
+      );
+    }
+  }, TIMEOUT_MS);
+
+  it('the generic fallback still recognizes modified and bare declarations', () => {
+    const names = (src: string): string[] => extractSignatures('a.pl', src).entries.map(e => e.name);
+    expect(names('sub greet {\n')).toEqual(['greet']);
+    expect(names('  public function handle(x) {\n')).toEqual(['handle']);
+    expect(names('\tstatic\tclass\tWidget {\n')).toEqual(['Widget']);
+    expect(names('export procedure run()\n')).toEqual(['run']);
+    expect(names('async def fetch(x)\n')).toEqual(['fetch']);
+    expect(names('notfunction nope\n')).toEqual([]);
+    expect(names(spaces(500) + '\n')).toEqual([]);
+  });
+
+  it('extractJavaRouteDefinitions survives an annotation argument list of pure whitespace', async () => {
+    // `^` without /m looks anchored and safe, but TWO `\s*` split by an optional `{` give
+    // n x n split points before the required `"` fails — and the argument blob comes from
+    // a balanced-paren scan with no length cap.
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions(
+          'Hostile.java',
+          `import javax.ws.rs.Path;\n@Path(${spaces(b)})\npublic class C { @GET public String f(){return "";} }\n`,
+        );
+      }),
+      'java annotation args',
+    );
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions(
+          'Hostile.java',
+          `@RestController\nclass C {\n  @RequestMapping(value =${spaces(b)}x)\n  public String f(){return "";}\n}\n`,
+        );
+      }),
+      'java named annotation args',
+    );
+  }, TIMEOUT_MS);
+
+  it('still reads positional, braced, named and generously-spaced annotation paths', async () => {
+    const paths = async (src: string): Promise<string[]> =>
+      (await extractJavaRouteDefinitions('C.java', src)).map(r => r.path);
+    expect(await paths('@RestController\nclass C {\n @GetMapping("/a")\n public String a(){return "";}\n}\n')).toEqual(['/a']);
+    expect(await paths('@RestController\nclass C {\n @GetMapping(   "/sp"   )\n public String a(){return "";}\n}\n')).toEqual(['/sp']);
+    expect(await paths('@RestController\nclass C {\n @GetMapping({"/x", "/y"})\n public String a(){return "";}\n}\n')).toEqual(['/x']);
+    expect(await paths('@RestController\nclass C {\n @GetMapping( { "/x" } )\n public String a(){return "";}\n}\n')).toEqual(['/x']);
+    expect(await paths('@RestController\nclass C {\n @GetMapping(\n   "/nl"\n )\n public String a(){return "";}\n}\n')).toEqual(['/nl']);
+    expect(await paths('@RestController\nclass C {\n @RequestMapping(value = "/v", method = RequestMethod.GET)\n public String a(){return "";}\n}\n')).toEqual(['/v']);
+    // `@RequestMapping` needs an explicit method to emit a route (pre-existing, unrelated
+    // to the whitespace bound — verified identical against the unfixed extractor).
+    expect(await paths('@RestController\nclass C {\n @RequestMapping(path  =  { "/p" }, method = RequestMethod.GET)\n public String a(){return "";}\n}\n')).toEqual(['/p']);
   });
 });

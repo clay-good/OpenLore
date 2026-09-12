@@ -13,7 +13,7 @@
 import { mkdir, lstat, readFile, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { applyMarkdownBlock, uninstallMarkdownBlock, hasManagedBlock } from './markdown-block.js';
-import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreservingFormat, type JsonPathEdit } from '../json-managed.js';
+import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreservingFormat, honoredManagedPaths, type JsonPathEdit } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
@@ -26,6 +26,36 @@ const SETTINGS_PATH = '.claude/settings.json';
 const SETTINGS_LOCAL_PATH = '.claude/settings.local.json';
 const MCP_PATH = '.mcp.json';
 
+/**
+ * The repo-scope grant: the whole `openlore` command family, in ONE repository the
+ * operator chose to wire.
+ */
+const OPENLORE_PERMISSION = 'Bash(openlore:*)';
+
+/**
+ * The user-scope grant, deliberately narrower.
+ *
+ * A user-scope permission applies in EVERY repository the agent is ever pointed at,
+ * hostile ones included — and `openlore` is not a read-only command family:
+ * `decisions`/`enforce`/`drift --install-hook` write executable git hooks, `install`
+ * rewrites agent configuration, `serve`/`mcp` open listeners. Granting all of that
+ * everywhere, with no approval prompt, is a bigger thing than the user asked a bare
+ * `openlore install` for, so the user scope grants only the read-only orientation
+ * command the workflow actually leans on. The broad grant stays opt-in: run
+ * `openlore install` inside the repository that needs it (repo scope), or add the
+ * wider rule by hand.
+ *
+ * This does NOT gate the SessionStart/UserPromptSubmit hooks. Those are wired as an
+ * absolute `<node> <…>/dist/cli/index.js orient …` (or the `npx --yes openlore …`
+ * fallback), which `Bash(openlore:*)` never matched either — and hook commands do
+ * not consult `permissions.allow` at all. Verified against `managedHooks`/
+ * `resolveOpenloreCommand` before narrowing.
+ */
+const OPENLORE_USER_PERMISSION = 'Bash(openlore orient:*)';
+
+/** Every permission spelling OpenLore has written, so uninstall cleans up after an older install too. */
+const OPENLORE_PERMISSIONS: readonly string[] = [OPENLORE_PERMISSION, OPENLORE_USER_PERMISSION];
+
 /** Where Claude Code reads each managed file, per scope. */
 interface ClaudeLayout {
   /** Instruction block file, relative to the scope root. */
@@ -34,8 +64,10 @@ interface ClaudeLayout {
   mcp: string;
   /** Hook settings file, relative to the scope root. */
   settings: string;
-  /** File carrying the `Bash(openlore:*)` permission, relative to the scope root. */
+  /** File carrying the OpenLore Bash permission, relative to the scope root. */
   permissions: string;
+  /** The permission written there (see {@link OPENLORE_PERMISSION}). */
+  permission: string;
   /**
    * May a file that holds nothing but OpenLore entries be deleted on uninstall?
    * False for the user scope: `~/.claude.json` is Claude Code's own account state,
@@ -65,6 +97,7 @@ const LAYOUTS: Record<'repo' | 'user', ClaudeLayout> = {
     mcp: MCP_PATH,
     settings: SETTINGS_PATH,
     permissions: SETTINGS_LOCAL_PATH,
+    permission: OPENLORE_PERMISSION,
     mayDeleteMcpFile: true,
     mayDeleteSettingsFile: true,
   },
@@ -73,6 +106,7 @@ const LAYOUTS: Record<'repo' | 'user', ClaudeLayout> = {
     mcp: '.claude.json',
     settings: SETTINGS_PATH,
     permissions: SETTINGS_PATH,
+    permission: OPENLORE_USER_PERMISSION,
     mayDeleteMcpFile: false,
     mayDeleteSettingsFile: false,
   },
@@ -179,7 +213,6 @@ async function publishManagedFile(
   return result;
 }
 
-const OPENLORE_PERMISSION = 'Bash(openlore:*)';
 
 /**
  * MCP server registration. Wires `openlore mcp --preset <name>`: the caller's
@@ -381,8 +414,10 @@ function valueAt(obj: Record<string, unknown>, segs: string[]): unknown {
  */
 function managedRemovalEdits(parsed: Record<string, unknown>): JsonPathEdit[] {
   const edits: JsonPathEdit[] = [];
-  const meta = readMeta(parsed);
-  for (const dotted of meta?.paths ?? []) {
+  // `honoredManagedPaths`, not the meta's raw `paths`: the list is read back out of a
+  // repository-controlled file, so only the paths this version actually writes may be
+  // turned into deletions. `removeManaged` reports the rest (see its `refused`).
+  for (const dotted of honoredManagedPaths(parsed)) {
     const segs = dotted.split('.');
     edits.push({ path: [...segs], value: undefined });
     for (let i = segs.length - 1; i >= 1; i--) {
@@ -403,11 +438,12 @@ function managedRemovalEdits(parsed: Record<string, unknown>): JsonPathEdit[] {
  */
 function withOpenLorePermission(
   base: Record<string, unknown>,
+  permission: string,
 ): { permissions: Record<string, unknown>; allow: unknown[] } | null {
   const perms = (base.permissions as Record<string, unknown>) ?? {};
   const allow = Array.isArray(perms.allow) ? (perms.allow as unknown[]) : [];
-  if (allow.includes(OPENLORE_PERMISSION)) return null;
-  const nextAllow = [...allow, OPENLORE_PERMISSION];
+  if (allow.includes(permission)) return null;
+  const nextAllow = [...allow, permission];
   return { permissions: { ...perms, allow: nextAllow }, allow: nextAllow };
 }
 
@@ -433,6 +469,29 @@ function isOurMcpEntry(entry: unknown): boolean {
   // Matching only the first shape would strand every entry written by this version —
   // the exact failure this fallback exists to prevent.
   return flat.includes('openlore') || flat.some(isOpenloreCliEntryPath);
+}
+
+/**
+ * Report `_openlore.paths` entries this version will NOT delete.
+ *
+ * The list lives in the file being uninstalled, so a repository can put anything in
+ * it — `permissions.deny`, `hooks.PreToolUse` — and a delete-whatever-it-says
+ * uninstall would strip the team's own guards under OpenLore's name. Naming the
+ * entries is the honest outcome: the operator learns the file claims OpenLore owns
+ * something it does not.
+ */
+function reportRefusedManagedPaths(
+  result: ApplyResult,
+  path: string,
+  displayName: string,
+  refused: string[],
+): void {
+  if (refused.length === 0) return;
+  result.warnings.push(
+    `${displayName} declares OpenLore-managed paths OpenLore does not write `
+    + `(${refused.join(', ')}); they were left untouched. Remove them from `
+    + `"_openlore".paths in ${path} if they are stale.`,
+  );
 }
 
 /** Record a refused write, naming the cause the code actually observed. */
@@ -680,7 +739,7 @@ export const claudeCodeAdapter: Adapter = {
     // (change: unify-onboarding-entrypoint).
     const permissionSharesSettingsFile = settingsPath === localPath;
     if (permissionSharesSettingsFile) {
-      const merged = withOpenLorePermission(base);
+      const merged = withOpenLorePermission(base, layout.permission);
       if (merged) {
         next.permissions = merged.permissions;
         settingsEdits.push({ path: ['permissions', 'allow'], value: merged.allow });
@@ -697,10 +756,10 @@ export const claudeCodeAdapter: Adapter = {
         // Never claim the hooks: on this host they are the one thing that was not written.
         ? `${layout.settings}: OpenLore hooks not wired — ${commandHazard}`
         : !had
-          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''}`
+          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
           : !changed
             ? `${layout.settings}: already up to date`
-            : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''} in ${layout.settings}`,
+            : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
       preview: !had
         ? previewCreate(settingsPath, after)
         : !changed
@@ -726,14 +785,14 @@ export const claudeCodeAdapter: Adapter = {
     const existingLocal = await readJsonOrEmpty(localPath);
     const perms = (existingLocal.permissions as Record<string, unknown>) ?? {};
     const allow = Array.isArray(perms.allow) ? (perms.allow as unknown[]) : [];
-    if (allow.includes(OPENLORE_PERMISSION)) {
+    if (allow.includes(layout.permission)) {
       mdResult.changes.push({
         path: localPath,
         kind: 'noop',
-        summary: `${layout.permissions}: ${OPENLORE_PERMISSION} already allowed`,
+        summary: `${layout.permissions}: ${layout.permission} already allowed`,
       });
     } else {
-      const nextAllow = [...allow, OPENLORE_PERMISSION];
+      const nextAllow = [...allow, layout.permission];
       const nextLocal = { ...existingLocal, permissions: { ...perms, allow: nextAllow } };
       const localAfter = serializeManaged(rawLocal, nextLocal, [
         { path: ['permissions', 'allow'], value: nextAllow },
@@ -742,8 +801,8 @@ export const claudeCodeAdapter: Adapter = {
         path: localPath,
         kind: hadLocal ? 'update' : 'create',
         summary: hadLocal
-          ? `add ${OPENLORE_PERMISSION} to ${layout.permissions}`
-          : `create ${layout.permissions} with ${OPENLORE_PERMISSION}`,
+          ? `add ${layout.permission} to ${layout.permissions}`
+          : `create ${layout.permissions} with ${layout.permission}`,
         preview: hadLocal
           ? previewDiff(localPath, rawLocal ?? '', localAfter)
           : previewCreate(localPath, localAfter),
@@ -772,7 +831,12 @@ export const claudeCodeAdapter: Adapter = {
     try {
       const rawMcp = await readFile(mcpPath, 'utf8');
       const parsedMcp = JSON.parse(rawMcp) as Record<string, unknown>;
-      let { next, removed } = removeManaged(parsedMcp);
+      // `next`/`removed` are reassigned below; `refused` is not.
+      const managed = removeManaged(parsedMcp);
+      const refused = managed.refused;
+      let next = managed.next;
+      let removed = managed.removed;
+      reportRefusedManagedPaths(md, mcpPath, layout.mcp, refused);
       let removalEdits = managedRemovalEdits(parsedMcp);
       // User scope ONLY. The rationale is specific to a file OpenLore does not own
       // (`~/.claude.json`, whose unrecognized top-level keys another tool may drop).
@@ -864,7 +928,8 @@ export const claudeCodeAdapter: Adapter = {
     // Also strip any legacy managed entry (mcpServers.openlore + meta) a prior
     // version wrote here before MCP moved to .mcp.json.
     removalEdits.push(...managedRemovalEdits(parsed));
-    const { next, removed } = removeManaged(parsed);
+    const { next, removed, refused } = removeManaged(parsed);
+    reportRefusedManagedPaths(md, settingsPath, layout.settings, refused);
     if (removed) changed = true;
     if (!changed) {
       await stripPermission(ctx, layout, localPath, md);
@@ -921,8 +986,12 @@ async function stripPermission(
     return;
   }
   const permsObj = parsedLocal.permissions as Record<string, unknown> | undefined;
-  if (permsObj && Array.isArray(permsObj.allow) && permsObj.allow.includes(OPENLORE_PERMISSION)) {
-    const filtered = (permsObj.allow as unknown[]).filter((p) => p !== OPENLORE_PERMISSION);
+  // Strip EVERY spelling OpenLore has written, not just this scope's: a user-scope
+  // uninstall must also clear the broad `Bash(openlore:*)` an older version put there.
+  if (permsObj && Array.isArray(permsObj.allow)
+    && (permsObj.allow as unknown[]).some((p) => typeof p === 'string' && OPENLORE_PERMISSIONS.includes(p))) {
+    const filtered = (permsObj.allow as unknown[])
+      .filter((p) => !(typeof p === 'string' && OPENLORE_PERMISSIONS.includes(p)));
     const localEdits: JsonPathEdit[] = [];
     if (filtered.length === 0) {
       localEdits.push({ path: ['permissions', 'allow'], value: undefined });
@@ -958,7 +1027,7 @@ async function stripPermission(
       md.changes.push({
         path: localPath,
         kind: 'update',
-        summary: `strip ${OPENLORE_PERMISSION} from ${layout.permissions}`,
+        summary: `strip ${layout.permission} from ${layout.permissions}`,
       });
     }
   }

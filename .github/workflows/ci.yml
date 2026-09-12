@@ -63,6 +63,12 @@ jobs:
         # exception cannot outlive its cause.
         run: npm run audit:gate
 
+      # `prepublishOnly` lists this check, but nothing ever runs that script: the
+      # release packs with `npm pack` and publishes with `--ignore-scripts`. Without
+      # this step the unreferenced-dependency guard runs in zero automated places.
+      - name: Audit for unreferenced dependencies
+        run: npm run audit:deps
+
       - name: Run ESLint
         run: npm run lint
 
@@ -95,6 +101,16 @@ jobs:
       - name: Certify derived-artifact answer equivalence
         run: npm run test:equivalence
         timeout-minutes: 3
+
+      # The extractor budget tests assert WALL-CLOCK ceilings on hostile inputs, so they
+      # are CPU-bound for seconds at a time. Run in their own step without file
+      # parallelism: sharing a runner with the rest of the suite made both sides flaky —
+      # these tripped their own ceilings under contention, and their load pushed the
+      # genuinely time-dependent tests elsewhere (serve's idle-shutdown timers) over
+      # theirs. Excluded from `test:unit` below so the work is not paid for twice.
+      - name: Certify extractor cost budgets
+        run: npm run test:budgets
+        timeout-minutes: 10
 
       # Equivalence files run in the bounded gate above; exclude them here so the
       # the same certification assertions are not paid for twice in this job.

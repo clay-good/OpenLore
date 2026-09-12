@@ -428,6 +428,11 @@ async function runOpenAILoop(
           // codeql[js/file-access-to-http]
           body: JSON.stringify({ model: cfg.model, messages: history, tools: toolDefs, tool_choice: 'auto' }),
           signal: attemptSignal,
+          // Never follow a redirect: a cross-origin redirect strips only Authorization,
+          // Cookie and Proxy-Authorization, and a 307/308 replays the body — so a followed
+          // hop would forward the conversation (and, for key-in-header providers, the key)
+          // to a host the first response chose. Same rule as serve-client.ts.
+          redirect: 'error',
         }), llmTlsRelaxed()),
         signal,
       );
@@ -533,6 +538,9 @@ async function runGeminiLoop(
             // codeql[js/file-access-to-http]
             body: JSON.stringify(body),
             signal: attemptSignal,
+            // Never follow a redirect: the API key rides in the URL here, and a 307/308
+            // replays the body. Same reason as the compat provider above.
+            redirect: 'error',
           },
         ), llmTlsRelaxed()),
         signal,
@@ -649,6 +657,9 @@ async function runAnthropicLoop(
             messages: history,
           }),
           signal: attemptSignal,
+          // Never follow a redirect: `x-api-key` is not stripped cross-origin and a
+          // 307/308 replays the body. Same reason as the compat provider above.
+          redirect: 'error',
         }), llmTlsRelaxed()),
         signal,
       );

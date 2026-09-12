@@ -62,6 +62,18 @@ export function escapeDotString(s: string): string {
  * and tab go too: these are single-line display values (a path, a symbol name), so a
  * newline in one is itself a way to forge an extra output line.
  *
+ * Three classes of NON-C0 Unicode formatting characters go with them, because C0 alone
+ * is not the whole attack surface:
+ *   - bidi overrides and isolates (U+202A-U+202E, U+2066-U+2069) and the marks
+ *     U+061C / U+200E / U+200F reverse rendered text, so a decision title or symbol
+ *     name can display as the opposite of the bytes OpenLore actually verified;
+ *   - the line/paragraph separators U+2028 / U+2029 start a new line in many
+ *     terminals and editors — the same forged-extra-line attack as `\n`.
+ * These also matter on the MCP/JSON path, which C0 stripping does not need to cover:
+ * `JSON.stringify` escapes control characters to `\uXXXX` but passes every one of
+ * these through verbatim. This is the same class `sanitizeReviewValue` neutralizes
+ * before repository text reaches a PR comment; keep the two in step.
+ *
  * This is for UNTRUSTED values only. OpenLore's own color codes are applied by the
  * shared color layer AFTER this runs, so they are unaffected.
  */
@@ -76,10 +88,10 @@ export function sanitizeForTerminal(
   //     are the template's own formatting, so they are kept. ESC is removed either
   //     way, which is what blocks the cursor/screen/OSC attacks.
   const pattern = opts.keepNewlines
-    // eslint-disable-next-line no-control-regex -- C0 except \n, plus DEL and C1
-    ? /[\x00-\x09\x0b-\x1f\x7f-\x9f]/g
-    // eslint-disable-next-line no-control-regex -- all of C0, plus DEL and C1
-    : /[\x00-\x1f\x7f-\x9f]/g;
+    // eslint-disable-next-line no-control-regex -- C0 except \n, plus DEL, C1, bidi and separators
+    ? /[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g
+    // eslint-disable-next-line no-control-regex -- all of C0, plus DEL, C1, bidi and separators
+    : /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g;
   return value.replace(pattern, '');
 }
 

@@ -16,6 +16,7 @@
 
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
 import { readJsonArtifactCached, readDependencyGraphOrPartial } from './artifact-cache.js';
@@ -86,9 +87,12 @@ async function loadManifestCached(manifestPath: string, cacheKey: string): Promi
     const mtime = (await stat(manifestPath)).mtimeMs;
     const cached = _manifestCache.get(cacheKey);
     if (cached && cached.fileMtime === mtime) return cached;
-    const raw = await readFile(manifestPath, 'utf-8');
+    // Bounded read: the manifest lives in the repository, so a committed FIFO at this path would
+    // block inside `open()` on a libuv worker and hang every `orient` call.
+    const raw = await readArtifactBounded(manifestPath, ANALYSIS_ARTIFACT_MAX_BYTES);
+    if (!raw) return undefined;
     const entry: ManifestCache = {
-      manifest: JSON.parse(raw) as RagManifest,
+      manifest: JSON.parse(raw.text) as RagManifest,
       fileMtime: mtime,
       condensed: cached?.condensed ?? new Map(),
     };
@@ -633,8 +637,22 @@ export async function handleOrient(
   // ── Provenance (local git/gh, spec-18) ─────────────────────────────────────
   // "Last changed by X in PR #N" for the files this task touches — derived from
   // local git history (and local gh if present). Additive, local-only, no upload.
+  //
+  // The record's own `provenance` label is the WEAKEST of the strings it carries
+  // and can never be `reviewed-corpus`: neither string was reviewed as itself.
+  //   - `lastAuthor` is git's `%an`, which any committer sets freely
+  //     (`git -c user.name=…`) — `source-derived` at best.
+  //   - `lastPrTitle` comes from `gh`, and a PR title stays editable by its author
+  //     AFTER the review that merged it, so it is text supplied by another actor
+  //     with no review behind it: `foreign-actor`, the same label interference-map
+  //     gives gh-derived text.
+  // `orient` is the first call of nearly every session, so a `reviewed-corpus`
+  // stamp here would launder attacker-authored text into almost every context.
   let provenance:
-    | Array<{ file: string; lastAuthor: string; lastDate?: string; lastPr?: number; lastPrTitle?: string; provenance: 'reviewed-corpus' }>
+    | Array<{
+        file: string; lastAuthor: string; lastDate?: string; lastPr?: number; lastPrTitle?: string;
+        provenance: Extract<ServedContentProvenance, 'source-derived' | 'foreign-actor'>;
+      }>
     | undefined;
   if (!lean) try {
     const es = llmCtx?.edgeStore;
@@ -649,7 +667,7 @@ export async function handleOrient(
             ...(r.lastDate ? { lastDate: r.lastDate } : {}),
             ...(topPr ? { lastPr: topPr.number } : {}),
             ...(topPr?.title ? { lastPrTitle: topPr.title } : {}),
-            provenance: 'reviewed-corpus',
+            provenance: topPr?.title ? 'foreign-actor' : 'source-derived',
           };
         });
       }

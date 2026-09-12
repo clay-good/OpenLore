@@ -207,6 +207,12 @@ async function withPartialIndexReceipt(result: unknown, directory: string): Prom
 
 export const SOURCE_CARRYING_TOOLS = new Set([
   'get_function_body',
+  // `get_function_skeleton` returns near-verbatim file content: the skeleton drops
+  // comment/log/blank lines and nothing else, so a PEM block or a .env body passes
+  // through whole. It stamps REPO_CONTENT_PROVENANCE exactly like get_function_body,
+  // and tool-dispatch-redaction.test.ts now DERIVES that stamp set so a source-carrying
+  // tool cannot be added to the surface and forgotten here again.
+  'get_function_skeleton',
   'find_clones',
   'analyze_env_impact',
   'search_code',

@@ -1807,10 +1807,34 @@ interface DefSite {
  * Reaching-definitions fixpoint sweep budget. Real code converges in O(loop-nesting
  * depth) sweeps (a handful); a function needing more than this is pathologically
  * nested (e.g. machine-generated) and is failed soft to no overlay rather than
- * spending quadratic time. 128 sweeps bounds the build to well under a second even
- * on adversarial input while never firing on real code.
+ * spending quadratic time.
+ *
+ * A sweep COUNT alone does not bound the build, and this comment used to claim it did
+ * ("128 sweeps bounds the build to well under a second even on adversarial input").
+ * That was measurably false: one sweep costs O(edges x |OUT|), and |OUT| grows with the
+ * number of definitions, so the total is roughly sweeps x edges x defs. Nested `try`
+ * blocks make all three grow together — measured on real `buildFunctionCfg`, a
+ * TypeScript function of nested try/catch cost 61ms at 3.5KB, 428ms at 7.2KB and
+ * 5,053ms at 18.5KB, i.e. cubic-ish in file size on an input far below the 4MB file
+ * cap. {@link MAX_CFG_BLOCKS} does not help: it bounds the region ABOVE this window, so
+ * the worst case sits just under it. {@link REACHING_MAX_WORK} is what actually bounds
+ * the work.
  */
 const REACHING_MAX_SWEEPS = 128;
+
+/**
+ * Upper bound on the WORK of the fixpoint, counted in def-set element visits.
+ *
+ * This is the bound the sweep count was mistakenly believed to provide. Chosen from
+ * measurement, not taste: the most expensive function in this repository's own source
+ * costs 764,040 element visits (measured over all 8,945 functions in `src/`), so the
+ * ceiling sits 26x above
+ * real code while capping an adversarial function to a fraction of a second. Exceeding
+ * it fails soft to no overlay, exactly as a non-converging fixpoint already does — the
+ * def-use overlay is advisory, and omitting it is a disclosed lower bound rather than
+ * wrong data.
+ */
+const REACHING_MAX_WORK = 20_000_000;
 
 /** Upper bound on CFG blocks per function; above this the overlay is skipped
  *  (fail soft) so an adversarial / machine-generated function can't blow up the
@@ -1884,14 +1908,23 @@ function computeReachingDefs(builder: CfgBuilder, params: string[], paramLine: n
 
   let changed = true;
   let sweeps = 0;
+  // Counted per predecessor and per IN element rather than per Set operation: one
+  // comparison against the ceiling for each inner loop, not for each element.
+  let work = 0;
   const maxSweeps = Math.min(n * n + 16, REACHING_MAX_SWEEPS);
   while (changed && sweeps++ < maxSweeps) {
     changed = false;
     for (let b = 0; b < n; b++) {
       const nin = new Set<number>();
-      for (const p of preds[b]) for (const s of outSet[p]) nin.add(s);
+      for (const p of preds[b]) {
+        work += outSet[p].size;
+        if (work > REACHING_MAX_WORK) return null;
+        for (const s of outSet[p]) nin.add(s);
+      }
       // OUT = GEN ∪ (IN − KILL)
       const nout = new Set<number>(gen[b]);
+      work += nin.size;
+      if (work > REACHING_MAX_WORK) return null;
       for (const s of nin) if (!kill[b].has(s)) nout.add(s);
       if (!setEq(nin, inSet[b])) { inSet[b] = nin; changed = true; }
       if (!setEq(nout, outSet[b])) { outSet[b] = nout; changed = true; }

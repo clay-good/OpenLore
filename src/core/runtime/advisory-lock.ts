@@ -164,6 +164,29 @@ export interface LockHeld {
   /** Age of the holder's last write, in milliseconds. */
   ageMs: number;
   lockPath: string;
+  /**
+   * Set when the holder names no identifiable process, so nothing can ever judge it
+   * stale: the payload carries no PID this loop can parse. A lock file COMMITTED to a
+   * repository looks exactly like this, and it strands every cooperating writer by
+   * design — availability only, never a bypass. Callers should show this instead of
+   * reporting a plain "another process holds the lock", which sends an operator
+   * looking for a process that does not exist.
+   */
+  disclosure?: string;
+}
+
+/** The `held` descriptor for an unreclaimable holder, with the disclosure filled in. */
+function describeHolder(payload: string, mtimeMs: number, lockPath: string): LockHeld {
+  const held: LockHeld = { held: true, payload, ageMs: Date.now() - mtimeMs, lockPath };
+  // Both payload shapes count as identifying: the default `"<pid> <iso>"` and the
+  // structured JSON an ownership policy writes. Only a payload naming neither is
+  // one no staleness predicate can ever act on.
+  if (pidFromDefaultPayload(payload) === null && !/"pid"\s*:\s*\d+/.test(payload)) {
+    held.disclosure = `The lock file ${lockPath} names no process, so it can never be judged stale — `
+      + 'it may have been shipped with the repository or left by a crash. Remove it if no OpenLore '
+      + 'process is running.';
+  }
+  return held;
 }
 
 /**
@@ -449,11 +472,11 @@ export async function acquireLockAt(
           continue; // retry acquire immediately
         }
         if (onContended === 'report') {
-          return { held: true, payload: contents, ageMs: Date.now() - mtimeMs, lockPath };
+          return describeHolder(contents, mtimeMs, lockPath);
         }
         if (Date.now() - start > maxWaitMs) {
           if (!bestEffortAfterMaxWait) {
-            return { held: true, payload: contents, ageMs: Date.now() - mtimeMs, lockPath };
+            return describeHolder(contents, mtimeMs, lockPath);
           }
           return { bestEffort: true, waitedMs: Date.now() - start, inode: -1, refresh: async () => {}, release: async () => {} };
         }

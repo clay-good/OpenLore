@@ -72,7 +72,9 @@ function displayCoverageReport(report: TestCoverageReport, json: boolean): void 
     const pct = `(${info.percent}%)`;
     const drift = info.hasDrift ? ' ⚠ drift detected' : '';
     const status = info.percent >= 80 ? ' ✓' : '';
-    console.log(`     ${domain.padEnd(20)} ${bar.padStart(6)}  ${pct.padEnd(8)}${status}${drift}`);
+    // The domain name is a spec directory name — repository-derived, like the
+    // scenario names below it. safe() before padEnd so the column width is right.
+    console.log(`     ${safe(domain).padEnd(20)} ${bar.padStart(6)}  ${pct.padEnd(8)}${status}${drift}`);
   }
 
   if (report.uncovered.length > 0) {

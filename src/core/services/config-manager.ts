@@ -10,6 +10,7 @@ import YAML from 'yaml';
 import type { ProjectType, OpenLoreConfig } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
 import { colorForStderr } from '../../utils/colors.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import {
   DEFAULT_MAX_FILES,
   DEFAULT_ANTHROPIC_MODEL,
@@ -197,7 +198,13 @@ function emitConfigValidationWarnings(
     const signature = `${configPath} ${finding.kind} ${finding.key ?? ''}`;
     if (emittedConfigWarnings.has(signature)) continue;
     emittedConfigWarnings.add(signature);
-    process.stderr.write(`${prefix} ${OPENLORE_CONFIG_REL_PATH}: ${finding.message}\n`);
+    // `finding.message` quotes the offending config text back — an unknown KEY NAME or a
+    // version string read straight out of .openlore/config.json, which is repository
+    // content and therefore untrusted. Unsanitized, a key named with a `\x1b[2K\r`
+    // prefix erases whatever this hub already printed. `openlore doctor` wraps the same
+    // findings in safe(); this was the sibling sink that did not. Only the message is
+    // sanitized: `prefix` is OpenLore's own colour, whose ESC must survive.
+    process.stderr.write(`${prefix} ${OPENLORE_CONFIG_REL_PATH}: ${sanitizeForTerminal(finding.message, { keepNewlines: true })}\n`);
   }
 }
 

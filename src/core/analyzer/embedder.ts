@@ -47,6 +47,9 @@ export async function resolveEmbedder(cfg?: OpenLoreConfig | null): Promise<Embe
   // requested local index into a remote one (which would also mismatch dimensions).
   if (cfg?.embedding?.provider === 'local') {
     const { LocalEmbeddingService } = await import('./local-embedding-service.js');
+    // fromConfig (not the constructor): the model id comes from the analyzed repo's
+    // config, and on the local path it selects weights that get downloaded and executed
+    // in this process — so it goes through the trust check there, not straight through.
     return LocalEmbeddingService.fromConfig(cfg.embedding);
   }
   const { EmbeddingService } = await import('./embedding-service.js');

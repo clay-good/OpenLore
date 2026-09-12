@@ -631,7 +631,15 @@ export async function defaultEnumerateBranches(
     if (wanted && !wanted.has(branch)) continue;
     let mergeBase: string;
     try {
-      mergeBase = (await runGit(repoPath, ['merge-base', baseRef, branch])).trim();
+      // `--end-of-options` on every operand that is a REF NAME read out of the repo.
+      // `check-ref-format` forbids a `-`-leading path component, but `.git/packed-refs`
+      // is plain text git reads WITHOUT that validation, so a line like
+      //   <sha> refs/heads/--output=/tmp/pwned
+      // makes `for-each-ref --format=%(refname:short)` emit the literal
+      // `--output=/tmp/pwned`, and a bare operand position would let git parse it as a
+      // flag. `baseRef` is already validated by `validateGitRef`; `branch` is repo data
+      // and is not, so it is fenced here instead.
+      mergeBase = (await runGit(repoPath, ['merge-base', '--end-of-options', baseRef, branch])).trim();
       if (!mergeBase) throw new Error('git returned an empty merge base');
     } catch (error) {
       out.push(failedBranch(repoName, branch, 'merge-base', error));
@@ -639,7 +647,10 @@ export async function defaultEnumerateBranches(
     }
     let tip: string;
     try {
-      tip = (await runGit(repoPath, ['rev-parse', branch])).trim();
+      // `--verify --quiet` as well as `--end-of-options`: plain `rev-parse` ECHOES an
+      // unrecognized leading option back on stdout, which would put the injected token
+      // itself into `tip`. `--verify` makes it resolve-or-fail instead.
+      tip = (await runGit(repoPath, ['rev-parse', '--verify', '--quiet', '--end-of-options', branch])).trim();
       if (!tip) throw new Error('git returned an empty branch tip');
     } catch (error) {
       out.push(failedBranch(repoName, branch, 'tip resolution', error));
@@ -668,7 +679,7 @@ export async function defaultEnumerateBranches(
       continue;
     }
     let actor = branch;
-    try { actor = (await runGit(repoPath, ['log', '-1', '--format=%an', branch])).trim() || branch; } catch { /* keep branch as actor */ }
+    try { actor = (await runGit(repoPath, ['log', '-1', '--format=%an', '--end-of-options', branch])).trim() || branch; } catch { /* keep branch as actor */ }
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, mergeBase, files);
     out.push({ actor, ref: branch, title: branch, repo: repoName, kind: 'branch', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }

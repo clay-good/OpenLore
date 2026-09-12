@@ -11,7 +11,7 @@
  */
 
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory } from './utils.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
 import {
@@ -79,7 +79,10 @@ function isWellFormed(fp: unknown): fp is StyleFingerprint {
 async function readStyleFingerprint(absDir: string): Promise<StyleFingerprint | null> {
   try {
     const path = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_STYLE_FINGERPRINT);
-    const parsed: unknown = JSON.parse(await readFile(path, 'utf-8'));
+    // Bounded read: repository-controlled artifact (symlink / FIFO / oversized all fail closed).
+    const raw = await readArtifactBounded(path);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw.text);
     return isWellFormed(parsed) ? parsed : null;
   } catch {
     return null;

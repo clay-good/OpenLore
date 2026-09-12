@@ -243,37 +243,40 @@ describe('sanitizeErrorMessage', () => {
   });
 
   // -- API key redaction --
+  // The shared redactor stamps a TYPED marker (`[REDACTED:api-key]`), which is what every
+  // other server channel already emits; these assertions check the credential is gone and
+  // a marker is present, not the exact spelling.
   it('should redact Gemini-style ?key= parameters', () => {
     expect(sanitizeErrorMessage('Request to https://api.google.com?key=AIzaSyB1234567890abcdefg failed'))
-      .toContain('?key=[REDACTED]');
+      .toContain('[REDACTED');
     expect(sanitizeErrorMessage('Request to https://api.google.com?key=AIzaSyB1234567890abcdefg failed'))
       .not.toContain('AIzaSyB');
   });
 
   it('should redact Anthropic API keys (sk-ant-...)', () => {
     expect(sanitizeErrorMessage('Auth failed with sk-ant-api03-abcdefghij1234567890'))
-      .toContain('[REDACTED]');
+      .toContain('[REDACTED');
     expect(sanitizeErrorMessage('Auth failed with sk-ant-api03-abcdefghij1234567890'))
       .not.toContain('sk-ant-');
   });
 
   it('should redact OpenAI API keys (sk-...)', () => {
     expect(sanitizeErrorMessage('Key: sk-proj-abcdefghijklmnopqrstuvwx'))
-      .toContain('[REDACTED]');
+      .toContain('[REDACTED');
     expect(sanitizeErrorMessage('Key: sk-proj-abcdefghijklmnopqrstuvwx'))
       .not.toContain('sk-proj-');
   });
 
   it('should redact Bearer tokens', () => {
     expect(sanitizeErrorMessage('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload'))
-      .toContain('Bearer [REDACTED]');
+      .toContain('[REDACTED');
     expect(sanitizeErrorMessage('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload'))
       .not.toContain('eyJhbG');
   });
 
   it('should redact x-api-key header values', () => {
     expect(sanitizeErrorMessage('x-api-key: sk-ant-api03-abcdef1234567890'))
-      .toContain('x-api-key: [REDACTED]');
+      .toContain('x-api-key: [REDACTED');
   });
 
   // -- Pass-through --
@@ -284,6 +287,45 @@ describe('sanitizeErrorMessage', () => {
 
   it('should handle empty string', () => {
     expect(sanitizeErrorMessage('')).toBe('');
+  });
+
+  // -- Classes the private redactor this delegated to used to miss. This channel ships
+  //    provider error text to the BROWSER over SSE, so a gap here is a disclosure.
+  it('redacts a free-standing Google API key', () => {
+    const out = sanitizeErrorMessage('key AIzaSyB1234567890abcdefghijklmnopqrstuvw rejected');
+    expect(out).not.toContain('AIzaSyB');
+    expect(out).toContain('[REDACTED');
+  });
+
+  it('redacts an x-goog-api-key header echo', () => {
+    expect(sanitizeErrorMessage('x-goog-api-key: AIzaSyB1234567890abcdefghijklmnopqrstuvw'))
+      .not.toContain('AIzaSyB');
+  });
+
+  it('redacts a GitHub token', () => {
+    expect(sanitizeErrorMessage('ghp_abcdefghijklmnopqrstuvwxyz0123456789'))
+      .not.toContain('ghp_abcdef');
+  });
+
+  it('redacts an AWS access key id', () => {
+    expect(sanitizeErrorMessage('AKIAIOSFODNN7EXAMPLE denied')).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+
+  it('redacts a user:pass@ connection string on any scheme', () => {
+    expect(sanitizeErrorMessage('proxy https://svc:S3cr3tPw@internal/api unreachable'))
+      .not.toContain('S3cr3tPw');
+  });
+
+  it('redacts the exact credential this process holds, even unframed', () => {
+    const prev = process.env.OPENAI_COMPAT_API_KEY;
+    process.env.OPENAI_COMPAT_API_KEY = 'corp-gw-9f21caa1';
+    try {
+      expect(sanitizeErrorMessage('gateway: unknown credential corp-gw-9f21caa1'))
+        .not.toContain('corp-gw-9f21caa1');
+    } finally {
+      if (prev === undefined) delete process.env.OPENAI_COMPAT_API_KEY;
+      else process.env.OPENAI_COMPAT_API_KEY = prev;
+    }
   });
 });
 

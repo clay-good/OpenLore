@@ -57,7 +57,10 @@ export function renderDecision(d: PendingDecision, idx: number, total: number): 
     `  ${C.dim}ID        :${C.reset} ${safe(d.id)}`,
     `  ${C.dim}Domains   :${C.reset} ${safe(d.affectedDomains.join(', ')) || C.dim + 'unknown' + C.reset}`,
     `  ${C.dim}Confidence:${C.reset} ${conf}`,
-    `  ${C.dim}Evidence  :${C.reset} ${d.verificationEvidence ?? 'legacy/unknown'}`,
+    // safe(), like every other field on this panel: the union type is not enforced at
+    // load time, and in a full-screen TUI an injected `\x1b[3A` rewrites the lines
+    // ABOVE this one — including the LLM-extracted review warning below.
+    `  ${C.dim}Evidence  :${C.reset} ${safe(d.verificationEvidence ?? 'legacy/unknown')}`,
     `  ${C.dim}Origin    :${C.reset} ${d.contentOrigin === 'llm-extracted' ? 'LLM-extracted' : d.contentOrigin === 'agent-recorded' ? 'agent-recorded' : 'legacy/unknown'}`,
     ...(d.contentOrigin === 'llm-extracted'
       ? [`  ${C.yellow}⚠ LLM-extracted from repository content; review every field before approval.${C.reset}`]

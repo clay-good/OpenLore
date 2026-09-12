@@ -23,6 +23,13 @@
  * recording proxy) is the legitimate reason to commit the field at all, and a
  * loopback address cannot exfiltrate to an attacker's host.
  *
+ * That last clause depends on one thing outside this module: every credentialed fetch
+ * must set `redirect: 'error'`. A loopback listener (a hostile repo can ship a dev script
+ * that binds the port) is otherwise a one-hop redirector — the fetch spec strips only
+ * Authorization, Cookie and Proxy-Authorization across origins, so `x-api-key` /
+ * `x-goog-api-key` survive and a 307/308 replays the body. `outbound-redirect-guard.test.ts`
+ * holds that side of the boundary.
+ *
  * `generation.openaiCompatBaseUrl` follows the same rule. A remote compatibility
  * gateway must be selected by the operator through an option or environment variable;
  * a committed repository value is accepted only for loopback development servers.
