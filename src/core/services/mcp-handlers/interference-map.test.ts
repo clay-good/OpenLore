@@ -607,7 +607,7 @@ describe('adversarial — hazard classes beyond WAW', () => {
 describe('default providers disclose assessment gaps', () => {
   const branchList = async (_repoPath: string, args: string[]): Promise<string> => {
     if (args[0] === 'for-each-ref') return 'main\nfeature\n';
-    if (args[0] === 'rev-parse' && args[1] === '--verify') return 'main\n';
+    if (args[0] === 'rev-parse' && args.some(a => a.endsWith('^{commit}'))) return 'main\n';
     throw new Error(`unexpected git ${args.join(' ')}`);
   };
 
@@ -618,12 +618,12 @@ describe('default providers disclose assessment gaps', () => {
     }],
     ['tip resolution', async (repoPath: string, args: string[]) => {
       if (args[0] === 'merge-base') return 'abc123\n';
-      if (args[0] === 'rev-parse' && args[1] === 'feature') throw new Error('missing tip');
+      if (args[0] === 'rev-parse' && args.at(-1) === 'feature') throw new Error('missing tip');
       return branchList(repoPath, args);
     }],
     ['diff', async (repoPath: string, args: string[]) => {
       if (args[0] === 'merge-base') return 'abc123\n';
-      if (args[0] === 'rev-parse' && args[1] === 'feature') return 'def456\n';
+      if (args[0] === 'rev-parse' && args.at(-1) === 'feature') return 'def456\n';
       if (args[0] === 'diff') throw new Error('object unavailable');
       return branchList(repoPath, args);
     }],
@@ -699,7 +699,7 @@ describe('default providers disclose assessment gaps', () => {
   it('turns a default-provider branch failure into a final not-assessed node', async () => {
     const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
       if (args[0] === 'for-each-ref') return 'main\nfeature\n';
-      if (args[0] === 'rev-parse' && args[1] === '--verify') return 'main\n';
+      if (args[0] === 'rev-parse' && args.some(a => a.endsWith('^{commit}'))) return 'main\n';
       if (args[0] === 'merge-base') throw new Error('shallow history');
       throw new Error(`unexpected git ${args.join(' ')}`);
     };
@@ -779,7 +779,7 @@ describe('default providers disclose assessment gaps', () => {
     let fileCount = 400;
     const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
       if (args[0] === 'for-each-ref') return 'main\nfeature\n';
-      if (args[0] === 'rev-parse' && args[1] === '--verify') return 'main\n';
+      if (args[0] === 'rev-parse' && args.some(a => a.endsWith('^{commit}'))) return 'main\n';
       if (args[0] === 'merge-base') return 'abc123\n';
       if (args[0] === 'rev-parse') return 'def456\n';
       if (args[0] === 'diff') return patch(fileCount);
