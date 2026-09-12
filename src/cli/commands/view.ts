@@ -684,10 +684,11 @@ export const viewCommand = new Command('view')
                     const r = await withRelaxedTls(
                       () =>
                         // INTENTIONAL EGRESS: repo config can select only loopback; remote endpoints are operator-supplied.
-                        // codeql[js/file-access-to-http]
                         // Never follow a redirect: a loopback baseUrl is trusted because it
                         // cannot reach the network, which only holds while it cannot hand
                         // back a redirect to somewhere that can.
+                        // The suppression must stay on the line directly above the call.
+                        // codeql[js/file-access-to-http]
                         fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout, redirect: 'error' }),
                       llmTlsRelaxed(),
                     );

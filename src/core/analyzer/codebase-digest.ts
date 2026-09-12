@@ -58,9 +58,13 @@ interface DigestOptions {
  * developer's agent instructions; a backtick could close the code span the value sits in and let
  * the rest render as markup. Structure is stripped, the text itself is not rewritten — the
  * surrounding frame (below) is what says the content is data.
+ *
+ * STRIPPED, not escaped. Escaping `|` as `\\|` was incomplete: a backslash is not itself
+ * escaped, so `a\\|b` became `a\\\\|b` — an escaped BACKSLASH followed by a live pipe, which
+ * closes the cell anyway. Removing the structural characters has no such ordering hazard.
  */
 function repoText(value: string): string {
-  return value.replace(/[\r\n]+/g, ' ').replace(/\|/g, '\\|').replace(/`/g, "'");
+  return value.replace(/[\r\n|`]+/g, ' ');
 }
 
 function rel(absPath: string, rootPath: string): string {
