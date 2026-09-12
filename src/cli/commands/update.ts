@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { logger } from '../../utils/logger.js';
 import {
   formatPlatformCommand,
+  windowsCommandHazard,
   resolvePlatformCommand,
   type PlatformCommandRuntime,
 } from '../../utils/platform-command.js';
@@ -187,6 +188,49 @@ function runCommand(cmd: string, args: string[]): Promise<number> {
   });
 }
 
+/**
+ * The plain, hand-typable upgrade command for each install method.
+ *
+ * These are the package-manager invocations, NOT the resolved absolute-path form: the
+ * resolved form exists so OpenLore can SPAWN an upgrade without a shell, and it is useless as
+ * an instruction — on Windows it is two space-separated absolute paths that no shell can
+ * parse unquoted. The same strings already back the "could not determine how openlore was
+ * installed" message below.
+ */
+const PLAIN_UPGRADE_INSTRUCTION: Record<InstallMethod, string> = {
+  homebrew: 'brew upgrade openlore',
+  'npm-global': 'npm install -g openlore@latest',
+  'npm-local': 'npm install openlore@latest',
+  npx: 'npx --yes openlore@latest',
+  unknown: 'npm install -g openlore@latest',
+};
+
+/**
+ * The command to SHOW the user for `method`, quoted when this host's paths can be quoted.
+ *
+ * `update` only ever reports a command — the real upgrade runs through `spawn` with an argv
+ * and no shell — so a path that cannot be formatted for Windows must degrade to the plain
+ * instruction rather than throw out of a command that was working fine
+ * (change: harden-windows-hook-quoting).
+ *
+ * The fallback is derived from `method` rather than passed in, because a caller that built it
+ * from the resolved invocation would hand the user an unquoted pair of absolute paths — a
+ * worse instruction than the one this exists to print.
+ *
+ * Exported as a test seam: the fallback is only reachable on a host whose own paths cannot be
+ * quoted, which no fixture can produce through `runUpdate` without a network round-trip.
+ */
+export function printableCommand(
+  invocation: { command: string; args: string[] },
+  platform: NodeJS.Platform,
+  method: InstallMethod,
+): string {
+  if (platform === 'win32' && windowsCommandHazard(invocation)) {
+    return PLAIN_UPGRADE_INSTRUCTION[method];
+  }
+  return formatPlatformCommand(invocation, platform);
+}
+
 interface UpdateOpts {
   check?: boolean;
   dryRun?: boolean;
@@ -236,7 +280,7 @@ export async function runUpdate(
     logger.info(
       'Project dependency',
       `openlore is a project-local dependency here. Upgrade it in your project with:\n  ` +
-        formatPlatformCommand({ command: local.cmd, args: local.args }, platform)
+        printableCommand({ command: local.cmd, args: local.args }, platform, method)
     );
     return 0;
   }
@@ -251,7 +295,7 @@ export async function runUpdate(
     return 1;
   }
 
-  const printable = formatPlatformCommand({ command: upgrade.cmd, args: upgrade.args }, platform);
+  const printable = printableCommand({ command: upgrade.cmd, args: upgrade.args }, platform, method);
   if (opts.dryRun) {
     logger.info('Would run', printable);
     return 0;

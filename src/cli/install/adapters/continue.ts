@@ -13,7 +13,7 @@ import { readFile, unlink } from 'node:fs/promises';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
-import { formatPlatformCommand, resolveOpenloreCommand } from '../../../utils/platform-command.js';
+import { formatPlatformCommand, resolveOpenloreCommand, windowsCommandHazard } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 
 const CONFIG_PATH = '.continue/config.json';
@@ -61,6 +61,28 @@ export const continueAdapter: Adapter = {
           },
         ],
         warnings: [`${CONFIG_PATH} has hand-edits in OpenLore-managed paths — pass --force to overwrite`],
+        conflict: true,
+      };
+    }
+
+    // An unformattable Windows path refuses THIS file with the reason, rather than letting
+    // `formatPlatformCommand` throw out of a project-scope adapter — which `runInstall`
+    // rethrows, failing a whole install over one slash command
+    // (change: harden-windows-hook-quoting).
+    const hazard = ctx.platform === 'win32'
+      ? windowsCommandHazard(resolveOpenloreCommand(['orient', '--json'], ctx.platform, ctx.platformCommandRuntime))
+      : null;
+    if (hazard) {
+      return {
+        changes: [{
+          path: configPath,
+          kind: 'noop',
+          summary: `${CONFIG_PATH}: not written — the command path (${hazard.part}) contains ${hazard.reason}`,
+        }],
+        warnings: [
+          `${CONFIG_PATH} was not written: the command path (${hazard.part}) contains ${hazard.reason}. `
+          + 'Reinstall openlore from a path without that character.',
+        ],
         conflict: true,
       };
     }

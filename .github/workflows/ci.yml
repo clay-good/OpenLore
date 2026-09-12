@@ -322,6 +322,30 @@ jobs:
               throw "Windows install routed the $key hook through npx (cmd.exe shim)"
             }
           }
+          # harden-windows-hook-quoting (#483): Claude Code runs a hook command through GIT
+          # BASH, where a bare backslash is an escape that is dropped. Nothing above can see
+          # that - the MCP launcher is spawned with an argv and never meets a shell - so the
+          # unquoted entry path shipped green and every hook died with `Cannot find module`.
+          # This runs the hook STRING through the real Git Bash on a real Windows host, which
+          # is the only place in CI where that interpretation is the genuine article.
+          $bash = (Get-Command bash -ErrorAction SilentlyContinue).Source
+          if (-not $bash) { throw 'Git Bash is absent from the runner; the hook shell cannot be verified' }
+          foreach ($key in 'SessionStart', 'UserPromptSubmit') {
+            # Swap the subcommand for `--version`, so the probe proves the SHELL resolved the
+            # path and Node ran it, without depending on an index being built yet.
+            $probe = $settings.hooks.$key[0].hooks[0].command -replace 'orient (--json|--inject)$', '--version'
+            # Written to a file, not passed as an argument: the hook string carries its own
+            # double quotes, and PowerShell's native-argument quoting would rewrite them.
+            Set-Content -Path hook-probe.sh -Value $probe -Encoding ascii
+            $out = (& $bash hook-probe.sh 2>&1) | Out-String
+            if ($out -match 'Cannot find module') {
+              throw "#483 regression: Git Bash could not resolve the $key hook path. $out"
+            }
+            if ($out -notmatch '\d+\.\d+\.\d+') {
+              throw "The $key hook command did not run under Git Bash. $out"
+            }
+          }
+          Remove-Item hook-probe.sh
           # A hostile npx.cmd in the working directory must now be irrelevant: the launcher
           # never reaches npx at all. Kept as a regression probe on exactly that property.
           Set-Content -Path npx.cmd -Value '@exit /b 91'

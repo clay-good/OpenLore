@@ -1,6 +1,13 @@
 import { win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { formatPlatformCommand, isOpenloreCliEntryPath, resolvePlatformCommand, resolveOpenloreCommand } from './platform-command.js';
+import {
+  formatPlatformCommand,
+  isOpenloreCliEntryPath,
+  resolvePlatformCommand,
+  resolveOpenloreCommand,
+  windowsCommandHazard,
+  windowsQuotingHazard,
+} from './platform-command.js';
 
 describe('resolvePlatformCommand', () => {
   const windowsRuntime = {
@@ -211,6 +218,66 @@ describe('formatPlatformCommand quotes for the shell that will run it', () => {
         '"C:\\Users\\me\\AppData\\Roaming\\nvm\\v24.13.0\\node_modules\\openlore\\dist\\cli\\index.js" ' +
         'orient --json',
     );
+  });
+
+  it('leaves a flag and a bare word unquoted on Windows', () => {
+    expect(formatPlatformCommand({ command: 'brew', args: ['upgrade', 'openlore'] }, 'win32'))
+      .toBe('brew upgrade openlore');
+  });
+});
+
+/**
+ * The double-quote form is right for an ordinary Windows path and WRONG for the shapes
+ * below, because double quotes do not make a POSIX shell literal. Each case is also pinned
+ * against a real `bash` in platform-command.posix-oracle.test.ts; these assert the
+ * REFUSAL, which is what keeps a silently-broken or code-executing line out of a config.
+ */
+describe('windowsQuotingHazard refuses what the quoted form cannot carry', () => {
+  it.each([
+    ['C:\\Users\\me\\openlore\\dist\\cli\\index.js', 'an ordinary path'],
+    ['C:\\Program Files\\nodejs\\node.exe', 'a path with a space'],
+    ['C:\\Users\\dev$\\AppData\\Roaming\\npm\\x.js', 'a `$` that starts no expansion'],
+    ['C:\\Users\\%USERNAME%\\x.js', 'a literal percent, which Git Bash leaves alone'],
+    ['C:\\Users\\a!b\\x.js', 'a bang'],
+    ['orient', 'a bare argument'],
+    ['--json', 'a flag'],
+  ])('carries %j (%s)', (part) => {
+    expect(windowsQuotingHazard(part)).toBeNull();
+  });
+
+  it.each([
+    ['C:\\a"\\x.js', /double quote/],
+    ['C:\\Users\\me\\', /trailing backslash/],
+    ['\\\\srv\\share\\openlore\\dist\\cli\\index.js', /UNC prefix/],
+    ['C:\\$Recycle.Bin\\x.js', /backslash a POSIX shell drops/],
+    ['C:\\Users\\a$b\\x.js', /expansion/],
+    ['C:\\Users\\a${IFS}b\\x.js', /expansion/],
+    ['C:\\Users\\a$(id)b\\x.js', /expansion/],
+    ['C:\\Users\\a`id`b\\x.js', /backtick/],
+    ['C:\\Users\\a\nb', /line break/],
+  ])('refuses %j', (part, reason) => {
+    expect(windowsQuotingHazard(part)).toMatch(reason);
+  });
+
+  it('names the offending part, and only refuses on Windows', () => {
+    const invocation = {
+      command: 'C:\\Program Files\\nodejs\\node.exe',
+      args: ['C:\\Users\\a$b\\openlore\\dist\\cli\\index.js', 'orient'],
+    };
+    expect(windowsCommandHazard(invocation)).toEqual({
+      part: 'C:\\Users\\a$b\\openlore\\dist\\cli\\index.js',
+      reason: expect.stringMatching(/expansion/),
+    });
+    expect(() => formatPlatformCommand(invocation, 'win32')).toThrow(/contains an expansion/);
+    // The POSIX branch single-quotes the same input, so it stays formattable.
+    expect(formatPlatformCommand(invocation, 'linux')).toContain("'C:\\Users\\a$b\\openlore");
+  });
+
+  it('reports no hazard for an invocation this host can write', () => {
+    expect(windowsCommandHazard({
+      command: 'C:\\Program Files\\nodejs\\node.exe',
+      args: ['C:\\npm\\openlore\\dist\\cli\\index.js', 'orient', '--json'],
+    })).toBeNull();
   });
 });
 

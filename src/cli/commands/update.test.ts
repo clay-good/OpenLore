@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detectInstallMethod, upgradeCommandFor, type InstallEvidence } from './update.js';
+import { detectInstallMethod, upgradeCommandFor, type InstallEvidence, printableCommand } from './update.js';
 
 describe('detectInstallMethod', () => {
   it('detects Homebrew installs (separator-agnostic)', () => {
@@ -96,5 +96,47 @@ describe('upgradeCommandFor', () => {
       cmd: 'C:\\Program Files\\nodejs\\node.exe',
       args: ['C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js', 'install', '-g', 'openlore@latest'],
     });
+  });
+});
+
+/**
+ * `update` only ever REPORTS a command — the upgrade itself runs through `spawn` with an
+ * argv and no shell. So a host whose paths cannot be quoted for Windows must degrade to a
+ * plain instruction, never throw out of a command that was working (#483 hardening).
+ */
+describe('printableCommand', () => {
+  const invocation = {
+    command: 'C:\\Program Files\\nodejs\\node.exe',
+    args: ['C:\\npm\\node_modules\\npm\\bin\\npm-cli.js', 'install', '-g', 'openlore@latest'],
+  };
+
+  it('quotes both Windows paths when they can be quoted', () => {
+    expect(printableCommand(invocation, 'win32', 'npm-global')).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe" "C:\\npm\\node_modules\\npm\\bin\\npm-cli.js" '
+      + 'install -g openlore@latest',
+    );
+  });
+
+  // Not a caller-supplied string: the fallback has to be the PLAIN package-manager command
+  // for the method. Building it from the resolved invocation would print two unquoted absolute
+  // paths — `C:\Program Files\nodejs\node.exe C:\Program Files\...\npm-cli.js install -g …` —
+  // which no shell can parse, i.e. a worse instruction than the one it replaces.
+  it.each([
+    ['npm-global', 'npm install -g openlore@latest'],
+    ['npm-local', 'npm install openlore@latest'],
+    ['homebrew', 'brew upgrade openlore'],
+    ['unknown', 'npm install -g openlore@latest'],
+  ] as const)('falls back to a typable %s instruction when a path cannot be quoted', (method, expected) => {
+    const hostile = { ...invocation, command: 'C:\\Users\\a$b\\nodejs\\node.exe' };
+    const printed = printableCommand(hostile, 'win32', method);
+    expect(printed).toBe(expected);
+    // The point of the fallback: what it prints is runnable, not a bare path with spaces.
+    expect(printed).not.toMatch(/Program Files/);
+  });
+
+  it('never takes the fallback on a POSIX host, which quotes the same path fine', () => {
+    const hostile = { command: '/opt/a$b/node', args: ['/opt/a$b/openlore/dist/cli/index.js'] };
+    expect(printableCommand(hostile, 'linux', 'npm-global'))
+      .toBe("'/opt/a$b/node' '/opt/a$b/openlore/dist/cli/index.js'");
   });
 });

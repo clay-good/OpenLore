@@ -9,6 +9,17 @@ import type { ApplyContext } from './types.js';
 
 const dirs: string[] = [];
 
+/**
+ * A Windows host whose own paths cannot be written into a shell command field: the profile
+ * directory `a$b` is a parameter expansion Git Bash would substitute, and no quoting form
+ * means the same thing to cmd.exe and to a POSIX shell (change: harden-windows-hook-quoting).
+ */
+const UNFORMATTABLE_WINDOWS_RUNTIME = {
+  nodeExecutable: 'C:\\Users\\a$b\\nodejs\\node.exe',
+  pathValue: '',
+  fileExists: () => true,
+};
+
 async function context(platform: NodeJS.Platform): Promise<ApplyContext> {
   const root = await mkdtemp(join(tmpdir(), 'openlore-platform-command-'));
   dirs.push(root);
@@ -179,5 +190,55 @@ describe('a built install wires OpenLore\'s own CLI, never the npx shim', () => 
 
     expect((await claudeCodeAdapter.uninstall(ctx)).conflict).toBe(false);
     expect(JSON.parse(await readFile(mcpPath, 'utf8')).mcpServers?.openlore).toBeUndefined();
+  });
+});
+
+/**
+ * An install must never write a command field it knows the shell will mangle — nor crash the
+ * whole run over one. `runInstall` rethrows a project-scope adapter error, so the refusal has
+ * to happen in the adapter, as a reported conflict (change: harden-windows-hook-quoting).
+ */
+describe('an unformattable Windows path is refused, not written and not fatal', () => {
+  it('refuses the Claude Code hooks file and names the reason', async () => {
+    const ctx = { ...(await context('win32')), platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME };
+    const result = await claudeCodeAdapter.apply(ctx);
+
+    expect(result.conflict).toBe(true);
+    expect(result.warnings.join('\n')).toMatch(/contains an expansion/);
+    await expect(readFile(join(ctx.root, '.claude/settings.json'), 'utf8')).rejects.toThrow();
+    // The MCP entry is an argv, never a shell string, so it is unaffected and still written.
+    const mcp = JSON.parse(await readFile(join(ctx.root, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.openlore.command).toBe('C:\\Users\\a$b\\nodejs\\node.exe');
+  });
+
+  it('refuses the Continue slash command and writes no config', async () => {
+    const ctx = { ...(await context('win32')), platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME };
+    const result = await continueAdapter.apply(ctx);
+
+    expect(result.conflict).toBe(true);
+    expect(result.warnings.join('\n')).toMatch(/contains an expansion/);
+    await expect(readFile(join(ctx.root, '.continue/config.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('still UNINSTALLS hooks that a now-unformattable path once wired', async () => {
+    // Uninstall identifies our groups by their `_openlore` marker and needs no command at
+    // all. Formatting one there would throw on the removal path and strand the very hooks
+    // uninstall exists to remove — so the keys are deliberately decoupled from the commands.
+    const ctx = await context('win32');
+    await claudeCodeAdapter.apply(ctx);
+    const settingsPath = join(ctx.root, '.claude/settings.json');
+    expect(JSON.parse(await readFile(settingsPath, 'utf8')).hooks.SessionStart).toBeDefined();
+
+    const result = await claudeCodeAdapter.uninstall({
+      ...ctx, platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME,
+    });
+
+    expect(result.conflict).toBe(false);
+    let remaining: Record<string, unknown> = {};
+    try {
+      remaining = JSON.parse(await readFile(settingsPath, 'utf8')).hooks ?? {};
+    } catch { /* the file is removed outright once nothing is left in it */ }
+    expect(remaining.SessionStart).toBeUndefined();
+    expect(remaining.UserPromptSubmit).toBeUndefined();
   });
 });
