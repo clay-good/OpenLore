@@ -9,6 +9,17 @@ import type { ApplyContext } from './types.js';
 
 const dirs: string[] = [];
 
+/**
+ * A Windows host whose own paths cannot be written into a shell command field: the profile
+ * directory `a$b` is a parameter expansion Git Bash would substitute, and no quoting form
+ * means the same thing to cmd.exe and to a POSIX shell (change: harden-windows-hook-quoting).
+ */
+const UNFORMATTABLE_WINDOWS_RUNTIME = {
+  nodeExecutable: 'C:\\Users\\a$b\\nodejs\\node.exe',
+  pathValue: '',
+  fileExists: () => true,
+};
+
 async function context(platform: NodeJS.Platform): Promise<ApplyContext> {
   const root = await mkdtemp(join(tmpdir(), 'openlore-platform-command-'));
   dirs.push(root);
@@ -179,5 +190,101 @@ describe('a built install wires OpenLore\'s own CLI, never the npx shim', () => 
 
     expect((await claudeCodeAdapter.uninstall(ctx)).conflict).toBe(false);
     expect(JSON.parse(await readFile(mcpPath, 'utf8')).mcpServers?.openlore).toBeUndefined();
+  });
+});
+
+/**
+ * An install must never write a command field it knows the shell will mangle — nor crash the
+ * whole run over one. `runInstall` rethrows a project-scope adapter error, so the refusal has
+ * to happen in the adapter, as a reported conflict (change: harden-windows-hook-quoting).
+ */
+describe('an unformattable Windows path costs the hooks, and nothing else', () => {
+  it('installs everything that IS writable, and leaves only the hooks out', async () => {
+    const ctx = { ...(await context('win32')), platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME };
+    const result = await claudeCodeAdapter.apply(ctx);
+
+    // NOT a conflict: an unquotable path is a property of the host, not a clash with the
+    // user's file. Reporting it as a conflict returned exit 1, which also skipped the index
+    // build — so one unwritable field cost the whole install.
+    expect(result.conflict).toBeFalsy();
+    expect(result.warnings.join('\n')).toMatch(/hooks were NOT wired, because .*contains an expansion/);
+
+    // The three things that are still perfectly writable are written.
+    const mcp = JSON.parse(await readFile(join(ctx.root, '.mcp.json'), 'utf8'));
+    expect(mcp.mcpServers.openlore.command).toBe('C:\\Users\\a$b\\nodejs\\node.exe');
+    await expect(readFile(join(ctx.root, 'CLAUDE.md'), 'utf8')).resolves.toContain('OpenLore');
+    const settings = JSON.parse(await readFile(join(ctx.root, '.claude/settings.json'), 'utf8'));
+    // ... and the hooks, the one unwritable thing, are absent rather than wrong.
+    expect(settings.hooks?.SessionStart).toBeUndefined();
+    expect(settings.hooks?.UserPromptSubmit).toBeUndefined();
+  });
+
+  it('removes a hook it wired earlier once the host can no longer run it', async () => {
+    // The failure this prevents: openlore is reinstalled to an unquotable path, so the hook
+    // still on disk names a command Git Bash mangles. Leaving it means #483's
+    // `Cannot find module` on every single turn, forever, with nothing saying why.
+    const ctx = await context('win32');
+    await claudeCodeAdapter.apply(ctx);
+    const settingsPath = join(ctx.root, '.claude/settings.json');
+    expect(JSON.parse(await readFile(settingsPath, 'utf8')).hooks.SessionStart).toBeDefined();
+
+    const result = await claudeCodeAdapter.apply({
+      ...ctx, platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME,
+    });
+
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'));
+    expect(settings.hooks?.SessionStart).toBeUndefined();
+    expect(settings.hooks?.UserPromptSubmit).toBeUndefined();
+    expect(result.warnings.join('\n')).toMatch(/removed rather than left pointing at a command/);
+  });
+
+  it('keeps a user-authored hook in the same group while removing only ours', async () => {
+    const ctx = await context('win32');
+    await claudeCodeAdapter.apply(ctx);
+    const settingsPath = join(ctx.root, '.claude/settings.json');
+    const wired = JSON.parse(await readFile(settingsPath, 'utf8'));
+    wired.hooks.SessionStart.push({ matcher: '', hooks: [{ type: 'command', command: 'mine.sh' }] });
+    await writeFile(settingsPath, JSON.stringify(wired, null, 2));
+
+    await claudeCodeAdapter.apply({
+      ...ctx, platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME, force: true,
+    });
+
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'));
+    expect(JSON.stringify(settings.hooks.SessionStart)).toContain('mine.sh');
+    expect(JSON.stringify(settings.hooks.SessionStart)).not.toContain('_openlore');
+  });
+
+  it('declines the Continue slash command without failing the run', async () => {
+    const ctx = { ...(await context('win32')), platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME };
+    const result = await continueAdapter.apply(ctx);
+
+    // Not a conflict: Continue being unwirable must not undo a Claude Code install that
+    // succeeded in the same pass.
+    expect(result.conflict).toBe(false);
+    expect(result.warnings.join('\n')).toMatch(/\/orient command was NOT wired.*contains an expansion/);
+    await expect(readFile(join(ctx.root, '.continue/config.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('still UNINSTALLS hooks that a now-unformattable path once wired', async () => {
+    // Uninstall identifies our groups by their `_openlore` marker and needs no command at
+    // all. Formatting one there would throw on the removal path and strand the very hooks
+    // uninstall exists to remove — so the keys are deliberately decoupled from the commands.
+    const ctx = await context('win32');
+    await claudeCodeAdapter.apply(ctx);
+    const settingsPath = join(ctx.root, '.claude/settings.json');
+    expect(JSON.parse(await readFile(settingsPath, 'utf8')).hooks.SessionStart).toBeDefined();
+
+    const result = await claudeCodeAdapter.uninstall({
+      ...ctx, platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME,
+    });
+
+    expect(result.conflict).toBe(false);
+    let remaining: Record<string, unknown> = {};
+    try {
+      remaining = JSON.parse(await readFile(settingsPath, 'utf8')).hooks ?? {};
+    } catch { /* the file is removed outright once nothing is left in it */ }
+    expect(remaining.SessionStart).toBeUndefined();
+    expect(remaining.UserPromptSubmit).toBeUndefined();
   });
 });

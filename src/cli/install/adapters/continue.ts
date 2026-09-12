@@ -13,10 +13,17 @@ import { readFile, unlink } from 'node:fs/promises';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
-import { formatPlatformCommand, resolveOpenloreCommand } from '../../../utils/platform-command.js';
+import { formatPlatformCommand, resolveOpenloreCommand, windowsCommandHazard } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 
 const CONFIG_PATH = '.continue/config.json';
+
+/**
+ * The argv the `/orient` slash command runs — ONE definition, because the hazard check below
+ * and the emitter here must ask about the same command. Two copies is how the Windows and
+ * POSIX quoting rules drifted apart in the first place (change: harden-windows-hook-quoting).
+ */
+const ORIENT_ARGS = ['orient', '--json'] as const;
 
 function slashCommand(
   platform: NodeJS.Platform,
@@ -25,7 +32,7 @@ function slashCommand(
   return {
     name: 'orient',
     description: 'Call openlore orient() for the current task context',
-    run: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime), platform),
+    run: formatPlatformCommand(resolveOpenloreCommand(ORIENT_ARGS, platform, runtime), platform),
   };
 }
 
@@ -62,6 +69,33 @@ export const continueAdapter: Adapter = {
         ],
         warnings: [`${CONFIG_PATH} has hand-edits in OpenLore-managed paths — pass --force to overwrite`],
         conflict: true,
+      };
+    }
+
+    // A host whose paths cannot be quoted for a shell has no writable `/orient` command, and
+    // the slash command is all this adapter contributes — so it writes nothing and says why,
+    // rather than letting `formatPlatformCommand` throw out of a project-scope adapter, which
+    // `runInstall` rethrows.
+    //
+    // NOT a conflict, for the same reason as in the claude-code adapter: an unquotable path is
+    // a property of the host, not a clash with the user's file. Conflict semantics fail the
+    // whole run, and Continue being unwirable must not undo a Claude Code install that
+    // succeeded in the same pass (change: harden-windows-hook-quoting).
+    const hazard = ctx.platform === 'win32'
+      ? windowsCommandHazard(resolveOpenloreCommand(ORIENT_ARGS, ctx.platform, ctx.platformCommandRuntime))
+      : null;
+    if (hazard) {
+      return {
+        changes: [{
+          path: configPath,
+          kind: 'noop',
+          summary: `${CONFIG_PATH}: /orient not wired — the command path (${hazard.part}) contains ${hazard.reason}`,
+        }],
+        warnings: [
+          `The Continue /orient command was NOT wired, because the command path (${hazard.part}) `
+          + `contains ${hazard.reason}. Reinstall openlore from a path without that character.`,
+        ],
+        conflict: false,
       };
     }
 
