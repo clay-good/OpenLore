@@ -124,6 +124,15 @@ jobs:
       - name: Audit dependencies
         run: npm run audit:gate
 
+      # The required CI lane checks both of these; a release must not be the weaker
+      # path. `prepublishOnly` nominally covers them, but it never executes here --
+      # the tarball is built with `npm pack` and published with `--ignore-scripts`.
+      - name: Check lockfile integrity digests
+        run: npm run lock:integrity:check
+
+      - name: Audit for unreferenced dependencies
+        run: npm run audit:deps
+
       - name: Verify published API consumer contract
         run: npm run test:api-consumer
 

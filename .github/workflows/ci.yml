@@ -63,6 +63,12 @@ jobs:
         # exception cannot outlive its cause.
         run: npm run audit:gate
 
+      # `prepublishOnly` lists this check, but nothing ever runs that script: the
+      # release packs with `npm pack` and publishes with `--ignore-scripts`. Without
+      # this step the unreferenced-dependency guard runs in zero automated places.
+      - name: Audit for unreferenced dependencies
+        run: npm run audit:deps
+
       - name: Run ESLint
         run: npm run lint
 
