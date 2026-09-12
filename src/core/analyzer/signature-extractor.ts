@@ -315,15 +315,69 @@ function extractTypeScript(content: string): ExtractedSignature[] {
   return entries;
 }
 
+/**
+ * Precomputed "nearest preceding line of interest" indices for one `lines` array.
+ *
+ * The doc-comment lookups below are called for EVERY line of the file and each walked
+ * BACKWARDS to find where the block above ends and begins. On a file of blank lines that
+ * walk reaches line 0 every time: O(n^2) `trim()` calls, no regex involved, and it sits on
+ * the hottest extractor in the repo. Measured on the real `extractSignatures`, 200 KB of
+ * newlines: `a.ts` cost 240 s (`.js`/`.tsx`/`.jsx`/`.mts` the same) and `a.java` likewise.
+ * A per-file size cap does not help a quadratic — 4 MB is 20x this payload for 400x the
+ * time.
+ *
+ * One forward pass computes all three, so every lookup is O(1). This is the same
+ * single-entry memo discipline as `getLineNumber` in import-parser.ts: parsing is
+ * per-file and sequential, so one entry hits effectively always, and what it retains is
+ * bounded by one file.
+ */
+interface DocScanIndex {
+  /** Nearest j < i whose line is non-blank, else -1. (JSDoc skips blanks.) */
+  prevNonBlank: Int32Array;
+  /** Nearest j < i whose line is non-blank and not an annotation, else -1. (Javadoc.) */
+  prevSignificant: Int32Array;
+  /** Greatest j <= i whose line opens a block comment (`/**`), else -1. */
+  prevBlockOpen: Int32Array;
+}
+
+let _docScanLines: string[] | undefined;
+let _docScanIndex: DocScanIndex | undefined;
+
+function docScanIndex(lines: string[]): DocScanIndex {
+  if (_docScanLines === lines && _docScanIndex) return _docScanIndex;
+  const n = lines.length;
+  const prevNonBlank = new Int32Array(n);
+  const prevSignificant = new Int32Array(n);
+  const prevBlockOpen = new Int32Array(n);
+  let nonBlank = -1;
+  let significant = -1;
+  let blockOpen = -1;
+  for (let i = 0; i < n; i++) {
+    // Written strictly BEFORE this line is inspected, so each entry means "before i".
+    prevNonBlank[i] = nonBlank;
+    prevSignificant[i] = significant;
+    const t = lines[i].trim();
+    if (t !== '') {
+      nonBlank = i;
+      if (!t.startsWith('@')) significant = i;
+    }
+    // …whereas a block opener at `i` is itself a candidate for `i`.
+    if (t.startsWith('/**')) blockOpen = i;
+    prevBlockOpen[i] = blockOpen;
+  }
+  _docScanLines = lines;
+  _docScanIndex = { prevNonBlank, prevSignificant, prevBlockOpen };
+  return _docScanIndex;
+}
+
 function extractJSDoc(lines: string[], declLineIdx: number): string | undefined {
-  // Walk backwards to find */ then /**
-  let endIdx = declLineIdx - 1;
+  // Walk backwards to find */ then /** — via the precomputed index, not a rescan.
+  const idx = docScanIndex(lines);
   // Skip blank lines
-  while (endIdx >= 0 && lines[endIdx].trim() === '') endIdx--;
+  const endIdx = declLineIdx > 0 ? idx.prevNonBlank[declLineIdx] : -1;
   if (endIdx < 0 || !lines[endIdx].trim().endsWith('*/')) return undefined;
 
-  let startIdx = endIdx;
-  while (startIdx >= 0 && !lines[startIdx].trim().startsWith('/**')) startIdx--;
+  const startIdx = idx.prevBlockOpen[endIdx];
   if (startIdx < 0) return undefined;
 
   // Find first meaningful @description or plain text line
@@ -468,7 +522,25 @@ function extractCpp(content: string): ExtractedSignature[] {
 
     // Function / method: look for Name(params) followed by qualifiers then { or :
     // This regex finds the last word before a ( that has content after closing )
-    const fnMatch = trimmed.match(/\b(\w+)\s*\(([^)]*)\)\s*(?:const\s*)?(?:noexcept[^{;]*)?\s*(?:override\s*)?(?:final\s*)?(?:->\s*[\w:*&<>, ]+\s*)?[{:]/);
+    // Every inter-token run and every inner class is BOUNDED. This pattern is
+    // unanchored, so it restarts at each of O(n) `\w` positions on the line, and the
+    // chain of optional groups each ending in an unbounded `\s*` multiplied the
+    // partitions it tried before the required `[{:]` failed to arrive. Measured on a
+    // `.cpp` file of `(a` repeated (unclosed parens, no brace): 4.5 s at 50 KB, 13 s at
+    // 100 KB. `trimmed` is one line, so `\n` cannot occur in it and `[ \t\r]` is the
+    // exact equivalent of `\s` here; the only recall difference is a parameter list over
+    // 4,000 characters on a single line, which is the bound already adopted for
+    // `TS_PROPS_INTERFACE` (ui-component-extractor.ts) and `helm.ts`.
+    //
+    // The parameter bound is 1,000 rather than that house 4,000, and the difference is
+    // measured, not stylistic: a bounded quantifier still costs O(n x bound), because
+    // `[^)]` cannot match `)` yet the engine gives the run back one character at a time
+    // anyway. At 4,000 a 240 KB hostile line still cost 3.0 s — linear, so invisible to a
+    // growth-ratio test, and close enough to the absolute ceiling to flake on a loaded
+    // box. 1,000 brings it to ~0.8 s. The recall cost is a parameter list over 1,000
+    // characters ON ONE LINE; unlike the C and Dart scanners, this pattern is
+    // single-line-only, so a wide generated signature is already wrapped past it.
+    const fnMatch = trimmed.match(/\b(\w+)[ \t\r]{0,80}\(([^)]{0,1000})\)[ \t\r]{0,80}(?:const[ \t\r]{0,80})?(?:noexcept[^{;\n]{0,200})?[ \t\r]{0,80}(?:override[ \t\r]{0,80})?(?:final[ \t\r]{0,80})?(?:->[ \t\r]{0,80}[\w:*&<>, ]{0,200}[ \t\r]{0,80})?[{:]/);
     if (fnMatch) {
       const name = fnMatch[1];
       if (!CPP_SKIP_NAMES.has(name) && /^[a-zA-Z_]/.test(name)) {
@@ -491,15 +563,31 @@ function extractSwift(content: string): ExtractedSignature[] {
   const entries: ExtractedSignature[] = [];
   const lines = content.split('\n');
 
+  /**
+   * Index of the nearest non-blank line strictly before the current one, carried forward
+   * instead of re-scanned.
+   *
+   * The doc-comment lookup used to walk backwards over blank lines from EVERY line, which
+   * is O(n^2) `trim()` calls on a file of blank lines — not a regex at all, and the one
+   * quadratic here that a regex audit would not catch. Measured on the real
+   * `extractSignatures('a.swift', …)`: 200 KB of newlines cost 291 s (4 min 51 s), now ~1 ms.
+   *
+   * Exactly equivalent: the loop runs forward, so if the immediately preceding line is
+   * non-blank it IS the nearest one, and otherwise the nearest one is unchanged from the
+   * previous iteration. Updated at the top of the body so the `continue`s below cannot
+   * skip it.
+   */
+  let prevNonBlank = -1;
+
   for (let i = 0; i < lines.length && entries.length < MAX_SIGS_PER_FILE; i++) {
+    if (i > 0 && lines[i - 1].trim() !== '') prevNonBlank = i - 1;
     const line = lines[i];
     const trimmed = line.trimStart();
 
     // Collect /// doc comment above the declaration
     let docstring: string | undefined;
     if (i > 0) {
-      let j = i - 1;
-      while (j >= 0 && lines[j].trim() === '') j--;
+      const j = prevNonBlank;
       if (j >= 0 && lines[j].trim().startsWith('///')) {
         docstring = lines[j].trim().slice(3).trim() || undefined;
       }
@@ -668,17 +756,12 @@ function extractJava(content: string): ExtractedSignature[] {
  * line of the block, or undefined.
  */
 function extractJavadoc(lines: string[], declLineIdx: number): string | undefined {
-  let endIdx = declLineIdx - 1;
-  // Skip annotation lines and blanks
-  while (endIdx >= 0) {
-    const t = lines[endIdx].trim();
-    if (t === '' || t.startsWith('@')) { endIdx--; continue; }
-    break;
-  }
+  // Skip annotation lines and blanks — via the precomputed index, not a rescan.
+  const idx = docScanIndex(lines);
+  const endIdx = declLineIdx > 0 ? idx.prevSignificant[declLineIdx] : -1;
   if (endIdx < 0 || !lines[endIdx].trim().endsWith('*/')) return undefined;
 
-  let startIdx = endIdx;
-  while (startIdx >= 0 && !lines[startIdx].trim().startsWith('/**')) startIdx--;
+  const startIdx = idx.prevBlockOpen[endIdx];
   if (startIdx < 0) return undefined;
 
   for (let j = startIdx + 1; j <= endIdx; j++) {
@@ -699,7 +782,20 @@ function extractGeneric(content: string): ExtractedSignature[] {
   for (let i = 0; i < lines.length && entries.length < MAX_SIGS_PER_FILE; i++) {
     const line = lines[i];
     // Generic: lines that look like declarations (function/class/def keywords)
-    const match = line.match(/^\s*(?:public|private|protected|export|static|async)?\s*(?:function|class|def|func|fn|sub|procedure)\s+(\w+)/);
+    //
+    // The whitespace run belongs INSIDE the optional modifier group, not beside it. Written
+    // as `^\s*(?:MOD)?\s*KW`, the two runs are separated only by an OPTIONAL group, so a
+    // whitespace-only line can be partitioned n x n ways before the keyword fails to
+    // arrive — the same shape as the Spring annotation blob. This fallback handles every
+    // extension without a dedicated extractor, so a one-line `.pl` or `.erl` file of spaces
+    // reached it: measured on the real `extractSignatures` at 200 KB, `a.erl` cost 133 s and
+    // `a.pl` 127 s; both are now ~1 ms.
+    //
+    // EXACTLY equivalent: `\s* MOD? \s* KW` and `\s* (MOD \s*)? KW` describe the same
+    // language (including the degenerate `publicfunction f`, where the inner run is empty).
+    // Moving the run inside means the group can only be entered after a literal modifier
+    // matches, so on a run of pure whitespace there is only one variable-length run left.
+    const match = line.match(/^\s*(?:(?:public|private|protected|export|static|async)\s*)?(?:function|class|def|func|fn|sub|procedure)\s+(\w+)/);
     if (match) {
       entries.push({ kind: 'function', name: match[1], signature: line.trim().slice(0, 120) });
     }
@@ -714,7 +810,17 @@ function extractGeneric(content: string): ExtractedSignature[] {
 
 function extractTerraformSignatures(content: string): ExtractedSignature[] {
   const entries: ExtractedSignature[] = [];
-  const re = /^\s*(resource|data|module|variable|output|provider)\s+("[^"]+"(?:\s+"[^"]+")?|\w+)/gm;
+  // Indentation is `[ \t]`, NOT `\s`. `\s` matches `\n`, so `^\s*` under /m rescans
+  // every remaining newline to EOF from each of O(n) line starts and gives them back
+  // one at a time — quadratic on a `.tf` file of blank lines (measured: 7.9 s at 50 KB,
+  // 484 s at 200 KB, and the 4 MB file cap is 20x that again). `MAX_SIGS_PER_FILE` is no
+  // defence: the payload produces ZERO matches, so the capping loop never runs.
+  //
+  // A semantic no-op: a newline inside "the indentation of this line" is a
+  // contradiction — it means a different line, which `^` under /m already anchors. A
+  // Terraform block header is `keyword "label" "label" {` on one line, so the inner
+  // separators are spaces/tabs too.
+  const re = /^[ \t]*(resource|data|module|variable|output|provider)[ \t]+("[^"]+"(?:[ \t]+"[^"]+")?|\w+)/gm;
   for (const m of content.matchAll(re)) {
     if (entries.length >= MAX_SIGS_PER_FILE) break;
     const block = m[1];

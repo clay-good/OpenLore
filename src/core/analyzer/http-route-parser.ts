@@ -897,10 +897,21 @@ const JAXRS_METHOD_ANNOTATIONS: Array<[string, string]> = [
  *   ("/foo", method=…) → /foo
  */
 function extractSpringPath(argsBlob: string): string | null {
-  // Positional string: first quoted literal at start, possibly preceded by `{`
-  const positional = argsBlob.match(/^\s*\{?\s*"([^"]*)"/);
+  // Positional string: first quoted literal at start, possibly preceded by `{`.
+  //
+  // The whitespace runs are BOUNDED. `^` without /m anchors at offset 0, which looks
+  // safe, but TWO `\s*` separated by an optional `{` give n x n split points to try
+  // before the required `"` fails — and `argsBlob` is unbounded, because
+  // `scanJavaAnnotations` takes annotation arguments with a balanced-paren scan that
+  // has no length cap. Measured on the real `extractJavaRouteDefinitions` with
+  // `@Path(<N spaces>)`: 8.3 s at 50 KB, 42 s at 100 KB.
+  //
+  // An annotation's `(` and its first string literal are never separated by more than a
+  // few hundred characters of real formatting; past that the annotation is simply not
+  // recognized, which is already the outcome for any other unparseable argument blob.
+  const positional = argsBlob.match(/^\s{0,200}\{?\s{0,200}"([^"]*)"/);
   if (positional) return positional[1];
-  const named = argsBlob.match(/(?:value|path)\s*=\s*\{?\s*"([^"]*)"/);
+  const named = argsBlob.match(/(?:value|path)\s{0,200}=\s{0,200}\{?\s{0,200}"([^"]*)"/);
   if (named) return named[1];
   return null;
 }
@@ -1391,9 +1402,9 @@ export async function extractAllHttpEdges(
  */
 function djangoRegexToTemplate(re: string): string {
   let p = re.replace(/^\^/, '').replace(/\$$/, '');
-  p = p.replace(/\(\?P<[^>]+>[^)]*\)/g, ':param'); // named group
-  p = p.replace(/\(\?:[^)]*\)/g, ':param');        // non-capturing group
-  p = p.replace(/\([^)]*\)/g, ':param');           // plain group
+  p = p.replace(/\(\?P<[^>]{0,200}>[^)]{0,500}\)/g, ':param'); // named group
+  p = p.replace(/\(\?:[^)]{0,500}\)/g, ':param');   // non-capturing group
+  p = p.replace(/\([^)]{0,500}\)/g, ':param');      // plain group
   p = p.replace(/\\([./])/g, '$1');                // unescape \. and \/
   return '/' + p.replace(/^\/+/, '');
 }

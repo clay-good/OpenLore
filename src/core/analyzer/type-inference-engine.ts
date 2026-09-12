@@ -143,11 +143,16 @@ export function inferReceiverTypeAt(
 
 function inferPython(source: string): InferredTypes {
   const result: InferredTypes = new Map();
+  // Indent is `[ \t]`, not `\s`: `^\s*` under /m is quadratic on a file of blank lines
+  // (36.9 s isolated at 100 KB of newlines, 0 ms after), and narrowing it is a no-op
+  // because `^` under /m already anchors each line. Python has no statement-level
+  // newline inside `x = Foo(` or `x: Foo =` without a continuation, so nothing is lost.
+  // Hardening: the audit measured the shape, not an end-to-end payload.
   // var = ClassName(...)
-  for (const m of source.matchAll(/^\s*(\w+)\s*=\s*([A-Z]\w*)\s*\(/gm))
+  for (const m of source.matchAll(/^[ \t]*(\w+)[ \t]*=[ \t]*([A-Z]\w*)[ \t]*\(/gm))
     result.set(m[1], m[2]);
   // var: ClassName = ...
-  for (const m of source.matchAll(/^\s*(\w+)\s*:\s*([A-Z]\w*)\s*=/gm))
+  for (const m of source.matchAll(/^[ \t]*(\w+)[ \t]*:[ \t]*([A-Z]\w*)[ \t]*=/gm))
     result.set(m[1], m[2]);
   // param: ClassName in signatures
   for (const m of source.matchAll(/\b(\w+)\s*:\s*([A-Z]\w*)\b/g))

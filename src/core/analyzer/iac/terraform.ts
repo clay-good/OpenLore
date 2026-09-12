@@ -239,17 +239,40 @@ function classifyRef(token: string): string | null {
   return `${root}.${segs[1]}`;
 }
 
+/**
+ * A dotted reference token — `aws_s3_bucket.b.arn`, `var.x`, `module.m.out`.
+ *
+ * The dotted-segment group is `*`, NOT `+`, and the dot requirement is restored by
+ * `isDottedRef` below. With `+`, the greedy `[\w-]*` ate a whole identifier run and the
+ * group then REQUIRED a literal `.`, so the engine gave the run back one character at a
+ * time — from every start offset. Measured on the real `extractTerraform`, 50 KB of `a`
+ * as an attribute value: 7.5 s via the `.tf` path and 7.1 s via `.tf.json`; the report
+ * measured 42 s / 45 s at 100 KB. With `*`, nothing is ever required after a greedy run,
+ * the match succeeds immediately, and the scan is linear.
+ *
+ * Exactly equivalent: `[\w-]` cannot match `.`, so shortening the prefix can never expose
+ * a dot that the greedy path missed. A position that yields a dotless token under `*` is
+ * precisely a position that yielded NO match under `+`, and every start inside a dotless
+ * run is itself dotless — so the wider match span cannot skip a token the old form found.
+ */
+const REF_TOKEN = /[a-zA-Z_][\w-]*(?:\.[a-zA-Z_][\w-]*)*/g;
+
+/** Restores the `+` semantics of `REF_TOKEN`'s dotted group, in linear time. */
+function isDottedRef(token: string): boolean {
+  return token.includes('.');
+}
+
 /** Extract candidate dotted tokens from a body, ignoring quoted-string noise. */
 function scanRefTokens(body: string): string[] {
   const tokens: string[] = [];
   // Interpolations first (legacy ${…} and HCL2 bare refs both land in masked body).
   for (const m of body.matchAll(/\$\{([^}]*)\}/g)) {
-    for (const t of m[1].matchAll(/[a-zA-Z_][\w-]*(?:\.[a-zA-Z_][\w-]*)+/g)) tokens.push(t[0]);
+    for (const t of m[1].matchAll(REF_TOKEN)) if (isDottedRef(t[0])) tokens.push(t[0]);
   }
   const masked = maskStrings(body);
-  for (const t of masked.matchAll(/[a-zA-Z_][\w-]*(?:\.[a-zA-Z_][\w-]*)+/g)) {
+  for (const t of masked.matchAll(REF_TOKEN)) {
     // Skip method/function calls like foo.bar( … ) where the token precedes '('
-    tokens.push(t[0]);
+    if (isDottedRef(t[0])) tokens.push(t[0]);
   }
   return tokens;
 }
@@ -292,7 +315,8 @@ function ingestTfJson(
     const seen = new Set<string>();
     const json = JSON.stringify(body ?? {});
     for (const m of json.matchAll(/\$\{([^}]*)\}/g)) {
-      for (const t of m[1].matchAll(/[a-zA-Z_][\w-]*(?:\.[a-zA-Z_][\w-]*)+/g)) {
+      for (const t of m[1].matchAll(REF_TOKEN)) {
+        if (!isDottedRef(t[0])) continue;
         const ref = classifyRef(t[0]);
         if (ref && ref !== fromAddress && !seen.has(`r:${ref}`)) {
           seen.add(`r:${ref}`);
