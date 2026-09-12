@@ -88,6 +88,21 @@ export function resolvePlatformCommand(
 }
 
 /**
+ * An argv element no shell treats specially, so it needs no quoting at all.
+ *
+ * ONE constant for both branches below, deliberately. The Windows branch used to carry its
+ * own list of characters that FORCE quoting, and the two rules drifted: the denylist missed
+ * `;`, `'`, `~`, `*`, `?`, `#`, brace expansion and the empty string, each of which a POSIX
+ * shell acts on in an unquoted word (`a;id` alone runs `id`), while this allowlist was sound
+ * from the start. Sharing it means neither branch can be weaker than the other for the same
+ * input (change: harden-windows-hook-quoting).
+ *
+ * ASCII on purpose: a non-ASCII path like `C:\Users\Müller` is ordinary, and quoting it is
+ * cheaper than vouching for every codepoint a shell might one day treat as special.
+ */
+const SAFE_BARE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/**
  * Quote one argv element for a POSIX shell.
  *
  * Double quotes are NOT enough here: `$`, a backtick and `\` keep their meaning
@@ -96,27 +111,9 @@ export function resolvePlatformCommand(
  * embedded-quote case closes, escapes, and reopens.
  */
 function quotePosix(part: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(part)) return part;
+  if (SAFE_BARE_WORD.test(part)) return part;
   return `'${part.split("'").join(`'\\''`)}'`;
 }
-
-/**
- * Windows parts that need NO quoting: the same allowlist shape `quotePosix` uses.
- *
- * #484 fixed the reported bug by adding `\` to a DENYLIST of characters that force quoting.
- * That is the right outcome — Claude Code runs a hook command through Git Bash on Windows, a
- * POSIX shell reads a bare `\` as an escape and drops it, so a space-free entry path went
- * through as `C:Usersme...index.js` and every hook failed with `Cannot find module` (#483) —
- * but a denylist can only ever be as complete as the next character someone thinks of. It
- * missed `;`, `'`, `~`, `*`, `?`, `#`, brace expansion and the empty string, each of which a
- * POSIX shell acts on in an UNQUOTED word: `a;id` alone runs `id`.
- *
- * So the Windows branch is inverted to match the POSIX one, which was already sound by
- * construction: quote unless the part is made only of characters no shell treats specially.
- * Every real path contains a `\`, `:` or a space and is therefore quoted; `orient`, `--json`
- * and `openlore@latest` stay bare, which is what keeps the emitted line readable.
- */
-const WINDOWS_SAFE_BARE = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
 /**
  * Does `$` at this position start a parameter or command substitution, or is it a literal?
@@ -224,8 +221,12 @@ export function formatPlatformCommand(
       + 'Reinstall openlore from a path without that character, or wire the command by hand.',
     );
   }
+  // Double quotes: the only grouping cmd.exe understands, and the one form that also survives
+  // Git Bash, which is the shell Claude Code runs a hook command through on Windows. There a
+  // BARE backslash is an escape and is dropped, which is what turned a space-free entry path
+  // into `C:Usersme...index.js` and failed every hook with `Cannot find module` (#483).
   return parts
-    .map((part) => WINDOWS_SAFE_BARE.test(part) ? part : `"${part}"`)
+    .map((part) => SAFE_BARE_WORD.test(part) ? part : `"${part}"`)
     .join(' ');
 }
 

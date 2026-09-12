@@ -107,6 +107,10 @@ describe('the emitted Windows command survives a real POSIX shell', () => {
     ['a caret', 'C:\\Users\\a^b\\openlore\\x.js'],
     ['parentheses', 'C:\\Users\\a(b)c\\openlore\\x.js'],
     ['a single quote', "C:\\Users\\o'brien\\openlore\\x.js"],
+    ['a non-ASCII profile directory', 'C:\\Users\\Müller\\openlore\\x.js'],
+    ['a semicolon, which an unquoted word would run as a second command', 'C:\\Users\\a;id\\x.js'],
+    ['a tilde, which an unquoted word would expand to a home directory', 'C:\\Users\\~\\x.js'],
+    ['a glob, which an unquoted word would match against the directory', 'C:\\Users\\a*b\\x.js'],
   ])('carries %s through unchanged', (_label, entry) => {
     expect(windowsQuotingHazard(entry)).toBeNull();
     expect(shellArgv(formatPlatformCommand({ command: NODE_EXE, args: [entry, 'orient'] }, 'win32')))
@@ -135,6 +139,14 @@ describe('the emitted Windows command survives a real POSIX shell', () => {
     const argv = shellArgv(`"${NODE_EXE}" "${entry}" orient`);
     // Either the line does not parse at all, or the path did not come back intact.
     expect(argv === null || argv[1] !== entry).toBe(true);
+  });
+
+  withBash('delivers an empty argument, which the denylist form silently dropped', () => {
+    // Not a curiosity: `''` matched nothing in the old must-quote class, so it was emitted
+    // bare and disappeared in word splitting — the command ran with one argument fewer.
+    expect(shellArgv(formatPlatformCommand({ command: 'N', args: ['a', '', 'b'] }, 'win32')))
+      .toEqual(['N', 'a', '', 'b']);
+    expect(shellArgv('N a  b')).toEqual(['N', 'a', 'b']);
   });
 
   withBash('never lets a path smuggle a second command past the quoting', () => {

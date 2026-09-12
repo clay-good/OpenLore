@@ -224,6 +224,24 @@ describe('formatPlatformCommand quotes for the shell that will run it', () => {
     expect(formatPlatformCommand({ command: 'brew', args: ['upgrade', 'openlore'] }, 'win32'))
       .toBe('brew upgrade openlore');
   });
+
+  it('quotes a non-ASCII Windows path, which the character class cannot vouch for', () => {
+    // A profile directory like `C:\Users\Müller` is ordinary on Windows. The allowlist is
+    // ASCII, so anything outside it is quoted rather than assumed inert.
+    expect(formatPlatformCommand({
+      command: 'C:\\Program Files\\nodejs\\node.exe',
+      args: ['C:\\Users\\Müller\\openlore\\dist\\cli\\index.js', 'orient'],
+    }, 'win32')).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Müller\\openlore\\dist\\cli\\index.js" orient',
+    );
+  });
+
+  it('quotes an empty argument instead of letting the shell drop it', () => {
+    // The previous denylist matched no character in `''`, so an empty part went through BARE
+    // and vanished during word splitting — one argument silently fewer than intended.
+    expect(formatPlatformCommand({ command: 'openlore', args: ['orient', '', 'x'] }, 'win32'))
+      .toBe('openlore orient "" x');
+  });
 });
 
 /**
