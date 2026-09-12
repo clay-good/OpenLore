@@ -36,7 +36,7 @@
  */
 
 import { join } from 'node:path';
-import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
+import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { traversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';

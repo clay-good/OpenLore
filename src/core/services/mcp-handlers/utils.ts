@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { descriptorIsThePathEntry, readArtifactBytesBounded } from '../../../utils/bounded-artifact-read.js';
-import { lstat, open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { lstat, open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';

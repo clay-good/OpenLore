@@ -771,7 +771,11 @@ export const claudeCodeAdapter: Adapter = {
     try {
       const rawMcp = await readFile(mcpPath, 'utf8');
       const parsedMcp = JSON.parse(rawMcp) as Record<string, unknown>;
-      let { next, removed, refused } = removeManaged(parsedMcp);
+      // `next`/`removed` are reassigned below; `refused` is not.
+      const managed = removeManaged(parsedMcp);
+      const refused = managed.refused;
+      let next = managed.next;
+      let removed = managed.removed;
       reportRefusedManagedPaths(md, mcpPath, layout.mcp, refused);
       let removalEdits = managedRemovalEdits(parsedMcp);
       // User scope ONLY. The rationale is specific to a file OpenLore does not own

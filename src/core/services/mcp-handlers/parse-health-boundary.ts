@@ -10,7 +10,7 @@
  */
 
 import { join } from 'node:path';
-import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
+import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH } from '../../../constants.js';
 import { EXCLUSION_REASON_LABEL, type ParseHealthReport, type FileParseHealth } from '../../analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../analyzer/memory-strategy.js';

@@ -23,7 +23,7 @@
  */
 
 import { statSync, unlinkSync } from 'node:fs';
-import { open, readFile, mkdir, unlink } from 'node:fs/promises';
+import { open, mkdir, unlink } from 'node:fs/promises';
 import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { renameWithContentionRetry } from '../decisions/atomic-store.js';
 import { dirname, join } from 'node:path';

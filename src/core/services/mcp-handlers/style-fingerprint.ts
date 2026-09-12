@@ -11,7 +11,7 @@
  */
 
 import { join } from 'node:path';
-import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
+import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory } from './utils.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
 import {
