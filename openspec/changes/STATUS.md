@@ -38,9 +38,10 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 
 ## In flight — 1
 
-`shrink-receiver-resolution-boundary` — chained intra-object receiver resolution
-(`this.<field>.m()` / `self.<field>.m()`), on a branch with its `change:` markers in `src/`. Archive
-it the moment it merges.
+`resolve-literal-reflective-dispatch` — literal dispatch tables and literal members on a self-typed
+receiver become `literal-reflective` edges; refusals stay disclosed boundary sites. On a branch with
+its `change:` markers in `src/`. Archive it the moment it merges. (`shrink-receiver-resolution-boundary`
+merged in #465 and awaits archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.

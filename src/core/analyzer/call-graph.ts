@@ -74,6 +74,11 @@ import {
   type FileDynamicBoundary,
   type ResolutionProbe,
 } from './dynamic-boundary.js';
+import {
+  resolveLiteralReflection,
+  literalReflectionKey,
+  type LiteralReflectionResult,
+} from './literal-reflection.js';
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
 // synchronous native call nothing else can interrupt.
 import { parseWithBudget as rawParseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
@@ -5157,14 +5162,13 @@ function maxMatchedTotal(candidates: AttributedCandidate[]): number | undefined 
  * it. Deciding on argument form instead would leave a literal-but-unresolvable target with neither
  * an edge nor a site — a silence indistinguishable from "no dynamic dispatch here".
  *
- * Purely additive: it reads `allNodes` and `edges` and returns a separate map. No node or edge is
- * created, mutated, or removed, which is what keeps the emitted graph byte-identical to a build
- * with the matcher disabled.
+ * Purely additive: it reads `allNodes` and the literal-reflection outcome and returns a separate
+ * map. No node or edge is created, mutated, or removed here.
  */
 function finalizeDynamicBoundaries(
   byFile: Map<string, { language: string; candidates: AttributedCandidate[] }>,
   allNodes: Map<string, FunctionNode>,
-  edges: CallEdge[],
+  literalReflection: LiteralReflectionResult | undefined,
 ): Map<string, FileDynamicBoundary> | undefined {
   if (byFile.size === 0) return undefined;
 
@@ -5175,38 +5179,20 @@ function finalizeDynamicBoundaries(
     if (n.isExternal) continue;
     nameCounts.set(n.name, (nameCounts.get(n.name) ?? 0) + 1);
   }
-  // A candidate is retracted ONLY by an edge the reflective resolver itself produced — never by
-  // one that merely shares a caller and a name. A resolved edge carries no byte offset and no
-  // column, so a caller+line+name key cannot tell two calls apart: in
-  // `x = getattr(o, "run"); run()` the ordinary `run()` edge would erase the `getattr` site,
-  // leaving neither an edge nor a site — the exact silence this feature exists to remove.
-  //
-  // Nothing emits the rule yet (the sibling change `resolve-literal-reflective-dispatch` owns it),
-  // so today nothing retracts — which is the honest answer, because today's graph really does carry
-  // no edge for any of these constructs. The key set is built only over callers that carry a
-  // candidate, so a repository with one reflective file does not allocate a string per graph edge.
-  const callersWithCandidates = new Set<string>();
-  for (const { candidates } of byFile.values()) {
-    for (const c of candidates) if (c.symbolId) callersWithCandidates.add(c.symbolId);
-  }
-  const resolvedKeys = new Set<string>();
-  if (callersWithCandidates.size > 0) {
-    for (const e of edges) {
-      if (e.synthesizedBy !== REFLECTIVE_RESOLUTION_RULE) continue;
-      if (!callersWithCandidates.has(e.callerId)) continue;
-      resolvedKeys.add(`${e.callerId}\u0000${e.calleeName}`);
-    }
-  }
-
-  const probe: ResolutionProbe = {
-    resolvedToEdge: (c) =>
-      !!c.symbolId && !!c.literalTarget
-      && resolvedKeys.has(`${c.symbolId}\u0000${c.literalTarget}`),
-    countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
-  };
 
   const out = new Map<string, FileDynamicBoundary>();
   for (const [filePath, { language, candidates }] of byFile) {
+    // A candidate is retracted ONLY when the literal-reflection resolver bound that very construct
+    // — keyed on its file and byte offset, never on a caller and a name. A resolved edge carries no
+    // offset, so in `getattr(self, "run")(); getattr(other, "run")()` a caller+name key would let
+    // the first binding erase the second site, leaving neither an edge nor a site for it
+    // (change: resolve-literal-reflective-dispatch).
+    const key = (c: { startIndex: number }): string => literalReflectionKey(filePath, c.startIndex);
+    const probe: ResolutionProbe = {
+      resolvedToEdge: (c) => literalReflection?.bound.has(key(c)) ?? false,
+      countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
+      refusalFor: (c) => literalReflection?.refusals.get(key(c)),
+    };
     const sites = finalizeDynamicBoundarySites(candidates, probe);
     const record = buildFileDynamicBoundary(filePath, language, sites, maxMatchedTotal(candidates));
     if (record) out.set(filePath, record);
@@ -6460,6 +6446,24 @@ export class CallGraphBuilder {
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);
 
+    // Pass 7a: literal reflective dispatch (change: resolve-literal-reflective-dispatch). A
+    // self-typed receiver needs the class hierarchy, so this runs here rather than with Pass 2d.
+    // Additive and provenance-labeled; a failure binds nothing, so every candidate stays a site.
+    let literalReflection: LiteralReflectionResult | undefined;
+    try {
+      literalReflection = resolveLiteralReflection({
+        candidatesByFile: dynamicBoundaryCandidates,
+        nodes: allNodes,
+        classes,
+        inheritanceEdges,
+        edges,
+        fanOutCap: EVENT_CHANNEL_FANOUT_CAP,
+      });
+      edges.push(...literalReflection.edges);
+    } catch {
+      literalReflection = undefined;
+    }
+
     // Pass 7b: CHA — type-hierarchy-resolved polymorphic dispatch
     // (spec: add-type-hierarchy-resolved-dispatch). Runs after the hierarchy is
     // built so ClassNode/InheritanceEdge are available. Additive and provenance-
@@ -6471,7 +6475,9 @@ export class CallGraphBuilder {
       // directly-resolved edge.
       const directCalleeIdsByCaller = new Map<string, Set<string>>();
       for (const e of edges) {
-        if (e.confidence === 'synthesized') continue;
+        // A literal-reflection edge is excluded too, so one dispatch is never wired twice under two
+        // provenance labels (change: resolve-literal-reflective-dispatch).
+        if (e.confidence === 'synthesized' && e.synthesizedBy !== REFLECTIVE_RESOLUTION_RULE) continue;
         if (e.kind && e.kind !== 'calls') continue;
         let s = directCalleeIdsByCaller.get(e.callerId);
         if (!s) { s = new Set(); directCalleeIdsByCaller.set(e.callerId, s); }
@@ -6534,7 +6540,7 @@ export class CallGraphBuilder {
       },
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
-      dynamicBoundaryByFile: finalizeDynamicBoundaries(dynamicBoundaryCandidates, allNodes, edges),
+      dynamicBoundaryByFile: finalizeDynamicBoundaries(dynamicBoundaryCandidates, allNodes, literalReflection),
       httpClientDegradations: httpClientDegradations.length > 0 ? httpClientDegradations : undefined,
       grammarUnavailable: grammarUnavailableByLanguage.size > 0
         ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)

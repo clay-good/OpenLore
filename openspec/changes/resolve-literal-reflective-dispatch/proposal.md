@@ -10,6 +10,14 @@
 > provenance-labeled edges, and routes every refusal into the sibling change's disclosure so
 > the residue is named rather than silently absent.
 
+> **Built 2026-09-12, with a second re-scope.** Container registration ↔ resolution is NOT
+> recovered: a resolution call returns an instance, so the call-form rule below leaves it no call
+> edge, and the dispatch through the instance would need the registered type from library-specific
+> registration syntax. It stays a disclosed site. The refusal names follow the vocabulary
+> `disclose-dynamic-boundary-regions` shipped (`no-static-target`, `ambiguous-target`, …) plus a new
+> `over-cap`. Retraction keys on the construct's identity, not on caller and name. Shipped as
+> `literal-reflection.ts` (Pass 7a) with a `literalReflection` capability for TS/JS/Python/Ruby.
+
 ## The gap
 
 - **Reflective dispatch through a symbol the resolver can see is dropped anyway.** A literal

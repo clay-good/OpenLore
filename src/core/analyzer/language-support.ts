@@ -37,7 +37,7 @@ import { SIGNATURE_LANGUAGES } from './signature-extractor.js';
 import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
 import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
-import { supportsDynamicBoundary } from './dynamic-boundary.js';
+import { supportsDynamicBoundary, supportsLiteralReflection } from './dynamic-boundary.js';
 import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-capability.js';
 import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
 import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
@@ -66,6 +66,7 @@ export const CAPABILITIES = [
   'crossServiceHttp',
   'errorPropagation',
   'dynamicBoundary',
+  'literalReflection',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -85,6 +86,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
   errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
   dynamicBoundary: 'Dynamic-boundary site recording: reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition and DI-container resolution are recorded as disclosed boundaries. A language WITHOUT this reports no site because none is looked for — never because it contains no dynamic dispatch.',
+  literalReflection: 'Literal reflective dispatch recovery: a module-level literal dispatch table (`HANDLERS[k]()`) and a literal member on a self-typed receiver (`this["m"]()`, `getattr(self, "m")()`, Ruby `send(:m)`) become `literal-reflective` synthesized edges under strict uniqueness; every refusal stays a disclosed dynamic-boundary site. Reflection by bare name on an untyped receiver is never resolved. A language WITHOUT this binds none of these shapes.',
 };
 
 /**
@@ -156,6 +158,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (CROSS_SERVICE_HTTP_LANGUAGES.has(language)) out.push('crossServiceHttp');
   if (ERROR_PROPAGATION_LANGUAGES.has(language)) out.push('errorPropagation');
   if (supportsDynamicBoundary(language)) out.push('dynamicBoundary');
+  if (supportsLiteralReflection(language)) out.push('literalReflection');
   // Return in canonical CAPABILITIES order for determinism.
   return CAPABILITIES.filter(c => out.includes(c));
 }

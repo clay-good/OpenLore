@@ -48,8 +48,14 @@ only for the kinds that can hide a *caller* (`reflective-invoke`, `computed-memb
 `container-resolution`). Sites outside that closure are left to the standing caveat above.
 
 It is **disclosure only** — never resolution, and never the opposite conclusion. A boundary can
-withhold a negative claim; it can never report a symbol as live, tested, or unsafe. Recovering the
-statically-decidable subset is a separate change (`resolve-literal-reflective-dispatch`). A language
+withhold a negative claim; it can never report a symbol as live, tested, or unsafe.
+
+The statically decidable subset is recovered as edges instead (`literalReflection` in
+`docs/language-support.md`): a module-level literal dispatch table and a literal member on a
+self-typed receiver bind under strict uniqueness, as `synthesized` edges labeled
+`literal-reflective` that `directResolvedOnly` removes. A construct that binds stops being a site; one
+that does not stays a site with its refusal reason (`over-cap`, `ambiguous-target`, …), so recovery
+shrinks the disclosed boundary without removing the disclosure. A language
 with no matcher records no site and is reported as *unsupported* by the capability registry, never as
 containing no dynamic dispatch.
 

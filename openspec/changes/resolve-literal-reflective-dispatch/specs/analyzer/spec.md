@@ -5,11 +5,21 @@
 ### Requirement: StructurallyResolvableReflectiveTargetsBecomeEdges
 
 The call-graph builder SHALL recover a call edge for a reflective dispatch construct whose target
-is a **symbol reference the resolver can bind structurally**, in three families: a literal-keyed
-dispatch table whose values are name-bound function references resolved in the table's own
-lexical scope; a container registration paired with a resolution site carrying the same literal
-token within the analyzed repository; and a literal-keyed member access on a receiver whose type
-is statically recovered.
+is a **symbol reference the resolver can bind structurally**, in two families: a literal-keyed
+dispatch table — a module-level literal map of literal keys to named functions, declared once and
+neither rebound nor mutated in its file — indexed at a call site; and a literal-keyed member access
+on a receiver whose type is statically recovered, which is the enclosing class for a self-like
+receiver (`this["m"]()`, `getattr(self, "m")()`, Ruby `send(:m)`), resolved within that class and its
+subclasses, or within its ancestors only when none of those defines the member and every base up
+the chain resolves to an indexed class.
+
+A table SHALL bind all of its entries or none; a table whose distinct bound names exceed the
+existing synthesis fan-out cap SHALL bind none.
+
+DI-container resolution SHALL NOT be recovered. A resolution call returns an instance rather than
+invoking a registered callable, so under the call-form rule below it yields no call edge; the
+dispatch through the instance needs the registered type, and registration syntax is
+library-specific. Such a construct SHALL remain a disclosed site.
 
 Resolution SHALL use a **strict-uniqueness** resolver: a target binds only when the internal
 candidate set has exactly one member after any type narrowing. The same-file preference used by
@@ -40,8 +50,8 @@ emitted twice under two provenance labels.
 
 The synthesized edge set SHALL be identical after a full analysis and after any sequence of
 incremental rebuilds reaching the same tree state. A rule whose output depends on which files
-were in a rebuild subset — in particular cross-file container pairing — SHALL compute over the
-full file set or SHALL be omitted with its sites disclosed.
+were in a rebuild subset SHALL compute over the full file set or SHALL be omitted with its sites
+disclosed; the single-file lane resolves nothing and discloses every candidate.
 
 Language coverage SHALL be registered in the language-capability registry, derived from the live
 rule tables, so a language with no rules is reported as unsupported rather than as containing no
@@ -75,12 +85,20 @@ reflection.
 - **WHEN** the repository is analyzed
 - **THEN** exactly one edge exists for that caller→callee pair
 
-#### Scenario: Container pairing is stable under incremental rebuild
+#### Scenario: A single-file rebuild discloses rather than resolves
 
-- **GIVEN** a container registration in one file and its resolution in another
-- **WHEN** only the resolution site's file is rebuilt incrementally
-- **THEN** the resulting synthesized edge set equals the set produced by a full analysis of the
-  same tree state, or the affected site is disclosed as a boundary
+- **GIVEN** a literal dispatch table and its dispatch site in one file
+- **WHEN** only that file's dynamic-boundary record is re-derived by the single-file lane
+- **THEN** the site is disclosed with refusal reason `unresolved-in-file-scope`, and a full analysis
+  of the same tree state produces the same synthesized edge set regardless of file order
+
+#### Scenario: A table that can change at runtime is not a table
+
+- **GIVEN** a dispatch table declared with `let`, shadowed by a parameter of the same name, assigned
+  into, or passed to `Object.assign`
+- **WHEN** the repository is analyzed
+- **THEN** no edge is emitted and the dispatch site is disclosed with refusal reason
+  `no-static-target`
 
 #### Scenario: Disabling the rules restores today's graph
 
@@ -94,9 +112,15 @@ The partition between a recovered edge and a disclosed dynamic-boundary site SHA
 by the **resolution outcome**, not by the syntactic form of the target.
 
 The shared reflective matcher SHALL record every recognized construct as a **candidate** during
-extraction. After resolution, a candidate that produced exactly one edge SHALL be discharged, and
+extraction. After resolution, a candidate whose target bound SHALL be discharged, and
 every candidate that did not SHALL be emitted as a dynamic-boundary site carrying its refusal
-reason from a closed set: `non-literal`, `unresolved-external`, `ambiguous`, or `over-cap`. Site
+reason from the closed dynamic-boundary refusal vocabulary: `no-static-target`,
+`unresolved-external`, `resolvable-but-unbound`, `ambiguous-target`, `unresolved-in-file-scope`, or
+`over-cap`. A resolver refusal (`over-cap`, or an ambiguous table entry) SHALL take precedence over a
+refusal derived from a repository-wide name count.
+
+A candidate SHALL be discharged by its own identity (its file and byte offset), never by a caller
+and a target name, so binding one construct cannot retract another in the same caller. Site
 emission SHALL therefore occur after resolution, not during the extraction walk.
 
 No recognized construct SHALL yield both an edge and a site, and none SHALL yield neither.
@@ -119,12 +143,20 @@ boundaries, concatenated-name reconstruction, or evaluation of generated code.
 - **WHEN** the repository is analyzed
 - **THEN** no edges are emitted **and** a site with refusal reason `over-cap` is recorded
 
+#### Scenario: One bound construct does not retract another
+
+- **GIVEN** `getattr(self, "run")()` and `getattr(other, "run")()` in one method, where the first
+  binds through the enclosing class and `run` is also defined elsewhere
+- **WHEN** the repository is analyzed
+- **THEN** the first yields an edge and no site, and the second yields a site with refusal reason
+  `ambiguous-target`
+
 #### Scenario: A concatenated target is never reconstructed
 
 - **GIVEN** `getattr(o, "get_" + name)()`
 - **WHEN** the repository is analyzed
 - **THEN** no edge is emitted, no partial name is inferred, and a site with refusal reason
-  `non-literal` is recorded
+  `no-static-target` is recorded
 
 #### Scenario: The partition is total
 

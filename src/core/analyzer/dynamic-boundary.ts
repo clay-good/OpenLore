@@ -100,6 +100,11 @@ export const DYNAMIC_BOUNDARY_REFUSALS = [
    * not check.
    */
   'unresolved-in-file-scope',
+  /**
+   * A literal dispatch table whose bound targets exceed the synthesis fan-out cap. The resolver
+   * emits no edge rather than a partial set (change: resolve-literal-reflective-dispatch).
+   */
+  'over-cap',
 ] as const;
 
 export type DynamicBoundaryRefusal = (typeof DYNAMIC_BOUNDARY_REFUSALS)[number];
@@ -112,6 +117,7 @@ export const DYNAMIC_BOUNDARY_REFUSAL_LABEL: Record<DynamicBoundaryRefusal, stri
   'ambiguous-target': 'the named target resolves to more than one symbol',
   'unresolved-in-file-scope': 'the named target was not resolved within this file, and no '
     + 'repository-wide lookup was performed for this record',
+  'over-cap': 'the dispatch table binds more targets than the synthesis fan-out cap',
 };
 
 /**
@@ -222,6 +228,19 @@ export interface DynamicBoundaryCandidate {
   evidenceTruncated?: true;
   /** The static literal the construct dispatches to, when it has one (`getattr(o, "run")`). */
   literalTarget?: string;
+  /**
+   * The dispatch receiver denotes the enclosing object (`this["m"]()`, `getattr(self, "m")()`,
+   * Ruby `send(:m)`), so `literalTarget` names a method of the enclosing class's type
+   * (change: resolve-literal-reflective-dispatch).
+   */
+  receiver?: 'self';
+  /**
+   * The construct indexes a module-level literal dispatch table declared once in this file: the
+   * sorted, deduplicated names its entries bind (only the selected entry's when the key is a
+   * literal). `names` is bounded by {@link DYNAMIC_BOUNDARY_SITE_CAP}; `size` stays exact
+   * (change: resolve-literal-reflective-dispatch).
+   */
+  table?: { names: string[]; size: number };
   /**
    * The EXACT number of constructs matched in this file, present on the first candidate only and
    * only when the retained list was capped. Keeps a file's reported scale true after the matcher
@@ -343,6 +362,20 @@ interface LanguageSpec {
    * self-like receiver, and the bare-name matching the honesty contract forbids never happens.
    */
   calleeKindsOnAnyReceiver?: boolean;
+  /**
+   * Literal-reflection recovery facts (change: resolve-literal-reflective-dispatch). None of these
+   * resolves anything here; they record the structure the resolver needs after Pass 7.
+   *
+   * `selfSubscriptReceivers`: receivers of a STATIC-index member call that denote the enclosing
+   * object (`this["m"]()`), recorded with their literal so the resolver can narrow by class type.
+   */
+  selfSubscriptReceivers?: string[];
+  /** Rule name → argument holding the receiver; a self-like receiver there narrows by type. */
+  selfReceiverArg?: Record<string, number>;
+  /** `calleeKinds` rules that invoke a method on their receiver (bare or self receiver = self). */
+  selfDispatchOnReceiver?: string[];
+  /** How a module-level literal dispatch table is declared, when this language's tables are read. */
+  dispatchTables?: 'js' | 'python';
 }
 
 /**
@@ -394,6 +427,8 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     diMethods: ['resolve', 'provide'],
     importStyle: 'python',
     importNodeTypes: ['import_statement', 'import_from_statement'],
+    selfReceiverArg: { getattr: 0 },
+    dispatchTables: 'python',
   },
   Ruby: {
     triggers: ['send', 'eval', 'define_', 'method_missing', 'const_get',
@@ -424,6 +459,7 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     // Ruby declares no gated or DI rule, so no import evidence is consulted; the style is declared
     // anyway so the field stays total and a future rule cannot forget it.
     importStyle: 'js',
+    selfDispatchOnReceiver: ['send', 'public_send', '__send__'],
   },
   PHP: {
     triggers: ['call_user_func', 'eval', 'create_function', '$$', 'ReflectionMethod', 'ReflectionClass'],
@@ -557,6 +593,8 @@ function tsSpec(): LanguageSpec {
     diMethods: ['get', 'resolve', 'make', 'cradle'],
     importStyle: 'js',
     importNodeTypes: ['import_statement'],
+    selfSubscriptReceivers: ['this'],
+    dispatchTables: 'js',
   };
 }
 
@@ -566,6 +604,19 @@ function tsSpec(): LanguageSpec {
  */
 export function supportsDynamicBoundary(language: string): boolean {
   return Object.hasOwn(DYNAMIC_BOUNDARY_LANG_SPECS, language);
+}
+
+/**
+ * True when this language's matcher records the structure literal-reflection recovery needs — a
+ * self-typed receiver or a module-level dispatch table (change: resolve-literal-reflective-dispatch).
+ * Read from the same table, so the capability registry cannot claim a rule that does not exist.
+ */
+export function supportsLiteralReflection(language: string): boolean {
+  const spec = Object.hasOwn(DYNAMIC_BOUNDARY_LANG_SPECS, language)
+    ? DYNAMIC_BOUNDARY_LANG_SPECS[language]
+    : undefined;
+  return !!spec && (!!spec.dispatchTables || !!spec.selfSubscriptReceivers?.length
+    || !!spec.selfDispatchOnReceiver?.length || !!spec.selfReceiverArg);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -689,13 +740,12 @@ function literalTargetOf(
   const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
   const selector = actual[selectorIndex];
   if (!selector) return undefined;
-  if (spec.literalTypes.includes(selector.type)) return literalValue(textOf(source, selector));
   // A quoted literal wraps its content in a child node in several grammars; look exactly one level
-  // in, never across siblings.
-  for (const c of childrenOf(selector)) {
-    if (spec.literalTypes.includes(c.type)) return literalValue(textOf(source, c));
-  }
-  return undefined;
+  // in, and only into a wrapper — never into an expression that merely contains a literal.
+  const literal = spec.literalTypes.includes(selector.type)
+    ? selector
+    : wrappedLiteral(source, spec, selector);
+  return literal ? literalValue(textOf(source, literal)) : undefined;
 }
 
 /** The dotted text of a call's callee (`Reflect.get`), or undefined when it is not a member access. */
@@ -812,11 +862,16 @@ export function matchDynamicBoundaries(
   const atOffset = new Map<number, DynamicBoundaryCandidate>();
   const seen = new Set<number>();
   let matched = 0;
+  // Module-level dispatch tables, read only when a subscript call's receiver could name one.
+  let tables: Map<string, Map<string, string>> | undefined;
+  const stableTables = (): Map<string, Map<string, string>> =>
+    (tables ??= spec.dispatchTables ? collectStableTables(spec.dispatchTables, root, source) : new Map());
+  /** Returns the NEWLY retained candidate, so a rule can attach recovery facts to it. */
   const record = (
     kind: DynamicBoundaryKind,
     node: DynamicBoundaryNode,
     literalTarget?: string,
-  ): void => {
+  ): DynamicBoundaryCandidate | undefined => {
     // One construct yields at most one candidate: a nested match (`getattr(o, x)()`) must not be
     // counted twice, and double-counting would inflate the density budget as well as the receipt.
     //
@@ -839,7 +894,7 @@ export function matchDynamicBoundaries(
       if (existing && literalTarget && !existing.literalTarget && existing.kind === kind) {
         existing.literalTarget = literalTarget;
       }
-      return;
+      return undefined;
     }
     seen.add(node.startIndex);
     matched++;
@@ -848,7 +903,7 @@ export function matchDynamicBoundaries(
     // worker, held for the whole build, and JSON-serialized into a fact-cache row — megabytes per
     // file, for a set the artifact caps at fifty anyway. `matched` keeps the count exact so the
     // truncation receipt still reports the true scale.
-    if (out.length >= DYNAMIC_BOUNDARY_SITE_CAP) return;
+    if (out.length >= DYNAMIC_BOUNDARY_SITE_CAP) return undefined;
     const { evidence, truncated } = toEvidence(textOf(source, node));
     const candidate: DynamicBoundaryCandidate = {
       kind,
@@ -860,6 +915,7 @@ export function matchDynamicBoundaries(
     };
     out.push(candidate);
     atOffset.set(node.startIndex, candidate);
+    return candidate;
   };
 
   const stack: DynamicBoundaryNode[] = [root];
@@ -884,7 +940,33 @@ export function matchDynamicBoundaries(
         const index = field(fn, 'index') ?? field(fn, 'subscript')
           ?? childrenOf(fn).slice(1).find(c => c.type !== '[' && c.type !== ']');
         const staticIndex = !!index && !!spec.staticIndexTypes?.includes(index.type);
-        if (!staticIndex && !isGenericSubscription(source, fn, spec)) record('computed-member', n);
+        const receiverNode = field(fn, 'object') ?? field(fn, 'value') ?? childrenOf(fn)[0];
+        const receiver = receiverNode ? textOf(source, receiverNode).trim() : '';
+        const table = spec.dispatchTables && IDENTIFIER.test(receiver)
+          ? stableTables().get(receiver)
+          : undefined;
+        if (staticIndex) {
+          // A static index is ordinarily a resolvable member access, not a boundary. Two shapes are
+          // recorded anyway, because literal reflection recovers them and only a recorded candidate
+          // keeps an unrecovered one disclosed (change: resolve-literal-reflective-dispatch).
+          const literal = index?.type === 'string' ? literalValue(textOf(source, index)) : undefined;
+          if (literal && spec.selfSubscriptReceivers?.includes(receiver)) {
+            const c = record('computed-member', n, literal);
+            if (c) c.receiver = 'self';
+          } else if (table && index) {
+            const hit = table.get(keyText(textOf(source, index)));
+            if (hit) {
+              const c = record('computed-member', n);
+              if (c) c.table = { names: [hit], size: 1 };
+            }
+          }
+        } else if (!isGenericSubscription(source, fn, spec)) {
+          const c = record('computed-member', n);
+          if (c && table) {
+            const names = [...new Set(table.values())].sort();
+            c.table = { names: names.slice(0, DYNAMIC_BOUNDARY_SITE_CAP), size: names.length };
+          }
+        }
       } else if (text) {
         // A dotted rule is checked first, on the FULL dotted text: `Reflect.get` must never be read
         // as a bare `get`.
@@ -902,7 +984,11 @@ export function matchDynamicBoundaries(
           const innerName = lastSegment(calleeText(source, fn) ?? '');
           const innerKind = spec.invokeOnlyKinds[innerName];
           if (innerKind) {
-            record(innerKind, n, literalTargetOf(source, fn, spec, spec.selectorIndex?.[innerName]));
+            const c = record(innerKind, n, literalTargetOf(source, fn, spec, spec.selectorIndex?.[innerName]));
+            const receiverAt = spec.selfReceiverArg?.[innerName];
+            if (c?.literalTarget && receiverAt !== undefined && isSelfArgument(source, fn, receiverAt)) {
+              c.receiver = 'self';
+            }
             pushChildren(stack, n);
             continue;
           }
@@ -921,7 +1007,11 @@ export function matchDynamicBoundaries(
         } else if (dyn && !kind) {
           if (literalTargetOfAnyShape(source, n, spec, dyn.index) === undefined) record(dyn.kind, n);
         } else if (kind) {
-          record(kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[bare]));
+          const c = record(kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[bare]));
+          if (c?.literalTarget && spec.selfDispatchOnReceiver?.includes(bare)
+            && isSelfReceiverCall(source, n, text)) {
+            c.receiver = 'self';
+          }
         } else {
           // 2. Gated member rules — `.invoke(`, `.Call(`, `.getBean(` — which fire only when the
           //    file imports the framework that gives the name its reflective meaning.
@@ -1029,18 +1119,242 @@ function isSelfDotted(text: string): boolean {
   return receiver === 'self' || receiver === 'this' || receiver === 'super' || receiver === 'cls';
 }
 
+/** Is the argument at `index` a self-like receiver (`getattr(self, "m")`)? */
+function isSelfArgument(source: string, call: DynamicBoundaryNode, index: number): boolean {
+  const args = field(call, 'arguments') ?? childrenOf(call).find(c => /argument/.test(c.type));
+  if (!args) return false;
+  const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
+  const text = actual[index] ? textOf(source, actual[index]).trim() : '';
+  return text === 'self' || text === 'cls' || text === 'this';
+}
+
+/**
+ * Does this call dispatch on the enclosing object? A grammar with a `receiver` field (Ruby) answers
+ * from it — Ruby's callee text is the bare method name even for `target.send(:m)` — and every other
+ * grammar answers from the dotted callee text.
+ */
+function isSelfReceiverCall(source: string, call: DynamicBoundaryNode, callee: string): boolean {
+  const receiver = field(call, 'receiver');
+  if (receiver) return textOf(source, receiver).trim() === 'self';
+  return !callee.includes('.') || isSelfDotted(callee);
+}
+
+/**
+ * The literal a wrapper node carries (`argument > string` in grammars that wrap each argument), or
+ * undefined. Only a node whose other children are punctuation tokens counts: `"get_" + name` also
+ * has a literal child, and reading it would reconstruct a partial name for a dispatch computed at
+ * runtime (change: resolve-literal-reflective-dispatch).
+ */
+function wrappedLiteral(
+  source: string,
+  spec: LanguageSpec,
+  node: DynamicBoundaryNode,
+): DynamicBoundaryNode | undefined {
+  const kids = childrenOf(node);
+  const literals = kids.filter(k => spec.literalTypes.includes(k.type));
+  if (literals.length !== 1) return undefined;
+  // A punctuation token's type is its own text; an identifier, operand or call is not.
+  return kids.every(k => k === literals[0] || k.type === textOf(source, k)) ? literals[0] : undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Literal dispatch tables (change: resolve-literal-reflective-dispatch)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A key's text with one layer of quoting removed; numbers and bare names are returned unchanged. */
+function keyText(text: string): string {
+  const t = text.trim();
+  return t.length >= 2 && (t[0] === '"' || t[0] === "'" || t[0] === '`') && t.endsWith(t[0])
+    ? t.slice(1, -1)
+    : t;
+}
+
+/**
+ * Node types that BIND a name, per table style: node type → the fields holding the bound pattern.
+ * `*` means the node's direct identifier children; `.` means the whole node. Assignment targets are
+ * included, so `H[k] = f` and `H.x = f` count as a second binding and disqualify the table.
+ */
+const BINDING_SITES: Record<'js' | 'python', Record<string, string[]>> = {
+  js: {
+    variable_declarator: ['name'], required_parameter: ['pattern'], optional_parameter: ['pattern'],
+    formal_parameters: ['*'], arrow_function: ['parameter'], function_declaration: ['name'],
+    function_expression: ['name'], generator_function_declaration: ['name'],
+    class_declaration: ['name'], catch_clause: ['parameter'], import_specifier: ['alias', 'name'],
+    namespace_import: ['*'], import_clause: ['*'], for_in_statement: ['left'],
+    assignment_expression: ['left'], augmented_assignment_expression: ['left'],
+  },
+  python: {
+    parameters: ['*'], lambda_parameters: ['*'], default_parameter: ['name'],
+    typed_parameter: ['*'], typed_default_parameter: ['name'], assignment: ['left'],
+    augmented_assignment: ['left'], for_statement: ['left'], function_definition: ['name'],
+    class_definition: ['name'], aliased_import: ['alias'], as_pattern: ['alias'],
+    named_expression: ['name'], global_statement: ['*'], delete_statement: ['.'],
+    import_from_statement: ['.'],
+  },
+};
+
+const BINDING_IDENTIFIER_TYPES = new Set(['identifier', 'shorthand_property_identifier_pattern']);
+
+/** How many binding occurrences each of `names` has anywhere in the file. Iterative. */
+function countBindings(
+  style: 'js' | 'python',
+  root: DynamicBoundaryNode,
+  source: string,
+  names: Set<string>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const bump = (n: DynamicBoundaryNode): void => {
+    if (!BINDING_IDENTIFIER_TYPES.has(n.type)) return;
+    const name = textOf(source, n);
+    if (names.has(name)) counts.set(name, (counts.get(name) ?? 0) + 1);
+  };
+  const sites = BINDING_SITES[style];
+  const stack: DynamicBoundaryNode[] = [root];
+  while (stack.length > 0) {
+    const n = stack.pop()!;
+    const fields = Object.hasOwn(sites, n.type) ? sites[n.type] : undefined;
+    if (fields) {
+      for (const f of fields) {
+        if (f === '*') {
+          for (const c of childrenOf(n)) bump(c);
+          continue;
+        }
+        const sub = f === '.' ? n : field(n, f);
+        if (!sub) continue;
+        const inner: DynamicBoundaryNode[] = [sub];
+        while (inner.length > 0) {
+          const m = inner.pop()!;
+          bump(m);
+          inner.push(...childrenOf(m));
+        }
+        // `import { a as b }` binds only the alias; the name is read only when there is none.
+        if (n.type === 'import_specifier') break;
+      }
+    }
+    pushChildren(stack, n);
+  }
+  return counts;
+}
+
+/** A table mutated through a call (`H.update(...)`, `Object.assign(H, ...)`, `delete H.k`). */
+function mutatedThroughCall(source: string, name: string): boolean {
+  const n = escapeToken(name);
+  return new RegExp(
+    `(?<![\\w$])${n}\\.(?:update|setdefault|pop|popitem|clear)\\s*\\(`
+    + `|Object\\.(?:assign|defineProperty|defineProperties|setPrototypeOf)\\(\\s*${n}(?![\\w$])`
+    + `|(?<![\\w$])delete\\s+${n}(?![\\w$])`,
+  ).test(source);
+}
+
+/** A JS/TS object literal of literal keys → identifier values, or null when it is anything else. */
+function jsTable(source: string, value: DynamicBoundaryNode | undefined): Map<string, string> | null {
+  let v = value;
+  while (v && (v.type === 'as_expression' || v.type === 'satisfies_expression'
+    || v.type === 'parenthesized_expression')) {
+    v = childrenOf(v).find(c => c.type !== '(' && c.type !== ')');
+  }
+  if (!v || v.type !== 'object') return null;
+  const table = new Map<string, string>();
+  for (const e of childrenOf(v)) {
+    if (e.type === '{' || e.type === '}' || e.type === ',' || e.type === 'comment') continue;
+    if (e.type === 'shorthand_property_identifier') {
+      table.set(textOf(source, e), textOf(source, e));
+      continue;
+    }
+    if (e.type !== 'pair') return null;
+    const key = field(e, 'key');
+    const val = field(e, 'value');
+    if (!key || val?.type !== 'identifier') return null;
+    if (key.type !== 'property_identifier' && key.type !== 'string' && key.type !== 'number') return null;
+    table.set(keyText(textOf(source, key)), textOf(source, val));
+  }
+  return table.size > 0 ? table : null;
+}
+
+/** A Python dict literal of plain string/integer keys → identifier values, or null. */
+function pyTable(source: string, right: DynamicBoundaryNode | undefined): Map<string, string> | null {
+  if (right?.type !== 'dictionary') return null;
+  const table = new Map<string, string>();
+  for (const e of childrenOf(right)) {
+    if (e.type === '{' || e.type === '}' || e.type === ',' || e.type === 'comment') continue;
+    if (e.type !== 'pair') return null;
+    const key = field(e, 'key');
+    const val = field(e, 'value');
+    if (!key || val?.type !== 'identifier') return null;
+    let k: string;
+    if (key.type === 'integer') {
+      k = textOf(source, key);
+    } else if (key.type === 'string') {
+      const parts = childrenOf(key);
+      // A prefixed (`b"…"`, `f"…"`) or escaped key is not the plain literal an index compares with.
+      if (!/^['"]$/.test(textOf(source, parts[0] ?? key))) return null;
+      if (parts.some(p => p.type !== 'string_start' && p.type !== 'string_content' && p.type !== 'string_end')) {
+        return null;
+      }
+      k = parts.filter(p => p.type === 'string_content').map(p => textOf(source, p)).join('');
+    } else {
+      return null;
+    }
+    table.set(k, textOf(source, val));
+  }
+  return table.size > 0 ? table : null;
+}
+
+/**
+ * Module-level literal dispatch tables that are STABLE in this file: declared exactly once (a JS
+ * `const`, or a single Python module assignment), bound nowhere else — no parameter, local or
+ * assignment target reuses the name — and not mutated through a call. Anything weaker could be
+ * rebound or extended at runtime, and resolving through it would be a guess.
+ */
+function collectStableTables(
+  style: 'js' | 'python',
+  root: DynamicBoundaryNode,
+  source: string,
+): Map<string, Map<string, string>> {
+  const declared = new Map<string, Map<string, string> | null>();
+  const put = (name: string, table: Map<string, string> | null): void => {
+    declared.set(name, declared.has(name) ? null : table);
+  };
+  for (const top of childrenOf(root)) {
+    if (style === 'js') {
+      const decl = top.type === 'export_statement'
+        ? childrenOf(top).find(c => c.type === 'lexical_declaration')
+        : top;
+      if (decl?.type !== 'lexical_declaration') continue;
+      const isConst = childrenOf(decl)[0]?.type === 'const';
+      for (const d of childrenOf(decl)) {
+        if (d.type !== 'variable_declarator') continue;
+        const name = field(d, 'name');
+        if (name?.type !== 'identifier') continue;
+        put(textOf(source, name), isConst ? jsTable(source, field(d, 'value')) : null);
+      }
+    } else {
+      if (top.type !== 'expression_statement') continue;
+      const assignment = childrenOf(top)[0];
+      if (assignment?.type !== 'assignment') continue;
+      const left = field(assignment, 'left');
+      if (left?.type !== 'identifier') continue;
+      put(textOf(source, left), pyTable(source, field(assignment, 'right')));
+    }
+  }
+  const candidates = new Set([...declared].filter(([, t]) => t !== null).map(([name]) => name));
+  const stable = new Map<string, Map<string, string>>();
+  if (candidates.size === 0) return stable;
+  const bindings = countBindings(style, root, source, candidates);
+  for (const name of candidates) {
+    if (bindings.get(name) === 1 && !mutatedThroughCall(source, name)) stable.set(name, declared.get(name)!);
+  }
+  return stable;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The partition: candidates → sites, decided by resolution OUTCOME
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** What the resolver did with a candidate's literal target. Supplied by the caller after Pass 2. */
 /**
  * The synthesis rule a reflective-resolution edge carries. Declared here, next to the partition it
- * governs, so the recovering change (`resolve-literal-reflective-dispatch`) and the disclosing one
- * cannot drift apart on the name.
- *
- * Nothing emits it yet, which is the correct state: today's resolver really does bind no edge for
- * any of these constructs, so today every candidate becomes a site.
+ * governs, so the recovering change (`resolve-literal-reflective-dispatch`, `literal-reflection.ts`)
+ * and the disclosing one cannot drift apart on the name.
  */
 export const REFLECTIVE_RESOLUTION_RULE = 'literal-reflective';
 
@@ -1064,6 +1378,12 @@ export interface ResolutionProbe {
    * `unresolved-in-file-scope` rather than a repository-wide claim the probe never checked.
    */
   countSymbolsNamed(name: string): number | null;
+  /**
+   * The resolver's OWN refusal for a construct it attempted and declined — `over-cap`, or a table
+   * entry that is ambiguous. Wins over the name count, which cannot see a table's entries or a
+   * type-narrowed candidate set (change: resolve-literal-reflective-dispatch).
+   */
+  refusalFor?(candidate: { startIndex: number }): DynamicBoundaryRefusal | undefined;
 }
 
 /** A candidate with its enclosing-symbol attribution filled in by the extractor. */
@@ -1091,13 +1411,19 @@ export function finalizeDynamicBoundarySites(
   const sites: DynamicBoundarySite[] = [];
   for (const c of candidates) {
     if (probe.resolvedToEdge(c)) continue;
-    let refusal: DynamicBoundaryRefusal = 'no-static-target';
-    if (c.literalTarget) {
+    let refusal: DynamicBoundaryRefusal = probe.refusalFor?.(c) ?? 'no-static-target';
+    if (refusal !== 'no-static-target') {
+      // The resolver's own reason stands.
+    } else if (c.literalTarget) {
       const count = probe.countSymbolsNamed(c.literalTarget);
       refusal = count === null ? 'unresolved-in-file-scope'
         : count === 0 ? 'unresolved-external'
         : count === 1 ? 'resolvable-but-unbound'
         : 'ambiguous-target';
+    } else if (c.table && probe.countSymbolsNamed(c.table.names[0] ?? '') === null) {
+      // A single-file lane read the table but ran no resolver: a named table is not "computed at
+      // runtime", and this lane cannot say more.
+      refusal = 'unresolved-in-file-scope';
     }
     sites.push({
       line: c.line,
