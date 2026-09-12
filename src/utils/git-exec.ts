@@ -69,17 +69,19 @@ const rawExecFileAsync = promisify(execFile);
  * than to the ones that look dangerous, because which key fires depends on the repo's
  * config and attributes, not on the subcommand we chose.
  *
- * RESIDUAL, stated honestly: `.gitattributes`-driven drivers — `diff.<name>.textconv`
- * and `filter.<name>.clean/smudge` — are also command strings, and they cannot be turned
- * off centrally because the driver NAME is chosen by the repository and `-c` has no
- * wildcard. Commands that honor them should pass `--no-textconv` themselves. Everything
- * git will run without an attribute opt-in is covered here.
+ * Note what is NOT here: `diff.external`. Setting it EMPTY does not disable it — git
+ * tries to RUN the empty string and dies with "cannot run : No such file or directory",
+ * breaking every diff. The documented off-switch is the `--no-ext-diff` flag, so external
+ * diff and attribute-driven textconv are handled by {@link DIFF_DRIVER_OFF} below instead.
+ *
+ * RESIDUAL, stated honestly: `filter.<name>.clean/smudge` is also a command string and
+ * cannot be turned off centrally, because the driver NAME is chosen by the repository and
+ * `-c` has no wildcard. It needs an attribute opt-in plus a checkout-ish operation, which
+ * nothing here performs. Everything git will run without an attribute opt-in is covered.
  */
 export const GIT_UNTRUSTED_CONFIG_OFF: readonly string[] = [
   // Runs on `git status` / `git diff` to speed up dirty-file detection. The verified vector.
   '-c', 'core.fsmonitor=false',
-  // Runs instead of git's internal diff, on any `git diff`.
-  '-c', 'diff.external=',
   // Runs to page output. We never want a pager in a subprocess regardless.
   '-c', 'core.pager=cat',
   // Runs for any transport that shells out to ssh.
@@ -91,6 +93,26 @@ export const GIT_UNTRUSTED_CONFIG_OFF: readonly string[] = [
   // Server-side hooks, reachable if a caller ever serves a repo.
   '-c', 'uploadpack.packObjectsHook=',
 ];
+
+/**
+ * Per-subcommand flags that disable the two REPO-CHOSEN DIFF DRIVERS git would otherwise run.
+ *
+ * `--no-ext-diff` defeats `diff.external`; `--no-textconv` defeats the
+ * `.gitattributes`-selected `diff.<name>.textconv`. Both are commands the analyzed repository
+ * supplies, and both fire on an ordinary `git diff`/`git log` — verified: a repo with
+ * `diff.external` set runs it on a plain `git diff`, and `--no-ext-diff` both blocks it and
+ * still produces the real diff.
+ *
+ * These are FLAGS rather than `-c` overrides because that is the only mechanism git offers
+ * (see the note in {@link GIT_UNTRUSTED_CONFIG_OFF}), which is why they are keyed by
+ * subcommand: only the diff-producing commands accept them.
+ */
+const DIFF_DRIVER_OFF = ['--no-ext-diff', '--no-textconv'] as const;
+
+/** Subcommands that accept {@link DIFF_DRIVER_OFF}. Verified against git 2.50. */
+const DIFF_DRIVER_SUBCOMMANDS = new Set([
+  'diff', 'log', 'show', 'whatchanged', 'diff-tree', 'diff-index', 'diff-files', 'format-patch', 'range-diff',
+]);
 
 /** True when `file` names the git binary (bare, absolute, or `.exe`). */
 function isGitBinary(file: string): boolean {
@@ -106,7 +128,14 @@ function isGitBinary(file: string): boolean {
  */
 function hardenedArgs(file: string, args?: readonly string[]): string[] | undefined {
   if (!isGitBinary(file)) return args as string[] | undefined;
-  return [...GIT_UNTRUSTED_CONFIG_OFF, ...(args ?? [])];
+  const rest = [...(args ?? [])];
+  // The subcommand is argv[0] here: callers pass it directly, and any `-c` this module adds
+  // goes in front afterwards. Insert the driver flags immediately AFTER it, where git expects
+  // its own options, and only for the subcommands that accept them.
+  if (rest.length > 0 && DIFF_DRIVER_SUBCOMMANDS.has(rest[0])) {
+    rest.splice(1, 0, ...DIFF_DRIVER_OFF);
+  }
+  return [...GIT_UNTRUSTED_CONFIG_OFF, ...rest];
 }
 
 /** Promisified `execFile`, `windowsHide: true` always applied. */

@@ -171,12 +171,53 @@ describe('untrusted-repository config hardening', () => {
     // and each is a key git treats as a command to RUN, not as a setting.
     const prefix = GIT_UNTRUSTED_CONFIG_OFF.join(' ');
     expect(prefix).toContain('core.fsmonitor=false');
-    expect(prefix).toContain('diff.external=');
     expect(prefix).toContain('core.sshCommand=');
     expect(prefix).toContain('core.pager=cat');
     expect(prefix).toContain('protocol.ext.allow=never');
     expect(prefix).toContain('core.hooksPath=');
     expect(prefix).toContain('uploadpack.packObjectsHook=');
+    // Deliberately NOT a `-c` override: `-c diff.external=` makes git try to RUN the empty
+    // string ("cannot run : No such file or directory") and breaks every diff. The driver
+    // flags below are the documented off-switch.
+    expect(prefix).not.toContain('diff.external');
+  });
+
+  it('turns off the repo-chosen diff drivers on diff-producing subcommands only', async () => {
+    await execFileGit('git', ['diff', '--stat'], { cwd: process.cwd() });
+    const diffArgs = recorded.promisifiedExecFile[0][1] as string[];
+    // Immediately after the subcommand, where git expects its own options.
+    expect(diffArgs.slice(diffArgs.indexOf('diff'), diffArgs.indexOf('diff') + 3))
+      .toEqual(['diff', '--no-ext-diff', '--no-textconv']);
+
+    // `rev-parse` does not accept them, so they must not be added there.
+    execFileGitSync('git', ['rev-parse', '--verify', 'HEAD']);
+    expect(argvOfFirstCall(childProcess.execFileSync)).not.toContain('--no-ext-diff');
+  });
+
+  it('does not execute diff.external from the analyzed repository, and still diffs', async () => {
+    // The second verified vector: `diff.external` is a command git runs on a plain
+    // `git diff`. Setting it empty via `-c` is NOT a fix (it breaks diff outright), so
+    // this asserts the flag mechanism actually both blocks it and preserves output.
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-extdiff-'));
+    const marker = join(dir, 'PWNED');
+    try {
+      const git = (...args: string[]) =>
+        childProcess.execFileSync('git', args, { cwd: dir, encoding: 'utf-8' });
+      git('init', '-q', '.');
+      writeFileSync(join(dir, 'a.txt'), 'one\n');
+      git('add', '.');
+      git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x');
+      writeFileSync(join(dir, 'a.txt'), 'two\n');
+      git('config', 'diff.external', `sh -c "touch '${marker}'; exit 0"`);
+
+      const { stdout } = await execFileGit('git', ['diff', '--unified=0'], { cwd: dir });
+
+      expect(existsSync(marker)).toBe(false);
+      // Non-vacuous: the real internal diff still ran.
+      expect(stdout).toContain('a.txt');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('does not execute core.fsmonitor from the analyzed repository', async () => {
