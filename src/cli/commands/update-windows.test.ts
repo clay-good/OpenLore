@@ -36,7 +36,7 @@ import { runUpdate } from './update.js';
 describe('openlore update on Windows', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('uses the resolved shim for npm-root evidence and prints the same dry-run invocation', async () => {
+  it('resolves the shim for npm-root evidence, and shows a line the user can actually run', async () => {
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
 
     const runtime = {
@@ -50,9 +50,14 @@ describe('openlore update on Windows', () => {
       ['C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js', 'root', '-g'],
       expect.objectContaining({ windowsHide: true }),
     );
-    expect(info).toHaveBeenCalledWith(
-      'Would run',
-      '"C:\\Program Files\\nodejs\\node.exe" "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" install -g openlore@latest',
-    );
+    // The displayed line is DELIBERATELY not the resolved argv above. That form starts with a
+    // quoted path, and a PowerShell statement whose first token is quoted parses as a string
+    // expression — so the exact line is a syntax error in the shell a Windows user is most
+    // likely to paste it into. `update` reports a command; it spawns its own argv either way,
+    // so the report is the plain equivalent, and the label no longer promises it verbatim
+    // (change: harden-windows-hook-quoting).
+    expect(info).toHaveBeenCalledWith('Would upgrade with', 'npm install -g openlore@latest');
+    const shown = info.mock.calls.flat().join(' ');
+    expect(shown).not.toContain('npm-cli.js');
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detectInstallMethod, upgradeCommandFor, type InstallEvidence } from './update.js';
+import { detectInstallMethod, upgradeCommandFor, type InstallEvidence, printableCommand } from './update.js';
 
 describe('detectInstallMethod', () => {
   it('detects Homebrew installs (separator-agnostic)', () => {
@@ -96,5 +96,45 @@ describe('upgradeCommandFor', () => {
       cmd: 'C:\\Program Files\\nodejs\\node.exe',
       args: ['C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js', 'install', '-g', 'openlore@latest'],
     });
+  });
+});
+
+/**
+ * `update` only ever REPORTS a command — the upgrade itself runs through `spawn` with an argv
+ * and no shell — so the line it prints has to be RUNNABLE if a user pastes it, which on
+ * Windows the resolved form is not: a statement whose first token is a quoted path parses in
+ * PowerShell as a string expression, not a command (#483 hardening).
+ */
+describe('printableCommand', () => {
+  const invocation = {
+    command: 'C:\\Program Files\\nodejs\\node.exe',
+    args: ['C:\\npm\\node_modules\\npm\\bin\\npm-cli.js', 'install', '-g', 'openlore@latest'],
+  };
+
+  it.each([
+    ['npm-global', 'npm install -g openlore@latest'],
+    ['npm-local', 'npm install openlore@latest'],
+    ['homebrew', 'brew upgrade openlore'],
+    ['npx', 'npx --yes openlore@latest'],
+    ['unknown', 'npm install -g openlore@latest'],
+  ] as const)('prints the typable %s command on Windows', (method, expected) => {
+    const printed = printableCommand(invocation, 'win32', method);
+    expect(printed).toBe(expected);
+    // The whole point: never a quoted absolute path, which PowerShell cannot invoke.
+    expect(printed).not.toMatch(/Program Files|"/);
+  });
+
+  it('prints the same typable command when the path could not be quoted at all', () => {
+    // `C:\Users\a$b` is a path `formatPlatformCommand` REFUSES. Reporting an upgrade must not
+    // throw because of it, so the Windows branch never formats a path in the first place.
+    const hostile = { ...invocation, command: 'C:\\Users\\a$b\\nodejs\\node.exe' };
+    expect(() => printableCommand(hostile, 'win32', 'npm-global')).not.toThrow();
+    expect(printableCommand(hostile, 'win32', 'npm-global')).toBe('npm install -g openlore@latest');
+  });
+
+  it('keeps the exact resolved form on POSIX, where it is both precise and paste-safe', () => {
+    const posix = { command: '/opt/a$b/node', args: ['/opt/a$b/openlore/dist/cli/index.js'] };
+    expect(printableCommand(posix, 'linux', 'npm-global'))
+      .toBe("'/opt/a$b/node' '/opt/a$b/openlore/dist/cli/index.js'");
   });
 });

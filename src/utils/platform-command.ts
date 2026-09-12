@@ -88,6 +88,24 @@ export function resolvePlatformCommand(
 }
 
 /**
+ * An argv element no shell treats specially, so it needs no quoting at all.
+ *
+ * ONE constant for both branches below, deliberately. The Windows branch used to carry its
+ * own list of characters that FORCE quoting, and the two rules drifted: the denylist missed
+ * `;`, `'`, `~`, `*`, `?`, `#`, brace expansion and the empty string, each of which a POSIX
+ * shell acts on in an unquoted word (`a;id` alone runs `id`), while this allowlist was sound
+ * from the start. Sharing it means neither branch can be weaker than the other for the same
+ * input (change: harden-windows-hook-quoting).
+ *
+ * Note `:` is IN the list and does not force quoting — a real Windows path is quoted for its
+ * separators or its spaces, not for its drive colon.
+ *
+ * ASCII on purpose: a non-ASCII path like `C:\Users\Müller` is ordinary, and quoting it is
+ * cheaper than vouching for every codepoint a shell might one day treat as special.
+ */
+const SAFE_BARE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/**
  * Quote one argv element for a POSIX shell.
  *
  * Double quotes are NOT enough here: `$`, a backtick and `\` keep their meaning
@@ -96,8 +114,90 @@ export function resolvePlatformCommand(
  * embedded-quote case closes, escapes, and reopens.
  */
 function quotePosix(part: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(part)) return part;
+  if (SAFE_BARE_WORD.test(part)) return part;
   return `'${part.split("'").join(`'\\''`)}'`;
+}
+
+/**
+ * Does `$` at this position start a parameter or command substitution, or is it a literal?
+ *
+ * `[` is in the set for bash's DEPRECATED `$[1+1]` arithmetic, which it still evaluates — a
+ * `$` before anything else (a separator, a space, end of string) is an ordinary character, so
+ * a profile directory like `C:\Users\dev$` stays writable instead of being refused.
+ */
+function startsPosixExpansion(next: string | undefined): boolean {
+  return next !== undefined && /[A-Za-z0-9_{([*@#?!$-]/.test(next);
+}
+
+/**
+ * Why the `"<part>"` form cannot carry `part` through a POSIX shell, or `null` when it can.
+ *
+ * Double quotes do NOT make a POSIX shell literal — inside them a backslash still escapes
+ * `$`, a backtick, `"` and another backslash, and `$`/backtick still expand. So the quoted
+ * form is right for ordinary Windows paths and WRONG for four shapes, two of which are
+ * worse than the bug it fixes:
+ *
+ *   - an embedded `"` ENDS the quoted run, so the remainder of the line executes as code;
+ *   - a TRAILING backslash escapes our own closing quote, swallowing every later argument;
+ *   - an unescaped `$…` or backtick is SUBSTITUTED — the very thing `quotePosix` above uses
+ *     single quotes to prevent, so the Windows branch must not be weaker for the same input;
+ *   - `\$`, `` \` ``, `\"` and `\\` (a UNC prefix, `C:\$Recycle.Bin`) lose the backslash and
+ *     mangle the path, which is #483's own `Cannot find module`, one turn at a time.
+ *
+ * There is no single string that means the same thing to cmd.exe AND to a POSIX shell for
+ * those, so this REFUSES rather than emitting a line that silently fails or runs code. The
+ * scanner mirrors bash's documented rule and is pinned against a real `bash` in
+ * platform-command.posix-oracle.test.ts (change: harden-windows-hook-quoting).
+ *
+ * NOT covered, deliberately: cmd.exe expands `%VAR%` even inside double quotes and no string
+ * form suppresses it. A literal `%` path round-trips under the Git Bash that actually runs
+ * our hooks, so refusing it would break a working install to appease a shell we do not target.
+ */
+export function windowsQuotingHazard(part: string): string | null {
+  if (part.includes('\n')) return 'a line break, which a single-line command field cannot carry';
+  // The loop below would catch a leading `\\` as an ordinary backslash pair. This case exists
+  // only to name it as the UNC path it almost always is, so the message is actionable.
+  if (part.startsWith('\\\\')) {
+    return 'a UNC prefix (`\\\\server\\share`), whose leading `\\\\` a POSIX shell collapses to one backslash';
+  }
+  for (let i = 0; i < part.length; i += 1) {
+    const char = part[i];
+    if (char === '"') {
+      return 'a double quote, which would end the quoted run and let the rest of the line run as code';
+    }
+    if (char === '`') return 'a backtick, which a POSIX shell runs as a command substitution';
+    if (char === '$' && startsPosixExpansion(part[i + 1])) {
+      return `an expansion (\`${part.slice(i, i + 2)}\`), which a POSIX shell would substitute`;
+    }
+    if (char === '\\') {
+      const next = part[i + 1];
+      if (next === undefined) {
+        return 'a trailing backslash, which would escape the closing quote and swallow the arguments after it';
+      }
+      if (next === '$' || next === '`' || next === '"' || next === '\\') {
+        return `a \`\\${next}\` pair, whose backslash a POSIX shell drops — mangling the path`;
+      }
+      i += 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * The first part of `invocation` that cannot be formatted for Windows, or `null`.
+ *
+ * Exported for the callers that must NOT take the throw below: an install adapter refuses
+ * just the one config field and reports why, and `openlore update` prints its generic
+ * instructions, rather than either crashing a whole run over an unwritable path.
+ */
+export function windowsCommandHazard(
+  invocation: PlatformCommand,
+): { part: string; reason: string } | null {
+  for (const part of [invocation.command, ...invocation.args]) {
+    const reason = windowsQuotingHazard(part);
+    if (reason) return { part, reason };
+  }
+  return null;
 }
 
 /**
@@ -117,10 +217,24 @@ export function formatPlatformCommand(
 ): string {
   const parts = [invocation.command, ...invocation.args];
   if (platform !== 'win32') return parts.map(quotePosix).join(' ');
-  // cmd.exe: double quotes are the only grouping it understands, and a literal `"`
-  // cannot appear in a path there at all.
+  const hazard = windowsCommandHazard(invocation);
+  if (hazard) {
+    throw new Error(
+      `Cannot write a Windows command for ${hazard.part}: it contains ${hazard.reason}. `
+      + 'Reinstall openlore from a path without that character, or wire the command by hand.',
+    );
+  }
+  // Double quotes: the only grouping cmd.exe understands, and the one form that also survives
+  // Git Bash, which is the shell Claude Code runs a hook command through on Windows. There a
+  // BARE backslash is an escape and is dropped, which is what turned a space-free entry path
+  // into `C:Usersme...index.js` and failed every hook with `Cannot find module` (#483).
+  //
+  // "cmd.exe" here means an interactive prompt, or a `cmd` invocation that wraps the whole line
+  // in its own quotes — which is what Node does when it runs a command through a shell. A bare
+  // `cmd` with an unwrapped line applies its two-quotes-only rule and would strip our first and
+  // last quote; nothing OpenLore writes is run that way, and no string form would survive it.
   return parts
-    .map((part) => /[\s&|<>^%!()]/.test(part) ? `"${part}"` : part)
+    .map((part) => SAFE_BARE_WORD.test(part) ? part : `"${part}"`)
     .join(' ');
 }
 
