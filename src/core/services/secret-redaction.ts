@@ -67,7 +67,12 @@ const SECRET_VALUE_PATTERNS: readonly SecretPattern[] = [
   // `https://svc:S3cr3tPw@internal/api` (a gateway URL echoed in a provider error) was
   // passing every channel untouched. Runs after the specific patterns so their typed
   // match still wins for a known scheme.
-  { pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]+@[^\s'"`]+/gi, kind: 'connection-string' },
+  // Scheme bounded to 40 chars (the longest registered IANA scheme is ~36). Unbounded,
+  // `[a-z0-9+.-]*` eats a long dotted token, then REQUIRES `://`, then backtracks from
+  // every offset — and because `.` is in the class the payload is just an ordinary long
+  // member chain (`a.a.a.a…`), i.e. what real source code looks like. Measured 16,620 ms
+  // on 100 KB; bounded, 11 ms, with identical matches.
+  { pattern: /\b[a-z][a-z0-9+.-]{0,40}:\/\/[^\s:/@]+:[^\s@/]+@[^\s'"`]+/gi, kind: 'connection-string' },
   { pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, kind: 'jwt' },
   { pattern: /\bAKIA[0-9A-Z]{16}\b/g, kind: 'cloud-credential' },
   {

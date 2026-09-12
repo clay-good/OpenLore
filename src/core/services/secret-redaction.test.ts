@@ -133,4 +133,27 @@ describe('gaps closed by the red-team pass', () => {
     expect(redactLocalPaths('/home/deploy/app')).toBe('[path]');
     expect(redactLocalPaths('C:\\Users\\bob\\file.ts')).toBe('[path]');
   });
+
+  it('stays linear on a long dotted token (connection-string ReDoS)', () => {
+    // The scheme class contains `.`, so an ORDINARY long member chain is the payload:
+    // unbounded, the scan eats it, requires `://`, and backtracks from every offset.
+    // Measured 16,620 ms before the `{0,40}` bound, 11 ms after. Repo content reaches
+    // this module, and stalling the redactor is what lets a credential through.
+    const payload = 'a.'.repeat(50_000);
+    const started = Date.now();
+    expect(redactSecretText(payload).redactions.count).toBe(0);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('still redacts every connection-string shape the bound must not break', () => {
+    for (const url of [
+      'https://svc:S3cr3tPw@internal/api',
+      'postgres://u:p@h/db',
+      'redis://a:b@h:6379',
+      'x+y.z-1://a:b@c',
+    ]) {
+      expect(redactSecretText(url).value).not.toContain('S3cr3tPw');
+      expect(redactSecretText(url).redactions.count).toBeGreaterThan(0);
+    }
+  });
 });

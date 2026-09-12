@@ -163,7 +163,11 @@ export function detectInjectionShapes(content: string): InjectionShapeMatch[] {
     },
     {
       shape: 'message-impersonation',
-      pattern: /(?:^|\n)\s*(?:\[(?:system|assistant|agent|tool)\]|<(?:system|assistant|agent|tool)>|(?:system|assistant|agent|tool)\s*:)/i,
+      // `[ \t]` not `\s`: `\s` matches `\n`, so `(?:^|\n)\s*` re-anchors at every one of a
+      // file's newlines and the scan is quadratic on blank lines — 37,739 ms on 100 KB,
+      // versus 3 ms here, with identical verdicts. A leading `\n` run is still matched,
+      // because the alternation's own `\n` consumes one and `[ \t]*` the indentation.
+      pattern: /(?:^|\n)[ \t]*(?:\[(?:system|assistant|agent|tool)\]|<(?:system|assistant|agent|tool)>|(?:system|assistant|agent|tool)[ \t]*:)/i,
     },
     {
       shape: 'decision-steering',
