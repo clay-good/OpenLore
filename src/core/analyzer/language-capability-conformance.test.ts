@@ -100,43 +100,52 @@ describe('language conformance — grammar availability (diagnostic, runs first)
     ).toEqual([]);
   });
 
-  // Dart and Lua are the only two languages that reach the WASM lane: `tree-sitter-wasms`
-  // binaries loaded through `web-tree-sitter`. Those two packages are versioned
-  // independently and are NOT freely upgradable together.
+  // Dart is the only language that reaches the WASM lane: a `@repomix/tree-sitter-wasms`
+  // binary loaded through `web-tree-sitter`. Those are two independently versioned packages,
+  // and a loader only parses binaries built for it — which is the trap this guard exists for.
   //
-  // Measured 2026-09-05: `web-tree-sitter` 0.25.10 loads them; 0.26.0 and every version
-  // after it reject them outright. The binaries in `tree-sitter-wasms@0.1.13` — the
-  // newest published build, with no successor — carry an emscripten dylink section the
-  // 0.26+ loader refuses. It throws an Error with an EMPTY message, so the only symptom
-  // is Dart and Lua quietly dropping out of the capability matrix while it still claims
-  // them. That is exactly the over-claim this file exists to prevent, and it cost a day
-  // to trace, so the constraint is asserted here rather than left as a comment.
+  // History (issue #472). The lane used to carry Dart AND Lua on `tree-sitter-wasms@0.1.13`,
+  // whose binaries every `web-tree-sitter` >= 0.26 rejects: they carry an emscripten dylink
+  // section the rewritten loader refuses, and it throws an Error with an EMPTY message. The only
+  // symptom was Dart and Lua quietly dropping out of the call graph while the capability matrix
+  // still claimed them — the exact over-claim this file exists to prevent. `tree-sitter-wasms`
+  // has published nothing since, so web-tree-sitter sat pinned at 0.25.x for months.
   //
-  // Note the fault is in these BINARIES, not in the 0.26+ loader: measured 2026-09-07,
-  // web-tree-sitter 0.27.0 loads other grammars' WASM (e.g. the maintained Lua and Dart
-  // grammar packages' own builds) without complaint. So there are two ways out, not one:
-  //   1. `tree-sitter-wasms` publishes binaries built for the new loader, or
-  //   2. Dart and Lua move off this lane entirely — native grammars for both now exist
-  //      (issue #472), which would delete the lane and drop both packages. Evaluated and
-  //      declined on supply-chain grounds, not for lack of a working option.
-  // Lift this pin when either lands, and re-run this suite to confirm Dart and Lua load.
-  it('keeps web-tree-sitter on a version whose loader accepts the pinned tree-sitter-wasms binaries', () => {
+  // The pin lifted by replacing the stale BINARIES, not by waiting: Dart now loads the
+  // `@repomix/tree-sitter-wasms` rebuild (byte-identical parse trees, so the extractor is
+  // untouched), and Lua left the lane for the maintained native grammar. See
+  // `docs/language-support.md`.
+  //
+  // What still has to hold: BOTH halves of the lane are pinned EXACTLY, so neither the loader nor
+  // the binaries can drift alone on a lockfile refresh or a caret. A bump of either is a reviewed
+  // PR whose CI runs the availability assertion above, which is what actually proves the pair
+  // still fits — a version ceiling only encoded one known-bad boundary.
+  it('pins both halves of the WASM lane exactly, so loader and binaries cannot drift apart', () => {
     const pkg = createRequire(import.meta.url)('../../../package.json') as {
       dependencies: Record<string, string>;
     };
-    const wts = pkg.dependencies['web-tree-sitter'];
-    const wasms = pkg.dependencies['tree-sitter-wasms'];
-    const [major, minor] = wts.replace(/^\D+/, '').split('.').map(Number);
+    const lane = {
+      'web-tree-sitter': pkg.dependencies['web-tree-sitter'],
+      '@repomix/tree-sitter-wasms': pkg.dependencies['@repomix/tree-sitter-wasms'],
+    };
 
-    expect(
-      major === 0 && minor <= 25,
-      `web-tree-sitter is pinned at ${wts} with tree-sitter-wasms at ${wasms}. Every `
-      + `web-tree-sitter >= 0.26 rejects the tree-sitter-wasms 0.1.13 binaries (empty-message `
-      + `throw from its dylink parser), which silently removes Dart and Lua from the call `
-      + `graph while the capability matrix still claims them. Upgrade only alongside a `
-      + `tree-sitter-wasms release built for the new loader, and re-run this suite to confirm `
-      + `Dart and Lua still load.`,
-    ).toBe(true);
+    for (const [name, spec] of Object.entries(lane)) {
+      expect(
+        spec,
+        `${name} must be declared in dependencies — it is half of the WASM grammar lane that `
+        + `serves Dart.`,
+      ).toBeDefined();
+      expect(
+        /^\d+\.\d+\.\d+$/.test(spec ?? ''),
+        `${name} is declared as "${spec}", which is a RANGE. Both halves of the WASM lane — the `
+        + `web-tree-sitter loader and the @repomix/tree-sitter-wasms binaries it loads — must be `
+        + `pinned exactly. A loader only parses binaries built for it: web-tree-sitter 0.26 `
+        + `rewrote its loader and rejects binaries built for the old one with an EMPTY-message `
+        + `throw, which silently removes Dart from the call graph while the capability matrix `
+        + `still claims it (issue #472). Bump the two together in a reviewed PR and let the `
+        + `grammar-availability assertion above prove the pair still loads.`,
+      ).toBe(true);
+    }
   });
 });
 
@@ -419,9 +428,10 @@ describe('language conformance — cross-service HTTP', () => {
 // clean code, this fails here (on the fixture) instead of quietly in a user's repo
 // (change: add-parse-health-boundary-disclosure).
 //
-// NOTE: the WASM-loaded grammars (Lua, Dart) are structurally EXCLUDED from parse-health (their
-// shared WASM Language heap yields spurious ERROR nodes on parses after the first), so they always
-// produce no record here — this canary guards the 16 native-loader languages, not those two.
+// NOTE: Dart is structurally EXCLUDED from parse-health (it is the one WASM-loaded grammar, and
+// its shared WASM Language heap yields spurious ERROR nodes on parses after the first), so it
+// always produces no record here — this canary guards the 17 native-loader languages, not Dart.
+// Lua counts as one of the 17: it moved to the native lane with the maintained grammar (#472).
 describe('grammar-drift canary — every claimed callGraph language parses its fixture cleanly', () => {
   for (const f of BASIC) {
     it(`${f.language}: fixture parses with zero ERROR/MISSING nodes`, async () => {
@@ -444,12 +454,14 @@ describe('grammar-drift canary — every claimed callGraph language parses its f
 // resolver guess):
 //  - Bash: a bare command call (`helper`) is lexically indistinguishable from an external command
 //    across files, so the extractor deliberately does not bind it cross-file. Asserted explicitly below.
-//  - Lua, Dart: WASM-loaded grammars whose shared WASM Language heap yields spurious ERROR nodes on
-//    parses AFTER the first in a process (the same limitation the grammar-drift canary excludes them
-//    for). Their callGraph support — including cross-file name resolution on a first parse — is proven
-//    by the standalone build in section (1); a second in-process build (this sweep) is unreliable, so
-//    they are excluded here rather than asserted flakily.
-const CROSS_FILE_EXCLUDED = new Set(['Bash', 'Lua', 'Dart']);
+//  - Dart: the one WASM-loaded grammar, whose shared WASM Language heap yields spurious ERROR nodes
+//    on parses AFTER the first in a process (the same limitation the grammar-drift canary excludes
+//    it for). Its callGraph support — including cross-file name resolution on a first parse — is
+//    proven by the standalone build in section (1); a second in-process build (this sweep) is
+//    unreliable, so it is excluded here rather than asserted flakily. Lua was excluded for the same
+//    reason until it left the WASM lane for the maintained native grammar (#472); it is asserted
+//    below now that repeated in-process builds resolve it stably.
+const CROSS_FILE_EXCLUDED = new Set(['Bash', 'Dart']);
 interface CrossFile { language: string; a: { path: string; content: string }; b: { path: string; content: string }; caller: string; callee: string; confidence: string }
 const CROSS_FILE: CrossFile[] = [
   { language: 'TypeScript', confidence: 'import',    caller: 'main', callee: 'helper', a: { path: 'a.ts', content: `import { helper } from './b';\nexport function main(){ helper(); }` }, b: { path: 'b.ts', content: `export function helper(){ return 1; }` } },
@@ -467,6 +479,7 @@ const CROSS_FILE: CrossFile[] = [
   { language: 'Swift',      confidence: 'name_only', caller: 'mainFn', callee: 'helper', a: { path: 'a.swift', content: `func mainFn() { helper() }\n` }, b: { path: 'b.swift', content: `func helper() -> Int { return 1 }\n` } },
   { language: 'Scala',      confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'A.scala', content: `object A {\n  def main(): Unit = { B.helper() }\n}` }, b: { path: 'B.scala', content: `object B {\n  def helper(): Int = 1\n}` } },
   { language: 'Elixir',     confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'a.ex', content: `defmodule A do\n  def main(), do: B.helper()\nend\n` }, b: { path: 'b.ex', content: `defmodule B do\n  def helper(), do: 1\nend\n` } },
+  { language: 'Lua',        confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'a.lua', content: `function main()\n  helper()\nend\n` }, b: { path: 'b.lua', content: `function helper()\n  return 1\nend\n` } },
 ];
 
 describe('language conformance — cross-file resolution for EVERY claimed callGraph language', () => {
