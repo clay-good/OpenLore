@@ -187,6 +187,52 @@ function runCommand(cmd: string, args: string[]): Promise<number> {
   });
 }
 
+/**
+ * The plain, hand-typable upgrade command for each install method.
+ *
+ * These are the package-manager invocations, NOT the resolved absolute-path form. The resolved
+ * form exists so OpenLore can SPAWN an upgrade without a shell; as an INSTRUCTION on Windows
+ * it is unusable, because its first token is a quoted path and PowerShell parses a statement
+ * that starts with `"` in expression mode — the line becomes a string literal and the next
+ * token is a syntax error, rather than a command. (`&` would invoke it, but telling a user to
+ * paste a call operator is worse than telling them the command they actually meant.) The same
+ * strings already back the "could not determine how openlore was installed" message below.
+ */
+const PLAIN_UPGRADE_INSTRUCTION: Record<InstallMethod, string> = {
+  homebrew: 'brew upgrade openlore',
+  'npm-global': 'npm install -g openlore@latest',
+  'npm-local': 'npm install openlore@latest',
+  npx: 'npx --yes openlore@latest',
+  unknown: 'npm install -g openlore@latest',
+};
+
+/**
+ * The command to SHOW the user for `method`.
+ *
+ * `update` only ever REPORTS a command — the upgrade itself runs through `spawn` with an argv
+ * and no shell — so what matters here is that the line is runnable if a user pastes it, not
+ * that it is character-for-character what was spawned.
+ *
+ * On Windows it therefore prints the plain package-manager command rather than the resolved
+ * invocation: the resolved form is not a command in PowerShell (see
+ * PLAIN_UPGRADE_INSTRUCTION), and it is the same upgrade either way. That also means this
+ * function cannot throw — a path that `formatPlatformCommand` refuses never reaches it — and
+ * that no `$`-shaped path is ever printed into a shell whose expansion rules differ from the
+ * POSIX ones the refusal models (change: harden-windows-hook-quoting).
+ *
+ * POSIX keeps the resolved, single-quoted form, which is both exact and paste-safe there.
+ *
+ * Exported as a test seam: `runUpdate` reaches this only after a network round-trip.
+ */
+export function printableCommand(
+  invocation: { command: string; args: string[] },
+  platform: NodeJS.Platform,
+  method: InstallMethod,
+): string {
+  if (platform === 'win32') return PLAIN_UPGRADE_INSTRUCTION[method];
+  return formatPlatformCommand(invocation, platform);
+}
+
 interface UpdateOpts {
   check?: boolean;
   dryRun?: boolean;
@@ -236,7 +282,7 @@ export async function runUpdate(
     logger.info(
       'Project dependency',
       `openlore is a project-local dependency here. Upgrade it in your project with:\n  ` +
-        formatPlatformCommand({ command: local.cmd, args: local.args }, platform)
+        printableCommand({ command: local.cmd, args: local.args }, platform, method)
     );
     return 0;
   }
@@ -251,9 +297,13 @@ export async function runUpdate(
     return 1;
   }
 
-  const printable = formatPlatformCommand({ command: upgrade.cmd, args: upgrade.args }, platform);
+  const printable = printableCommand({ command: upgrade.cmd, args: upgrade.args }, platform, method);
   if (opts.dryRun) {
-    logger.info('Would run', printable);
+    // "Would upgrade with", not "Would run": on Windows the line shown is the plain
+    // package-manager command rather than the resolved argv this would actually spawn (see
+    // printableCommand), so promising it verbatim would be a small lie in the one output whose
+    // entire job is to say what happens.
+    logger.info('Would upgrade with', printable);
     return 0;
   }
 
