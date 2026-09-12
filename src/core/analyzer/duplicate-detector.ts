@@ -284,8 +284,13 @@ function getShingles(tokens: string[], k = SHINGLE_SIZE): Set<string> {
 
 function jaccard(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 && b.size === 0) return 1;
+  // Iterate the SMALLER set and probe the larger: the intersection is symmetric, so
+  // the cost is min(|a|,|b|) rather than |a|. It matters because `findClones` puts a
+  // caller-supplied query on one side of every comparison — iterating the query's set
+  // let the caller set the per-candidate cost of a whole-repo scan.
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
   let inter = 0;
-  for (const x of a) if (b.has(x)) inter++;
+  for (const x of small) if (large.has(x)) inter++;
   return inter / (a.size + b.size - inter);
 }
 

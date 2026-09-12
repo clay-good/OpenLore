@@ -16,7 +16,8 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { readFileConfined } from '../../../utils/path-confinement.js';
+import { join } from 'node:path';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -407,7 +408,12 @@ async function diffSurface(
   const baseFiles: Array<{ path: string; content: string; language: string }> = [];
   const headFiles: Array<{ path: string; content: string; language: string }> = [];
   for (const f of changed) {
-    const headContent = f.status === 'deleted' ? '' : await readFile(resolve(absDir, f.path), 'utf-8').catch(() => '');
+    // `f.path` is git-derived; confine the working-tree read the way structural-diff.ts
+    // and impact-certificate.ts confine the same value (defense-in-depth: safeJoin
+    // guarantees no escape, and this file's contents reach the caller as signatures).
+    const headContent = f.status === 'deleted'
+      ? ''
+      : await readFileConfined(absDir, f.path).catch(() => '');
     const baseContent = await fileAtRef(absDir, oldRef, f.oldPath ?? f.path);
     if (headContent) headFiles.push({ path: f.path, content: headContent, language: detectLanguage(f.path) });
     if (baseContent) baseFiles.push({ path: f.oldPath ?? f.path, content: baseContent, language: detectLanguage(f.oldPath ?? f.path) });

@@ -433,6 +433,44 @@ describe('seed resolution helpers', () => {
     expect(seedsFromSymbols(cg, ['bar']).map(n => n.id)).toEqual(['src/foo.ts::bar']);
     expect(seedsFromSymbols(cg, ['testFoo'])).toEqual([]); // tests are never seeds
   });
+  /**
+   * The name index hoisted out of the per-symbol loop (so resolution is O(symbols)
+   * rather than O(symbols × nodes)) must not change WHICH nodes resolve or in what
+   * order. Pin exact-then-substring, case-insensitivity, and cg.nodes ordering.
+   */
+  it('keeps exact-then-substring resolution semantics and node ordering', () => {
+    const nodes = [
+      node({ id: 'src/a.ts::parseConfig' }),
+      node({ id: 'src/b.ts::zparseConfigDeep' }),
+      node({ id: 'src/c.ts::parseConfigLoader' }),
+      node({ id: 'src/d.ts::PARSECONFIG' }),
+      node({ id: 'src/e.test.ts::parseConfigSpec', isTest: true }),
+    ];
+    const g = graph(nodes, []);
+    // An exact (case-insensitive) hit wins outright — the substring branch is not taken.
+    expect(seedsFromSymbols(g, ['parseconfig']).map(n => n.id))
+      .toEqual(['src/a.ts::parseConfig', 'src/d.ts::PARSECONFIG']);
+    // With no exact hit, every substring match resolves — in cg.nodes order, not name order,
+    // and never a test node.
+    expect(seedsFromSymbols(g, ['parseconfigl']).map(n => n.id)).toEqual(['src/c.ts::parseConfigLoader']);
+    expect(seedsFromSymbols(g, ['arseConfig']).map(n => n.id)).toEqual([
+      'src/a.ts::parseConfig',
+      'src/b.ts::zparseConfigDeep',
+      'src/c.ts::parseConfigLoader',
+      'src/d.ts::PARSECONFIG',
+    ]);
+    expect(seedsFromSymbols(g, ['parseConfigSpec'])).toEqual([]);
+  });
+
+  it('refuses more changedSymbols than the schema advertises', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: cg } as never);
+    const r = await handleSelectTests({
+      directory: '/p',
+      changedSymbols: Array.from({ length: 101 }, (_, i) => `sym${i}`),
+    }) as { error?: string };
+    expect(r.error).toMatch(/changedSymbols too long/);
+  });
+
   it('seedsFromFiles matches by tolerant path and excludes tests', () => {
     const seeds = seedsFromFiles(cg, ['src/foo.ts']).map(n => n.name).sort();
     expect(seeds).toEqual(['bar', 'foo']);

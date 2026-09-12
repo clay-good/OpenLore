@@ -137,6 +137,25 @@ describe('handleFindClones', () => {
     expect(res.matches.map(m => m.file).sort()).toEqual(['exact.ts', 'query.ts']);
   });
 
+  it('refuses an oversized snippet instead of fingerprinting it', async () => {
+    // `findClones` is synchronous and costs |queryShingles| × nodes, and the tool timeout
+    // is a Promise.race that cannot preempt a synchronous loop — so an unbounded snippet
+    // is an event-loop stall, not a slow query. 64 KB + 1 must be refused, not scanned.
+    const res = (await handleFindClones({
+      directory: dir,
+      snippet: `${QUERY}\n${'// x'.repeat(20_000)}`,
+    })) as { error?: string; matches?: unknown[] };
+    expect(res.error).toMatch(/snippet too long/);
+    expect(res.matches).toBeUndefined();
+  });
+
+  it('still accepts a snippet at the ceiling', async () => {
+    const padded = QUERY + '\n'.repeat(64 * 1024 - QUERY.length);
+    expect(padded.length).toBe(64 * 1024);
+    const res = (await handleFindClones({ directory: dir, snippet: padded })) as { error?: string };
+    expect(res.error).toBeUndefined();
+  });
+
   it('returns an explicit not-found (with candidates) for an unknown symbol', async () => {
     const res = (await handleFindClones({ directory: dir, symbol: 'computeTot' })) as {
       error: string;

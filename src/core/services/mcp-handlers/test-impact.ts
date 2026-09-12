@@ -72,16 +72,46 @@ interface SymbolSeedResolution {
 
 const WIDENED_SYMBOL_EXAMPLE_LIMIT = 8;
 
+/**
+ * Cap on `changedSymbols`, mirroring the tool schema's advertised `maxItems: 100`.
+ * The schema bound is now enforced at the transport, but this handler is also called
+ * in-process (blast_radius, the CLI), so the bound lives where the cost is paid:
+ * resolution is synchronous and scans the whole node set per symbol, and every MISS
+ * takes the more expensive substring branch — so the cheapest request to author is
+ * the most expensive to serve.
+ */
+const MAX_CHANGED_SYMBOLS = 100;
+
 /** Resolve symbols and retain the substring-fallback receipt for callers that disclose it. */
 function resolveSymbolSeeds(cg: SerializedCallGraph, symbols: string[]): SymbolSeedResolution {
   const out = new Map<string, FunctionNode>();
   const widened: SymbolSeedResolution['widened'] = [];
+
+  // One pass over the graph builds the lowercased name index every symbol then probes,
+  // instead of two filters (with a per-node `toLowerCase()` allocation) PER SYMBOL.
+  // Positions are retained so a match list is assembled in cg.nodes order — byte-for-byte
+  // the order the old `cg.nodes.filter(...)` produced, which seeds and `examples` depend on.
+  const byLowerName = new Map<string, Array<{ i: number; node: FunctionNode }>>();
+  cg.nodes.forEach((n, i) => {
+    if (n.isExternal || n.isTest) return;
+    const key = n.name.toLowerCase();
+    const bucket = byLowerName.get(key);
+    if (bucket) bucket.push({ i, node: n });
+    else byLowerName.set(key, [{ i, node: n }]);
+  });
+  const inNodeOrder = (hits: Array<{ i: number; node: FunctionNode }>): FunctionNode[] =>
+    hits.slice().sort((a, b) => a.i - b.i).map(h => h.node);
+
   for (const sym of symbols) {
     const lower = sym.toLowerCase();
     if (lower.trim().length === 0) continue;
-    const exact = cg.nodes.filter(n => !n.isExternal && !n.isTest && n.name.toLowerCase() === lower);
+    const exact = inNodeOrder(byLowerName.get(lower) ?? []);
     const fallback = exact.length === 0
-      ? cg.nodes.filter(n => !n.isExternal && !n.isTest && n.name.toLowerCase().includes(lower))
+      ? inNodeOrder(
+        [...byLowerName.entries()]
+          .filter(([name]) => name.includes(lower))
+          .flatMap(([, hits]) => hits),
+      )
       : [];
     const pick = exact.length > 0 ? exact : fallback;
     if (fallback.length > 0) {
@@ -142,6 +172,13 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   // uncommitted changes?". The result flags that it defaulted, so it's never
   // mysterious.
   const hasSymbols = !!(input.changedSymbols && input.changedSymbols.length > 0);
+  if (hasSymbols && input.changedSymbols!.length > MAX_CHANGED_SYMBOLS) {
+    return {
+      error:
+        `changedSymbols too long: ${input.changedSymbols!.length} symbols (max ${MAX_CHANGED_SYMBOLS}). ` +
+        'Pass diffRef to select tests for a whole diff instead of enumerating symbols.',
+    };
+  }
   if (hasSymbols && input.changedSymbols!.some(symbol => symbol.trim().length === 0)) {
     return { error: 'changedSymbols must contain non-empty symbol names.' };
   }

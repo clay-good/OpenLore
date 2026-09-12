@@ -110,6 +110,13 @@ async function spawnConsolidateBackground(rootPath: string): Promise<Consolidate
 // record_decision
 // ============================================================================
 
+/**
+ * Ceiling on a recorded decision's title/rationale. Matches the `maxLength: 4096`
+ * the tool schema advertises for both, and `MAX_POLICY_TEXT` in constraint-ledger.ts
+ * (which applies the same ceiling, but only when `constraints` is declared).
+ */
+const MAX_DECISION_TEXT = 4_096;
+
 export async function handleRecordDecision(
   directory: string,
   title: string,
@@ -123,6 +130,18 @@ export async function handleRecordDecision(
   try {
     if (!title?.trim()) return { error: 'title is required and must not be empty.' };
     if (!rationale?.trim()) return { error: 'rationale is required and must not be empty.' };
+    // Bound them UNCONDITIONALLY, the way queryTooLongError is applied elsewhere. The
+    // schema advertises maxLength 4096 for both, and the constraint ledger enforces the
+    // same ceiling — but only on the path where `constraints` is supplied. Omit
+    // `constraints` and a multi-megabyte title was persisted to the decision store and
+    // then re-read by every later list / sync / projection.
+    for (const [field, value] of [['title', title], ['rationale', rationale]] as const) {
+      if (value.length > MAX_DECISION_TEXT) {
+        return {
+          error: `${field} too long: ${value.length} characters (max ${MAX_DECISION_TEXT}). Shorten the ${field}.`,
+        };
+      }
+    }
 
     const rootPath = await validateDirectory(directory);
     const store = await loadDecisionStore(rootPath);

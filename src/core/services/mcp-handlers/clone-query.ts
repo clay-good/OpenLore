@@ -20,8 +20,7 @@
  * never a graph.
  */
 
-import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFileConfined } from '../../../utils/path-confinement.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import {
   findClones,
@@ -48,6 +47,20 @@ const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 200;
 const HTML_RE = /\.html?$/i;
 
+/**
+ * Ceiling on a `snippet` query, in characters.
+ *
+ * Every other free-text tool argument is bounded by `queryTooLongError`
+ * (MAX_QUERY_LENGTH = 1000); a snippet is code, not a query, so it needs a
+ * code-sized ceiling instead — 64 KB is far more than any function an agent is
+ * about to write, and far less than a weapon. The bound is REQUIRED, not cosmetic:
+ * `findClones` is fully synchronous and costs |queryShingles| × nodes, so a
+ * megabyte-scale snippet blocks the event loop for the whole process. The 60s tool
+ * timeout is a `Promise.race` and cannot preempt a synchronous loop, and the stdio
+ * transport caps no request body — so this is the only place the cost can be capped.
+ */
+const MAX_SNIPPET_LENGTH = 64 * 1024;
+
 /** Serialized call-graph node fields this handler reads. */
 interface SerNode extends CloneQueryNode {
   startLine?: number;
@@ -69,6 +82,15 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
       error:
         'Provide exactly one of `symbol` (a function name, or name::path, in the index) or ' +
         '`snippet` (raw code to compare).',
+    };
+  }
+  // Bound the snippet BEFORE any repository work: rejecting it here costs nothing,
+  // whereas fingerprinting it commits the process to a synchronous whole-index scan.
+  if (hasSnippet && input.snippet!.length > MAX_SNIPPET_LENGTH) {
+    return {
+      error:
+        `snippet too long: ${input.snippet!.length} characters (max ${MAX_SNIPPET_LENGTH}). ` +
+        'Pass the single function you are about to write, not a whole file.',
     };
   }
 
@@ -96,7 +118,12 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
   const fileContentMap = new Map<string, string>();
   for (const rel of filePaths) {
     try {
-      const content = await readFile(join(absDir, rel), 'utf-8');
+      // `rel` comes from the cached call graph — an artifact committed by the analyzed
+      // repository, so an attacker-controlled path (the index attestation is advisory).
+      // Confine it the way symbol-span.ts does for the same value: the contents are
+      // returned to the caller as clone-match bodies, so an escape is an arbitrary
+      // file read. readFileConfined also closes the safeJoin→readFile swap window.
+      const content = await readFileConfined(absDir, rel);
       files.push({ path: rel, content });
       fileContentMap.set(rel, content);
     } catch {
