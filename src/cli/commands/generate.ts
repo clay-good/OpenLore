@@ -13,6 +13,7 @@ import { mkdir, mkdtemp, open, readdir, readFile, stat, rm, writeFile } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import { safeJoin } from '../../utils/path-confinement.js';
@@ -974,7 +975,8 @@ Each spec.md follows OpenSpec conventions:
         console.log('');
         console.log('  Warnings:');
         for (const warning of report.warnings.slice(0, 5)) {
-          console.log(`    ⚠ ${warning}`);
+          // Warnings and validation errors quote spec paths and requirement names.
+          console.log(`    ⚠ ${safe(warning)}`);
         }
         if (report.warnings.length > 5) {
           console.log(`    ... and ${report.warnings.length - 5} more`);
@@ -986,7 +988,7 @@ Each spec.md follows OpenSpec conventions:
         console.log('');
         console.log('  Validation errors:');
         for (const error of report.validationErrors.slice(0, 5)) {
-          console.log(`    ✗ ${error}`);
+          console.log(`    ✗ ${safe(error)}`);
         }
       }
 
@@ -994,7 +996,7 @@ Each spec.md follows OpenSpec conventions:
       console.log('');
       console.log('  Next steps:');
       for (let i = 0; i < report.nextSteps.length; i++) {
-        console.log(`    ${i + 1}. ${report.nextSteps[i]}`);
+        console.log(`    ${i + 1}. ${safe(report.nextSteps[i])}`);
       }
 
       console.log('');

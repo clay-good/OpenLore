@@ -18,13 +18,26 @@ const codeUnit = fc.oneof(
   { weight: 3, arbitrary: fc.integer({ min: 0x00, max: 0x9f }) }, // control-heavy
   { weight: 2, arbitrary: fc.integer({ min: 0xa0, max: 0xffff }) }, // ordinary BMP text
   { weight: 1, arbitrary: fc.constantFrom(0x1b, 0x00, 0x0a, 0x0d, 0x09, 0x08, 0x7f, 0x9f, 0x80) },
+  // The non-C0 half of the class: bidi overrides/isolates (which reverse rendered
+  // text) and the line/paragraph separators. `JSON.stringify` passes these through
+  // verbatim, so the MCP path depends on the sanitizer removing them.
+  { weight: 1, arbitrary: fc.constantFrom(0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2066, 0x2069) },
 );
 const fuzzyString = fc
   .array(codeUnit, { maxLength: 256 })
   .map((units) => units.map((u) => String.fromCharCode(u)).join(''));
 
-/** The characters the default (no-newline) mode must strip: all C0, DEL, C1. */
-const isForbiddenDefault = (code: number): boolean => code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+/** Bidi controls and line separators, stripped in BOTH modes (a newline they are not). */
+const isBidiOrSeparator = (code: number): boolean =>
+  code === 0x061c ||
+  code === 0x200e ||
+  code === 0x200f ||
+  (code >= 0x2028 && code <= 0x202e) ||
+  (code >= 0x2066 && code <= 0x2069);
+
+/** The characters the default (no-newline) mode must strip: all C0, DEL, C1, bidi, separators. */
+const isForbiddenDefault = (code: number): boolean =>
+  code <= 0x1f || (code >= 0x7f && code <= 0x9f) || isBidiOrSeparator(code);
 
 describe('fuzz: sanitizeForTerminal', () => {
   it('default mode strips every C0 / DEL / C1 control code unit', () => {
@@ -48,6 +61,7 @@ describe('fuzz: sanitizeForTerminal', () => {
           const c = out.charCodeAt(i);
           if (c === 0x0a) continue; // newline is the one permitted control
           if (c === 0x1b) return false; // ESC (and thus every CSI/OSC) must never survive
+          if (isBidiOrSeparator(c)) return false; // keepNewlines does not mean keep U+2028
           if (isForbiddenDefault(c)) return false;
         }
         return true;

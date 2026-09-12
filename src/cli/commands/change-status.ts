@@ -13,7 +13,7 @@ import { Command } from 'commander';
 import { glob } from 'glob';
 import { parse as parseYaml } from 'yaml';
 import { safeJoin } from '../../utils/path-confinement.js';
-import { writeStdout } from '../output.js';
+import { writeStdout, writeStderr } from '../output.js';
 import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
 const CHANGE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -432,7 +432,8 @@ export async function runChangeStatusCli(options: ChangeStatusCliOptions): Promi
     }
     return 0;
   } catch (error) {
-    process.stderr.write(`change-status: ${error instanceof Error ? error.message : String(error)}\n`);
+    // The error message quotes change names and paths read from the repository.
+    await writeStderr(`change-status: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
 }

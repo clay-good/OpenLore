@@ -19,6 +19,7 @@
 import { validateAgainstSchema } from '../../../cli/manifest/schema-validator.js';
 import { MCP_TOOL_TIMEOUT_MS, MCP_TOOL_TIMEOUT_OVERRIDES } from '../../../constants.js';
 import { suggestKey } from '../config-schema.js';
+import { sanitizeForTerminal } from '../../../utils/misc.js';
 
 /** Stable MCP tool error-code taxonomy. */
 export type McpToolErrorCode = 'INVALID_ARGS' | 'NOT_ANALYZED' | 'TIMEOUT' | 'OUTPUT_TRUNCATED' | 'INTERNAL';
@@ -195,9 +196,20 @@ function largestFittingJsonCut(text: string, budget: number): number {
  *     truncated to fit (shape preserved, valid JSON, marked `truncated: true`);
  *   - anything else over budget → a valid JSON envelope wrapping the partial.
  * Binary search keeps the result within the byte budget despite JSON-escaping overhead.
+ *
+ * The string branch also SANITIZES, which the object branches do not need to: an object
+ * result is emitted through `JSON.stringify`, which escapes control characters to
+ * `\uXXXX` and renders them inert on the way to the agent's terminal. A string result
+ * is emitted verbatim, so its control characters survive — and the one string-returning
+ * handler (`get_signatures`) returns extracted source, code COMMENTS included. That
+ * makes a comment in an analyzed repository a way to clear the agent's terminal and
+ * print a forged OpenLore verdict. Newlines are the signature listing's own structure,
+ * so they are kept.
  */
 export function capStructuredResult(result: unknown, maxBytes: number): { text: string; truncated: boolean } {
-  if (typeof result === 'string') return capOutput(result, maxBytes);
+  if (typeof result === 'string') {
+    return capOutput(sanitizeForTerminal(result, { keepNewlines: true }), maxBytes);
+  }
 
   const full = JSON.stringify(result, null, 2);
   if (Buffer.byteLength(full, 'utf8') <= maxBytes) return { text: full, truncated: false };

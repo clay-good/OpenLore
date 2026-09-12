@@ -606,7 +606,7 @@ export async function runAutopilotGate(
     process.exitCode = 0;
   } catch (err) {
     // Advisory-safety: an autopilot fault never blocks the commit.
-    console.error(`openlore autopilot: skipped (${(err as Error).message}) — commit not blocked`);
+    console.error(`openlore autopilot: skipped (${safe((err as Error).message)}) — commit not blocked`);
     process.exitCode = 0;
   }
 }
@@ -691,7 +691,11 @@ export function displayDecision(d: PendingDecision, verbose = false): void {
   }
   if (verbose) {
     console.log(`   Status     : ${safe(d.status)}  Confidence: ${confidence}  Scope: ${safeScopeLabel}`);
-    console.log(`   Verification evidence: ${d.verificationEvidence ?? 'legacy/unknown'}`);
+    // safe() like every neighbouring field: the `'git-diff' | 'none'` union is a
+    // compile-time claim only — loadDecisionStore validates that `decisions` is an
+    // array, not the shape of each record, so a hand-edited or hostile decision store
+    // can put anything here.
+    console.log(`   Verification evidence: ${safe(d.verificationEvidence ?? 'legacy/unknown')}`);
     console.log(`   Rationale  : ${safe(d.rationale)}`);
     if (d.affectedDomains.length) console.log(`   Domains    : ${safe(d.affectedDomains.join(', '))}`);
     if (d.proposedRequirement) console.log(`   Requirement: ${safe(d.proposedRequirement)}`);
@@ -880,6 +884,14 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       if (!options.json && decision.affectedFiles.length > 0) {
         console.log('\nIf this change should not be committed, revert it manually:');
         for (const f of decision.affectedFiles) {
+          // This line is meant to be COPIED INTO A SHELL, so stripping the controls is
+          // not enough — a sanitized path is a different path, and pasting it would
+          // restore the wrong file (or nothing). Refuse to print it instead, and name
+          // the file count so the omission is visible.
+          if (safe(f) !== f) {
+            console.log('  (one affected path contains control characters and is not printable — revert it from `git status`)');
+            continue;
+          }
           console.log(`  git restore ${f}`);
         }
         console.log('\nOr to document why this approach was rejected:');
@@ -1422,7 +1434,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
 
       for (const d of result.synced) {
         logger.success(`✔ Synced [${d.id}] ${d.title}`);
-        for (const p of d.syncedToSpecs) console.log(`   → ${p}`);
+        for (const p of d.syncedToSpecs) console.log(`   → ${safe(p)}`);
       }
       for (const e of result.errors) {
         logger.error(`✗ [${e.id}] ${e.error}`);
@@ -1563,7 +1575,7 @@ decisionsCommand
       logger.section('Decision Ledger (newest first)');
       for (const e of entries) {
         const when = e.at.replace('T', ' ').slice(0, 19);
-        const commit = e.commit ? ` @${e.commit}` : '';
+        const commit = e.commit ? ` @${safe(e.commit)}` : '';
         console.log(`${when}  [${safe(e.id)}] ${safe(e.from ?? '∅')} → ${safe(e.to)}  by ${safe(e.actor)}${commit}  ${safe(e.title)}`);
       }
       console.log(`\nTotal: ${entries.length} transition(s)`);
@@ -1732,7 +1744,7 @@ decisionsCommand
       for (const r of results) {
         const verb = r.disposition === 'promoted' ? 'promoted to Approved' : 'rejected (retired from specs)';
         logger.success(`[${r.id}] ${verb} — ${r.title}`);
-        for (const p of r.specsUpdated) console.log(`   → ${p}`);
+        for (const p of r.specsUpdated) console.log(`   → ${safe(p)}`);
       }
       if (remaining.length === 0) {
         console.log(results.length > 0 ? '\nReview queue is empty.' : 'No auto-accepted decisions await review.');

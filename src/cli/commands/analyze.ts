@@ -581,7 +581,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
                 console.log('  Agent config files:');
                 for (const { rel, created } of aiResults) {
                   const tag = created ? '(created)' : '(already exists)';
-                  console.log(`    ├─ ${rel}  ${tag}`);
+                  console.log(`    ├─ ${safe(rel)}  ${tag}`);
                 }
                 logger.blank();
               }
@@ -676,7 +676,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       console.log('  Repository Structure:');
       console.log(`    ├─ Files analyzed: ${repoMap.summary.analyzedFiles}`);
       console.log(`    ├─ High-value files: ${repoMap.highValueFiles.length}`);
-      console.log(`    ├─ Languages: ${repoMap.summary.languages.slice(0, 3).map(l => l.language).join(', ')}`);
+      console.log(`    ├─ Languages: ${safe(repoMap.summary.languages.slice(0, 3).map(l => l.language).join(', '))}`);
       if (artifacts.repoStructure.undomained?.length) {
         const roleCounts = new Map<string, number>();
         for (const item of artifacts.repoStructure.undomainedEvidence ?? []) {
@@ -685,7 +685,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         const detail = [...roleCounts.entries()].map(([role, count]) => `${count} ${role}`).join(', ');
         console.log(`    ├─ Undomained analyzed evidence: ${artifacts.repoStructure.undomained.length} (${safe(detail)})`);
       }
-      console.log(`    └─ Architecture: ${artifacts.repoStructure.architecture.pattern}`);
+      console.log(`    └─ Architecture: ${safe(artifacts.repoStructure.architecture.pattern)}`);
       console.log('');
 
       console.log('  Dependency Graph:');
@@ -706,7 +706,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         console.log(`    ├─ Internal calls: ${cg.stats.totalEdges}`);
         if (cg.hubFunctions?.length > 0) {
           const hubs = cg.hubFunctions.slice(0, 3).map(f => `${f.name}(fanIn=${f.fanIn})`).join(', ');
-          console.log(`    ├─ Hub functions: ${hubs}`);
+          console.log(`    ├─ Hub functions: ${safe(hubs)}`);
         }
         if (cg.layerViolations?.length > 0) {
           console.log(`    ├─ ⚠ Layer violations: ${cg.layerViolations.length}`);
@@ -740,7 +740,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
           };
 
           console.log(`  Refactoring Candidates  (${s.withIssues}/${s.totalFunctions} functions):`);
-          console.log(`    ${badges}`);
+          console.log(`    ${safe(badges)}`);
           console.log('');
 
           const top = (rp.priorities as Array<{ function: string; file: string; fanIn: number; fanOut: number; issues: string[]; requirements: string[] }>).slice(0, 7);
@@ -761,7 +761,9 @@ After analysis, run 'openlore generate' to create OpenSpec files.
                           : `${p.requirements?.length ?? 0} req`;
               const extra = (p.issues ?? []).slice(1).map(i => issueLabel[i] ?? i).join(', ');
               const reqs  = (p.requirements?.length ?? 0) > 0 ? `  [${p.requirements.slice(0,2).join(', ')}${p.requirements.length > 2 ? '…' : ''}]` : '';
-              console.log(`    ${name}  ${file}  ${val.padEnd(12)}${extra ? '  +' + extra : ''}${reqs}`);
+              // name/file/extra/reqs are all read back out of refactor-priorities.json —
+              // symbol names, file names, issue keys and requirement names.
+              console.log(`    ${safe(name)}  ${safe(file)}  ${safe(val).padEnd(12)}${extra ? '  +' + safe(extra) : ''}${safe(reqs)}`);
             }
           }
 
@@ -769,12 +771,12 @@ After analysis, run 'openlore generate' to create OpenSpec files.
             console.log('');
             for (const c of rp.cycles as Array<{ size: number; participants: Array<{ function: string; file: string }> }>) {
               const names = c.participants.map(p => p.function).join(' ↔ ');
-              console.log(`    ⚠ Cycle: ${names}`);
+              console.log(`    ⚠ Cycle: ${safe(names)}`);
             }
           }
 
           console.log('');
-          console.log(`    → ${opts.output}refactor-priorities.json`);
+          console.log(`    → ${safe(opts.output)}refactor-priorities.json`);
           console.log('');
         }
       } catch (rpErr) {
@@ -804,7 +806,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
             .map(([type, count]) => `${count} ${type}`)
             .join('  ·  ');
 
-          console.log(`    └─ Types: ${typeLabels}`);
+          console.log(`    └─ Types: ${safe(typeLabels)}`);
 
           // Show top 5 clone groups
           if (dup.cloneGroups.length > 0) {
@@ -820,12 +822,12 @@ After analysis, run 'openlore generate' to create OpenSpec files.
                 return `${fileParts[fileParts.length - 2]}/${fileParts[fileParts.length - 1]}:${i.functionName}`;
               }).join('  ');
 
-              console.log(`    ${group.type.padEnd(10)} (${group.instances.length}x, ${group.lineCount} lines): ${files}`);
+              console.log(`    ${safe(group.type).padEnd(10)} (${group.instances.length}x, ${group.lineCount} lines): ${safe(files)}`);
             }
           }
 
           console.log('');
-          console.log(`    → ${opts.output}duplicates.json`);
+          console.log(`    → ${safe(opts.output)}duplicates.json`);
           console.log('');
         }
       } catch (dupErr) {
@@ -898,43 +900,43 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
       // Files generated
       console.log('  Output Files:');
-      console.log(`    ├─ ${opts.output}repo-structure.json`);
-      console.log(`    ├─ ${opts.output}dependency-graph.json`);
-      console.log(`    ├─ ${opts.output}llm-context.json`);
-      console.log(`    ├─ ${opts.output}dependencies.mermaid`);
+      console.log(`    ├─ ${safe(opts.output)}repo-structure.json`);
+      console.log(`    ├─ ${safe(opts.output)}dependency-graph.json`);
+      console.log(`    ├─ ${safe(opts.output)}llm-context.json`);
+      console.log(`    ├─ ${safe(opts.output)}dependencies.mermaid`);
       if (artifacts.repoStructure.schemas.length > 0) {
-        console.log(`    ├─ ${opts.output}schema-inventory.json  (${artifacts.repoStructure.schemas.length} table(s))`);
+        console.log(`    ├─ ${safe(opts.output)}schema-inventory.json  (${artifacts.repoStructure.schemas.length} table(s))`);
       }
       if (artifacts.repoStructure.routeInventory.total > 0) {
-        console.log(`    ├─ ${opts.output}route-inventory.json  (${artifacts.repoStructure.routeInventory.total} route(s))`);
+        console.log(`    ├─ ${safe(opts.output)}route-inventory.json  (${artifacts.repoStructure.routeInventory.total} route(s))`);
       }
       if (artifacts.repoStructure.middleware.length > 0) {
-        console.log(`    ├─ ${opts.output}middleware-inventory.json  (${artifacts.repoStructure.middleware.length} middleware entry(ies))`);
+        console.log(`    ├─ ${safe(opts.output)}middleware-inventory.json  (${artifacts.repoStructure.middleware.length} middleware entry(ies))`);
       }
       if (artifacts.repoStructure.uiComponents.length > 0) {
-        console.log(`    ├─ ${opts.output}ui-inventory.json  (${artifacts.repoStructure.uiComponents.length} UI component(s))`);
+        console.log(`    ├─ ${safe(opts.output)}ui-inventory.json  (${artifacts.repoStructure.uiComponents.length} UI component(s))`);
       }
       if (artifacts.repoStructure.envVars.length > 0) {
-        console.log(`    ├─ ${opts.output}env-inventory.json  (${artifacts.repoStructure.envVars.length} env var(s))`);
+        console.log(`    ├─ ${safe(opts.output)}env-inventory.json  (${artifacts.repoStructure.envVars.length} env var(s))`);
       }
       // Listed like the peer inventories, and only when something was recorded — the artifact is
       // absent on a repository with no site (change: disclose-dynamic-boundary-regions).
       if (artifacts.dynamicBoundary) {
         console.log(
-          `    ├─ ${opts.output}dynamic-boundary.json  (${artifacts.dynamicBoundary.totalSites} `
+          `    ├─ ${safe(opts.output)}dynamic-boundary.json  (${artifacts.dynamicBoundary.totalSites} `
           + `dispatch site(s) the call graph cannot follow, in ${artifacts.dynamicBoundary.totalFiles} file(s))`,
         );
       }
       // CODEBASE.md (digestWritten) is the last branch when present, so it owns the
       // └─ corner; otherwise the corner falls to ARCHITECTURE.md / SUMMARY.md.
       if (architectureMdWritten) {
-        console.log(`    ├─ ${opts.output}SUMMARY.md`);
-        console.log(`    ${digestWritten ? '├─' : '└─'} ${opts.output}ARCHITECTURE.md`);
+        console.log(`    ├─ ${safe(opts.output)}SUMMARY.md`);
+        console.log(`    ${digestWritten ? '├─' : '└─'} ${safe(opts.output)}ARCHITECTURE.md`);
       } else {
-        console.log(`    ${digestWritten ? '├─' : '└─'} ${opts.output}SUMMARY.md`);
+        console.log(`    ${digestWritten ? '├─' : '└─'} ${safe(opts.output)}SUMMARY.md`);
       }
       if (digestWritten) {
-        console.log(`    └─ ${opts.output}CODEBASE.md`);
+        console.log(`    └─ ${safe(opts.output)}CODEBASE.md`);
         // Agent-onboarding tip — skipped when `openlore install` runs analyze
         // (install wires CLAUDE.md/.mcp.json/hooks itself, so this would contradict it).
         if (!options.embedded) {
@@ -963,7 +965,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
           console.log('  Agent config files:');
           for (const { rel, created } of aiConfigsCreated) {
             const tag = created ? '(created)' : '(already exists)';
-            console.log(`    ├─ ${rel}  ${tag}`);
+            console.log(`    ├─ ${safe(rel)}  ${tag}`);
           }
         } else {
           console.log('  Agent config files: not generated');
@@ -1034,9 +1036,9 @@ async function runEmbedStep(
       const label = event.index === 'function' ? 'Function index' : event.index === 'text' ? 'Text line index' : 'Spec index';
       if (event.index === 'spec' && (event.status === 'warning' || event.status === 'skip')) {
         console.log(formatSpecIndexFailure(event.detail ?? 'unknown error', freshSpecDirectory));
-      } else if (event.status === 'warning') console.log(`    ⚠ ${label} skipped: ${event.detail ?? 'unknown error'}`);
-      else if (event.status === 'skip') console.log(`    ℹ ${label} skipped${event.detail ? `: ${event.detail}` : ''}`);
-      else if (event.status === 'complete') console.log(`    ✓ ${label} built${event.detail ? ` ${event.detail}` : ''}`);
+      } else if (event.status === 'warning') console.log(`    ⚠ ${label} skipped: ${safe(event.detail ?? 'unknown error')}`);
+      else if (event.status === 'skip') console.log(`    ℹ ${label} skipped${event.detail ? `: ${safe(event.detail)}` : ''}`);
+      else if (event.status === 'complete') console.log(`    ✓ ${label} built${event.detail ? ` ${safe(event.detail)}` : ''}`);
     },
   };
   await buildAnalysisIndexes({

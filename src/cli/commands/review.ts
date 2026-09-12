@@ -26,7 +26,7 @@ import { Command } from 'commander';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
-import { writeStdout } from '../output.js';
+import { writeStdout, writeStderr } from '../output.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
 import { isGitRepositoryRoot } from '../../core/drift/git-diff.js';
@@ -675,9 +675,11 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
     // fall back to stdout so the briefing is not lost. Diagnostics stay off stdout.
     try {
       await writeFile(opts.out, rendered, 'utf-8');
-      process.stderr.write(`[ok] Wrote review briefing to ${opts.out}\n`);
+      await writeStderr(`[ok] Wrote review briefing to ${opts.out}\n`);
     } catch (err) {
-      process.stderr.write(`[warn] Could not write ${opts.out} (${err instanceof Error ? err.message : String(err)}); writing to stdout instead.\n`);
+      // Both interpolations are path-shaped (the --out path, and an fs error message
+      // that quotes it), so this goes through the sanitized sink too.
+      await writeStderr(`[warn] Could not write ${opts.out} (${err instanceof Error ? err.message : String(err)}); writing to stdout instead.\n`);
       await writeStdout(rendered);
     }
   } else if (format === 'json') {
@@ -688,7 +690,10 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
     // Markdown to stdout (so the CI Action can capture it); a compact human summary
     // to stderr so an interactive run is readable without scraping the markdown.
     await writeStdout(rendered);
-    if (process.stderr.isTTY) process.stderr.write(renderHuman(briefing) + '\n');
+    // writeStderr: renderHuman interpolates decision titles, memory and spec messages,
+    // hub symbols and test paths. This branch fires exactly when a human terminal is
+    // attached, so a raw write here is the one that a forged verdict is rendered into.
+    if (process.stderr.isTTY) await writeStderr(renderHuman(briefing) + '\n');
   }
 
   if (opts.hook && enforcementGated) {

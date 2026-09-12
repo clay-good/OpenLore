@@ -99,14 +99,16 @@ function displayIssue(issue: DriftIssue, verbose: boolean): void {
   }
 
   if (verbose || issue.severity === 'error') {
-    console.log(`      ${issue.message}`);
+    // message/suggestion are assembled from the same spec and file paths that the
+    // filePath/specPath lines above wrap in safe() — same untrusted text, one layer in.
+    console.log(`      ${safe(issue.message)}`);
   }
 
   if (issue.changedLines) {
     console.log(`      +${issue.changedLines.added}/-${issue.changedLines.removed} lines`);
   }
 
-  console.log(`      -> ${issue.suggestion}`);
+  console.log(`      -> ${safe(issue.suggestion)}`);
 }
 
 export function displaySummary(result: DriftResult): void {

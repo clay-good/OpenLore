@@ -1,5 +1,5 @@
 /**
- * Stdout helpers for CLI commands.
+ * Stdout/stderr helpers for CLI commands.
  *
  * `process.stdout` is ASYNCHRONOUS when it points at a pipe (the normal case when an
  * agent or shell captures `openlore … --json`): a `process.stdout.write(big)` followed
@@ -43,6 +43,30 @@ export function writeStdout(text: string): Promise<void> {
     // so resolving eagerly is both correct and avoids hanging on a stubbed stdout that
     // doesn't invoke the callback. (A second resolve from the callback is a no-op.)
     const acceptedWithoutBackpressure = process.stdout.write(text, (err) =>
+      err ? reject(err) : resolve(),
+    );
+    if (acceptedWithoutBackpressure) resolve();
+  });
+}
+
+/**
+ * The stderr twin of `writeStdout`, sanitized identically.
+ *
+ * Several commands render the SAME human report to either stream depending on mode:
+ * `--hook` and TTY branches send it to stderr so it never pollutes scripted stdout
+ * (blast-radius, impact-certificate, review). Writing to `process.stderr` directly
+ * bypassed the strip that `writeStdout` applies, so the exact string that is sanitized
+ * on one branch went out raw on the other — and for `review` the raw branch is the one
+ * that fires when a human terminal is attached, which is precisely where a forged
+ * verdict lands. Making stderr a sanitized sink removes the choice from the call site.
+ *
+ * Drain semantics match `writeStdout`: stderr is also a pipe under capture, so a
+ * caller that exits right after must await this.
+ */
+export function writeStderr(text: string): Promise<void> {
+  text = stripTerminalControls(text);
+  return new Promise<void>((resolve, reject) => {
+    const acceptedWithoutBackpressure = process.stderr.write(text, (err) =>
       err ? reject(err) : resolve(),
     );
     if (acceptedWithoutBackpressure) resolve();

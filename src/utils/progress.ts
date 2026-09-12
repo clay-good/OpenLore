@@ -5,6 +5,7 @@
 
 import ora, { Ora } from 'ora';
 import { logger } from './logger.js';
+import { sanitizeForTerminal } from './misc.js';
 
 /**
  * Render a tqdm-style progress bar: [=====>    ] 45% (9/20)
@@ -23,12 +24,6 @@ export interface ProgressOptions {
   enabled?: boolean;
   /** Prefix for log messages */
   prefix?: string;
-}
-
-export interface FileDiscoveryProgress {
-  found: number;
-  directories: number;
-  currentFile?: string;
 }
 
 export interface AnalysisProgress {
@@ -157,18 +152,6 @@ export class ProgressIndicator {
   }
 
   /**
-   * Update file discovery progress
-   */
-  updateFileDiscovery(progress: FileDiscoveryProgress): void {
-    const details = progress.currentFile
-      ? ` (${progress.currentFile})`
-      : '';
-    this.update(
-      `Discovering files... (${progress.found} found, ${progress.directories} directories)${details}`
-    );
-  }
-
-  /**
    * Update analysis progress
    */
   updateAnalysis(progress: AnalysisProgress): void {
@@ -231,10 +214,10 @@ export class ProgressIndicator {
       if (this.spinner && this.enabled) {
         // Pause spinner, log, resume
         this.spinner.stop();
-        console.log(`  [verbose] ${message}`);
+        console.log(`  [verbose] ${sanitizeForTerminal(message, { keepNewlines: true })}`);
         this.spinner.start();
       } else {
-        console.log(`  [verbose] ${message}`);
+        console.log(`  [verbose] ${sanitizeForTerminal(message, { keepNewlines: true })}`);
       }
     }
   }
@@ -246,12 +229,19 @@ export class ProgressIndicator {
     return [...this.logs];
   }
 
+  /**
+   * The single funnel for spinner text. Callers pass file paths and error messages
+   * read out of the analyzed repository, and ora writes them to the terminal with
+   * its own cursor control — so an ESC smuggled through a path would be interpreted
+   * mid-spinner. Newlines go too: spinner text is one line by construction.
+   */
   private formatMessage(message: string): string {
-    return message;
+    return sanitizeForTerminal(message);
   }
 
+  /** The non-TTY twin of formatMessage: same untrusted text, plain-line sink. */
   private log(message: string): void {
-    console.log(message);
+    console.log(sanitizeForTerminal(message, { keepNewlines: true }));
   }
 }
 
@@ -308,7 +298,7 @@ export function showGenerationSuccess(options: {
   console.log('');
   console.log(isTTY ? '✅ Generation complete!' : '[ok] Generation complete!');
   console.log('');
-  console.log(`   ${isTTY ? '📁' : '-'} ${options.specsCount} spec files written to ${options.outputPath}`);
+  console.log(`   ${isTTY ? '📁' : '-'} ${options.specsCount} spec files written to ${sanitizeForTerminal(options.outputPath)}`);
 
   if (options.tokensUsed) {
     console.log(`   ${isTTY ? '🔤' : '-'} ${options.tokensUsed.toLocaleString()} tokens used`);
@@ -330,7 +320,7 @@ export function showAnalysisSuccess(options: {
   console.log(isTTY ? '✅ Analysis complete!' : '[ok] Analysis complete!');
   console.log('');
   console.log(`   ${isTTY ? '📁' : '-'} ${options.filesAnalyzed} files analyzed`);
-  console.log(`   ${isTTY ? '📊' : '-'} Results saved to ${options.outputPath}`);
+  console.log(`   ${isTTY ? '📊' : '-'} Results saved to ${sanitizeForTerminal(options.outputPath)}`);
 
   if (options.domains) {
     console.log(`   ${isTTY ? '🏷️ ' : '-'} ${options.domains} domain clusters detected`);
