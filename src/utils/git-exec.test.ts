@@ -23,7 +23,10 @@
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import * as childProcess from 'node:child_process';
-import { execFileGit, execFileGitSync, spawnGit, spawnGitSync } from './git-exec.js';
+import { execFileGit, execFileGitSync, spawnGit, spawnGitSync, GIT_UNTRUSTED_CONFIG_OFF } from './git-exec.js';
+import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /** The `util.promisify.custom` implementation Node attaches to `execFile`. */
 type CustomExecFile = (file: unknown, args: unknown, options: unknown) => Promise<{ stdout: string; stderr: string }>;
@@ -139,5 +142,72 @@ describe('spawnGit / spawnGitSync', () => {
     expect(child.stdout).toBeTruthy();
     child.stdin.end();
     child.kill();
+  });
+});
+
+describe('untrusted-repository config hardening', () => {
+  /** The argv the wrapper handed to the real child_process function. */
+  function argvOfFirstCall(fn: unknown): string[] {
+    return (fn as Mock).mock.calls[0][1] as string[];
+  }
+
+  it('prepends the config-off prefix on every helper', async () => {
+    await execFileGit('git', ['--version']);
+    expect(recorded.promisifiedExecFile[0][1]).toEqual([...GIT_UNTRUSTED_CONFIG_OFF, '--version']);
+
+    execFileGitSync('git', ['--version']);
+    expect(argvOfFirstCall(childProcess.execFileSync)).toEqual([...GIT_UNTRUSTED_CONFIG_OFF, '--version']);
+
+    spawnGitSync('git', ['--version'], { encoding: 'utf-8' });
+    expect(argvOfFirstCall(childProcess.spawnSync)).toEqual([...GIT_UNTRUSTED_CONFIG_OFF, '--version']);
+
+    const child = spawnGit('git', ['--version'], { stdio: 'ignore' });
+    expect(argvOfFirstCall(childProcess.spawn)).toEqual([...GIT_UNTRUSTED_CONFIG_OFF, '--version']);
+    child.kill();
+  });
+
+  it('disables the command-valued config keys an analyzed repo can set', () => {
+    // Named individually: dropping one is the regression this file exists to catch,
+    // and each is a key git treats as a command to RUN, not as a setting.
+    const prefix = GIT_UNTRUSTED_CONFIG_OFF.join(' ');
+    expect(prefix).toContain('core.fsmonitor=false');
+    expect(prefix).toContain('diff.external=');
+    expect(prefix).toContain('core.sshCommand=');
+    expect(prefix).toContain('core.pager=cat');
+    expect(prefix).toContain('protocol.ext.allow=never');
+    expect(prefix).toContain('core.hooksPath=');
+    expect(prefix).toContain('uploadpack.packObjectsHook=');
+  });
+
+  it('does not execute core.fsmonitor from the analyzed repository', async () => {
+    // The end-to-end proof. `git status` in a repo whose own .git/config sets
+    // core.fsmonitor runs that command string as the current user; this is the
+    // spawn `openlore analyze` makes, twice, on every run.
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-fsmonitor-'));
+    const marker = join(dir, 'PWNED');
+    try {
+      const git = (...args: string[]) =>
+        childProcess.execFileSync('git', args, { cwd: dir, encoding: 'utf-8' });
+      git('init', '-q', '.');
+      writeFileSync(join(dir, 'a.txt'), 'hi');
+      git('add', '.');
+      git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x');
+      // Quoting note: the marker path contains no shell metacharacters (mkdtemp
+      // yields [A-Za-z0-9-] under the temp root), so this is a faithful payload.
+      git('config', 'core.fsmonitor', `sh -c "touch '${marker}'; echo /dev/null"`);
+
+      await execFileGit('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: dir });
+
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a non-git binary untouched', () => {
+    // git's -c flags would be meaningless or hostile to another program; the
+    // helpers are also used for the windowsHide discipline alone.
+    execFileGitSync(process.execPath, ['-e', 'process.stdout.write("ok")']);
+    expect(argvOfFirstCall(childProcess.execFileSync)).toEqual(['-e', 'process.stdout.write("ok")']);
   });
 });
