@@ -187,12 +187,29 @@ describe('formatPlatformCommand quotes for the shell that will run it', () => {
     );
   });
 
-  it('keeps the cmd.exe double-quote form on Windows', () => {
+  it('quotes every Windows path, because Git Bash eats an unquoted backslash', () => {
     expect(formatPlatformCommand({
       command: 'C:\\Program Files\\nodejs\\node.exe',
       args: ['C:\\npm\\openlore\\dist\\cli\\index.js', 'orient'],
     }, 'win32')).toBe(
-      '"C:\\Program Files\\nodejs\\node.exe" C:\\npm\\openlore\\dist\\cli\\index.js orient',
+      '"C:\\Program Files\\nodejs\\node.exe" "C:\\npm\\openlore\\dist\\cli\\index.js" orient',
+    );
+  });
+
+  it('quotes a space-free Windows entry path, the case that reached users', () => {
+    // nvm-windows installs under a path with no space, so the old space-only rule
+    // left it bare and Git Bash resolved C:Usersme...index.js (#483).
+    expect(formatPlatformCommand({
+      command: 'C:\\Program Files\\nodejs\\node.exe',
+      args: [
+        'C:\\Users\\me\\AppData\\Roaming\\nvm\\v24.13.0\\node_modules\\openlore\\dist\\cli\\index.js',
+        'orient',
+        '--json',
+      ],
+    }, 'win32')).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe" ' +
+        '"C:\\Users\\me\\AppData\\Roaming\\nvm\\v24.13.0\\node_modules\\openlore\\dist\\cli\\index.js" ' +
+        'orient --json',
     );
   });
 });

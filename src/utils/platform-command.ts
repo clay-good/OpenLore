@@ -117,10 +117,14 @@ export function formatPlatformCommand(
 ): string {
   const parts = [invocation.command, ...invocation.args];
   if (platform !== 'win32') return parts.map(quotePosix).join(' ');
-  // cmd.exe: double quotes are the only grouping it understands, and a literal `"`
-  // cannot appear in a path there at all.
+  // Double quotes are the only grouping cmd.exe understands, and they also survive
+  // Git Bash, which is the shell Claude Code runs a hook command through on Windows.
+  // A BACKSLASH therefore has to trigger quoting too, not just a space: Git Bash reads
+  // an unquoted `\` as an escape and drops it, so a space-free entry path went through
+  // as C:Usersme...index.js and every hook fired "Cannot find module" (#483). A literal
+  // `"` cannot appear in a Windows path at all, so nothing needs escaping inside.
   return parts
-    .map((part) => /[\s&|<>^%!()]/.test(part) ? `"${part}"` : part)
+    .map((part) => /[\s&|<>^%!()\\]/.test(part) ? `"${part}"` : part)
     .join(' ');
 }
 
