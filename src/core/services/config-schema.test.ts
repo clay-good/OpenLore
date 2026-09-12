@@ -429,3 +429,46 @@ describe('config-schema — robustness', () => {
     expect(kinds.indexOf('type-mismatch')).toBeLessThan(kinds.indexOf('version-newer'));
   });
 });
+
+describe('bounded numeric ranges (a clone may not size the operator\'s work)', () => {
+  const defaults = { ...FULLY_POPULATED };
+
+  it('clamps an inflated chunkMaxChars and tokenBudget, reporting each', () => {
+    const parsed = {
+      ...FULLY_POPULATED,
+      generation: { domains: 'auto', chunkMaxChars: 5_000_000, timeout: 99_999_999 },
+      contextInjection: { tokenBudget: 10_000_000 },
+    };
+
+    const result = backfillRequiredConfigDefaults(parsed, defaults);
+    const config = result.config as typeof parsed;
+
+    expect(config.generation.chunkMaxChars).toBe(200_000);
+    expect(config.generation.timeout).toBe(600_000);
+    expect(config.contextInjection.tokenBudget).toBe(100_000);
+    expect(result.findings.filter(f => f.kind === 'value-clamped').map(f => f.key).sort())
+      .toEqual(['contextInjection.tokenBudget', 'generation.chunkMaxChars', 'generation.timeout']);
+    // Never fatal: one silly number must not make the repository unanalyzable.
+    expect(result.findings.every(f => f.fatal !== true)).toBe(true);
+    // The caller's object is not mutated.
+    expect(parsed.generation.chunkMaxChars).toBe(5_000_000);
+  });
+
+  it('clamps a zero/negative maxFiles up to the minimum', () => {
+    const parsed = { ...FULLY_POPULATED, analysis: { maxFiles: 0, includePatterns: [], excludePatterns: [] } };
+    const result = backfillRequiredConfigDefaults(parsed, defaults);
+    expect((result.config as typeof parsed).analysis.maxFiles).toBe(1);
+  });
+
+  it('leaves in-range values and non-numbers untouched', () => {
+    const parsed = {
+      ...FULLY_POPULATED,
+      analysis: { maxFiles: 25, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto', chunkMaxChars: 8_000 },
+    };
+    const result = backfillRequiredConfigDefaults(parsed, defaults);
+    expect(result.findings.filter(f => f.kind === 'value-clamped')).toEqual([]);
+    expect((result.config as typeof parsed).generation.chunkMaxChars).toBe(8_000);
+  });
+});
+

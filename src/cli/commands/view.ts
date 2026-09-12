@@ -43,18 +43,45 @@ import { runChatAgent, resolveProviderConfig } from '../../core/services/chat-ag
 import { collectSpecMarkdown, readConfinedFile } from './view-files.js';
 import { readViewerFreshness, setViewerFreshnessHeaders } from './viewer-freshness.js';
 import { loadViewerToolchain, OptionalFeatureError } from './optional-features.js';
+import {
+  redactLocalPaths,
+  redactSecretTextWithKnownValues,
+} from '../../core/services/secret-redaction.js';
 
-/** Strip internal filesystem paths and API keys from error messages before sending to clients. */
+/**
+ * Credentials this server can be holding. Enumerated so the shared redactor can match the
+ * EXACT value, not just a provider-shaped one: an error body echoed by a gateway may name
+ * the key with no `sk-`/`AIza`/`Bearer` framing at all, and this path forwards 300 bytes of
+ * provider error text to the BROWSER over SSE.
+ */
+const VIEW_CREDENTIAL_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_COMPAT_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'EMBED_API_KEY',
+  'OPENLORE_EMBEDDING_API_KEY',
+] as const;
+
+/**
+ * Strip internal filesystem paths and credentials from error messages before sending them
+ * to clients.
+ *
+ * Delegates to `secret-redaction`, which is the single source of truth for every server
+ * output channel (mcp-security: Secret Confinement Across All Output Paths). The private
+ * pattern list this used to carry was a weaker second redactor — it missed free-standing
+ * `AIza…` keys, `x-goog-api-key:`, GitHub `gh[pous]_` tokens, JWTs, AWS `AKIA…`, echoed
+ * `"api_key": …` fields, PEM blocks and `user:pass@` URLs — on the one channel that
+ * answers a remote browser. Same call shape as `doctor`'s redactDoctorResults.
+ */
 export function sanitizeErrorMessage(msg: string): string {
-  return msg
-    .replace(/\/Users\/[^\s:]+/g, '[path]')
-    .replace(/\/home\/[^\s:]+/g, '[path]')
-    .replace(/[A-Z]:\\[^\s:]+/g, '[path]')
-    .replace(/[?&]key=[A-Za-z0-9\-_]{10,}/g, '?key=[REDACTED]')
-    .replace(/sk-ant-[A-Za-z0-9\-_]{10,}/g, '[REDACTED]')
-    .replace(/sk-[A-Za-z0-9\-_]{20,}/g, '[REDACTED]')
-    .replace(/Bearer\s+\S{10,}/g, 'Bearer [REDACTED]')
-    .replace(/x-api-key:\s*\S{10,}/gi, 'x-api-key: [REDACTED]');
+  return redactLocalPaths(
+    redactSecretTextWithKnownValues(
+      msg,
+      VIEW_CREDENTIAL_ENV_VARS.map(name => process.env[name]),
+    ).value,
+  );
 }
 
 /**
@@ -616,7 +643,11 @@ export const viewCommand = new Command('view')
                   if (cfg.kind === 'gemini') {
                     const r = await withRelaxedTls(() => fetch(
                       `https://generativelanguage.googleapis.com/v1beta/models?key=${cfg.apiKey}`,
-                      { signal: modelTimeout }
+                      // Never follow a redirect: the key is in the URL, so a followed hop
+                      // carries it to whatever host the redirect names. Same rule as
+                      // serve-client.ts; a cross-origin redirect strips only
+                      // Authorization/Cookie/Proxy-Authorization, nothing else.
+                      { signal: modelTimeout, redirect: 'error' }
                     ), llmTlsRelaxed());
                     if (r.ok) {
                       const data = await r.json() as { models?: Array<{ name: string; supportedGenerationMethods?: string[] }> };
@@ -628,6 +659,8 @@ export const viewCommand = new Command('view')
                     const r = await withRelaxedTls(() => fetch(`${cfg.baseUrl}/models`, {
                       headers: { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
                       signal: modelTimeout,
+                      // Never follow a redirect: `x-api-key` survives a cross-origin hop.
+                      redirect: 'error',
                     }), llmTlsRelaxed());
                     if (r.ok) {
                       const data = await r.json() as { data?: Array<{ id: string }> };
@@ -652,7 +685,10 @@ export const viewCommand = new Command('view')
                       () =>
                         // INTENTIONAL EGRESS: repo config can select only loopback; remote endpoints are operator-supplied.
                         // codeql[js/file-access-to-http]
-                        fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout }),
+                        // Never follow a redirect: a loopback baseUrl is trusted because it
+                        // cannot reach the network, which only holds while it cannot hand
+                        // back a redirect to somewhere that can.
+                        fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout, redirect: 'error' }),
                       llmTlsRelaxed(),
                     );
                     if (r.ok) {

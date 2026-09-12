@@ -46,14 +46,24 @@ describe('resolveGenerationProvider', () => {
     });
   });
 
-  it('uses a keyless configured provider and configured model', () => {
-    expect(resolveGenerationProvider({
-      generation: { provider: 'claude-code', model: 'sonnet' },
-    })).toEqual({
-      provider: 'claude-code',
-      model: 'sonnet',
-      openaiCompatBaseUrl: undefined,
-    });
+  it('uses a keyless configured provider only when the operator admits it', () => {
+    // `generation.provider` is committed in the analyzed repository, and a keyless CLI
+    // provider has no credential brake — so it needs an operator signal
+    // (OPENLORE_GENERATION_PROVIDER, or an override) before OpenLore spawns the agent
+    // binary on repo-authored prompt text. See llm-provider-resolution.test.ts.
+    const config = { generation: { provider: 'claude-code', model: 'sonnet' } };
+    expect(resolveGenerationProvider(config)).toBeNull();
+
+    process.env.OPENLORE_GENERATION_PROVIDER = 'claude-code';
+    try {
+      expect(resolveGenerationProvider(config)).toEqual({
+        provider: 'claude-code',
+        model: 'sonnet',
+        openaiCompatBaseUrl: undefined,
+      });
+    } finally {
+      delete process.env.OPENLORE_GENERATION_PROVIDER;
+    }
   });
 
   it('uses the same environment priority as the CLI', () => {

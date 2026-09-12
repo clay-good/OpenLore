@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveEmbedder, embedderMode, servedRetrievalMode } from './embedder.js';
-import { LocalEmbeddingService, DEFAULT_LOCAL_MODEL } from './local-embedding-service.js';
+import {
+  LocalEmbeddingService,
+  DEFAULT_LOCAL_MODEL,
+  LOCAL_MODEL_ENV,
+  resolveTrustedLocalModel,
+} from './local-embedding-service.js';
 import { EmbeddingService, type Embedder } from './embedding-service.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
@@ -131,7 +136,9 @@ describe('servedRetrievalMode — honest about what the index actually serves', 
 describe('LocalEmbeddingService', () => {
   it('records a local: prefixed model name for sidecar mode detection', () => {
     expect(new LocalEmbeddingService().modelName).toBe(`local:${DEFAULT_LOCAL_MODEL}`);
-    expect(LocalEmbeddingService.fromConfig({ provider: 'local', model: 'm' }).modelName).toBe('local:m');
+    // The constructor is the operator-driven path and takes any id; fromConfig reads the
+    // repository's config, so it applies the trust check below.
+    expect(new LocalEmbeddingService('m').modelName).toBe('local:m');
   });
 
   it('returns [] for an empty input without loading the model', async () => {
@@ -185,5 +192,41 @@ describe('resolveEmbedder — half-configured environment is disclosed', () => {
     const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
     expect(await resolveEmbedder(null)).toBeNull();
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `embedding.model` under `provider: 'local'` is a HuggingFace repo id that Transformers.js
+ * downloads and loads into onnxruntime IN-PROCESS — on the read path (orient/search_code),
+ * not just analyze. `embedding.baseUrl` is refused when it is not loopback; this string
+ * reached the network and a native parser with no check at all.
+ */
+describe('resolveTrustedLocalModel — a repo may not choose which weights are executed', () => {
+  const saved = { ...process.env };
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    delete process.env[LOCAL_MODEL_ENV];
+  });
+  afterEach(() => { process.env = { ...saved }; });
+
+  it('ignores an arbitrary repo-supplied model and says so', async () => {
+    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    const e = await resolveEmbedder(cfg({ provider: 'local', model: 'attacker/backdoored-onnx' }));
+    expect(e?.modelName).toBe(`local:${DEFAULT_LOCAL_MODEL}`);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/embedding\.model/);
+  });
+
+  it('accepts an allowlisted small sentence embedder', () => {
+    expect(resolveTrustedLocalModel('Xenova/bge-small-en-v1.5')).toBe('Xenova/bge-small-en-v1.5');
+  });
+
+  it('accepts any model the OPERATOR names in the environment', () => {
+    process.env[LOCAL_MODEL_ENV] = 'my-org/custom-embedder';
+    expect(resolveTrustedLocalModel('attacker/backdoored-onnx')).toBe('my-org/custom-embedder');
+  });
+
+  it('falls back to the pinned default when the field is absent', () => {
+    expect(resolveTrustedLocalModel(undefined)).toBe(DEFAULT_LOCAL_MODEL);
   });
 });

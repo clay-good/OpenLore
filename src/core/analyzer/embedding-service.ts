@@ -186,6 +186,11 @@ export class EmbeddingService implements Embedder {
       method: 'POST',
       headers,
       body: JSON.stringify({ input: truncated, model: this.model }),
+      // Never follow a redirect: a cross-origin hop keeps custom headers, and a 307/308
+      // replays this body — the repository text being embedded. Following one would send
+      // both to a host the endpoint's own response chose, defeating the loopback-only rule
+      // repo-config-trust applies to `embedding.baseUrl`.
+      redirect: 'error',
     }), this.relaxTls || isInsecureTlsAllowed());
 
     if (!response.ok) {

@@ -64,7 +64,9 @@ type ConfigRuleMetadata = {
 };
 
 type ConfigRule = ConfigRuleMetadata & (
-  | { kind: 'string' | 'number' | 'boolean' | 'string-or-null' }
+  | { kind: 'string' | 'boolean' | 'string-or-null' }
+  /** `min`/`max` bound a repo-authored number; out-of-range values are clamped, not rejected. */
+  | { kind: 'number'; min?: number; max?: number }
   | { kind: 'enum'; values: readonly string[] }
   | { kind: 'array'; element: ConfigRule }
   | { kind: 'string-or-string-array' }
@@ -82,6 +84,21 @@ function requiredFor<T>(required: RequiredFieldMap<T>): readonly string[] {
 
 const stringRule: ConfigRule = { kind: 'string' };
 const numberRule: ConfigRule = { kind: 'number' };
+
+/**
+ * Bounds for the numeric knobs that size WORK, not just output.
+ *
+ * `.openlore/config.json` is committed in the analyzed repository, so on a clone these
+ * numbers are attacker-authored. Unbounded, they are a cost amplifier rather than a
+ * configuration mistake: `generation.chunkMaxChars` and `contextInjection.tokenBudget`
+ * size every prompt sent to the operator's PAID provider, `analysis.maxFiles` sizes the
+ * walk, and `generation.timeout` decides how long a single hostile request may hold the
+ * process. The bounds are wide enough that no plausible real setting is touched, and an
+ * out-of-range value is clamped and reported rather than rejected — the same
+ * warn-and-ignore shape the endpoint trust boundary uses, so one silly number never makes
+ * the repository unanalyzable.
+ */
+const boundedNumber = (min: number, max: number): ConfigRule => ({ kind: 'number', min, max });
 const booleanRule: ConfigRule = { kind: 'boolean' };
 const stringArrayRule: ConfigRule = { kind: 'array', element: stringRule };
 
@@ -89,7 +106,7 @@ const analysisRule: ConfigRule = {
   kind: 'object',
   strict: true,
   fields: fieldsFor<AnalysisConfig>({
-    maxFiles: numberRule,
+    maxFiles: boundedNumber(1, 1_000_000),
     includePatterns: stringArrayRule,
     excludePatterns: stringArrayRule,
   }),
@@ -105,8 +122,8 @@ const generationRule: ConfigRule = {
     openaiCompatBaseUrl: stringRule,
     skipSslVerify: booleanRule,
     disableResponseFormat: booleanRule,
-    timeout: numberRule,
-    chunkMaxChars: numberRule,
+    timeout: boundedNumber(1_000, 600_000),
+    chunkMaxChars: boundedNumber(500, 200_000),
     domains: { kind: 'string-or-string-array', compatibilityDefault: true },
   }),
   required: requiredFor<GenerationConfig>({ domains: true }),
@@ -199,7 +216,7 @@ const contextInjectionRule: ConfigRule = {
   kind: 'object',
   fields: fieldsFor<ContextInjectionConfig>({
     mode: { kind: 'enum', values: ['off', 'task-scoped'] },
-    tokenBudget: numberRule,
+    tokenBudget: boundedNumber(50, 100_000),
     relevanceMinMatches: numberRule,
     relevanceMinFanIn: numberRule,
     relevanceMinScore: numberRule,
@@ -351,7 +368,7 @@ export const CONFIG_MIGRATIONS: readonly ConfigMigration[] = [];
 
 /** A single deterministic finding from validating a config object. */
 export interface ConfigValidationFinding {
-  kind: 'unknown-key' | 'missing-required' | 'type-mismatch' | 'version-older' | 'version-newer' | 'default-added';
+  kind: 'unknown-key' | 'missing-required' | 'type-mismatch' | 'version-older' | 'version-newer' | 'default-added' | 'value-clamped';
   /** The offending key, when the finding is about one. */
   key?: string;
   /** Human-readable message. */
@@ -420,7 +437,46 @@ export function backfillRequiredConfigDefaults(
   };
 
   visit(config, defaults, CONFIG_RULE, '');
+  clampBoundedNumbers(config, CONFIG_RULE, '', findings);
   return { config, findings };
+}
+
+/**
+ * Clamp every out-of-range bounded number in place, reporting each one.
+ *
+ * Runs on the normalized copy (never the caller's object) at the read boundary, so the
+ * clamped value is what consumers actually receive — a repo-authored `chunkMaxChars:
+ * 5000000` cannot inflate a prompt just because nothing downstream re-checks it. Reported,
+ * never fatal: the bound protects the operator's cost and time, and refusing the whole
+ * config over one number would be a denial of service of its own. A non-number is left to
+ * the type-mismatch path.
+ */
+function clampBoundedNumbers(
+  target: Record<string, unknown>,
+  rule: Extract<ConfigRule, { kind: 'object' }>,
+  path: string,
+  findings: ConfigValidationFinding[],
+): void {
+  for (const [key, childRule] of Object.entries(rule.fields)) {
+    const childPath = path ? `${path}.${key}` : key;
+    const value = target[key];
+    if (childRule.kind === 'object') {
+      if (isConfigObject(value)) clampBoundedNumbers(value, childRule, childPath, findings);
+      continue;
+    }
+    if (childRule.kind !== 'number' || typeof value !== 'number' || !Number.isFinite(value)) continue;
+    const { min, max } = childRule;
+    const clamped = min !== undefined && value < min ? min : max !== undefined && value > max ? max : value;
+    if (clamped === value) continue;
+    target[key] = clamped;
+    findings.push({
+      kind: 'value-clamped',
+      key: childPath,
+      fatal: false,
+      message: `config key '${childPath}' = ${value} is outside the supported range `
+        + `${min ?? '-∞'}–${max ?? '∞'} — using ${clamped} (file unchanged)`,
+    });
+  }
 }
 
 /**

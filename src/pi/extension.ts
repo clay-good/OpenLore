@@ -69,7 +69,16 @@ import {
   type ServeHealth,
 } from '../cli/commands/serve-descriptor.js';
 import type { ContextInjectionConfig } from '../types/index.js';
-import { discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
+import {
+  refuseRepoConfiguredEndpoint,
+  resolveTrustedCompatBase,
+} from '../core/services/repo-config-trust.js';
+// Pi renders nothing written to stdout, and logger.warning (used by the trust boundary and
+// by every library path this extension calls) is a console.log. Route those to stderr so a
+// refusal is at least recoverable from the host's log instead of vanishing — the same
+// discipline the MCP server applies for the same reason. Operator-facing messages still go
+// through ctx.ui.notify.
+import { redirectConsoleToStderr } from '../utils/quiet-stdout.js';
 import {
   frameServedContent,
   readAnalysisContentProvenance,
@@ -223,6 +232,12 @@ async function fetchModels(baseUrl: string, apiKey?: string): Promise<string[] |
     const res = await fetch(modelsUrl(baseUrl), {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       signal: AbortSignal.timeout(1500),
+      // Never follow a redirect. A cross-origin redirect strips only Authorization,
+      // Cookie and Proxy-Authorization — so the one-hop redirect a loopback endpoint can
+      // hand back would otherwise turn a "cannot exfiltrate" loopback base URL into a
+      // probe of (or a credential delivery to) any host it names. Same rule as
+      // serve-client.ts.
+      redirect: 'error',
     });
     if (!res.ok) return null;
     const data = await res.json() as { data?: { id: string }[] };
@@ -326,12 +341,29 @@ export async function runConfigWizard(ctx: ExtensionContext, existing?: Existing
 
     if (generation.provider) {
       row('Model', generation.model ?? '—', async () => {
-        const apiBase = generation.provider === 'openai' ? 'https://api.openai.com' : (generation.openaiCompatBaseUrl ?? '');
-        const apiKey = generation.provider ? process.env[PROVIDER_ENV_VARS[generation.provider] ?? ''] : undefined;
         // `generation` is seeded from the ANALYZED REPO's config, and fetchModels sends
-        // `Authorization: Bearer <operator key>` to whatever it names — so opening this
-        // row on a hostile repo would hand over the key. Say where it is going.
-        discloseRepoConfiguredEndpoint('generation.openaiCompatBaseUrl', generation.openaiCompatBaseUrl);
+        // `Authorization: Bearer <operator key>` to whatever it names — so on a hostile
+        // repo, merely opening this row would hand over OPENAI_COMPAT_API_KEY. This is a
+        // generation endpoint carrying an operator credential, so it takes the same
+        // resolveTrustedCompatBase rule the generate/doctor paths take: a remote value is
+        // used only when the OPERATOR set it (env), never because the clone committed it.
+        // Disclosure is not enough here, and it is also invisible in Pi: logger.warning
+        // writes to stdout, which the TUI never renders — hence ctx.ui.notify, the channel
+        // every other warning in this wizard uses.
+        const compatBase = resolveTrustedCompatBase(
+          process.env.OPENAI_COMPAT_BASE_URL,
+          generation.openaiCompatBaseUrl,
+        );
+        if (generation.openaiCompatBaseUrl && !compatBase) {
+          ui.notify(
+            `Ignoring generation.openaiCompatBaseUrl "${generation.openaiCompatBaseUrl}" from ` +
+              'this repository: a repo may not choose where your API key is sent. ' +
+              'Set OPENAI_COMPAT_BASE_URL to trust it deliberately.',
+            'warning',
+          );
+        }
+        const apiBase = generation.provider === 'openai' ? 'https://api.openai.com' : (compatBase ?? '');
+        const apiKey = generation.provider ? process.env[PROVIDER_ENV_VARS[generation.provider] ?? ''] : undefined;
         const models = apiBase ? await fetchModels(apiBase, apiKey) : null;
         if (models && models.length > 0) {
           const modelList = generation.model && models.includes(generation.model)
@@ -381,7 +413,23 @@ export async function runConfigWizard(ctx: ExtensionContext, existing?: Existing
 
     if (embedding?.baseUrl) {
       row('Model', embedding.model || '(none)', async () => {
-        const models = embedding?.baseUrl ? await fetchModels(embedding.baseUrl) : null;
+        // Same repo-authored value the analyze path and `openlore doctor` refuse when it
+        // is not loopback: probing it here would make the wizard an instance-metadata /
+        // internal-host scanner on behalf of a clone. Refuse, and say so in the TUI —
+        // the module's own logger.warning goes to stdout, which Pi never shows.
+        const embedBase = refuseRepoConfiguredEndpoint(
+          'embedding.baseUrl',
+          embedding?.baseUrl,
+          'Enter a model name instead.',
+        );
+        if (embedding?.baseUrl && !embedBase) {
+          ui.notify(
+            `Not listing models from "${embedding.baseUrl}": a repository's config may not ` +
+              'choose where requests go. Type the model name instead.',
+            'warning',
+          );
+        }
+        const models = embedBase ? await fetchModels(embedBase) : null;
         if (models && models.length > 0) {
           const cur = embedding?.model;
           const modelList = cur && models.includes(cur)
@@ -1564,6 +1612,12 @@ function registerOpenlore(
   pi: ExtensionAPI,
   runtime: { orientTimeoutMs?: number } = {},
 ): void {
+  // Stdout belongs to the Pi host (rpc/json modes stream protocol on it, and the TUI
+  // renders none of it), so a library-level logger.warning written with console.log is
+  // both invisible and potentially corrupting. Redirect once at registration; not
+  // restored, because the extension lives for the whole session.
+  redirectConsoleToStderr();
+
   const daemons = new Map<string, Daemon>();
   const daemonFailures = new Map<string, string>();
   // Negative cache: when a daemon can't be reached, remember the failure for a

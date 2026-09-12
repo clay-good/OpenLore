@@ -19,7 +19,7 @@
  * `-`/`_`/`.` (e.g. `anthropicApiKey`, `x-openlore-token`, `client_secret`).
  */
 const SECRET_KEY_NAME =
-  /(^|[._-])(api[._-]?key|apikey|token|secret|password|passwd|authorization|credential|client[._-]?secret|access[._-]?key|private[._-]?key|session[._-]?key)([._-]|$)/i;
+  /(^|[._-])(api[._-]?key|apikey|token|secret|password|passwd|authorization|auth|credential|client[._-]?secret|access[._-]?key|private[._-]?key|session[._-]?key|session[._-]?id|signing[._-]?key|cookie|webhook(?:[._-]?url)?|pat)([._-]|$)/i;
 
 /** Canonical AWS SDK credential property names, including camelCase object syntax. */
 const CLOUD_CREDENTIAL_KEY_NAME = /^(?:aws)?(?:secretAccessKey|sessionToken)$/i;
@@ -62,6 +62,12 @@ const SECRET_VALUE_PATTERNS: readonly SecretPattern[] = [
   { pattern: /Bearer\s+\S{10,}/gi, kind: 'authorization', replacement: 'Bearer $MARKER' },
   { pattern: /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----/g, kind: 'private-key' },
   { pattern: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?):\/\/[^\s:/]+:[^\s@/]+@[^\s'"`]+/gi, kind: 'connection-string' },
+  // Any OTHER scheme carrying `user:pass@` — the enumeration above covers the databases
+  // we expected, but the credential is in the same place whatever the scheme is, and
+  // `https://svc:S3cr3tPw@internal/api` (a gateway URL echoed in a provider error) was
+  // passing every channel untouched. Runs after the specific patterns so their typed
+  // match still wins for a known scheme.
+  { pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]+@[^\s'"`]+/gi, kind: 'connection-string' },
   { pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, kind: 'jwt' },
   { pattern: /\bAKIA[0-9A-Z]{16}\b/g, kind: 'cloud-credential' },
   {
@@ -93,6 +99,27 @@ const SECRET_VALUE_PATTERNS: readonly SecretPattern[] = [
   // Google-style `?key=...` in a provider URL (e.g. Gemini generateContent).
   { pattern: /([?&]key=)[A-Za-z0-9\-_]{8,}/gi, kind: 'api-key', replacement: '$1$MARKER' },
 ];
+
+/** True when an object key name denotes a credential (either naming convention). */
+function isSecretKeyName(key: string): boolean {
+  return SECRET_KEY_NAME.test(key) || CLOUD_CREDENTIAL_KEY_NAME.test(key);
+}
+
+/**
+ * Absolute filesystem paths → `[path]`.
+ *
+ * Not a credential, so it is NOT one of the secret patterns (it must not inflate a
+ * redaction receipt), but it belongs in this module rather than being re-implemented per
+ * surface: the view server ships error text to a browser, and a home-directory path
+ * discloses the operator's username and local layout. Compose it with the secret
+ * redactors at any surface that answers a remote client.
+ */
+export function redactLocalPaths(s: string): string {
+  return s
+    .replace(/\/Users\/[^\s:]+/g, '[path]')
+    .replace(/\/home\/[^\s:]+/g, '[path]')
+    .replace(/[A-Z]:\\[^\s:]+/g, '[path]');
+}
 
 function marker(kind: SecretKind, typed: boolean): string {
   return typed ? `[REDACTED:${kind}]` : '[REDACTED]';
@@ -187,7 +214,13 @@ export function redactSecrets<T>(value: T, _seen?: WeakMap<object, unknown>): T 
   const out: Record<string, unknown> = {};
   seen.set(value as object, out);
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof v === 'string' && (SECRET_KEY_NAME.test(k) || CLOUD_CREDENTIAL_KEY_NAME.test(k))) {
+    // ANY value under a secret-named key, not only a string one: `{"apiKey":{"value":"…"}}`
+    // and `{"token":["…"]}` are ordinary shapes for a credential read out of a config or a
+    // provider response, and the old string-only test walked straight into them (the
+    // nested string then only met the pattern matcher, which a short or unusual key
+    // escapes). null/undefined is left as-is — replacing it would invent a credential
+    // where there is none.
+    if (isSecretKeyName(k) && v != null) {
       out[k] = '[REDACTED]';
     } else {
       out[k] = redactSecrets(v, seen);
@@ -226,11 +259,12 @@ export function redactSecretsWithReport<T>(value: T, typed = true): RedactionRes
     const copy: Record<string, unknown> = {};
     seen.set(current, copy);
     for (const [key, child] of Object.entries(current as Record<string, unknown>)) {
-      if (typeof child === 'string' && CLOUD_CREDENTIAL_KEY_NAME.test(key)) {
+      // Key-named secrets are replaced whatever their VALUE type — see redactSecrets.
+      if (child != null && CLOUD_CREDENTIAL_KEY_NAME.test(key)) {
         copy[key] = marker('cloud-credential', typed);
         count++;
         kinds.add('cloud-credential');
-      } else if (typeof child === 'string' && SECRET_KEY_NAME.test(key)) {
+      } else if (child != null && SECRET_KEY_NAME.test(key)) {
         copy[key] = marker('secret-field', typed);
         count++;
         kinds.add('secret-field');
