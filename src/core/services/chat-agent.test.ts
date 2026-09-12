@@ -244,7 +244,18 @@ describe('resolveProviderConfig', () => {
 // runChatAgent — agentic loops via mocked fetch
 // ============================================================================
 
-// Helper to create a mock fetch Response
+/**
+ * A minimal fetch `Response` double.
+ *
+ * Deliberately NOT a real `Response`: these tests hand the SAME instance to several fetches in
+ * one agentic loop (`mockResolvedValue`, not `…Once`), and a real body can only be read once.
+ *
+ * Deliberately CAST rather than satisfied structurally, too. The WHATWG surface keeps growing —
+ * `bytes()` arrived with `@types/node` 26, `textStream()` with 26.5 — and each addition broke
+ * `npm run typecheck` until someone re-declared a method no test calls. `@types/node` is a
+ * caret range, so that break arrives with any fresh install, not just a Dependabot bump. A
+ * double should owe the type checker only the surface it actually implements.
+ */
 function mockResponse(body: object, ok = true, status = 200): Response {
   return {
     ok,
@@ -262,10 +273,7 @@ function mockResponse(body: object, ok = true, status = 200): Response {
     arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
     blob: () => Promise.resolve(new Blob([])),
     formData: () => Promise.resolve(new FormData()),
-    // Added to `Response` by @types/node 26 (tracking the undici/WHATWG surface).
-    // Unused by these tests, but the mock is typed as a full `Response`.
-    bytes: () => Promise.resolve(new Uint8Array()),
-  };
+  } as unknown as Response;
 }
 
 describe('runChatAgent', () => {
