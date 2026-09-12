@@ -40,6 +40,11 @@ import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { readFile, writeFile, readdir, mkdir, mkdtemp, copyFile, rm, stat, rename, open } from 'node:fs/promises';
+import {
+  ANALYSIS_ARTIFACT_MAX_BYTES,
+  readArtifactBounded,
+  readArtifactBytesBounded,
+} from '../../utils/bounded-artifact-read.js';
 import { tmpdir } from 'node:os';
 import { join, basename, isAbsolute, dirname } from 'node:path';
 import {
@@ -241,8 +246,10 @@ async function readSourceIdentity(
   analysisDir: string,
 ): Promise<{ sourceCommit: string | null; sourceTreeState: SourceTreeState }> {
   try {
-    const raw = await readFile(join(analysisDir, ARTIFACT_FINGERPRINT), 'utf-8');
-    const parsed = JSON.parse(raw) as { commit?: unknown; sourceTreeState?: unknown };
+    // Bounded read: repository-controlled artifact (symlink / FIFO / oversized all fail closed).
+    const raw = await readArtifactBounded(join(analysisDir, ARTIFACT_FINGERPRINT));
+    if (!raw) return { sourceCommit: null, sourceTreeState: 'unknown' };
+    const parsed = JSON.parse(raw.text) as { commit?: unknown; sourceTreeState?: unknown };
     const sourceCommit = typeof parsed.commit === 'string' && parsed.commit.length > 0
       ? parsed.commit
       : null;
@@ -483,7 +490,11 @@ async function readStoreWithoutLocalCaches(
         stage = await stageIn();
         scratch = join(stage, basename(dbPath));
       } else {
-        scratch = `${dbPath}.export-${process.pid}-${exportScratchSeq++}`;
+        // The name must be UNPREDICTABLE, not merely unique: `copyFile` follows a symlink at the
+        // destination, so a repository that can guess this path can pre-commit a link there and
+        // have the export write through it. pid + counter is guessable; a random component is not.
+        // Still matched by `isLocalOnlyDebris`, so a leaked file can never be bundled.
+        scratch = `${dbPath}.export-${process.pid}-${exportScratchSeq++}-${randomUUID()}`;
       }
       await copyFile(dbPath, scratch);
       const db = new DatabaseSync(scratch);
@@ -581,7 +592,13 @@ export async function buildBundle(
           + 'machine\'s extraction cache and is larger than necessary';
       }
     } else {
-      bytes = await readFile(join(analysisDir, name));
+      // Bounded read: a payload file is repository-controlled until this export reads it, so a
+      // committed FIFO must not block the export inside `open()` and a symlink must not pull an
+      // out-of-tree file into the bundle.
+      const path = join(analysisDir, name);
+      const read = await readArtifactBytesBounded(path, ANALYSIS_ARTIFACT_MAX_BYTES);
+      if (read.state !== 'ok') throw new BundleError('unreadable', `Unreadable index payload file: ${path}`);
+      bytes = read.bytes;
     }
     payload[name] = bytes.toString('base64');
     manifestFiles.push({ name, bytes: bytes.length });
@@ -843,7 +860,8 @@ export async function promoteStagedIndex(
       await sweepDeadImportStages(promotionParent, promotionDir);
       let priorManifest: string | null = null;
       try {
-        priorManifest = await readFile(join(analysisDir, GENERATION_MANIFEST_FILE), 'utf8');
+        // Bounded read (same untrusted-artifact rules as every other `.openlore` reader).
+        priorManifest = (await readArtifactBounded(join(analysisDir, GENERATION_MANIFEST_FILE)))?.text ?? null;
       } catch {
         // A legacy generation has no manifest. Removing the publishing marker restores its
         // legacy identity if promotion fails before replacing a payload file.

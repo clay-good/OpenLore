@@ -8,6 +8,7 @@
 
 import { readFile, stat, readdir, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -144,8 +145,10 @@ export class SpecSnapshotGenerator {
 
     // Load artifacts in parallel
     const [llmContextRaw, mappingRaw, git, specDomains] = await Promise.all([
-      readFile(join(analysisDir, ARTIFACT_LLM_CONTEXT), 'utf-8').catch(() => null),
-      readFile(join(analysisDir, ARTIFACT_MAPPING), 'utf-8').catch(() => null),
+      // Bounded reads: these are repository-controlled files, so a committed FIFO must not hang
+      // the generator and a symlink must not redirect the read out of the analysis directory.
+      readArtifactBounded(join(analysisDir, ARTIFACT_LLM_CONTEXT), ANALYSIS_ARTIFACT_MAX_BYTES).then(r => r?.text ?? null),
+      readArtifactBounded(join(analysisDir, ARTIFACT_MAPPING), ANALYSIS_ARTIFACT_MAX_BYTES).then(r => r?.text ?? null),
       getGitState(this.rootPath),
       discoverSpecDomains(openspecPath, this.rootPath),
     ]);

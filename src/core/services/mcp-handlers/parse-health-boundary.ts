@@ -10,7 +10,7 @@
  */
 
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH } from '../../../constants.js';
 import { EXCLUSION_REASON_LABEL, type ParseHealthReport, type FileParseHealth } from '../../analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../analyzer/memory-strategy.js';
@@ -20,7 +20,10 @@ import { describeScriptContainerBoundaries } from '../../analyzer/sfc-script-ext
 export async function loadParseHealthReport(absDir: string): Promise<ParseHealthReport | null> {
   const path = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH);
   try {
-    const parsed = JSON.parse(await readFile(path, 'utf-8')) as ParseHealthReport;
+    // Bounded read: repository-controlled artifact (symlink / FIFO / oversized all fail closed).
+    const raw = await readArtifactBounded(path);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw.text) as ParseHealthReport;
     return Array.isArray(parsed.files) ? parsed : null;
   } catch {
     return null;

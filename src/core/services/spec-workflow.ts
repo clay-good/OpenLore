@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { isAbsolute, join, posix, relative } from 'node:path';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
@@ -176,14 +177,19 @@ async function loadAnalysisArtifacts(root: string, analysis: string): Promise<Om
     const repoPath = join(analysis, ARTIFACT_REPO_STRUCTURE);
     const graphPath = join(analysis, ARTIFACT_DEPENDENCY_GRAPH);
     const contextPath = join(analysis, ARTIFACT_LLM_CONTEXT);
-    const [repoRaw, graphRaw, contextRaw, repoStat, graphStat, contextStat] = await Promise.all([
-      readFile(repoPath, 'utf8'),
-      readFile(graphPath, 'utf8'),
-      readFile(contextPath, 'utf8'),
+    // Bounded reads: repository-controlled artifacts (a committed FIFO would hang this load
+    // permanently; a symlink would redirect it out of the analysis directory). A refusal is
+    // indistinguishable from an absent analysis to this caller, which already returns null.
+    const [repoRead, graphRead, contextRead, repoStat, graphStat, contextStat] = await Promise.all([
+      readArtifactBounded(repoPath, ANALYSIS_ARTIFACT_MAX_BYTES),
+      readArtifactBounded(graphPath, ANALYSIS_ARTIFACT_MAX_BYTES),
+      readArtifactBounded(contextPath, ANALYSIS_ARTIFACT_MAX_BYTES),
       stat(repoPath),
       stat(graphPath),
       stat(contextPath),
     ]);
+    if (!repoRead || !graphRead || !contextRead) return null;
+    const [repoRaw, graphRaw, contextRaw] = [repoRead.text, graphRead.text, contextRead.text];
     const repo = JSON.parse(repoRaw) as RepoStructure;
     const graph = JSON.parse(graphRaw) as DependencyGraphResult;
     const context = JSON.parse(contextRaw) as LLMContext;

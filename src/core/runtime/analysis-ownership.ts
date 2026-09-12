@@ -24,6 +24,7 @@
 
 import { statSync, unlinkSync } from 'node:fs';
 import { open, readFile, mkdir, unlink } from 'node:fs/promises';
+import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { renameWithContentionRetry } from '../decisions/atomic-store.js';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -490,7 +491,10 @@ export async function acquireAnalysisOwnership(
 /** Read the current progress sidecar, or `null` when no analysis is publishing. */
 export async function readAnalysisProgress(analysisDir: string): Promise<AnalysisProgress | null> {
   try {
-    return JSON.parse(await readFile(progressPathOf(analysisDir), 'utf8')) as AnalysisProgress;
+    // Bounded read: the sidecar lives under the repository's `.openlore/`, so a committed FIFO
+    // there must not block a status read inside `open()`.
+    const raw = await readArtifactBounded(progressPathOf(analysisDir));
+    return raw ? JSON.parse(raw.text) as AnalysisProgress : null;
   } catch {
     return null;
   }

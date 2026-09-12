@@ -10,7 +10,8 @@
  *   existing ones are skipped (no duplicate detection by content hash).
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
+import { confinedAtomicWriteFile } from '../../utils/path-confinement.js';
 import { dirname, resolve, sep } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import type { GeneratedTestFile } from '../../types/test-generator.js';
@@ -158,7 +159,11 @@ export async function writeTestFiles(opts: {
         continue;
       }
 
-      await writeFile(absPath, content, 'utf-8');
+      // The lexical check above cannot see a symlinked path COMPONENT, and a plain `writeFile`
+      // follows one — so a repo committing a link here had generated content written wherever it
+      // pointed. The confined atomic writer re-checks on the real path and refuses a non-regular
+      // target, like every other file OpenLore writes into a repository.
+      await confinedAtomicWriteFile(rootPath, absPath, content);
       file.isNew = false;
       result.merged++;
       continue;
@@ -166,7 +171,7 @@ export async function writeTestFiles(opts: {
 
     // New file
     await mkdir(dirname(absPath), { recursive: true });
-    await writeFile(absPath, file.content, 'utf-8');
+    await confinedAtomicWriteFile(rootPath, absPath, file.content);
     file.isNew = true;
     result.written++;
   }

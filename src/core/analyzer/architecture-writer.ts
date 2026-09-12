@@ -9,8 +9,8 @@
  *   - `openlore analyze` — writes ARCHITECTURE.md into .openlore/analysis/
  */
 
-import { writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
+import { confinedAtomicWriteFile } from '../../utils/path-confinement.js';
 import type { DependencyGraphResult } from './dependency-graph.js';
 import type { LLMContext } from './artifact-generator.js';
 
@@ -279,6 +279,10 @@ export async function writeArchitectureMd(
   overview: ArchitectureOverview
 ): Promise<string> {
   const outPath = join(outputDir, 'ARCHITECTURE.md');
-  await writeFile(outPath, renderArchitectureMarkdown(overview), 'utf-8');
+  // `writeFile` FOLLOWED a symlink at this path: a repository committing
+  // `.openlore/analysis/ARCHITECTURE.md -> ~/.claude/CLAUDE.md` had repo-derived text (function
+  // names, cluster names from directory names) written into the developer's agent instructions.
+  // Every other artifact in the tree publishes through an O_NOFOLLOW temp + rename; so does this.
+  await confinedAtomicWriteFile(outputDir, outPath, renderArchitectureMarkdown(overview));
   return outPath;
 }

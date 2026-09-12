@@ -24,6 +24,22 @@ import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { escapeRegExp } from '../../../utils/misc.js';
 import { readFileConfined, readFileConfinedWithStat } from '../../../utils/path-confinement.js';
+import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
+
+/**
+ * Read one cached `.openlore/analysis/` artifact under the untrusted-artifact rules.
+ *
+ * These files are repository-controlled: a committed symlink would redirect the read out of the
+ * analysis directory, and a committed FIFO blocks inside `open()` on a libuv threadpool worker
+ * forever — a hang `process.exit` cannot interrupt, which is a permanent denial of service on the
+ * MCP server. A refusal THROWS so each caller's existing catch falls back to live extraction,
+ * exactly as it already does for a missing or malformed artifact.
+ */
+async function readCachedArtifact(path: string): Promise<string> {
+  const read = await readArtifactBounded(path, ANALYSIS_ARTIFACT_MAX_BYTES);
+  if (!read) throw new Error(`unreadable cached artifact: ${path}`);
+  return read.text;
+}
 import { readAnalysisArtifactOrPartial, readDependencyGraphOrPartial } from './artifact-cache.js';
 import {
   DEFAULT_MAX_FILES,
@@ -286,7 +302,7 @@ export async function handleGetDuplicateReport(
 
   let raw: string;
   try {
-    raw = await readFile(cachePath, 'utf-8');
+    raw = await readCachedArtifact(cachePath);
   } catch {
     return {
       error:
@@ -977,7 +993,7 @@ export async function handleGetRouteInventory(
 
   // Try reading cached artifact first
   try {
-    const raw = await readFile(artifactPath, 'utf-8');
+    const raw = await readCachedArtifact(artifactPath);
     const inventory = JSON.parse(raw);
     // Untrusted artifact: only serve it if the top-level shape is a plain object;
     // a malformed/poisoned artifact falls through to live re-extraction instead of
@@ -1026,7 +1042,7 @@ export async function handleGetMiddlewareInventory(
 
   // Try reading cached artifact first
   try {
-    const raw = await readFile(artifactPath, 'utf-8');
+    const raw = await readCachedArtifact(artifactPath);
     const inventory = JSON.parse(raw);
     if (!Array.isArray(inventory)) throw new Error('malformed cached middleware inventory');
     return summarizeListInventory({ cached: true, total: inventory.length, entries: inventory }, 'entries', responseFormat, hint);
@@ -1069,7 +1085,7 @@ export async function handleGetSchemaInventory(
   const hint = 'call get_schema_inventory with responseFormat:"detailed" for the full inventory';
 
   try {
-    const raw = await readFile(artifactPath, 'utf-8');
+    const raw = await readCachedArtifact(artifactPath);
     const schemas = JSON.parse(raw);
     if (!Array.isArray(schemas)) throw new Error('malformed cached schema inventory');
     return summarizeListInventory({ cached: true, total: schemas.length, schemas }, 'schemas', responseFormat, hint);
@@ -1112,7 +1128,7 @@ export async function handleGetUIComponents(
   const hint = 'call get_ui_component_inventory with responseFormat:"detailed" for the full inventory';
 
   try {
-    const raw = await readFile(artifactPath, 'utf-8');
+    const raw = await readCachedArtifact(artifactPath);
     const components = JSON.parse(raw);
     if (!Array.isArray(components)) throw new Error('malformed cached UI inventory');
     return summarizeListInventory({ cached: true, total: components.length, components }, 'components', responseFormat, hint);
@@ -1155,7 +1171,7 @@ export async function handleGetEnvVars(
   const hint = 'call get_env_vars with responseFormat:"detailed" for the full inventory';
 
   try {
-    const raw = await readFile(artifactPath, 'utf-8');
+    const raw = await readCachedArtifact(artifactPath);
     const envVars = JSON.parse(raw);
     if (!Array.isArray(envVars)) throw new Error('malformed cached env inventory');
     return summarizeListInventory({ cached: true, total: envVars.length, envVars }, 'envVars', responseFormat, hint);
@@ -1197,7 +1213,7 @@ export async function handleGetExternalPackages(
   const artifactPath = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_EXTERNAL_PACKAGES);
 
   try {
-    const raw = await readFile(artifactPath, 'utf-8');
+    const raw = await readCachedArtifact(artifactPath);
     const result = JSON.parse(raw);
     if (result === null || typeof result !== 'object' || Array.isArray(result)) {
       throw new Error('malformed cached external-packages inventory');

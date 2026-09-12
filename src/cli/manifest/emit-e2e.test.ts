@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureLogger } from '../../utils/logger.js';
@@ -117,6 +117,37 @@ describe('runManifestEmit (end-to-end)', () => {
     expect(manifest.repo.git_commit).toBeNull();
     expect(manifest.links.repo).toBeNull();
   });
+
+  it('refuses to write the manifest through a symlink at the output path', async () => {
+    // `.well-known/openlore.json` lives in the repository, so a hostile repo can commit it as a
+    // link to any file the developer can write. The confined atomic publish refuses that target.
+    const victim = join(dir, 'victim.json');
+    writeFileSync(victim, '{"original":true}\n');
+    mkdirSync(join(dir, '.well-known'), { recursive: true });
+    symlinkSync(victim, join(dir, '.well-known', 'openlore.json'));
+
+    // Either refusal is correct: the link's target canonicalizes out of the destination directory,
+    // and a same-directory link would be refused as "not a regular file". Both fail closed.
+    await expect(runManifestEmit({ projectRoot: dir }))
+      .rejects.toThrow(/Path escape blocked|not a regular file/);
+    expect(readFileSync(victim, 'utf-8')).toBe('{"original":true}\n');
+  });
+
+  it('does not hang when an analysis artifact is a FIFO rather than a regular file', async () => {
+    // REPRODUCED before the fix: `mkfifo .openlore/analysis/dependency-graph.json` blocked the
+    // emit inside `open()` on a libuv worker forever. The bounded reader refuses it instead, so
+    // the manifest is still emitted — with the exports that artifact would have contributed absent.
+    const graph = join(dir, '.openlore', 'analysis', 'dependency-graph.json');
+    rmSync(graph);
+    execFileSync('mkfifo', [graph]);
+
+    const code = await runManifestEmit({ projectRoot: dir, out: join(dir, 'fifo.json') });
+
+    // The property under test is that this RETURNS at all; the manifest is still valid, minus
+    // whatever the refused artifact would have contributed.
+    expect(code).toBe(0);
+    expect(validateManifest(JSON.parse(readFileSync(join(dir, 'fifo.json'), 'utf-8')))).toEqual([]);
+  }, 15_000);
 
   it('--dry-run previews the destination without writing the file (fix-cli-output-hygiene)', async () => {
     const out = join(dir, '.well-known', 'openlore.json');
