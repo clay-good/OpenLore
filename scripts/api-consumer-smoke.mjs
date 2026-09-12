@@ -100,7 +100,7 @@ if (typeof readServeDescriptor !== 'function') { console.error('subpath did not 
 `);
   runNode(root, [probe], { cwd: fixture, trace });
   const loaded = readFileSync(trace, 'utf8');
-  const forbidden = ['core/analyzer', 'web-tree-sitter', 'tree-sitter-wasms', 'lancedb', 'api/index.js'];
+  const forbidden = ['core/analyzer', 'web-tree-sitter', '@repomix/tree-sitter-wasms', 'lancedb', 'api/index.js'];
   const leaked = forbidden.filter((needle) => loaded.includes(needle));
   if (leaked.length > 0) fail('openlore/serve-descriptor loaded modules it must not', leaked.join(', '));
 

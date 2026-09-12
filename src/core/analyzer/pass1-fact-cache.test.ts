@@ -597,7 +597,8 @@ describe('the extractor stamp', () => {
     const require = createRequire(import.meta.url);
     const names = __grammarPackageNamesForTests(HERE);
     expect(names).toContain('web-tree-sitter');
-    expect(names).toContain('tree-sitter-wasms');
+    expect(names).toContain('@repomix/tree-sitter-wasms');
+    expect(names).toContain('@tree-sitter-grammars/tree-sitter-lua');
 
     const installed = names.filter(n => existsSync(join(REPO_ROOT, 'node_modules', n)));
     expect(installed.length).toBeGreaterThan(1);
