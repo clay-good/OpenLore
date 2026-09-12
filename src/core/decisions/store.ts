@@ -57,11 +57,82 @@ export async function loadDecisionStore(rootPath: string): Promise<DecisionStore
   }
   const store = parsed as DecisionStore;
   if (typeof store.sequence !== 'number') store.sequence = 0; // legacy default
-  store.decisions = store.decisions.map((decision) => ({
-    ...decision,
-    contentOrigin: decision.contentOrigin ?? 'legacy-unknown',
-  }));
+  // Per-record validation. The top-level check above only proved `decisions` is an
+  // array; every field inside it is still attacker-authored (see sanitizeDecision).
+  const records = store.decisions as unknown[];
+  if (records.some((record) => !isDecisionRecordShaped(record))) {
+    await quarantineCorrupt(path, 'invalid shape (malformed decision record)');
+    return emptyStore();
+  }
+  store.decisions = store.decisions.map(sanitizeDecision);
   return store;
+}
+
+/**
+ * The status vocabulary at runtime, written as an exhaustive record so a status
+ * added to `DecisionStatus` fails to compile until it is listed here — the
+ * validator can never silently fall behind the union.
+ */
+const DECISION_STATUSES: Readonly<Record<DecisionStatus, true>> = {
+  draft: true, consolidated: true, verified: true, phantom: true,
+  approved: true, 'auto-approved': true, rejected: true, synced: true,
+};
+
+type ApprovedBy = NonNullable<PendingDecision['approvedBy']>;
+const APPROVED_BY_VALUES: Readonly<Record<ApprovedBy, true>> = { human: true, autopilot: true };
+
+type ContentOrigin = PendingDecision['contentOrigin'];
+const CONTENT_ORIGINS: Readonly<Record<ContentOrigin, true>> = {
+  'agent-recorded': true, 'llm-extracted': true, 'legacy-unknown': true,
+};
+
+/** Closed-set membership by own property only, so `__proto__`/`constructor` never pass. */
+function inClosedSet(value: unknown, set: Readonly<Record<string, true>>): boolean {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(set, value);
+}
+
+/** Minimum structure for a record to be a decision at all (rather than corruption). */
+function isDecisionRecordShaped(record: unknown): boolean {
+  if (record === null || typeof record !== 'object' || Array.isArray(record)) return false;
+  const { id, title } = record as { id?: unknown; title?: unknown };
+  return typeof id === 'string' && id.length > 0 && typeof title === 'string';
+}
+
+/**
+ * `.openlore/decisions/pending.json` is repo content, so every field in it is
+ * attacker-authored: anyone who can land a commit can write any value they like.
+ * These fields are not inert data — `decisionContentProvenance` reads
+ * status/approvedBy/humanReviewedAt to decide whether a decision's text is served
+ * to an agent as `reviewed-corpus`, and `isBlockingStatus` reads `status` to gate
+ * commits. So the vocabulary is bounded here, at the one load door, and it fails
+ * CLOSED — the same principle {@link illegalPromotionToApproved} already commits to
+ * for an unrecognized status:
+ *   - an unknown `status`, or a malformed acceptance field, downgrades the record to
+ *     `draft`: the weakest ACTIVE status. It is never `reviewed-corpus`, never
+ *     promoted by accident, and stays visible to a human rather than vanishing.
+ *   - `approvedBy` outside {human, autopilot} and a `humanReviewedAt` that is not a
+ *     parseable timestamp are dropped, so a free-form string can never stand in for
+ *     "a human looked at this".
+ * This bounds the vocabulary; it does not prove the claim. A hand-written
+ * `status: "approved", approvedBy: "human"` still conforms — corroborating that
+ * against an authenticated trail remains the open gap (the ledger next door is
+ * plain repo content too, so it is forgeable in exactly the same way).
+ */
+function sanitizeDecision(decision: PendingDecision): PendingDecision {
+  const approvedByOk = decision.approvedBy === undefined || inClosedSet(decision.approvedBy, APPROVED_BY_VALUES);
+  const reviewedAtOk = decision.humanReviewedAt === undefined
+    || (typeof decision.humanReviewedAt === 'string' && !Number.isNaN(Date.parse(decision.humanReviewedAt)));
+  const statusOk = inClosedSet(decision.status, DECISION_STATUSES);
+  const sanitized: PendingDecision = {
+    ...decision,
+    status: statusOk && approvedByOk && reviewedAtOk ? decision.status : 'draft',
+    contentOrigin: inClosedSet(decision.contentOrigin, CONTENT_ORIGINS)
+      ? decision.contentOrigin
+      : 'legacy-unknown',
+  };
+  if (!approvedByOk) delete sanitized.approvedBy;
+  if (!reviewedAtOk) delete sanitized.humanReviewedAt;
+  return sanitized;
 }
 
 export async function saveDecisionStore(rootPath: string, store: DecisionStore): Promise<void> {

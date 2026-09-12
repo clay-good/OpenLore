@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { ARTIFACT_ANALYSIS_ORIGIN, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import type { PendingDecision } from '../../types/index.js';
 
@@ -88,10 +88,16 @@ export async function indexedSpecContentProvenance(
   servedValues: readonly string[],
 ): Promise<Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>> {
   try {
-    const root = resolve(rootPath);
-    const candidate = resolve(root, relativePath);
-    if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) return 'local-unreviewed';
-    const current = await readFile(candidate, 'utf8');
+    // `relativePath` is built from an INDEX-derived spec domain (search_specs /
+    // orient compose `openspec/specs/<domain>/spec.md`), so the path is repo content.
+    // A lexical `resolve` + `startsWith` check is not confinement: a committed
+    // symlink at the final component passes it and the read follows the link out of
+    // the tree — and a committed FIFO would block the read outright. `readFileConfined`
+    // is the tree's one door for an artifact-derived path: lexical AND canonical
+    // confinement, `O_NOFOLLOW`, regular-file only, and it throws — which lands in
+    // the catch below as `local-unreviewed`, the fail-closed answer.
+    const { readFileConfined } = await import('../../utils/path-confinement.js');
+    const current = await readFileConfined(resolve(rootPath), relativePath);
     if (servedValues.some(value => value.length > 0 && !current.includes(value))) {
       return 'local-unreviewed';
     }

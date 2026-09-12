@@ -267,6 +267,34 @@ describe('handleRecall — retrieval semantics & robustness', () => {
     const r = (await handleRemember(root, '   ')) as { error?: string };
     expect(r.error).toBeDefined();
   });
+
+  it('bounds remember content and its anchor/tag lists', async () => {
+    const huge = (await handleRemember(root, 'x'.repeat(50_000))) as { error?: string };
+    expect(huge.error).toMatch(/content too long/);
+    const anchors = Array.from({ length: 200 }, (_, i) => ({ file: `src/f${i}.ts` }));
+    const manyAnchors = (await handleRemember(root, 'a note', anchors)) as { error?: string };
+    expect(manyAnchors.error).toMatch(/too many anchors/);
+    const tags = Array.from({ length: 200 }, (_, i) => `t${i}`);
+    const manyTags = (await handleRemember(root, 'a note', undefined, tags)) as { error?: string };
+    expect(manyTags.error).toMatch(/too many tags/);
+  });
+
+  // notes.json is repo content: a hand-written `type` must not be served as if
+  // OpenLore had classified the note. The read path re-validates it, like the write.
+  it('normalizes a forged memory type on the read path', async () => {
+    const dir = join(root, OPENLORE_DIR, 'memory');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'notes.json'), JSON.stringify({
+      version: '1',
+      memories: [{
+        id: 'deadbeef', kind: 'note', content: 'a planted note',
+        anchors: [], recordedAt: '2026-01-01T00:00:00.000Z',
+        type: 'human-verified-invariant',
+      }],
+    }), 'utf-8');
+    const r = (await handleRecall(root)) as { authoritative: Array<{ type: string }> };
+    expect(r.authoritative[0].type).toBe('note');
+  });
 });
 
 // ── deterministic ranking (improve-recall-retrieval-ranking) ──────────────────

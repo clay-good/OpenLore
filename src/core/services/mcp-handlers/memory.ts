@@ -14,7 +14,7 @@
  * scan over everything persisted.
  */
 
-import { validateDirectory, sanitizeMcpError } from './utils.js';
+import { validateDirectory, sanitizeMcpError, queryTooLongError } from './utils.js';
 import { loadDecisionStore, INACTIVE_STATUSES } from '../../decisions/store.js';
 import { loadMemoryStore, updateMemoryStore, makeMemoryId } from '../../decisions/memory-store.js';
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
@@ -50,6 +50,18 @@ function normalizeMemoryType(type?: string): MemoryType {
   return (type && (MEMORY_TYPES as readonly string[]).includes(type)) ? (type as MemoryType) : 'note';
 }
 
+/**
+ * Bounds on a remembered note. `.openlore/memory/notes.json` is repo content, and
+ * `remember` is an MCP tool any caller can drive, so neither the content nor the
+ * anchor/tag lists may be unbounded (mcp-security: Bounded Computation — an
+ * unbounded note is recalled into every later session's context, and unbounded
+ * anchor hints drive unbounded anchor resolution). `queryTooLongError` is the
+ * established bound for free text on this surface; the list caps sit next to it
+ * rather than inventing a new shared constant.
+ */
+const MAX_MEMORY_ANCHORS = 25;
+const MAX_MEMORY_TAGS = 25;
+
 // ── remember ────────────────────────────────────────────────────────────────
 
 export interface AnchorHint {
@@ -67,6 +79,14 @@ export async function handleRemember(
 ): Promise<unknown> {
   try {
     if (!content?.trim()) return { error: 'content is required and must not be empty.' };
+    const tooLong = queryTooLongError(content, 'content');
+    if (tooLong) return tooLong;
+    if (anchorHints && anchorHints.length > MAX_MEMORY_ANCHORS) {
+      return { error: `too many anchors: ${anchorHints.length} (max ${MAX_MEMORY_ANCHORS}). Record one memory per region of code.` };
+    }
+    if (tags && tags.length > MAX_MEMORY_TAGS) {
+      return { error: `too many tags: ${tags.length} (max ${MAX_MEMORY_TAGS}).` };
+    }
     const rootPath = await validateDirectory(directory);
 
     let anchors: StructuralAnchor[] = [];
@@ -311,7 +331,12 @@ export async function handleRecall(
 
       for (const m of memStore.memories) {
         if (!noteInScope.has(m.id)) continue;           // out of temporal scope / invalidated
-        if (wantType && (m.type ?? 'note') !== wantType) continue; // type filter
+        // The stored `type` is repo content (notes.json is committed), so it is
+        // re-validated on the READ path too, not only where `remember` wrote it: a
+        // hand-edited file must not be able to present a type outside the closed set
+        // as if OpenLore had classified it. Unknown ⇒ `note`, the weakest label.
+        const memoryType = normalizeMemoryType(m.type);
+        if (wantType && memoryType !== wantType) continue; // type filter
         const f = memoryFreshness(m.anchors, view);
         const r = scoreMemory(terms, {
           anchorSymbols: m.anchors.map((a) => a.symbolName).filter((s): s is string => !!s),
@@ -332,7 +357,7 @@ export async function handleRecall(
           provenance: 'local-unreviewed',
           freshness: f.freshness,
           anchored: f.anchored,
-          type: m.type ?? 'note',
+          type: memoryType,
           ...(m.validFromCommit ? { validFromCommit: m.validFromCommit } : {}),
           ...(invalidated ? { invalidated: true } : {}),
           verify: f.freshness === 'drifted' || staleRefs.length > 0 ? true : undefined,
