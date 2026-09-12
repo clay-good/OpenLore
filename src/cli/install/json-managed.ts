@@ -107,16 +107,42 @@ export function readMeta(doc: Record<string, unknown>): ManagedJsonMeta | null {
 }
 
 /**
+ * Every JSON path an OpenLore adapter in THIS version writes — `mcpServers.openlore`
+ * (claude-code, cursor) and `slashCommands` (continue).
+ *
+ * This is the allowlist `_openlore.paths` is measured against. A path outside it is
+ * not something OpenLore can have written, so it is not something `--uninstall` may
+ * delete. Add an entry here in the same change that starts writing one.
+ */
+const MANAGED_JSON_PATHS: readonly string[] = ['mcpServers.openlore', 'slashCommands'];
+
+/**
  * A managed path taken from the DOCUMENT rather than from our own constants.
  *
  * `_openlore.paths` is read back off disk, so it is user-editable data, not a value
- * this code chose. It can therefore name a prototype-polluting path — and OpenLore
- * never writes one, so such an entry cannot describe anything we manage. Dropping it
- * is the correct reading; `setPath`/`deletePath` still throw for internal callers,
- * where an unsafe path would be a programmer error rather than untrusted input.
+ * this code chose — and in a cloned repository it is ATTACKER-authored: a PR adding
+ * `"_openlore":{"managed":true,"paths":["permissions.deny","hooks.PreToolUse"]}` to a
+ * checked-in `.claude/settings.json` used to make a later `openlore install --uninstall`
+ * delete the team's deny rules and PreToolUse guards, and blame OpenLore's uninstall
+ * for it. So the on-disk list is INTERSECTED with what this version actually manages;
+ * anything else is returned in `refused` for the caller to report rather than honor.
+ *
+ * The prototype-polluting filter is kept (it is now subsumed, but it documents why
+ * such an entry can never describe anything we manage); `setPath`/`deletePath` still
+ * throw for internal callers, where an unsafe path would be a programmer error.
  */
-function managedPathsFrom(meta: ManagedJsonMeta): string[] {
-  return meta.paths.filter((p) => !p.split('.').some(isProtoPollutingKey));
+function managedPathsFrom(meta: ManagedJsonMeta): { honored: string[]; refused: string[] } {
+  const safe = meta.paths.filter((p) => !p.split('.').some(isProtoPollutingKey));
+  return {
+    honored: safe.filter((p) => MANAGED_JSON_PATHS.includes(p)),
+    refused: meta.paths.filter((p) => !MANAGED_JSON_PATHS.includes(p)),
+  };
+}
+
+/** The subset of a document's declared managed paths this version will act on. */
+export function honoredManagedPaths(doc: Record<string, unknown>): string[] {
+  const meta = readMeta(doc);
+  return meta ? managedPathsFrom(meta).honored : [];
 }
 
 /**
@@ -125,7 +151,7 @@ function managedPathsFrom(meta: ManagedJsonMeta): string[] {
  */
 export function isHandEdited(doc: Record<string, unknown>, meta: ManagedJsonMeta): boolean {
   const subset: Record<string, unknown> = {};
-  for (const path of managedPathsFrom(meta)) {
+  for (const path of managedPathsFrom(meta).honored) {
     const value = getPath(doc, path);
     if (value !== undefined) setPath(subset, path, value);
   }
@@ -165,16 +191,25 @@ export function mergeEntries(
   return { next, action, handEdited };
 }
 
+/**
+ * Remove what THIS version manages, and report every declared path it would not.
+ *
+ * `refused` is never empty on a document whose `_openlore.paths` names something
+ * outside {@link MANAGED_JSON_PATHS}; the caller surfaces it, because a silent skip
+ * and a silent deletion are both worse than saying what was declared.
+ */
 export function removeManaged(doc: Record<string, unknown>): {
   next: Record<string, unknown>;
   removed: boolean;
+  refused: string[];
 } {
   const meta = readMeta(doc);
-  if (!meta) return { next: doc, removed: false };
+  if (!meta) return { next: doc, removed: false, refused: [] };
+  const { honored, refused } = managedPathsFrom(meta);
   const next = structuredClone(doc) as Record<string, unknown>;
-  for (const path of managedPathsFrom(meta)) deletePath(next, path);
+  for (const path of honored) deletePath(next, path);
   delete next[META_KEY];
-  return { next, removed: true };
+  return { next, removed: true, refused };
 }
 
 // ---------- path helpers ----------

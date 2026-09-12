@@ -460,7 +460,9 @@ describe('enforce git hook install/uninstall', () => {
   it('appends after an existing decisions-gate hook, stripping a trailing `exit 0`', async () => {
     const root = await mkRepo();
     await mkdir(join(root, '.git', 'hooks'), { recursive: true });
-    await writeFile(join(root, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n\n# openlore-decisions-hook\nrun-gate\nexit 0\n', 'utf-8');
+    // mode 0o755: Git only runs an executable hook, and OpenLore refuses to republish a
+    // non-executable one as executable.
+    await writeFile(join(root, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n\n# openlore-decisions-hook\nrun-gate\nexit 0\n', { encoding: 'utf-8', mode: 0o755 });
     await installEnforcementHook(root);
     const h = await readHook(root);
     expect(h).toContain('# openlore-decisions-hook');
@@ -470,7 +472,9 @@ describe('enforce git hook install/uninstall', () => {
   it('is idempotent and uninstall removes only our block', async () => {
     const root = await mkRepo();
     await mkdir(join(root, '.git', 'hooks'), { recursive: true });
-    await writeFile(join(root, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n\n# openlore-decisions-hook\nrun-gate\nexit 0\n', 'utf-8');
+    // mode 0o755: Git only runs an executable hook, and OpenLore refuses to republish a
+    // non-executable one as executable.
+    await writeFile(join(root, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n\n# openlore-decisions-hook\nrun-gate\nexit 0\n', { encoding: 'utf-8', mode: 0o755 });
     await installEnforcementHook(root);
     await installEnforcementHook(root);
     let h = await readHook(root);

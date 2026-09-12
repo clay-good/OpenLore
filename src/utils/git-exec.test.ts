@@ -174,12 +174,33 @@ describe('untrusted-repository config hardening', () => {
     expect(prefix).toContain('core.sshCommand=');
     expect(prefix).toContain('core.pager=cat');
     expect(prefix).toContain('protocol.ext.allow=never');
-    expect(prefix).toContain('core.hooksPath=');
     expect(prefix).toContain('uploadpack.packObjectsHook=');
     // Deliberately NOT a `-c` override: `-c diff.external=` makes git try to RUN the empty
     // string ("cannot run : No such file or directory") and breaks every diff. The driver
     // flags below are the documented off-switch.
     expect(prefix).not.toContain('diff.external');
+    // Scoped to hook-running verbs, not always-on: `-c core.hooksPath=` makes
+    // `git rev-parse --git-path hooks` answer `./`, which sent the hook installer at
+    // the repository root. See HOOKS_OFF.
+    expect(prefix).not.toContain('core.hooksPath');
+  });
+
+  it('disables the repo hook directory only for subcommands that run hooks', () => {
+    // `commit --dry-run` exits non-zero on a clean tree; only the argv matters here.
+    try { execFileGitSync('git', ['commit', '--dry-run'], { cwd: process.cwd() }); } catch { /* argv is the assertion */ }
+    expect(argvOfFirstCall(childProcess.execFileSync).join(' ')).toContain('core.hooksPath=');
+  });
+
+  it('leaves a config read able to see the real hooksPath', async () => {
+    // The regression this scoping exists to prevent.
+    // Oracle: the answer must match what UNWRAPPED git says. With the override applied
+    // always-on, the wrapped call answered `./` while git itself answered the real path.
+    const expected = childProcess
+      .execFileSync('git', ['rev-parse', '--git-path', 'hooks'], { cwd: process.cwd(), encoding: 'utf-8' })
+      .trim();
+    const { stdout } = await execFileGit('git', ['rev-parse', '--git-path', 'hooks'], { cwd: process.cwd() });
+    expect(stdout.trim()).toBe(expected);
+    expect(stdout.trim()).not.toBe('./');
   });
 
   it('turns off the repo-chosen diff drivers on diff-producing subcommands only', async () => {

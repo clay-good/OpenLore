@@ -53,7 +53,12 @@ describe('user-scope wiring', () => {
     const hooks = settings.hooks as Record<string, unknown[]>;
     expect(Object.keys(hooks).sort()).toEqual(['SessionStart', 'UserPromptSubmit']);
     const permissions = settings.permissions as { allow: string[] };
-    expect(permissions.allow).toContain('Bash(openlore:*)');
+    // The user scope grants ONLY the read-only orientation command: a permission written
+    // here applies in every repository the agent is ever pointed at, hostile ones
+    // included, and `openlore` as a family writes hooks and config. The broad
+    // `Bash(openlore:*)` stays a repo-scope grant.
+    expect(permissions.allow).toContain('Bash(openlore orient:*)');
+    expect(permissions.allow).not.toContain('Bash(openlore:*)');
 
     expect(await readFile(join(home, '.claude', 'CLAUDE.md'), 'utf8')).toContain('OPENLORE');
   });
@@ -199,10 +204,11 @@ describe('user-scope wiring', () => {
     expect(forSettings).toHaveLength(1);
     // The single plan covers BOTH things that file carries in the user scope.
     expect(forSettings[0].summary).toContain('hooks');
-    expect(forSettings[0].summary).toContain('Bash(openlore:*)');
+    // The grant is NAMED in the summary, so a user-scope permission is never silent.
+    expect(forSettings[0].summary).toContain('Bash(openlore orient:*)');
     const preview = forSettings[0].preview ?? '';
     expect(preview).toContain('SessionStart');
-    expect(preview).toContain('Bash(openlore:*)');
+    expect(preview).toContain('Bash(openlore orient:*)');
   });
 });
 

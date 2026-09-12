@@ -685,7 +685,7 @@ describe('autoInitSuppression', () => {
     writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), JSON.stringify({ autoInit: false }));
     expect(autoInitSuppression(dir)).toEqual({
       reason: 'config',
-      detail: '"autoInit": false in .openlore/config.json',
+      detail: '"autoInit": false in this repository\'s .openlore/config.json',
     });
   });
 

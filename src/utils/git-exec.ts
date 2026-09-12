@@ -88,8 +88,6 @@ export const GIT_UNTRUSTED_CONFIG_OFF: readonly string[] = [
   '-c', 'core.sshCommand=',
   // `ext::<command>` URLs execute their argument. No remote we use needs it.
   '-c', 'protocol.ext.allow=never',
-  // Hook directory; nothing here commits, but a future caller must not inherit one.
-  '-c', 'core.hooksPath=',
   // Server-side hooks, reachable if a caller ever serves a repo.
   '-c', 'uploadpack.packObjectsHook=',
 ];
@@ -108,6 +106,26 @@ export const GIT_UNTRUSTED_CONFIG_OFF: readonly string[] = [
  * subcommand: only the diff-producing commands accept them.
  */
 const DIFF_DRIVER_OFF = ['--no-ext-diff', '--no-textconv'] as const;
+
+/**
+ * Disable the repository's hook directory — for the subcommands that actually RUN hooks.
+ *
+ * Scoped rather than always-on because `-c core.hooksPath=` POISONS A CONFIG READ: with it
+ * set, `git rev-parse --git-path hooks` answers `./` instead of `.git/hooks`, which sent
+ * OpenLore's own hook installer at the repository root. Nothing here commits today, so the
+ * always-on version bought no protection and cost a correct answer.
+ *
+ * Keeping it for the hook-running verbs means a future caller that adds one does not inherit
+ * `core.hooksPath` from the analyzed repository, while every read-only command — and every
+ * `git config` query — still sees the repo's real configuration.
+ */
+const HOOKS_OFF = ['-c', 'core.hooksPath='] as const;
+
+/** Subcommands that run repository hooks. */
+const HOOK_RUNNING_SUBCOMMANDS = new Set([
+  'commit', 'merge', 'rebase', 'checkout', 'switch', 'am', 'pull', 'push',
+  'cherry-pick', 'revert', 'stash', 'clone', 'worktree', 'gc',
+]);
 
 /** Subcommands that accept {@link DIFF_DRIVER_OFF}. Verified against git 2.50. */
 const DIFF_DRIVER_SUBCOMMANDS = new Set([
@@ -135,7 +153,8 @@ function hardenedArgs(file: string, args?: readonly string[]): string[] | undefi
   if (rest.length > 0 && DIFF_DRIVER_SUBCOMMANDS.has(rest[0])) {
     rest.splice(1, 0, ...DIFF_DRIVER_OFF);
   }
-  return [...GIT_UNTRUSTED_CONFIG_OFF, ...rest];
+  const hooksOff = rest.length > 0 && HOOK_RUNNING_SUBCOMMANDS.has(rest[0]) ? HOOKS_OFF : [];
+  return [...GIT_UNTRUSTED_CONFIG_OFF, ...hooksOff, ...rest];
 }
 
 /** Promisified `execFile`, `windowsHide: true` always applied. */

@@ -35,7 +35,11 @@ const HOOK_MARKER = '# openlore-impact-certificate-hook';
 async function tmpRepo(precommit?: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'ol-cert-hook-'));
   await mkdir(join(root, '.git', 'hooks'), { recursive: true });
-  if (precommit !== undefined) await writeFile(join(root, '.git', 'hooks', 'pre-commit'), precommit, 'utf-8');
+  // mode 0o755: Git only runs an EXECUTABLE hook, and OpenLore refuses to republish a
+  // non-executable one as executable, so a realistic fixture has to be executable.
+  if (precommit !== undefined) {
+    await writeFile(join(root, '.git', 'hooks', 'pre-commit'), precommit, { encoding: 'utf-8', mode: 0o755 });
+  }
   return root;
 }
 const readHook = (root: string) => readFile(join(root, '.git', 'hooks', 'pre-commit'), 'utf-8');

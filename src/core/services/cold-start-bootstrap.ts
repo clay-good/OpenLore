@@ -28,6 +28,7 @@
 
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { childEnvWithoutScopedTlsRelaxation } from './tls-scope.js';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep, win32 } from 'node:path';
 import {
@@ -336,7 +337,11 @@ export function autoInitSuppression(
     return { reason: 'env', detail: 'OPENLORE_NO_AUTO_ANALYZE is set in this environment' };
   }
   if (autoInitDisabled(directory)) {
-    return { reason: 'config', detail: '"autoInit": false in .openlore/config.json' };
+    // Name the FILE's owner, not just the key: `autoInit: false` is read from the
+    // analyzed repository's own config, so a clone can decide that background
+    // indexing never runs here. Availability only, but the operator should see
+    // whose choice it was.
+    return { reason: 'config', detail: '"autoInit": false in this repository\'s .openlore/config.json' };
   }
   if (!isInsideGitWorkTree(directory)) {
     return { reason: 'not-a-git-work-tree', detail: 'this directory is not inside a git work tree' };
@@ -495,8 +500,18 @@ export async function buildIndexInChildProcess(
     const child: ChildProcess = spawnProcess(
       process.execPath,
       [cliPath, ...args],
-      // windowsHide: detached alone surfaces a console window on Windows.
-      { cwd: directory, stdio: 'ignore', detached: true, windowsHide: true },
+      {
+        cwd: directory,
+        stdio: 'ignore',
+        detached: true,
+        // windowsHide: detached alone surfaces a console window on Windows.
+        windowsHide: true,
+        // A child started while a `withRelaxedTls` scope happens to be open would
+        // inherit NODE_TLS_REJECT_UNAUTHORIZED=0 for its WHOLE life — a long index
+        // build running entirely unverified because one request opted out. The helper
+        // is a no-op when no scope is open, and preserves an operator's own setting.
+        env: childEnvWithoutScopedTlsRelaxation(),
+      },
     );
     activeBuildChildren.add(child);
     child.once('error', error => {
