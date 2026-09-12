@@ -115,8 +115,19 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Same split the CI unit job uses, and it must cover the same FILES that
+      # `test:run` did: `test:unit` excludes both the equivalence set and the budget
+      # set, so each needs its own step or a release would silently test less than CI.
+      - name: Certify derived-artifact answer equivalence
+        run: npm run test:equivalence
+
+      # Wall-clock ceilings on hostile inputs: run without file parallelism so runner
+      # contention cannot fail a release over a timing bound rather than a real defect.
+      - name: Certify extractor cost budgets
+        run: npm run test:budgets
+
       - name: Run tests
-        run: npm run test:run
+        run: npm run test:unit
 
       - name: Run deterministic integration tests
         run: npm run test:integration:ci

@@ -102,6 +102,16 @@ jobs:
         run: npm run test:equivalence
         timeout-minutes: 3
 
+      # The extractor budget tests assert WALL-CLOCK ceilings on hostile inputs, so they
+      # are CPU-bound for seconds at a time. Run in their own step without file
+      # parallelism: sharing a runner with the rest of the suite made both sides flaky —
+      # these tripped their own ceilings under contention, and their load pushed the
+      # genuinely time-dependent tests elsewhere (serve's idle-shutdown timers) over
+      # theirs. Excluded from `test:unit` below so the work is not paid for twice.
+      - name: Certify extractor cost budgets
+        run: npm run test:budgets
+        timeout-minutes: 10
+
       # Equivalence files run in the bounded gate above; exclude them here so the
       # the same certification assertions are not paid for twice in this job.
       - name: Run remaining unit tests
