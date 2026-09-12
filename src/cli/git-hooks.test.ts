@@ -538,7 +538,7 @@ describe('effective Git hook delivery', () => {
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/cannot be inspected safely/));
   });
 
-  it('refuses to republish a non-executable pre-existing hook as executable', async () => {
+  it.skipIf(process.platform === 'win32')('refuses to republish a non-executable pre-existing hook as executable', async () => {
     const root = await repository('openlore-mode-promotion-');
     const hookPath = join(root, '.git', 'hooks', 'pre-commit');
     // What an archive-delivered repository can ship: attacker shell in a hook Git

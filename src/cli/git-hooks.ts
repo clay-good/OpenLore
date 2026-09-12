@@ -341,6 +341,14 @@ async function reclaimStaleLock(
   }
 }
 
+/**
+ * Does this platform have a POSIX execute bit for Node to read?
+ *
+ * Windows maps only the read-only attribute into `stat().mode`, so no file there ever
+ * reports one. Any check phrased as "is this executable" answers `false` for everything.
+ */
+const EXECUTE_BIT_IS_MEANINGFUL = process.platform !== 'win32';
+
 /** One installed OpenLore block, whatever gate wrote it (`# openlore-<gate>-hook` … `# end-…`). */
 const OPENLORE_HOOK_BLOCK = /^[ \t]*#[ \t]*openlore-[a-z-]+-hook\b[\s\S]*?^[ \t]*#[ \t]*end-openlore-[a-z-]+-hook[^\n]*$/gm;
 
@@ -458,7 +466,16 @@ export async function updateHookFile(
     // exactly that way: OpenLore, not Git, would be what makes it run at the next
     // commit. Refuse rather than absorb content we did not write; a hook OpenLore
     // itself published is already 0755, so a re-run is unaffected.
-    if (existing !== null && !existingIsExecutable && !isOpenLoreAuthoredHook(existing)) {
+    //
+    // POSIX only, and not as a convenience: on Windows this check is both impossible
+    // and meaningless. Node maps no execute bit there — `stat().mode` reports 0o666 or
+    // 0o444 — so `existingIsExecutable` would be false for EVERY file, refusing every
+    // pre-existing hook. And the premise does not hold either: Git for Windows runs a
+    // hook through its shell regardless of a POSIX bit, so there is no ignored-today
+    // file to promote. Disclosed rather than silently skipped: on Windows a
+    // pre-existing third-party hook is appended to, exactly as it was before.
+    if (EXECUTE_BIT_IS_MEANINGFUL && existing !== null && !existingIsExecutable
+      && !isOpenLoreAuthoredHook(existing)) {
       return {
         status: 'unavailable',
         reason: 'the existing hook is not executable and OpenLore did not write it, so publishing it back as executable (0755) would make Git start running code it ignores today — review that file, then remove it or make it executable yourself and re-run',
