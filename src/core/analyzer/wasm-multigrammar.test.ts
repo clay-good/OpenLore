@@ -11,18 +11,23 @@ const edge = (g: SerializedCallGraph, caller: string, callee: string) => {
   return !!c && !!d && g.edges.some(e => e.callerId === c.id && e.calleeId === d.id);
 };
 
-// Regression: two WASM-backed grammars (Dart + Lua) in ONE build() must each
-// produce a COMPLETE graph. web-tree-sitter is a singleton emscripten module
-// with a shared heap; loading both grammars into one instance silently corrupts
-// the second grammar's parses (Lua lost half its functions). Each grammar must
-// load in its own module instance. Order both ways to be safe.
-describe('spec-08 WASM multi-grammar isolation (Dart + Lua together)', () => {
+// Regression: the WASM lane (Dart) and the native lane (Lua) in ONE build() must each
+// produce a COMPLETE graph, in either order. web-tree-sitter is a singleton emscripten
+// module with a shared heap, and this pairing is where that used to show: both languages
+// were WASM-backed, loading both grammars into one instance silently corrupted the second
+// one's parses (Lua lost half its functions), so each grammar loads in its own module
+// instance. Lua has since moved to the native lane (#472), which leaves Dart the lane's
+// only caller — so the two-WASM-grammar case now has no second caller to exercise it, and
+// the per-grammar isolation in `loadWasmGrammarSoft` stays keyed per grammar for the next
+// one. What this file still proves is that the two lanes coexist in one build without
+// either disturbing the other.
+describe('spec-08 lane coexistence (WASM Dart + native Lua together)', () => {
   it('both Dart and Lua graph fully when analyzed in the same run', async () => {
     const g = serializeCallGraph(await new CallGraphBuilder().build([
       load('dart/app.dart', 'Dart'),
       load('lua/app.lua', 'Lua'),
     ]));
-    if (fnNames(g, 'Dart').length === 0 && fnNames(g, 'Lua').length === 0) return; // WASM unavailable
+    if (fnNames(g, 'Dart').length === 0 && fnNames(g, 'Lua').length === 0) return; // grammars unavailable
     expect(fnNames(g, 'Dart')).toEqual(['helper', 'main', 'run']);
     expect(fnNames(g, 'Lua')).toEqual(['boot', 'helper', 'run']);
     expect(edge(g, 'run', 'helper')).toBe(true); // resolves within each

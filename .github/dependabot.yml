@@ -33,6 +33,12 @@ updates:
           - 'tree-sitter'
           - 'tree-sitter-*'
           - 'web-tree-sitter'
+          # Scoped grammar packages: a bare `tree-sitter-*` glob does not match a name
+          # that starts with `@scope/`, so each scope is listed. `@repomix/…` carries the
+          # Dart WASM binaries and `@tree-sitter-grammars/…` the native Lua grammar —
+          # both belong in this PR, not in routine drift (issue #472).
+          - '@repomix/tree-sitter-wasms'
+          - '@tree-sitter-grammars/*'
           - '@lancedb/lancedb'
       # The Pi host packages, in their own PR — same reasoning as parser-stack, a
       # different cause. Every `@earendil-works/pi-*` release so far ships an

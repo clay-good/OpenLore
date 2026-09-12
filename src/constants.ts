@@ -790,7 +790,7 @@ export const PAGERANK_MAX_ITERATIONS = 100;
 /**
  * Hard ceiling on extraction worker threads, regardless of core count. Each worker
  * holds its own tree-sitter parsers and grammar handles (native `.node` bindings
- * plus, for Lua/Dart, an isolated web-tree-sitter WASM heap), so pool size is
+ * plus, for Dart, an isolated web-tree-sitter WASM heap), so pool size is
  * bounded by memory, not just cores. Beyond this the marginal parse throughput no
  * longer pays for the resident grammar set.
  */

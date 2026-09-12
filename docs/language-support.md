@@ -100,15 +100,25 @@ losing templates and namespaces.
 ### Graceful grammar degradation
 
 If a native grammar is unavailable or ABI-incompatible, OpenLore warns once, keeps the file in
-keyword search, and skips graph extraction for that language without aborting analysis. Lua and
-Dart are the only two languages served by portable WASM grammars rather than the native lane, each
-in an isolated WASM module; if that backend is unavailable, they degrade in the same way.
+keyword search, and skips graph extraction for that language without aborting analysis. Dart is the
+only language served by a portable WASM grammar rather than the native lane, in an isolated WASM
+module; if that backend is unavailable, it degrades in the same way.
 
-Keeping those two on WASM is a deliberate hold rather than an absence of alternatives. Native Dart
-and Lua grammars now exist and were evaluated (issue #472); adopting them would remove the WASM lane
-entirely and unpin `web-tree-sitter`, but the only fitting native Dart package is a single-maintainer
-fork with negligible download volume, so the swap was declined on supply-chain grounds. The pin is
-enforced by a guard test, so a silent capability regression cannot slip through.
+Dart stays on WASM as a deliberate hold rather than for lack of an alternative. A native Dart
+grammar does exist and parses byte-identically (issue #472), but the only fitting package is a
+single-maintainer fork with negligible download volume, so the swap was declined on supply-chain
+grounds — the WASM binaries in use come from a build with SLSA provenance instead. Revisit if a
+well-supported native build appears.
+
+Lua used to share that lane and no longer does: it moved to the maintained
+`@tree-sitter-grammars/tree-sitter-lua` grammar on the native lane, which ships prebuilt bindings
+for every supported platform. That migration is what lifted the `web-tree-sitter` pin — the old
+`tree-sitter-wasms` binaries were rejected by every loader from 0.26 onward, with an empty-message
+throw that silently removed both languages from the call graph — and it hands Lua two capabilities
+the WASM lane cannot offer: trustworthy parse-health and an enforceable parse budget. Dart's
+binaries moved to the `@repomix/tree-sitter-wasms` rebuild, whose parse trees are byte-identical to
+the old ones. Both halves of the remaining lane are pinned exactly, and a guard test fails if
+either is loosened to a range, so loader and binaries can never drift apart unreviewed.
 
 ### Out of scope
 

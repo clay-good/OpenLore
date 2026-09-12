@@ -2659,9 +2659,9 @@ async function loadGrammarSoft(
 }
 
 /**
- * WASM grammar loader via web-tree-sitter (ABI-agnostic, portable). The only
- * two callers are Dart and Lua; every other language takes the native lane.
- * Soft-fails. See the Dart block below for why this lane is still here.
+ * WASM grammar loader via web-tree-sitter (ABI-agnostic, portable). Dart is the only
+ * caller; every other language takes the native lane. Soft-fails. See the Dart block
+ * below for why this lane is still here.
  */
 async function loadWasmGrammarSoft(
   language: string,
@@ -3039,27 +3039,48 @@ const SCALA_SPEC: QueryLangSpec = {
   `,
 };
 
-// ── Lua (via bundled WASM — see the Dart block for why this lane stays) ────
+// ── Lua ─────────────────────────────────────────────────────────────────────
+//
+// Native lane, like every other language here. Lua used to load the portable
+// `tree-sitter-wasms` build through web-tree-sitter; it moved to the maintained
+// `@tree-sitter-grammars/tree-sitter-lua` grammar, whose prebuilt bindings ship for
+// every supported platform (issue #472). That change is what made web-tree-sitter
+// upgradable again, and it hands Lua the two capabilities the WASM lane cannot
+// offer: trustworthy parse-health and an enforceable parse budget.
+//
+// The grammar lineage changed with the transport — the WASM build carried the
+// unmaintained Azganoth grammar, which named these nodes
+// `(local_)function_definition_statement` / `call` and wrapped every dotted name in
+// a `variable`. The maintained grammar spells the same constructs
+// `function_declaration` / `function_call` over `dot_index_expression` /
+// `method_index_expression`, with local-ness carried as a parent field rather than a
+// distinct node type. The queries below are that rename, one for one, and extraction
+// is unchanged: the (function, className) and call-name sets came out identical on
+// both Lua fixtures and a 62-line stress file covering goto, varargs, metatables,
+// `t.f`/`t:m`, and nested closures. The conformance sweeps hold that line in CI —
+// including the cross-file and parse-health assertions Lua could not carry on the
+// WASM lane.
 const LUA_SPEC: QueryLangSpec = {
   language: 'Lua',
-  loader: () => loadWasmGrammarSoft('Lua', 'tree-sitter-wasms/out/tree-sitter-lua.wasm'),
+  loader: () => loadGrammarSoft('Lua', () => import('@tree-sitter-grammars/tree-sitter-lua'), m => m.default),
   classTypes: new Set(),
   // `function t.f()` / `function t:m()` record the table name in className.
   extraClassName: (fnNode) => {
-    const nameVar = fnNode.childForFieldName('name');
-    if (nameVar?.type === 'variable') return nameVar.childForFieldName('table')?.text;
+    const nameNode = fnNode.childForFieldName('name');
+    if (nameNode?.type === 'dot_index_expression' || nameNode?.type === 'method_index_expression') {
+      return nameNode.childForFieldName('table')?.text;
+    }
     return undefined;
   },
   fnQuery: `
-    (local_function_definition_statement name: (identifier) @fn.name) @fn.node
-    (function_definition_statement name: (identifier) @fn.name) @fn.node
-    (function_definition_statement name: (variable field: (identifier) @fn.name)) @fn.node
-    (function_definition_statement name: (variable method: (identifier) @fn.name)) @fn.node
+    (function_declaration name: (identifier) @fn.name) @fn.node
+    (function_declaration name: (dot_index_expression field: (identifier) @fn.name)) @fn.node
+    (function_declaration name: (method_index_expression method: (identifier) @fn.name)) @fn.node
   `,
   callQuery: `
-    (call function: (variable name: (identifier) @call.name)) @call.node
-    (call function: (variable field: (identifier) @call.name)) @call.node
-    (call function: (variable method: (identifier) @call.name)) @call.node
+    (function_call name: (identifier) @call.name) @call.node
+    (function_call name: (dot_index_expression field: (identifier) @call.name)) @call.node
+    (function_call name: (method_index_expression method: (identifier) @call.name)) @call.node
   `,
 };
 
@@ -3105,20 +3126,26 @@ const RECOVERED_RECEIVER_LANGUAGES: ReadonlySet<string> = new Set(['Kotlin', 'C#
 
 // ── Dart (via portable WASM + web-tree-sitter) ───────────────────────────────
 //
-// Dart loads the portable `tree-sitter-wasms` WASM through web-tree-sitter
+// Dart loads a portable `@repomix/tree-sitter-wasms` build through web-tree-sitter
 // (ABI-agnostic, pure JS/WASM, builds on every platform) — each WASM grammar in
 // its own module instance (see loadWasmGrammarSoft).
 //
-// This is a deliberate hold, not an absence. Native grammars for Dart and Lua
-// DO now exist and were evaluated (issue #472): the native Dart grammar parses
-// byte-identically to this one, and migrating both would delete this lane, drop
-// `web-tree-sitter` + `tree-sitter-wasms` from dependencies, and unpin
-// web-tree-sitter 0.26+. It was declined on supply-chain grounds — the only
-// fitting native Dart package is a single-maintainer fork with negligible
-// download volume. Revisit if a well-supported build appears. Dart's grammar places the
-// `function_body` as a SIBLING of `function_signature` (not a child), so a
-// generic query extractor would attribute no calls — hence a custom walk that
-// spans signature+body.
+// Dart is the lane's only remaining caller, and staying on it is a deliberate hold.
+// Native Dart grammars do exist and were evaluated (issue #472): one parses
+// byte-identically to this build, and taking it would delete the lane outright and
+// drop `web-tree-sitter` too. It was declined on supply-chain grounds — the only
+// fitting native Dart package is a single-maintainer fork with negligible download
+// volume, whereas the WASM binaries here come from a build with SLSA provenance.
+// Revisit if a well-supported native build appears.
+//
+// The binaries moved from `tree-sitter-wasms` to the `@repomix` rebuild because the
+// former published nothing that the web-tree-sitter 0.26+ loader accepts, which held
+// the loader pinned at 0.25.x. The rebuild's parse trees are byte-identical (verified
+// across the fixtures plus a 697-node Dart file), so the walk below did not change.
+//
+// Dart's grammar places the `function_body` as a SIBLING of `function_signature`
+// (not a child), so a generic query extractor would attribute no calls — hence a
+// custom walk that spans signature+body.
 
 const DART_CLASS_TYPES = new Set(['class_definition', 'mixin_declaration', 'extension_declaration', 'enum_declaration']);
 
@@ -3126,7 +3153,7 @@ async function extractDartGraph(
   filePath: string,
   content: string,
 ): Promise<FileExtractResult> {
-  const handle = await loadWasmGrammarSoft('Dart', 'tree-sitter-wasms/out/tree-sitter-dart.wasm');
+  const handle = await loadWasmGrammarSoft('Dart', '@repomix/tree-sitter-wasms/out/tree-sitter-dart.wasm');
   if (!handle) return { nodes: [], rawEdges: [] };
 
   return handle.withTree(content, (root) => {
