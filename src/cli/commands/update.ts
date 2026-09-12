@@ -299,7 +299,11 @@ export async function runUpdate(
 
   const printable = printableCommand({ command: upgrade.cmd, args: upgrade.args }, platform, method);
   if (opts.dryRun) {
-    logger.info('Would run', printable);
+    // "Would upgrade with", not "Would run": on Windows the line shown is the plain
+    // package-manager command rather than the resolved argv this would actually spawn (see
+    // printableCommand), so promising it verbatim would be a small lie in the one output whose
+    // entire job is to say what happens.
+    logger.info('Would upgrade with', printable);
     return 0;
   }
 

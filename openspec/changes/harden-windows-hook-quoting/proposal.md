@@ -110,3 +110,9 @@ redirects — which first surfaced as stray files in this repo's own working tre
   last quote of a line like ours. Nothing OpenLore writes is run that way — Node's `shell:true`
   wraps with `/d /s /c` — and no string form would survive it.
 - **No new spec domain.** One `cli` requirement, mirroring `SubprocessesNeverSurfaceAConsoleWindow`.
+- **Two adjacent crashes are left alone**, deliberately, because they are pre-existing and have
+  a different cause — cannot LOCATE a command, rather than cannot QUOTE one. Both are filed:
+  `resolveOpenloreCommand` still throws out of a project-scope adapter when `npx-cli.js` cannot
+  be found or the Node path is not absolute (`mcpEntry` runs before any check), and
+  `doctor --fix` discards `runInstall`'s exit code and reports a rewire as corrected either
+  way. Fixing them here would widen the claim this change is making.

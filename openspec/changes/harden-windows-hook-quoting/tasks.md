@@ -21,7 +21,9 @@
 - [x] 3.1a `claude-code`: strip a hook wired earlier on a host that can no longer run it,
   keeping any user-authored entry in the same group.
 - [x] 3.2 `claude-code`: extract `MANAGED_HOOKS` so uninstall never formats a command.
-- [x] 3.3 `continue`: decline `.continue/config.json` with the reason.
+- [x] 3.3 `continue`: decline `.continue/config.json` with the reason, also without conflicting
+  — Continue being unwirable must not undo a Claude Code install from the same pass — and
+  derive the argv once, so the hazard check and the emitter cannot ask about different commands.
 - [x] 3.4 `update`: `printableCommand` prints the plain package-manager instruction on Windows
   — the resolved form is a string expression in PowerShell, not a command.
 

@@ -255,12 +255,14 @@ describe('an unformattable Windows path costs the hooks, and nothing else', () =
     expect(JSON.stringify(settings.hooks.SessionStart)).not.toContain('_openlore');
   });
 
-  it('refuses the Continue slash command and writes no config', async () => {
+  it('declines the Continue slash command without failing the run', async () => {
     const ctx = { ...(await context('win32')), platformCommandRuntime: UNFORMATTABLE_WINDOWS_RUNTIME };
     const result = await continueAdapter.apply(ctx);
 
-    expect(result.conflict).toBe(true);
-    expect(result.warnings.join('\n')).toMatch(/contains an expansion/);
+    // Not a conflict: Continue being unwirable must not undo a Claude Code install that
+    // succeeded in the same pass.
+    expect(result.conflict).toBe(false);
+    expect(result.warnings.join('\n')).toMatch(/\/orient command was NOT wired.*contains an expansion/);
     await expect(readFile(join(ctx.root, '.continue/config.json'), 'utf8')).rejects.toThrow();
   });
 

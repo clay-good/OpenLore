@@ -18,6 +18,13 @@ import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confineme
 
 const CONFIG_PATH = '.continue/config.json';
 
+/**
+ * The argv the `/orient` slash command runs — ONE definition, because the hazard check below
+ * and the emitter here must ask about the same command. Two copies is how the Windows and
+ * POSIX quoting rules drifted apart in the first place (change: harden-windows-hook-quoting).
+ */
+const ORIENT_ARGS = ['orient', '--json'] as const;
+
 function slashCommand(
   platform: NodeJS.Platform,
   runtime: ApplyContext['platformCommandRuntime'],
@@ -25,7 +32,7 @@ function slashCommand(
   return {
     name: 'orient',
     description: 'Call openlore orient() for the current task context',
-    run: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime), platform),
+    run: formatPlatformCommand(resolveOpenloreCommand(ORIENT_ARGS, platform, runtime), platform),
   };
 }
 
@@ -65,25 +72,30 @@ export const continueAdapter: Adapter = {
       };
     }
 
-    // An unformattable Windows path refuses THIS file with the reason, rather than letting
-    // `formatPlatformCommand` throw out of a project-scope adapter — which `runInstall`
-    // rethrows, failing a whole install over one slash command
-    // (change: harden-windows-hook-quoting).
+    // A host whose paths cannot be quoted for a shell has no writable `/orient` command, and
+    // the slash command is all this adapter contributes — so it writes nothing and says why,
+    // rather than letting `formatPlatformCommand` throw out of a project-scope adapter, which
+    // `runInstall` rethrows.
+    //
+    // NOT a conflict, for the same reason as in the claude-code adapter: an unquotable path is
+    // a property of the host, not a clash with the user's file. Conflict semantics fail the
+    // whole run, and Continue being unwirable must not undo a Claude Code install that
+    // succeeded in the same pass (change: harden-windows-hook-quoting).
     const hazard = ctx.platform === 'win32'
-      ? windowsCommandHazard(resolveOpenloreCommand(['orient', '--json'], ctx.platform, ctx.platformCommandRuntime))
+      ? windowsCommandHazard(resolveOpenloreCommand(ORIENT_ARGS, ctx.platform, ctx.platformCommandRuntime))
       : null;
     if (hazard) {
       return {
         changes: [{
           path: configPath,
           kind: 'noop',
-          summary: `${CONFIG_PATH}: not written — the command path (${hazard.part}) contains ${hazard.reason}`,
+          summary: `${CONFIG_PATH}: /orient not wired — the command path (${hazard.part}) contains ${hazard.reason}`,
         }],
         warnings: [
-          `${CONFIG_PATH} was not written: the command path (${hazard.part}) contains ${hazard.reason}. `
-          + 'Reinstall openlore from a path without that character.',
+          `The Continue /orient command was NOT wired, because the command path (${hazard.part}) `
+          + `contains ${hazard.reason}. Reinstall openlore from a path without that character.`,
         ],
-        conflict: true,
+        conflict: false,
       };
     }
 

@@ -229,10 +229,10 @@ export function formatPlatformCommand(
   // BARE backslash is an escape and is dropped, which is what turned a space-free entry path
   // into `C:Usersme...index.js` and failed every hook with `Cannot find module` (#483).
   //
-  // "cmd.exe" here means an interactive prompt, or a `cmd /c` that wraps the whole line — as
-  // Node's own `shell: true` does with `/d /s /c "<line>"`. A bare `cmd /c` applies its
-  // two-quotes-only rule and would strip our first and last quote; nothing OpenLore writes is
-  // run that way, and no string form would survive it.
+  // "cmd.exe" here means an interactive prompt, or a `cmd` invocation that wraps the whole line
+  // in its own quotes — which is what Node does when it runs a command through a shell. A bare
+  // `cmd` with an unwrapped line applies its two-quotes-only rule and would strip our first and
+  // last quote; nothing OpenLore writes is run that way, and no string form would survive it.
   return parts
     .map((part) => SAFE_BARE_WORD.test(part) ? part : `"${part}"`)
     .join(' ');
