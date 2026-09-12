@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
-import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile, mkdir } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, rename, rm, stat, symlink, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -545,5 +545,53 @@ describe('readAnalysisOwner', () => {
     const lockPath = await plantOwner(analysisDir, livePayload(root, analysisDir));
     await readAnalysisOwner(root, analysisDir);
     await expect(stat(lockPath)).resolves.toBeDefined();
+  });
+});
+
+describe('analysis ownership — progress sidecar under a republishing writer', () => {
+  it('reads the sidecar while its own writer republishes it', async () => {
+    // The heartbeat publishes write-temp-then-rename, continuously. The bounded artifact
+    // reader refuses a file whose identity changed across the read — correct for a
+    // write-once artifact, fatal here: every refusal surfaces as `null`, which callers
+    // read as "no analysis is running" while one is. Before the sidecar opted into
+    // `republishedConcurrently`, this loop returned null for well over half its reads.
+    const { analysisDir } = await fixture();
+    const path = progressPathOf(analysisDir);
+    await mkdir(runtimeDirOf(analysisDir), { recursive: true });
+    await writeFile(path, JSON.stringify({ stage: 'starting', updatedAt: new Date().toISOString() }));
+
+    let republishing = true;
+    const writer = (async () => {
+      while (republishing) {
+        const tmp = `${path}.spin.tmp`;
+        await writeFile(tmp, JSON.stringify({ stage: 'starting', updatedAt: new Date().toISOString() }));
+        await rename(tmp, path);
+      }
+    })();
+
+    try {
+      for (let i = 0; i < 50; i++) {
+        expect(await readAnalysisProgress(analysisDir)).toMatchObject({ stage: 'starting' });
+      }
+    } finally {
+      republishing = false;
+      await writer;
+    }
+  });
+
+  it('still refuses a symlinked or non-regular sidecar', async () => {
+    // The relaxation must cost none of the refusals it was granted alongside.
+    const linked = await fixture();
+    await mkdir(runtimeDirOf(linked.analysisDir), { recursive: true });
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-progress-target-'));
+    roots.push(outside);
+    const secret = join(outside, 'secret.json');
+    await writeFile(secret, JSON.stringify({ stage: 'leaked' }));
+    await symlink(secret, progressPathOf(linked.analysisDir));
+    expect(await readAnalysisProgress(linked.analysisDir)).toBeNull();
+
+    const dir = await fixture();
+    await mkdir(progressPathOf(dir.analysisDir), { recursive: true });
+    expect(await readAnalysisProgress(dir.analysisDir)).toBeNull();
   });
 });

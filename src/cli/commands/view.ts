@@ -683,11 +683,14 @@ export const viewCommand = new Command('view')
                     if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
                     const r = await withRelaxedTls(
                       () =>
-                        // INTENTIONAL EGRESS: repo config can select only loopback; remote endpoints are operator-supplied.
                         // Never follow a redirect: a loopback baseUrl is trusted because it
                         // cannot reach the network, which only holds while it cannot hand
                         // back a redirect to somewhere that can.
-                        // The suppression must stay on the line directly above the call.
+                        //
+                        // The next two lines are load-bearing IN THIS ORDER: the reviewed-egress
+                        // guard requires the rationale immediately above the marker, and CodeQL
+                        // requires the marker immediately above the call. Nothing goes between.
+                        // INTENTIONAL EGRESS: repo config can select only loopback; remote endpoints are operator-supplied.
                         // codeql[js/file-access-to-http]
                         fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout, redirect: 'error' }),
                       llmTlsRelaxed(),

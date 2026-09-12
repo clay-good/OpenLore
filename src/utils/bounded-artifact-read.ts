@@ -100,6 +100,16 @@ export async function descriptorIsThePathEntry(handle: FileHandle, path: string)
  *
  * Three properties the obvious `stat(path)` + `readFile(path)` form does not have:
  *
+ * Pass `republishedConcurrently` for a file its own writer rewrites continuously (the
+ * analysis progress sidecar). The identity checks exist so the returned bytes and the
+ * returned stamp describe the same entry, which is the right contract for a write-once
+ * artifact — but a hot file is republished by write-temp-then-rename, so those checks fail
+ * as a matter of course and a caller reading "refused" as "not there" reports no analysis
+ * running while one is (measured: 234 false absences in 400 reads). The option relaxes ONLY
+ * the identity comparison; O_NOFOLLOW, O_NONBLOCK and the isFile/size ceiling still refuse a
+ * symlink, a FIFO and an oversized file, and the stamp is then taken from the opened
+ * descriptor, which is the entry actually read.
+ *
  *  - **The ceiling bounds the READ.** A prior stat only describes the file at that
  *    instant; a file that grows afterwards is still read to EOF. Reading in chunks up
  *    to `MAX_ARTIFACT_BYTES + 1` fails closed instead.
@@ -137,6 +147,7 @@ export type BoundedReadResult =
 export async function readArtifactBytesBounded(
   path: string,
   maxBytes: number = MAX_ARTIFACT_BYTES,
+  options: { republishedConcurrently?: boolean } = {},
 ): Promise<BoundedReadResult> {
   let handle: FileHandle | undefined;
   try {
@@ -157,7 +168,12 @@ export async function readArtifactBytesBounded(
   try {
     const opened = await handle.stat({ bigint: true });
     if (!opened.isFile() || opened.size > BigInt(maxBytes)) return { state: 'refused' };
-    if (!(await descriptorIsThePathEntry(handle, path))) return { state: 'refused' };
+    // A file its own writer republishes cannot satisfy the identity checks, and demanding
+    // them turns a normal concurrent rename into a reported ABSENCE. See the option's
+    // docs: O_NOFOLLOW, O_NONBLOCK and the isFile/size checks above are what refuse a
+    // symlink, a FIFO and an oversized file, and all three still apply here.
+    if (!options.republishedConcurrently
+      && !(await descriptorIsThePathEntry(handle, path))) return { state: 'refused' };
 
     const chunks: Buffer[] = [];
     let total = 0;
@@ -172,6 +188,9 @@ export async function readArtifactBytesBounded(
 
     // The file must not have moved underneath the read, or the stamp would describe
     // something other than what was returned.
+    if (options.republishedConcurrently) {
+      return { state: 'ok', bytes: Buffer.concat(chunks, total), stamp: stampOf(opened) };
+    }
     const after = await handle.stat({ bigint: true });
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
       || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) return { state: 'refused' };
