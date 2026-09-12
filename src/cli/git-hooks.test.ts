@@ -566,7 +566,12 @@ describe('effective Git hook delivery', () => {
     await installDriftHook(root);
 
     expect(await readFile(hookPath, 'utf-8')).toContain('DRIFT_VERDICT=');
-    expect((await stat(hookPath)).mode & 0o100).toBe(0o100);
+    // The refresh itself is asserted on every platform; only the published MODE is
+    // POSIX-specific. Windows maps no execute bit into `stat().mode`, so this would read
+    // 0 there for a file Git will nonetheless run through its shell.
+    if (process.platform !== 'win32') {
+      expect((await stat(hookPath)).mode & 0o100).toBe(0o100);
+    }
   });
 
   it('refuses a core.hooksPath pointing outside the repository', async () => {

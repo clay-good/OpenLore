@@ -549,7 +549,11 @@ describe('readAnalysisOwner', () => {
 });
 
 describe('analysis ownership — progress sidecar under a republishing writer', () => {
-  it('reads the sidecar while its own writer republishes it', async () => {
+  // POSIX only: staging this race needs a rename OVER a file the reader holds open, which
+  // Windows refuses outright (EPERM). The production path is platform-independent — the
+  // Windows heartbeat hits the same identity check through `renameWithContentionRetry` —
+  // but the race cannot be constructed here.
+  it.skipIf(process.platform === 'win32')('reads the sidecar while its own writer republishes it', async () => {
     // The heartbeat publishes write-temp-then-rename, continuously. The bounded artifact
     // reader refuses a file whose identity changed across the read — correct for a
     // write-once artifact, fatal here: every refusal surfaces as `null`, which callers
@@ -579,6 +583,8 @@ describe('analysis ownership — progress sidecar under a republishing writer', 
     }
   });
 
+  // Runs on Windows deliberately: `O_NOFOLLOW` is a no-op there, so this is the case that
+  // caught the republish option skipping the only symlink refusal that platform has.
   it('still refuses a symlinked or non-regular sidecar', async () => {
     // The relaxation must cost none of the refusals it was granted alongside.
     const linked = await fixture();
