@@ -97,6 +97,9 @@ export function resolvePlatformCommand(
  * from the start. Sharing it means neither branch can be weaker than the other for the same
  * input (change: harden-windows-hook-quoting).
  *
+ * Note `:` is IN the list and does not force quoting — a real Windows path is quoted for its
+ * separators or its spaces, not for its drive colon.
+ *
  * ASCII on purpose: a non-ASCII path like `C:\Users\Müller` is ordinary, and quoting it is
  * cheaper than vouching for every codepoint a shell might one day treat as special.
  */
@@ -225,6 +228,11 @@ export function formatPlatformCommand(
   // Git Bash, which is the shell Claude Code runs a hook command through on Windows. There a
   // BARE backslash is an escape and is dropped, which is what turned a space-free entry path
   // into `C:Usersme...index.js` and failed every hook with `Cannot find module` (#483).
+  //
+  // "cmd.exe" here means an interactive prompt, or a `cmd /c` that wraps the whole line — as
+  // Node's own `shell: true` does with `/d /s /c "<line>"`. A bare `cmd /c` applies its
+  // two-quotes-only rule and would strip our first and last quote; nothing OpenLore writes is
+  // run that way, and no string form would survive it.
   return parts
     .map((part) => SAFE_BARE_WORD.test(part) ? part : `"${part}"`)
     .join(' ');

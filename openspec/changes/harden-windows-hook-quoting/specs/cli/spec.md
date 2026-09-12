@@ -26,11 +26,23 @@ quoted run and lets the remainder of the line execute, and a trailing backslash 
 closing quote and swallows the arguments after it, so emitting either is worse than the bug
 that motivated quoting.
 
-A refusal SHALL decline one config field, naming the part and the reason, and SHALL NOT fail
-the whole run. A command that is only DISPLAYED — `openlore update` prints an upgrade line and
-executes its own argv without a shell — SHALL fall back to a plain instruction. The removal
-path SHALL NOT format a command at all, so that a host whose paths became unformattable can
-still uninstall what was wired.
+Such a host SHALL still receive every part of the install that does NOT depend on a shell
+string — the MCP server entry, which is an argv; the instruction block; the tool permission —
+and SHALL lose only the hooks, named with the reason. It SHALL NOT be reported as a conflict:
+an unquotable path is a property of the host rather than a clash with the user's file, and
+conflict semantics fail the run, which also skips the index build.
+
+A hook OpenLore wired earlier SHALL be REMOVED on such a host rather than left in place, since
+it names a command the host mangles and would fail on every invocation; entries the user
+authored in the same hook group SHALL survive.
+
+A command that is only DISPLAYED — `openlore update` prints an upgrade line and executes its
+own argv without a shell — SHALL print a command the user can actually run. On Windows that is
+the plain package-manager instruction, not the resolved invocation: a statement whose first
+token is a quoted path parses in PowerShell as a string expression rather than a command.
+
+The removal path SHALL NOT format a command at all, so that a host whose paths became
+unformattable can still uninstall what was wired.
 
 The guard SHALL be pinned against a REAL POSIX shell rather than against a restated expected
 string: the emitted line is handed to `bash` and the argv it yields is compared to the intended

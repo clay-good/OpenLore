@@ -632,12 +632,43 @@ export const claudeCodeAdapter: Adapter = {
           : { path: ['mcpServers', 'openlore'], value: undefined },
       );
     }
+    // A host whose own paths cannot be quoted for a shell (see `windowsCommandHazard`) has NO
+    // correct hook command available. That is a property of the host, not a conflict with the
+    // user's file, so it does NOT refuse the write: the MCP entry is an argv, the permission is
+    // a literal and the instruction block is prose, all still correct, and discarding them over
+    // one unwritable field helps nobody. Only the hooks are left out.
+    //
+    // Any hook group WE wired earlier IS removed, because it names a command this host mangles
+    // — #483's own `Cannot find module`, once per turn, forever. A hook that cannot work is
+    // worse than no hook, and silently leaving it while reporting a refusal is worse still
+    // (change: harden-windows-hook-quoting).
     const commandHazard = hookCommandHazard(ctx.platform, ctx.platformCommandRuntime);
-    if (commandHazard) return refusedWrite(mdResult, settingsPath, layout.settings, commandHazard);
-    for (const { key, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
-      const merged = mergeOurHook((base.hooks as Record<string, unknown>)?.[key], command);
-      nextHooks[key] = merged;
-      settingsEdits.push({ path: ['hooks', key], value: merged });
+    if (commandHazard) {
+      for (const { key } of MANAGED_HOOKS) {
+        const original = (base.hooks as Record<string, unknown>)?.[key];
+        if (!Array.isArray(original)) continue;
+        const filtered = stripOurHook(original);
+        if (filtered.length === original.length) continue;
+        if (filtered.length === 0) {
+          delete nextHooks[key];
+          settingsEdits.push({ path: ['hooks', key], value: undefined });
+        } else {
+          nextHooks[key] = filtered;
+          settingsEdits.push({ path: ['hooks', key], value: filtered });
+        }
+      }
+      mdResult.warnings.push(
+        `The SessionStart and UserPromptSubmit hooks were NOT wired, because ${commandHazard}. `
+        + 'Everything else was installed, and any earlier OpenLore hook was removed rather than '
+        + 'left pointing at a command this host cannot run. Reinstall openlore from a path '
+        + 'without that character to get the hooks.',
+      );
+    } else {
+      for (const { key, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
+        const merged = mergeOurHook((base.hooks as Record<string, unknown>)?.[key], command);
+        nextHooks[key] = merged;
+        settingsEdits.push({ path: ['hooks', key], value: merged });
+      }
     }
 
     // In the user scope the hooks file and the permission file are ONE file. Two
@@ -662,11 +693,14 @@ export const claudeCodeAdapter: Adapter = {
     const change: PlannedChange = {
       path: settingsPath,
       kind: !had ? 'create' : !changed ? 'noop' : 'update',
-      summary: !had
-        ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''}`
-        : !changed
-          ? `${layout.settings}: already up to date`
-          : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''} in ${layout.settings}`,
+      summary: commandHazard
+        // Never claim the hooks: on this host they are the one thing that was not written.
+        ? `${layout.settings}: OpenLore hooks not wired — ${commandHazard}`
+        : !had
+          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''}`
+          : !changed
+            ? `${layout.settings}: already up to date`
+            : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${OPENLORE_PERMISSION}` : ''} in ${layout.settings}`,
       preview: !had
         ? previewCreate(settingsPath, after)
         : !changed

@@ -49,13 +49,25 @@ thing to cmd.exe and to a POSIX shell for them, so `formatPlatformCommand` throw
 writing a line that silently fails or executes code — the protection `quotePosix` already
 gives the POSIX branch, which the Windows branch was missing for the same input.
 
-**The refusal reaches the user as a refusal, not a crash.** `runInstall` rethrows a
-project-scope adapter error, so both config writers check first (`windowsCommandHazard`) and
-decline one file with the reason. `openlore update` only ever PRINTS a command — it spawns its
-own argv without a shell — so it degrades to the plain package-manager instruction for the
-detected method. That instruction is derived from the method, not from the resolved
-invocation: joining the resolved parts would have printed two unquoted absolute paths, which
-is less runnable than the line it replaces.
+**A refusal costs the hooks, and nothing else.** `runInstall` rethrows a project-scope adapter
+error, so the writers check first (`windowsCommandHazard`) instead of letting the throw escape.
+What they then do matters as much: an unquotable path is a property of the HOST, not a clash
+with the user's file, so it is not reported as a conflict. The MCP entry (an argv), the
+instruction block (prose) and the tool permission (a literal) are all still correct and are
+still written; only the hooks are left out. Treating it as a conflict returned exit 1, which
+also skipped the index build — one unwritable field cost the entire install.
+
+A hook OpenLore wired earlier is REMOVED on such a host, not left in place. It names a command
+this host mangles, so keeping it is #483's `Cannot find module` once per turn, forever, with
+nothing saying why; a user-authored entry in the same group survives untouched.
+
+`openlore update` only ever PRINTS a command — it spawns its own argv without a shell — so on
+Windows it prints the plain package-manager command for the detected method instead of the
+resolved form. That is not merely a fallback: a statement whose first token is a quoted path
+parses in PowerShell as a string EXPRESSION, so the resolved line is a syntax error there
+rather than an invocation. Printing the command the user actually meant is correct for cmd.exe,
+PowerShell and bash alike, and it keeps every `$`-shaped path out of a shell whose expansion
+rules differ from the POSIX ones the refusal models.
 
 **Uninstall is decoupled from formatting.** `managedHooks` was called on the removal path for
 its keys alone, so an unformattable path would have thrown there too — stranding the hooks
@@ -88,5 +100,13 @@ redirects — which first surfaced as stray files in this repo's own working tre
   while changing the emitted path for every Windows user.
 - **cmd.exe's `%VAR%` expansion is not defended.** No string form suppresses it, and a literal
   `%` path round-trips under the Git Bash that actually runs our hooks — refusing it would
-  break a working install to appease a shell we do not target. Disclosed at the code.
+  break a working install to appease a shell we do not target. Disclosed at the code. `!VAR!`
+  under delayed expansion is the same shape and equally undefendable.
+- **A UNC install is now an unsupported host, explicitly.** `"\\\\srv\\share\\…"` is fine for
+  cmd.exe but collapses to one backslash in bash, and neither forward slashes nor single quotes
+  fix it for both. Such a host gets everything except the hooks, with the reason named, rather
+  than a hook that cannot run.
+- **A bare `cmd /c` is not a supported carrier.** Its two-quotes-only rule strips the first and
+  last quote of a line like ours. Nothing OpenLore writes is run that way — Node's `shell:true`
+  wraps with `/d /s /c` — and no string form would survive it.
 - **No new spec domain.** One `cli` requirement, mirroring `SubprocessesNeverSurfaceAConsoleWindow`.

@@ -336,7 +336,10 @@ jobs:
             $probe = $settings.hooks.$key[0].hooks[0].command -replace 'orient (--json|--inject)$', '--version'
             # Written to a file, not passed as an argument: the hook string carries its own
             # double quotes, and PowerShell's native-argument quoting would rewrite them.
-            Set-Content -Path hook-probe.sh -Value $probe -Encoding ascii
+            # utf8NoBOM, not ascii: an ascii write would silently mangle a non-ASCII path
+            # (`C:\Users\Müller\…`) before bash ever saw it, and a BOM would break the first
+            # token. The runner's own paths are ASCII, so this is about not lying if that changes.
+            Set-Content -Path hook-probe.sh -Value $probe -Encoding utf8NoBOM
             $out = (& $bash hook-probe.sh 2>&1) | Out-String
             if ($out -match 'Cannot find module') {
               throw "#483 regression: Git Bash could not resolve the $key hook path. $out"

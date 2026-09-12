@@ -17,7 +17,6 @@ import { existsSync, readFileSync } from 'node:fs';
 import { logger } from '../../utils/logger.js';
 import {
   formatPlatformCommand,
-  windowsCommandHazard,
   resolvePlatformCommand,
   type PlatformCommandRuntime,
 } from '../../utils/platform-command.js';
@@ -191,11 +190,13 @@ function runCommand(cmd: string, args: string[]): Promise<number> {
 /**
  * The plain, hand-typable upgrade command for each install method.
  *
- * These are the package-manager invocations, NOT the resolved absolute-path form: the
- * resolved form exists so OpenLore can SPAWN an upgrade without a shell, and it is useless as
- * an instruction — on Windows it is two space-separated absolute paths that no shell can
- * parse unquoted. The same strings already back the "could not determine how openlore was
- * installed" message below.
+ * These are the package-manager invocations, NOT the resolved absolute-path form. The resolved
+ * form exists so OpenLore can SPAWN an upgrade without a shell; as an INSTRUCTION on Windows
+ * it is unusable, because its first token is a quoted path and PowerShell parses a statement
+ * that starts with `"` in expression mode — the line becomes a string literal and the next
+ * token is a syntax error, rather than a command. (`&` would invoke it, but telling a user to
+ * paste a call operator is worse than telling them the command they actually meant.) The same
+ * strings already back the "could not determine how openlore was installed" message below.
  */
 const PLAIN_UPGRADE_INSTRUCTION: Record<InstallMethod, string> = {
   homebrew: 'brew upgrade openlore',
@@ -206,28 +207,29 @@ const PLAIN_UPGRADE_INSTRUCTION: Record<InstallMethod, string> = {
 };
 
 /**
- * The command to SHOW the user for `method`, quoted when this host's paths can be quoted.
+ * The command to SHOW the user for `method`.
  *
- * `update` only ever reports a command — the real upgrade runs through `spawn` with an argv
- * and no shell — so a path that cannot be formatted for Windows must degrade to the plain
- * instruction rather than throw out of a command that was working fine
- * (change: harden-windows-hook-quoting).
+ * `update` only ever REPORTS a command — the upgrade itself runs through `spawn` with an argv
+ * and no shell — so what matters here is that the line is runnable if a user pastes it, not
+ * that it is character-for-character what was spawned.
  *
- * The fallback is derived from `method` rather than passed in, because a caller that built it
- * from the resolved invocation would hand the user an unquoted pair of absolute paths — a
- * worse instruction than the one this exists to print.
+ * On Windows it therefore prints the plain package-manager command rather than the resolved
+ * invocation: the resolved form is not a command in PowerShell (see
+ * PLAIN_UPGRADE_INSTRUCTION), and it is the same upgrade either way. That also means this
+ * function cannot throw — a path that `formatPlatformCommand` refuses never reaches it — and
+ * that no `$`-shaped path is ever printed into a shell whose expansion rules differ from the
+ * POSIX ones the refusal models (change: harden-windows-hook-quoting).
  *
- * Exported as a test seam: the fallback is only reachable on a host whose own paths cannot be
- * quoted, which no fixture can produce through `runUpdate` without a network round-trip.
+ * POSIX keeps the resolved, single-quoted form, which is both exact and paste-safe there.
+ *
+ * Exported as a test seam: `runUpdate` reaches this only after a network round-trip.
  */
 export function printableCommand(
   invocation: { command: string; args: string[] },
   platform: NodeJS.Platform,
   method: InstallMethod,
 ): string {
-  if (platform === 'win32' && windowsCommandHazard(invocation)) {
-    return PLAIN_UPGRADE_INSTRUCTION[method];
-  }
+  if (platform === 'win32') return PLAIN_UPGRADE_INSTRUCTION[method];
   return formatPlatformCommand(invocation, platform);
 }
 

@@ -15,12 +15,15 @@
 
 ## 3. Make the refusal survivable
 
-- [x] 3.1 `claude-code`: check before the write, `refusedWrite` the settings file with the
-  reason; the MCP entry is an argv and is unaffected.
+- [x] 3.1 `claude-code`: check before the write, then wire everything that does not need a
+  shell string and omit ONLY the hooks, with the reason — not a conflict, which failed the run
+  and skipped the index build.
+- [x] 3.1a `claude-code`: strip a hook wired earlier on a host that can no longer run it,
+  keeping any user-authored entry in the same group.
 - [x] 3.2 `claude-code`: extract `MANAGED_HOOKS` so uninstall never formats a command.
 - [x] 3.3 `continue`: decline `.continue/config.json` with the reason.
-- [x] 3.4 `update`: `printableCommand` degrades to the plain package-manager instruction for
-  the detected method, never to a join of the resolved absolute paths.
+- [x] 3.4 `update`: `printableCommand` prints the plain package-manager instruction on Windows
+  — the resolved form is a string expression in PowerShell, not a command.
 
 ## 4. Let a real shell be the judge
 
