@@ -1,5 +1,5 @@
 // Ambient declarations for spec-08 modules that ship no usable types.
-// Lua and Dart are loaded via portable WASM (tree-sitter-wasms) through
+// Dart is loaded via a portable WASM build (@repomix/tree-sitter-wasms) through
 // web-tree-sitter, which we access through a minimal structural interface.
 declare module 'web-tree-sitter';
 
@@ -11,6 +11,10 @@ declare module 'web-tree-sitter';
 // build is skipped on the runner), even though the typecheck job — which did
 // install it — passes. Declaring the modules here makes the build resolve them
 // regardless of install state, matching tree-sitter-cpp.d.ts.
+declare module '@tree-sitter-grammars/tree-sitter-lua' {
+  const language: object;
+  export default language;
+}
 declare module 'tree-sitter-bash' {
   const language: object;
   export default language;

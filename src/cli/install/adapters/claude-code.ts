@@ -17,7 +17,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreserving
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
-import { formatPlatformCommand, isOpenloreCliEntryPath, resolveOpenloreCommand } from '../../../utils/platform-command.js';
+import { formatPlatformCommand, isOpenloreCliEntryPath, resolveOpenloreCommand, windowsCommandHazard } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 import { isGuardedWriteFailure, withGuardedConfigWrite } from '../guarded-config-write.js';
 
@@ -245,22 +245,46 @@ function mcpEntry(
  *     orient against the submitted prompt and injects a bounded, ignorable
  *     block so the first turn begins already oriented
  *     (change: add-task-scoped-context-injection).
+ *
+ * The keys and argv live here, SEPARATE from the formatted command, because uninstall needs
+ * only the keys: it identifies our groups by the `_openlore` marker. Formatting a command on
+ * that path would let an unformattable path (see `windowsCommandHazard`) throw during
+ * REMOVAL, stranding the very hooks uninstall exists to take out
+ * (change: harden-windows-hook-quoting).
  */
+const MANAGED_HOOKS: ReadonlyArray<{ key: string; args: readonly string[] }> = [
+  { key: 'SessionStart', args: ['orient', '--json'] },
+  { key: 'UserPromptSubmit', args: ['orient', '--inject'] },
+];
+
 /** The hook keys OpenLore manages, with commands resolved for the generating host. */
 function managedHooks(
   platform: NodeJS.Platform,
   runtime: ApplyContext['platformCommandRuntime'],
 ): ReadonlyArray<{ key: string; command: string }> {
-  return [
-    {
-      key: 'SessionStart',
-      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime), platform),
-    },
-    {
-      key: 'UserPromptSubmit',
-      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--inject'], platform, runtime), platform),
-    },
-  ];
+  return MANAGED_HOOKS.map(({ key, args }) => ({
+    key,
+    command: formatPlatformCommand(resolveOpenloreCommand(args, platform, runtime), platform),
+  }));
+}
+
+/**
+ * Why the hook commands cannot be written for this host, or `null` when they can.
+ *
+ * Checked BEFORE the write so an unformattable path refuses one file with an actionable
+ * reason, instead of `formatPlatformCommand` throwing out of a project-scope adapter —
+ * which `runInstall` rethrows, taking down a whole install over one config field.
+ */
+function hookCommandHazard(
+  platform: NodeJS.Platform,
+  runtime: ApplyContext['platformCommandRuntime'],
+): string | null {
+  if (platform !== 'win32') return null;
+  for (const { args } of MANAGED_HOOKS) {
+    const hazard = windowsCommandHazard(resolveOpenloreCommand(args, platform, runtime));
+    if (hazard) return `the hook command path (${hazard.part}) contains ${hazard.reason}`;
+  }
+  return null;
 }
 
 function ourHookGroup(command: string): Record<string, unknown> {
@@ -667,10 +691,43 @@ export const claudeCodeAdapter: Adapter = {
           : { path: ['mcpServers', 'openlore'], value: undefined },
       );
     }
-    for (const { key, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
-      const merged = mergeOurHook((base.hooks as Record<string, unknown>)?.[key], command);
-      nextHooks[key] = merged;
-      settingsEdits.push({ path: ['hooks', key], value: merged });
+    // A host whose own paths cannot be quoted for a shell (see `windowsCommandHazard`) has NO
+    // correct hook command available. That is a property of the host, not a conflict with the
+    // user's file, so it does NOT refuse the write: the MCP entry is an argv, the permission is
+    // a literal and the instruction block is prose, all still correct, and discarding them over
+    // one unwritable field helps nobody. Only the hooks are left out.
+    //
+    // Any hook group WE wired earlier IS removed, because it names a command this host mangles
+    // — #483's own `Cannot find module`, once per turn, forever. A hook that cannot work is
+    // worse than no hook, and silently leaving it while reporting a refusal is worse still
+    // (change: harden-windows-hook-quoting).
+    const commandHazard = hookCommandHazard(ctx.platform, ctx.platformCommandRuntime);
+    if (commandHazard) {
+      for (const { key } of MANAGED_HOOKS) {
+        const original = (base.hooks as Record<string, unknown>)?.[key];
+        if (!Array.isArray(original)) continue;
+        const filtered = stripOurHook(original);
+        if (filtered.length === original.length) continue;
+        if (filtered.length === 0) {
+          delete nextHooks[key];
+          settingsEdits.push({ path: ['hooks', key], value: undefined });
+        } else {
+          nextHooks[key] = filtered;
+          settingsEdits.push({ path: ['hooks', key], value: filtered });
+        }
+      }
+      mdResult.warnings.push(
+        `The SessionStart and UserPromptSubmit hooks were NOT wired, because ${commandHazard}. `
+        + 'Everything else was installed, and any earlier OpenLore hook was removed rather than '
+        + 'left pointing at a command this host cannot run. Reinstall openlore from a path '
+        + 'without that character to get the hooks.',
+      );
+    } else {
+      for (const { key, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
+        const merged = mergeOurHook((base.hooks as Record<string, unknown>)?.[key], command);
+        nextHooks[key] = merged;
+        settingsEdits.push({ path: ['hooks', key], value: merged });
+      }
     }
 
     // In the user scope the hooks file and the permission file are ONE file. Two
@@ -695,11 +752,14 @@ export const claudeCodeAdapter: Adapter = {
     const change: PlannedChange = {
       path: settingsPath,
       kind: !had ? 'create' : !changed ? 'noop' : 'update',
-      summary: !had
-        ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
-        : !changed
-          ? `${layout.settings}: already up to date`
-          : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
+      summary: commandHazard
+        // Never claim the hooks: on this host they are the one thing that was not written.
+        ? `${layout.settings}: OpenLore hooks not wired — ${commandHazard}`
+        : !had
+          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
+          : !changed
+            ? `${layout.settings}: already up to date`
+            : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
       preview: !had
         ? previewCreate(settingsPath, after)
         : !changed
@@ -846,7 +906,7 @@ export const claudeCodeAdapter: Adapter = {
     const removalEdits: JsonPathEdit[] = [];
     const hooksObj = parsed.hooks as Record<string, unknown> | undefined;
     if (hooksObj) {
-      for (const { key } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
+      for (const { key } of MANAGED_HOOKS) {
         if (!Array.isArray(hooksObj[key])) continue;
         const original = hooksObj[key] as unknown[];
         const filtered = stripOurHook(original);

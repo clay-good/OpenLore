@@ -110,9 +110,15 @@ export interface BudgetableParser<TTree> {
  * Presence is not capability. `web-tree-sitter@0.25` exposes `setTimeoutMicros` and throws
  * `TypeError: Cannot convert 0 to a BigInt` from inside it — its WASM shim passes a Number where
  * the import demands a BigInt. Left to propagate, arming the deadline made every file in the
- * WASM-grammar languages (Dart, Lua) fail to extract: a bound that silently deleted real work,
- * which is the exact failure mode this change exists to prevent. So the first refusal demotes that
- * KIND of parser to unbounded rather than being paid, and thrown, per file.
+ * WASM-grammar languages fail to extract: a bound that silently deleted real work, which is the
+ * exact failure mode this change exists to prevent. So the first refusal demotes that KIND of
+ * parser to unbounded rather than being paid, and thrown, per file.
+ *
+ * The lane that provoked this has since narrowed to Dart alone (Lua moved to the native lane,
+ * #472) and `web-tree-sitter@0.27` omits `setTimeoutMicros` altogether, so today Dart takes the
+ * plain unsupported path above rather than this one. The demotion stays: it is keyed on the
+ * binding, not on a language, and it is the only thing standing between a future
+ * exists-but-throws deadline and silently empty extraction.
  *
  * Keyed on the parser's PROTOTYPE, not the instance. Keying the instance looked right and was
  * useless on the one lane it was written for: the WASM grammar handle constructs a fresh parser
