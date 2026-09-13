@@ -3,6 +3,28 @@
 All notable changes to OpenLore are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-09-13
+
+**The release where OpenLore checks the locks before reading the map.**
+
+- **See collisions before they land.** In-flight work now gets a real Git textual-merge verdict,
+  and changed or newly added tests are always selected with a plain-language reason.
+- **Find more of the code that actually runs.** Framework entry points, literal dispatch tables,
+  and config-wired files now participate in reachability instead of looking accidentally dead.
+- **Make governance portable.** Public-surface checks emit stable finding codes, recommend the
+  appropriate SemVer bump, and can export SARIF for code-scanning workflows.
+- **Give agents a better-sized map.** `orient` fits its entire answer to the requested token budget,
+  while generated spec links are checked against structural evidence before they are presented.
+- **Treat a repository like input, not a houseguest.** Git execution, network egress, symlinks,
+  artifact reads, terminal output, MCP arguments, regex cost, and trust labels all gained stricter
+  fail-closed boundaries. Dependabot is clear and the reviewed intentional-egress alerts are closed.
+
+No breaking changes. Existing commands and configuration remain compatible with 3.1.x.
+
+**Upgrade:** `npm i -g openlore@3.2.0` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.1.1...v3.2.0
+
 ## [3.1.1] - 2026-09-07
 
 **The release where the first run stops being the worst run — and Windows joins CI.**
