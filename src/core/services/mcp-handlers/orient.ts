@@ -20,12 +20,13 @@ import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
 import { readJsonArtifactCached, readDependencyGraphOrPartial } from './artifact-cache.js';
-import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
+import { expandHandle, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
-import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
+import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
+import { fitPayloadToBudget } from './budget-fit.js';
 import { loadArchitectureRules } from '../../architecture/rules.js';
 import {
   compactIdiomSummary,
@@ -239,11 +240,14 @@ export async function handleOrient(
   let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
   const clampedLimit = Math.max(1, Math.min(limit, 20));
+  // With a token budget the budget, not the entry cap, decides how many ranked functions fit
+  // (change: refine-orient-context-budgeting). Without one the default is unchanged.
+  const entryPool = tokenBudget ? Math.max(clampedLimit, ORIENT_BUDGET_CANDIDATE_POOL) : clampedLimit;
 
   // ── Parallel data loading ──────────────────────────────────────────────────
   const [rawResults, mappingIdx, llmCtx] = await Promise.all([
     VectorIndex.search(outputDir, task, embedSvc, {
-      limit: clampedLimit * 3,
+      limit: tokenBudget ? Math.max(clampedLimit * 3, entryPool) : clampedLimit * 3,
       vocabularyExpansion,
       onRetrievalMode: mode => {
         retrievalMode = mode === 'semantic' ? embedderMode(embedSvc) : mode;
@@ -259,7 +263,7 @@ export async function handleOrient(
   // Exclude external synthetic nodes (fetch, https.request, etc.) — they have no spec/docstring
   const topResults = rawResults
     .filter(r => r.record.filePath !== 'external' && !r.record.id?.startsWith('external::'))
-    .slice(0, clampedLimit);
+    .slice(0, entryPool);
 
   const relevantFunctionsAll: OrientFunction[] = topResults.map(r => {
     const startLine = getCachedNodeStartLine(llmCtx, r.record.id);
@@ -283,14 +287,11 @@ export async function handleOrient(
     };
   });
 
-  // Progressive disclosure (Spec 25 P2–P4): when a tokenBudget is set, collapse
-  // exact duplicates then greedily keep the highest-scored functions that fit.
-  // Default (no budget) is unchanged. The `expand` handle on every kept item
-  // means a dropped/collapsed body is one cheap get_function_body call away.
-  const budgeted = tokenBudget
-    ? applyTokenBudget(collapseExactDuplicates(relevantFunctionsAll), tokenBudget)
-    : { kept: relevantFunctionsAll, omitted: 0 };
-  const relevantFunctions = budgeted.kept;
+  // Progressive disclosure (Spec 25 P2–P4): when a tokenBudget is set, collapse exact duplicates; the
+  // whole rendered payload is then fitted to the budget at the end (fitOrientToBudget). Default (no
+  // budget) is unchanged. The `expand` handle on every kept item means a dropped/collapsed body is one
+  // cheap get_function_body call away.
+  const relevantFunctions = tokenBudget ? collapseExactDuplicates(relevantFunctionsAll) : relevantFunctionsAll;
 
   const emptyResult = relevantFunctions.length === 0
     ? {
@@ -985,9 +986,6 @@ export async function handleOrient(
     relevantFiles,
     relevantFunctions,
     ...(emptyResult ? { emptyResult } : {}),
-    ...(budgeted.omitted > 0
-      ? { relevantFunctionsOmitted: omissionNote(budgeted.omitted, 'raise tokenBudget, increase limit, or call search_code') }
-      : {}),
     specDomains,
     callPaths,
     suggestedTools,
@@ -1004,7 +1002,8 @@ export async function handleOrient(
   // exact `expand` handle or one dedicated tool call away — so we trim bytes per
   // turn without forcing a follow-up round-trip. The rich default is unchanged.
   if (lean) {
-    return withIndexStaleness(absDir, { ...core, lean: true }, llmCtx);
+    const leanPayload = { ...core, lean: true };
+    return withIndexStaleness(absDir, tokenBudget ? fitOrientToBudget(leanPayload, tokenBudget) : leanPayload, llmCtx);
   }
 
   const result = {
@@ -1026,7 +1025,54 @@ export async function handleOrient(
     ...(regionStyle !== undefined ? { regionStyle } : {}),
     nextSteps,
   };
-  return withIndexStaleness(absDir, result, llmCtx);
+  return withIndexStaleness(absDir, tokenBudget ? fitOrientToBudget(result, tokenBudget) : result, llmCtx);
+}
+
+/**
+ * Sections trimmed to fit a `tokenBudget`, most peripheral first; each is drained before the next is
+ * touched, always from its lowest-ranked end. Call paths are not trimmed on their own: a call path is
+ * kept exactly when its function is, so a function and its callers and callees drop together.
+ * Governance context (pending, stale, reversed, and governing decisions, unreconciled memories) and next
+ * steps are never trimmed.
+ */
+const ORIENT_BUDGET_TRIM_ORDER = [
+  'behavioralHotspots', 'landmarks', 'changeCoupling', 'provenance', 'architectureViolations',
+  'specLinkedFunctions', 'inlineSpecs', 'matchingSpecs', 'insertionPoints', 'specDomains',
+  'relevantFunctions',
+] as const;
+
+/**
+ * Fit a rendered orient payload to `tokenBudget` (change: refine-orient-context-budgeting): whole
+ * trailing entries are dropped across sections in {@link ORIENT_BUDGET_TRIM_ORDER}, keeping at least one
+ * relevant function, and the payload carries a `budget` receipt with the per-section omitted counts.
+ * The estimate uses the server's character-based token estimator and does not count the staleness note
+ * added afterwards.
+ */
+function fitOrientToBudget<T extends Record<string, unknown>>(payload: T, tokenBudget: number): Record<string, unknown> {
+  const fit = fitPayloadToBudget(payload, tokenBudget, ORIENT_BUDGET_TRIM_ORDER, { relevantFunctions: 1 }, (trimmed, omitted) => {
+    const functions = (trimmed.relevantFunctions ?? []) as Array<{ name: string; filePath: string }>;
+    const droppedFunctions = omitted.relevantFunctions ?? 0;
+    const receipt = { ...omitted };
+    let callPaths = trimmed.callPaths;
+    if (droppedFunctions > 0 && Array.isArray(trimmed.callPaths)) {
+      const kept = new Set(functions.map(f => `${f.name}\0${f.filePath}`));
+      const all = trimmed.callPaths as Array<{ function: string; filePath: string }>;
+      callPaths = all.filter(path => kept.has(`${path.function}\0${path.filePath}`));
+      const droppedPaths = all.length - (callPaths as unknown[]).length;
+      if (droppedPaths > 0) receipt.callPaths = droppedPaths;
+    }
+    return {
+      ...trimmed,
+      ...(Array.isArray(trimmed.relevantFiles) ? { relevantFiles: [...new Set(functions.map(f => f.filePath))] } : {}),
+      ...(callPaths !== undefined ? { callPaths } : {}),
+      ...(droppedFunctions > 0
+        ? { relevantFunctionsOmitted: omissionNote(droppedFunctions, 'raise tokenBudget, increase limit, or call search_code') }
+        : {}),
+      budget: { tokenBudget, ...(Object.keys(receipt).length > 0 ? { omitted: receipt } : {}) },
+    };
+  });
+  const budget = fit.payload.budget as Record<string, unknown>;
+  return { ...fit.payload, budget: { ...budget, estimatedTokens: fit.estimatedTokens, fits: fit.fits } };
 }
 
 // ============================================================================

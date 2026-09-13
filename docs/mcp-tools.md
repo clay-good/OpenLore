@@ -57,14 +57,14 @@ live registry.
 <!-- standing-context-cost:start -->
 | Preset | Tools | Measured tokens | Budget |
 |---|---:|---:|---:|
-| `minimal` | 6 | 2,736 | 2,950 |
-| `navigation` | 10 | 3,533 | 3,800 |
-| `memory` | 3 | 1,216 | 1,300 |
-| `verify` | 3 | 1,262 | 1,350 |
-| `federation` | 10 | 3,865 | 4,100 |
-| `coordination` | 5 | 2,487 | 2,650 |
-| `substrate` | 15 | 5,131 | 5,500 |
-| `full` | 76 | 24,236 | 25,500 |
+| `minimal` | 6 | 2,741 | 2,950 |
+| `navigation` | 10 | 3,538 | 3,800 |
+| `memory` | 3 | 1,221 | 1,300 |
+| `verify` | 3 | 1,267 | 1,350 |
+| `federation` | 10 | 3,870 | 4,100 |
+| `coordination` | 5 | 2,492 | 2,650 |
+| `substrate` | 15 | 5,136 | 5,500 |
+| `full` | 76 | 24,242 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
@@ -370,8 +370,9 @@ Registered only under `openlore mcp --preset coordination`.
 directory    string   Absolute path to the project directory
 task         string   Natural-language description of the task, e.g. "add rate limiting to the API"
 limit        number   Max relevant functions to return (default: 5, max: 20)
-tokenBudget  number   Optional: cap relevantFunctions to ~this many tokens (Spec 25 P4) —
-                      highest-scored kept, exact duplicates collapsed; each carries an `expand` handle
+tokenBudget  number   Optional: fit the whole response to ~this many tokens — lowest-ranked entries
+                      dropped first across sections, governance context kept, per-section omitted
+                      counts in `budget`; each item carries an `expand` handle
 lean         boolean  Optional: return only the navigation core (relevantFunctions + callPaths +
                       specDomains + suggestedTools), dropping enrichment (Spec 27). See below.
 ```

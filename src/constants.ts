@@ -762,6 +762,14 @@ export const INCREMENTAL_CLOSURE_BUDGET = 40;
  */
 export const MAX_PROVENANCE_EDGES = 25;
 
+/**
+ * Ranked functions `orient` draws from when a `tokenBudget` is set (change:
+ * refine-orient-context-budgeting). Without a budget the entry cap (`limit`, at most 20) decides; with
+ * one the budget decides, over this bounded pool — the previous search width (`limit` × 3 at the
+ * largest limit). A bound on work, not a tuning weight.
+ */
+export const ORIENT_BUDGET_CANDIDATE_POOL = 60;
+
 // ============================================================================
 // PAGERANK
 // ============================================================================

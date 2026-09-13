@@ -4,58 +4,40 @@
 
 ### Requirement: ExactFitTokenBudgeting
 
-When a caller passes `tokenBudget` to `orient` (or `get_minimal_context`), the handler SHALL fit
-the whole rendered payload to that budget by searching over the number of included entries in rank
-order across all budgeted sections — expanding when the budget allows more than the default caps
-and contracting when it allows less — rather than applying the budget to a single section over a
-fixed candidate cap. Fitting SHALL be deterministic (same graph, task, and budget yield the same
-payload). Under budget pressure, whole low-ranked entries SHALL be dropped before any field is
-trimmed from a higher-ranked entry, and every section that dropped entries SHALL carry a truncation
-receipt disclosing the omitted count. When no budget is passed, output SHALL be unchanged from the
-pre-existing behavior.
+When a caller passes `tokenBudget` to `orient`, the handler SHALL fit the whole rendered payload to
+that budget, not a single section over a fixed candidate cap. It SHALL trim whole entries from the
+lowest-ranked end of its list sections, in a fixed peripheral-first order, and find the fewest removals
+that fit, keeping at least one relevant function; a call path SHALL be kept exactly when its function
+is. When the budget allows, relevant functions and call
+paths SHALL be drawn from a bounded pool larger than the default entry cap. Governance context
+(pending, stale, reversed, and governing decisions, and unreconciled memories) SHALL never be trimmed.
+The payload SHALL carry a `budget` receipt stating the budget, the estimated tokens, whether it fits,
+and the entries omitted per section. Fitting SHALL be deterministic (same graph, task, and budget
+yield the same payload). When no budget is passed, output SHALL be unchanged from the pre-existing
+behavior.
 
-#### Scenario: A small budget yields an exact-fit payload with receipts
+#### Scenario: A small budget yields a fitted payload with receipts
 
 - **GIVEN** an orient call with a `tokenBudget` smaller than the default payload
 - **WHEN** the handler renders the result
-- **THEN** the rendered payload fits the budget within the documented tolerance
-- **AND** entries were dropped whole, in inverse rank order, before any top-ranked entry lost fields
-- **AND** each section that dropped entries discloses its omitted count
+- **THEN** the estimated tokens of the rendered payload are within the budget
+- **AND** entries were dropped whole from the lowest-ranked end, peripheral sections first
+- **AND** the `budget` receipt names the omitted count per section
 
-#### Scenario: A large budget broadens beyond the fixed caps
+#### Scenario: A large budget broadens beyond the entry cap
 
 - **GIVEN** an orient call with a `tokenBudget` larger than the default payload
 - **WHEN** the handler renders the result
-- **THEN** additional ranked entries are included beyond the former fixed per-section caps, up to
-  the budget or the bounded candidate neighborhood
+- **THEN** more relevant functions are included than the `limit` entry cap, up to the bounded pool
+
+#### Scenario: Governance context survives any budget
+
+- **GIVEN** a pending decision that applies to a relevant file
+- **WHEN** orient runs with a budget too small to fit
+- **THEN** the pending decision is still returned, and the receipt reports that the budget was not met
 
 #### Scenario: No budget means no change
 
 - **GIVEN** an orient call without `tokenBudget`
 - **WHEN** the handler renders the result
 - **THEN** the payload is identical to the pre-change default behavior
-
-### Requirement: SeedConditionedBudgetShaping
-
-Orient's budget fitting SHALL condition on seed quality using only existing deterministic signals:
-when the caller supplies no seeds (no working diff and no task-matched symbols above the relevance
-gate), the entry budget SHALL expand by a fixed, source-cited multiplier so a cold-start
-orientation is broader; when seeds exist, entries connected to task-string identifier matches and
-working-diff symbols SHALL be preferred by the ranking's restart distribution. No new tuned
-constant SHALL be introduced: every value not derivable from an existing constant or classifier
-SHALL live in the same fixed-constants table the personalized-PageRank implementation uses, each
-entry citing its prior-art source.
-
-#### Scenario: A seedless first orientation is broader
-
-- **GIVEN** an orient call on a task with no working diff and no matched seed symbols
-- **WHEN** the budget is fitted
-- **THEN** the entry budget is expanded by the fixed cold-start multiplier
-- **AND** the result includes strictly more ranked entries than a seeded call at the same budget
-
-#### Scenario: Constants are table-fixed and cited, never knobs
-
-- **GIVEN** the cold-start multiplier or any seed-weighting value
-- **WHEN** its definition is inspected
-- **THEN** it resides in the fixed-constants table with a citation to its prior-art source
-- **AND** no runtime or config parameter tunes it

@@ -892,4 +892,77 @@ describe('handleOrient', () => {
     expect(fooPaths!.callees.some(c => c.name === 'fetch')).toBe(false);
     expect(fooPaths!.callees.some(c => c.name === 'doBar')).toBe(true);
   });
+
+  // change: refine-orient-context-budgeting
+  describe('whole-payload token budget', () => {
+    const results = (count: number) => Array.from({ length: count }, (_, i) =>
+      makeSearchResult({ name: `handler${String(i).padStart(2, '0')}`, filePath: `src/module${i}.ts` }));
+    const tokens = (value: unknown) => Math.ceil(JSON.stringify(value).length / 4);
+
+    beforeEach(() => {
+      vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    });
+
+    it('leaves the payload unchanged when no budget is passed', async () => {
+      vi.mocked(VectorIndex.search).mockResolvedValue(results(30));
+      const first = await handleOrient('/tmp/proj', 'handler', 5) as Record<string, unknown>;
+      expect(first.budget).toBeUndefined();
+      expect((first.relevantFunctions as unknown[]).length).toBe(5);
+      expect(vi.mocked(VectorIndex.search).mock.calls.at(-1)?.[3]).toMatchObject({ limit: 15 });
+    });
+
+    it('fits a small budget by dropping peripheral entries first, with a receipt', async () => {
+      vi.mocked(VectorIndex.search).mockResolvedValue(results(30));
+      const full = await handleOrient('/tmp/proj', 'handler', 5, 1_000_000) as Record<string, unknown>;
+      const budget = Math.floor(tokens(full) / 3);
+      const fitted = await handleOrient('/tmp/proj', 'handler', 5, budget) as Record<string, unknown> & {
+        budget: { tokenBudget: number; estimatedTokens: number; fits: boolean; omitted?: Record<string, number> };
+      };
+      expect(fitted.budget).toMatchObject({ tokenBudget: budget, fits: true });
+      expect(fitted.budget.estimatedTokens).toBeLessThanOrEqual(budget);
+      expect(fitted.budget.omitted).toBeDefined();
+      const kept = fitted.relevantFunctions as Array<{ name: string }>;
+      expect(kept.map(f => f.name)).toEqual((full.relevantFunctions as Array<{ name: string }>).slice(0, kept.length).map(f => f.name));
+      expect(fitted.relevantFiles).toEqual([...new Set((fitted.relevantFunctions as Array<{ filePath: string }>).map(f => f.filePath))]);
+      // A call path is kept exactly when its function is.
+      expect((fitted.callPaths as Array<{ function: string }>).map(p => p.function)).toEqual(kept.map(f => f.name));
+      if ((fitted.budget.omitted?.relevantFunctions ?? 0) > 0) {
+        expect(fitted.budget.omitted?.insertionPoints).toBe((full.insertionPoints as unknown[]).length);
+        expect(fitted.relevantFunctionsOmitted).toMatch(/omitted to fit tokenBudget/);
+      }
+    });
+
+    it('broadens past the default entry cap when the budget allows', async () => {
+      vi.mocked(VectorIndex.search).mockResolvedValue(results(40));
+      const wide = await handleOrient('/tmp/proj', 'handler', 5, 1_000_000) as Record<string, unknown> & { budget: { fits: boolean } };
+      expect((wide.relevantFunctions as unknown[]).length).toBe(40);
+      expect(wide.budget.fits).toBe(true);
+      expect(vi.mocked(VectorIndex.search).mock.calls.at(-1)?.[3]).toMatchObject({ limit: 60 });
+    });
+
+    it('never trims governance context and keeps at least one function', async () => {
+      vi.mocked(VectorIndex.search).mockResolvedValue(results(10));
+      vi.mocked(loadDecisionStore).mockResolvedValue({
+        version: '1', sessionId: 's', updatedAt: '2026-01-01T00:00:00.000Z',
+        decisions: [{
+          id: 'abcd1234', status: 'draft', title: 'Keep auth in one place', rationale: 'r', consequences: 'c',
+          proposedRequirement: null, affectedDomains: [], affectedFiles: ['src/module0.ts'], sessionId: 's',
+          recordedAt: '2026-01-01T00:00:00.000Z', confidence: 'high', syncedToSpecs: [],
+        }],
+      } as never);
+      const plain = await handleOrient('/tmp/proj', 'handler', 5) as Record<string, unknown>;
+      const tiny = await handleOrient('/tmp/proj', 'handler', 5, 10) as Record<string, unknown> & { budget: { fits: boolean } };
+      expect(tiny.budget.fits).toBe(false);
+      expect((tiny.relevantFunctions as unknown[]).length).toBe(1);
+      expect(plain.pendingDecisions).toBeDefined();
+      expect(tiny.pendingDecisions).toEqual(plain.pendingDecisions);
+    });
+
+    it('is deterministic for the same task and budget', async () => {
+      vi.mocked(VectorIndex.search).mockResolvedValue(results(30));
+      const a = await handleOrient('/tmp/proj', 'handler', 5, 400);
+      const b = await handleOrient('/tmp/proj', 'handler', 5, 400);
+      expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    });
+  });
 });

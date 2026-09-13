@@ -1,6 +1,6 @@
 # Refine orient context budgeting: exact-fit payloads, cold-start breadth, seed-conditioned shaping
 
-> Status: PROPOSED (2026-07-03, e2e audit). Closes the gap between orient's existing budgeting
+> Status: BUILT (2026-09-13), narrowed — see *Scope as built*. Originally PROPOSED (2026-07-03, e2e audit). Closes the gap between orient's existing budgeting
 > plumbing and the Aider repo-map mechanism (prior art:
 > https://aider.chat/docs/repomap.html) — deterministic, no LLM, no new tuning constants.
 
@@ -55,6 +55,28 @@ Deliberately NOT borrowed from Aider: its map cache/refresh heuristics (OpenLore
 epistemic lease already own freshness), its rendered-tree text format (orient returns structured
 JSON), and its empirically tuned per-signal multipliers as opaque floats (every constant here is
 table-fixed and source-cited, never a knob).
+
+## Scope as built
+
+- **Built:** whole-payload fitting for `orient` (`src/core/services/mcp-handlers/budget-fit.ts`). With
+  a `tokenBudget`, relevant functions and call paths come from a bounded 60-entry pool
+  (`ORIENT_BUDGET_CANDIDATE_POOL`), and whole trailing entries are dropped across sections in a fixed
+  peripheral-first order until the rendered payload fits; a call path is kept exactly when its function
+  is. A binary search finds the fewest removals. On this repository a 3,000-token budget returns 12
+  functions with their call paths (the default is 5).
+  A `budget` receipt reports estimated tokens, whether the budget was met, and omitted counts per
+  section. Governance context is never trimmed, and the no-budget default is unchanged.
+- **Deferred — cold-start expansion and seed-conditioned shaping:** `orient` reads no working diff, so
+  "no diff" is not a signal it has, and a task with no matched symbol already returns an explained
+  empty result rather than a narrow one. Its only seed signal is the task match, which already orders
+  the ranking (and restarts personalized PageRank in `rankBy: 'pagerank'`). A cold-start multiplier
+  would have nothing to broaden.
+- **Deferred — `get_minimal_context`:** its distance mode deliberately ignores `tokenBudget` so the
+  default shape is never silently truncated (pinned by a test), and its PageRank mode already fits each
+  neighbour list with an `omittedForBudget` receipt. Moving it to whole-payload fitting is a separate
+  decision.
+- **Fixed caps without a budget stay:** the per-section `.slice` caps still apply to sections derived
+  per call (spec domains, insertion points, enrichment); only the function and call-path pool widens.
 
 ## Why this is in scope
 

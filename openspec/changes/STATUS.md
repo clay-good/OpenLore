@@ -36,14 +36,18 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 0
+## In flight — 1
+
+`refine-orient-context-budgeting` — `orient` fits `tokenBudget` across sections with receipts, broadens
+a cold-start orientation, and keeps the no-budget default unchanged. On a branch with its `change:`
+marker in `src/`.
 
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 100
+## To build — 99
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -169,7 +173,6 @@ trust boundary for served content.
 | `optimize-serving-hot-path-caches` | The default tools rebuild derived graph structures and re-parse multi-MB artifacts on every call, and re-scan the whole corpus per keyword search |
 | `promote-backed-language-visibility` | the generated matrix discloses its scope, the docs get one canonical page |
 | `refine-first-run-partial-serving` | minutes of "no index found" before the first answer |
-| `refine-orient-context-budgeting` | exact-fit payloads, cold-start breadth, seed-conditioned shaping |
 | `refine-public-surface-certification` | rule codes + semver bump, an accepted-breakage baseline, consumer-weighted verdicts |
 | `resolve-literal-reflective-dispatch` | recover the *structurally* decidable subset, and refuse the rest loudly |
 | `scale-analyze-to-workspace-shards` | a monorepo stops paying for the whole repo on every analyze |
