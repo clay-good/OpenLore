@@ -49,13 +49,15 @@ function repositoryRelativeUri(path: string): string | undefined {
 }
 
 function compareFindings(a: ClassifiedFinding, b: ClassifiedFinding): number {
-  const keys = (f: ClassifiedFinding) => [f.code, f.subject, f.discriminator ?? '', f.location?.path ?? '', String(f.location?.line ?? ''), f.message];
-  const ka = keys(a);
-  const kb = keys(b);
-  for (let i = 0; i < ka.length; i++) {
-    if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
-  }
-  return 0;
+  // Include every result-emitted field. Sorting only by the identity fields would leave
+  // distinct findings tied, making the serialized log depend on the caller's input order.
+  const key = (f: ClassifiedFinding) => JSON.stringify([
+    f.code, f.subject, f.discriminator ?? '', f.location?.path ?? '', f.location?.line ?? null,
+    f.message, f.severity, f.source, f.enforcementClass, f.baselineState ?? '', f.remediation ?? '',
+  ]);
+  const ka = key(a);
+  const kb = key(b);
+  return ka < kb ? -1 : ka > kb ? 1 : 0;
 }
 
 /** Build a SARIF 2.1.0 log object from classified governance findings. Pure and deterministic. */
@@ -116,7 +118,7 @@ export function buildSarifLog(input: SarifInput): Record<string, unknown> {
       results,
       properties: {
         ...(input.graphFingerprint ? { graphFingerprint: input.graphFingerprint } : { graphFingerprint: null }),
-        caveats: [...(input.caveats ?? [])],
+        caveats: [...(input.caveats ?? [])].sort(),
       },
     }],
   };

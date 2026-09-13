@@ -1282,5 +1282,16 @@ describe('openlore enforce --sarif (add-sarif-finding-emission)', () => {
       spy.mockRestore();
     }
   });
-});
 
+  it('only warns when the SARIF path cannot be written', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-enforce-sarif-'));
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
+    try {
+      expect(await runEnforceCli({ cwd: root, json: true, sarif: join(root, 'missing', 'out.sarif') })).toBe(0);
+      expect(spy.mock.calls.map((call: unknown[]) => String(call[0])).join('')).toMatch(/could not write SARIF/i);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

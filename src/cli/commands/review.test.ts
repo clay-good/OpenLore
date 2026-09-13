@@ -493,6 +493,24 @@ describe('runReviewCli (output + advisory posture)', () => {
     expect(errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toMatch(/Wrote review briefing/);
   });
 
+  it('--sarif writes a SARIF log without changing the JSON briefing or exit code', async () => {
+    const plain = await runReviewCli({ cwd: '/p', base: 'main', format: 'json' });
+    const plainOut = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    outSpy.mockClear();
+    const withSarif = await runReviewCli({ cwd: '/p', base: 'main', format: 'json', sarif: '/tmp/review.sarif' });
+    expect(withSarif).toBe(plain);
+    expect(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toBe(plainOut);
+    const sarifWrite = vi.mocked(writeFile).mock.calls.find(([path]) => path === '/tmp/review.sarif');
+    expect(sarifWrite).toBeDefined();
+    expect(JSON.parse(String(sarifWrite![1]))).toMatchObject({ version: '2.1.0', runs: [{ tool: { driver: { name: 'openlore' } } }] });
+  });
+
+  it('--sarif write failures only warn and preserve the review result', async () => {
+    vi.mocked(writeFile).mockRejectedValueOnce(new Error('read-only filesystem'));
+    expect(await runReviewCli({ cwd: '/p', base: 'main', format: 'json', sarif: '/nope/review.sarif' })).toBe(0);
+    expect(errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toMatch(/could not write SARIF/i);
+  });
+
   it('advisory by default (exit 0) even with a block pattern configured but no --hook', async () => {
     const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }], orphanFindings: [{ id: 'memory-1', filePath: 'x.ts', message: 'gone' }] } } as unknown as BlastRadiusBriefing;
     vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);

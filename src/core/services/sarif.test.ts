@@ -69,6 +69,14 @@ describe('buildSarifLog (add-sarif-finding-emission)', () => {
     expect(one).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/);
   });
 
+  it('breaks result sort ties with every emitted finding field and sorts caveats', () => {
+    const a = finding({ source: 'alpha', severity: 'info' });
+    const b = finding({ source: 'beta', severity: 'warning' });
+    const one = JSON.stringify(buildSarifLog({ findings: [a, b], toolVersion: '2', caveats: ['z', 'a'] }));
+    const two = JSON.stringify(buildSarifLog({ findings: [b, a], toolVersion: '2', caveats: ['a', 'z'] }));
+    expect(one).toBe(two);
+  });
+
   it('reports the installed version', () => {
     expect(openloreVersion()).toMatch(/^\d+\.\d+\.\d+/);
   });
