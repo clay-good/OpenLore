@@ -33,10 +33,10 @@ const LANG = 'GitHub Actions';
  * Masking neutralizes that while keeping the value detectable as dynamic (a `uses:` that
  * contains the sentinel is unresolvable → no edge). Mirrors the Helm `{{ }}` masking pre-pass.
  */
-const GHA_EXPR = '__OPENLORE_GHA_EXPR__';
+export const GHA_EXPR = '__OPENLORE_GHA_EXPR__';
 
 /** Replace every `${{ … }}` with the sentinel, preserving newline count so line numbers stay stable. */
-function maskExpressions(content: string): string {
+export function maskExpressions(content: string): string {
   return content.replace(/\$\{\{[\s\S]{0,10000}?\}\}/g, (m) => GHA_EXPR + m.replace(/[^\n]/g, ''));
 }
 

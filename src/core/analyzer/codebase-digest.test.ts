@@ -225,6 +225,23 @@ describe('generateCodebaseDigest', () => {
     expect(content).toContain('**1** entry points');
   });
 
+  // change: add-framework-entry-point-adapters
+  it('counts the entry points that live in files a config invokes', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
+    await mkdir(join(tmpDir, 'src', 'cli'), { recursive: true });
+    await writeFile(join(tmpDir, 'src', 'cli', 'index.ts'), 'export {};\n');
+    await writeFile(join(tmpDir, 'package.json'), JSON.stringify({ bin: 'src/cli/index.ts' }));
+    const node = (id: string) => ({
+      id, name: id.split('::')[1], filePath: id.split('::')[0], isAsync: false, language: 'TypeScript',
+      startIndex: 0, endIndex: 1, fanIn: 0, fanOut: 0,
+    });
+    const entryPoints = [node('src/cli/index.ts::run'), node('src/orphan.ts::unused')];
+    const cg = makeCallGraph({ nodes: entryPoints, entryPoints });
+    await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
+    const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+    expect(content).toContain('**2** entry points (no internal callers), **1** of them in files a config invokes');
+  });
+
   it('includes layer violations section when violations are present', async () => {
     const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
     const cg = makeCallGraph({

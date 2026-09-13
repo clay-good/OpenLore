@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { confinedAtomicWriteFile } from '../../utils/path-confinement.js';
 import { frameServedContent } from '../services/served-content.js';
 import type { LLMContext, RepoStructure } from './artifact-generator.js';
+import { collectExternalWiring } from './entry-point-adapters.js';
 import type { DependencyGraphResult } from './dependency-graph.js';
 import { languageCoverageMatrix, renderCoverageMatrixMarkdown } from './language-support.js';
 
@@ -142,7 +143,14 @@ export async function generateCodebaseDigest(
       lines.push('## Overview');
       lines.push(`- **${prodNodes.length}** functions / methods analyzed`);
       lines.push(`- **${internalEdges}** internal call edges`);
-      lines.push(`- **${cg.entryPoints?.length ?? 0}** entry points (no internal callers)`);
+      // Decompose entry points into config-wired vs. orphaned (change: add-framework-entry-point-adapters).
+      const wired = rootPath
+        ? new Set((await collectExternalWiring(rootPath).catch(() => ({ wired: [] }))).wired.map(w => w.file))
+        : new Set<string>();
+      const wiredEntryPoints = (cg.entryPoints ?? [])
+        .filter(n => wired.has(n.filePath.replaceAll('\\', '/').replace(/^\.\//, ''))).length;
+      lines.push(`- **${cg.entryPoints?.length ?? 0}** entry points (no internal callers)` +
+        (wiredEntryPoints > 0 ? `, **${wiredEntryPoints}** of them in files a config invokes (package.json, tsconfig, test-runner config, CI run steps)` : ''));
       lines.push(`- **${cg.hubFunctions?.length ?? 0}** hub functions (high fan-in)`);
       if (cg.stats?.avgFanIn !== undefined) {
         lines.push(`- avg fan-in: **${cg.stats.avgFanIn.toFixed(2)}**, avg fan-out: **${cg.stats.avgFanOut.toFixed(2)}**`);

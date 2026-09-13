@@ -36,14 +36,19 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 0
+## In flight — 1
+
+`add-framework-entry-point-adapters` — deterministic readers of package.json, tsconfig, test-runner
+config, and GitHub Actions `run:` steps add receipted `externally-wired` liveness roots to
+`find_dead_code`, `report_coverage_gaps`, and the entry-point digest. On a branch with its `change:`
+marker in `src/`.
 
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 101
+## To build — 100
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -116,7 +121,6 @@ trust boundary for served content.
 | `add-edit-loop-breakage-verdict` | The graph learns about a breaking edit in milliseconds; the agent learns at commit time |
 | `add-enforcement-baseline-ratchet` | a `frozen` class that blocks only NEW findings |
 | `add-flag-impact-analysis` | Piranha's deterministic kernel, no rewriter |
-| `add-framework-entry-point-adapters` | config-wired code stops reading as orphaned |
 | `add-incremental-bundle-delta` | apply a stale ancestor bundle, then re-analyze only the delta |
 | `add-incremental-early-cutoff` | unchanged extracted facts stop the invalidation cascade |
 | `add-knowledge-map-and-coupling-upgrades` | bus factor, temporal aggregation, ticket-ID grouping |

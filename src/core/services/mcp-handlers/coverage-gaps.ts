@@ -29,7 +29,8 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
-import { deadCodeIds } from './reachability.js';
+import { deadCodeIds, wiringKey } from './reachability.js';
+import { collectExternalWiring, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import {
   loadDynamicBoundaryReport,
   loadImportAdjacency,
@@ -106,6 +107,12 @@ interface CoverageGap {
    *                                     dispatch), not evidence the code is unused.
    */
   deadReason?: DeadFlagReason;
+  /**
+   * The config receipts (file and key) that invoke this symbol's file (change:
+   * add-framework-entry-point-adapters): the reason an untested symbol with no caller is
+   * untested-not-dead rather than also-dead.
+   */
+  externallyWired?: WiringReceipt[];
 }
 
 /** Why a gap is also in the dead set. Closed set, derived — no new traversal. */
@@ -232,6 +239,7 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     dynamicReport,
     dynamicReport ? await loadImportAdjacency(absDir) : new Map(),
   );
+  const wiredFiles = new Map((await collectExternalWiring(absDir).catch(() => ({ wired: [] }))).wired.map(w => [w.file, w.receipts]));
   const landmarks = computeLandmarkSignals(cg, { deadIds });
   const signalsById = new Map(landmarks.map(l => [l.id, l.signals]));
 
@@ -244,6 +252,8 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
       fanIn: n.fanIn ?? 0,
       signals,
     };
+    const wiredBy = wiredFiles.get(wiringKey(n.filePath));
+    if (wiredBy) gap.externallyWired = wiredBy;
     if (deadIds.has(n.id)) {
       // `also-dead` asserts the ABSENCE of any caller. A dynamic-boundary site that can name this
       // symbol is exactly the evidence that such an assertion is not established, so the label is

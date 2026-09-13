@@ -1,6 +1,6 @@
 # Framework entry-point adapters: config-wired code stops reading as orphaned
 
-> Status: PROPOSED (2026-07-03, e2e audit follow-up). Deterministic config-file readers that mark
+> Status: BUILT (2026-09-12), narrowed — see *Scope as built*. Originally PROPOSED (2026-07-03, e2e audit follow-up). Deterministic config-file readers that mark
 > files/symbols as externally referenced — package.json `bin`/`main`/`exports`, npm scripts, test
 > runner configs, CI workflow `run:` steps — so wiring that never appears as an import stops
 > inflating entry-point and dead-code candidates. Prior art: knip (https://knip.dev/), whose ~150
@@ -59,6 +59,27 @@ globs that fail to resolve are disclosed boundaries, never guesses. Deliberately
 from knip: its `--fix` auto-deletion (nothing is ever auto-deleted — `reachability.ts:28`), its
 JS-ecosystem-only scope framing, and the 150-plugin ambition — adapters stay a small set of
 format parsers, each deterministic and individually testable.
+
+## Scope as built
+
+- **Built:** one module, `src/core/analyzer/entry-point-adapters.ts`, with three stages:
+  - the root `package.json` (`bin`, `main`, `module`, `exports`, `scripts`, `jest`), with a build
+    output mapped back to its source through tsconfig `outDir` → `rootDir` before the literal path;
+  - `tsconfig.json` `files` and literal vitest/vite/jest `setupFiles` / `globalSetup` values;
+  - `.github/workflows` `run:` steps, through the workflow parser's `${{ }}` masking, relative to each
+    step's working directory.
+- **Roots:** every function in a wired file is an `externally-wired` root. The call graph has no node
+  for module-scope code, so what a wired file runs at load time cannot be told from its helpers; the
+  roots doctrine prefers false-live over false-dead.
+- **Consumers:** `find_dead_code` (`rootKinds.externallyWired`, an `externalWiring` receipt block,
+  scope and boundary caveats), `report_coverage_gaps` (`externallyWired` receipts on a gap), and the
+  CODEBASE.md entry-point line (config-wired count).
+- **Measured on this repository:** 38 of 1,018 entry points are in files a config invokes; 53 files are
+  wired, and 7 references are disclosed boundaries (a `cd` inside a multi-line CI script and a shell
+  variable).
+- **Deferred:** tsconfig `references` (they name projects, not code files), workspace-member manifests,
+  framework route conventions, and literal values the config builds at runtime. The first two and the
+  route conventions are named in the `find_dead_code` caveats.
 
 ## Why this is in scope
 
