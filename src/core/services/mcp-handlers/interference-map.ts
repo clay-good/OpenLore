@@ -1219,10 +1219,17 @@ function boundResponse(map: InterferenceMap): InterferenceMap {
   map.conflictsTruncated = map.conflictCount > map.conflicts.length;
   map.findings = map.findings.slice(0, 25);
   map.findingsTruncated = map.findingCount > map.findings.length;
-  // Long repository paths and refs can keep a 50-conflict list over budget: halve it until it fits.
-  while (jsonBytes(map) > SOFT_BUDGET_BYTES && (map.conflicts.length > 0 || map.findings.length > 0)) {
-    map.conflicts = map.conflicts.slice(0, Math.floor(map.conflicts.length / 2));
-    map.findings = map.findings.slice(0, Math.floor(map.findings.length / 2));
+  // Long repository paths and refs can keep a 50-conflict list over budget: halve the evidence
+  // lists until it fits, but only while dropping evidence can help. Node details are capped first.
+  map.changes = map.changes.map(c => (c.detail && c.detail.length > 500 ? { ...c, detail: `${c.detail.slice(0, 500)}…` } : c));
+  const withoutEvidence = jsonBytes({ ...map, conflicts: [], findings: [] });
+  if (withoutEvidence <= SOFT_BUDGET_BYTES) {
+    while (jsonBytes(map) > SOFT_BUDGET_BYTES && map.conflicts.length > 0) {
+      map.conflicts = map.conflicts.slice(0, Math.floor(map.conflicts.length / 2));
+    }
+    while (jsonBytes(map) > SOFT_BUDGET_BYTES && map.findings.length > 0) {
+      map.findings = map.findings.slice(0, Math.floor(map.findings.length / 2));
+    }
   }
   map.conflictsTruncated = map.conflictCount > map.conflicts.length;
   map.findingsTruncated = map.findingCount > map.findings.length;

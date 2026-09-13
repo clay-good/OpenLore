@@ -1266,3 +1266,21 @@ describe('textual merge verdict — determinism, time budget, and response size'
     expect(map.truncationNote).toBeDefined();
   });
 });
+
+describe('response bound keeps evidence when nodes alone are large', () => {
+  it('caps node details and does not drop conflicts that cannot make the map fit', async () => {
+    const failed = Array.from({ length: 38 }, (_, i) => change({
+      ref: `broken-${i}`, actor: 'x', repo: 'this-repo', kind: 'branch', fetchError: 'e'.repeat(8_000),
+    }));
+    const pair = ['p1', 'p2'].map(ref => change({
+      ref, actor: 'x', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(4, 1)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+    }));
+    const map = await run({ directory: '/p', includePullRequests: false }, providers({ branchesByRepo: { 'this-repo': [...pair, ...failed] } }));
+    expect(map.conflictCount).toBe(1);
+    expect(map.conflicts).toHaveLength(1);
+    expect(Buffer.byteLength(JSON.stringify(map))).toBeLessThanOrEqual(200 * 1024);
+    expect(map.changes.every(c => (c.detail?.length ?? 0) <= 501)).toBe(true);
+  });
+});

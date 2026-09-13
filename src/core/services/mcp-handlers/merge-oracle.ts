@@ -58,8 +58,9 @@ const PATH_CHARS_CAP = 240;
 const OBJECT_ID = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 /** Longest single git process run for one simulation. */
 const SPAWN_TIMEOUT_MS = 30_000;
-/** Changed paths that are checked for merge attributes. */
+/** Changed paths that are checked for merge attributes, by count and by total characters (Windows argv limit). */
 const SHARED_PATHS_CAP = 500;
+const SHARED_PATH_CHARS_CAP = 24_000;
 /** Repository settings that change merge results and are plain values, safe to forward with `-c`. */
 const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.renamelimit', 'diff.renamelimit', 'merge.directoryrenames']);
 /** `merge` attribute values that mean the default text merge the simulation runs. */
@@ -87,6 +88,10 @@ function scratchEnv(): NodeJS.ProcessEnv {
   const env = noLazyFetchEnv();
   for (const key of REPO_ENV) delete env[key];
   return env;
+}
+
+function capPath(path: string): string {
+  return path.length > PATH_CHARS_CAP ? `${path.slice(0, PATH_CHARS_CAP)}…` : path;
 }
 
 function firstLine(text: string): string {
@@ -192,13 +197,16 @@ async function mergeAttributeBlocker(repoPath: string, base: string, tipA: strin
   );
   const shared = [...new Set([...(await changed(tipA)), ...(await changed(tipB))])].sort();
   if (shared.length === 0) return undefined;
-  if (shared.length > SHARED_PATHS_CAP) return `${shared.length} changed paths exceed the ${SHARED_PATHS_CAP}-path merge-attribute check`;
+  const chars = shared.reduce((n, path) => n + path.length + 1, 0);
+  if (shared.length > SHARED_PATHS_CAP || chars > SHARED_PATH_CHARS_CAP) {
+    return `${shared.length} changed paths (${chars} characters) exceed the merge-attribute check limit of ${SHARED_PATHS_CAP} paths or ${SHARED_PATH_CHARS_CAP} characters`;
+  }
   for (const source of [undefined, base, tipA, tipB]) {
     const args = ['check-attr', '-z', ...(source ? [`--source=${source}`] : []), 'merge', '--', ...shared];
     const fields = (await readGit(repoPath, args, deadline)).split('\0');
     for (let i = 0; i + 2 < fields.length; i += 3) {
       if (!DEFAULT_MERGE_ATTRIBUTE.has(fields[i + 2])) {
-        return `${fields[i]} has merge attribute "${fields[i + 2]}", which the simulation does not apply`;
+        return `${capPath(fields[i])} has merge attribute "${fields[i + 2].slice(0, 40)}", which the simulation does not apply`;
       }
     }
   }
@@ -218,7 +226,8 @@ export async function simulateMerge(repoPath: string, tipA: string, tipB: string
   try {
     return await simulate(repoPath, tipA, tipB, deadline, options.scratchParent ?? tmpdir());
   } catch (error) {
-    const detail = error instanceof DeadlineReached ? error.message : `merge simulation failed: ${failureDetail(error)}`;
+    const budgetSpent = error instanceof DeadlineReached || (deadline !== undefined && Date.now() >= deadline);
+    const detail = budgetSpent ? 'the merge simulation time budget was spent' : `merge simulation failed: ${failureDetail(error)}`;
     return { verdict: 'not-assessed', detail };
   }
 }
@@ -279,14 +288,14 @@ async function simulate(repoPath: string, tipA: string, tipB: string, deadline: 
       const tab = entry.indexOf('\t');
       if (tab < 0) continue;
       if (entry.startsWith(`${GITLINK_MODE} `)) {
-        return { verdict: 'not-assessed', detail: `${entry.slice(tab + 1)} is a submodule conflict, and the simulation cannot see submodule commits` };
+        return { verdict: 'not-assessed', detail: `${capPath(entry.slice(tab + 1))} is a submodule conflict, and the simulation cannot see submodule commits` };
       }
       paths.add(entry.slice(tab + 1));
     }
     const files = [...paths].sort();
     return {
       verdict: 'textual-conflict',
-      conflictedFiles: files.slice(0, CONFLICTED_FILES_CAP).map(f => (f.length > PATH_CHARS_CAP ? `${f.slice(0, PATH_CHARS_CAP)}…` : f)),
+      conflictedFiles: files.slice(0, CONFLICTED_FILES_CAP).map(capPath),
       conflictedFileCount: files.length,
     };
   } finally {
