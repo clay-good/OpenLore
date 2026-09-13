@@ -131,7 +131,7 @@ function renderHuman(c: ImpactCertificate): string {
     lines.push(`   ${sev === 'critical' ? '⛔' : '⚠'} NEW path into "${surface}" (${sev}): ${paths[0].path.join(' → ')}${paths.length > 1 ? ` (+${paths.length - 1} more)` : ''}`);
   }
   if ('count' in c.tests && c.tests.count > 0) {
-    const top = c.tests.toRun.slice(0, 8).map(t => t.test).join(', ');
+    const top = c.tests.toRun.slice(0, 8).map(t => t.test === '*' ? t.file : t.test).join(', ');
     lines.push(`   Tests to run (${c.tests.count}): ${top}${c.tests.count > 8 ? ', …' : ''}`);
   }
   if ('truncatedAtDepth' in c.tests && c.tests.truncatedAtDepth !== undefined) {

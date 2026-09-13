@@ -688,6 +688,37 @@ describe('select_tests safeguard tiers', () => {
     expect(r.soundness.caveats.join(' ')).toMatch(/5 more untracked test file\(s\)/);
   });
 
+  it('applies the test rule in the analyzed directory frame, not under a tests/ parent', async () => {
+    git.prefix = 'tests/app/';
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph([node({ id: 'src/util.ts::util' })], []) } as never);
+    await touch('src/util.ts');
+    changed([{ path: 'tests/app/src/util.ts', status: 'modified' }]);
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests).toEqual([]);
+  });
+
+  it('never selects a test through a tested_by association the backward walk crossed', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph([
+      node({ id: 'src/s.ts::S' }), node({ id: 'src/p.ts::P' }),
+      node({ id: 'src/t1.test.ts::T1', isTest: true }), node({ id: 'src/t2.test.ts::T2', isTest: true }),
+    ], [
+      edge('src/t1.test.ts::T1', 'src/s.ts::S'),
+      edge('src/p.ts::P', 'src/t1.test.ts::T1', 'tested_by', 'T1'),
+      edge('src/t2.test.ts::T2', 'src/p.ts::P'),
+    ]) } as never);
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['S'] }) as Result;
+    expect(r.selectedTests.map(t => t.test)).toEqual(['T1']);
+  });
+
+  it('keeps the no-tests-detected warning when only tier files were selected', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph([node({ id: 'src/foo.ts::foo' })], []) } as never);
+    await touch('src/foo.ts', 'src/new.test.ts');
+    changed([{ path: 'src/foo.ts', status: 'modified', isTest: false }, { path: 'src/new.test.ts', status: 'added' }]);
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests.map(t => t.test)).toEqual(['*']);
+    expect(r.soundness.caveats.join(' ')).toMatch(/No tests were detected in this graph, so reachability selected nothing/);
+  });
+
   it('discloses flakiness as not assessed on the nothing-to-select return too', async () => {
     const r = await handleSelectTests({ directory: '/p', changedSymbols: ['noSuchSymbol'] }) as Result;
     expect(r.flakiness.assessed).toBe(false);

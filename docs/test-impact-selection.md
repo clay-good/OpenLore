@@ -121,7 +121,7 @@ and `confidence` always agree; a tier reason always wins), and `alsoIncludedBeca
 reason that selected it, tier first, then shallowest depth. A selection whose reaching path crosses a synthesized (heuristically recovered)
 edge carries `structuralBasis: { synthesizedEdges, synthesizedBy }`, built from the existing edge
 provenance labels (a direct edge for the same pair wins). A synthesized `tested_by` association counts
-as one such edge, and `directResolvedOnly` skips it. A directly-resolved selection carries none,
+as one such edge, and `directResolvedOnly` skips it. A path that only exists by crossing a `tested_by` association (production to test) backward is not a reaching path, so it selects nothing. A directly-resolved selection carries none,
 and the response-level `confidenceBoundary` is unchanged.
 
 `flakiness: { assessed: false }` states that no test-outcome history is read, so no test is labeled

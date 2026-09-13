@@ -256,9 +256,11 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       const prefix = await gitPrefix(absDir);
       const tierFileSet = new Set<string>();
       for (const f of diff.files) {
-        if (f.status === 'deleted' || !isTestFile(f.path)) continue;
+        if (f.status === 'deleted') continue;
+        // The test rule is applied in the analyzed directory's frame, as the analyzer applies it: under
+        // an analyzed `tests/app/`, `src/util.ts` is production code.
         const local = localPath(f.path, prefix);
-        if (!local || tierFileSet.has(local) || !existsSync(join(absDir, local))) continue;
+        if (!local || !isTestFile(local) || tierFileSet.has(local) || !existsSync(join(absDir, local))) continue;
         tierFileSet.add(local);
         tierFiles.push({ file: local, reason: f.status === 'added' ? SELECTION_REASON.newTest : SELECTION_REASON.changedTest });
       }
@@ -352,6 +354,13 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   const byTest = new Map<string, SelectedTest>();
   const reasonsByTest = new Map<string, Set<string>>();
   const pairEdges = buildPairEdgeIndex(cg.edges);
+  // The backward walk also crosses `tested_by` associations (production → test), so a reached id path
+  // can run through a test that is not a caller at all. Such a path is not a reaching path.
+  const testedByOnlyPairs = new Set<string>();
+  for (const e of cg.edges) if (e.kind === 'tested_by') testedByOnlyPairs.add(e.callerId + '\x00' + e.calleeId);
+  for (const e of cg.edges) if (e.kind !== 'tested_by') testedByOnlyPairs.delete(e.callerId + '\x00' + e.calleeId);
+  const crossesTestedBy = (ids: string[]): boolean =>
+    testedByOnlyPairs.size > 0 && ids.some((id, i) => i + 1 < ids.length && testedByOnlyPairs.has(id + '\x00' + ids[i + 1]));
   /** The synthesized edges on a reaching id path `[caller, …, seed]`, by the pair index (direct wins). */
   const basisOfPath = (ids: string[]): SelectedTest['structuralBasis'] => {
     let synthesizedEdges = 0;
@@ -414,8 +423,10 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     if (depth === 0) continue;
     const n = nodeMap.get(id);
     if (!n?.isTest || n.isExternal) continue;
+    const idPath = idPathToSeed(id);
+    if (crossesTestedBy(idPath)) continue;
     const confidence: Confidence = depth === 1 ? 'high' : depth <= 3 ? 'medium' : 'low';
-    add(n.filePath, n.name, pathToSeed(id), confidence, SELECTION_REASON.reaches(depth), basisOfPath(idPathToSeed(id)));
+    add(n.filePath, n.name, pathToSeed(id), confidence, SELECTION_REASON.reaches(depth), basisOfPath(idPath));
   }
 
   // Source 2 — `tested_by` edges on any reached production node (catches import-
@@ -427,7 +438,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     const idPath = idPathToSeed(e.callerId);
     // The backward walk crosses `tested_by` edges too, so a production node can be reached THROUGH
     // this very test; selecting the test again via that node would serve a cyclic path.
-    if (idPath.includes(e.calleeId)) continue;
+    if (idPath.includes(e.calleeId) || crossesTestedBy(idPath)) continue;
     const testFile = e.calleeId.includes('::') ? e.calleeId.split('::')[0] : e.calleeId;
     const onSeed = seedIds.has(e.callerId);
     const confidence: Confidence = onSeed ? 'high' : 'medium';
@@ -504,7 +515,9 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     'Static call-graph selection is an over-approximate prioritizer, not a sound replacement for the full suite.',
     'Dynamic dispatch, reflection, and dependency injection can under-select (a relevant test may be missed).',
   ];
-  if (testDetection === 'none' && selectedTests.length === 0) {
+  if (testDetection === 'none' && selectedTests.length > 0) {
+    caveats.push('No tests were detected in this graph, so reachability selected nothing; only changed or new test files were selected. Verify test-file detection for your languages.');
+  } else if (testDetection === 'none') {
     caveats.push('No tests were detected in this graph — the selection is empty, not "no tests needed". Verify test-file detection for your languages.');
   } else if (testDetection === 'partial') {
     caveats.push(`Test detection is incomplete for some changed languages (${seedLangs.join(', ')}); tests in undetected languages are missing.`);
