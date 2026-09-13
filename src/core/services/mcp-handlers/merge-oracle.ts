@@ -130,9 +130,13 @@ function isExitOne(error: unknown): boolean {
   return e?.code === 1 && !e.killed && !e.signal;
 }
 
-/** Git's boolean parsing: `true`/`yes`/`on`, a key with no value, or any non-zero integer. */
-function isGitTrue(value: string): boolean {
-  return value === '' || /^(true|yes|on)$/i.test(value) || (/^-?\d+$/.test(value) && Number(value) !== 0);
+/**
+ * Git's boolean parsing. A key with no `=` at all (`hasValue` false) is true; an explicitly empty
+ * value is false; otherwise `true`/`yes`/`on` or any non-zero integer.
+ */
+function isGitTrue(value: string, hasValue = true): boolean {
+  if (!hasValue) return true;
+  return /^(true|yes|on)$/i.test(value) || (/^-?\d+$/.test(value) && Number(value) !== 0);
 }
 
 /**
@@ -183,10 +187,11 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
     const scope = fields[i];
     const entry = fields[i + 1];
     const newline = entry.indexOf('\n');
-    const key = (newline < 0 ? entry : entry.slice(0, newline)).toLowerCase();
-    const value = newline < 0 ? '' : entry.slice(newline + 1).trim();
+    const hasValue = newline >= 0;
+    const key = (hasValue ? entry.slice(0, newline) : entry).toLowerCase();
+    const value = hasValue ? entry.slice(newline + 1).trim() : '';
     const repositoryScope = scope === 'local' || scope === 'worktree' || scope === 'command';
-    if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && isGitTrue(value))) {
+    if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && isGitTrue(value, hasValue))) {
       partialClone = true;
       continue;
     }
@@ -205,12 +210,12 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       continue;
     }
     if (key === 'merge.renormalize') {
-      if (isGitTrue(value)) return { detail: 'merge.renormalize is set, and renormalization depends on attributes the simulation ignores' };
+      if (isGitTrue(value, hasValue)) return { detail: 'merge.renormalize is set, and renormalization depends on attributes the simulation ignores' };
       continue;
     }
     if (FORWARDED_CONFIG.has(key)) {
-      if (!/^[A-Za-z0-9_-]{0,32}$/.test(value)) return { detail: `${key} has a value the simulation cannot forward` };
-      args.push('-c', `${key}=${value || 'true'}`);
+      if (hasValue && !/^[A-Za-z0-9_-]{1,32}$/.test(value)) return { detail: `${key} has a value the simulation cannot forward` };
+      args.push('-c', `${key}=${hasValue ? value : 'true'}`);
       continue;
     }
     if (parts[0] === 'merge' && repositoryScope && !HARMLESS_MERGE_KEYS.has(key)) {
@@ -266,6 +271,13 @@ async function mergeAttributeBlocker(
       const parts = path.split('/');
       for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
     }
+    // Filesystems fold more than ASCII case (APFS: `ſ`→`s`, `ς`→`σ`, `ß`→`ss`, NFC/NFD), and JavaScript
+    // has no full Unicode case fold, so a non-ASCII name where folding matters is not assessed.
+    const nonAscii = (name: string) => /[\u0080-\uFFFF]/.test(name);
+    const dirChars = [...dirs].reduce((n, dir) => n + dir.length + 2, 0);
+    if (dirChars > SHARED_PATH_CHARS_CAP) return `changed directories (${dirChars} characters) exceed the ${SHARED_PATH_CHARS_CAP}-character case check limit`;
+    const nonAsciiDir = [...dirs].find(nonAscii);
+    if (nonAsciiDir) return `${capPath(nonAsciiDir)} is a non-ASCII directory name, and filesystem case folding cannot be checked for it`;
     const dirsLower = new Map([...dirs].map(dir => [dir.toLowerCase(), dir] as const));
     if (dirsLower.size < dirs.size) {
       const spellings = [...dirs].filter(dir => dirsLower.get(dir.toLowerCase()) !== dir);
@@ -277,6 +289,9 @@ async function mergeAttributeBlocker(
       if (dirs.size > 0) entries.push(...(await readGit(repoPath, [...listing, '--', ...[...dirs].map(dir => `${dir}/`)], deadline)).split('\0'));
       for (const entry of entries.filter(Boolean)) {
         const name = entry.slice(entry.lastIndexOf('/') + 1);
+        if (nonAscii(name)) {
+          return `${capPath(entry)} is a non-ASCII name beside a changed path, and filesystem case folding cannot be checked for it`;
+        }
         const variantAttributes = name !== '.gitattributes' && name.toLowerCase() === '.gitattributes';
         const variantDir = !dirs.has(entry) && dirsLower.has(entry.toLowerCase());
         if (variantAttributes || variantDir) {

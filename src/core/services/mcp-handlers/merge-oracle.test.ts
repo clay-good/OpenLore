@@ -422,4 +422,26 @@ describe('simulateMerge', () => {
     const main = git(repo, 'rev-parse', 'main');
     expect(await simulateMerge(join(lone, '.git'), main, main)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/different git directory/) });
   });
+
+  it('is not-assessed for non-ASCII names a filesystem may case-fold, and reads an empty config value as false', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { 'sub/f.txt': lines() }, 'fold-base');
+    const a = commitFiles(repo, base, { 'sub/f.txt': lines({ 1: 'B' }), 'sub/.gitattributeſ': 'f.txt -merge\n' }, 'fold-a');
+    const b = commitFiles(repo, base, { 'sub/f.txt': lines({ 7: 'H' }), 'sub/.gitattributeſ': 'f.txt -merge\n' }, 'fold-b');
+    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/non-ASCII name beside a changed path/) });
+    const sigmaBase = commitFiles(repo, main, { 'σ/f.txt': lines() }, 'sigma-base');
+    const s1 = commitFiles(repo, sigmaBase, { 'σ/f.txt': lines({ 1: 'B' }), 'ς/.gitattributes': 'f.txt -merge\n' }, 'sigma-a');
+    const s2 = commitFiles(repo, sigmaBase, { 'σ/f.txt': lines({ 7: 'H' }), 'ς/.gitattributes': 'f.txt -merge\n' }, 'sigma-b');
+    expect(await simulateMerge(repo, s1, s2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/non-ASCII/) });
+
+    const moved = git(repo, 'rev-parse', 'ren-move');
+    const edited = git(repo, 'rev-parse', 'ren-edit');
+    expect((await simulateMerge(repo, moved, edited)).verdict).toBe('clean-automerge');
+    git(repo, 'config', 'merge.renames', '');
+    try {
+      expect((await simulateMerge(repo, moved, edited)).verdict).not.toBe('clean-automerge');
+    } finally {
+      git(repo, 'config', '--unset', 'merge.renames');
+    }
+  });
 });
