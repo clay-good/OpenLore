@@ -3,8 +3,8 @@
 ## Implementation
 - [x] Remove the `?? _RO` fallback in `toolAnnotations`; require an explicit `TOOL_ANNOTATIONS`
       entry per tool in `TOOL_DEFINITIONS`
-- [x] Annotation-coverage test: fails CI when a tool lacks an entry, or an audited writing tool is
-      declared `readOnlyHint: true`
+- [x] Annotation guard: fails CI when a tool lacks an entry, or when a read-only tool's dispatch target
+      reaches a write or spawn primitive through resolved calls outside the audited cache paths
 - [ ] ~~`outputSchema` + `structuredContent` for the `substrate` tools~~ — deferred (see proposal)
 - [x] Convert argument-validation failures from `McpError(InvalidParams)` to `isError: true` tool
       results with parameter name, expected shape, and a corrected example call

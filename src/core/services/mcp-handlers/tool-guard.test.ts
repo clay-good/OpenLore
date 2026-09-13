@@ -3,8 +3,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { TOOL_DEFINITIONS } from '../../../cli/commands/mcp.js';
 import {
-  validateToolArgs, exampleToolArguments, invalidArgumentsMessage, withToolTimeout, ToolTimeoutError, toolTimeoutMs,
+  validateToolArgs, exampleToolArguments, invalidArgumentsMessage, checkToolArguments, withToolTimeout, ToolTimeoutError, toolTimeoutMs,
   capOutput, capStructuredResult, classifyToolError,
 } from './tool-guard.js';
 
@@ -94,13 +96,69 @@ describe('invalidArgumentsMessage', () => {
     });
     expect(exampleToolArguments(undefined)).toEqual({});
   });
+  it('fills nested required properties and minimum array items', () => {
+    const nested = {
+      type: 'object',
+      properties: {
+        target: { type: 'object', properties: { kind: { type: 'string', enum: ['file'] }, value: { type: 'string' } }, required: ['kind', 'value'] },
+        tasks: { type: 'array', minItems: 1, items: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+      },
+      required: ['target', 'tasks'],
+    };
+    expect(exampleToolArguments(nested)).toEqual({ target: { kind: 'file', value: 'example' }, tasks: [{ id: 'example' }] });
+  });
+  it('gives every advertised tool a corrected example that passes its own schema', () => {
+    const failing = TOOL_DEFINITIONS
+      .filter(t => validateToolArgs(exampleToolArguments(t.inputSchema), t.inputSchema) !== null)
+      .map(t => `${t.name}: ${validateToolArgs(exampleToolArguments(t.inputSchema), t.inputSchema)}`);
+    expect(failing).toEqual([]);
+  });
   it('names the tool, the parameter and its shape, and a call to retry with', () => {
     const detail = validateToolArgs({ directory: '/p', functionName: 'f', maxDepth: 2 }, tool)!;
     expect(invalidArgumentsMessage('get_subgraph', detail, tool)).toBe(
-      'Invalid arguments for "get_subgraph": /kind: missing required property; expected type string; example: "calls". ' +
+      'Tool error [INVALID_ARGS]: Invalid arguments for "get_subgraph": /kind: missing required property; expected type string; example: "calls". ' +
       'Fix the arguments and call "get_subgraph" again, for example with: ' +
       '{"directory":"/absolute/path/to/project","functionName":"example","maxDepth":1,"kind":"calls"}',
     );
+  });
+  it('bounds, redacts, and strips terminal controls from echoed caller values', () => {
+    const huge = invalidArgumentsMessage('orient', `/rankBy: value "${'x'.repeat(2_000_000)}" not in enum`, {});
+    expect(huge.length).toBeLessThan(1_300);
+    const secret = invalidArgumentsMessage('orient', '/rankBy: value "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH" not in enum', {});
+    expect(secret).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(invalidArgumentsMessage('orient', 'unknown property "a\u001b[31mb"', {})).not.toContain('\u001b');
+  });
+});
+
+describe('checkToolArguments', () => {
+  const schema = { type: 'object', properties: { directory: { type: 'string' }, symbol: { type: 'string' } }, required: ['symbol'] };
+  const accept = async (d: string) => d || '/launch';
+  const fail = async () => { throw new Error('Directory not found: /gone.'); };
+
+  it('passes valid arguments through with the validated directory', async () => {
+    await expect(checkToolArguments('t', { symbol: 's', directory: '/p' }, schema, { hadExplicitDirectory: true, validateDirectory: accept }))
+      .resolves.toEqual({ ok: true, directory: '/p' });
+  });
+  it('returns a schema rejection as an isError result, never a thrown protocol error', async () => {
+    const checked = await checkToolArguments('t', { directory: '/p' }, schema, { hadExplicitDirectory: true, validateDirectory: accept });
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.result.isError).toBe(true);
+    expect(checked.result.content[0].text).toMatch(/^Tool error \[INVALID_ARGS\]: Invalid arguments for "t": \/symbol: missing required property/);
+  });
+  it('gives a bad directory an example that includes a directory, with no doubled period', async () => {
+    const checked = await checkToolArguments('t', { symbol: 's' }, schema, { hadExplicitDirectory: false, validateDirectory: fail });
+    if (checked.ok) throw new Error('expected a rejection');
+    const text = checked.result.content[0].text;
+    expect(text).toContain('launch root could not be used');
+    expect(text).toContain('for example with: {"symbol":"example","directory":"/absolute/path/to/project"}');
+    expect(text).not.toContain('..');
+  });
+  it('is the only argument gate in the MCP CallTool handler, which throws no protocol error for it', () => {
+    const source = readFileSync(new URL('../../../cli/commands/mcp.ts', import.meta.url), 'utf-8');
+    expect(source).toContain('await checkToolArguments(name, args, toolDef.inputSchema,');
+    expect(source).toContain('if (!checked.ok) return checked.result;');
+    expect(source).not.toMatch(/new McpError\(/);
   });
 });
 

@@ -503,8 +503,10 @@ describe('tool annotations (spec-11)', () => {
     expect(toolAnnotations('orient').title).toBe('Orient');
   });
 
-  it('marks LLM-backed tools open-world and local analysis tools closed-world', () => {
-    expect(toolAnnotations('generate_tests').openWorldHint).toBe(true);
+  it('marks network- and LLM-reaching tools open-world and local analysis tools closed-world', () => {
+    expect(toolAnnotations('map_in_flight_conflicts').openWorldHint).toBe(true);
+    expect(toolAnnotations('record_decision').openWorldHint).toBe(true);
+    expect(toolAnnotations('generate_tests').openWorldHint).toBe(false);
     expect(toolAnnotations('orient').openWorldHint).toBe(false);
     expect(toolAnnotations('find_dead_code').openWorldHint).toBe(false);
   });

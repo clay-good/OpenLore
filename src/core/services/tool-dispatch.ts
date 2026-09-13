@@ -415,7 +415,9 @@ async function dispatchToolImpl(
   } else if (name === 'audit_spec_coverage') {
     const { directory, maxUncovered = 50, hubThreshold = 5 } =
       args as { directory: string; maxUncovered?: number; hubThreshold?: number };
-    return handleAuditSpecCoverage(directory, maxUncovered, hubThreshold);
+    // Read-only over MCP: never overwrite the CLI's saved audit report or snapshot (change:
+    // adopt-mcp-protocol-conformance).
+    return handleAuditSpecCoverage(directory, maxUncovered, hubThreshold, false);
   } else if (name === 'generate_tests') {
     const { directory, domains, framework, useLlm, dryRun } =
       args as {

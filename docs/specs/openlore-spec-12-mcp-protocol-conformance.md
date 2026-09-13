@@ -6,6 +6,11 @@
 
 ## Progress
 
+> Superseded in part (2026-09-12, change `adopt-mcp-protocol-conformance`): argument-validation
+> failures are no longer JSON-RPC -32602 errors. They are `isError: true` tool results that name the
+> parameter, the expected shape, and a corrected example call (SEP-1303). The rest of this record is
+> historical.
+
 Branch: `openlore-spec-12-mcp-protocol-conformance`. **DONE** — handler behavior in PR #117;
 the SDK-`Client` conformance suite (acceptance #13) added in PR #137.
 

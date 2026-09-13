@@ -22,6 +22,7 @@ import { validateAgainstSchema } from '../../../cli/manifest/schema-validator.js
 import { MCP_TOOL_TIMEOUT_MS, MCP_TOOL_TIMEOUT_OVERRIDES } from '../../../constants.js';
 import { suggestKey } from '../config-schema.js';
 import { sanitizeForTerminal } from '../../../utils/misc.js';
+import { redactSecretString } from '../secret-redaction.js';
 
 /** Stable MCP tool error-code taxonomy. */
 export type McpToolErrorCode = 'INVALID_ARGS' | 'NOT_ANALYZED' | 'TIMEOUT' | 'OUTPUT_TRUNCATED' | 'INTERNAL';
@@ -60,7 +61,7 @@ function schemaAtPath(schema: Record<string, unknown>, path: string): Record<str
 }
 
 /** A value of the shape a property schema declares, for a corrected-call example. */
-function exampleValue(propertySchema: Record<string, unknown>, key?: string): unknown {
+function exampleValue(propertySchema: Record<string, unknown>, key?: string, depth = 0): unknown {
   if (Array.isArray(propertySchema.enum) && propertySchema.enum.length > 0) return propertySchema.enum[0];
   if ('const' in propertySchema) return propertySchema.const;
   const expected = Array.isArray(propertySchema.type)
@@ -71,31 +72,85 @@ function exampleValue(propertySchema: Record<string, unknown>, key?: string): un
     return typeof propertySchema.minimum === 'number' ? propertySchema.minimum : 1;
   }
   if (expected.includes('boolean')) return true;
-  if (expected.includes('array')) return [];
-  return {};
+  if (expected.includes('array')) {
+    const items = propertySchema.items;
+    const count = typeof propertySchema.minItems === 'number' ? propertySchema.minItems : 0;
+    return items && typeof items === 'object' && depth < MAX_EXAMPLE_DEPTH
+      ? Array.from({ length: count }, () => exampleValue(items as Record<string, unknown>, undefined, depth + 1))
+      : [];
+  }
+  // An object example fills its own required properties, so the example validates.
+  return depth < MAX_EXAMPLE_DEPTH ? exampleToolArguments(propertySchema, depth + 1) : {};
 }
 
+const MAX_EXAMPLE_DEPTH = 4;
+
 /**
- * A minimal argument object that satisfies a tool's top-level `required` list, each value an
- * example of its declared shape — the "corrected example" half of an actionable validation error.
+ * A minimal argument object that satisfies a schema's `required` list, each value an example of its
+ * declared shape — the "corrected example" half of an actionable validation error.
  */
-export function exampleToolArguments(inputSchema: unknown): Record<string, unknown> {
+export function exampleToolArguments(inputSchema: unknown, depth = 0): Record<string, unknown> {
   if (!inputSchema || typeof inputSchema !== 'object') return {};
   const schema = inputSchema as Record<string, unknown>;
   const properties = schema.properties && typeof schema.properties === 'object'
     ? schema.properties as Record<string, Record<string, unknown>>
     : {};
   const required = Array.isArray(schema.required) ? schema.required.filter((k): k is string => typeof k === 'string') : [];
-  return Object.fromEntries(required.map(key => [key, exampleValue(properties[key] ?? {}, key)]));
+  return Object.fromEntries(required.map(key => [key, exampleValue(properties[key] ?? {}, key, depth)]));
 }
+
+/** Characters of rejection detail kept; a caller-supplied value is echoed inside it. */
+const MAX_INVALID_ARGUMENTS_DETAIL = 1_000;
 
 /**
  * The text of an actionable Tool Execution Error for rejected arguments: the tool, what is wrong
- * (parameter path and expected shape), and a corrected example call to retry with.
+ * (parameter path and expected shape), and a corrected example call to retry with. The detail echoes
+ * caller-supplied values, so it is bounded, secret-redacted, and stripped of terminal controls like
+ * every other error result.
  */
-export function invalidArgumentsMessage(toolName: string, detail: string, inputSchema: unknown): string {
-  return `Invalid arguments for "${toolName}": ${detail}. Fix the arguments and call "${toolName}" again, ` +
-    `for example with: ${JSON.stringify(exampleToolArguments(inputSchema))}`;
+export function invalidArgumentsMessage(
+  toolName: string,
+  detail: string,
+  inputSchema: unknown,
+  exampleOverrides: Record<string, unknown> = {},
+): string {
+  const trimmed = detail.replace(/\.+$/, '');
+  const bounded = trimmed.length > MAX_INVALID_ARGUMENTS_DETAIL
+    ? `${trimmed.slice(0, MAX_INVALID_ARGUMENTS_DETAIL - 1)}…`
+    : trimmed;
+  const example = { ...exampleToolArguments(inputSchema), ...exampleOverrides };
+  return sanitizeForTerminal(redactSecretString(
+    `Tool error [INVALID_ARGS]: Invalid arguments for "${toolName}": ${bounded}. ` +
+    `Fix the arguments and call "${toolName}" again, for example with: ${JSON.stringify(example)}`,
+  ));
+}
+
+type InvalidArgumentsResult = { content: Array<{ type: 'text'; text: string }>; isError: true };
+
+/**
+ * Check a tool call's arguments before anything runs (change: adopt-mcp-protocol-conformance): schema
+ * validation, then the `directory`. A rejection is a Tool Execution Error (`isError: true`) the model
+ * can act on, never a JSON-RPC protocol error; it creates nothing, so no telemetry is written for it.
+ */
+export async function checkToolArguments(
+  toolName: string,
+  args: unknown,
+  inputSchema: unknown,
+  options: { hadExplicitDirectory: boolean; validateDirectory: (directory: string) => Promise<string> },
+): Promise<{ ok: true; directory: string } | { ok: false; result: InvalidArgumentsResult }> {
+  const reject = (text: string) => ({ ok: false as const, result: { content: [{ type: 'text' as const, text }], isError: true as const } });
+  const argError = validateToolArgs(args, inputSchema);
+  if (argError) return reject(invalidArgumentsMessage(toolName, argError, inputSchema));
+  const raw = args !== null && typeof args === 'object' ? (args as Record<string, unknown>).directory : undefined;
+  try {
+    return { ok: true, directory: await options.validateDirectory(typeof raw === 'string' ? raw : '') };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const hint = options.hadExplicitDirectory
+      ? ''
+      : '; the server launch root could not be used, so pass an existing absolute project path as "directory"';
+    return reject(invalidArgumentsMessage(toolName, `/directory: ${detail}${hint}`, inputSchema, { directory: '/absolute/path/to/project' }));
+  }
 }
 
 /**

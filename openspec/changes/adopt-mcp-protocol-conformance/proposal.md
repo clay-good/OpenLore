@@ -1,4 +1,4 @@
-# Adopt MCP protocol conformance: guarded annotations, output schemas, actionable errors, elicitation
+# Adopt MCP protocol conformance: guarded annotations and actionable errors
 
 > Status: BUILT (2026-09-12), narrowed — see *Scope as built*. Originally PROPOSED (2026-07-03, e2e audit). Brings the MCP surface up to the now-standard protocol
 > features it is ideally placed to use — all local, all deterministic, no behavior change to any
@@ -64,13 +64,15 @@ dishonest, per the existing comment at `mcp.ts:2413-2414`), and remote/HTTP tran
   and the WATCH comment on the custom initialize handler.
 - **Deferred — `outputSchema` + `structuredContent`:** since this proposal, the default surface gained
   guarded standing-context token budgets (`STANDING_CONTEXT_BUDGETS`, at most 10% headroom over a
-  measured baseline, published in `docs/mcp-tools.md`). Output schemas for the 15 `substrate` tools
-  would be a large standing-cost increase on the surface ADR-0023 keeps lean, for a benefit no
-  current client consumes. It needs its own measured change.
-- **Deferred — elicitation for decision approval:** the decisions gate runs in a git pre-commit hook,
-  outside any MCP session, so no in-flight MCP request exists to carry an elicitation when it fires.
-  An approval flow inside `approve_decision` changes the human-authorization design and needs its own
-  change.
+  measured baseline, published in `docs/mcp-tools.md`). Measured with `measureStandingContextTokens`:
+  the 15 `substrate` tools cost 5,131 tokens against a 5,500 budget; a bare top-level schema per tool
+  adds about 950 tokens (+19%) and a realistic nested one about 4,900 (+96%). That needs a new,
+  reviewed baseline on the surface ADR-0023 keeps lean, so it needs its own measured change.
+- **Deferred — elicitation for decision approval:** the decisions gate runs in a git pre-commit hook
+  (`openlore decisions --gate`), outside any MCP session, so the gate itself has no MCP request to
+  carry an elicitation. The in-session path could elicit from inside an `approve_decision` call, but
+  that changes the human-authorization design (today `approvedBy` is recorded as `human` for a
+  model-issued call), so it needs its own change.
 
 ## Why this is in scope
 
@@ -82,12 +84,13 @@ membership, so no benchmark is required (ADR-0023 governs membership, not encodi
 
 ## Impact
 
-- `src/cli/commands/mcp.ts` (annotations guard, error shape, initialize WATCH comment,
-  elicitation wiring), `mcp-presets.test.ts` (budget bumps with rationale), schema derivation for
-  the 13 substrate tools, a new annotation-coverage test.
-- Specs: `mcp-quality` — 2 ADDED (StandardToolAnnotationsAreEmittedAndGuarded,
-  SubstrateConclusionsCarryOutputSchemas); `mcp-handlers` — 2 ADDED
-  (ValidationErrorsAreActionable, ElicitationRidesTheDecisionApprovalFlow).
-- Risk: payload-budget growth from schemas (mitigated: substrate-first, per-bump rationale);
-  client compatibility with `structuredContent` (mitigated: text content is still emitted, per
-  spec); elicitation is capability-gated so non-supporting hosts see no change.
+- As built: `src/cli/commands/mcp.ts` (annotation table without fallback, corrected hints, the
+  argument check, the initialize WATCH comment), `src/core/services/mcp-handlers/tool-guard.ts`
+  (`checkToolArguments`, bounded and redacted example-bearing messages), and
+  `src/cli/commands/mcp-annotations.test.ts` (coverage plus a type-checker write-reachability guard).
+- Specs as built: `mcp-quality` — MODIFIED *Tool Behavior Annotations* (it already required accurate
+  annotations; the guard and the no-fallback rule are added to it); `mcp-handlers` — ADDED
+  *ValidationErrorsAreActionable*.
+- The original *What changes* items for output schemas and elicitation, their budget bumps, and the
+  "client without elicitation" check are not built; see *Scope as built*.
+- Risk: a client that expected JSON-RPC -32602 for bad arguments now receives an `isError` result.
