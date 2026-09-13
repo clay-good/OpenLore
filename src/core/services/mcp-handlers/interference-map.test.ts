@@ -1084,3 +1084,134 @@ describe('round-2 — CRLF parsing (C1) + honest caveats (M-A, FINDING 2)', () =
     expect(map.caveats.some(c => /read against the LOCAL base/i.test(c))).toBe(false);
   });
 });
+
+describe('InFlightConflictsCarryATextualMergeVerdict (add-merge-tree-conflict-oracle)', () => {
+  const TIP_X = 'a'.repeat(40);
+  const TIP_Y = 'b'.repeat(40);
+  const wawPair = (tips: { x?: string; y?: string }) => [
+    change({
+      ref: 'feat-x', actor: 'Alice', repo: 'this-repo', kind: 'branch', ...(tips.x ? { tip: tips.x } : {}),
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(4, 3)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+    }),
+    change({
+      ref: 'feat-y', actor: 'Bob', repo: 'this-repo', kind: 'branch', ...(tips.y ? { tip: tips.y } : {}),
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(6, 2)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+    }),
+  ];
+  const withMerge = (branches: RawChange[], simulateMerge: InFlightProviders['simulateMerge']): InFlightProviders =>
+    ({ ...providers({ branchesByRepo: { 'this-repo': branches } }), simulateMerge });
+
+  it('keeps a WAW hazard and annotates a disjoint edit as clean-automerge', async () => {
+    const sim = vi.fn(async () => ({ verdict: 'clean-automerge' as const }));
+    const map = await run({ directory: '/p', includePullRequests: false }, withMerge(wawPair({ x: TIP_X, y: TIP_Y }), sim));
+    expect(sim).toHaveBeenCalledWith('/p', TIP_X, TIP_Y);
+    expect(map.conflicts[0]).toMatchObject({ hazard: 'WAW', textualMerge: { verdict: 'clean-automerge' } });
+    expect(map.conflicts[0].suggestion).toMatch(/merges the text cleanly/i);
+    expect(map.findingCount).toBe(1);
+    expect(map.textualConflictCount).toBe(0);
+    expect(map.caveats.some(c => /merge-tree.*ignores this repository's merge drivers/i.test(c))).toBe(true);
+  });
+
+  it('annotates same-line edits as textual-conflict, names the files, and counts them in the headline', async () => {
+    const sim = async () => ({ verdict: 'textual-conflict' as const, conflictedFiles: ['a.ts'] });
+    const map = await run({ directory: '/p', includePullRequests: false }, withMerge(wawPair({ x: TIP_X, y: TIP_Y }), sim));
+    expect(map.conflicts[0].textualMerge).toEqual({ verdict: 'textual-conflict', conflictedFiles: ['a.ts'] });
+    expect(map.conflicts[0].suggestion).toMatch(/textual merge conflict in a\.ts/i);
+    expect(map.textualConflictCount).toBe(1);
+    expect(map.headline).toMatch(/1 textual merge conflict/);
+  });
+
+  it('does not call a shared append "safe in either order" when git reports a textual conflict', async () => {
+    const reg = (ref: string, tip: string) => change({
+      ref, actor: ref, repo: 'this-repo', kind: 'branch', tip,
+      files: [{ path: 'reg.ts', status: 'modified', hunks: [appendHunk(20)] }],
+      baseSymbolsByFile: new Map([['reg.ts', [baseSym('reg.ts::REGISTRY', 10, 50)]]]),
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      withMerge([reg('pr-a', TIP_X), reg('pr-b', TIP_Y)], async () => ({ verdict: 'textual-conflict' as const, conflictedFiles: ['reg.ts'] })),
+    );
+    expect(map.conflicts[0].hazard).toBe('shared-append');
+    expect(map.conflicts[0].suggestion).not.toMatch(/safe to land/i);
+    expect(map.conflicts[0].suggestion).toMatch(/textual merge conflict in reg\.ts/i);
+  });
+
+  it('is not-assessed, never clean, when a tip is missing or one side is an agent task', async () => {
+    const sim = vi.fn(async () => ({ verdict: 'clean-automerge' as const }));
+    const noTip = await run({ directory: '/p', includePullRequests: false }, withMerge(wawPair({ x: TIP_X }), sim));
+    expect(noTip.conflicts[0].textualMerge).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/feat-y has no local tip/) });
+    const task = await run(
+      { directory: '/p', includePullRequests: false, tasks: [{ id: 'agent-1', seedSymbols: ['a.ts::foo'] }] },
+      withMerge([wawPair({ x: TIP_X })[0]], sim),
+    );
+    expect(task.conflicts[0].textualMerge).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/agent task with no commit/) });
+    expect(sim).not.toHaveBeenCalled();
+  });
+
+  it('turns a failed or unresolvable simulation into not-assessed', async () => {
+    const rejected = await run(
+      { directory: '/p', includePullRequests: false },
+      withMerge(wawPair({ x: TIP_X, y: TIP_Y }), async () => { throw new Error('boom'); }),
+    );
+    expect(rejected.conflicts[0].textualMerge).toEqual({ verdict: 'not-assessed', detail: 'boom' });
+  });
+
+  it('does not simulate a cross-repository pair (no shared history)', async () => {
+    vi.mocked(handleSpecStoreStatus).mockResolvedValue({
+      bound: true, targets: [{ name: 'other', resolved: true, state: 'indexed', path: '/other' }],
+    } as never);
+    const sharedGraph = graph([node({ id: 'a.ts::foo', startLine: 1, endLine: 10, stableId: 'S1' })]);
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: sharedGraph } as never);
+    const [x, y] = wawPair({ x: TIP_X, y: TIP_Y });
+    const stable = new Map([['a.ts', [baseSym('a.ts::foo', 1, 10, 'S1')]]]);
+    const sim = vi.fn(async () => ({ verdict: 'clean-automerge' as const }));
+    const map = await run(
+      { directory: '/p', includePullRequests: false, federation: true },
+      { ...providers({ branchesByRepo: { 'this-repo': [{ ...x, baseSymbolsByFile: stable }], other: [{ ...y, repo: 'other', baseSymbolsByFile: stable }] } }), simulateMerge: sim },
+    );
+    const cross = map.conflicts.find(c => c.crossRepo);
+    expect(cross?.textualMerge).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/different repositories/) });
+    expect(sim).not.toHaveBeenCalled();
+  });
+
+  it('bounds the simulations per call and discloses the rest as not assessed', async () => {
+    const many = Array.from({ length: 12 }, (_, i) => change({
+      ref: `b${String(i).padStart(2, '0')}`, actor: 'x', repo: 'this-repo', kind: 'branch', tip: String(i % 10).repeat(40),
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(4, 1)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+    }));
+    const sim = vi.fn(async () => ({ verdict: 'clean-automerge' as const }));
+    const map = await run({ directory: '/p', includePullRequests: false }, withMerge(many, sim));
+    expect(map.conflictCount).toBe(66);
+    expect(sim).toHaveBeenCalledTimes(60);
+    expect(map.conflicts.filter(c => c.textualMerge.verdict === 'not-assessed')).toHaveLength(6);
+    expect(map.caveats.some(c => /6 conflict pair\(s\) were not merge-simulated/.test(c))).toBe(true);
+  });
+
+  it('carries a branch tip and a locally present PR head commit into the raw change', async () => {
+    const oid = 'c'.repeat(40);
+    const branchGit = async (_p: string, args: string[]): Promise<string> => {
+      if (args[0] === 'for-each-ref') return 'main\nfeature\n';
+      if (args[0] === 'merge-base') return 'abc123\n';
+      if (args[0] === 'rev-parse' && args.at(-1) === 'feature') return `${oid}\n`;
+      if (args[0] === 'rev-parse') return 'main\n';
+      if (args[0] === 'diff') return 'diff --git a/n.md b/n.md\n--- a/n.md\n+++ b/n.md\n@@ -1 +1 @@\n-a\n+b\n';
+      return '';
+    };
+    const branches = await defaultEnumerateBranches('/repo', 'this-repo', 'main', undefined, branchGit);
+    expect((Array.isArray(branches) ? branches : branches.changes)[0].tip).toBe(oid);
+
+    const patch = 'diff --git a/n.md b/n.md\n--- a/n.md\n+++ b/n.md\n@@ -1 +1 @@\n-a\n+b\n';
+    const listWith = (headRefOid: string) => JSON.stringify([{ number: 7, headRefName: 'f', headRefOid, title: 't' }]);
+    const gh = (headRefOid: string) => async (_p: string, args: string[]) => (args[1] === 'list' ? listWith(headRefOid) : patch);
+    const present = await defaultEnumeratePullRequests('/repo', 'this-repo', 'main', gh(oid), async () => 'main\n');
+    expect(present.changes[0].tip).toBe(oid);
+    const absentGit = async (_p: string, args: string[]) => { if (args[0] === 'cat-file') throw new Error('missing'); return 'main\n'; };
+    const absent = await defaultEnumeratePullRequests('/repo', 'this-repo', 'main', gh(oid), absentGit);
+    expect(absent.changes[0].tip).toBeUndefined();
+    const forged = await defaultEnumeratePullRequests('/repo', 'this-repo', 'main', gh('--output=/tmp/x'), async () => 'main\n');
+    expect(forged.changes[0].tip).toBeUndefined();
+  });
+});

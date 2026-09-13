@@ -51,6 +51,7 @@ import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
 import type { ServedContentProvenance } from '../served-content.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
+import { simulateMerge, type TextualMerge } from './merge-oracle.js';
 
 
 // ── caps (mirrors plan_parallel_work: the schedule is O(N), evidence lists O(N²)) ──
@@ -62,6 +63,8 @@ const CONFLICT_LIST_CAP = 200;
 const FINDINGS_LIST_CAP = 100;
 /** Witness ids surfaced per conflict (a whole-file WAW pair can share dozens). */
 const WITNESS_CAP = 8;
+/** `git merge-tree` simulations run per call; further conflict pairs are disclosed as not assessed. */
+const MAX_MERGE_SIMULATIONS = 60;
 /** Files re-parsed per change for its base snapshot (a huge diff is the slow path). */
 const MAX_FILES_PER_CHANGE = 400;
 /**
@@ -146,6 +149,11 @@ export interface InterferenceConflict {
   witnesses: string[];
   /** Plain-language landing order suggestion. */
   suggestion: string;
+  /**
+   * What `git merge-tree` says about merging the two tips: `textual-conflict`, `clean-automerge`
+   * (the hazard is behavioral only), or `not-assessed` with a detail — never silently clean.
+   */
+  textualMerge: TextualMerge;
 }
 
 export interface InterferenceMap {
@@ -161,6 +169,8 @@ export interface InterferenceMap {
   conflicts: InterferenceConflict[];
   conflictCount: number;
   conflictsTruncated: boolean;
+  /** Conflict pairs whose merge simulation reports a textual conflict (over all pairs, uncapped). */
+  textualConflictCount: number;
   /** WAW conflicts as policy-shaped findings a caller/CI can classify. Capped — see `findingCount`. */
   findings: GovernanceFinding[];
   findingCount: number;
@@ -412,7 +422,18 @@ function shortName(id: string): string {
   return id.includes('::') ? id.split('::').pop()! : id;
 }
 
-function suggestionFor(v: HazardVerdict, labels: string[], a: ChangeNode, b: ChangeNode): string {
+function suggestionFor(v: HazardVerdict, labels: string[], a: ChangeNode, b: ChangeNode, merge: TextualMerge): string {
+  const base = hazardSuggestion(v, labels, a, b, merge);
+  if (merge.verdict === 'textual-conflict') {
+    return `${base} Git reports a textual merge conflict in ${merge.conflictedFiles?.join(', ') || 'the shared files'}: whichever lands second must resolve it by hand.`;
+  }
+  if (merge.verdict === 'clean-automerge' && (v.kind === 'WAW' || v.kind === 'RAW')) {
+    return `${base} Git merges the text cleanly, so the risk is behavioral, not a merge conflict.`;
+  }
+  return base;
+}
+
+function hazardSuggestion(v: HazardVerdict, labels: string[], a: ChangeNode, b: ChangeNode, merge: TextualMerge): string {
   const wits = witnessSummary(labels);
   switch (v.kind) {
     case 'WAW':
@@ -422,7 +443,9 @@ function suggestionFor(v: HazardVerdict, labels: string[], a: ChangeNode, b: Cha
       if (v.direction === 'A after B') return `Land ${b.ref} before ${a.ref} — ${a.ref} reads what ${b.ref} writes (${wits}).`;
       return `${a.ref} and ${b.ref} each read the other's writes (${wits}) — order is ambiguous; coordinate before landing either.`;
     case 'shared-append':
-      return `${a.ref} and ${b.ref} both append to ${wits}; git 3-way-merges this trivially. Safe to land in either order.`;
+      return merge.verdict === 'textual-conflict'
+        ? `${a.ref} and ${b.ref} both append to ${wits}.`
+        : `${a.ref} and ${b.ref} both append to ${wits}; git 3-way-merges this trivially. Safe to land in either order.`;
     case 'WAR':
       return `${a.ref} and ${b.ref} touch the same file(s) at disjoint symbols (${wits}). Low risk.`;
     case 'soft-coupling':
@@ -441,6 +464,8 @@ export interface RawChange {
   repo: string;
   kind: ActorKind;
   title?: string;
+  /** The change's tip commit id, when it exists locally (drives the textual merge simulation). */
+  tip?: string;
   /** Parsed diff hunks (empty when fetchError is set). */
   files: FileHunks[];
   /** Base-snapshot symbols by changed-file path (the provider does the re-parse I/O). */
@@ -469,6 +494,8 @@ export interface InFlightProviders {
   enumeratePullRequests(repoPath: string, repoName: string, baseRef: string): Promise<EnumerationOutput>;
   /** Whether `gh` is available at all (drives the "PRs not enumerated" caveat). */
   ghAvailable(repoPath: string): Promise<boolean>;
+  /** Simulate merging two tip commits (default: a read-only `git merge-tree` in a scratch repository). */
+  simulateMerge?(repoPath: string, tipA: string, tipB: string): Promise<TextualMerge>;
 }
 
 async function git(repoPath: string, args: string[]): Promise<string> {
@@ -522,9 +549,10 @@ async function buildBaseSymbols(
   const byFile = new Map<string, BaseSymbol[]>();
   const unreadable: string[] = [];
   for (const f of files.slice(0, MAX_FILES_PER_CHANGE)) {
-    // No base content exists for an added file. Two branches adding the same path
-    // are therefore a textual-conflict case for add-merge-tree-conflict-oracle;
-    // this symbol-based classifier must not pretend it assessed their new symbols.
+    // No base content exists for an added file, so this symbol-based classifier must
+    // not pretend it assessed its new symbols. The merge simulation only annotates
+    // pairs that already share a hazard, so two changes that only add the same path
+    // are still not reported here.
     if (f.status === 'added') continue;
     const basePath = f.oldPath ?? f.path; // a renamed file's base content lives at oldPath
     const lang = detectLanguage(basePath);
@@ -681,12 +709,12 @@ export async function defaultEnumerateBranches(
     let actor = branch;
     try { actor = (await runGit(repoPath, ['log', '-1', '--format=%an', '--end-of-options', branch])).trim() || branch; } catch { /* keep branch as actor */ }
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, mergeBase, files);
-    out.push({ actor, ref: branch, title: branch, repo: repoName, kind: 'branch', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
+    out.push({ actor, ref: branch, title: branch, repo: repoName, kind: 'branch', tip, files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return { changes: out, caveats: base.caveat ? [base.caveat] : [] };
 }
 
-interface GhPr { number: number; headRefName: string; author?: { login?: string }; title?: string }
+interface GhPr { number: number; headRefName: string; headRefOid?: string; author?: { login?: string }; title?: string }
 
 /** Default provider: enumerate open PRs via gh, diffing each against the local base. */
 export async function defaultEnumeratePullRequests(
@@ -702,7 +730,7 @@ export async function defaultEnumeratePullRequests(
 ): Promise<RawChangeEnumeration> {
   let prs: GhPr[];
   try {
-    const stdout = await runGh(repoPath, ['pr', 'list', '--state', 'open', '--json', 'number,headRefName,author,title', '--limit', '50']);
+    const stdout = await runGh(repoPath, ['pr', 'list', '--state', 'open', '--json', 'number,headRefName,headRefOid,author,title', '--limit', '50']);
     prs = JSON.parse(stdout) as GhPr[];
   } catch (error) {
     throw new Error(`gh pr list failed for ${repoName}: ${errorDetail(error)}`, { cause: error });
@@ -742,9 +770,21 @@ export async function defaultEnumeratePullRequests(
     // Old content is read from the LOCAL base ref (an approximation when the PR's base
     // has advanced past local) — disclosed in the caveats.
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, baseRef, files);
-    out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
+    const tip = await localCommit(repoPath, pr.headRefOid, runGit);
+    out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', ...(tip ? { tip } : {}), files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return { changes: out, caveats };
+}
+
+/** A PR head commit id, only when that commit is present locally (a merge needs its objects). */
+async function localCommit(repoPath: string, oid: string | undefined, runGit: CommandRunner): Promise<string | undefined> {
+  if (typeof oid !== 'string' || !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(oid)) return undefined;
+  try {
+    await runGit(repoPath, ['cat-file', '-e', `${oid}^{commit}`]);
+    return oid;
+  } catch {
+    return undefined;
+  }
 }
 
 async function defaultGhAvailable(repoPath: string): Promise<boolean> {
@@ -755,6 +795,7 @@ const DEFAULT_PROVIDERS: InFlightProviders = {
   enumerateBranches: defaultEnumerateBranches,
   enumeratePullRequests: defaultEnumeratePullRequests,
   ghAvailable: defaultGhAvailable,
+  simulateMerge,
 };
 
 function appendEnumeration(output: EnumerationOutput, raw: RawChange[], caveats: string[]): void {
@@ -917,7 +958,7 @@ export async function computeInterferenceMap(
   });
   const cgByRepo = new Map(repos.map(r => [r.name, r]));
 
-  interface AssessedNode { node: ChangeNode; footprint: Footprint; stableByNodeId: Map<string, string> }
+  interface AssessedNode { node: ChangeNode; footprint: Footprint; stableByNodeId: Map<string, string>; tip?: string }
   const assessed: AssessedNode[] = [];
   const notAssessed: ChangeNode[] = [];
   const partialReads: Array<{ ref: string; files: number }> = [];
@@ -963,6 +1004,7 @@ export async function computeInterferenceMap(
       node: { actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: true, changedFiles: rc.files.length, writeSetCount: writeMembers.length },
       footprint,
       stableByNodeId,
+      ...(rc.tip ? { tip: rc.tip } : {}),
     });
   }
 
@@ -996,7 +1038,7 @@ export async function computeInterferenceMap(
   if (malformedTasks > 0) caveats.push(`${malformedTasks} supplied task descriptor(s) were skipped for a missing/invalid id.`);
 
   // ── 4. Pairwise hazard classification across all assessed nodes ─────────────
-  const conflicts: InterferenceConflict[] = [];
+  const pairs: Array<{ conflict: Omit<InterferenceConflict, 'suggestion' | 'textualMerge'>; v: HazardVerdict; labels: string[]; A: AssessedNode; B: AssessedNode }> = [];
   const findings: GovernanceFinding[] = [];
   for (let i = 0; i < assessed.length; i++) {
     for (let j = i + 1; j < assessed.length; j++) {
@@ -1019,14 +1061,16 @@ export async function computeInterferenceMap(
       }
       if (v.kind === 'none') continue;
       const labels = v.witnesses.map(id => nameByWitnessId.get(id) ?? shortName(id));
-      conflicts.push({
-        a: { actor: A.node.actor, ref: A.node.ref, repo: A.node.repo, provenance: A.node.provenance },
-        b: { actor: B.node.actor, ref: B.node.ref, repo: B.node.repo, provenance: B.node.provenance },
-        hazard: v.kind,
-        direction: v.direction,
-        crossRepo,
-        witnesses: capWitnesses(labels),
-        suggestion: suggestionFor(v, labels, A.node, B.node),
+      pairs.push({
+        conflict: {
+          a: { actor: A.node.actor, ref: A.node.ref, repo: A.node.repo, provenance: A.node.provenance },
+          b: { actor: B.node.actor, ref: B.node.ref, repo: B.node.repo, provenance: B.node.provenance },
+          hazard: v.kind,
+          direction: v.direction,
+          crossRepo,
+          witnesses: capWitnesses(labels),
+        },
+        v, labels, A, B,
       });
       if (v.kind === 'WAW') {
         findings.push({
@@ -1040,8 +1084,39 @@ export async function computeInterferenceMap(
     }
   }
 
-  // Deterministic ordering of every list.
-  conflicts.sort(conflictOrder);
+  // ── 5. Textual merge verdict per conflict pair (deterministic order, bounded) ──
+  pairs.sort((x, y) => conflictOrder(x.conflict, y.conflict));
+  const merge = providers.simulateMerge ?? simulateMerge;
+  const conflicts: InterferenceConflict[] = [];
+  let simulations = 0;
+  let simulationCapped = 0;
+  for (const p of pairs) {
+    let textualMerge: TextualMerge;
+    if (p.conflict.crossRepo) {
+      textualMerge = { verdict: 'not-assessed', detail: 'changes in different repositories share no git history' };
+    } else if (!p.A.tip || !p.B.tip) {
+      const missing = [p.A, p.B].filter(n => !n.tip).map(n => n.node.kind === 'agent-task'
+        ? `${n.node.ref} is an agent task with no commit`
+        : `${n.node.ref} has no local tip commit (fetch it to assess)`);
+      textualMerge = { verdict: 'not-assessed', detail: missing.join('; ') };
+    } else if (simulations >= MAX_MERGE_SIMULATIONS) {
+      simulationCapped++;
+      textualMerge = { verdict: 'not-assessed', detail: `the ${MAX_MERGE_SIMULATIONS}-simulation cap for one call was reached` };
+    } else {
+      simulations++;
+      const repoPath = cgByRepo.get(p.A.node.repo)?.path ?? absDir;
+      textualMerge = await merge(repoPath, p.A.tip, p.B.tip).catch((error: unknown) => ({ verdict: 'not-assessed' as const, detail: errorDetail(error) }));
+    }
+    conflicts.push({ ...p.conflict, suggestion: suggestionFor(p.v, p.labels, p.A.node, p.B.node, textualMerge), textualMerge });
+  }
+  if (simulations > 0) {
+    caveats.push('Textual merge verdicts come from a read-only `git merge-tree` simulation in a scratch repository that ignores this repository\'s merge drivers and attributes; a repository that relies on a custom merge driver or `merge=union` may merge differently.');
+  }
+  if (simulationCapped > 0) {
+    caveats.push(`${simulationCapped} conflict pair(s) were not merge-simulated because the ${MAX_MERGE_SIMULATIONS}-simulation cap was reached.`);
+  }
+
+  // Deterministic ordering of every list (conflicts are already in conflictOrder).
   findings.sort((a, b) => (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : a.message < b.message ? -1 : a.message > b.message ? 1 : 0));
   const changes = [...assessed.map(a => a.node), ...notAssessed].sort(changeOrder);
 
@@ -1067,6 +1142,7 @@ export async function computeInterferenceMap(
     conflicts: conflicts.slice(0, CONFLICT_LIST_CAP),
     conflictCount: conflicts.length,
     conflictsTruncated: conflicts.length > CONFLICT_LIST_CAP,
+    textualConflictCount: conflicts.filter(c => c.textualMerge.verdict === 'textual-conflict').length,
     findings: findings.slice(0, FINDINGS_LIST_CAP),
     findingCount: findings.length,
     findingsTruncated: findings.length > FINDINGS_LIST_CAP,
@@ -1079,7 +1155,7 @@ export async function computeInterferenceMap(
   return boundResponse(map);
 }
 
-function conflictOrder(a: InterferenceConflict, b: InterferenceConflict): number {
+function conflictOrder(a: Pick<InterferenceConflict, 'a' | 'b' | 'hazard'>, b: Pick<InterferenceConflict, 'a' | 'b' | 'hazard'>): number {
   return a.a.repo.localeCompare(b.a.repo) || a.a.ref.localeCompare(b.a.ref)
     || a.b.repo.localeCompare(b.b.repo) || a.b.ref.localeCompare(b.b.ref)
     || a.hazard.localeCompare(b.hazard);
@@ -1105,6 +1181,7 @@ function renderHeadline(map: InterferenceMap): string {
   else {
     parts.push(`${map.conflictCount} conflict pair(s)`);
     if (waw > 0) parts.push(`${waw} write-write (must serialize)`);
+    if (map.textualConflictCount > 0) parts.push(`${map.textualConflictCount} textual merge conflict(s)`);
   }
   if (map.notAssessedCount > 0) parts.push(`${map.notAssessedCount} not assessed`);
   return parts.join('; ') + '.';

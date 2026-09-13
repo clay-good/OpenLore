@@ -1713,7 +1713,8 @@ export const TOOL_DEFINITIONS = [
       'Each footprint is derived from the ACTUAL diff (per-symbol append vs modify read off the hunks, so ' +
       'two PRs appending disjoint registry entries do NOT falsely conflict); the hazard classifier ' +
       '(WAW/RAW/shared-append/WAR) then runs across all nodes. Returns per conflict: the two actors, ' +
-      'hazard, shared symbols, suggested landing order. A change whose diff can\'t be fetched or whose ' +
+      'hazard, shared symbols, suggested landing order, and a textualMerge verdict from a read-only git ' +
+      'merge-tree simulation (textual-conflict | clean-automerge | not-assessed). A change whose diff can\'t be fetched or whose ' +
       'symbols don\'t resolve is "not assessed", never "no conflict". Read-only, stateless, advisory; ' +
       'opt-in federation matches across repos by stable id. Same hazard classifier as plan_parallel_work, ' +
       'different input: this harvests changes already in flight, plan_parallel_work plans a caller-supplied ' +

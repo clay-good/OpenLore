@@ -43,7 +43,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 99
+## To build — 98
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -122,7 +122,6 @@ trust boundary for served content.
 | `add-lsp-evidence-tier` | compiler-grade receipts for existing verdicts, never a navigation surface |
 | `add-memory-anchor-verdicts` | memories about one line stop drifting with the whole function |
 | `add-memory-trigger-predicates` | the right memory pushes itself into the briefing, deterministically |
-| `add-merge-tree-conflict-oracle` | A `git merge-tree` textual-conflict oracle inside map_in_flight_conflicts — separate "git will auto-merge" from "git will conflict" |
 | `add-ownership-tagged-conclusions` | per-conclusion staleness instead of a blanket lease |
 | `add-perf-regression-counter-budgets` | A deterministic counter-based performance budget in CI — catch the "fourth parse pass" before it lands |
 | `add-scip-index-interchange` | overlay compiler-verified resolution onto the tree-sitter ladder |
@@ -252,6 +251,16 @@ architecture violations, and matching specs are never dropped, and a `budget` re
 served size. Four adversarial reviews found the first version widened the pool before fitting (a
 budget above the default returned less); two verification rounds hardened the redesign. Cold-start
 expansion, seed shaping, and `get_minimal_context` are deferred.
+
+Shipped and archived since: `add-merge-tree-conflict-oracle` (2026-09-13, narrowed) — every
+`map_in_flight_conflicts` conflict pair carries a `textualMerge` verdict (`textual-conflict` with the
+files named, `clean-automerge`, or `not-assessed` with a reason) from `git merge-tree` between the two
+tip commits over a merge base resolved in the real repository. The merge runs in a scratch bare
+repository that reads the real objects through an alternates file: a pre-build probe showed that
+`merge-tree` writes objects and runs a repository-chosen merge driver (even from `info/attributes`,
+past `--attr-source`), and the scratch repository prevents both. A missing or criss-cross merge base,
+a PR head that is not local, an agent task, a cross-repo pair, or the 60-simulation cap is
+`not-assessed`, never clean. Per-symbol hunk mapping is deferred.
 
 ## Maintenance rules (what kept this table honest)
 
