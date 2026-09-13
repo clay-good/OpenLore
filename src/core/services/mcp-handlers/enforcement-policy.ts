@@ -160,6 +160,49 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A stable matched module depends on a strictly more-unstable module.',
     remediation: 'Instability inversion: {subject}; invert the dependency through a stable interface.',
   },
+  // ── public-surface certification (refine-public-surface-certification) ──
+  // One code per breaking contract rule, so a policy gates an individual rule. Emitted only by
+  // `certify_public_surface` (it needs a base ref); `openlore enforce` does not run it.
+  'export-removed': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'An exported symbol was removed from the public surface.',
+    remediation: 'Export removed: {subject}; keep a deprecated export, or release as a major version.',
+  },
+  'export-renamed': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'An exported symbol was renamed; consumers binding the old name break.',
+    remediation: 'Export renamed: {subject}; keep the old name as an alias, or release as a major version.',
+  },
+  'export-visibility-reduced': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'An exported symbol is still defined but no longer exported.',
+    remediation: 'Export hidden: {subject}; restore the export, or release as a major version.',
+  },
+  'param-removed': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'A parameter was removed from an exported signature.',
+    remediation: 'Parameter removed: {subject}; keep the parameter (ignored), or release as a major version.',
+  },
+  'param-required-added': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'A required parameter was added to an exported signature.',
+    remediation: 'Required parameter added: {subject}; make it optional with a default, or release as a major version.',
+  },
+  'param-became-required': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'An optional parameter of an exported signature became required.',
+    remediation: 'Parameter became required: {subject}; keep it optional, or release as a major version.',
+  },
+  'param-type-narrowed': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'A parameter type of an exported signature was narrowed.',
+    remediation: 'Parameter type narrowed: {subject}; accept the wider type, or release as a major version.',
+  },
+  'return-type-narrowed': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'The return type of an exported signature was narrowed.',
+    remediation: 'Return type narrowed: {subject}; keep the wider return type, or release as a major version.',
+  },
   // ── dynamic-boundary disclosure (disclose-dynamic-boundary-regions) ──
   'dynamic-boundary-in-conclusion-scope': {
     // Advisory, like every non-corpus code: blocking is always opt-in. A team that wants CI to

@@ -292,8 +292,18 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 | `parallel-work-conflict` | plan-parallel-work | advisory | Two tasks proposed for concurrent work have a write-write (WAW) conflict; `plan_parallel_work` schedules them into different waves. |
 | `parallel-work-cycle` | plan-parallel-work | advisory | A set of proposed tasks forms an unorderable read-after-write cycle; `plan_parallel_work` schedules the members mutually exclusive and the circular dependency should be resolved. |
 | `cross-actor-conflict` | interference-map | advisory | Two in-flight changes (branches/PRs/agent tasks, within or across a federation) have a write-write (WAW) conflict on a shared symbol; `map_in_flight_conflicts` reports them as must-not-land-concurrently. A CI check can name this code to warn when a new PR collides with an open one. |
+| `export-removed` | public-surface | advisory | An exported symbol was removed from the public surface. |
+| `export-renamed` | public-surface | advisory | An exported symbol was renamed; consumers binding the old name break. |
+| `export-visibility-reduced` | public-surface | advisory | An exported symbol is still defined but no longer exported. |
+| `param-removed` | public-surface | advisory | A parameter was removed from an exported signature. |
+| `param-required-added` | public-surface | advisory | A required parameter was added to an exported signature. |
+| `param-became-required` | public-surface | advisory | An optional parameter of an exported signature became required. |
+| `param-type-narrowed` | public-surface | advisory | A parameter type of an exported signature was narrowed. |
+| `return-type-narrowed` | public-surface | advisory | The return type of an exported signature was narrowed. |
 
 > **Note on the surface codes.** The change-impact certificate's *own* `--json` finding codes are `surface-newly-reached` / `surface-critical` (see [mcp-tools.md](mcp-tools.md)); the enforcement gate governs the **per-severity** codes `surface-info` / `surface-warn` / `surface-critical` (one per declared surface severity). To block a surface via `enforcement.policy`, name the per-severity code (e.g. `"surface-critical": "blocking"`), not `surface-newly-reached` — an unrecognized code is retained but governs nothing.
+
+> **Note on the public-surface codes.** The eight `public-surface` codes are the breaking-classed rule codes of `certify_public_surface` (one finding per rule per changed export, in its `findings[]`). Like the parallel-work codes, they are emitted only by that tool, which needs a base ref; `openlore enforce` does not run it. `signature-unprovable` (potentially-breaking) and `export-added` are rule codes on the verdict but not findings.
 
 > **Note on the parallel-work / cross-actor codes.** `parallel-work-conflict` / `parallel-work-cycle` (from `plan_parallel_work`) and `cross-actor-conflict` (from `map_in_flight_conflicts`) are emitted **only** by those MCP tools, which `openlore enforce` never runs (the gate is diff-based; these tools need a caller-supplied task list or live git/PR state). Naming them in `enforcement.policy` lets the **caller that invokes the tool** classify its `findings[]` with `resolveEnforcementClass` and block in its own CI — e.g. a CI check that warns when a new PR's footprint collides with an open one; the bundled commit gate never produces or blocks on them.
 

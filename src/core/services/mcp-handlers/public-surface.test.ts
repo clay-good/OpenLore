@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assembleSurfaceDiff, computeCertifyPublicSurface } from './public-surface.js';
+import { assembleSurfaceDiff, computeCertifyPublicSurface, publicSurfaceFindings } from './public-surface.js';
+import { FINDING_CODE_REGISTRY, resolveEnforcementClass } from './enforcement-policy.js';
+import { BREAKING_SURFACE_RULE_CODES } from '../../analyzer/public-surface.js';
 
 // Mock only the two utils the handler reads; the pure assembleSurfaceDiff core below
 // does not touch them, so the existing suite is unaffected. git-diff is imported
@@ -303,3 +305,55 @@ describe('handleCertifyPublicSurface — base-ref is fatal on non-resolution (fi
     expect(r.baseRefFallback).toBeUndefined();
   });
 });
+
+describe('rule codes, suggested bump, and findings (refine-public-surface-certification)', () => {
+  it('attaches a rule code to each change kind', async () => {
+    const base = [ts('a.ts', 'export function gone(): void {}\nexport function hidden(): void {}\nexport function keep(a: string | number): void {}\n')];
+    const head = [ts('a.ts', 'function hidden(): void {}\nexport function keep(a: string): void {}\nexport function fresh(): void {}\n')];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    expect(change(r, 'gone')?.ruleCodes).toEqual(['export-removed']);
+    expect(change(r, 'hidden')?.ruleCodes).toEqual(['export-visibility-reduced']);
+    expect(change(r, 'keep')?.ruleCodes).toEqual(['param-type-narrowed']);
+    expect(change(r, 'fresh')?.ruleCodes).toEqual(['export-added']);
+    expect(r.suggestedBump).toBe('major');
+  });
+
+  it('suggests minor for an additive diff and patch for a benign one', async () => {
+    const additive = await assembleSurfaceDiff([ts('a.ts', 'export function a(): void {}\n')], [ts('a.ts', 'export function a(): void {}\nexport function b(): void {}\n')], noRename);
+    expect(additive.suggestedBump).toBe('minor');
+    expect(additive.findings).toEqual([]);
+    const benign = await assembleSurfaceDiff([ts('a.ts', 'export function a(x: string): void {}\n')], [ts('a.ts', 'export function a(x): void {}\n')], noRename);
+    expect(benign.overall).toBe('potentially-breaking');
+    expect(benign.suggestedBump).toBe('patch');
+    expect(benign.findings).toEqual([]);
+  });
+
+  it('emits one registered finding per breaking rule code, gateable per rule', async () => {
+    const base = [ts('a.ts', 'export function gone(): void {}\nexport function keep(a: string | number): void {}\n')];
+    const head = [ts('a.ts', 'export function keep(a: string): void {}\n')];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    expect(r.findings.map((f) => [f.code, f.subject])).toEqual([['export-removed', 'a.ts::gone'], ['param-type-narrowed', 'a.ts::keep']]);
+    for (const f of r.findings) {
+      expect(FINDING_CODE_REGISTRY[f.code]?.source).toBe('public-surface');
+      expect(f.remediation).toContain(f.subject);
+    }
+    const policy = { 'export-removed': 'blocking' as const };
+    const classes = Object.fromEntries(r.findings.map((f) => [f.code, resolveEnforcementClass(f.code, policy)]));
+    expect(classes).toEqual({ 'export-removed': 'blocking', 'param-type-narrowed': 'advisory' });
+  });
+
+  it('registers every breaking rule code, and no potentially-breaking code', () => {
+    for (const code of BREAKING_SURFACE_RULE_CODES) expect(FINDING_CODE_REGISTRY[code]?.defaultClass).toBe('advisory');
+    expect(FINDING_CODE_REGISTRY['signature-unprovable']).toBeUndefined();
+    expect(FINDING_CODE_REGISTRY['export-added']).toBeUndefined();
+    expect(publicSurfaceFindings([{ changeKind: 'signature', class: 'potentially-breaking', name: 'x', file: 'a.ts', kind: 'function', reasons: [], ruleCodes: ['signature-unprovable'] }])).toEqual([]);
+  });
+
+  it('does not claim sibling repositories are checked', async () => {
+    const r = await assembleSurfaceDiff([ts('a.ts', 'export function gone(): void {}\n')], [ts('a.ts', '\n')], noRename);
+    const detail = r.extraCrossings.map((c) => c.detail).join(' ');
+    expect(detail).not.toMatch(/sibling repos are also checked/i);
+    expect(detail).toMatch(/not checked, including under federation/);
+  });
+});
+

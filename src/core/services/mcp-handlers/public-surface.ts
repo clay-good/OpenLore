@@ -38,10 +38,14 @@ import {
   classifySignatureChange,
   signatureClassifiable,
   overallClass,
+  suggestedBump,
+  BREAKING_SURFACE_RULE_CODES,
   type SurfaceChange,
   type SurfaceKind,
   type ChangeClass,
+  type SuggestedBump,
 } from '../../analyzer/public-surface.js';
+import { FINDING_CODE_REGISTRY, type GovernanceFinding } from './enforcement-policy.js';
 
 
 const MAX_SURFACE = 500;
@@ -452,6 +456,8 @@ export async function assembleSurfaceDiff(
   summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number };
   changes: SurfaceChange[];
   breaking: Array<SurfaceChange & { consumers: Consumer[]; consumersTruncated: number }>;
+  suggestedBump: SuggestedBump;
+  findings: GovernanceFinding[];
   soundness: { posture: string; languages: string };
   extraCrossings: Array<{ kind: 'unindexed-repo'; count: number; detail: string }>;
 }> {
@@ -472,7 +478,7 @@ export async function assembleSurfaceDiff(
   for (const [key, head] of headByKey) {
     const base = baseByKey.get(key);
     if (!base) { addedFns.push(head); continue; }
-    const { class: cls, reasons } = classifySignatureChange(base.signature, head.signature, head.language);
+    const { class: cls, reasons, ruleCodes } = classifySignatureChange(base.signature, head.signature, head.language);
     if (cls === 'non-breaking' && reasons.length === 0) continue; // unchanged contract
     changes.push({
       changeKind: 'signature',
@@ -483,6 +489,7 @@ export async function assembleSurfaceDiff(
       before: base.signature,
       after: head.signature,
       reasons,
+      ruleCodes,
     });
   }
   // Symbols only in base → removed (candidate rename source).
@@ -508,6 +515,7 @@ export async function assembleSurfaceDiff(
       before: base.signature,
       after: pair.to.id.slice(pair.to.id.lastIndexOf('::') + 2),
       reasons: [`exported symbol renamed to "${pair.to.name}" (${pair.reason}, basis: ${pair.basis})`],
+      ruleCodes: ['export-renamed'],
       rename: { to: pair.to.name, file: pair.to.filePath, reason: pair.reason, basis: pair.basis },
     });
   }
@@ -529,6 +537,7 @@ export async function assembleSurfaceDiff(
       reasons: [stillDefined
         ? 'exported symbol is still defined but no longer exported (visibility reduced: public → private)'
         : 'exported symbol was removed from the public surface'],
+      ruleCodes: [stillDefined ? 'export-visibility-reduced' : 'export-removed'],
     });
   }
 
@@ -543,6 +552,7 @@ export async function assembleSurfaceDiff(
       kind: kindFromSignature(head.signature),
       after: head.signature,
       reasons: ['new export added to the public surface'],
+      ruleCodes: ['export-added'],
     });
   }
 
@@ -580,6 +590,7 @@ export async function assembleSurfaceDiff(
         file: path,
         kind: 'unknown',
         reasons: ['exported symbol was removed from the public surface (no signature available — non-function or aliased export)'],
+        ruleCodes: ['export-removed'],
       });
     }
     for (const name of headN) {
@@ -591,6 +602,7 @@ export async function assembleSurfaceDiff(
         file: path,
         kind: 'unknown',
         reasons: ['new export added to the public surface'],
+        ruleCodes: ['export-added'],
       });
     }
   }
@@ -617,7 +629,7 @@ export async function assembleSurfaceDiff(
     ? [{
         kind: 'unindexed-repo' as const,
         count: breaking.length,
-        detail: 'Consumers of these breaking changes that live OUTSIDE any indexed repo (closed-source or external downstreams) are not visible; the listed consumers are in-repo only. Under federation, indexed sibling repos are also checked.',
+        detail: 'Consumers of these breaking changes that live OUTSIDE any indexed repo (closed-source or external downstreams) are not visible; the listed consumers are in-repo only. Consumers in sibling repositories are not checked, including under federation.',
       }]
     : [];
 
@@ -630,6 +642,8 @@ export async function assembleSurfaceDiff(
     },
     changes,
     breaking,
+    suggestedBump: suggestedBump(changes),
+    findings: publicSurfaceFindings(changes),
     soundness: {
       posture: anyClassifiable
         ? 'Compatibility is classified from statically-available signatures; anything unprovable is potentially-breaking, never silently safe.'
@@ -638,6 +652,35 @@ export async function assembleSurfaceDiff(
     },
     extraCrossings,
   };
+}
+
+const BREAKING_CODE_SET: ReadonlySet<string> = new Set(BREAKING_SURFACE_RULE_CODES);
+
+/**
+ * Governance findings for a surface diff: one per breaking-classed rule code per changed symbol, so
+ * an `enforcement.policy` can gate an individual rule (for example block `export-removed` but not
+ * `param-type-narrowed`). A `potentially-breaking` change emits none: `signature-unprovable` is not
+ * a breaking-classed code. Deterministic order (the changes are already sorted).
+ */
+export function publicSurfaceFindings(changes: readonly SurfaceChange[]): GovernanceFinding[] {
+  const findings: GovernanceFinding[] = [];
+  for (const change of changes) {
+    if (change.class !== 'breaking') continue;
+    for (const code of change.ruleCodes) {
+      if (!BREAKING_CODE_SET.has(code)) continue;
+      const subject = `${change.file}::${change.name}`;
+      findings.push({
+        code,
+        severity: 'error',
+        source: 'public-surface',
+        subject,
+        message: `${change.changeKind} of exported "${change.name}": ${change.reasons.join('; ')}`,
+        remediation: FINDING_CODE_REGISTRY[code]?.remediation?.replace('{subject}', subject),
+        location: { path: change.file },
+      });
+    }
+  }
+  return findings;
 }
 
 export async function computeCertifyPublicSurface(input: CertifyPublicSurfaceInput): Promise<unknown> {

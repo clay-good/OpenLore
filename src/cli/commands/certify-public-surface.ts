@@ -21,6 +21,7 @@ interface SurfaceChangeOut {
   before?: string;
   after?: string;
   reasons: string[];
+  ruleCodes?: string[];
   rename?: { to: string; file: string };
   consumers?: Array<{ name: string; file: string }>;
   consumersTruncated?: number;
@@ -42,6 +43,7 @@ interface DiffResult {
   summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number };
   changes: SurfaceChangeOut[];
   breaking: SurfaceChangeOut[];
+  suggestedBump?: 'major' | 'minor' | 'patch';
   soundness: { posture: string; languages: string };
   confidenceBoundary?: { knownUnknowable?: Array<{ detail: string }>; integrity?: { verdict?: string; detail?: string }; staleness?: { detail?: string } };
 }
@@ -63,11 +65,12 @@ function renderDiff(r: DiffResult): string {
   lines.push(`   base: ${r.base} → ${r.head}`);
   if (r.baseRefFallback) lines.push(`   ⚠ requested base "${r.baseRefFallback.requested}" did not resolve — certified against "${r.baseRefFallback.resolved}" (--allow-base-fallback)`);
   lines.push(`   ${r.summary.breaking} breaking · ${r.summary.potentiallyBreaking} potentially-breaking · ${r.summary.nonBreaking} non-breaking`);
+  if (r.suggestedBump) lines.push(`   suggested version bump: ${r.suggestedBump}`);
   if (r.confidenceBoundary?.integrity?.detail) lines.push(`   ⚠ index integrity ${r.confidenceBoundary.integrity.verdict}: ${r.confidenceBoundary.integrity.detail}`);
   if (r.confidenceBoundary?.staleness?.detail) lines.push(`   ⚠ ${r.confidenceBoundary.staleness.detail}`);
   const ranked = [...r.changes].sort((a, b) => order(a.class) - order(b.class));
   for (const c of ranked) {
-    lines.push(`   ${ICON[c.class]} ${c.class}  ${c.name}  (${c.changeKind})  ${c.file}`);
+    lines.push(`   ${ICON[c.class]} ${c.class}  ${c.name}  (${c.changeKind})  ${c.file}${c.ruleCodes?.length ? `  [${c.ruleCodes.join(', ')}]` : ''}`);
     for (const reason of c.reasons) lines.push(`        - ${reason}`);
     const breaking = r.breaking.find((b) => b.name === c.name && b.file === c.file && b.changeKind === c.changeKind);
     if (breaking?.consumers?.length) {

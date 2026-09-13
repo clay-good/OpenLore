@@ -40,6 +40,39 @@ export interface PublicSurfaceSymbol {
 /** The closed breaking-change classification (proposal §2). */
 export type ChangeClass = 'breaking' | 'non-breaking' | 'potentially-breaking';
 
+/**
+ * The closed set of stable rule codes a classification carries (change:
+ * refine-public-surface-certification). A code names WHICH contract rule fired; the class says
+ * how severe it is. `signature-unprovable` is the `potentially-breaking` rule and is never a
+ * breaking-classed code. Non-breaking reasons without a contract effect carry no code.
+ */
+export type SurfaceRuleCode =
+  | 'export-removed'
+  | 'export-renamed'
+  | 'export-visibility-reduced'
+  | 'export-added'
+  | 'param-removed'
+  | 'param-required-added'
+  | 'param-became-required'
+  | 'param-type-narrowed'
+  | 'return-type-narrowed'
+  | 'signature-unprovable';
+
+/** The breaking-classed rule codes; each is a registered governance finding code. */
+export const BREAKING_SURFACE_RULE_CODES: readonly SurfaceRuleCode[] = [
+  'export-removed',
+  'export-renamed',
+  'export-visibility-reduced',
+  'param-removed',
+  'param-required-added',
+  'param-became-required',
+  'param-type-narrowed',
+  'return-type-narrowed',
+];
+
+/** The semver bump a surface diff calls for. */
+export type SuggestedBump = 'major' | 'minor' | 'patch';
+
 /** How a public-surface symbol changed across the diff. */
 export type SurfaceChangeKind = 'removed' | 'added' | 'renamed' | 'signature' | 'visibility-reduced';
 
@@ -57,6 +90,8 @@ export interface SurfaceChange {
   after?: string;
   /** Transparent, human-readable reasons behind the class (the evidence, not a score). */
   reasons: string[];
+  /** The stable rule codes that fired, in reason order, without duplicates. */
+  ruleCodes: SurfaceRuleCode[];
   /** For a rename, the new name/location (detected via symbol-identity continuity). */
   rename?: { to: string; file: string; reason: ContinuityReason; basis: ContinuityBasis };
 }
@@ -228,20 +263,21 @@ export function classifySignatureChange(
   beforeSig: string,
   afterSig: string,
   language: string,
-): { class: ChangeClass; reasons: string[] } {
+): { class: ChangeClass; reasons: string[]; ruleCodes: SurfaceRuleCode[] } {
   if (beforeSig.replace(/\s+/g, ' ').trim() === afterSig.replace(/\s+/g, ' ').trim()) {
-    return { class: 'non-breaking', reasons: [] };
+    return { class: 'non-breaking', reasons: [], ruleCodes: [] };
   }
   if (!signatureClassifiable(language)) {
-    return { class: 'potentially-breaking', reasons: [`signature changed in ${language}; compatibility not statically classifiable`] };
+    return { class: 'potentially-breaking', reasons: [`signature changed in ${language}; compatibility not statically classifiable`], ruleCodes: ['signature-unprovable'] };
   }
   const before = parseSignature(beforeSig, language);
   const after = parseSignature(afterSig, language);
   if (before.confidence === 'unparsed' || after.confidence === 'unparsed') {
-    return { class: 'potentially-breaking', reasons: ['signature changed but could not be parsed into a comparable shape'] };
+    return { class: 'potentially-breaking', reasons: ['signature changed but could not be parsed into a comparable shape'], ruleCodes: ['signature-unprovable'] };
   }
 
   const reasons: string[] = [];
+  const codes = new Set<SurfaceRuleCode>();
   let cls: ChangeClass = 'non-breaking';
   const max = Math.max(before.params.length, after.params.length);
   for (let i = 0; i < max; i++) {
@@ -250,6 +286,7 @@ export function classifySignatureChange(
     if (b && !a) {
       cls = worst(cls, 'breaking');
       reasons.push(`parameter "${b.name}" was removed`);
+      codes.add('param-removed');
       continue;
     }
     if (!b && a) {
@@ -257,6 +294,7 @@ export function classifySignatureChange(
       else {
         cls = worst(cls, 'breaking');
         reasons.push(`required parameter "${a.name}" was added`);
+        codes.add('param-required-added');
       }
       continue;
     }
@@ -264,19 +302,23 @@ export function classifySignatureChange(
     if (b.optional && !a.optional) {
       cls = worst(cls, 'breaking');
       reasons.push(`parameter "${a.name}" became required`);
+      codes.add('param-became-required');
     }
     if (b.type !== undefined && a.type !== undefined) {
       const rel = compareTypes(b.type, a.type);
       if (rel === 'narrowed') {
         cls = worst(cls, 'breaking');
         reasons.push(`parameter "${a.name}" type narrowed (${b.type} → ${a.type})`);
+        codes.add('param-type-narrowed');
       } else if (rel === 'incomparable') {
         cls = worst(cls, 'potentially-breaking');
         reasons.push(`parameter "${a.name}" type changed (${b.type} → ${a.type}); compatibility unprovable`);
+        codes.add('signature-unprovable');
       }
     } else if ((b.type ?? '') !== (a.type ?? '')) {
       cls = worst(cls, 'potentially-breaking');
       reasons.push(`parameter "${a.name}" changed but is untyped; compatibility unprovable`);
+      codes.add('signature-unprovable');
     }
   }
 
@@ -287,21 +329,35 @@ export function classifySignatureChange(
       if (rel === 'narrowed') {
         cls = worst(cls, 'breaking');
         reasons.push(`return type narrowed (${before.returnType} → ${after.returnType})`);
+        codes.add('return-type-narrowed');
       } else if (rel === 'widened') {
         reasons.push(`return type widened (${before.returnType} → ${after.returnType})`); // non-breaking
       } else if (rel === 'incomparable') {
         cls = worst(cls, 'potentially-breaking');
         reasons.push(`return type changed (${before.returnType} → ${after.returnType}); compatibility unprovable`);
+        codes.add('signature-unprovable');
       }
     } else {
       cls = worst(cls, 'potentially-breaking');
       reasons.push('return type changed but is untyped; compatibility unprovable');
+      codes.add('signature-unprovable');
     }
   }
 
   // A signature differed but no rule fired (e.g. whitespace/param-name only) — provably benign.
-  if (reasons.length === 0) return { class: 'non-breaking', reasons: ['declaration changed without an observable contract effect'] };
-  return { class: cls, reasons };
+  if (reasons.length === 0) return { class: 'non-breaking', reasons: ['declaration changed without an observable contract effect'], ruleCodes: [] };
+  return { class: cls, reasons, ruleCodes: [...codes] };
+}
+
+/**
+ * The semver bump a surface diff calls for, as a total function of the classification: `major`
+ * when any change is breaking, else `minor` when an export was added, else `patch`. A
+ * `potentially-breaking` change keeps its meaning and is never escalated to `major` here.
+ */
+export function suggestedBump(changes: readonly SurfaceChange[]): SuggestedBump {
+  if (changes.some((c) => c.class === 'breaking')) return 'major';
+  if (changes.some((c) => c.changeKind === 'added')) return 'minor';
+  return 'patch';
 }
 
 /** Roll an overall verdict up from the per-symbol classes (breaking dominates). */
