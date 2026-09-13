@@ -71,12 +71,14 @@ format parsers, each deterministic and individually testable.
   - `.github/workflows` `run:` steps, parsed again with the workflow parser's `${{ }}` masking (not
     through its step handling), relative to each step's working directory.
 - **Commands** count only executed files: the script after a runner (past wrappers such as `cross-env`
-  or `npx`), a `--require`/`--import` preload, or a path in command position. Arguments, redirect
-  targets, and heredoc bodies are ignored; a variable, glob, `-m module`, or path after `cd` is a
-  boundary.
+  or `npx`, shell keywords, subshells, and brace groups), a `--require`/`--import` preload, or a relative
+  path in command position, using each runner's own value and inline flags. Arguments, redirect
+  targets, heredoc bodies, package scripts run by name, and `node_modules` tools are ignored; a
+  variable, glob, `-m module`, or path after `cd` is a boundary.
 - **Reading** uses the no-follow, non-blocking bounded reader (a FIFO or linked config is an
-  `unreadable-config` boundary), parses YAML without merge keys, and caps references per config with a
-  disclosure. These are bounding constants, not tuning constants.
+  `unreadable-config` boundary), parses YAML without merge keys, scans test-runner values in linear
+  time, deduplicates and caps references and boundaries per config with a disclosure, and memoizes
+  resolution. These are bounding constants, not tuning constants.
 - **Roots:** every function in a wired file is an `externally-wired` root, stated in the caveats of
   `find_dead_code` and `report_coverage_gaps`.
 - **Consumers:** `find_dead_code` (`rootKinds.externallyWired`, `externalWiring` receipts and

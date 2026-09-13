@@ -65,6 +65,8 @@ const MAX_WORKFLOW_FILES = 200;
 const MAX_WORKFLOW_DIR_ENTRIES = 5_000;
 /** References taken from one config file; more is disclosed. */
 const MAX_REFERENCES_PER_CONFIG = 1_000;
+/** Distinct boundaries kept from one config file; more is counted. */
+const MAX_BOUNDARIES_PER_CONFIG = 100;
 const MAX_REPORTED_BOUNDARIES = 50;
 
 const TEST_RUNNER_CONFIGS = [
@@ -74,32 +76,69 @@ const TEST_RUNNER_CONFIGS = [
 ];
 const TEST_RUNNER_KEYS = ['setupFiles', 'setupFilesAfterEnv', 'globalSetup', 'globalTeardown'];
 
-/** Commands that run the file named after them. */
-const RUNNERS = new Set(['node', 'tsx', 'ts-node', 'bun', 'deno', 'python', 'python3', 'sh', 'bash', 'zsh', 'ruby']);
-/** Commands that run the command after them. */
-const WRAPPERS = new Set(['env', 'cross-env', 'npx', 'bunx', 'exec', 'time', 'nohup', 'sudo']);
-/** Runner flags whose value is a file the runner loads before the script. */
-const PRELOAD_FLAGS = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader']);
-/** Runner flags that take a value that is not a file. */
-const VALUE_FLAGS = new Set(['--env-file', '--inspect-port', '--title', '--cwd', '-I']);
-/** Runner flags after which no script file follows (inline code, a module by name). */
-const INLINE_FLAGS = new Set(['-e', '--eval', '-p', '--print', '-c']);
-/** Runner subcommands that precede the script. */
-const RUNNER_SUBCOMMANDS = new Set(['watch', 'run']);
+/** How one runner takes its script: flags that take a value, flags after which no script follows. */
+interface RunnerSyntax {
+  valueFlags: Set<string>;
+  inlineFlags: Set<string>;
+  /** Flags whose value is a file loaded before the script. */
+  preloadFlags?: Set<string>;
+  subcommands?: Set<string>;
+  /** Names a module rather than a file (`python -m pkg`). */
+  moduleFlag?: string;
+}
+const NODE_LIKE: RunnerSyntax = {
+  valueFlags: new Set(['--env-file', '--inspect-port', '--title', '--stack-size', '--max-old-space-size', '--conditions', '-C', '--input-type']),
+  inlineFlags: new Set(['-e', '--eval', '-p', '--print']),
+  preloadFlags: new Set(['-r', '--require', '--import', '--loader', '--experimental-loader']),
+  subcommands: new Set(['watch']),
+};
+const TS_RUNNER: RunnerSyntax = {
+  ...NODE_LIKE,
+  valueFlags: new Set([...NODE_LIKE.valueFlags, '--tsconfig', '-P', '--project', '--compiler', '-O', '--compiler-options']),
+};
+const SHELL: RunnerSyntax = { valueFlags: new Set(['-o', '-O', '+o', '+O']), inlineFlags: new Set(['-c']) };
+const RUNNERS = new Map<string, RunnerSyntax>([
+  ['node', NODE_LIKE],
+  ['tsx', TS_RUNNER],
+  ['ts-node', TS_RUNNER],
+  ['bun', { ...NODE_LIKE, subcommands: new Set(['run']) }],
+  ['deno', { valueFlags: new Set(['--config', '-c', '--import-map', '--lock', '--allow-read', '--allow-write', '--allow-net', '--allow-env']), inlineFlags: new Set(['eval']), subcommands: new Set(['run', 'task']) }],
+  ['python', { valueFlags: new Set(['-W', '-X', '-Q']), inlineFlags: new Set(['-c']), moduleFlag: '-m' }],
+  ['python3', { valueFlags: new Set(['-W', '-X', '-Q']), inlineFlags: new Set(['-c']), moduleFlag: '-m' }],
+  ['sh', SHELL], ['bash', SHELL], ['zsh', SHELL],
+  ['ruby', { valueFlags: new Set(['-I', '-r', '-C', '-E']), inlineFlags: new Set(['-e']) }],
+]);
+/** Commands that run the command after them, with their options that take a value. */
+const WRAPPERS = new Map<string, Set<string>>([
+  ['env', new Set(['-u', '--unset', '-C', '--chdir', '-S'])],
+  ['cross-env', new Set()], ['npx', new Set(['-p', '--package'])], ['bunx', new Set()],
+  ['exec', new Set(['-a'])], ['time', new Set(['-o', '-f'])], ['nohup', new Set()],
+  ['sudo', new Set(['-u', '-g', '-C', '-h', '-p', '-U'])],
+]);
+/** Shell words that precede a command without being one. */
+const SHELL_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'while', 'until', 'do', '!']);
 
 interface Reference extends WiringReceipt {
   reference: string;
 }
 
-/** Collects one config's references and boundaries, capping references with a disclosure. */
+/** Collects references and boundaries, deduplicating and capping both per config file. */
 class Collector {
   readonly references: Reference[] = [];
   readonly boundaries: WiringBoundary[] = [];
-  private perConfig = new Map<string, number>();
+  /** Boundaries dropped by the per-config cap. */
+  droppedBoundaries = 0;
+  private referencesPerConfig = new Map<string, number>();
+  private boundariesPerConfig = new Map<string, number>();
+  private seenReferences = new Set<string>();
+  private seenBoundaries = new Set<string>();
 
   reference(ref: Reference): void {
-    const count = (this.perConfig.get(ref.config) ?? 0) + 1;
-    this.perConfig.set(ref.config, count);
+    const key = JSON.stringify([ref.config, ref.key, ref.reference]);
+    if (this.seenReferences.has(key)) return;
+    this.seenReferences.add(key);
+    const count = (this.referencesPerConfig.get(ref.config) ?? 0) + 1;
+    this.referencesPerConfig.set(ref.config, count);
     if (count <= MAX_REFERENCES_PER_CONFIG) this.references.push(ref);
     else if (count === MAX_REFERENCES_PER_CONFIG + 1) {
       this.boundary({ config: ref.config, key: '', reference: `more than ${MAX_REFERENCES_PER_CONFIG} references`, reason: 'unsupported-form' });
@@ -107,7 +146,13 @@ class Collector {
   }
 
   boundary(boundary: WiringBoundary): void {
-    this.boundaries.push(boundary);
+    const key = JSON.stringify([boundary.config, boundary.key, boundary.reference, boundary.reason]);
+    if (this.seenBoundaries.has(key)) return;
+    this.seenBoundaries.add(key);
+    const count = (this.boundariesPerConfig.get(boundary.config) ?? 0) + 1;
+    this.boundariesPerConfig.set(boundary.config, count);
+    if (count <= MAX_BOUNDARIES_PER_CONFIG) this.boundaries.push(boundary);
+    else this.droppedBoundaries++;
   }
 }
 
@@ -122,8 +167,15 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
   await readWorkflows(root, out);
 
   const receiptsByFile = new Map<string, WiringReceipt[]>();
+  const resolutions = new Map<string, Promise<string | { reason: WiringBoundaryReason }>>();
+  const directories = new Map<string, Promise<string[] | null>>();
   for (const ref of out.references) {
-    const resolved = await resolveReference(root, ref.reference, tsconfig.outDir, tsconfig.rootDir);
+    let pending = resolutions.get(ref.reference);
+    if (!pending) {
+      pending = resolveReference(root, ref.reference, tsconfig.outDir, tsconfig.rootDir, directories);
+      resolutions.set(ref.reference, pending);
+    }
+    const resolved = await pending;
     if (typeof resolved === 'string') {
       const receipts = receiptsByFile.get(resolved) ?? [];
       if (!receipts.some(r => r.config === ref.config && r.key === ref.key)) receipts.push({ config: ref.config, key: ref.key });
@@ -136,19 +188,12 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
   const wired = [...receiptsByFile]
     .map(([file, receipts]) => ({ file, receipts: receipts.sort(compareReceipts) }))
     .sort((a, b) => compareText(a.file, b.file));
-  const seen = new Set<string>();
   const boundaries = out.boundaries
-    .filter(b => {
-      const key = JSON.stringify([b.config, b.key, b.reference, b.reason]);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
     .sort((a, b) => compareReceipts(a, b) || compareText(a.reference, b.reference) || compareText(a.reason, b.reason));
   return {
     wired,
     boundaries: boundaries.slice(0, MAX_REPORTED_BOUNDARIES),
-    boundariesOmitted: Math.max(0, boundaries.length - MAX_REPORTED_BOUNDARIES),
+    boundariesOmitted: Math.max(0, boundaries.length - MAX_REPORTED_BOUNDARIES) + out.droppedBoundaries,
   };
 }
 
@@ -250,13 +295,19 @@ function executedWords(words: Word[]): Executed[] {
   let i = 0;
   while (i < words.length) {
     const text = words[i].text;
+    const name = systemCommandName(text);
+    if (SHELL_KEYWORDS.has(text) && !words[i].quoted) { i++; continue; }
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text) && !words[i].quoted) { i++; continue; }
-    if (WRAPPERS.has(systemCommandName(text))) {
+    const wrapperValueFlags = WRAPPERS.get(name);
+    if (wrapperValueFlags) {
       i++;
-      while (i < words.length && words[i].text.startsWith('-')) i++;
+      while (i < words.length && words[i].text.startsWith('-')) {
+        i += wrapperValueFlags.has(words[i].text) ? 2 : 1;
+      }
       continue;
     }
     if (['pnpm', 'yarn', 'npm'].includes(text) && ['exec', 'dlx'].includes(words[i + 1]?.text ?? '')) { i += 2; continue; }
+    if (['pnpm', 'yarn'].includes(text) && RUNNERS.has(words[i + 1]?.text ?? '')) { i++; continue; }
     break;
   }
   const command = words[i];
@@ -268,35 +319,55 @@ function executedWords(words: Word[]): Executed[] {
     return [{ kind: 'file', word: command }];
   }
   if (command.text.includes('$')) return [];
-  // A relative path in command position runs that repository file; an absolute one is a system binary.
+  // A relative path in command position runs that repository file; an absolute one is a system binary,
+  // and one under node_modules is an installed tool.
   if (!command.text.startsWith('/') && /[/\\]/.test(command.text) && /[\w.]/.test(command.text)) {
-    return [{ kind: 'file', word: command }];
+    return /^(\.\/)?node_modules[/\\]/.test(command.text) ? [] : [{ kind: 'file', word: command }];
   }
-  if (!RUNNERS.has(name)) return [];
+  const syntax = RUNNERS.get(name);
+  if (!syntax) return [];
 
   const executed: Executed[] = [];
   for (let j = i + 1; j < words.length; j++) {
     const word = words[j];
-    const [flag, inline] = word.text.startsWith('-') ? word.text.split(/=(.*)/s, 2) : [word.text, undefined];
-    if (INLINE_FLAGS.has(flag)) return executed;
-    if (flag === '-m') {
+    const isFlag = word.text.startsWith('-') && !word.quoted && word.text !== '-';
+    const [flag, inline] = isFlag ? word.text.split(/=(.*)/s, 2) : [word.text, undefined];
+    if (syntax.inlineFlags.has(flag)) return executed;
+    if (syntax.moduleFlag && flag === syntax.moduleFlag) {
       const module = inline ?? words[j + 1]?.text;
-      if (module) executed.push({ kind: 'module', word: { text: `-m ${module}`, quoted: false } });
+      if (module) executed.push({ kind: 'module', word: { text: `${flag} ${module}`, quoted: false } });
       return executed;
     }
-    if (PRELOAD_FLAGS.has(flag)) {
+    if (isFlag && syntax.preloadFlags?.has(flag)) {
       const value = inline !== undefined ? { text: inline, quoted: word.quoted } : words[++j];
-      // A preload named as a package (`--import tsx`) is not a repository file.
-      if (value && /^[./]|\.[cm]?[jt]sx?$/.test(value.text)) executed.push({ kind: 'file', word: value });
+      // A preload named as a package (`--import tsx`, `-r dotenv/config`) is not a repository file.
+      if (value && /^\.{0,2}\/|\.[cm]?[jt]sx?$/.test(value.text)) executed.push({ kind: 'file', word: value });
       continue;
     }
-    if (VALUE_FLAGS.has(flag) && inline === undefined) { j++; continue; }
-    if (word.text.startsWith('-')) continue;
-    if (j === i + 1 && RUNNER_SUBCOMMANDS.has(word.text)) continue;
+    if (isFlag && syntax.valueFlags.has(flag) && inline === undefined) { j++; continue; }
+    if (isFlag) {
+      // An unknown flag may take a value: a following word that cannot be a script is that value.
+      const next = words[j + 1];
+      if (inline === undefined && next && !next.text.startsWith('-') && !looksLikeScript(next.text)) j++;
+      continue;
+    }
+    if (j === i + 1 && syntax.subcommands?.has(word.text)) continue;
+    if (!looksLikeScript(word.text) && !/[$*?[\]{}]/.test(word.text) && !word.text.includes(GHA_EXPR)) {
+      // A bare name (`bun run build`, `deno task dev`) names a package script or task, not a file.
+      if (!syntax.subcommands?.has(words[i + 1]?.text ?? '')) {
+        executed.push({ kind: 'module', word: { text: `${name} ${word.text}`, quoted: false } });
+      }
+      return executed;
+    }
     executed.push({ kind: 'file', word });
     return executed;
   }
   return executed;
+}
+
+/** A word that can name a script file: a path, or a name with a script extension. */
+function looksLikeScript(text: string): boolean {
+  return /[/\\]/.test(text) || /\.[A-Za-z0-9]{1,5}$/.test(text);
 }
 
 /**
@@ -315,7 +386,13 @@ function shellSegments(command: string): Word[][] {
   const endWord = () => {
     if (inWord) {
       if (redirect) redirect = false;
-      else words.push({ text: word, quoted });
+      else if ((word === '{' || word === '}') && !quoted) {
+        // A brace group's words are a command of their own.
+        word = ''; quoted = false; inWord = false;
+        if (words.length > 0) segments.push(words);
+        words = [];
+        return;
+      } else words.push({ text: word, quoted });
     }
     word = ''; quoted = false; inWord = false;
   };
@@ -357,6 +434,12 @@ function shellSegments(command: string): Word[][] {
       continue;
     }
     if (ch === ' ' || ch === '\t') { endWord(); continue; }
+    if ((ch === '(' || ch === ')') && !(ch === '(' && word.endsWith('$'))) {
+      // Subshells and command substitutions: their commands are segments of their own.
+      if (ch === '(' && inWord) { word += ch; continue; }
+      endSegment();
+      continue;
+    }
     if (ch === ';' || ch === '|' || ch === '&') {
       if (ch === '&' && command[i + 1] === '>') { endWord(); redirect = true; i++; continue; }
       endSegment();
@@ -413,12 +496,15 @@ async function readTestRunnerConfigs(root: string, out: Collector): Promise<void
     const source = await readConfig(root, config, out);
     if (source === null) continue;
     const code = stripCodeComments(source);
+    // Keys are matched where string contents are blanked, so a key inside a string is not a key.
+    const keysOnly = blankStringValues(code);
     for (const key of TEST_RUNNER_KEYS) {
-      for (const match of code.matchAll(new RegExp(`\\b${key}\\s*:\\s*`, 'g'))) {
+      for (const match of keysOnly.matchAll(new RegExp(`(?:\\b|['"])${key}['"]?\\s*:\\s*`, 'g'))) {
         const value = readValueExpression(code, match.index + match[0].length);
-        const literals = stringLiterals(value);
-        const nonLiteral = value.replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, '').replace(/[[\],\s]/g, '');
-        if (literals === null || nonLiteral.length > 0) {
+        // A type annotation (`setupFiles: string[]`) declares the key; it wires nothing.
+        if (/^(?:string|readonly\s+string)(?:\[\])?\s*[;,]?\s*$|^Array<string>/.test(value.trim())) continue;
+        const literals = literalStrings(value);
+        if (literals === null) {
           out.boundary({ config, key, reference: value.trim().slice(0, 120), reason: 'unparsed-config' });
           continue;
         }
@@ -431,10 +517,13 @@ async function readTestRunnerConfigs(root: string, out: Collector): Promise<void
 /** The text of one value expression starting at `start`: a bracketed array, a string, or a bare token. */
 function readValueExpression(code: string, start: number): string {
   let depth = 0;
-  for (let i = start; i < code.length && i < start + 20_000; i++) {
+  const limit = Math.min(code.length, start + 20_000);
+  for (let i = start; i < limit; i++) {
     const ch = code[i];
     if (ch === "'" || ch === '"' || ch === '`') {
-      i = skipString(code, i);
+      const close = closingQuote(code, i);
+      if (close < 0) return code.slice(start, limit);
+      i = close;
       if (depth === 0) return code.slice(start, i + 1);
       continue;
     }
@@ -447,17 +536,47 @@ function readValueExpression(code: string, start: number): string {
       return code.slice(start, i);
     }
   }
-  return code.slice(start, Math.min(code.length, start + 20_000));
+  return code.slice(start, limit);
 }
 
-/** The string literals in an array or string expression; `null` when a template has substitutions. */
-function stringLiterals(value: string): string[] | null {
+/**
+ * The string literals of a string or array-of-strings expression, scanned in one pass; `null` when the
+ * expression is anything else (an identifier, a call, a spread, a template substitution, an unclosed
+ * string).
+ */
+function literalStrings(value: string): string[] | null {
   const literals: string[] = [];
-  for (const match of value.matchAll(/(['"`])((?:\\.|(?!\1)[^\\])*)\1/g)) {
-    if (match[1] === '`' && match[2].includes('${')) return null;
-    literals.push(match[2]);
+  const text = value.trim();
+  let i = text.startsWith('[') ? 1 : 0;
+  const end = text.startsWith('[') ? (text.endsWith(']') ? text.length - 1 : -1) : text.length;
+  if (end < 0) return null;
+  while (i < end) {
+    const ch = text[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === ',') { i++; continue; }
+    if (ch !== "'" && ch !== '"' && ch !== '`') return null;
+    const close = closingQuote(text, i);
+    if (close < 0 || close >= end) return null;
+    const content = text.slice(i + 1, close);
+    if (ch === '`' && content.includes('${')) return null;
+    literals.push(content);
+    i = close + 1;
   }
   return literals;
+}
+
+/** Code with the contents of every string blanked, except a string used as an object key. */
+function blankStringValues(code: string): string {
+  let out = '';
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if (ch !== "'" && ch !== '"' && ch !== '`') { out += ch; continue; }
+    const close = closingQuote(code, i);
+    const end = close < 0 ? code.length - 1 : close;
+    const isKey = /^\s*:/.test(code.slice(end + 1, end + 64));
+    out += isKey ? code.slice(i, end + 1) : ch + ' '.repeat(Math.max(0, end - i - 1)) + (close < 0 ? '' : ch);
+    i = end;
+  }
+  return out;
 }
 
 function expandJestRootDir(value: string): string {
@@ -519,7 +638,7 @@ async function readWorkflows(root: string, out: Collector): Promise<void> {
         const shell = typeof step.shell === 'string' ? step.shell : jobShell;
         // Only POSIX shell syntax is tokenized; a PowerShell or cmd step is disclosed, not misread.
         if (shell && !/^(bash|sh)\b/.test(shell.trim())) {
-          out.boundary({ config, key, reference: `shell ${shell.split(/\s/)[0]}`, reason: 'unsupported-form' });
+          out.boundary({ config, key, reference: `shell ${shell.split(/\s/)[0].replaceAll(GHA_EXPR, '${{ }}')}`, reason: 'unsupported-form' });
           return;
         }
         const stepDir = typeof step['working-directory'] === 'string' ? step['working-directory'] : jobDir;
@@ -551,6 +670,7 @@ async function resolveReference(
   reference: string,
   outDir: string | undefined,
   rootDir: string | undefined,
+  directories: Map<string, Promise<string[] | null>>,
 ): Promise<string | { reason: WiringBoundaryReason }> {
   const path = posix.normalize(reference.replaceAll('\\', '/').replace(/^\.\//, ''));
   if (path.startsWith('/') || /^[A-Za-z]:/.test(path) || path === '..' || path.startsWith('../')) {
@@ -568,7 +688,7 @@ async function resolveReference(
       const absolute = join(root, candidate);
       if (!isConfinedPath(root, absolute)) { outside = true; continue; }
       try {
-        if ((await stat(absolute)).isFile()) return await repositorySpelling(root, candidate);
+        if ((await stat(absolute)).isFile()) return await repositorySpelling(root, candidate, directories);
       } catch {
         // not this variant
       }
@@ -580,16 +700,21 @@ async function resolveReference(
 }
 
 /** A path in the spelling its directories actually use, so a case-insensitive match keys the graph path. */
-async function repositorySpelling(root: string, candidate: string): Promise<string> {
-  const parts = candidate.split('/');
+async function repositorySpelling(
+  root: string,
+  candidate: string,
+  directories: Map<string, Promise<string[] | null>>,
+): Promise<string> {
   const spelled: string[] = [];
-  for (const part of parts) {
-    try {
-      const entries = await readdir(join(root, ...spelled));
-      spelled.push(entries.includes(part) ? part : entries.find(e => e.toLowerCase() === part.toLowerCase()) ?? part);
-    } catch {
-      spelled.push(part);
+  for (const part of candidate.split('/')) {
+    const dir = join(root, ...spelled);
+    let pending = directories.get(dir);
+    if (!pending) {
+      pending = readdir(dir).catch(() => null);
+      directories.set(dir, pending);
     }
+    const entries = await pending;
+    spelled.push(!entries || entries.includes(part) ? part : entries.find(e => e.toLowerCase() === part.toLowerCase()) ?? part);
   }
   return spelled.join('/');
 }
@@ -621,7 +746,7 @@ async function readConfig(root: string, relativePath: string, out: Collector): P
     out.boundary({ config: relativePath, key: '', reference: relativePath, reason: 'unreadable-config' });
     return null;
   }
-  return read.bytes.toString('utf-8');
+  return read.bytes.toString('utf-8').replace(/^\uFEFF/, '');
 }
 
 async function readJsonConfig(
@@ -642,12 +767,18 @@ async function readJsonConfig(
   return null;
 }
 
-/** The index of the closing quote of the string opening at `start`, or the last index. */
-function skipString(source: string, start: number): number {
+/** The index of the closing quote of the string opening at `start`, or -1 when it is unclosed. */
+function closingQuote(source: string, start: number): number {
   const quote = source[start];
   let i = start + 1;
   while (i < source.length && source[i] !== quote) i += source[i] === '\\' ? 2 : 1;
-  return Math.min(i, source.length - 1);
+  return i < source.length ? i : -1;
+}
+
+/** The index of the closing quote of the string opening at `start`, or the last index. */
+function skipString(source: string, start: number): number {
+  const close = closingQuote(source, start);
+  return close < 0 ? source.length - 1 : close;
 }
 
 /** Source with `//` and `/* *\/` comments removed; string and template contents are untouched. */

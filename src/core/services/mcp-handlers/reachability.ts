@@ -97,8 +97,11 @@ export async function loadExternalWiring(absDir: string): Promise<{ report: Exte
 /** Caveats every conclusion resting on config-wired roots carries. */
 export function externalWiringCaveats(report: ExternalWiringReport): string[] {
   const caveats = [
-    'Every function in a file a config invokes (package.json bin/main/module/exports/scripts/jest, tsconfig files, vitest/vite/jest setup files, .github/workflows run steps) is treated as live, because module-scope code has no call-graph node; unused helpers in such a file are not flagged. Workspace-member manifests, framework routing conventions, and other config formats are not read, so code wired only there can appear dead.',
+    'Config wiring is read from the root package.json (bin, main, module, exports, scripts, jest), tsconfig.json files, vitest/vite/jest setup files, and POSIX-shell .github/workflows run steps. Workspace-member manifests, framework routing conventions, and other config formats are not read, so code wired only there can appear dead.',
   ];
+  if (report.wired.length > 0) {
+    caveats.push('Every function in a file a config invokes is treated as live, because module-scope code has no call-graph node; unused helpers in such a file are not flagged.');
+  }
   const unresolved = report.boundaries.length + report.boundariesOmitted;
   if (unresolved > 0) {
     caveats.push(`${unresolved} config reference(s) could not be resolved to a repository file (dynamic, unsupported, missing, outside the repository, or an unreadable config; see externalWiring.boundaries) — code they would wire can appear dead.`);

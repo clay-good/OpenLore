@@ -40,7 +40,7 @@ import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { traversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
-import { deadCodeIds } from './reachability.js';
+import { deadCodeIds, loadExternalWiring } from './reachability.js';
 import {
   loadDynamicBoundaryReport,
   loadImportAdjacency,
@@ -301,9 +301,10 @@ async function dynamicHitFor(absDir: string, subject: FunctionNode): Promise<Qua
  *     dispatch blind spot; static reachability cannot decide deadness).
  */
 async function verifyDead(absDir: string, cg: SerializedCallGraph, subject: FunctionNode): Promise<ClaimResult> {
-  const deadFull = await deadCodeIds(absDir, cg);
+  const externalWiring = (await loadExternalWiring(absDir)).byFile;
+  const deadFull = await deadCodeIds(absDir, cg, { externalWiring });
   const strictCg: SerializedCallGraph = { ...cg, edges: cg.edges.filter(e => e.confidence !== 'synthesized') };
-  const deadStrict = await deadCodeIds(absDir, strictCg);
+  const deadStrict = await deadCodeIds(absDir, strictCg, { externalWiring });
 
   const inFull = deadFull.has(subject.id);
   const inStrict = deadStrict.has(subject.id);

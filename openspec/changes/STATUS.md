@@ -36,12 +36,7 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 1
-
-`add-framework-entry-point-adapters` — deterministic readers of package.json, tsconfig, test-runner
-config, and GitHub Actions `run:` steps add receipted `externally-wired` liveness roots to
-`find_dead_code`, `report_coverage_gaps`, and the entry-point digest. On a branch with its `change:`
-marker in `src/`.
+## In flight — 0
 
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
@@ -239,6 +234,16 @@ with `save: false`, destructive and open-world hints). Argument-validation failu
 results that name the parameter, the expected shape, and a schema-valid corrected call, bounded and
 redacted. Output schemas (measured +19% to +96% of the substrate standing cost) and elicitation for
 decision approval are deferred to their own changes.
+
+Shipped and archived since: `add-framework-entry-point-adapters` (2026-09-12, narrowed) — deterministic
+readers of the root package.json, tsconfig files, vitest/vite/jest setup files, and POSIX-shell GitHub
+Actions `run:` steps make every function in a file a config executes an `externally-wired` liveness
+root with a receipt, in `find_dead_code`, the shared dead set, `report_coverage_gaps`, and the
+entry-point digest. A shell tokenizer counts only executed files (never arguments, redirects, or
+heredoc bodies); variables, globs, `cd`, modules by name, PowerShell steps, and unreadable configs are
+reasoned boundaries. Four adversarial reviews plus a fix-verification review hardened it against false
+wiring, FIFO hangs, a YAML merge-key bomb, quadratic scans, and unbounded boundary growth. On this
+repository 36 of 1,018 entry points are config-invoked.
 
 ## Maintenance rules (what kept this table honest)
 

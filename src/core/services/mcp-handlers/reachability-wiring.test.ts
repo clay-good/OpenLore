@@ -96,6 +96,16 @@ describe('find_dead_code with config-wired roots', () => {
     expect(caveats).toMatch(/Workspace-member manifests, framework routing conventions/);
   });
 
+  it('states the all-functions rule only when something is wired', async () => {
+    vi.mocked(collectExternalWiring).mockResolvedValue(NONE);
+    const none = (await handleFindDeadCode({ directory: '/p' }) as DeadResult).soundness.caveats.join(' ');
+    expect(none).not.toMatch(/Every function in a file a config invokes/);
+    expect(none).toMatch(/Workspace-member manifests/);
+    vi.mocked(collectExternalWiring).mockResolvedValue(WIRED);
+    const wired = (await handleFindDeadCode({ directory: '/p' }) as DeadResult).soundness.caveats.join(' ');
+    expect(wired).toMatch(/Every function in a file a config invokes is treated as live/);
+  });
+
   it('shares the wired roots with the dead set other conclusions read', async () => {
     vi.mocked(collectExternalWiring).mockResolvedValue(WIRED);
     expect([...await deadCodeIds('/p', CG)]).toEqual(['src/unused.ts::orphan']);
@@ -117,7 +127,7 @@ describe('report_coverage_gaps with config-wired roots', () => {
       coverageGaps: Array<{ name: string; alsoFlaggedDead?: true; externallyWired?: unknown[] }>;
       soundness: { caveats: string[] };
     };
-    expect(r.soundness.caveats.join(' ')).toMatch(/Every function in a file a config invokes .* is treated as live/);
+    expect(r.soundness.caveats.join(' ')).toMatch(/Every function in a file a config invokes is treated as live/);
     expect(r.soundness.caveats.join(' ')).toMatch(/1 config reference\(s\) could not be resolved/);
     const runCli = r.coverageGaps.find(g => g.name === 'runCli');
     expect(runCli).toMatchObject({ externallyWired: [{ config: 'package.json', key: 'bin.tool' }] });

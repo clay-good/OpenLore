@@ -170,6 +170,48 @@ describe('collectExternalWiring — shell commands', () => {
   });
 });
 
+describe('collectExternalWiring — runner syntax', () => {
+  it('reads each runner\'s flags: shell -e, value flags, subshells, keywords, and wrapper options', async () => {
+    for (const f of ['s/e.sh', 's/ts.ts', 's/w.py', 'ignore', 's/stack.js', 's/sub.js', 'sub.js', 's/kw.sh', 's/bang.js', 's/sudo.js', 's/envu.js', 's/yarn.js']) {
+      await put(f);
+    }
+    await put('tsconfig.json', '{}');
+    await put('package.json', JSON.stringify({
+      scripts: {
+        shellE: 'bash -e s/e.sh',
+        tsconfig: 'tsx --tsconfig tsconfig.json s/ts.ts',
+        pythonW: 'python -W ignore s/w.py',
+        stack: 'node --stack-size 2000 s/stack.js',
+        subshell: '( cd s && node sub.js ); { cd s; node sub.js; }',
+        keywords: 'if true; then bash s/kw.sh; fi; ! node s/bang.js',
+        wrappers: 'sudo -u ci node s/sudo.js && env -u FOO node s/envu.js && yarn node s/yarn.js',
+        tasks: 'bun run build && deno task dev && ./node_modules/.bin/tsc',
+      },
+    }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['s/bang.js', 's/e.sh', 's/envu.js', 's/kw.sh', 's/stack.js', 's/sudo.js', 's/ts.ts', 's/w.py', 's/yarn.js']);
+    expect(report.boundaries).toEqual([
+      { config: 'package.json', key: 'scripts.subshell', reference: 'sub.js', reason: 'unsupported-form' },
+    ]);
+  });
+
+  it('parses a hostile unclosed setup-file string in linear time', async () => {
+    await put('vitest.config.ts', `export default { test: { setupFiles: '${"\\'".repeat(200_000)}` );
+    const started = Date.now();
+    const report = await collectExternalWiring(root);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(report.boundaries.map(b => b.reason)).toEqual(['unparsed-config']);
+  }, 20_000);
+
+  it('keeps boundaries bounded per config', async () => {
+    const run = Array.from({ length: 5_000 }, (_, i) => `node $X${i}`).join(';');
+    await put('.github/workflows/noisy.yml', `jobs:\n  a:\n    steps:\n      - run: ${JSON.stringify(run)}\n`);
+    const report = await collectExternalWiring(root);
+    expect(report.boundaries).toHaveLength(50);
+    expect(report.boundariesOmitted).toBe(4_950);
+  });
+});
+
 describe('collectExternalWiring — tsconfig and test runners', () => {
   it('reads tsconfig files and literal setup files, and discloses a non-literal setting', async () => {
     await put('tsconfig.json', '{ "files": ["src/entry.ts", "types/global.d.ts"] }');
@@ -194,6 +236,22 @@ describe('collectExternalWiring — tsconfig and test runners', () => {
     expect(report.boundaries).toEqual([
       { config: 'vitest.config.ts', key: 'globalSetup', reference: 'setupPath', reason: 'unparsed-config' },
     ]);
+  });
+
+  it('reads quoted keys, ignores keys inside strings and type annotations, and tolerates a BOM', async () => {
+    await put('quoted.ts');
+    await put('in-string.ts');
+    await put('bom.ts');
+    await put('vitest.config.ts', [
+      "const note = \"setupFiles: ['./in-string.ts']\";",
+      'interface Options { setupFiles: string[]; globalSetup: string }',
+      "export default { test: { 'setupFiles': ['./quoted.ts'] } };",
+      '',
+    ].join('\n'));
+    await put('package.json', '\uFEFF' + JSON.stringify({ main: 'bom.ts' }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['bom.ts', 'quoted.ts']);
+    expect(report.boundaries).toEqual([]);
   });
 
   it('reads multi-line jest arrays and expands <rootDir>', async () => {
@@ -264,6 +322,14 @@ describe('collectExternalWiring — GitHub Actions', () => {
     expect(report.boundaries).toEqual([
       { config: '.github/workflows/os.yml', key: 'jobs.linux.steps[2].run', reference: 'shell pwsh', reason: 'unsupported-form' },
       { config: '.github/workflows/os.yml', key: 'jobs.windows.steps[0].run', reference: 'shell pwsh', reason: 'unsupported-form' },
+    ]);
+  });
+
+  it('shows a templated shell as an expression, not the internal placeholder', async () => {
+    await put('.github/workflows/matrix.yml', 'jobs:\n  a:\n    steps:\n      - shell: ${{ matrix.shell }}\n        run: node x.js\n');
+    const report = await collectExternalWiring(root);
+    expect(report.boundaries).toEqual([
+      { config: '.github/workflows/matrix.yml', key: 'jobs.a.steps[0].run', reference: 'shell ${{ }}', reason: 'unsupported-form' },
     ]);
   });
 
