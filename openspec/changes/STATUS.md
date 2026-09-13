@@ -36,12 +36,7 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 1
-
-`refine-orient-context-budgeting` — `orient` fits `tokenBudget` to the whole response: adds ranked
-functions past `limit` while they fit, or trims peripheral entries first, with a receipt; the no-budget
-default is unchanged. On a branch with its `change:`
-marker in `src/`.
+## In flight — 0
 
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
@@ -248,6 +243,15 @@ heredoc bodies); variables, globs, `cd`, modules by name, PowerShell steps, and 
 reasoned boundaries. Four adversarial reviews plus a fix-verification review hardened it against false
 wiring, FIFO hangs, a YAML merge-key bomb, quadratic scans, and unbounded boundary growth. On this
 repository 36 of 1,018 entry points are config-invoked.
+
+Shipped and archived since: `refine-orient-context-budgeting` (2026-09-13, narrowed) — `orient`'s
+`tokenBudget` fits the whole response as sent: the top-`limit` answer is built exactly as without a
+budget, then functions ranked past `limit` are added with their call paths while they fit, or whole
+lowest-ranked entries are trimmed peripheral-first with the fewest removals. Decisions, memories,
+architecture violations, and matching specs are never dropped, and a `budget` receipt reports the exact
+served size. Four adversarial reviews found the first version widened the pool before fitting (a
+budget above the default returned less); two verification rounds hardened the redesign. Cold-start
+expansion, seed shaping, and `get_minimal_context` are deferred.
 
 ## Maintenance rules (what kept this table honest)
 
