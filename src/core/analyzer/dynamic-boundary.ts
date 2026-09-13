@@ -16,9 +16,10 @@
  *
  * Four rules are load-bearing:
  *
- *  1. **Records, never resolves.** A site NEVER produces a node or an edge. Enabling the matcher
- *     leaves the emitted graph byte-identical. Recovering the statically-decidable subset is the
- *     job of the sibling change `resolve-literal-reflective-dispatch`, not this one.
+ *  1. **Records, never resolves.** A site NEVER produces a node or an edge. The matcher only records
+ *     candidates; the one structurally provable family — a stable literal dispatch table — is bound
+ *     after Pass 7 by `literal-reflection.ts` (change: resolve-literal-reflective-dispatch), which
+ *     discharges exactly the candidates it binds.
  *  2. **The partition is by resolution OUTCOME, not argument form.** Every recognized construct is
  *     a *candidate*; {@link finalizeDynamicBoundarySites} retracts only those the resolver actually
  *     bound to an internal symbol. A static literal that resolves to nothing, or ambiguously, still
@@ -87,8 +88,9 @@ export const DYNAMIC_BOUNDARY_REFUSALS = [
    * A static literal selector naming exactly ONE symbol, which the resolver nonetheless did not
    * bind to an edge. Its own reason because the alternative — folding it into
    * `unresolved-external` — states "resolves to no symbol" about a target that plainly does, which
-   * is a false statement from the feature whose whole claim is honesty. This is the case the
-   * sibling change `resolve-literal-reflective-dispatch` is built to recover.
+   * is a false statement from the feature whose whole claim is honesty. Bare-name reflection stays
+   * unrecovered by design (change: resolve-literal-reflective-dispatch re-scoped it out), so this
+   * reason remains a permanent disclosure.
    */
   'resolvable-but-unbound',
   /** A static literal selector that names more than one symbol; picking one would be a guess. */
@@ -1123,21 +1125,24 @@ function isSelfDotted(text: string): boolean {
 }
 
 /**
- * The literal a wrapper node carries (`argument > string` in grammars that wrap each argument), or
- * undefined. Only a node whose other children are punctuation tokens counts: `"get_" + name` also
- * has a literal child, and reading it would reconstruct a partial name for a dispatch computed at
- * runtime (change: resolve-literal-reflective-dispatch).
+ * The literal a wrapper node carries, or undefined. Only a WRAPPER shape — an argument node (which may
+ * carry a named-argument label, `callback: 'run'`), a string, or a symbol — is looked into, and only
+ * when it holds exactly one literal and no interpolation. An expression that merely contains a literal
+ * (`"get_" + name`, a concatenated string) is never read: that would reconstruct a partial name for a
+ * dispatch computed at runtime (change: resolve-literal-reflective-dispatch).
  */
 function wrappedLiteral(
   source: string,
   spec: LanguageSpec,
   node: DynamicBoundaryNode,
 ): DynamicBoundaryNode | undefined {
+  if (!/argument|string|symbol/.test(node.type) || /concatenated/.test(node.type)) return undefined;
   const kids = childrenOf(node);
+  if (kids.some(k => /interpolation|substitution/.test(k.type))) return undefined;
   const literals = kids.filter(k => spec.literalTypes.includes(k.type));
-  if (literals.length !== 1) return undefined;
-  // A punctuation token's type is its own text; an identifier, operand or call is not.
-  return kids.every(k => k === literals[0] || k.type === textOf(source, k)) ? literals[0] : undefined;
+  // A literal whose own text is a fragment of a larger string (`string_content` beside an escape) is
+  // still one literal only when it is the sole literal child.
+  return literals.length === 1 && textOf(source, literals[0]).length > 0 ? literals[0] : undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1341,9 +1346,12 @@ function collectStableTables(root: DynamicBoundaryNode, source: string): Map<str
     // Code evaluation or dynamic scope anywhere makes every table in the file unprovable: `eval` in any
     // spelling (`(eval)(…)` is still a direct eval), `Function(…)` with or without `new`, and `with`.
     if (n.type === 'with_statement') evaluatesCode = true;
+    // `globalThis.eval(…)` names it as a property, and `(0, eval)(…)` as a plain identifier.
+    if (n.type === 'identifier' || n.type === 'property_identifier') {
+      if (textOf(source, n) === 'eval') evaluatesCode = true;
+    }
     if (n.type === 'identifier') {
       const name = textOf(source, n);
-      if (name === 'eval') evaluatesCode = true;
       if (name === 'Function' && (parent?.type === 'new_expression' || parent?.type === 'call_expression')) {
         evaluatesCode = true;
       }
@@ -1383,6 +1391,17 @@ function collectStableTables(root: DynamicBoundaryNode, source: string): Map<str
     }
   }
   if (evaluatesCode) return stable;
+  thisAt.sort((x, y) => x - y);
+  /** Is any `this` token inside `[start, end)`? Binary search over the sorted offsets. */
+  const thisWithin = (start: number, end: number): boolean => {
+    let lo = 0;
+    let hi = thisAt.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (thisAt[mid] < start) lo = mid + 1; else hi = mid;
+    }
+    return lo < thisAt.length && thisAt[lo] < end;
+  };
 
   for (const name of names) {
     if (unstable.has(name) || nestedVarBindings.has(name)) continue;
@@ -1391,7 +1410,7 @@ function collectStableTables(root: DynamicBoundaryNode, source: string): Map<str
     for (const value of new Set(entries.values())) {
       const span = functionSpans.get(value);
       if (!span || bindings.get(value) !== 1 || written.has(value) || nestedVarBindings.has(value)) continue;
-      if (thisAt.some(at => at >= span[0] && at < span[1])) continue;
+      if (thisWithin(span[0], span[1])) continue;
       local.set(value, span);
     }
     stable.set(name, { entries, local });
@@ -1452,9 +1471,8 @@ export interface AttributedCandidate extends DynamicBoundaryCandidate {
  * external target resolves to nothing, and would otherwise produce neither an edge nor a site —
  * a silent hole that reads as "no dynamic dispatch here".
  *
- * With no reflective resolver wired (the sibling change `resolve-literal-reflective-dispatch` owns
- * that), `resolvedToEdge` is false for every candidate and every one becomes a site — which is the
- * honest answer for today's graph, since today's graph really does emit no edge for them.
+ * Only a literal dispatch table is ever bound (change: resolve-literal-reflective-dispatch); every
+ * other candidate reaches this function unbound and becomes a site.
  */
 export function finalizeDynamicBoundarySites(
   candidates: AttributedCandidate[],

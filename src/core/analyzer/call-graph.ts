@@ -5185,8 +5185,8 @@ function finalizeDynamicBoundaries(
   for (const [filePath, { language, candidates }] of byFile) {
     // A candidate is retracted ONLY when the literal-reflection resolver bound that very construct
     // — keyed on its file and byte offset, never on a caller and a name. A resolved edge carries no
-    // offset, so in `getattr(self, "run")(); getattr(other, "run")()` a caller+name key would let
-    // the first binding erase the second site, leaving neither an edge nor a site for it
+    // offset, so in `STABLE[k](); LOOSE[k]()` over one entry name a caller+name key would let the
+    // first binding erase the second site, leaving neither an edge nor a site for it
     // (change: resolve-literal-reflective-dispatch).
     const key = (c: { startIndex: number }): string => literalReflectionKey(filePath, c.startIndex);
     const probe: ResolutionProbe = {
@@ -6471,7 +6471,9 @@ export class CallGraphBuilder {
         edges,
         fanOutCap: EVENT_CHANNEL_FANOUT_CAP,
       });
-      edges.push(...literalReflection.edges);
+      // A loop, not a spread: a large repository's edge list exceeds the engine's argument limit, and
+      // the throw would be swallowed below and silently turn recovery off for the whole build.
+      for (const edge of literalReflection.edges) edges.push(edge);
     } catch {
       literalReflection = undefined;
     }

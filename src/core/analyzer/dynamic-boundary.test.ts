@@ -322,8 +322,8 @@ describe('the partition is decided by resolution outcome', () => {
   });
 
   it('Ruby send with a literal symbol is a site today — the resolver emits no edge for it', async () => {
-    // The sibling change `resolve-literal-reflective-dispatch` is what turns this into an edge. Until
-    // it lands the graph really does carry nothing for this call, so the honest answer is a site.
+    // Bare-name reflection is never recovered (change: resolve-literal-reflective-dispatch re-scoped
+    // it out), so the graph carries nothing for this call and the honest answer is a site.
     const sites = await sitesOf('a.rb', 'Ruby', `
 class Router
   def process; end
@@ -703,6 +703,15 @@ class Command {
 });
 
 describe('the refusal reason is never a false statement', () => {
+  it('a literal beside a named-argument label is still read, while a concatenation never is', async () => {
+    // A named argument wraps its literal with a label; the label is not an operand, so the dispatch
+    // target is still a static literal and must not be described as computed at runtime.
+    const php = await sitesOf('a.php', 'PHP', "<?php\nfunction d() { return call_user_func(callback: 'run'); }\n");
+    expect(php.map(s => s.refusal)).toEqual(['unresolved-in-file-scope']);
+    const concatenated = await sitesOf('b.py', 'Python', 'def d(o, n):\n    return getattr(o, "get_" + n)()\n');
+    expect(concatenated.map(s => s.refusal)).toEqual(['no-static-target']);
+  });
+
   it('the FULL BUILD reports resolvable-but-unbound, not "resolves to no symbol"', async () => {
     // The whole-repository build is the only lane that can count symbols by name, so it is the only
     // one that may make a claim about how many there are. `run` exists, so saying "resolves to no

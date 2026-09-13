@@ -3,7 +3,7 @@
 > Status: BUILT (2026-09-12). Scope as shipped: **literal dispatch tables in JavaScript/TypeScript**.
 > Everything else this proposal once considered is re-scoped out on evidence, below.
 
-## The gap
+## Why
 
 Plugin systems, job runners, and command dispatchers reach their targets through a literal table —
 `const HANDLERS = { create: createUser, remove: deleteUser }` indexed at `HANDLERS[k]()`. The callee
@@ -12,7 +12,7 @@ dead-code candidate, an `also-dead` coverage gap, and a symbol with an empty bla
 change `disclose-dynamic-boundary-regions` already records the construct as a dynamic-boundary site;
 this change recovers the part that is provable and keeps the rest disclosed.
 
-## What changes
+## What Changes
 
 1. **One recovered family: a stable literal dispatch table** (JS/TS). The table is a module-private
    `const` object whose name is used only in its declaration, a type query, or as the receiver of an

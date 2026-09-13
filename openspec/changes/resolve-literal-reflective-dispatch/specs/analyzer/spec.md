@@ -8,7 +8,8 @@ The call-graph builder SHALL recover a call edge for a **literal dispatch table*
 (not exported) JavaScript/TypeScript `const` object of literal keys to names, whose name is used
 nowhere in its file except its declaration, a type query, and as the receiver of an immediately
 invoked subscript (`NAME[k]()`), in a file that neither evaluates code nor opens a dynamic scope
-(any reference to `eval`, `Function(…)` with or without `new`, or a `with` statement).
+(any reference to `eval` as an identifier or a property, `Function(…)` with or without `new`, or a
+`with` statement).
 
 Each entry SHALL bind by the span of its same-file module-level declaration — a function declaration
 or a `const` arrow or function expression, bound once (counting a `var` nested in a top-level block),
@@ -22,7 +23,8 @@ targets exceed the existing synthesis fan-out cap. Keys SHALL compare as JavaScr
 key's target set covers the table's own entries only; a prototype polluted elsewhere is outside what
 a single file can establish.
 
-The following SHALL NOT be recovered and SHALL remain disclosed sites:
+The following SHALL NOT be recovered. Each reflective call among them SHALL remain a disclosed site,
+and a static-index member access (`this["m"]()`) SHALL remain unrecorded, as it was before:
 
 - a literal member on a self-like receiver (`this["m"]()`, `getattr(self, "m")()`, Ruby
   `send(:m)`): the class graph does not bound the receiver's type, because members added by
@@ -252,7 +254,8 @@ at most once.
 
 #### Scenario: A bound construct does not consume the disclosure of another
 
-- **GIVEN** a file with more literal-key table dispatches than the per-file retained-site bound,
-  followed by one `eval(code)`
+- **GIVEN** a file with as many literal-key table dispatches as the per-file retained-site bound,
+  followed by one computed member call `o[k]()`
 - **WHEN** the repository is analyzed
-- **THEN** the `eval` is recorded as a site, and the file's total counts only unbound constructs
+- **THEN** the computed call is recorded as a listed site, and the file's total counts each construct
+  at most once, with any construct past the bound counted as a site
