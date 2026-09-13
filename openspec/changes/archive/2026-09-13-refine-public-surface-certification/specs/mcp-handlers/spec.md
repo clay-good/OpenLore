@@ -17,7 +17,7 @@ caller that runs the tool can gate an individual rule with an `enforcement.polic
 `potentially-breaking` class SHALL keep its meaning: `signature-unprovable` SHALL NOT be a
 breaking-classed code. The verdict SHALL include a `suggestedBump`: `major` when any change is
 `breaking`; otherwise withheld (`null`, with a reason) when any change is `potentially-breaking` or
-the changed files are in no signature-classifiable language; otherwise `minor` when an export was
+any changed code file is in a language whose signatures are not classified; otherwise `minor` when an export was
 added, else `patch`. The consumer disclosure SHALL state that only in-repo consumers were checked
 and SHALL NOT claim that sibling repositories are checked.
 
@@ -42,3 +42,10 @@ and SHALL NOT claim that sibling repositories are checked.
 - **THEN** `suggestedBump` is `minor`, and a diff with any breaking change yields `major`
 - **AND** a diff with a `potentially-breaking` change and no breaking change withholds the bump
   and emits a `signature-unprovable` finding of severity `warning`
+
+#### Scenario: Changed code the classifier does not read withholds the bump
+
+- **GIVEN** a diff that changes a Go, Vue, or shell file (tracked, untracked, or renamed away)
+- **WHEN** the verdict is assembled
+- **THEN** `suggestedBump` is withheld with a reason, even if the TypeScript part alone would be
+  `minor` or `patch`; a changed test, Terraform, or config file does not withhold it

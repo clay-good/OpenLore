@@ -51,11 +51,21 @@ import { FINDING_CODE_REGISTRY, type GovernanceFinding } from './enforcement-pol
 const MAX_SURFACE = 500;
 const MAX_CONSUMERS = 25;
 const SOURCE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py)$/i;
+/** Code extensions the canonical language map does not know (C/C++ headers, Python stubs, …). */
+const EXTRA_CODE_RE = /\.(pyi|hxx|hh|mm|m|fs|fsx|vb|erl|hrl|clj|cljs|hs|ml|mli|zig|nim|jl|r)$/i;
+
 /**
- * Code files in a language whose public signatures are not classified. They never reach the
- * classifier, so a diff that changes one cannot earn a `minor`/`patch` bump on its evidence.
+ * A code file in a language whose public signatures are not classified. It never reaches the
+ * classifier, so a diff that changes one cannot earn a `minor`/`patch` bump on its evidence. Built
+ * from the canonical language map (so a Vue or shell file counts) plus a few extensions it does not
+ * know; infrastructure files (Terraform, Bicep), tests, and non-code files do not count.
  */
-const UNCLASSIFIED_CODE_RE = /\.(go|rs|java|kt|kts|scala|cs|fs|vb|rb|php|swift|c|cc|cpp|cxx|h|hh|hpp|m|mm|dart|lua|ex|exs|erl|clj|hs|ml)$/i;
+function isUnclassifiedCode(path: string): boolean {
+  if (SOURCE_RE.test(path) || isTestFile(path)) return false;
+  const language = detectLanguage(path);
+  if (language === 'Terraform' || language === 'Bicep') return false;
+  return language !== 'unknown' || EXTRA_CODE_RE.test(path);
+}
 
 export interface CertifyPublicSurfaceInput {
   directory: string;
@@ -382,8 +392,9 @@ async function changedSourceFiles(absDir: string, base: string): Promise<{ files
   // `export …` strings in fixtures that would otherwise read as phantom contract symbols).
   const eligible = (p: string): boolean => SOURCE_RE.test(p) && !isTestFile(p);
   const unassessed = new Set<string>();
-  const noteUnassessed = (p: string): void => { if (UNCLASSIFIED_CODE_RE.test(p) && !isTestFile(p)) unassessed.add(p); };
-  for (const f of diff.files) noteUnassessed(f.path);
+  const noteUnassessed = (p: string): void => { if (isUnclassifiedCode(p)) unassessed.add(p); };
+  // A rename counts both names: `lib.go` → `lib.txt` removes Go code the classifier never read.
+  for (const f of diff.files) { noteUnassessed(f.path); if (f.oldPath) noteUnassessed(f.oldPath); }
   const out = diff.files
     .filter((f) => eligible(f.path))
     .map((f) => ({ path: f.path, status: f.status as string, ...(f.oldPath ? { oldPath: f.oldPath } : {}) }));

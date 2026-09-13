@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFileGitSync } from '../../../utils/git-exec.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assembleSurfaceDiff, computeCertifyPublicSurface, publicSurfaceFindings } from './public-surface.js';
@@ -305,6 +306,35 @@ describe('handleCertifyPublicSurface — base-ref is fatal on non-resolution (fi
     expect(r.mode).toBe('diff');
     expect(r.suggestedBump).toBeNull();
     expect(r.suggestedBumpWithheld).toMatch(/1 changed code file\(s\) are in a language whose signatures are not classified/);
+  });
+
+  it.each([
+    [{ path: 'src/Button.vue', status: 'modified' }],
+    [{ path: 'pkg/api.pyi', status: 'modified' }],
+    [{ path: 'scripts/release.sh', status: 'modified' }],
+    [{ path: 'lib.txt', oldPath: 'lib.go', status: 'renamed' }],
+  ])('withholds the bump for an unclassified code file: %o', async (file) => {
+    vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [file], resolvedBase: 'main' } as never);
+    const r = (await computeCertifyPublicSurface({ directory: dir, baseRef: 'HEAD' })) as Record<string, unknown>;
+    expect(r.suggestedBump).toBeNull();
+  });
+
+  it.each([
+    [{ path: 'pkg/a_test.go', status: 'modified' }],
+    [{ path: 'infra/main.tf', status: 'modified' }],
+    [{ path: 'package.json', status: 'modified' }],
+  ])('does not withhold the bump for a test, infrastructure, or config file: %o', async (file) => {
+    vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [file], resolvedBase: 'main' } as never);
+    const r = (await computeCertifyPublicSurface({ directory: dir, baseRef: 'HEAD' })) as Record<string, unknown>;
+    expect(r.suggestedBump).toBe('patch');
+  });
+
+  it('counts an untracked code file in an unclassified language', async () => {
+    execFileGitSync('git', ['init', '-q', dir]);
+    await writeFile(join(dir, 'new.go'), 'package x\nfunc New() {}\n');
+    const r = (await computeCertifyPublicSurface({ directory: dir, baseRef: 'HEAD' })) as Record<string, unknown>;
+    expect(r.suggestedBump).toBeNull();
+    expect(r.suggestedBumpWithheld).toMatch(/1 changed code file/);
   });
 
   it('a docs-only change still gets a patch bump (non-code files do not withhold it)', async () => {
