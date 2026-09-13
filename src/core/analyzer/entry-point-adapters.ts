@@ -131,6 +131,8 @@ const RUNNERS = new Map<string, RunnerSyntax>([
   ['sh', SHELL], ['bash', SHELL], ['zsh', SHELL],
   ['ruby', { valueFlags: new Set(['-I', '-r', '-C', '-E']), inlineFlags: new Set(['-e']) }],
 ]);
+/** Runners that resolve an extensionless script the way Node does. */
+const NODE_RESOLVING = new Set(['node', 'tsx', 'ts-node', 'bun']);
 /** Commands that run the command after them, with their options that take a value. */
 const WRAPPERS = new Map<string, Set<string>>([
   ['env', new Set(['-u', '--unset', '-C', '--chdir', '-S'])],
@@ -143,6 +145,8 @@ const SHELL_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'while', 'until', 
 
 interface Reference extends WiringReceipt {
   reference: string;
+  /** A bare name a JavaScript runner resolves (`node build` → `build.js`). */
+  resolvesLikeNode?: boolean;
 }
 
 /** Collects references and boundaries, deduplicating and capping both per config file. */
@@ -193,10 +197,11 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
   const resolutions = new Map<string, Promise<string | { reason: WiringBoundaryReason }>>();
   const directories = new Map<string, Promise<string[] | null>>();
   for (const ref of out.references) {
-    let pending = resolutions.get(ref.reference);
+    const memoKey = `${ref.resolvesLikeNode ? 'node:' : ''}${ref.reference}`;
+    let pending = resolutions.get(memoKey);
     if (!pending) {
-      pending = resolveReference(root, ref.reference, tsconfig.outDir, tsconfig.rootDir, directories);
-      resolutions.set(ref.reference, pending);
+      pending = resolveReference(root, ref.reference, tsconfig.outDir, tsconfig.rootDir, directories, ref.resolvesLikeNode === true);
+      resolutions.set(memoKey, pending);
     }
     const resolved = await pending;
     if (typeof resolved === 'string') {
@@ -204,7 +209,7 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
       if (!receipts.some(r => r.config === ref.config && r.key === ref.key)) receipts.push({ config: ref.config, key: ref.key });
       receiptsByFile.set(resolved, receipts);
     } else {
-      out.boundary({ ...ref, reason: resolved.reason });
+      out.boundary({ config: ref.config, key: ref.key, reference: ref.reference, reason: resolved.reason });
     }
   }
 
@@ -282,23 +287,26 @@ function commandReferences(
   out: Collector,
   nesting = 0,
 ): void {
-  if (nesting > 3) return;
-  // A `cd` holds for the rest of its subshell: one flag per subshell depth.
-  const changedAt: boolean[] = [];
+  // A `cd` holds for the rest of its subshell: remember the shallowest depth a `cd` ran at.
+  let cdDepth = Infinity;
   for (const { words: segment, depth } of shellSegments(command)) {
-    changedAt.length = Math.min(changedAt.length, depth + 1);
-    const changedDirectory = changedAt.some(Boolean);
+    if (depth < cdDepth && cdDepth !== Infinity && depthLeft(cdDepth, depth)) cdDepth = Infinity;
+    const changedDirectory = cdDepth <= depth;
     const executed = executedWords(segment);
     for (const item of executed) {
       const text = item.word.text;
       if (item.kind === 'inline') {
-        if (!changedDirectory) commandReferences(text, config, key, workingDirectory, out, nesting + 1);
+        if (changedDirectory || nesting >= 3) {
+          out.boundary({ config, key, reference: text.slice(0, 120), reason: 'unsupported-form' });
+        } else {
+          commandReferences(text, config, key, workingDirectory, out, nesting + 1);
+        }
         continue;
       }
       if (text.includes('$') || text.includes(GHA_EXPR)) {
         out.boundary({ config, key, reference: text.replaceAll(GHA_EXPR, '${{ }}'), reason: 'dynamic-reference' });
       } else if (item.kind === 'cd') {
-        changedAt[depth] = true;
+        cdDepth = Math.min(cdDepth, depth);
       } else if (item.kind === 'module') {
         out.boundary({ config, key, reference: text, reason: 'unsupported-form' });
       } else if (/[*?[\]{}]/.test(text) && !item.word.quoted) {
@@ -308,14 +316,22 @@ function commandReferences(
         if (changedDirectory && !path.startsWith('/')) {
           out.boundary({ config, key, reference: path, reason: 'unsupported-form' });
         } else {
-          out.reference({ config, key, reference: workingDirectory ? posix.join(workingDirectory, path) : path });
+          out.reference({
+            config, key, reference: workingDirectory ? posix.join(workingDirectory, path) : path,
+            ...(item.resolvesLikeNode ? { resolvesLikeNode: true } : {}),
+          });
         }
       }
     }
   }
 }
 
-type Executed = { kind: 'file' | 'module' | 'cd' | 'inline'; word: Word };
+type Executed = { kind: 'file' | 'module' | 'cd' | 'inline'; word: Word; resolvesLikeNode?: boolean };
+
+/** Whether leaving to `depth` closed the subshell a `cd` at `cdDepth` ran in. */
+function depthLeft(cdDepth: number, depth: number): boolean {
+  return depth < cdDepth;
+}
 
 /** The command a word names: the basename of an absolute system path (`/usr/bin/env` → `env`). */
 function systemCommandName(text: string): string {
@@ -365,6 +381,18 @@ function executedWords(words: Word[]): Executed[] {
     if (word.text === '-' && !word.quoted) return executed;  // the script is read from stdin
     const isFlag = word.text.startsWith('-') && !word.quoted;
     const [flag, inline] = isFlag ? word.text.split(/=(.*)/s, 2) : [word.text, undefined];
+    // A group of short flags (`-euo pipefail`, `-ec`): its letters are flags, and the group takes a value
+    // when its last letter does.
+    if (isFlag && /^-[A-Za-z]{2,}$/.test(flag) && inline === undefined) {
+      const letters = flag.slice(1).split('').map(l => `-${l}`);
+      if (letters.some(l => syntax.inlineFlags.has(l))) {
+        const code = words[j + 1]?.text;
+        if (syntax.runsInline && code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
+        return executed;
+      }
+      if (syntax.valueFlags.has(letters[letters.length - 1])) j++;
+      continue;
+    }
     if (syntax.inlineFlags.has(flag)) {
       const code = inline ?? words[j + 1]?.text;
       if (syntax.runsInline && code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
@@ -389,7 +417,7 @@ function executedWords(words: Word[]): Executed[] {
     // After `bun run` / `deno run`, a bare name is a package script, not a file.
     if (!looksLikeScript(word.text) && syntax.subcommands?.has(words[i + 1]?.text ?? '')) return executed;
     // A bare name (`node build`, `bash test`) is tried as a file; resolution discloses a miss.
-    executed.push({ kind: 'file', word });
+    executed.push({ kind: 'file', word, resolvesLikeNode: NODE_RESOLVING.has(name) });
     return executed;
   }
   return executed;
@@ -407,6 +435,7 @@ function looksLikeScript(text: string): boolean {
 function shellSegments(command: string): Array<{ words: Word[]; depth: number }> {
   const segments: Array<{ words: Word[]; depth: number }> = [];
   let depth = 0;
+  const parens: Array<'word' | 'subshell'> = [];
   let words: Word[] = [];
   let word = '';
   let quoted = false;
@@ -462,7 +491,8 @@ function shellSegments(command: string): Array<{ words: Word[]; depth: number }>
     if (ch === '"') {
       let j = i + 1;
       while (j < command.length && command[j] !== '"') {
-        if (command[j] === '\\' && j + 1 < command.length) { word += command[j + 1]; j += 2; continue; }
+        // Inside double quotes a backslash escapes only `$`, backtick, `"`, `\`, and newline.
+        if (command[j] === '\\' && j + 1 < command.length && '$`"\\\n'.includes(command[j + 1])) { word += command[j + 1]; j += 2; continue; }
         word += command[j++];
       }
       quoted = true; inWord = true;
@@ -475,11 +505,21 @@ function shellSegments(command: string): Array<{ words: Word[]; depth: number }>
       continue;
     }
     if (ch === ' ' || ch === '\t') { endWord(); continue; }
-    if ((ch === '(' || ch === ')') && !(ch === '(' && i > 0 && command[i - 1] === '$')) {
-      // Subshells: their commands are segments of their own, and a `cd` inside ends with them.
-      if (ch === '(' && inWord) { word += ch; continue; }
+    if (ch === '(' || ch === ')') {
+      // `$(`, `$((`, `<(`, and `@(` open substitutions or patterns, not subshells: their `)` must not
+      // close a subshell. A plain `(` opens a subshell whose commands are segments of their own.
+      if (ch === '(' && (inWord || (i > 0 && '$<>@'.includes(command[i - 1])))) {
+        parens.push('word');
+        word += ch; inWord = true;
+        continue;
+      }
+      if (ch === ')' && parens.length > 0 && parens[parens.length - 1] === 'word') {
+        parens.pop();
+        word += ch; inWord = true;
+        continue;
+      }
       endSegment();
-      depth = ch === '(' ? depth + 1 : Math.max(0, depth - 1);
+      if (ch === '(') { parens.push('subshell'); depth++; } else { parens.pop(); depth = Math.max(0, depth - 1); }
       continue;
     }
     if (ch === ';' || ch === '|' || ch === '&') {
@@ -725,6 +765,7 @@ async function resolveReference(
   outDir: string | undefined,
   rootDir: string | undefined,
   directories: Map<string, Promise<string[] | null>>,
+  resolvesLikeNode = false,
 ): Promise<string | { reason: WiringBoundaryReason }> {
   const path = posix.normalize(reference.replaceAll('\\', '/').replace(/^\.\//, ''));
   if (path.startsWith('/') || /^[A-Za-z]:/.test(path) || path === '..' || path.startsWith('../')) {
@@ -738,7 +779,7 @@ async function resolveReference(
   }
   let outside = false;
   for (const base of bases) {
-    for (const candidate of sourceVariants(base)) {
+    for (const candidate of sourceVariants(base, resolvesLikeNode)) {
       const absolute = join(root, candidate);
       if (!isConfinedPath(root, absolute)) { outside = true; continue; }
       try {
@@ -774,10 +815,11 @@ async function repositorySpelling(
 }
 
 /** The path itself, then the TypeScript sources a JavaScript build output is compiled from. */
-function sourceVariants(path: string): string[] {
+function sourceVariants(path: string, resolvesLikeNode = false): string[] {
   const swap = (from: RegExp, to: string[]) => from.test(path) ? to.map(ext => path.replace(from, ext)) : [];
-  // An extensionless reference is tried as the runner would resolve it (`node build` → `build.js`).
-  const extensionless = /\.[A-Za-z0-9]{1,5}$/.test(posix.basename(path))
+  // An extensionless name a JavaScript runner runs is tried as that runner resolves it (`node build` →
+  // `build.js`); a shell or Python runs exactly the file named.
+  const extensionless = !resolvesLikeNode || /\.[A-Za-z0-9]{1,5}$/.test(posix.basename(path))
     ? []
     : ['.js', '.mjs', '.cjs', '.ts', '/index.js', '/index.ts'].map(ext => path + ext);
   return [
@@ -826,33 +868,45 @@ async function readJsonConfig(
   return null;
 }
 
-/** The index of the closing quote of the string opening at `start`, or -1 when it is unclosed. */
+/** Characters scanned for the end of a regex literal before deciding it is not one. */
+const MAX_REGEX_LITERAL = 512;
+/** Template substitutions nested deeper than this are treated as unclosed. */
+const MAX_TEMPLATE_NESTING = 64;
+
+/**
+ * The index of the closing quote of the string opening at `start`, or -1 when it is unclosed. Template
+ * substitutions (`${ … }`) may hold their own strings; they are tracked on an explicit stack.
+ */
 function closingQuote(source: string, start: number): number {
-  const quote = source[start];
-  let i = start + 1;
-  while (i < source.length && source[i] !== quote) {
-    if (source[i] === '\\') { i += 2; continue; }
-    // A template substitution may hold its own strings, including backticks.
-    if (quote === '`' && source[i] === '$' && source[i + 1] === '{') {
-      let depth = 1;
-      i += 2;
-      while (i < source.length && depth > 0) {
-        const ch = source[i];
-        if (ch === "'" || ch === '"' || ch === '`') {
-          const close = closingQuote(source, i);
-          if (close < 0) return -1;
-          i = close + 1;
-          continue;
-        }
-        if (ch === '{') depth++;
-        else if (ch === '}') depth--;
-        i++;
+  // Each frame is the quote of an open string, or `}` for an open substitution (with its brace depth).
+  const frames: Array<{ quote: string; braces: number }> = [{ quote: source[start], braces: 0 }];
+  for (let i = start + 1; i < source.length; i++) {
+    const frame = frames[frames.length - 1];
+    const ch = source[i];
+    if (frame.quote === '}') {
+      if (ch === "'" || ch === '"' || ch === '`') {
+        if (frames.length >= MAX_TEMPLATE_NESTING) return -1;
+        frames.push({ quote: ch, braces: 0 });
+      } else if (ch === '{') frame.braces++;
+      else if (ch === '}') {
+        if (frame.braces === 0) frames.pop();
+        else frame.braces--;
       }
       continue;
     }
-    i++;
+    if (ch === '\\') { i++; continue; }
+    if (frame.quote === '`' && ch === '$' && source[i + 1] === '{') {
+      if (frames.length >= MAX_TEMPLATE_NESTING) return -1;
+      frames.push({ quote: '}', braces: 0 });
+      i++;
+      continue;
+    }
+    if (ch === frame.quote) {
+      frames.pop();
+      if (frames.length === 0) return i;
+    }
   }
-  return i < source.length ? i : -1;
+  return -1;
 }
 
 /** The index just past a regex literal opening at `start`, or -1 when `start` does not open one. */
@@ -860,9 +914,12 @@ function regexLiteralEnd(source: string, start: number): number {
   if (source[start] !== '/' || source[start + 1] === '/' || source[start + 1] === '*') return -1;
   let k = start - 1;
   while (k >= 0 && (source[k] === ' ' || source[k] === '\t')) k--;
-  if (k >= 0 && !'(,=:[!&|?{};\n'.includes(source[k])) return -1;
+  const afterKeyword = /(?:^|[^\w$])(?:return|typeof|case|in|of|void|delete|throw)$/.test(source.slice(Math.max(0, k - 8), k + 1));
+  if (k < 0 || !('(,=:[!&|?{};'.includes(source[k]) || afterKeyword)) return -1;
   let inClass = false;
-  for (let i = start + 1; i < source.length && source[i] !== '\n'; i++) {
+  // A regex literal is short; a scan that finds no end within the line (or this bound) is not one.
+  const limit = Math.min(source.length, start + MAX_REGEX_LITERAL);
+  for (let i = start + 1; i < limit && source[i] !== '\n'; i++) {
     if (source[i] === '\\') { i++; continue; }
     if (source[i] === '[') inClass = true;
     else if (source[i] === ']') inClass = false;

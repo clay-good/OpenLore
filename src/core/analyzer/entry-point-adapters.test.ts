@@ -216,6 +216,38 @@ describe('collectExternalWiring — runner syntax', () => {
     ]);
   });
 
+  it('keeps a subshell cd across command substitutions, reads short-flag groups, and quoted backslash paths', async () => {
+    for (const f of ['b.js', 'y.js', 's.sh', 'scripts/build.js', 'test/index.js', 'build.js']) await put(f);
+    await put('package.json', JSON.stringify({
+      scripts: {
+        subst: '(cd a && echo $(pwd) && node b.js); (cd a; n=$((1+2)); node b.js)',
+        pipefail: "bash -euo pipefail -c 'node y.js' && bash -eo pipefail s.sh",
+        winpath: 'node "scripts\\build.js"',
+        shellBare: 'bash test',
+        nodeBare: 'node build',
+        cdInline: "cd x && sh -c 'node y.js'",
+      },
+    }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['build.js', 's.sh', 'scripts/build.js', 'y.js']);
+    expect(report.boundaries).toEqual([
+      { config: 'package.json', key: 'scripts.cdInline', reference: 'node y.js', reason: 'unsupported-form' },
+      { config: 'package.json', key: 'scripts.shellBare', reference: 'test', reason: 'target-not-found' },
+      { config: 'package.json', key: 'scripts.subst', reference: 'b.js', reason: 'unsupported-form' },
+    ]);
+  });
+
+  it('bounds cd tracking and regex and template scanning on hostile input', async () => {
+    const commands = `${'('.repeat(200_000)}cd a;${'x;'.repeat(100_000)}`;
+    await put('.github/workflows/deep.yml', `jobs:\n  a:\n    steps:\n      - run: ${JSON.stringify(commands)}\n`);
+    await put('vitest.config.ts', `${'(/['.repeat(100_000)}\n${'`${'.repeat(20_000)}\nexport default { test: { setupFiles: ['./s.ts'] } };\n`);
+    await put('s.ts');
+    const started = Date.now();
+    const report = await collectExternalWiring(root);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(report.wired.length + report.boundaries.length).toBeGreaterThanOrEqual(0);
+  }, 30_000);
+
   it('tokenizes a long command substitution run in linear time', async () => {
     await put('.github/workflows/subst.yml', `jobs:\n  a:\n    steps:\n      - run: ${JSON.stringify('$('.repeat(250_000))}\n`);
     const started = Date.now();
