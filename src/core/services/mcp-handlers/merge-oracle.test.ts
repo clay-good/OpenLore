@@ -678,4 +678,29 @@ describe('simulateMerge', () => {
     const b = commitFiles(repo, base, { 'd/f': lines({ 8: 'I' }) }, 'attr-symlink-b');
     expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/d\/\.gitattributes is a symlink/) });
   });
+
+  it('is not-assessed for a .gitattributes with a byte-order mark, a NUL byte, or a non-file mode', async () => {
+    // The analyzed worktree stays on main, which has no attributes file, so only the tree checks apply.
+    const main = git(repo, 'rev-parse', 'main');
+    const start = commitFiles(repo, main, { 'd/f': lines() }, 'attr-bytes-start');
+    const b = commitFiles(repo, start, { 'd/f': lines({ 8: 'I' }) }, 'attr-bytes-b');
+    const bom = commitFiles(repo, start, { '.gitattributes': '\uFEFFd/f merge=binary\n', 'd/f': lines({ 0: 'A' }) }, 'attr-bom');
+    expect(await simulateMerge(repo, bom, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/byte-order mark or a NUL byte/) });
+    const nul = commitFiles(repo, start, { '.gitattributes': 'x\0y\nd/f merge=binary\n', 'd/f': lines({ 0: 'A' }) }, 'attr-nul');
+    expect(await simulateMerge(repo, nul, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/byte-order mark or a NUL byte/) });
+
+    const env = { ...process.env, GIT_INDEX_FILE: join(root, 'index-attr-gitlink') };
+    const blob = (content: string) => execFileGitSync('git', ['hash-object', '-w', '--stdin'], { cwd: repo, input: content }).trim();
+    execFileGitSync('git', ['read-tree', start], { cwd: repo, env });
+    execFileGitSync('git', ['update-index', '--index-info'], {
+      cwd: repo, env,
+      input: `100644 ${blob('d/f merge=binary\n')}\t.gitattributes\n160000 ${blob('f merge\n')}\td/.gitattributes\n`,
+    });
+    const tree = execFileGitSync('git', ['write-tree'], { cwd: repo, env }).trim();
+    rmSync(env.GIT_INDEX_FILE, { force: true });
+    const base = execFileGitSync('git', ['commit-tree', tree, '-p', start, '-m', 'attr-gitlink-base'], { cwd: repo }).trim();
+    const la = commitFiles(repo, base, { 'd/f': lines({ 0: 'A' }) }, 'attr-gitlink-a');
+    const lb = commitFiles(repo, base, { 'd/f': lines({ 8: 'I' }) }, 'attr-gitlink-b');
+    expect(await simulateMerge(repo, la, lb)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/d\/\.gitattributes has mode 160000/) });
+  });
 });

@@ -412,6 +412,7 @@ async function mergeAttributeBlocker(
     const nonAsciiDir = [...dirs].find(nonAscii);
     if (nonAsciiDir) return `${capPath(nonAsciiDir)} is a non-ASCII directory name, and filesystem case folding cannot be checked for it`;
     const dirsLower = new Map([...dirs].map(dir => [dir.toLowerCase(), dir] as const));
+    const checkedAttributeBlobs = new Set<string>();
     // Two changed files that differ only by case (`README`, `readme`) overwrite each other on a
     // case-insensitive checkout, which fails a real merge.
     const sharedSet = new Set(shared);
@@ -432,13 +433,24 @@ async function mergeAttributeBlocker(
       if (dirs.size > 0) records.push(...(await readGit(repoPath, [...listing, '--', ...[...dirs].map(dir => `${dir}/`)], deadline)).split('\0'));
       for (const record of records.filter(Boolean)) {
         const tab = record.indexOf('\t');
-        const mode = record.slice(0, record.indexOf(' '));
+        const [mode, , objectId] = record.slice(0, tab).split(' ');
         const entry = record.slice(tab + 1);
         const name = entry.slice(entry.lastIndexOf('/') + 1);
-        // A real merge ignores a symlinked `.gitattributes`, but `check-attr --source` reads its target
-        // text as attribute lines, which can hide a rule (such as `merge=binary`) the merge applies.
-        if (mode === '120000' && name.toLowerCase() === '.gitattributes') {
-          return `${capPath(entry)} is a symlink, which a real merge ignores but the attribute check would read`;
+        if (name.toLowerCase() === '.gitattributes') {
+          // A real merge reads only a regular `.gitattributes` from disk, but `check-attr --source` reads
+          // a symlink's target or a gitlink's object as attribute lines, which can hide a rule the merge
+          // applies. A blob it does read can still disagree: git strips a UTF-8 BOM only from a file on
+          // disk, and the blob parser stops at a NUL byte. Each of these is not assessed.
+          if (mode !== '100644' && mode !== '100755') {
+            return `${capPath(entry)} ${mode === '120000' ? 'is a symlink' : `has mode ${mode}`}, which a real merge ignores but the attribute check would read`;
+          }
+          if (OBJECT_ID.test(objectId ?? '') && !checkedAttributeBlobs.has(objectId)) {
+            checkedAttributeBlobs.add(objectId);
+            const content = await readGit(repoPath, ['cat-file', 'blob', objectId], deadline);
+            if (content.startsWith('\uFEFF') || content.includes('\0')) {
+              return `${capPath(entry)} has a byte-order mark or a NUL byte, which the attribute check reads differently than a real merge`;
+            }
+          }
         }
         // NTFS drops trailing dots and spaces and has 8.3 short names (`GITATT~1`), so those alias too.
         if (nonAscii(name) || /[. ]$/.test(name) || /~\d/.test(name)) {
