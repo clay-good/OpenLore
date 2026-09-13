@@ -1122,7 +1122,7 @@ export async function computeInterferenceMap(
     conflicts.push({ ...p.conflict, suggestion: suggestionFor(p.v, p.labels, p.A.node, p.B.node, textualMerge), textualMerge });
   }
   if (simulations > 0) {
-    caveats.push('Textual merge verdicts come from a read-only `git merge-tree` simulation of the two tips with each other, not with the current base. It runs in a scratch repository, so no merge driver of this repository runs: a changed path with a non-default merge attribute, an unrecognized repository merge setting, a merge driver named like a default state, `merge.renormalize`, branch merge options, replace refs or grafts, or a submodule conflict is not assessed, and rename settings are forwarded. Your global and system git config still apply.');
+    caveats.push('Textual merge verdicts come from a read-only `git merge-tree` simulation of the two tips with each other, not with the current base or local uncommitted and untracked files. It runs in a scratch repository, so no merge driver of this repository runs: a changed path with a non-default merge attribute, an unrecognized repository merge setting, a merge driver named like a default state, `merge.renormalize`, branch merge options, replace refs or grafts, or a submodule conflict is not assessed, and rename settings are forwarded. Your global and system git config still apply.');
   }
   if (simulationTimedOut > 0) {
     caveats.push(`${simulationTimedOut} conflict pair(s) were not merge-simulated because the ${MERGE_SIMULATION_BUDGET_MS / 1000}-second simulation budget was spent.`);

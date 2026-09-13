@@ -591,6 +591,8 @@ describe('simulateMerge', () => {
     const tree = execFileGitSync('git', ['mktree'], { cwd: repo, input: `${aTree}\n040000 tree ${dTree}\te\n` }).trim();
     const a = execFileGitSync('git', ['commit-tree', tree, '-p', base, '-m', 'dirrename-a'], { cwd: repo }).trim();
     const b = commitFiles(repo, base, { 'd/y': 'y\n' }, 'dirrename-b');
+    // With the default merge.directoryRenames=conflict the merge conflicts, and that verdict stands.
+    expect((await simulateMerge(repo, a, b)).verdict).toBe('textual-conflict');
     git(repo, 'config', 'merge.directoryRenames', 'true');
     try {
       expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/places e\/y, which neither change touched/) });
