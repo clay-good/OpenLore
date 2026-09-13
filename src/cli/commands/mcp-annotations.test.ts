@@ -12,9 +12,14 @@ import { TOOL_DEFINITIONS, toolAnnotations, ANNOTATED_TOOL_NAMES } from './mcp.j
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const DISPATCH = resolve(ROOT, 'src/core/services/tool-dispatch.ts');
 
-/** Node primitives that write, move, or delete files, or start a process. */
-const WRITE_PRIMITIVE = /^(writeFile|writeFileSync|appendFile|appendFileSync|mkdir|mkdirSync|mkdtemp|mkdtempSync|rename|renameSync|rm|rmSync|rmdir|rmdirSync|unlink|unlinkSync|copyFile|copyFileSync|cp|cpSync|symlink|symlinkSync|link|linkSync|truncate|truncateSync|chmod|chmodSync|utimes|utimesSync|createWriteStream|spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)$/;
-const PRIMITIVE_MODULE = /node_modules[\\/]@types[\\/]node[\\/](fs|fs[\\/]promises|child_process)\.d\.ts$/;
+/**
+ * Node primitives that write, move, or delete files, or start a process or worker. Out of scope, and
+ * named so the limit is explicit: calls through a variable holding a function (a dispatch table, an
+ * injected callback, a function passed by reference), `node:sqlite` statements, and writes through an
+ * opened `FileHandle`.
+ */
+const WRITE_PRIMITIVE = /^(__promisify__|Worker|writeFile|writeFileSync|appendFile|appendFileSync|mkdir|mkdirSync|mkdtemp|mkdtempSync|rename|renameSync|rm|rmSync|rmdir|rmdirSync|unlink|unlinkSync|copyFile|copyFileSync|cp|cpSync|symlink|symlinkSync|link|linkSync|truncate|truncateSync|chmod|chmodSync|utimes|utimesSync|createWriteStream|spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)$/;
+const PRIMITIVE_MODULE = /node_modules[\\/]@types[\\/]node[\\/](fs|fs[\\/]promises|child_process|worker_threads)\.d\.ts$/;
 
 /** Shared write helpers: a write inside one is attributed to the function that called it. */
 const WRITE_HELPERS = new Set(['atomicWriteFile', 'renameWithContentionRetry', 'casUpdate', 'writeJsonAtomicStreaming']);
@@ -41,7 +46,11 @@ const READ_ONLY_TOOL_MAY_WRITE: Record<string, string> = {
   'latchFailed@src/core/analyzer/cfg-spill.ts': 'removes its own CFG spill file',
   'sweepLeakedCfgSpills@src/core/analyzer/cfg-spill.ts': 'removes leaked CFG spill files',
   'sweepLeakedStaging@src/core/analyzer/text-line-index.ts': 'removes leaked text-index staging',
-  'runGit@src/core/services/mcp-handlers/analysis.ts': 'OS temp directory, removed in finally',
+  'runGit@src/core/services/mcp-handlers/analysis.ts': 'OS temp directory, removed in finally; runs git diff',
+  // The hardened git runner: read-only tools issue read subcommands (log, diff, show, ls-files,
+  // rev-parse) and `gh` reads through it. A tool that issues a state-changing git command is a writer.
+  // The trace cannot tell a read subcommand from a write, so this entry is a reviewed trust boundary.
+  'execFileGit@src/utils/git-exec.ts': 'git and gh read subcommands through the hardened runner',
   // Argument-gated writes every read-only dispatch turns off (asserted below).
   'writeSpecLinkIndex@src/core/generator/spec-link-service.ts': 'mapping.json cache, only when persist is true',
   'audit@src/api/audit.ts': 'audit report, only when save is true',
@@ -80,6 +89,14 @@ function traceWrites(): ToolReach[] {
   const functionOf = (declaration: ts.Node | undefined): Fn | undefined => {
     let node = declaration;
     if (node && ts.isVariableDeclaration(node) && node.initializer) node = node.initializer;
+    // An overload signature has no body: follow the implementation it belongs to.
+    const signatureName = node && (node as { name?: ts.Node; body?: ts.Node }).body === undefined
+      ? (node as { name?: ts.Node }).name : undefined;
+    if (signatureName) {
+      const implementation = checker.getSymbolAtLocation(signatureName)?.declarations
+        ?.find(d => (d as { body?: ts.Node }).body !== undefined);
+      if (implementation) node = implementation;
+    }
     if (!node || !inProject(node)) return undefined;
     const fn = node as ts.FunctionLikeDeclaration;
     return (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isArrowFunction(node) ||
@@ -195,6 +212,8 @@ describe('tool annotation accuracy against the dispatch target', () => {
       remember: 'updateMemoryStore@src/core/decisions/memory-store.ts',
       record_decision: 'spawnConsolidateBackground@src/core/services/mcp-handlers/decisions.ts',
       sync_decisions: 'createADR@src/core/decisions/syncer.ts',
+      // Reached only through an overloaded signature: proves the trace follows implementations.
+      structural_diff: 'execFileGit@src/utils/git-exec.ts',
     };
     for (const [tool, owner] of Object.entries(expected)) {
       expect([...(byName(tool)?.writes.keys() ?? [])], tool).toContain(owner);
@@ -213,7 +232,9 @@ describe('argument-gated writes stay off for read-only dispatch', () => {
     const dispatch = readFileSync(DISPATCH, 'utf-8');
     expect(dispatch).toContain('handleAuditSpecCoverage(directory, maxUncovered, hubThreshold, false)');
     const workflow = readFileSync(resolve(ROOT, 'src/core/services/spec-workflow.ts'), 'utf-8');
-    expect(workflow.match(/persist: false/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    const persisted = [...workflow.matchAll(/resolveSpecLinkIndex\(\{[^}]*\}/g)].map(m => m[0]);
+    expect(persisted.length).toBeGreaterThanOrEqual(2);
+    expect(persisted.filter(call => !call.includes('persist: false'))).toEqual([]);
     const analysis = readFileSync(resolve(ROOT, 'src/core/services/mcp-handlers/analysis.ts'), 'utf-8');
     expect(analysis).toMatch(/resolveSpecLinkIndex\(\{[^}]*persist: false/);
   });
