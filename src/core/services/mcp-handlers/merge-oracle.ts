@@ -130,6 +130,17 @@ function isExitOne(error: unknown): boolean {
   return e?.code === 1 && !e.killed && !e.signal;
 }
 
+/** Git's boolean parsing: `true`/`yes`/`on`, a key with no value, or any non-zero integer. */
+function isGitTrue(value: string): boolean {
+  return value === '' || /^(true|yes|on)$/i.test(value) || (/^-?\d+$/.test(value) && Number(value) !== 0);
+}
+
+/**
+ * Merge driver names that `git check-attr` prints exactly like the default text merge states, so a
+ * user driver with one of these names would be invisible to the attribute check.
+ */
+const AMBIGUOUS_DRIVER_NAMES = new Set(['text', 'set', 'unspecified']);
+
 /** True when `git --version` output names version `major.minor` or later. */
 export function gitVersionAtLeast(versionOutput: string, major: number, minor: number): boolean {
   const match = /(\d+)\.(\d+)/.exec(versionOutput);
@@ -145,7 +156,7 @@ export function gitVersionAtLeast(versionOutput: string, major: number, minor: n
 async function repositoryMergeConfig(repoPath: string, deadline: number | undefined): Promise<{ args: string[] } | { detail: string }> {
   let listing: string;
   try {
-    listing = await readGit(repoPath, ['config', '--get-regexp', '^((merge|diff)\\.(renames|renamelimit|directoryrenames|renormalize|default)|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
+    listing = await readGit(repoPath, ['config', '--get-regexp', '^((merge|diff)\\.(renames|renamelimit|directoryrenames|renormalize|default)|merge\\..+\\.driver|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
   } catch (error) {
     if (isExitOne(error)) return { args: [] };
     throw error;
@@ -155,9 +166,14 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
   for (const line of listing.split('\n').filter(Boolean)) {
     const space = line.indexOf(' ');
     const key = (space < 0 ? line : line.slice(0, space)).toLowerCase();
-    const value = space < 0 ? 'true' : line.slice(space + 1).trim();
-    if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && /^(true|yes|on|1)$/i.test(value))) {
+    const value = space < 0 ? '' : line.slice(space + 1).trim();
+    if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && isGitTrue(value))) {
       partialClone = true;
+      continue;
+    }
+    if (key.startsWith('merge.') && key.endsWith('.driver') && key !== 'merge.default') {
+      const name = key.slice('merge.'.length, -'.driver'.length).toLowerCase();
+      if (AMBIGUOUS_DRIVER_NAMES.has(name)) return { detail: `a merge driver named "${name}" is configured, which the attribute check cannot tell from the default merge` };
       continue;
     }
     if (key === 'merge.default') {
@@ -168,7 +184,7 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       return { detail: `${key.slice(0, 80)} is set, and those merge options are not simulated` };
     }
     if (key === 'merge.renormalize') {
-      if (/^(true|yes|on|1)$/i.test(value)) return { detail: 'merge.renormalize is set, and renormalization depends on attributes the simulation ignores' };
+      if (isGitTrue(value)) return { detail: 'merge.renormalize is set, and renormalization depends on attributes the simulation ignores' };
       continue;
     }
     if (!FORWARDED_CONFIG.has(key)) continue;
@@ -193,7 +209,7 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
  */
 async function mergeAttributeBlocker(repoPath: string, base: string, tipA: string, tipB: string, deadline: number | undefined): Promise<string | undefined> {
   const changed = async (tip: string) => new Set(
-    (await readGit(repoPath, gitPathArgs('diff', '--name-only', '-z', '--no-renames', base, tip), deadline)).split('\0').filter(Boolean),
+    (await readGit(repoPath, gitPathArgs('diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--no-renames', base, tip), deadline)).split('\0').filter(Boolean),
   );
   const shared = [...new Set([...(await changed(tipA)), ...(await changed(tipB))])].sort();
   if (shared.length === 0) return undefined;
@@ -232,7 +248,11 @@ export async function simulateMerge(repoPath: string, tipA: string, tipB: string
   }
 }
 
-async function simulate(repoPath: string, tipA: string, tipB: string, deadline: number | undefined, scratchParent: string): Promise<TextualMerge> {
+async function simulate(startPath: string, tipA: string, tipB: string, deadline: number | undefined, scratchParent: string): Promise<TextualMerge> {
+  // Run every read from the top level: `diff --name-only` prints top-relative paths, while
+  // `check-attr` resolves paths against the current directory.
+  const repoPath = (await readGit(startPath, ['rev-parse', '--show-toplevel'], deadline)).trim();
+  if (!repoPath) throw new Error('could not locate the repository top level');
   const config = await repositoryMergeConfig(repoPath, deadline);
   if ('detail' in config) return { verdict: 'not-assessed', detail: config.detail };
   let bases: string[];

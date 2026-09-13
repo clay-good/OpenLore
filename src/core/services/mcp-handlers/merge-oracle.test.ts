@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -279,5 +279,45 @@ describe('simulateMerge', () => {
     expect(gitVersionAtLeast('git version 2.44.2.windows.1', 2, 45)).toBe(false);
     expect(gitVersionAtLeast('git version 3.0.0', 2, 45)).toBe(true);
     expect(gitVersionAtLeast('not git', 2, 45)).toBe(false);
+  });
+
+  it('is not-assessed for a merge driver named like a default state, and parses git booleans', async () => {
+    const i1 = git(repo, 'rev-parse', 'info-a');
+    const i2 = git(repo, 'rev-parse', 'info-b');
+    git(repo, 'config', 'merge.text.driver', 'false');
+    try {
+      expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/merge driver named "text"/) });
+    } finally {
+      git(repo, 'config', '--unset', 'merge.text.driver');
+    }
+    git(repo, 'config', 'merge.renormalize', '2');
+    try {
+      expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/merge\.renormalize/) });
+    } finally {
+      git(repo, 'config', '--unset', 'merge.renormalize');
+    }
+    expect((await simulateMerge(repo, i1, i2)).verdict).toBe('clean-automerge');
+  });
+
+  it('checks attributes by top-level path when run from a subdirectory', async () => {
+    git(repo, 'switch', '-q', '-c', 'subdir-base', 'main');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'sub', 'f.txt'), 'a\nb\nc\nd\ne\nf\ng\nh\ni\n');
+    writeFileSync(join(repo, '.gitattributes'), 'sub/f.txt merge=binary\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'subdir-base');
+    git(repo, 'switch', '-q', '-c', 'subdir-a');
+    writeFileSync(join(repo, 'sub', 'f.txt'), 'a\nB\nc\nd\ne\nf\ng\nh\ni\n');
+    git(repo, 'commit', '-q', '-am', 'subdir-a');
+    const a = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'switch', '-q', '-c', 'subdir-b', 'subdir-base');
+    writeFileSync(join(repo, 'sub', 'f.txt'), 'a\nb\nc\nd\ne\nf\ng\nh\nI\n');
+    git(repo, 'commit', '-q', '-am', 'subdir-b');
+    const b = git(repo, 'rev-parse', 'HEAD');
+    try {
+      expect(await simulateMerge(join(repo, 'sub'), a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/sub\/f\.txt has merge attribute "binary"/) });
+    } finally {
+      git(repo, 'switch', '-q', '-f', 'main');
+    }
   });
 });
