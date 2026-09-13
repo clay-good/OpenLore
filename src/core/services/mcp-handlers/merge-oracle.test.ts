@@ -614,4 +614,14 @@ describe('simulateMerge', () => {
     const vendored = execFileGitSync('git', ['commit-tree', tree, '-p', base, '-m', 'vendor'], { cwd: repo }).trim();
     expect(await simulateMerge(repo, edited, vendored)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/mod changes between a submodule and a regular entry/) });
   });
+
+  it('is not-assessed for a changed path longer than a checkout filesystem allows', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { 'g.txt': lines() }, 'long-base');
+    const a = commitFiles(repo, base, { 'g.txt': lines({ 1: 'B' }) }, 'long-a');
+    const longName = commitFiles(repo, base, { [`${'n'.repeat(300)}.txt`]: 'x\n' }, 'long-name');
+    expect(await simulateMerge(repo, a, longName)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/longer than a checkout filesystem allows/) });
+    const deep = commitFiles(repo, base, { [`${Array.from({ length: 6 }, () => 'd'.repeat(200)).join('/')}/f.txt`]: 'x\n' }, 'long-deep');
+    expect(await simulateMerge(repo, a, deep)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/longer than a checkout filesystem allows/) });
+  });
 });

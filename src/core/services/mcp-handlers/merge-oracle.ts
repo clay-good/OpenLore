@@ -359,6 +359,10 @@ async function mergeAttributeBlocker(
   // A real merge refuses to check out a path with a `.git` component (verify_path); merge-tree does not.
   const gitComponent = shared.find(path => path.split('/').some(part => part.toLowerCase() === '.git'));
   if (gitComponent) return `${capPath(gitComponent)} has a .git path component, which a real merge refuses to check out`;
+  // A path valid in git can exceed a checkout filesystem's limits (a 255-byte name; about 1,024 bytes on
+  // macOS), which fails a real merge's checkout; a branch made on Linux can carry one.
+  const tooLong = shared.find(path => Buffer.byteLength(path) > 1000 || path.split('/').some(part => Buffer.byteLength(part) > 255));
+  if (tooLong) return `${capPath(tooLong)} is longer than a checkout filesystem allows`;
   const chars = shared.reduce((n, path) => n + path.length + 1, 0);
   if (shared.length > SHARED_PATHS_CAP || chars > SHARED_PATH_CHARS_CAP) {
     return `${shared.length} changed paths (${chars} characters) exceed the merge-attribute check limit of ${SHARED_PATHS_CAP} paths or ${SHARED_PATH_CHARS_CAP} characters`;
