@@ -580,4 +580,22 @@ describe('simulateMerge', () => {
     const b = commitFiles(repo, base, { '.gitattributes': rules(true, false), 'f.txt': lines({ 7: 'H' }) }, 'merged-attr-b');
     expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/in the merged tree, f\.txt has attribute "filter"/) });
   });
+
+  it('is not-assessed when a directory rename places a path neither change touched', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { 'd/x': 'x\n', '.gitattributes': 'e/y filter=x\n' }, 'dirrename-base');
+    // A moves d/ to e/ (delete d/x, add e/x); B adds d/y.
+    const aTree = execFileGitSync('git', ['ls-tree', `${base}^{tree}`], { cwd: repo })
+      .split('\n').filter(line => line && !line.endsWith('\td')).join('\n');
+    const dTree = execFileGitSync('git', ['rev-parse', `${base}:d`], { cwd: repo }).trim();
+    const tree = execFileGitSync('git', ['mktree'], { cwd: repo, input: `${aTree}\n040000 tree ${dTree}\te\n` }).trim();
+    const a = execFileGitSync('git', ['commit-tree', tree, '-p', base, '-m', 'dirrename-a'], { cwd: repo }).trim();
+    const b = commitFiles(repo, base, { 'd/y': 'y\n' }, 'dirrename-b');
+    git(repo, 'config', 'merge.directoryRenames', 'true');
+    try {
+      expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/places e\/y, which neither change touched/) });
+    } finally {
+      git(repo, 'config', '--unset', 'merge.directoryRenames');
+    }
+  });
 });

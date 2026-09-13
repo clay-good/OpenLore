@@ -273,7 +273,7 @@ and `pull.twohead` (two more in a seventh round), and after a systematic pass ov
 path components (four more in an eighth round), and untrimmed value parsing, value ranges, and git's
 own path protection via `read-tree` (three more in a ninth round), an attribute allowlist plus git's
 integer ranges (two more in a tenth round), attributes from the merged `.gitattributes` (one more in an
-eleventh round), submodule conflicts, a 20-second budget, and a
+eleventh round), paths a directory rename places (one more in a twelfth round), submodule conflicts, a 20-second budget, and a
 response-size loop. A missing or criss-cross
 merge base, a PR head that is not local, an agent task, a cross-repo pair, or a cap is
 `not-assessed`, never clean. Per-symbol hunk mapping is deferred.

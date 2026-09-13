@@ -494,6 +494,16 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
     // The merged `.gitattributes` can hold an attribute none of the inputs has (each side removes a
     // different line that cleared it), and a real merge writes files with it. Check it the same way,
     // in the scratch repository, which has no config and so runs no filter or driver.
+    // A directory rename (merge.directoryRenames) can place a path neither side changed, such as
+    // `e/y` for an added `d/y`; no check above saw it, so the pair is not assessed.
+    const checked = new Set(changedPaths);
+    for (const tip of [tipA, tipB]) {
+      const moved = await execFileGit('git', gitPathArgs(`--git-dir=${scratch}`, 'diff-tree', '--no-ext-diff', '--no-textconv', '-r', '-z', '--name-only', '--no-renames', tip, tree.trim()), {
+        env, maxBuffer: 16 * 1024 * 1024, timeout: spawnTimeout(deadline),
+      });
+      const unseen = moved.stdout.split('\0').find(path => path && !checked.has(path));
+      if (unseen) return { verdict: 'not-assessed', detail: `the merge places ${capPath(unseen)}, which neither change touched (a directory rename), so its checks did not cover it` };
+    }
     if (changedPaths.length > 0) {
       const merged = await execFileGit('git', [`--git-dir=${scratch}`, '-c', 'core.precomposeunicode=false', 'check-attr', '-z', `--source=${tree.trim()}`, '-a', '--', ...changedPaths], {
         env, maxBuffer: 16 * 1024 * 1024, timeout: spawnTimeout(deadline),
