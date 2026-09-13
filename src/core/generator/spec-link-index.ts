@@ -77,8 +77,8 @@ export type SpecAnchorState =
   | 'type-only'
   /**
    * The cited identity is absent from the export inventory, but the cited FILE is one whose exports
-   * the analysis cannot vouch for — a language with no export extraction, a file the analysis did
-   * not cover, or a parse-health lower bound. Absence there is not evidence the symbol is gone, so
+   * the analysis cannot vouch for — a language with no export extraction, or a file the analysis did
+   * not cover. Absence there is not evidence the symbol is gone, so
    * the anchor is not called `stale` (change: ground-generated-specs-in-the-graph).
    */
   | 'not-assessed';
@@ -176,10 +176,17 @@ export interface SpecLinkIndexInput {
   maxCandidates?: number;
   /**
    * The boundary that makes a cited file unassessable, or `undefined` when its exports are fully
-   * inventoried. Supplied by the I/O shell, which can read the filesystem and parse health; absent,
+   * inventoried. Supplied by the I/O shell, which can read the filesystem; absent,
    * every file is treated as assessable (change: ground-generated-specs-in-the-graph).
    */
   assessFile?: (file: string) => string | undefined;
+  /**
+   * The real repository spelling of a cited file (through symlinks, and letter case on a
+   * case-insensitive volume), or `undefined` when it is no file. Anchors match exports by it, so an
+   * existing symbol cited under another spelling of its file is not called `stale`
+   * (change: ground-generated-specs-in-the-graph).
+   */
+  canonicalFile?: (file: string) => string | undefined;
   /** Injected only by tests that need a stable `generatedAt`. */
   now?: () => Date;
 }
@@ -378,6 +385,7 @@ function resolveAnchor(
   exportIndex: { values: Map<string, SpecSymbolRef[]>; types: Map<string, SpecSymbolRef[]> },
   maxCandidates: number,
   assessFile?: (file: string) => string | undefined,
+  canonicalFile?: (file: string) => string | undefined,
 ): SpecLinkAnchor {
   if (!parsed.symbol) {
     // A both-readings token (`Class.method`) becomes a symbol anchor ONLY when the
@@ -385,13 +393,14 @@ function resolveAnchor(
     // rather than being asserted as a stale symbol the spec may never have cited.
     const member = parsed.memberCandidate;
     if (member && (exportIndex.values.get(member)?.length ?? 0) > 0) {
-      return resolveAnchor(raw, { file: null, symbol: member }, exportIndex, maxCandidates, assessFile);
+      return resolveAnchor(raw, { file: null, symbol: member }, exportIndex, maxCandidates, assessFile, canonicalFile);
     }
     return { raw, file: parsed.file, symbol: null, state: 'footprint', candidates: [], candidateTotal: 0 };
   }
 
   const byName = exportIndex.values.get(parsed.symbol) ?? [];
-  const matches = parsed.file ? byName.filter(ref => ref.file === parsed.file) : byName;
+  const matchFile = parsed.file ? (canonicalFile?.(parsed.file) ?? parsed.file) : null;
+  const matches = matchFile ? byName.filter(ref => ref.file === matchFile) : byName;
 
   if (matches.length === 1) {
     return { raw, file: parsed.file, symbol: parsed.symbol, state: 'linked', candidates: [matches[0]], candidateTotal: 1 };
@@ -408,7 +417,7 @@ function resolveAnchor(
   // right there would be a false statement, so it gets its own state and discloses
   // where the type lives.
   const typeRefs = exportIndex.types.get(parsed.symbol) ?? [];
-  const typeMatches = parsed.file ? typeRefs.filter(ref => ref.file === parsed.file) : typeRefs;
+  const typeMatches = matchFile ? typeRefs.filter(ref => ref.file === matchFile) : typeRefs;
   if (typeMatches.length > 0) {
     return {
       raw, file: parsed.file, symbol: parsed.symbol, state: 'type-only',
@@ -470,7 +479,7 @@ export function buildSpecLinkIndex(input: SpecLinkIndexInput): SpecLinkIndex {
       for (const raw of block.anchors) {
         const parsed = parseSpecAnchor(raw);
         if (!parsed) continue;
-        anchors.push(resolveAnchor(raw, parsed, exportIndex, maxCandidates, input.assessFile));
+        anchors.push(resolveAnchor(raw, parsed, exportIndex, maxCandidates, input.assessFile, input.canonicalFile));
       }
 
       const functions = anchors

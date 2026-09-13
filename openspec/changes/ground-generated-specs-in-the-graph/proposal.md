@@ -16,8 +16,8 @@ Three live defects remained in that shipped path:
 2. **Colliding anchor proposals.** An operation and a sub-component operation of the same name share
    an anchor key, so the later proposal silently overwrote the earlier one's verified anchor.
 3. **`stale` over-claims.** The index calls any absent cited symbol "gone" — including symbols in a
-   language whose exports are never extracted (Go, Rust, …), in a file the analysis skipped, or in a
-   file that parsed with errors. Those are not evidence of removal.
+   language whose exports are never extracted (Go, Rust, …), or in a file the analysis skipped. Those
+   are not evidence of removal.
 
 ## What Changes
 

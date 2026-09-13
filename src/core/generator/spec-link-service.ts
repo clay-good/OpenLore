@@ -169,6 +169,22 @@ export async function buildFileAssessor(
   rootPath: string,
   graph: DependencyGraphResult,
 ): Promise<(file: string) => string | undefined> {
+  return (await buildFileView(rootPath, graph)).assessFile;
+}
+
+/** How the link index sees cited files on disk: the boundary, and the real spelling. */
+export interface SpecFileView {
+  assessFile(file: string): string | undefined;
+  canonicalFile(file: string): string | undefined;
+}
+
+/**
+ * Build the file view behind {@link buildFileAssessor}. Each cited file is resolved ONCE — a corpus
+ * citing one file a thousand times pays for one `stat` — to its real repository spelling, or to
+ * nothing when it is not a regular file inside the repository. A graph node deleted from disk after
+ * analysis resolves to nothing too, so its absent symbol is `stale`, not excused.
+ */
+export async function buildFileView(rootPath: string, graph: DependencyGraphResult): Promise<SpecFileView> {
   const analyzed = new Set<string>();
   for (const node of graph.nodes) {
     const file = normalizeAnchorPath(node.file.path);
@@ -177,28 +193,35 @@ export async function buildFileAssessor(
   let realRoot: string | undefined;
   try { realRoot = realpathSync.native(rootPath); } catch { realRoot = undefined; }
 
-  /** The cited file's analyzed or real on-disk spelling, or `undefined` when it is no file at all. */
-  const canonical = (file: string): string | undefined => {
-    if (analyzed.has(file)) return file;
+  const memo = new Map<string, string | null>();
+  const canonicalFile = (file: string): string | undefined => {
+    const cached = memo.get(file);
+    if (cached !== undefined) return cached ?? undefined;
+    let resolved: string | undefined;
     const abs = join(rootPath, file);
-    if (!realRoot || !isConfinedPath(rootPath, abs)) return undefined;
-    let rel: string;
-    try {
-      if (!statSync(abs).isFile()) return undefined;
-      rel = relative(realRoot, realpathSync.native(abs)).replaceAll('\\', '/');
-    } catch {
-      return undefined;
+    if (realRoot && isConfinedPath(rootPath, abs)) {
+      try {
+        if (statSync(abs).isFile()) {
+          const rel = relative(realRoot, realpathSync.native(abs)).replaceAll('\\', '/');
+          if (rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)) resolved = rel;
+        }
+      } catch {
+        resolved = undefined;
+      }
     }
-    if (rel.startsWith('..') || isAbsolute(rel)) return undefined;
-    return rel;
+    memo.set(file, resolved ?? null);
+    return resolved;
   };
 
-  return (file) => {
-    const target = canonical(file);
-    if (!target) return undefined;
-    if (!extractsExports(target)) return 'language-not-extracted';
-    if (!analyzed.has(target)) return 'file-not-analyzed';
-    return undefined;
+  return {
+    canonicalFile,
+    assessFile: (file) => {
+      const target = canonicalFile(file);
+      if (!target) return undefined;
+      if (!extractsExports(target)) return 'language-not-extracted';
+      if (!analyzed.has(target)) return 'file-not-analyzed';
+      return undefined;
+    },
   };
 }
 
@@ -264,7 +287,8 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
 
   const analysisGeneration = analysisGenerationId(graph);
   const digest = specCorpusDigest(specs);
-  const assessFile = await buildFileAssessor(rootPath, graph);
+  const fileView = await buildFileView(rootPath, graph);
+  const assessFile = fileView.assessFile;
 
   // The cache is consulted only when the caller asked for the whole corpus: a
   // domain-scoped read must not be served from (or overwrite) a global artifact.
@@ -297,6 +321,7 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
     specs,
     graph,
     assessFile,
+    canonicalFile: fileView.canonicalFile,
     analysisGeneration,
     sourceAnalysisFingerprint: analysisGeneration,
     ...(options.now ? { now: options.now } : {}),
@@ -364,25 +389,27 @@ export function verifyRequirementAnchors(
   graph: DependencyGraphResult,
 ): Map<string, SpecSymbolRef> {
   const resolve = buildSymbolResolver(graph);
-  const verified = new Map<string, SpecSymbolRef>();
-  const collided = new Set<string>();
+  // Group every proposal by key BEFORE resolving: two requirements sharing a key (an operation and a
+  // sub-component operation of the same name) must agree, and a disagreement — including one side
+  // proposing a name that does not resolve — writes no anchor rather than letting either side's
+  // anchor land on both headings. A requirement that proposes nothing does not take part
+  // (change: ground-generated-specs-in-the-graph).
+  const byKey = new Map<string, Array<{ symbol: string; ref: SpecSymbolRef | null }>>();
   for (const proposal of proposals) {
     const symbol = proposal.symbol?.trim();
     if (!symbol) continue;
-    const ref = resolve(symbol);
-    if (!ref) continue;
     const key = requirementAnchorKey(proposal.domain, proposal.requirement);
-    if (collided.has(key)) continue;
-    const prior = verified.get(key);
-    // Two requirements that share a key (an operation and a sub-component operation of the same name)
-    // but propose different symbols cannot both be right: write no anchor rather than whichever came
-    // last (change: ground-generated-specs-in-the-graph).
-    if (prior && (prior.name !== ref.name || prior.file !== ref.file)) {
-      verified.delete(key);
-      collided.add(key);
-      continue;
-    }
-    verified.set(key, ref);
+    const entries = byKey.get(key) ?? byKey.set(key, []).get(key)!;
+    entries.push({ symbol, ref: resolve(symbol) });
+  }
+  const verified = new Map<string, SpecSymbolRef>();
+  for (const [key, entries] of byKey) {
+    const first = entries[0];
+    if (!first.ref) continue;
+    const agree = entries.every(entry => entry.ref
+      ? entry.ref.name === first.ref!.name && entry.ref.file === first.ref!.file
+      : false);
+    if (agree) verified.set(key, first.ref);
   }
   return verified;
 }

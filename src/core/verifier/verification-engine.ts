@@ -1031,12 +1031,20 @@ Respond in JSON:
       if (!m) continue;
       const name = m[1].trim();
       let description = '';
+      let afterAnchor = false;
       for (let j = i + 1; j < Math.min(i + 20, lines.length); j++) {
         const l = lines[j].trim();
         if (l.length === 0) continue;
         if (/^#{1,6}\s/.test(l)) break;
-        if (/\*\*Implementation\*\*:/.test(l) || /^[-*]?\s*(?:`[^`]+`[\s,]*)+$/.test(l)
-          || /^>\s*(?:(?:Decision recorded|Date|Implementation|Implements|Source files?)\b|`)/i.test(l)) continue;
+        // An implementation anchor item, and the backtick-only lines that continue it — only directly
+        // after the anchor, so a normative line that is just a code span is still the description.
+        if (/^[-*]?\s*\*\*Implementation\*\*:/.test(l)) { afterAnchor = true; continue; }
+        if (afterAnchor && /^[-*]?\s*(?:`[^`]+`[\s,]*)+$/.test(l)) continue;
+        afterAnchor = false;
+        // A provenance blockquote names its label with a colon, or is a bare code span; a blockquote
+        // carrying normative prose is the description.
+        if (/^>\s*(?:Decision recorded|Date|Implementation|Implements|Source files?):/i.test(l)
+          || /^>\s*`[^`]+`\s*$/.test(l)) continue;
         description = l;
         break;
       }

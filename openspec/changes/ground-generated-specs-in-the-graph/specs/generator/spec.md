@@ -9,9 +9,9 @@ The generator SHALL write a requirement's implementation anchor (`- **Implementa
 that recovers a requirement's description from the lines following its heading reads the normative
 sentence.
 
-When two requirements the generator emits share an anchor key but their verified proposals name
-different symbols — an operation and a sub-component operation of the same name — the generator
-SHALL write no anchor for that key rather than whichever proposal came last.
+When two requirements the generator emits share an anchor key and their proposals disagree — they
+name different symbols, or one names a symbol that does not resolve — the generator SHALL write no
+anchor for that key rather than letting either proposal's anchor land on both requirements.
 
 Requirements SHALL continue to be recognized at the `### Requirement:` level only, the level the
 OpenSpec format counts; a `#### Requirement:` sub-component heading SHALL NOT enter the link index.
@@ -41,8 +41,9 @@ the analysis cannot vouch for:
 Parse health SHALL NOT be a boundary: its error regions come from a different extractor than the
 export inventory and are no evidence that inventory is incomplete.
 
-A boundary SHALL be named only for a file that is analyzed or exists as a regular file, resolved to
-its real spelling (symlinks, and letter case on a case-insensitive volume). An anchor that names no
+A boundary SHALL be named only for a file that exists as a regular file, resolved to its real
+spelling (symlinks, and letter case on a case-insensitive volume); an anchor SHALL match exports by
+that real spelling, so an existing symbol cited under another spelling of its file is `linked`. An anchor that names no
 file, and an anchor naming a file that exists nowhere or is not a regular file, SHALL remain `stale`
 when its symbol is absent, so absence is still claimed wherever it is evidence.
 

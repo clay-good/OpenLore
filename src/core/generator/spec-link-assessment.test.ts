@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { DependencyGraphResult, DependencyNode } from '../analyzer/dependency-graph.js';
-import { buildFileAssessor, orphanRequirementsOf, resolveSpecLinkIndex, verifyRequirementAnchors } from './spec-link-service.js';
+import { buildFileAssessor, buildFileView, orphanRequirementsOf, resolveSpecLinkIndex, verifyRequirementAnchors } from './spec-link-service.js';
 import { buildSpecLinkIndex } from './spec-link-index.js';
 import { renderRefresh } from '../../cli/commands/mapping.js';
 
@@ -32,11 +32,29 @@ describe('buildFileAssessor', () => {
 
   it('names each boundary, and vouches only for an analyzed, extracted file', async () => {
     await mkdir(join(root, 'src'), { recursive: true });
-    await writeFile(join(root, 'src', 'skipped.ts'), 'export function x() {}');
-    const assess = await buildFileAssessor(root, graphOf({ 'src/ok.ts': [], 'src/job.go': [] }));
+    for (const f of ['ok.ts', 'job.go', 'skipped.ts']) await writeFile(join(root, 'src', f), 'x');
+    await writeFile(join(root, '..hidden.ts'), 'x');
+    const assess = await buildFileAssessor(root, graphOf({ 'src/ok.ts': [], 'src/job.go': [], 'src/gone.go': [] }));
     expect(assess('src/ok.ts')).toBeUndefined();
     expect(assess('src/job.go')).toBe('language-not-extracted');
     expect(assess('src/skipped.ts')).toBe('file-not-analyzed');
+    expect(assess('..hidden.ts')).toBe('file-not-analyzed');
+    // A graph node deleted from disk after analysis is no boundary: its absence is evidence.
+    expect(assess('src/gone.go')).toBeUndefined();
+  });
+
+  it('links an existing symbol cited under another spelling of its file', async () => {
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, 'src', 'a.ts'), 'export function keep() {}');
+    await symlink(join(root, 'src'), join(root, 'lnk'));
+    const graph = graphOf({ 'src/a.ts': [{ name: 'keep' }] });
+    const view = await buildFileView(root, graph);
+    const index = buildSpecLinkIndex({
+      specs: [{ domain: 'auth', specFile: 'openspec/specs/auth/spec.md', content:
+        '# Auth\n\n### Requirement: Keeps\n\nThe system SHALL keep.\n\n- **Implementation**: `keep::lnk/a.ts`\n' }],
+      graph, analysisGeneration: 'gen-1', assessFile: view.assessFile, canonicalFile: view.canonicalFile,
+    });
+    expect(index.links[0].state).toBe('linked');
   });
 
   it('never excuses a file that exists nowhere or is not a regular file', async () => {
@@ -120,13 +138,17 @@ describe('not-assessed requirements are reported, not accused', () => {
 });
 
 describe('verifyRequirementAnchors', () => {
-  it('writes no anchor for two requirements that share a key but propose different symbols', () => {
-    const graph = graphOf({ 'src/a.ts': [{ name: 'runAll' }, { name: 'runStep' }, { name: 'stopAll' }] });
+  it('writes no anchor when requirements sharing a key disagree, even when one proposal does not resolve', () => {
+    const graph = graphOf({ 'src/a.ts': [{ name: 'runAll' }, { name: 'runStep' }, { name: 'stopAll' }, { name: 'go' }] });
     const verified = verifyRequirementAnchors([
       { domain: 'user', requirement: 'run', symbol: 'runAll' },
       { domain: 'user', requirement: 'Run', symbol: 'runStep' },
       { domain: 'user', requirement: 'stop', symbol: 'stopAll' },
+      { domain: 'user', requirement: 'Stop', symbol: 'nope' },
+      { domain: 'user', requirement: 'go', symbol: 'go' },
+      { domain: 'user', requirement: 'Go', symbol: 'go' },
+      { domain: 'user', requirement: 'GO', symbol: '' },
     ], graph);
-    expect([...verified.values()].map(ref => ref.name)).toEqual(['stopAll']);
+    expect([...verified.values()].map(ref => ref.name)).toEqual(['go']);
   });
 });
