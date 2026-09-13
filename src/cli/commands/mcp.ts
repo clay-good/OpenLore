@@ -642,7 +642,7 @@ export const TOOL_DEFINITIONS = [
     description:
       'USE THIS WHEN: "what code is unreachable / dead?", "is anything calling X?", or ' +
       '"what becomes dead if I delete X?". Cross-language mark-and-sweep reachability from roots ' +
-      '(tests, imported symbols, route handlers, main) over the call graph. ' +
+      '(tests, imported symbols, route handlers, main, files a config invokes) over the call graph. ' +
       'Pass ifDeleted to get the downstream-only-reachable set for a symbol. ' +
       'Results are confidence-tagged CANDIDATES, never deletion authority — dynamic dispatch, DI, ' +
       'and external consumers cause false positives, stated in the response. Run analyze_codebase first.',

@@ -93,7 +93,7 @@ describe('find_dead_code with config-wired roots', () => {
     expect(r.externalWiring.boundaries).toEqual(WIRED.boundaries);
     const caveats = r.soundness.caveats.join(' ');
     expect(caveats).toMatch(/1 config reference\(s\) could not be resolved/);
-    expect(caveats).toMatch(/workspace-member manifests, framework routing conventions/);
+    expect(caveats).toMatch(/Workspace-member manifests, framework routing conventions/);
   });
 
   it('shares the wired roots with the dead set other conclusions read', async () => {
@@ -115,7 +115,10 @@ describe('report_coverage_gaps with config-wired roots', () => {
     vi.mocked(collectExternalWiring).mockResolvedValue(WIRED);
     const r = await handleReportCoverageGaps({ directory: '/p' }) as {
       coverageGaps: Array<{ name: string; alsoFlaggedDead?: true; externallyWired?: unknown[] }>;
+      soundness: { caveats: string[] };
     };
+    expect(r.soundness.caveats.join(' ')).toMatch(/Every function in a file a config invokes .* is treated as live/);
+    expect(r.soundness.caveats.join(' ')).toMatch(/1 config reference\(s\) could not be resolved/);
     const runCli = r.coverageGaps.find(g => g.name === 'runCli');
     expect(runCli).toMatchObject({ externallyWired: [{ config: 'package.json', key: 'bin.tool' }] });
     expect(runCli?.alsoFlaggedDead).toBeUndefined();

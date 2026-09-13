@@ -22,6 +22,12 @@ vi.mock('./parse-health-boundary.js', async (importOriginal) => {
   return { ...actual, loadParseHealthReport: vi.fn(async () => null) };
 });
 
+// Config wiring is covered in reachability-wiring.test.ts; the wholesale fs mock above would only
+// exercise the adapters' failure path here.
+vi.mock('../../analyzer/entry-point-adapters.js', () => ({
+  collectExternalWiring: vi.fn(async () => ({ wired: [], boundaries: [], boundariesOmitted: 0 })),
+}));
+
 import { handleFindDeadCode } from './reachability.js';
 import { readCachedContext } from './utils.js';
 import { readFile } from 'node:fs/promises';

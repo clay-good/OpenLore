@@ -311,7 +311,7 @@ async function verifyDead(absDir: string, cg: SerializedCallGraph, subject: Func
   if (inFull) {
     return {
       verdict: 'confirmed',
-      reason: `"${subject.name}" is unreachable from every liveness root (tests, imported symbols, route handlers, main) — even counting synthesized dynamic-dispatch edges. It is a strong dead-code candidate; external consumers and reflection are still invisible to static analysis.`,
+      reason: `"${subject.name}" is unreachable from every liveness root (tests, imported symbols, route handlers, main, files a config invokes) — even counting synthesized dynamic-dispatch edges. It is a strong dead-code candidate; external consumers and reflection are still invisible to static analysis.`,
     };
   }
   if (inStrict) {

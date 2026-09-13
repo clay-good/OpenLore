@@ -29,8 +29,8 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
-import { deadCodeIds, wiringKey } from './reachability.js';
-import { collectExternalWiring, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
+import { deadCodeIds, wiringKey, loadExternalWiring, externalWiringCaveats } from './reachability.js';
+import type { WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import {
   loadDynamicBoundaryReport,
   loadImportAdjacency,
@@ -232,14 +232,16 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // ── Significance labels for ranking (reused classifiers, no new score) ──────
   // Strict mode is threaded into the dead set too, so `alsoFlaggedDead` rests on
   // the SAME edge basis as the gap partition (no strict/non-strict disagreement).
-  const deadIds = await deadCodeIds(absDir, cg, { directResolvedOnly: input.directResolvedOnly });
+  // Config wiring is read once and shared with the dead set (change: add-framework-entry-point-adapters).
+  const wiring = await loadExternalWiring(absDir);
+  const wiredFiles = wiring.byFile;
+  const deadIds = await deadCodeIds(absDir, cg, { directResolvedOnly: input.directResolvedOnly, externalWiring: wiredFiles });
   // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions), read once per invocation.
   const dynamicReport = await loadDynamicBoundaryReport(absDir, undefined, { directResolvedOnly: input.directResolvedOnly });
   const qualifyDynamic = buildQualifier(
     dynamicReport,
     dynamicReport ? await loadImportAdjacency(absDir) : new Map(),
   );
-  const wiredFiles = new Map((await collectExternalWiring(absDir).catch(() => ({ wired: [] }))).wired.map(w => [w.file, w.receipts]));
   const landmarks = computeLandmarkSignals(cg, { deadIds });
   const signalsById = new Map(landmarks.map(l => [l.id, l.signals]));
 
@@ -357,6 +359,8 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     // to substring, so a short name can scope to more than the one function intended.
     caveats.push('Symbol scope resolves by name (exact preferred, substring fallback); a short or partial symbol name may widen the scope to several functions.');
   }
+  // The also-dead label rests on config-wired roots too (change: add-framework-entry-point-adapters).
+  if (gaps.some(g => g.externallyWired || g.alsoFlaggedDead)) caveats.push(...externalWiringCaveats(wiring.report));
   // Emitted only when the returned page actually carries the reason — a caveat about
   // a signal that is not present is noise of the kind this change exists to remove.
   if (returned.some(g => g.deadReason === 'dead-via-unreachable-callers')) {

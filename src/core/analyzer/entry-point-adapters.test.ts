@@ -4,10 +4,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { collectExternalWiring, stripJsonComments } from './entry-point-adapters.js';
+import { collectExternalWiring, stripJsonComments, type ExternalWiringReport } from './entry-point-adapters.js';
 
 let root: string;
 let outside: string;
@@ -16,6 +17,8 @@ async function put(path: string, content = 'export {};\n'): Promise<void> {
   await mkdir(dirname(join(root, path)), { recursive: true });
   await writeFile(join(root, path), content);
 }
+
+const files = (report: ExternalWiringReport) => report.wired.map(w => w.file);
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'ol-wiring-'));
@@ -34,7 +37,11 @@ describe('collectExternalWiring — package.json', () => {
     await put('package.json', JSON.stringify({
       bin: { tool: 'dist/cli/index.js' },
       main: 'dist/api/index.js',
-      exports: { '.': { import: './dist/api/index.js', types: './dist/api/index.d.ts' }, './features/*': './dist/features/*.js' },
+      exports: {
+        '.': { import: './dist/api/index.js', types: './dist/api/index.d.ts' },
+        './features/*': './dist/features/*.js',
+        './package.json': './package.json',
+      },
     }));
     const report = await collectExternalWiring(root);
     expect(report.wired).toEqual([
@@ -46,30 +53,6 @@ describe('collectExternalWiring — package.json', () => {
     ]);
     expect(report.boundaries).toEqual([
       { config: 'package.json', key: 'exports["./features/*"]', reference: './dist/features/*.js', reason: 'dynamic-reference' },
-    ]);
-  });
-
-  it('reads the script files npm scripts run, and discloses what it cannot resolve', async () => {
-    await put('scripts/build.ts');
-    await put('tools/check.mjs');
-    await put('package.json', JSON.stringify({
-      scripts: {
-        build: 'tsx scripts/build.ts && node ./tools/check.mjs --strict',
-        test: 'vitest run src',
-        dynamic: 'node $SCRIPT',
-        missing: 'node scripts/gone.js',
-        escape: 'node ../elsewhere/run.js',
-      },
-    }));
-    const report = await collectExternalWiring(root);
-    expect(report.wired).toEqual([
-      { file: 'scripts/build.ts', receipts: [{ config: 'package.json', key: 'scripts.build' }] },
-      { file: 'tools/check.mjs', receipts: [{ config: 'package.json', key: 'scripts.build' }] },
-    ]);
-    expect(report.boundaries).toEqual([
-      { config: 'package.json', key: 'scripts.dynamic', reference: '$SCRIPT', reason: 'dynamic-reference' },
-      { config: 'package.json', key: 'scripts.escape', reference: '../elsewhere/run.js', reason: 'outside-repository' },
-      { config: 'package.json', key: 'scripts.missing', reference: 'scripts/gone.js', reason: 'target-not-found' },
     ]);
   });
 
@@ -85,11 +68,13 @@ describe('collectExternalWiring — package.json', () => {
     ] }]);
   });
 
-  it('reports a repeated unresolved reference once', async () => {
-    await put('package.json', JSON.stringify({ scripts: { twice: 'node gone.js && node gone.js' } }));
+  it('names a build output with no mapped source instead of calling it missing', async () => {
+    await put('tsconfig.json', '{ "compilerOptions": { "outDir": "dist" } }');
+    await put('src/index.ts');
+    await put('package.json', JSON.stringify({ main: 'dist/index.js' }));
     const report = await collectExternalWiring(root);
     expect(report.boundaries).toEqual([
-      { config: 'package.json', key: 'scripts.twice', reference: 'gone.js', reason: 'target-not-found' },
+      { config: 'package.json', key: 'main', reference: 'dist/index.js', reason: 'build-output-unmapped' },
     ]);
   });
 
@@ -109,6 +94,80 @@ describe('collectExternalWiring — package.json', () => {
     expect(report.wired).toEqual([]);
     expect(report.boundaries.map(b => b.reason)).toEqual(['outside-repository']);
   });
+
+  it('refuses a linked or FIFO config without hanging, and discloses it', async ({ skip }) => {
+    if (process.platform === 'win32') skip();
+    await writeFile(join(outside, 'package.json'), JSON.stringify({ main: 'x.js' }));
+    await symlink(join(outside, 'package.json'), join(root, 'package.json'));
+    execFileSync('mkfifo', [join(root, 'tsconfig.json')]);
+    const report = await collectExternalWiring(root);
+    expect(report.wired).toEqual([]);
+    expect(report.boundaries).toEqual([
+      { config: 'package.json', key: '', reference: 'package.json', reason: 'unreadable-config' },
+      { config: 'tsconfig.json', key: '', reference: 'tsconfig.json', reason: 'unreadable-config' },
+    ]);
+  }, 10_000);
+});
+
+describe('collectExternalWiring — shell commands', () => {
+  it('counts only the files a command executes, never arguments, outputs, or heredoc content', async () => {
+    for (const f of ['scripts/build.ts', 'tools/check.mjs', 'build.js', 'setup.cjs', 'run.ts', 'bin/tool', 'src/dead.ts', 'dist/out.js', 'old.js', 'gen.sh', 'log.js']) {
+      await put(f);
+    }
+    await put('package.json', JSON.stringify({
+      scripts: {
+        build: 'tsx scripts/build.ts&&node ./tools/check.mjs --strict',
+        out: 'node build.js > dist/out.js 2>log.js',
+        preload: 'cross-env NODE_ENV=test node --require ./setup.cjs --import tsx run.ts',
+        direct: './bin/tool --flag',
+        lint: 'eslint . --ignore-pattern src/dead.ts',
+        clean: 'rm -rf old.js; echo gen.sh | tee log.js',
+        test: 'vitest run src/dead.ts',
+      },
+    }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['bin/tool', 'build.js', 'run.ts', 'scripts/build.ts', 'setup.cjs', 'tools/check.mjs']);
+  });
+
+  it('discloses variables, globs, modules by name, and paths after a cd', async () => {
+    await put('scripts/a.js');
+    await put('package.json', JSON.stringify({
+      scripts: {
+        dynamic: 'node $SCRIPT',
+        glob: 'tsx src/cli-*.ts',
+        module: 'python -m pkg.tool',
+        moved: 'cd tools && node scripts/a.js',
+        missing: 'node scripts/gone.js',
+        escape: 'node ../elsewhere/run.js',
+        quoted: 'node "my dir/a.js"',
+      },
+    }));
+    const report = await collectExternalWiring(root);
+    expect(report.wired).toEqual([]);
+    expect(report.boundaries).toEqual([
+      { config: 'package.json', key: 'scripts.dynamic', reference: '$SCRIPT', reason: 'dynamic-reference' },
+      { config: 'package.json', key: 'scripts.escape', reference: '../elsewhere/run.js', reason: 'outside-repository' },
+      { config: 'package.json', key: 'scripts.glob', reference: 'src/cli-*.ts', reason: 'dynamic-reference' },
+      { config: 'package.json', key: 'scripts.missing', reference: 'scripts/gone.js', reason: 'target-not-found' },
+      { config: 'package.json', key: 'scripts.module', reference: '-m pkg.tool', reason: 'unsupported-form' },
+      { config: 'package.json', key: 'scripts.moved', reference: 'scripts/a.js', reason: 'unsupported-form' },
+      { config: 'package.json', key: 'scripts.quoted', reference: 'my dir/a.js', reason: 'target-not-found' },
+    ]);
+  });
+
+  it('reports a repeated unresolved reference once', async () => {
+    await put('package.json', JSON.stringify({ scripts: { twice: 'node gone.js && node gone.js' } }));
+    const report = await collectExternalWiring(root);
+    expect(report.boundaries).toEqual([
+      { config: 'package.json', key: 'scripts.twice', reference: 'gone.js', reason: 'target-not-found' },
+    ]);
+  });
+
+  it('keys a case-insensitive match by the repository spelling', async () => {
+    await put('src/Cased.ts');
+    await put('package.json', JSON.stringify({ scripts: { run: 'tsx src/Cased.ts' } }));
+    expect(files(await collectExternalWiring(root))).toEqual(['src/Cased.ts']);
+  });
 });
 
 describe('collectExternalWiring — tsconfig and test runners', () => {
@@ -116,15 +175,33 @@ describe('collectExternalWiring — tsconfig and test runners', () => {
     await put('tsconfig.json', '{ "files": ["src/entry.ts", "types/global.d.ts"] }');
     await put('src/entry.ts');
     await put('vitest.setup.ts');
-    await put('vitest.config.ts', "export default defineConfig({ test: { setupFiles: ['./vitest.setup.ts'], globalSetup: setupPath } });\n");
+    await put('vitest.other.ts');
+    await put('old-setup.ts');
+    await put('vitest.config.ts', [
+      'export default defineConfig({ test: {',
+      "  setupFiles: ['./vitest.setup.ts', './vitest.other.ts'],",
+      "  // setupFiles: ['./old-setup.ts'],",
+      '  globalSetup: setupPath,',
+      '} });',
+      '',
+    ].join('\n'));
     const report = await collectExternalWiring(root);
     expect(report.wired).toEqual([
       { file: 'src/entry.ts', receipts: [{ config: 'tsconfig.json', key: 'files' }] },
+      { file: 'vitest.other.ts', receipts: [{ config: 'vitest.config.ts', key: 'setupFiles' }] },
       { file: 'vitest.setup.ts', receipts: [{ config: 'vitest.config.ts', key: 'setupFiles' }] },
     ]);
     expect(report.boundaries).toEqual([
       { config: 'vitest.config.ts', key: 'globalSetup', reference: 'setupPath', reason: 'unparsed-config' },
     ]);
+  });
+
+  it('reads multi-line jest arrays and expands <rootDir>', async () => {
+    await put('jest.setup.js');
+    await put('jest.env.js');
+    await put('jest.config.js', "module.exports = {\n  setupFilesAfterEnv: [\n    '<rootDir>/jest.setup.js',\n  ],\n};\n");
+    await put('package.json', JSON.stringify({ jest: { setupFiles: ['<rootDir>/jest.env.js'] } }));
+    expect(files(await collectExternalWiring(root))).toEqual(['jest.env.js', 'jest.setup.js']);
   });
 });
 
@@ -141,6 +218,10 @@ describe('collectExternalWiring — GitHub Actions', () => {
       '      - run: node scripts/verify.js',
       '        working-directory: tools',
       '      - run: node ${{ matrix.script }}',
+      '      - run: |',
+      '          cat <<EOF > gen.sh',
+      '          node not/a/script.js',
+      '          EOF',
       '',
     ].join('\n'));
     const report = await collectExternalWiring(root);
@@ -153,6 +234,59 @@ describe('collectExternalWiring — GitHub Actions', () => {
     ]);
   });
 
+  it('discloses PowerShell steps instead of misreading their syntax, and follows line continuations', async () => {
+    await put('scripts/check.sh');
+    await put('scripts/probe.js');
+    await put('.github/workflows/os.yml', [
+      'jobs:',
+      '  windows:',
+      '    runs-on: windows-latest',
+      '    steps:',
+      '      - run: |',
+      '          $probe = Join-Path $PWD "x"',
+      '          node scripts/probe.js',
+      '  linux:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - run: |',
+      '          [[ "${{ needs.a.result }}" == "success" ]] || \\',
+      '            bash scripts/check.sh',
+      '      - run: /usr/bin/env node scripts/probe.js',
+      '      - shell: pwsh',
+      '        run: node scripts/probe.js',
+      '',
+    ].join('\n'));
+    const report = await collectExternalWiring(root);
+    expect(report.wired).toEqual([
+      { file: 'scripts/check.sh', receipts: [{ config: '.github/workflows/os.yml', key: 'jobs.linux.steps[0].run' }] },
+      { file: 'scripts/probe.js', receipts: [{ config: '.github/workflows/os.yml', key: 'jobs.linux.steps[1].run' }] },
+    ]);
+    expect(report.boundaries).toEqual([
+      { config: '.github/workflows/os.yml', key: 'jobs.linux.steps[2].run', reference: 'shell pwsh', reason: 'unsupported-form' },
+      { config: '.github/workflows/os.yml', key: 'jobs.windows.steps[0].run', reference: 'shell pwsh', reason: 'unsupported-form' },
+    ]);
+  });
+
+  it('parses a merge-key bomb quickly instead of expanding it', async () => {
+    const lines = ['a0: &a0 {x: 1}'];
+    for (let i = 1; i <= 40; i++) lines.push(`a${i}: &a${i} {<<: [*a${i - 1}, *a${i - 1}]}`);
+    lines.push('jobs: {}');
+    await put('.github/workflows/bomb.yml', lines.join('\n'));
+    const started = Date.now();
+    await collectExternalWiring(root);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 20_000);
+
+  it('caps references per config with a disclosure instead of losing everything', async () => {
+    await put('x.js');
+    await put('package.json', JSON.stringify({ bin: 'x.js' }));
+    const run = Array.from({ length: 1_500 }, (_, i) => `node s${i}.js`).join(' && ');
+    await put('.github/workflows/big.yml', `jobs:\n  a:\n    steps:\n      - run: ${JSON.stringify(run)}\n`);
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['x.js']);
+    expect(report.boundaries.some(b => b.reference === 'more than 1000 references')).toBe(true);
+  });
+
   it('contributes nothing for a repository with no supported config', async () => {
     await put('src/orphan.ts');
     expect(await collectExternalWiring(root)).toEqual({ wired: [], boundaries: [], boundariesOmitted: 0 });
@@ -161,7 +295,7 @@ describe('collectExternalWiring — GitHub Actions', () => {
 
 describe('stripJsonComments', () => {
   it('removes comments and trailing commas without touching string contents', () => {
-    const source = '{ "url": "http://x//y", /* block */ "a": [1, 2,], // line\n "b": "/*keep*/", }';
-    expect(JSON.parse(stripJsonComments(source))).toEqual({ url: 'http://x//y', a: [1, 2], b: '/*keep*/' });
+    const source = '{ "url": "http://x//y", /* block */ "a": [1, 2,], // line\n "b": "/*keep*/", "c": ["x, ]", "y,}"], }';
+    expect(JSON.parse(stripJsonComments(source))).toEqual({ url: 'http://x//y', a: [1, 2], b: '/*keep*/', c: ['x, ]', 'y,}'] });
   });
 });

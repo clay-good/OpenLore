@@ -149,8 +149,10 @@ export async function generateCodebaseDigest(
         : new Set<string>();
       const wiredEntryPoints = (cg.entryPoints ?? [])
         .filter(n => wired.has(n.filePath.replaceAll('\\', '/').replace(/^\.\//, ''))).length;
-      lines.push(`- **${cg.entryPoints?.length ?? 0}** entry points (no internal callers)` +
-        (wiredEntryPoints > 0 ? `, **${wiredEntryPoints}** of them in files a config invokes (package.json, tsconfig, test-runner config, CI run steps)` : ''));
+      const entryPointCount = cg.entryPoints?.length ?? 0;
+      lines.push(`- **${entryPointCount}** entry points (no internal callers)` + (rootPath && entryPointCount > 0
+        ? `: **${wiredEntryPoints}** in files a config invokes (package.json, tsconfig, test-runner config, CI run steps), **${entryPointCount - wiredEntryPoints}** invoked by no config read`
+        : ''));
       lines.push(`- **${cg.hubFunctions?.length ?? 0}** hub functions (high fan-in)`);
       if (cg.stats?.avgFanIn !== undefined) {
         lines.push(`- avg fan-in: **${cg.stats.avgFanIn.toFixed(2)}**, avg fan-out: **${cg.stats.avgFanOut.toFixed(2)}**`);

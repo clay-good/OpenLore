@@ -19,7 +19,7 @@ Static reachability **cannot see** dynamic entry points, framework magic (routes
 registries), reflection, or public API consumed *outside* the repo. All of these produce false
 "dead" positives. So `find_dead_code`:
 
-- treats **tests, imported symbols, route handlers, and `main`** as roots,
+- treats **tests, imported symbols, route handlers, `main`, and files a config invokes** as roots,
 - returns **confidence-tagged candidates with a reason**, never a verdict,
 - and **never auto-deletes**.
 
@@ -78,16 +78,25 @@ Code that only configuration invokes has no importer, so without evidence it rea
 | `vitest`/`vite`/`jest` config | literal `setupFiles` / `globalSetup` values |
 | `.github/workflows/*.yml` | files run by `run:` steps, relative to the step's `working-directory` |
 
+A command wires a file only when it **executes** it: the script after a runner (`node`, `tsx`,
+`python`, `bash`, …, past wrappers such as `cross-env` or `npx`), a `--require` / `--import` preload,
+or a path in command position. A path passed as an argument (`eslint src/x.ts`), a redirect target
+(`> dist/out.js`), or heredoc content is not wiring.
+
 Every function in a wired file becomes an `externally-wired` root: the graph has no node for
 module-scope code, so a wired file's load-time calls cannot be told from its helpers, and the bias
 stays false-live over false-dead. The report counts them in `rootKinds.externallyWired` and lists each
 wired file with its receipts (config file and key) in `externalWiring.files`.
 
-A reference the adapters cannot resolve — a shell variable or `${{ }}` expression, a missing target, a
-path outside the repository, or a config that does not parse — is listed in
-`externalWiring.boundaries` and counted in a caveat, never guessed. Workspace-member manifests,
-framework routing conventions, and other config formats are not read. On this repository, 38 of 1,018
-entry points are in config-wired files.
+A reference the adapters cannot resolve is listed in `externalWiring.boundaries` with a reason and
+counted in a caveat, never guessed: `dynamic-reference` (a variable, `${{ }}` expression, or glob),
+`unsupported-form` (a module run by name, a path after a `cd`, or a config with too many references),
+`target-not-found`, `build-output-unmapped` (a build output tsconfig does not map to a source),
+`outside-repository`, `unreadable-config` (a link, a non-regular file, or one over 1 MB), and
+`unparsed-config`. Workspace-member manifests,
+framework routing conventions, and other config formats are not read, and only POSIX shell
+workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
+repository, 36 of 1,018 entry points are in config-wired files.
 
 Confidence is deliberately conservative — the bias is toward **false-live over false-dead**:
 

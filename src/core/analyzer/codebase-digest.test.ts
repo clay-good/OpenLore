@@ -239,7 +239,8 @@ describe('generateCodebaseDigest', () => {
     const cg = makeCallGraph({ nodes: entryPoints, entryPoints });
     await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
     const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
-    expect(content).toContain('**2** entry points (no internal callers), **1** of them in files a config invokes');
+    expect(content).toContain('**2** entry points (no internal callers): **1** in files a config invokes');
+    expect(content).toContain('**1** invoked by no config read');
   });
 
   it('includes layer violations section when violations are present', async () => {

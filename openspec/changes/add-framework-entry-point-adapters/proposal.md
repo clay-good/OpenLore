@@ -62,31 +62,45 @@ format parsers, each deterministic and individually testable.
 
 ## Scope as built
 
-- **Built:** one module, `src/core/analyzer/entry-point-adapters.ts`, with three stages:
+- **Built:** one module, `src/core/analyzer/entry-point-adapters.ts` (not a directory), with three
+  stages:
   - the root `package.json` (`bin`, `main`, `module`, `exports`, `scripts`, `jest`), with a build
-    output mapped back to its source through tsconfig `outDir` → `rootDir` before the literal path;
-  - `tsconfig.json` `files` and literal vitest/vite/jest `setupFiles` / `globalSetup` values;
-  - `.github/workflows` `run:` steps, through the workflow parser's `${{ }}` masking, relative to each
-    step's working directory.
-- **Roots:** every function in a wired file is an `externally-wired` root. The call graph has no node
-  for module-scope code, so what a wired file runs at load time cannot be told from its helpers; the
-  roots doctrine prefers false-live over false-dead.
-- **Consumers:** `find_dead_code` (`rootKinds.externallyWired`, an `externalWiring` receipt block,
-  scope and boundary caveats), `report_coverage_gaps` (`externallyWired` receipts on a gap), and the
-  CODEBASE.md entry-point line (config-wired count).
-- **Measured on this repository:** 38 of 1,018 entry points are in files a config invokes; 53 files are
-  wired, and 7 references are disclosed boundaries (a `cd` inside a multi-line CI script and a shell
-  variable).
-- **Deferred:** tsconfig `references` (they name projects, not code files), workspace-member manifests,
-  framework route conventions, and literal values the config builds at runtime. The first two and the
-  route conventions are named in the `find_dead_code` caveats.
+    output tried first as its source through tsconfig `outDir` → `rootDir`;
+  - `tsconfig.json` `files` and literal vitest/vite/jest `setupFiles` / `setupFilesAfterEnv` /
+    `globalSetup` values (comments stripped, `<rootDir>` expanded);
+  - `.github/workflows` `run:` steps, parsed again with the workflow parser's `${{ }}` masking (not
+    through its step handling), relative to each step's working directory.
+- **Commands** count only executed files: the script after a runner (past wrappers such as `cross-env`
+  or `npx`), a `--require`/`--import` preload, or a path in command position. Arguments, redirect
+  targets, and heredoc bodies are ignored; a variable, glob, `-m module`, or path after `cd` is a
+  boundary.
+- **Reading** uses the no-follow, non-blocking bounded reader (a FIFO or linked config is an
+  `unreadable-config` boundary), parses YAML without merge keys, and caps references per config with a
+  disclosure. These are bounding constants, not tuning constants.
+- **Roots:** every function in a wired file is an `externally-wired` root, stated in the caveats of
+  `find_dead_code` and `report_coverage_gaps`.
+- **Consumers:** `find_dead_code` (`rootKinds.externallyWired`, `externalWiring` receipts and
+  boundaries, caveats), `report_coverage_gaps` (`externallyWired` receipts on a gap; the label is the
+  existing absence of `alsoFlaggedDead`), `verify_claim` and landmarks (the shared dead set), and the
+  CODEBASE.md entry-point line (in files a config invokes vs. invoked by no config read). CODEBASE.md
+  changes only on `analyze`; the query tools read config on every call.
+- **Measured on this repository:** 36 of 1,018 entry points are in files a config invokes; 24 files are
+  wired (for example `src/cli/index.ts` by `bin.openlore`, `exports["./cli"]`, and three scripts); 9
+  boundaries, all PowerShell workflow steps disclosed as `unsupported-form`. Six public repositories
+  reviewed before the tokenizer fixes (commander.js, execa, click, httpx, antfu/ni, tsup): every symbol
+  that left the candidate set was genuinely config-invoked.
+- **Shells:** only POSIX (`bash`/`sh`) steps are tokenized; a PowerShell or cmd step, including a
+  Windows runner's default shell, is one `unsupported-form` boundary.
+- **Dropped or deferred:** tsconfig `references` (they name projects, not code files), stage-2
+  include globs (they select test files, which are already roots), workspace-member manifests,
+  framework route conventions, a map-view decomposition, and a `cd`-tracking shell model.
 
 ## Why this is in scope
 
 `find_dead_code`'s candidates and the entry-point inventory are existing conclusions whose
 largest disclosed error source is config wiring; closing it with deterministic file readers is
 precision work on the substrate's own doctrine (candidates → fewer, receipted candidates), with
-zero new surface and zero constants.
+zero new surface and no tuning constants (only read bounds).
 
 ## Impact
 

@@ -36,6 +36,9 @@ graph yields a byte-identical report.
 - **Untested ≠ dead.** A gap that is *also* unreachable from any liveness root is labeled
   `alsoFlaggedDead: true` — that subset is [`find_dead_code`](reachability-dead-code.md)'s domain.
   An untested entry point (a live, framework-invoked root) is reported as a real gap, *not* dead.
+  A gap in a file a config invokes (a package.json `bin`, a script an npm script or CI step runs, a
+  test-runner setup file) carries `externallyWired` receipts naming the config file and key, and is
+  not flagged dead (change: `add-framework-entry-point-adapters`).
 - **A scope that matched nothing says so.** A `changedSymbols`/`diffRef`/`filePattern` that resolves
   to zero in-scope symbols returns an explicit `note` ("nothing matched", NOT "no coverage gaps"), so
   a typo'd symbol never reads as "my change is fully covered".

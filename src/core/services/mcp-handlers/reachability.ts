@@ -23,7 +23,7 @@
  * bridges and cross-language polymorphism, DI/plugin registries with no
  * statically-visible binding, RTA/VTA-level pruning of the CHA name+arity
  * over-approximation, and externally-consumed public exports — these can still
- * produce false "dead" positives. Roots include tests, imported symbols, and
+ * produce false "dead" positives. Roots include tests, imported symbols, files a config invokes, and
  * detected framework entries; every candidate carries a confidence level and a
  * reason; nothing is ever auto-deleted. Pass `directResolvedOnly` to ignore
  * synthesized edges and get the strict directly-resolved reachability instead.
@@ -88,10 +88,22 @@ const DYNAMIC_LANGS = new Set(['Python', 'Ruby', 'PHP', 'Lua', 'Elixir', 'Bash']
  * module-scope code, so what a wired file runs at load time cannot be told apart from its helpers —
  * and the roots doctrine prefers false-live over false-dead.
  */
-async function loadExternalWiring(absDir: string): Promise<{ report: ExternalWiringReport; byFile: Map<string, WiringReceipt[]> }> {
+export async function loadExternalWiring(absDir: string): Promise<{ report: ExternalWiringReport; byFile: Map<string, WiringReceipt[]> }> {
   const report = await collectExternalWiring(absDir)
     .catch((): ExternalWiringReport => ({ wired: [], boundaries: [], boundariesOmitted: 0 }));
   return { report, byFile: new Map(report.wired.map(w => [w.file, w.receipts])) };
+}
+
+/** Caveats every conclusion resting on config-wired roots carries. */
+export function externalWiringCaveats(report: ExternalWiringReport): string[] {
+  const caveats = [
+    'Every function in a file a config invokes (package.json bin/main/module/exports/scripts/jest, tsconfig files, vitest/vite/jest setup files, .github/workflows run steps) is treated as live, because module-scope code has no call-graph node; unused helpers in such a file are not flagged. Workspace-member manifests, framework routing conventions, and other config formats are not read, so code wired only there can appear dead.',
+  ];
+  const unresolved = report.boundaries.length + report.boundariesOmitted;
+  if (unresolved > 0) {
+    caveats.push(`${unresolved} config reference(s) could not be resolved to a repository file (dynamic, unsupported, missing, outside the repository, or an unreadable config; see externalWiring.boundaries) — code they would wire can appear dead.`);
+  }
+  return caveats;
 }
 
 /** A graph file path in the adapters' repo-relative spelling. */
@@ -182,7 +194,7 @@ function fileImported(filePath: string, importedFiles: Set<string>): boolean {
 
 /**
  * The candidate dead-code id set: code nodes (excluding tests) not reachable from
- * any liveness root (tests, by-name imports, HTTP handlers, main-like). Shares the
+ * any liveness root (tests, by-name imports, HTTP handlers, main-like, config-wired files). Shares the
  * documented roots definition with {@link handleFindDeadCode} so `find_dead_code`
  * and landmark signals agree on what "dead" means. Candidate ids only — deadness
  * is a signal, never deletion authority (see module header).
@@ -190,7 +202,7 @@ function fileImported(filePath: string, importedFiles: Set<string>): boolean {
 export async function deadCodeIds(
   absDir: string,
   cg: SerializedCallGraph,
-  opts?: { directResolvedOnly?: boolean },
+  opts?: { directResolvedOnly?: boolean; externalWiring?: Map<string, WiringReceipt[]> },
 ): Promise<Set<string>> {
   // Strict mode (opt-in): drop synthesized dynamic-dispatch edges from both the
   // reachability walk AND the synthesized route-handler roots, so a caller that
@@ -202,7 +214,7 @@ export async function deadCodeIds(
   const importedNames = dep?.names ?? null;
   const traversal = await loadTraversalIndex(absDir, cg);
   const handlerRootIds = externallyInvokedHandlerIds(cg, !strict);
-  const wiredFiles = (await loadExternalWiring(absDir)).byFile;
+  const wiredFiles = opts?.externalWiring ?? (await loadExternalWiring(absDir)).byFile;
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
     !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) || wiredFiles.has(wiringKey(n.filePath)) ||
@@ -526,16 +538,12 @@ function deadCodeSoundness(exportSignal: 'dependency-graph' | 'none', languages:
   const caveats = [
     'These are CANDIDATES, not deletion authority — never auto-delete based on this.',
     'Dynamic dispatch, reflection, DI, plugin registries, and framework routing invoke code invisibly to static analysis; such symbols can be flagged dead falsely.',
-    'Config wiring is read from the root package.json (bin, main, module, exports, scripts, jest), tsconfig.json files, vitest/vite/jest setup files, and .github/workflows run steps; workspace-member manifests, framework routing conventions, and other config formats are not read, so code wired only there can appear dead.',
     'Public API consumed OUTSIDE this repo is not visible as a root and may appear dead — treat exported library symbols with caution.',
   ];
   if (exportSignal === 'none') {
     caveats.push('No dependency graph found — the "imported elsewhere" liveness signal is unavailable, so confidence is reduced. Run analyze_codebase to generate it.');
   }
-  const unresolved = (wiring?.boundaries.length ?? 0) + (wiring?.boundariesOmitted ?? 0);
-  if (unresolved > 0) {
-    caveats.push(`${unresolved} config reference(s) could not be resolved to a repository file (dynamic, missing, outside the repository, or unparsed; see externalWiring.boundaries) — code they would wire can appear dead.`);
-  }
+  if (wiring) caveats.push(...externalWiringCaveats(wiring));
   const dynamic = languages.filter(l => DYNAMIC_LANGS.has(l));
   if (dynamic.length > 0) {
     caveats.push(`Dynamic languages present (${dynamic.join(', ')}): implicit exports and runtime dispatch make deadness unreliable — those candidates are capped at low confidence.`);
