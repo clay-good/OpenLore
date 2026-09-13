@@ -413,6 +413,7 @@ async function mergeAttributeBlocker(
     if (nonAsciiDir) return `${capPath(nonAsciiDir)} is a non-ASCII directory name, and filesystem case folding cannot be checked for it`;
     const dirsLower = new Map([...dirs].map(dir => [dir.toLowerCase(), dir] as const));
     const checkedAttributeBlobs = new Set<string>();
+    const attributeFilesByTree = new Map<string, string[]>();
     // Two changed files that differ only by case (`README`, `readme`) overwrite each other on a
     // case-insensitive checkout, which fails a real merge.
     const sharedSet = new Set(shared);
@@ -427,6 +428,8 @@ async function mergeAttributeBlocker(
       return `${capPath(spellings[0])} differs from another changed directory only by letter case`;
     }
     for (const tree of [base, tipA, tipB]) {
+      const attributeFiles: string[] = [];
+      attributeFilesByTree.set(tree, attributeFiles);
       // Records are `<mode> <type> <id>` TAB `<path>`; the mode shows a symlinked `.gitattributes`.
       const listing = gitPathArgs('-c', 'core.precomposeunicode=false', '--literal-pathspecs', 'ls-tree', '-z', '--full-tree', tree);
       const records = (await readGit(repoPath, listing, deadline)).split('\0');
@@ -444,11 +447,17 @@ async function mergeAttributeBlocker(
           if (mode !== '100644' && mode !== '100755') {
             return `${capPath(entry)} ${mode === '120000' ? 'is a symlink' : `has mode ${mode}`}, which a real merge ignores but the attribute check would read`;
           }
+          attributeFiles.push(entry);
           if (OBJECT_ID.test(objectId ?? '') && !checkedAttributeBlobs.has(objectId)) {
             checkedAttributeBlobs.add(objectId);
             const content = await readGit(repoPath, ['cat-file', 'blob', objectId], deadline);
             if (content.startsWith('\uFEFF') || content.includes('\0')) {
               return `${capPath(entry)} has a byte-order mark or a NUL byte, which the attribute check reads differently than a real merge`;
+            }
+            // git ignores an attributes line of 2,048 bytes or more; checkout expansion of the file on
+            // disk (for example `ident`) can push a line past that limit that the blob parser still reads.
+            if (content.split('\n').some(line => Buffer.byteLength(line) >= 2000)) {
+              return `${capPath(entry)} has a line near git's attribute line-length limit, which the attribute check can read differently than a real merge`;
             }
           }
         }
@@ -463,6 +472,14 @@ async function mergeAttributeBlocker(
           return `${capPath(entry)} differs from a changed path only by letter case`;
         }
       }
+    }
+    // Checkout attributes on a `.gitattributes` itself (`ident`, `working-tree-encoding`, a filter) change
+    // the file a real merge reads from disk; apply the same allowlist to the attributes files.
+    for (const [tree, files] of attributeFilesByTree) {
+      if (files.length === 0) continue;
+      const fields = (await readGit(repoPath, ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', `--source=${tree}`, '-a', '--', ...files], deadline)).split('\0');
+      const blocked = attributeBlocker(fields);
+      if (blocked) return blocked;
     }
   }
   return undefined;

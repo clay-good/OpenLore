@@ -277,8 +277,9 @@ eleventh round), paths a directory rename places (one more in a twelfth round), 
 (one more in a fourteenth round), over-long paths (one more in a fifteenth round), over-long symlink targets (one more in a
 sixteenth round), case-only file name collisions (one more in a seventeenth round), and refusing local rename and
 diff-algorithm settings that a fresh clone or hosted merge would not carry (an eighteenth round), and
-symlinked `.gitattributes` files (a nineteenth round), and non-file modes, byte-order marks, and NUL
-bytes in `.gitattributes` (a twentieth round), submodule conflicts, a 20-second budget, and a
+symlinked `.gitattributes` files (a nineteenth round), non-file modes, byte-order marks, and NUL
+bytes in `.gitattributes` (a twentieth round), and checkout attributes or near-limit lines in
+`.gitattributes` itself (a twenty-first round), submodule conflicts, a 20-second budget, and a
 response-size loop. A missing or criss-cross
 merge base, a PR head that is not local, an agent task, a cross-repo pair, or a cap is
 `not-assessed`, never clean. Per-symbol hunk mapping is deferred.

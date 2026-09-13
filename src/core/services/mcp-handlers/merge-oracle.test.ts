@@ -703,4 +703,14 @@ describe('simulateMerge', () => {
     const lb = commitFiles(repo, base, { 'd/f': lines({ 8: 'I' }) }, 'attr-gitlink-b');
     expect(await simulateMerge(repo, la, lb)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/d\/\.gitattributes has mode 160000/) });
   });
+
+  it('is not-assessed when a .gitattributes carries a checkout attribute or a near-limit line', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const start = commitFiles(repo, main, { 'f.txt': lines() }, 'attr-ident-start');
+    const other = commitFiles(repo, start, { 'f.txt': lines({ 8: 'I' }) }, 'attr-ident-b');
+    const ident = commitFiles(repo, start, { '.gitattributes': '.gitattributes ident\n', 'f.txt': lines({ 0: 'A' }) }, 'attr-ident-a');
+    expect(await simulateMerge(repo, ident, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.gitattributes has attribute "ident"/) });
+    const long = commitFiles(repo, start, { '.gitattributes': `f.txt${' '.repeat(2000)}text\n`, 'f.txt': lines({ 0: 'A' }) }, 'attr-long-a');
+    expect(await simulateMerge(repo, long, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/line-length limit/) });
+  });
 });
