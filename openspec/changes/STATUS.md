@@ -36,17 +36,14 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 1
+## In flight — 0
 
-`add-test-selection-safeguard-tiers` — `select_tests` always selects changed, new, and untracked test
-files, gives every selection a `reason` receipt and a per-test structural qualifier, and discloses
-flakiness as not assessed. On a branch with its `change:` marker in `src/`.
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 103
+## To build — 102
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -135,7 +132,6 @@ trust boundary for served content.
 | `add-structural-search-tool` | deterministic AST pattern search as a conclusion tool |
 | `add-symbol-content-hashes` | exact symbol-level changed-sets between revisions |
 | `add-symbol-provenance-conclusions` | when did this exist, what changed it last, what moves with it |
-| `add-test-selection-safeguard-tiers` | always-select rules, flakiness disclosure, and a structural-confidence qualifier |
 | `add-vuln-reachability-triage` | is the vulnerable function actually reachable from my code? |
 | `adopt-agent-context-interop` | AGENTS.md first-class, the orient skill portable, the injected digest evidence-slim |
 | `adopt-mcp-protocol-conformance` | guarded annotations, output schemas, actionable errors, elicitation |
@@ -222,6 +218,15 @@ no anchor, and an anchor whose symbol is absent from a file the analysis cannot 
 `stale`, matched by the file's real spelling and re-assessed before a cached index is served. Two
 review rounds withdrew `#### Requirement:` recovery (OpenSpec counts only `###`) and a parse-health
 boundary (wrong extractor's evidence).
+
+Shipped and archived since: `add-test-selection-safeguard-tiers` (2026-09-12, flakiness reader
+deferred) — a diff's changed, added, and untracked test files are always selected beside the backward
+walk, so a test-only diff no longer selects nothing. Every selection carries the `reason` behind its
+served path and any other reasons, a path across synthesized edges carries a `structuralBasis`, and
+`flakiness: { assessed: false }` is stated because no local per-test outcome history exists. Four
+adversarial reviews fixed path frames for subdirectory analysis, over-broad test classification,
+string-sorted depth reasons, cyclic `tested_by` paths, and an unbounded, silently failing untracked
+listing (now capped at 200 with disclosure).
 
 ## Maintenance rules (what kept this table honest)
 

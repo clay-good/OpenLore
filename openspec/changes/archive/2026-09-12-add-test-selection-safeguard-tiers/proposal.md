@@ -62,9 +62,16 @@ here, and the safeguard tiers apply regardless of whether a coverage artifact is
   edge index, and a `flakiness: { assessed: false }` disclosure. A diff touching only test files now
   selects them instead of returning "no changed production functions".
 - **Deferred:** the flakiness history reader. No local source in the repository records per-test
-  outcomes against a tree hash — JUnit XML carries none, and `gh run` history is per-workflow, not
-  per-test, without downloading artifacts over the network. Shipping the rule without a source would
-  be a guess; the absence is disclosed instead.
+  outcomes against a tree hash: the repository writes no JUnit XML. CI does upload one per-test
+  report tied to a commit (`windows-unit-report`), but reading it means downloading a CI artifact over
+  the network for one platform's runs. Shipping the rule without a local source would be a guess; the
+  absence is disclosed instead. The "different tree-hash is not flagged" and "no `gh`, no crash"
+  tests are deferred with it.
+- **Narrowed:** the per-test qualifier counts synthesized edges only. The graph stores no separate
+  per-edge "heuristic" label, so "synthesized or heuristic" collapses to the synthesized label.
+- **Dropped:** the payload-budget re-assertion in `src/cli/commands/mcp-presets.test.ts`. That test
+  asserts no `select_tests` payload, and no byte budget applies to it; the new fields add about 55
+  bytes per selected test, and untracked tier files are capped at 200.
 
 ## Why this is in scope
 

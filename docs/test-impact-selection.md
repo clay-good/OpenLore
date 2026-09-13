@@ -4,7 +4,8 @@
 
 You changed `parseConfig()`. Which tests should you run? `select_tests` answers it by walking
 the call graph **backward** from the change to every test that transitively reaches it — and
-returns each test with the path that connects it to the change.
+returns each test with the path that connects it to the change. It also always selects the test
+files the change itself added or edited, and says why each test was selected.
 
 This is **static, call-graph-based regression test selection (RTS)** — established CS (Ryder &
 Tip change-impact analysis; RTS++), not novelty — but served to the *agent at edit time* rather
@@ -30,8 +31,9 @@ So `select_tests` is a **prioritizer** — "run these first, they're almost cert
 ones" — **not a guarantee and not a replacement for the full suite.** The response carries:
 
 - `soundness.posture: "over-approximate"` and explicit `soundness.caveats`.
-- `coverage.testDetection: "full" | "partial" | "none"` — when test detection is incomplete for
-  the changed languages, it says so rather than returning a falsely-confident empty set.
+- `coverage.testDetection: "full" | "partial" | "none" | "not-applicable"` — when test detection is
+  incomplete for the changed languages, it says so rather than returning a falsely-confident empty
+  set. `not-applicable` means no production function changed (only test files did).
 
 ## Tool contract
 
@@ -46,10 +48,12 @@ ones" — **not a guarantee and not a replacement for the full suite.** The resp
   "seeds": [{ "name": "parseConfig", "file": "src/config.ts" }],
   "selectedTests": [
     { "test": "config.test", "file": "src/config.test.ts",
-      "viaPath": ["config.test", "loadConfig", "parseConfig"], "confidence": "high" }
+      "viaPath": ["config.test", "loadConfig", "parseConfig"], "confidence": "medium",
+      "reason": "included: reaches changed symbol at depth 2" }
   ],
   "soundness": { "posture": "over-approximate", "caveats": ["…dynamic dispatch may under-select…"] },
-  "coverage": { "languages": ["TypeScript"], "testDetection": "full" }
+  "coverage": { "languages": ["TypeScript"], "testDetection": "full" },
+  "flakiness": { "assessed": false, "reason": "No test-outcome history is read: …" }
 }
 ```
 
@@ -98,15 +102,26 @@ Reachability alone can miss the test that matters most: the one you just edited 
 | New test | a test file added since the base ref, or an **untracked**, non-ignored test file (which `git diff` never lists) | `included: new test` |
 | Changed test | a test file modified since the base ref | `included: test file itself changed` |
 | Reachability | a test that transitively reaches a changed symbol (the existing walk) | `included: reaches changed symbol at depth N` |
+| Same-file fallback | a test of another function in a changed function's file, when nothing reaches that function | `included: tests a function in the same file as a changed symbol` |
 
-Tiers only **add** selections, never remove one. A deleted test file is not selected. A test file the
-analysis has not indexed yet is selected whole (`test: "*"`). A diff that touches only test files now
-selects them, instead of reporting that no production function changed.
+Tiers only **add** selections, never remove one. A tier file must satisfy the analyzer's own
+test-file rule (a fixture under `test/` is not a test), lie inside the analyzed directory (diff paths
+are mapped out of the repository root), exist on disk, and match an indexed test file exactly (a
+same-named test in another folder is not selected). A deleted test file is not selected, and a
+renamed one is selected under its new path. A test file the analysis has not indexed yet is selected
+whole (`test: "*"`). A diff that touches only test files now selects them, instead of reporting that no
+production function changed. When untracked files cannot be listed, a caveat says a brand-new
+untracked test may be missing. At most 200 untracked test files are selected; a caveat counts the
+rest. An untracked path with control characters, or one not on disk under the analyzed directory, is
+skipped. Untracked files come from the working tree, so a `diffRef` base does not exclude them, just
+as it does not exclude unstaged edits.
 
-Every selected test carries its strongest `reason`, and `alsoIncludedBecause` lists any other reason
-that selected it. A selection whose reaching path crosses a synthesized (heuristically recovered)
+Every selected test carries the `reason` behind the path it is served with (so `reason`, `viaPath`,
+and `confidence` always agree; a tier reason always wins), and `alsoIncludedBecause` lists any other
+reason that selected it, tier first, then shallowest depth. A selection whose reaching path crosses a synthesized (heuristically recovered)
 edge carries `structuralBasis: { synthesizedEdges, synthesizedBy }`, built from the existing edge
-provenance labels (a direct edge for the same pair wins). A directly-resolved selection carries none,
+provenance labels (a direct edge for the same pair wins). A synthesized `tested_by` association counts
+as one such edge, and `directResolvedOnly` skips it. A directly-resolved selection carries none,
 and the response-level `confidenceBoundary` is unchanged.
 
 `flakiness: { assessed: false }` states that no test-outcome history is read, so no test is labeled

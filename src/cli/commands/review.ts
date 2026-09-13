@@ -452,7 +452,7 @@ export function renderMarkdown(b: ReviewBriefing): string {
       if (blast.tests.unavailable) {
         L.push(`- **Tests to run:** could not be computed (${markdownText(blast.tests.unavailable, 200)}) — not the same as "none impacted".`);
       } else if (blast.tests.count) {
-        const tests = blast.tests.toRun.slice(0, 10).map(t => inlineCode(t.test)).join(', ');
+        const tests = blast.tests.toRun.slice(0, 10).map(t => inlineCode(t.test === '*' ? t.file : t.test)).join(', ');
         L.push(`- **Tests to run (${blast.tests.count}):** ${tests}${blast.tests.count > 10 ? ', …' : ''}`);
       }
       if (blast.tests.truncatedAtDepth !== undefined) {
@@ -540,7 +540,7 @@ export function renderHuman(b: ReviewBriefing): string {
     if (blast.impact.hubsTouched.length) L.push('   Hubs: ' + blast.impact.hubsTouched.map(h => `${h.symbol} (${h.fanIn})`).join(', '));
     if (blast.impact.layersCrossed.length) L.push('   Layers crossed: ' + blast.impact.layersCrossed.join(', '));
     if (blast.tests.unavailable) L.push('   Tests to run: could not be computed — not the same as "none impacted".');
-    else if (blast.tests.count) L.push(`   Tests to run (${blast.tests.count}): ${blast.tests.toRun.slice(0, 8).map(t => t.test).join(', ')}${blast.tests.count > 8 ? ', …' : ''}`);
+    else if (blast.tests.count) L.push(`   Tests to run (${blast.tests.count}): ${blast.tests.toRun.slice(0, 8).map(t => t.test === '*' ? t.file : t.test).join(', ')}${blast.tests.count > 8 ? ', …' : ''}`);
     if (blast.tests.truncatedAtDepth !== undefined) L.push(`   ⚠ Test reachability was truncated at depth ${blast.tests.truncatedAtDepth}; deeper tests may exist.`);
     const testSoundness = blast.tests.soundness as { caveats?: string[] } | undefined;
     for (const caveat of testSoundness?.caveats ?? []) {

@@ -18,4 +18,9 @@
 - [x] Union-only test: tiers never remove a reachability selection
 - [x] Flakiness disclosure test: no history → `assessed: false`, no test labeled
 - [x] Qualifier test: a synthesized-edge-only path is labeled; a direct-resolution path is not
+- [x] Review-hardening tests: subdirectory path frames, exact file match, working-tree-deleted test,
+      untracked listing failure and cap, served reason agrees with its path, no cyclic `tested_by`
+      path, synthesized `tested_by` basis, flakiness on the no-seed return
+- [ ] ~~Payload budget re-asserted in `mcp-presets.test.ts`~~ — dropped: that test asserts no
+      `select_tests` payload (see proposal)
 - [x] Full suite green; no coverage-artifact code path touched

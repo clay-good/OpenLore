@@ -587,7 +587,8 @@ export const TOOL_DEFINITIONS = [
       'USE THIS WHEN: you changed code and want to know which tests to run — ' +
       '"which tests cover parseConfig?", "what should I run for this diff?". ' +
       'Walks the call graph BACKWARD from the change to every test that transitively reaches it, ' +
-      'with the reaching path per test. Deterministic, offline, no test run. ' +
+      'with the reaching path per test, and always includes changed and new test files; each test says why it was selected. ' +
+      'Deterministic, offline, no test run. ' +
       'It is an over-approximate PRIORITIZER (run these first), not a sound replacement for the full ' +
       'suite — the response states its confidence and coverage. The exact inverse of report_coverage_gaps ' +
       '(which finds important code NO test reaches); this finds the reaching tests FOR a change. ' +

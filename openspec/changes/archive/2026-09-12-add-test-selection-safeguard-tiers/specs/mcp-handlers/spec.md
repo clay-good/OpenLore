@@ -14,7 +14,8 @@ receipt naming its strongest tier ("included: new test", then "included: test fi
 then "included: reaches changed symbol at depth N") beside the existing `confidence` field, and SHALL
 list any other reason that also selected it. The tiers
 SHALL only add selections — a tier SHALL never remove a test the reachability walk selected — and
-SHALL be computed locally from the diff already derived for seeding, with no network dependency.
+SHALL be computed locally from git — the diff already derived for seeding plus a listing of
+untracked files — with no network dependency.
 
 #### Scenario: A changed test file is selected even when unreachable
 

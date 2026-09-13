@@ -339,7 +339,7 @@ The default MCP surface is the **`substrate`** preset — 15 tools: the navigati
 | "Which file/function handles X?" | `search_code` |
 | "What's the blast radius if I change this?" | `analyze_impact` — risk score + up/downstream chain + governing decisions |
 | "How does request X reach function Y?" | `trace_execution_path` |
-| "I changed X — which tests should I run?" | `select_tests` — backward reachability to the reaching tests |
+| "I changed X — which tests should I run?" | `select_tests` — backward reachability to the reaching tests, plus changed and new test files, each with a reason |
 | "What's dead / what dies if I delete X?" | `find_dead_code` — cross-language reachability, confidence-tagged |
 | "Blast radius of my whole diff before I commit?" | `blast_radius` — callers/layers, tests to run, specs that drift |
 | "Does my diff open a path into a sensitive boundary?" | `change_impact_certificate` |
