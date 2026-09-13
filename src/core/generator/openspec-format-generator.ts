@@ -485,15 +485,11 @@ export class OpenSpecFormatGenerator {
           lines.push('');
 
           for (const op of (sub.operations ?? [])) {
-            const subReqName = this.formatRequirementName(op.name);
-            lines.push(`#### Requirement: ${subReqName}`);
+            lines.push(`#### Requirement: ${this.formatRequirementName(op.name)}`);
             lines.push('');
             const opDesc = (op.description ?? '').replace(/^\s*(shall|must|should|may)\s+/i, '');
             lines.push(`The system SHALL ${opDesc.toLowerCase()}`);
             lines.push('');
-            // Sub-component requirements are anchored too: their proposals were verified, and a
-            // requirement the link index counts must be able to carry its anchor.
-            this.emitImplementationHint(lines, subReqName, domain.name, anchors);
             for (const scenario of (op.scenarios ?? [])) {
               this.addScenario(lines, scenario);
             }

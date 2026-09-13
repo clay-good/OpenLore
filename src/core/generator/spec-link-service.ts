@@ -15,15 +15,14 @@
  * never merely because the cache was unusable.
  */
 
-import { existsSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_MAPPING,
-  ARTIFACT_PARSE_HEALTH,
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_DIR,
   OPENSPEC_DIR,
@@ -33,7 +32,6 @@ import { isConfinedPath, safeJoin } from '../../utils/path-confinement.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
 import { extractsExports } from '../analyzer/import-parser.js';
-import type { FileParseHealth } from '../analyzer/parse-health.js';
 import { mappingSourceFingerprint } from './mapping-generator.js';
 import type { PipelineResult } from './spec-pipeline.js';
 import {
@@ -154,14 +152,18 @@ export async function loadSpecCorpus(
 
 /**
  * The boundary that makes a cited file's export inventory unable to vouch for an absent symbol
- * (change: ground-generated-specs-in-the-graph), in order of how certain the gap is:
+ * (change: ground-generated-specs-in-the-graph):
  *
  *   - `language-not-extracted` — exports are never extracted for this language;
- *   - `parse-health-lower-bound` — the file parsed with errors or was excluded, so its symbols are a
- *     lower bound;
  *   - `file-not-analyzed` — the file exists but the analysis did not cover it.
  *
- * A file that is analyzed, extracted and healthy returns `undefined`: there, absence is evidence.
+ * Parse health is deliberately NOT a boundary: its error regions come from the tree-sitter call-graph
+ * extractors, while the export inventory comes from the import parser, which they do not affect — so
+ * a tree-sitter error is no evidence the export list is incomplete.
+ *
+ * A boundary is named only for a file that is ANALYZED or EXISTS AS A REGULAR FILE, resolved to its
+ * real spelling (symlinks, and letter case on a case-insensitive volume). A cited file that exists
+ * nowhere, or is a directory, is no boundary: its absence is evidence, so the anchor stays `stale`.
  */
 export async function buildFileAssessor(
   rootPath: string,
@@ -172,32 +174,48 @@ export async function buildFileAssessor(
     const file = normalizeAnchorPath(node.file.path);
     if (file) analyzed.add(file);
   }
-  const lowerBound = new Set<string>();
-  try {
-    // Bounded read: repository-controlled artifact.
-    const raw = await readArtifactBounded(join(analysisDirOf(rootPath), ARTIFACT_PARSE_HEALTH), ANALYSIS_ARTIFACT_MAX_BYTES);
-    const report = raw ? JSON.parse(raw.text) as { files?: unknown } : null;
-    if (report && Array.isArray(report.files)) {
-      for (const health of report.files as Array<Partial<FileParseHealth>>) {
-        const file = typeof health?.filePath === 'string' ? normalizeAnchorPath(health.filePath) : null;
-        if (!file) continue;
-        if (health.parseFailed || health.exclusion || (health.errorCount ?? 0) > 0 || (health.missingCount ?? 0) > 0) {
-          lowerBound.add(file);
-        }
-      }
+  let realRoot: string | undefined;
+  try { realRoot = realpathSync.native(rootPath); } catch { realRoot = undefined; }
+
+  /** The cited file's analyzed or real on-disk spelling, or `undefined` when it is no file at all. */
+  const canonical = (file: string): string | undefined => {
+    if (analyzed.has(file)) return file;
+    const abs = join(rootPath, file);
+    if (!realRoot || !isConfinedPath(rootPath, abs)) return undefined;
+    let rel: string;
+    try {
+      if (!statSync(abs).isFile()) return undefined;
+      rel = relative(realRoot, realpathSync.native(abs)).replaceAll('\\', '/');
+    } catch {
+      return undefined;
     }
-  } catch {
-    // No readable parse-health report: no file is known to be a lower bound.
-  }
+    if (rel.startsWith('..') || isAbsolute(rel)) return undefined;
+    return rel;
+  };
+
   return (file) => {
-    if (!extractsExports(file)) return 'language-not-extracted';
-    if (lowerBound.has(file)) return 'parse-health-lower-bound';
-    if (!analyzed.has(file)) {
-      const abs = join(rootPath, file);
-      if (isConfinedPath(rootPath, abs) && existsSync(abs)) return 'file-not-analyzed';
-    }
+    const target = canonical(file);
+    if (!target) return undefined;
+    if (!extractsExports(target)) return 'language-not-extracted';
+    if (!analyzed.has(target)) return 'file-not-analyzed';
     return undefined;
   };
+}
+
+/**
+ * Does a cached index still assess its absent-symbol anchors the way the current files would? The
+ * cache is keyed on the analysis and the specs, but an assessment also reads the working tree — so every cited file behind a `stale` or `not-assessed` anchor is re-assessed, and any
+ * difference makes the cache stale.
+ */
+function assessmentsCurrent(index: SpecLinkIndex, assessFile: (file: string) => string | undefined): boolean {
+  for (const link of index.links) {
+    for (const anchor of link.anchors) {
+      if ((anchor.state !== 'stale' && anchor.state !== 'not-assessed') || !anchor.file) continue;
+      const expected = anchor.state === 'not-assessed' ? (anchor.boundary ?? null) : null;
+      if ((assessFile(anchor.file) ?? null) !== expected) return false;
+    }
+  }
+  return true;
 }
 
 async function loadGraph(rootPath: string): Promise<DependencyGraphResult | null> {
@@ -246,6 +264,7 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
 
   const analysisGeneration = analysisGenerationId(graph);
   const digest = specCorpusDigest(specs);
+  const assessFile = await buildFileAssessor(rootPath, graph);
 
   // The cache is consulted only when the caller asked for the whole corpus: a
   // domain-scoped read must not be served from (or overwrite) a global artifact.
@@ -262,7 +281,7 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
     if (raw !== null) {
       const read = readMappingArtifact(raw);
       if (read.kind === 'link-index') {
-        if (isLinkIndexCurrent(read.index, analysisGeneration, digest)) {
+        if (isLinkIndexCurrent(read.index, analysisGeneration, digest) && assessmentsCurrent(read.index, assessFile)) {
           return { state: 'available', index: read.index, source: 'cache', artifactPath };
         }
         cacheReason = 'fingerprint-mismatch';
@@ -277,7 +296,7 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
   const index = buildSpecLinkIndex({
     specs,
     graph,
-    assessFile: await buildFileAssessor(rootPath, graph),
+    assessFile,
     analysisGeneration,
     sourceAnalysisFingerprint: analysisGeneration,
     ...(options.now ? { now: options.now } : {}),
@@ -346,11 +365,24 @@ export function verifyRequirementAnchors(
 ): Map<string, SpecSymbolRef> {
   const resolve = buildSymbolResolver(graph);
   const verified = new Map<string, SpecSymbolRef>();
+  const collided = new Set<string>();
   for (const proposal of proposals) {
     const symbol = proposal.symbol?.trim();
     if (!symbol) continue;
     const ref = resolve(symbol);
-    if (ref) verified.set(requirementAnchorKey(proposal.domain, proposal.requirement), ref);
+    if (!ref) continue;
+    const key = requirementAnchorKey(proposal.domain, proposal.requirement);
+    if (collided.has(key)) continue;
+    const prior = verified.get(key);
+    // Two requirements that share a key (an operation and a sub-component operation of the same name)
+    // but propose different symbols cannot both be right: write no anchor rather than whichever came
+    // last (change: ground-generated-specs-in-the-graph).
+    if (prior && (prior.name !== ref.name || prior.file !== ref.file)) {
+      verified.delete(key);
+      collided.add(key);
+      continue;
+    }
+    verified.set(key, ref);
   }
   return verified;
 }

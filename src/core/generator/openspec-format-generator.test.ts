@@ -1037,21 +1037,6 @@ describe('OpenSpecFormatGenerator — requirement implementation anchors', () =>
     expect(anchor).toBeGreaterThan(shall);
   });
 
-  it('anchors a sub-component requirement whose proposal was verified', () => {
-    const result = createMockPipelineResult();
-    const service = result.services.find(sv => sv.domain === 'user') ?? result.services[0];
-    (service as { subSpecs?: unknown }).subSpecs = [{
-      name: 'InputValidation', callee: 'validateInput', purpose: 'Validates input.',
-      operations: [{ name: 'ValidateInput', description: 'validate the input', scenarios: [] }],
-    }];
-    const gen = new OpenSpecFormatGenerator();
-    const specs = gen.generateSpecs(result, anchorMap(service.domain || 'user', 'ValidateInput', 'validateInput', 'src/services/user.ts'));
-    const content = specs.find(s => s.domain === (service.domain || 'user'))!.content;
-    const heading = content.indexOf('#### Requirement: ');
-    expect(heading).toBeGreaterThanOrEqual(0);
-    expect(content.indexOf('- **Implementation**: `validateInput::src/services/user.ts`', heading)).toBeGreaterThan(heading);
-  });
-
   it('emits no anchor when no verified anchor exists for the requirement', () => {
     const gen = new OpenSpecFormatGenerator();
     const specs = gen.generateSpecs(

@@ -52,9 +52,8 @@ import { parseRequirementBlocks } from '../drift/spec-mapper.js';
  *       graph holds it, instead of always being read as a file path
  *   6 — an anchor naming an exported type resolves to `type-only` instead of
  *       `stale`: the type exists, it is merely outside what coverage measures
- *   7 — sub-component `#### Requirement:` blocks are indexed, and an absent identity
- *       in a file whose exports the analysis cannot vouch for is `not-assessed`
- *       instead of `stale` (change: ground-generated-specs-in-the-graph)
+ *   7 — an absent identity in a file whose exports the analysis cannot vouch for is
+ *       `not-assessed` instead of `stale` (change: ground-generated-specs-in-the-graph)
  */
 export const SPEC_LINK_INDEX_VERSION = 7;
 
@@ -604,7 +603,8 @@ function isAnchor(value: unknown): boolean {
   return isString(value.raw)
     && (value.file === null || isString(value.file))
     && (value.symbol === null || isString(value.symbol))
-    && ['linked', 'ambiguous', 'stale', 'footprint', 'type-only'].includes(String(value.state))
+    && ['linked', 'ambiguous', 'stale', 'footprint', 'type-only', 'not-assessed'].includes(String(value.state))
+    && (value.boundary === undefined || isString(value.boundary))
     && Array.isArray(value.candidates)
     && value.candidates.every(isSymbolRef)
     && isCount(value.candidateTotal);
@@ -615,7 +615,7 @@ function isRequirementLink(value: unknown): boolean {
   return isString(value.requirement)
     && isString(value.domain)
     && isString(value.specFile)
-    && ['linked', 'ambiguous', 'unmapped', 'stale'].includes(String(value.state))
+    && ['linked', 'ambiguous', 'unmapped', 'stale', 'not-assessed'].includes(String(value.state))
     && Array.isArray(value.anchors) && value.anchors.every(isAnchor)
     && Array.isArray(value.functions) && value.functions.every(isSymbolRef)
     && Array.isArray(value.footprintFiles) && value.footprintFiles.every(isString);
@@ -626,7 +626,7 @@ function isValidLinkIndexShape(value: Record<string, unknown>): boolean {
   if (!Array.isArray(value.orphanFunctions) || !value.orphanFunctions.every(isSymbolRef)) return false;
   if (!isObjectRecord(value.stats)) return false;
   const stats = value.stats;
-  const statKeys = ['totalRequirements', 'linked', 'ambiguous', 'unmapped', 'stale', 'totalExportedFunctions', 'coveredFunctions', 'orphanCount', 'footprintFileCount'];
+  const statKeys = ['totalRequirements', 'linked', 'ambiguous', 'unmapped', 'stale', 'notAssessed', 'totalExportedFunctions', 'coveredFunctions', 'orphanCount', 'footprintFileCount'];
   return statKeys.every(key => isCount(stats[key]));
 }
 

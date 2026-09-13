@@ -360,13 +360,20 @@ describe('buildSpecLinkIndex', () => {
 // ============================================================================
 
 describe('sub-component requirements and unassessable citations (change: ground-generated-specs-in-the-graph)', () => {
-  it('indexes a sub-component #### Requirement block with its own anchors', () => {
-    const content = `# Domain\n\n### Requirement: Top\n\nThe system SHALL top.\n\n- **Implementation**: \`top::src/a.ts\`\n\n## Sub-components\n\n### Sub-component: Part\n\n#### Requirement: Nested\n\nThe system SHALL nest.\n\n- **Implementation**: \`nested::src/a.ts\`\n\n#### Scenario: Works\n- **WHEN** x\n- **THEN** y\n`;
-    const blocks = parseRequirementBlocks(content);
-    expect(blocks.map(b => [b.name, b.anchors])).toEqual([['Top', ['top::src/a.ts']], ['Nested', ['nested::src/a.ts']]]);
-    const index = build(specInput(content), graph(node('src/a.ts', [{ name: 'top' }, { name: 'nested' }])));
-    expect(index.stats.totalRequirements).toBe(2);
-    expect(index.stats.linked).toBe(2);
+  it('does not count a #### sub-component heading as a requirement, as OpenSpec does not', () => {
+    const content = `# Domain\n\n### Requirement: Top\n\nThe system SHALL top.\n\n- **Implementation**: \`top::src/a.ts\`\n\n## Sub-components\n\n### Sub-component: Part\n\n#### Requirement: Nested\n\nThe system SHALL nest.\n`;
+    expect(parseRequirementBlocks(content).map(b => b.name)).toEqual(['Top']);
+  });
+
+  it('round-trips an index carrying not-assessed through the persisted artifact reader', () => {
+    const index = buildSpecLinkIndex({
+      specs: specInput(spec('RunsJob', ['Run::src/job.go'])),
+      graph: graph(node('src/a.ts', [{ name: 'other' }])),
+      analysisGeneration: 'gen-1',
+      assessFile: () => 'language-not-extracted',
+      now: () => new Date('2026-01-01T00:00:00.000Z'),
+    });
+    expect(readMappingArtifact(JSON.stringify(index)).kind).toBe('link-index');
   });
 
   it('reports an absent symbol in an unassessable file as not-assessed with its boundary, never stale', () => {

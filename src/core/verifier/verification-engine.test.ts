@@ -175,24 +175,25 @@ export function createUserService(): UserService {
   }
 
   describe('requirement parsing (change: ground-generated-specs-in-the-graph)', () => {
-    it('describes a requirement by its SHALL text, skipping provenance, at both heading levels', () => {
+    it('describes a requirement by its SHALL text, skipping provenance but not a normative blockquote', () => {
       const engine = new SpecVerificationEngine(llmService, { rootPath: testDir, openspecPath: openspecDir, outputDir });
       const parse = (engine as unknown as {
         parseSpecRequirements(content: string): Array<{ name: string; description: string }>;
       }).parseSpecRequirements.bind(engine);
       const content = [
         '### Requirement: AnchoredFirst', '',
-        '- **Implementation**: `run::src/a.ts`,', '  `stop::src/a.ts`', '',
+        '- **Implementation**: `run::src/a.ts`,', '  `stop::src/a.ts`, `halt::src/a.ts`', '',
         'The system SHALL run the job.', '',
-        '### Requirement: Decided', '', '> Decision recorded: abc12345', '',
+        '### Requirement: Decided', '', '> Decision recorded: abc12345', '> Date: 2026-01-01', '',
         'The system SHALL record decisions.', '',
+        '### Requirement: Quoted', '', '> The system SHALL quote.', '',
         '### Sub-component: Part', '',
         '#### Requirement: Nested', '', 'The system SHALL nest.', '',
       ].join('\n');
       expect(parse(content)).toEqual([
         { name: 'AnchoredFirst', description: 'The system SHALL run the job.' },
         { name: 'Decided', description: 'The system SHALL record decisions.' },
-        { name: 'Nested', description: 'The system SHALL nest.' },
+        { name: 'Quoted', description: '> The system SHALL quote.' },
       ]);
     });
   });

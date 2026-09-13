@@ -1208,8 +1208,21 @@ export function parseHtmlAssetImports(content: string): ImportInfo[] {
  * "this file exports nothing by that name" from "exports are never extracted for this language".
  */
 export function extractsExports(filePath: string): boolean {
+  const type = importParserFileType(filePath);
+  return type === 'ts' || type === 'js' || type === 'python' || type === 'java';
+}
+
+/** The parser's extension dispatch — the one definition `parseContent` and `extractsExports` share. */
+function importParserFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'html' | 'unknown' {
   const ext = extname(filePath).toLowerCase();
-  return ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '.java'].includes(ext);
+
+  if (['.ts', '.tsx', '.mts', '.cts'].includes(ext)) return 'ts';
+  if (['.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return 'js';
+  if (['.py', '.pyw'].includes(ext)) return 'python';
+  if (ext === '.java') return 'java';
+  if (['.html', '.htm'].includes(ext)) return 'html';
+
+  return 'unknown';
 }
 
 export class ImportExportParser {
@@ -1226,15 +1239,7 @@ export class ImportExportParser {
    * Get file extension type
    */
   private getFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'html' | 'unknown' {
-    const ext = extname(filePath).toLowerCase();
-
-    if (['.ts', '.tsx', '.mts', '.cts'].includes(ext)) return 'ts';
-    if (['.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return 'js';
-    if (['.py', '.pyw'].includes(ext)) return 'python';
-    if (ext === '.java') return 'java';
-    if (['.html', '.htm'].includes(ext)) return 'html';
-
-    return 'unknown';
+    return importParserFileType(filePath);
   }
 
   /** Parse caller-supplied bytes without re-reading a path that may have changed. */

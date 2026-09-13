@@ -13,8 +13,8 @@ Three live defects remained in that shipped path:
 1. **The verifier describes a requirement by its anchor.** The generator writes the anchor between
    the heading and the `SHALL` text, and `parseSpecRequirements` takes the first non-empty line after
    the heading — so every anchored requirement's "description" was the anchor line.
-2. **Sub-component requirements are invisible.** Neither the verifier nor the link index recovered
-   `#### Requirement:` blocks, and the generator threw away their verified anchors.
+2. **Colliding anchor proposals.** An operation and a sub-component operation of the same name share
+   an anchor key, so the later proposal silently overwrote the earlier one's verified anchor.
 3. **`stale` over-claims.** The index calls any absent cited symbol "gone" — including symbols in a
    language whose exports are never extracted (Go, Rust, …), in a file the analysis skipped, or in a
    file that parsed with errors. Those are not evidence of removal.
@@ -23,9 +23,9 @@ Three live defects remained in that shipped path:
 
 | Fix | Where |
 |---|---|
-| Anchor written below the normative text; sub-component requirements anchored | `openspec-format-generator.ts` |
-| `#### Requirement:` recovered by both parsers; verifier skips provenance lines | `spec-mapper.ts`, `verification-engine.ts` |
-| `not-assessed` anchor/requirement state with a named boundary; own stat, refresh listing, not an orphan; index version 7 | `spec-link-index.ts`, `spec-link-service.ts` (`buildFileAssessor`), `mapping.ts` |
+| Anchor written below the normative text; colliding proposals write no anchor | `openspec-format-generator.ts`, `spec-link-service.ts` |
+| Verifier skips anchor, continuation, and provenance-blockquote lines (a normative blockquote stays) | `verification-engine.ts` |
+| `not-assessed` anchor/requirement state with a named boundary (`language-not-extracted`, `file-not-analyzed`), only for an analyzed or existing regular file (real path, case); own stat, refresh listing, not an orphan; index version 7; cache re-assesses before serving | `spec-link-index.ts`, `spec-link-service.ts` (`buildFileAssessor`), `mapping.ts` |
 | `extractsExports` derived from the parser's own extension dispatch | `import-parser.ts` |
 
 ## Deliberately NOT built (superseded or deferred)
@@ -37,6 +37,11 @@ Three live defects remained in that shipped path:
 | Mapping onto `adopt-spec-link-status-vocabulary` | Obsolete for now: that change is unbuilt and defines no matching states |
 | Multi-symbol anchor writing, slice recording, out-of-slice dropping | Deferred: the read side already accepts multiple anchors; the writer gates each proposal against the whole graph |
 | `spec-requirement-ungrounded` finding, continuity-based rename bridging, no-key report clause | Deferred to follow-ups |
+| Recovering `#### Requirement:` sub-component requirements | **Withdrawn after review**: the OpenSpec format and eight other in-repo parsers count only `###`; indexing `####` added 185 unanchored requirements and duplicate names on this repository's own corpus |
+| A repair-stream section listing `not-assessed` requirements | Out of scope: `get_mapping` and `mapping refresh` list them; a new page section would shift already-thin response budgets |
+| `stale` for a symbol that exists but is not exported (a private helper, a class method) | Pre-existing: the export inventory is the resolution basis; unchanged here |
+| A parse-health lower-bound boundary | **Withdrawn after review**: parse health records tree-sitter regions, while exports come from the regex import parser, which they do not affect |
+| Citation-regression reporting, byte-identical regenerated provenance, uncited-by-construction and missing-citation-field reporting, stale-index `not-assessed`, a report naming excluded languages/files, the "grounded ≠ correct" statement, external-validator and dogfood tasks, drift/pipeline/CLI docs, API/drift-summary/Pi parity | Deferred with the grounding checker they belonged to; the anchor layout was separately confirmed to pass `openspec validate --specs --strict` during review |
 
 ## Impact
 
