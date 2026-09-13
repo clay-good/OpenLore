@@ -624,4 +624,21 @@ describe('simulateMerge', () => {
     const deep = commitFiles(repo, base, { [`${Array.from({ length: 6 }, () => 'd'.repeat(200)).join('/')}/f.txt`]: 'x\n' }, 'long-deep');
     expect(await simulateMerge(repo, a, deep)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/longer than a checkout filesystem allows/) });
   });
+
+  it('is not-assessed for a symlink whose target is longer than a checkout filesystem allows', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { 'g.txt': lines() }, 'symlink-base');
+    const a = commitFiles(repo, base, { 'g.txt': lines({ 1: 'B' }) }, 'symlink-a');
+    const withLink = (target: string, message: string) => {
+      const env = { ...process.env, GIT_INDEX_FILE: join(root, `index-${message}`) };
+      execFileGitSync('git', ['read-tree', base], { cwd: repo, env });
+      const blob = execFileGitSync('git', ['hash-object', '-w', '--stdin'], { cwd: repo, input: target }).trim();
+      execFileGitSync('git', ['update-index', '--index-info'], { cwd: repo, env, input: `120000 ${blob}\tlnk\n` });
+      const tree = execFileGitSync('git', ['write-tree'], { cwd: repo, env }).trim();
+      rmSync(env.GIT_INDEX_FILE, { force: true });
+      return execFileGitSync('git', ['commit-tree', tree, '-p', base, '-m', message], { cwd: repo }).trim();
+    };
+    expect(await simulateMerge(repo, a, withLink('z'.repeat(1024), 'symlink-long'))).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/lnk is a symlink whose target is longer/) });
+    expect((await simulateMerge(repo, a, withLink('target.txt', 'symlink-short'))).verdict).toBe('clean-automerge');
+  });
 });

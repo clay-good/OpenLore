@@ -338,7 +338,10 @@ async function mergeAttributeBlocker(
 ): Promise<string | undefined> {
   // `--raw` entries: `:<old mode> <new mode> <old id> <new id> <status>` NUL `<path>` NUL.
   let gitlinkTypeChange: string | undefined;
+  const symlinksByTip = new Map<string, string[]>();
   const changed = async (tip: string) => {
+    const symlinks: string[] = [];
+    symlinksByTip.set(tip, symlinks);
     const fields = (await readGit(repoPath, gitPathArgs('diff', '--no-ext-diff', '--no-textconv', '--raw', '-z', '--no-renames', base, tip), deadline)).split('\0');
     const paths = new Set<string>();
     for (let i = 0; i + 1 < fields.length; i += 2) {
@@ -346,6 +349,7 @@ async function mergeAttributeBlocker(
       const path = fields[i + 1];
       if (!path) continue;
       paths.add(path);
+      if (newMode === '120000') symlinks.push(path);
       // A submodule replaced by (or removed for) ordinary files collides with the checked-out
       // submodule's files in a real merge; the simulation cannot see that working-tree state.
       if (!gitlinkTypeChange && (oldMode === GITLINK_MODE) !== (newMode === GITLINK_MODE)) gitlinkTypeChange = path;
@@ -363,6 +367,17 @@ async function mergeAttributeBlocker(
   // macOS), which fails a real merge's checkout; a branch made on Linux can carry one.
   const tooLong = shared.find(path => Buffer.byteLength(path) > 1000 || path.split('/').some(part => Buffer.byteLength(part) > 255));
   if (tooLong) return `${capPath(tooLong)} is longer than a checkout filesystem allows`;
+  // A symlink target is a blob of any length in git, but creating the link fails past the filesystem's
+  // path limit (1,024 bytes on macOS). `ls-tree -l` reports each changed link's target size.
+  for (const [tip, links] of symlinksByTip) {
+    if (links.length === 0) continue;
+    const listing = await readGit(repoPath, gitPathArgs('--literal-pathspecs', 'ls-tree', '-l', '-z', '--full-tree', tip, '--', ...links), deadline);
+    for (const entry of listing.split('\0').filter(Boolean)) {
+      const tab = entry.indexOf('\t');
+      const size = Number(entry.slice(0, tab).trim().split(/\s+/)[3]);
+      if (!(size < 1000)) return `${capPath(entry.slice(tab + 1))} is a symlink whose target is longer than a checkout filesystem allows`;
+    }
+  }
   const chars = shared.reduce((n, path) => n + path.length + 1, 0);
   if (shared.length > SHARED_PATHS_CAP || chars > SHARED_PATH_CHARS_CAP) {
     return `${shared.length} changed paths (${chars} characters) exceed the merge-attribute check limit of ${SHARED_PATHS_CAP} paths or ${SHARED_PATH_CHARS_CAP} characters`;
