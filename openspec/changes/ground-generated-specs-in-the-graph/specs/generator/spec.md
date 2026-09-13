@@ -2,89 +2,58 @@
 
 ## ADDED Requirements
 
-### Requirement: SliceBackedRequirementsCiteTheirSymbolsThroughTheExistingAnchor
+### Requirement: ImplementationAnchorsAreParserSafeAndCoverSubComponents
 
-A requirement generated from a model response **over a supplied symbol slice** SHALL cite the
-concrete symbols it describes, drawn from that slice and written in the repository's canonical
-symbol-id form.
+The generator SHALL write a requirement's implementation anchor (`- **Implementation**: \`name::path\``)
+**after** the requirement's normative text, never between the heading and that text, so a parser
+that recovers a requirement's description from the lines following its heading reads the normative
+sentence.
 
-The citation SHALL extend the **existing** implementation-provenance line to carry every cited
-symbol rather than only the single best-scoring one. A second provenance line type SHALL NOT be
-introduced: a requirement carries one anchor, so a reader and a parser are never asked to
-disambiguate two.
+A sub-component requirement (`#### Requirement:`) whose anchor proposal was verified against the
+graph SHALL carry its anchor exactly as a top-level requirement does.
 
-Requirements the generator emits from a template, or from a model response with no symbol slice —
-the overview's capability and data-flow requirements, the domain-overview and endpoint fallbacks,
-and entity-validation requirements — SHALL be written without a citation and reported as
-**uncited-by-construction**, distinguished in the report from a citation a model declined to
-supply.
+The deterministic spec link index SHALL recover requirements at both the `### Requirement:` and the
+nested `#### Requirement:` heading levels, so no requirement is absent from its denominator.
 
-The slice supplied for a requirement SHALL be recorded, and the writer SHALL drop any cited
-symbol not present in that slice **before** the provenance line is written, so an out-of-slice
-citation is never persisted and can never later be graded. Relevance beyond slice membership is
-NOT deterministically checkable and SHALL NOT be claimed.
+#### Scenario: The anchor follows the normative text
 
-A response missing the citation field SHALL be handled by the existing schema-guarded parse path;
-the requirement is written uncited and the omission reported. No citation SHALL be fabricated and
-no run SHALL be aborted.
-
-#### Scenario: A slice-backed requirement carries every cited symbol
-
-- **GIVEN** a generation run over a domain whose slice contains three functions the requirement
-  describes
-- **WHEN** the requirement is generated
-- **THEN** its provenance line names all three in canonical id form, through the existing
-  implementation-provenance line rather than a second line type
-
-#### Scenario: A template requirement is uncited by construction
-
-- **GIVEN** a domain-overview fallback requirement, emitted from a template with no model
-  response and no slice
+- **GIVEN** a generated requirement with a verified implementation anchor
 - **WHEN** the spec is written
-- **THEN** it carries no provenance line and is reported uncited-by-construction, distinct from a
-  declined citation
+- **THEN** the anchor line appears after the `The system SHALL …` line
 
-#### Scenario: An out-of-slice citation is dropped before it is written
+#### Scenario: A sub-component requirement is anchored and indexed
 
-- **GIVEN** a model response citing a high-fan-in symbol that was not in the requirement's slice
-- **WHEN** the spec is written
-- **THEN** that symbol does not appear in the provenance line, so it can never be graded as
-  grounding
+- **GIVEN** an orchestrator service whose sub-component operation has a verified anchor
+- **WHEN** the spec is written and the link index is built
+- **THEN** the `#### Requirement:` block carries its anchor and is counted and resolved by the index
 
-### Requirement: ProvenanceIsPlacedBelowNormativeTextAndIsParserSafe
+### Requirement: SpecLinkAbsenceIsClaimedOnlyWhereAssessable
 
-The provenance line SHALL be emitted **after** the requirement's normative text, matching the
-placement the decision syncer already uses, so a parser that recovers a requirement's description
-from the lines following its heading is unaffected.
+The spec link index SHALL report an anchor whose cited symbol is absent from the export inventory as
+`not-assessed`, naming its boundary, rather than `stale`, when the cited file is one whose exports
+the analysis cannot vouch for:
 
-The requirement parser SHALL skip `>`-prefixed provenance lines when recovering a description,
-and SHALL recover requirements at both the `### Requirement:` and the nested `#### Requirement:`
-(sub-component) heading levels, so no requirement is absent from a grounding denominator that is
-required to be the full requirement set.
+- `language-not-extracted` — exports are never extracted for the file's language;
+- `parse-health-lower-bound` — the file parsed with errors or was excluded;
+- `file-not-analyzed` — the file exists but the analysis did not cover it.
 
-Provenance lines are **regenerated**, not preserved: the writer replaces the generated section
-wholesale, so a re-generation producing the same cited symbols SHALL produce a byte-identical
-provenance line, and a re-generation yielding no citation for a requirement that previously
-carried one SHALL be reported as a citation regression rather than silently written. Content
-outside the generated section, including hand-written requirements, is governed by the existing
-merge-fidelity requirement in the `openspec` domain and is out of scope here.
+An anchor that names no file SHALL remain `stale` when absent, and a file that neither exists nor is
+analyzed SHALL NOT be a boundary, so absence is still claimed wherever it is evidence. A requirement
+SHALL be `not-assessed` when any anchor is `not-assessed` and none is `stale` or `ambiguous`; it
+SHALL be counted in its own statistic, SHALL be listed by the refresh command with each boundary, and
+SHALL NOT be reported as an orphan requirement. The persisted index SHALL carry a new schema version
+so a cache built under the previous meaning is rebuilt.
 
-#### Scenario: The description is the requirement text, not the provenance
+#### Scenario: An unextracted language is not accused
 
-- **GIVEN** a generated requirement carrying a provenance line
-- **WHEN** the requirement is parsed
-- **THEN** its recovered description is its `The system SHALL …` text, and the provenance line is
-  skipped
+- **GIVEN** a requirement anchored to `Run::src/job.go` and an analysis that extracts no Go exports
+- **WHEN** the link index is built
+- **THEN** the anchor and the requirement are `not-assessed` with boundary `language-not-extracted`,
+  and no requirement is counted `stale`
 
-#### Scenario: Sub-component requirements are counted
+#### Scenario: A genuinely removed symbol is still stale
 
-- **GIVEN** a spec containing requirements at both heading levels
-- **WHEN** the corpus is enumerated for grounding
-- **THEN** both levels appear in the denominator
-
-#### Scenario: A lost citation is reported, not silently dropped
-
-- **GIVEN** a requirement that carried a citation in a prior generation and receives none in the
-  next
-- **WHEN** the spec is regenerated
-- **THEN** the loss is reported as a citation regression
+- **GIVEN** a requirement anchored to `gone::src/a.ts`, where `src/a.ts` is analyzed, healthy, and
+  exports no `gone`
+- **WHEN** the link index is built
+- **THEN** the requirement is `stale`

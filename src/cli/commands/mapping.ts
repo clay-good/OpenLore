@@ -38,6 +38,7 @@ export function renderRefresh(
     `  ambiguous:     ${stats.ambiguous}`,
     `  unmapped:      ${stats.unmapped}`,
     `  stale:         ${stats.stale}`,
+    `  not assessed:  ${stats.notAssessed ?? 0}`,
     `  covered:       ${stats.coveredFunctions}/${stats.totalExportedFunctions} exported symbols`,
   ];
 
@@ -88,6 +89,19 @@ export function renderRefresh(
     }
     lines.push('    Replace each stale anchor with the current exact `symbol::path`, or remove it if the');
     lines.push('    requirement no longer has an implementation. No candidate is selected automatically.');
+  }
+
+  const notAssessed = index.links.filter(link => link.state === 'not-assessed');
+  if (notAssessed.length > 0) {
+    lines.push('', '  Anchors the analysis cannot assess (absence there is not evidence the symbol is gone):');
+    for (const link of notAssessed.slice(0, MAX_LISTED_AMBIGUITIES)) {
+      const raw = link.anchors.filter(anchor => anchor.state === 'not-assessed')
+        .map(anchor => `\`${safe(anchor.raw)}\` (${safe(anchor.boundary ?? 'unassessable')})`).join(', ');
+      lines.push(`    [${safe(link.domain)}] ${safe(link.requirement)} → ${raw}`);
+    }
+    if (notAssessed.length > MAX_LISTED_AMBIGUITIES) {
+      lines.push(`    … and ${notAssessed.length - MAX_LISTED_AMBIGUITIES} more not-assessed requirements`);
+    }
   }
 
   lines.push('', `  Written to: ${artifactPath}`);

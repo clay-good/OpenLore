@@ -117,13 +117,16 @@ describe('spec workflow composites', () => {
     const root = fixture(1);
     mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
     writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), `# Billing\n\n${'evidence\n'.repeat(2_000)}`);
-    const first = await prepareSpecRepair({ directory: root, domain: 'billing', baseRef: 'HEAD', maxItems: 10, maxResponseBytes: 8 * 1024 });
+    // The budget only has to force a continuation; it is not what this test measures. 8 KiB sat within a
+    // few bytes of the pager's page-one threshold, so any new page-global field (a mapping stat) flipped
+    // this into `response-too-large` without changing the binding under test.
+    const first = await prepareSpecRepair({ directory: root, domain: 'billing', baseRef: 'HEAD', maxItems: 10, maxResponseBytes: 9 * 1024 });
     const follow = first.receipt.followUps.find(item => item.tool === 'prepare_spec_repair')!;
     expect(follow.arguments).toMatchObject({
       cursor: first.receipt.continuationCursor,
       baseRef: 'HEAD',
       maxItems: 10,
-      maxResponseBytes: 8 * 1024,
+      maxResponseBytes: 9 * 1024,
     });
     const reshaped = await prepareSpecRepair({
       directory: root, domain: 'billing', baseRef: 'auto', maxItems: 10,

@@ -1202,6 +1202,16 @@ export function parseHtmlAssetImports(content: string): ImportInfo[] {
   return out;
 }
 
+/**
+ * Whether `parseContent` extracts EXPORTS for this file (change: ground-generated-specs-in-the-graph).
+ * Derived from the same extension dispatch, so a consumer that reads the export inventory can tell
+ * "this file exports nothing by that name" from "exports are never extracted for this language".
+ */
+export function extractsExports(filePath: string): boolean {
+  const ext = extname(filePath).toLowerCase();
+  return ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '.java'].includes(ext);
+}
+
 export class ImportExportParser {
   private cache: Map<string, FileAnalysis> = new Map();
 

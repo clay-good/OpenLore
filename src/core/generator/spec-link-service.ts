@@ -15,6 +15,7 @@
  * never merely because the cache was unusable.
  */
 
+import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
@@ -22,6 +23,7 @@ import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bo
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_MAPPING,
+  ARTIFACT_PARSE_HEALTH,
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_DIR,
   OPENSPEC_DIR,
@@ -30,12 +32,15 @@ import type { MappingCoverageReason } from '../../types/index.js';
 import { isConfinedPath, safeJoin } from '../../utils/path-confinement.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
+import { extractsExports } from '../analyzer/import-parser.js';
+import type { FileParseHealth } from '../analyzer/parse-health.js';
 import { mappingSourceFingerprint } from './mapping-generator.js';
 import type { PipelineResult } from './spec-pipeline.js';
 import {
   buildSpecLinkIndex,
   buildSymbolResolver,
   isLinkIndexCurrent,
+  normalizeAnchorPath,
   readMappingArtifact,
   requirementAnchorKey,
   specCorpusDigest,
@@ -147,6 +152,54 @@ export async function loadSpecCorpus(
   return specs.sort((a, b) => a.specFile.localeCompare(b.specFile));
 }
 
+/**
+ * The boundary that makes a cited file's export inventory unable to vouch for an absent symbol
+ * (change: ground-generated-specs-in-the-graph), in order of how certain the gap is:
+ *
+ *   - `language-not-extracted` — exports are never extracted for this language;
+ *   - `parse-health-lower-bound` — the file parsed with errors or was excluded, so its symbols are a
+ *     lower bound;
+ *   - `file-not-analyzed` — the file exists but the analysis did not cover it.
+ *
+ * A file that is analyzed, extracted and healthy returns `undefined`: there, absence is evidence.
+ */
+export async function buildFileAssessor(
+  rootPath: string,
+  graph: DependencyGraphResult,
+): Promise<(file: string) => string | undefined> {
+  const analyzed = new Set<string>();
+  for (const node of graph.nodes) {
+    const file = normalizeAnchorPath(node.file.path);
+    if (file) analyzed.add(file);
+  }
+  const lowerBound = new Set<string>();
+  try {
+    // Bounded read: repository-controlled artifact.
+    const raw = await readArtifactBounded(join(analysisDirOf(rootPath), ARTIFACT_PARSE_HEALTH), ANALYSIS_ARTIFACT_MAX_BYTES);
+    const report = raw ? JSON.parse(raw.text) as { files?: unknown } : null;
+    if (report && Array.isArray(report.files)) {
+      for (const health of report.files as Array<Partial<FileParseHealth>>) {
+        const file = typeof health?.filePath === 'string' ? normalizeAnchorPath(health.filePath) : null;
+        if (!file) continue;
+        if (health.parseFailed || health.exclusion || (health.errorCount ?? 0) > 0 || (health.missingCount ?? 0) > 0) {
+          lowerBound.add(file);
+        }
+      }
+    }
+  } catch {
+    // No readable parse-health report: no file is known to be a lower bound.
+  }
+  return (file) => {
+    if (!extractsExports(file)) return 'language-not-extracted';
+    if (lowerBound.has(file)) return 'parse-health-lower-bound';
+    if (!analyzed.has(file)) {
+      const abs = join(rootPath, file);
+      if (isConfinedPath(rootPath, abs) && existsSync(abs)) return 'file-not-analyzed';
+    }
+    return undefined;
+  };
+}
+
 async function loadGraph(rootPath: string): Promise<DependencyGraphResult | null> {
   try {
     // Bounded read: repository-controlled artifact (a committed FIFO here would hang this call).
@@ -224,6 +277,7 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
   const index = buildSpecLinkIndex({
     specs,
     graph,
+    assessFile: await buildFileAssessor(rootPath, graph),
     analysisGeneration,
     sourceAnalysisFingerprint: analysisGeneration,
     ...(options.now ? { now: options.now } : {}),
@@ -377,14 +431,15 @@ export function coveredSymbolKeys(index: SpecLinkIndex): Set<string> {
  *
  * `unmapped` and `stale` requirements are orphans: the first cites no exact
  * symbol, the second cites one that is gone. An `ambiguous` requirement is NOT an
- * orphan — it names a real symbol that the repository defines more than once.
+ * orphan — it names a real symbol that the repository defines more than once — and
+ * neither is a `not-assessed` one, whose citation the analysis simply cannot check.
  */
 export function orphanRequirementsOf(
   index: SpecLinkIndex,
   domains?: Set<string>,
 ): Array<{ requirement: string; domain: string; specFile: string; state: SpecLinkIndex['links'][number]['state'] }> {
   return index.links
-    .filter(link => link.functions.length === 0 && link.state !== 'ambiguous')
+    .filter(link => link.functions.length === 0 && link.state !== 'ambiguous' && link.state !== 'not-assessed')
     .filter(link => !domains || domains.has(link.domain))
     .map(link => ({ requirement: link.requirement, domain: link.domain, specFile: link.specFile, state: link.state }));
 }

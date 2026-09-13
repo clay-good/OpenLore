@@ -1014,21 +1014,30 @@ Respond in JSON:
   /**
    * Parse requirements from a spec's markdown content.
    * Returns an array of { name, description } extracted from
-   * "### Requirement: Name\n\nThe system SHALL ..." blocks.
+   * "### Requirement: Name\n\nThe system SHALL ..." blocks, including sub-component
+   * "#### Requirement:" blocks.
+   *
+   * The description is the first line of NORMATIVE text. Provenance lines — an implementation
+   * anchor and its continuation lines, or a blockquote such as `> Decision recorded:` — are skipped,
+   * so a requirement whose anchor precedes its text is not described by the anchor
+   * (change: ground-generated-specs-in-the-graph).
    */
   private parseSpecRequirements(specContent: string): Array<{ name: string; description: string }> {
     const requirements: Array<{ name: string; description: string }> = [];
     const lines = specContent.split('\n');
 
     for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/^###\s+Requirement:\s+(.+)/i);
+      const m = lines[i].match(/^#{3,4}\s+Requirement:\s+(.+)/i);
       if (!m) continue;
       const name = m[1].trim();
-      // Look ahead for the description line (first non-empty line after the heading)
       let description = '';
-      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+      for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
         const l = lines[j].trim();
-        if (l.length > 0) { description = l; break; }
+        if (l.length === 0) continue;
+        if (/^#{1,6}\s/.test(l)) break;
+        if (l.startsWith('>') || /\*\*Implementation\*\*:/.test(l) || /^[-*]?\s*`[^`]+`[\s,]*$/.test(l)) continue;
+        description = l;
+        break;
       }
       if (name) requirements.push({ name, description });
     }

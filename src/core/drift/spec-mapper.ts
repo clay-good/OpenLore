@@ -196,9 +196,9 @@ function legacyImplementationAnchors(line: string): string[] | null {
 /**
  * Parse every requirement block and its requirement-scoped implementation anchors.
  *
- * A block runs from its `### Requirement:` heading to the next `#`-level heading of
- * the same or higher rank (`### ` / `## ` / `# `); `#### Scenario:` blocks stay inside
- * their requirement.
+ * A block runs from its `### Requirement:` — or sub-component `#### Requirement:` — heading to
+ * the next requirement heading or `#`-level heading of rank 3 or higher (`### ` / `## ` / `# `);
+ * `#### Scenario:` blocks stay inside their requirement (change: ground-generated-specs-in-the-graph).
  */
 export function parseRequirementBlocks(content: string): SpecRequirementBlock[] {
   const lines = content.split('\n');
@@ -207,7 +207,7 @@ export function parseRequirementBlocks(content: string): SpecRequirementBlock[] 
   let inImplBlock = false;
 
   for (const [index, line] of lines.entries()) {
-    const requirementMatch = line.match(/^###\s+Requirement:\s*(.+)/);
+    const requirementMatch = line.match(/^#{3,4}\s+Requirement:\s*(.+)/);
     if (requirementMatch) {
       current = { name: requirementMatch[1].trim(), line: index + 1, anchors: [] };
       blocks.push(current);

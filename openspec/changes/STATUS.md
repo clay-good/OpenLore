@@ -38,7 +38,11 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 
 ## In flight — 1
 
-None. (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
+`ground-generated-specs-in-the-graph` (narrowed) — sub-component requirements indexed and anchored,
+anchors written below normative text, the verifier's description no longer the anchor, and
+`not-assessed` instead of a false `stale` for citations the analysis cannot vouch for. On a branch with
+its `change:` markers in `src/`. (`shrink-receiver-resolution-boundary` merged in #465 and awaits
+archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.

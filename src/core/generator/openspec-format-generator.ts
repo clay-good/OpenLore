@@ -457,10 +457,10 @@ export class OpenSpecFormatGenerator {
         const reqName = this.formatRequirementName(operation.name);
         lines.push(`### Requirement: ${reqName}`);
         lines.push('');
-        this.emitImplementationHint(lines, reqName, domain.name, anchors);
         const opDesc = (operation.description ?? '').replace(/^\s*(shall|must|should|may)\s+/i, '');
         lines.push(`The system SHALL ${opDesc.toLowerCase()}`);
         lines.push('');
+        this.emitImplementationHint(lines, reqName, domain.name, anchors);
 
         // Operation scenarios
         for (const scenario of (operation.scenarios ?? [])) {
@@ -485,11 +485,15 @@ export class OpenSpecFormatGenerator {
           lines.push('');
 
           for (const op of (sub.operations ?? [])) {
-            lines.push(`#### Requirement: ${this.formatRequirementName(op.name)}`);
+            const subReqName = this.formatRequirementName(op.name);
+            lines.push(`#### Requirement: ${subReqName}`);
             lines.push('');
             const opDesc = (op.description ?? '').replace(/^\s*(shall|must|should|may)\s+/i, '');
             lines.push(`The system SHALL ${opDesc.toLowerCase()}`);
             lines.push('');
+            // Sub-component requirements are anchored too: their proposals were verified, and a
+            // requirement the link index counts must be able to carry its anchor.
+            this.emitImplementationHint(lines, subReqName, domain.name, anchors);
             for (const scenario of (op.scenarios ?? [])) {
               this.addScenario(lines, scenario);
             }
@@ -510,10 +514,10 @@ export class OpenSpecFormatGenerator {
           );
           lines.push(`### Requirement: ${reqName}`);
           lines.push('');
-          this.emitImplementationHint(lines, reqName, domain.name, anchors);
           const epPurpose = (endpoint.purpose ?? 'handle this endpoint').replace(/^\s*(shall|must|should|may)\s+/i, '');
           lines.push(`The system SHALL ${epPurpose.toLowerCase()}`);
           lines.push('');
+          this.emitImplementationHint(lines, reqName, domain.name, anchors);
           lines.push(`#### Scenario: ${reqName}Success`);
           lines.push(`- **GIVEN** the system is operational`);
           lines.push(`- **WHEN** ${endpoint.method} ${endpoint.path} is called`);
@@ -524,9 +528,9 @@ export class OpenSpecFormatGenerator {
         const reqName = this.formatRequirementName(`${domain.name}Overview`);
         lines.push(`### Requirement: ${reqName}`);
         lines.push('');
-        this.emitImplementationHint(lines, reqName, domain.name, anchors);
         lines.push(`The ${domain.name} domain SHALL provide its documented functionality.`);
         lines.push('');
+        this.emitImplementationHint(lines, reqName, domain.name, anchors);
         lines.push(`#### Scenario: ${reqName}Works`);
         lines.push('- **GIVEN** the system is operational');
         lines.push('- **WHEN** the domain functionality is invoked');
@@ -835,6 +839,10 @@ export class OpenSpecFormatGenerator {
   /**
    * Emit the requirement-scoped implementation anchor the deterministic link
    * index reads back: `- **Implementation**: \`name::path\`.
+   *
+   * Written BELOW the requirement's normative text, so a parser that recovers the description from
+   * the lines after the heading reads the `SHALL` sentence, not the anchor
+   * (change: ground-generated-specs-in-the-graph).
    *
    * Only anchors already VERIFIED against the graph are written — a proposal that
    * resolved to zero or several symbols is absent from the map, and the

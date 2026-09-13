@@ -121,3 +121,26 @@ are consumed automatically when their confidence is `reviewed` or `llm`. Lower-c
 semantic or heuristic hints remain file-footprint evidence only. Run
 `openlore mapping refresh` to see the bounded list of requirements that still need an
 exact `symbol::path` anchor; refresh never guesses a replacement for a stale anchor.
+
+
+## Sub-component requirements and unassessable citations
+
+Requirements are indexed at both heading levels: `### Requirement:` and the sub-component
+`#### Requirement:` form the generator writes under `## Sub-components`. The generator writes each
+anchor **below** the requirement's `The system SHALL …` line, so the verifier's description is the
+normative text rather than the anchor.
+
+A cited symbol that is absent from the export inventory is `stale` only where that absence is
+evidence. When the cited file is one the analysis cannot vouch for, the anchor and its requirement
+are `not-assessed`, with the boundary named:
+
+| Boundary | Meaning |
+|---|---|
+| `language-not-extracted` | exports are never extracted for the file's language (only TS/JS, Python and Java are) |
+| `parse-health-lower-bound` | the file parsed with errors or was excluded, so its symbols are a lower bound |
+| `file-not-analyzed` | the file exists but the analysis did not cover it |
+
+An anchor with no file stays `stale` when absent, and so does one naming a file that exists nowhere.
+`not-assessed` requirements are counted in `stats.notAssessed`, listed by `openlore mapping refresh`,
+and never reported as orphans. The artifact schema is version 7 (change:
+`ground-generated-specs-in-the-graph`).

@@ -14,6 +14,7 @@
  *   - anchor resolving to several exact identities         → `ambiguous`
  *   - anchor naming an exported TYPE (not behaviour)       → `type-only`
  *   - anchor whose identity is absent from the graph       → `stale`
+ *   - absent identity in a file the analysis cannot vouch for → `not-assessed`
  *   - requirement with no exact symbol anchor at all       → `unmapped`
  *
  * A file-only anchor contributes to the domain FOOTPRINT and never to function
@@ -51,13 +52,16 @@ import { parseRequirementBlocks } from '../drift/spec-mapper.js';
  *       graph holds it, instead of always being read as a file path
  *   6 — an anchor naming an exported type resolves to `type-only` instead of
  *       `stale`: the type exists, it is merely outside what coverage measures
+ *   7 — sub-component `#### Requirement:` blocks are indexed, and an absent identity
+ *       in a file whose exports the analysis cannot vouch for is `not-assessed`
+ *       instead of `stale` (change: ground-generated-specs-in-the-graph)
  */
-export const SPEC_LINK_INDEX_VERSION = 6;
+export const SPEC_LINK_INDEX_VERSION = 7;
 
 /** Default bound on disclosed candidates for one ambiguous or stale anchor. */
 export const SPEC_LINK_MAX_CANDIDATES = 5;
 
-export type SpecLinkState = 'linked' | 'ambiguous' | 'unmapped' | 'stale';
+export type SpecLinkState = 'linked' | 'ambiguous' | 'unmapped' | 'stale' | 'not-assessed';
 
 /** Why one anchor did not resolve to a single identity. */
 export type SpecAnchorState =
@@ -71,7 +75,14 @@ export type SpecAnchorState =
    * coverage measures. Distinct from `stale`, which asserts the cited symbol is
    * gone — saying that about a type that is right there is simply false.
    */
-  | 'type-only';
+  | 'type-only'
+  /**
+   * The cited identity is absent from the export inventory, but the cited FILE is one whose exports
+   * the analysis cannot vouch for — a language with no export extraction, a file the analysis did
+   * not cover, or a parse-health lower bound. Absence there is not evidence the symbol is gone, so
+   * the anchor is not called `stale` (change: ground-generated-specs-in-the-graph).
+   */
+  | 'not-assessed';
 
 export interface SpecSymbolRef {
   name: string;
@@ -93,6 +104,8 @@ export interface SpecLinkAnchor {
   candidates: SpecSymbolRef[];
   /** Total exact matches before the candidate bound was applied. */
   candidateTotal: number;
+  /** Why a `not-assessed` anchor could not be assessed (`language-not-extracted`, …). */
+  boundary?: string;
 }
 
 export interface SpecRequirementLink {
@@ -126,6 +139,8 @@ export interface SpecLinkIndexStats {
   ambiguous: number;
   unmapped: number;
   stale: number;
+  /** Requirements whose anchors could not be assessed (change: ground-generated-specs-in-the-graph). */
+  notAssessed: number;
   /** Exported, non-type symbols in the analyzed graph. */
   totalExportedFunctions: number;
   /** Distinct symbols covered by at least one uniquely-resolved anchor. */
@@ -160,6 +175,12 @@ export interface SpecLinkIndexInput {
   /** Legacy export-inventory fingerprint, recorded for compatibility reporting. */
   sourceAnalysisFingerprint?: string;
   maxCandidates?: number;
+  /**
+   * The boundary that makes a cited file unassessable, or `undefined` when its exports are fully
+   * inventoried. Supplied by the I/O shell, which can read the filesystem and parse health; absent,
+   * every file is treated as assessable (change: ground-generated-specs-in-the-graph).
+   */
+  assessFile?: (file: string) => string | undefined;
   /** Injected only by tests that need a stable `generatedAt`. */
   now?: () => Date;
 }
@@ -357,6 +378,7 @@ function resolveAnchor(
   parsed: ParsedSpecAnchor,
   exportIndex: { values: Map<string, SpecSymbolRef[]>; types: Map<string, SpecSymbolRef[]> },
   maxCandidates: number,
+  assessFile?: (file: string) => string | undefined,
 ): SpecLinkAnchor {
   if (!parsed.symbol) {
     // A both-readings token (`Class.method`) becomes a symbol anchor ONLY when the
@@ -364,7 +386,7 @@ function resolveAnchor(
     // rather than being asserted as a stale symbol the spec may never have cited.
     const member = parsed.memberCandidate;
     if (member && (exportIndex.values.get(member)?.length ?? 0) > 0) {
-      return resolveAnchor(raw, { file: null, symbol: member }, exportIndex, maxCandidates);
+      return resolveAnchor(raw, { file: null, symbol: member }, exportIndex, maxCandidates, assessFile);
     }
     return { raw, file: parsed.file, symbol: null, state: 'footprint', candidates: [], candidateTotal: 0 };
   }
@@ -395,6 +417,16 @@ function resolveAnchor(
     };
   }
 
+  // Absent from an inventory that cannot vouch for this file: not evidence the symbol is gone.
+  // A path-free anchor names no file, so nothing narrows it and `stale` stands.
+  const boundary = parsed.file ? assessFile?.(parsed.file) : undefined;
+  if (boundary) {
+    return {
+      raw, file: parsed.file, symbol: parsed.symbol, state: 'not-assessed', boundary,
+      candidates: byName.slice(0, maxCandidates), candidateTotal: byName.length,
+    };
+  }
+
   // The cited identity is absent. Same-name symbols elsewhere are disclosed as
   // candidates so a human can see where it moved — they are NOT auto-selected.
   return {
@@ -413,6 +445,8 @@ function requirementState(anchors: SpecLinkAnchor[]): SpecLinkState {
   if (symbolAnchors.length === 0) return 'unmapped';
   if (symbolAnchors.some(anchor => anchor.state === 'stale')) return 'stale';
   if (symbolAnchors.some(anchor => anchor.state === 'ambiguous')) return 'ambiguous';
+  // One unassessable citation leaves the requirement's link unestablished, but accuses nothing.
+  if (symbolAnchors.some(anchor => anchor.state === 'not-assessed')) return 'not-assessed';
   // A requirement anchored ONLY to types establishes no function coverage, but it
   // cites nothing missing either: `unmapped` says exactly that, where `stale`
   // would accuse the spec of naming something gone.
@@ -437,7 +471,7 @@ export function buildSpecLinkIndex(input: SpecLinkIndexInput): SpecLinkIndex {
       for (const raw of block.anchors) {
         const parsed = parseSpecAnchor(raw);
         if (!parsed) continue;
-        anchors.push(resolveAnchor(raw, parsed, exportIndex, maxCandidates));
+        anchors.push(resolveAnchor(raw, parsed, exportIndex, maxCandidates, input.assessFile));
       }
 
       const functions = anchors
@@ -490,6 +524,7 @@ export function buildSpecLinkIndex(input: SpecLinkIndexInput): SpecLinkIndex {
       ambiguous: countState('ambiguous'),
       unmapped: countState('unmapped'),
       stale: countState('stale'),
+      notAssessed: countState('not-assessed'),
       totalExportedFunctions: allExports.length,
       coveredFunctions: coveredKeys.size,
       orphanCount: orphanFunctions.length,

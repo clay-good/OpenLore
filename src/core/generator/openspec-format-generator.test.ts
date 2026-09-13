@@ -1020,6 +1020,38 @@ describe('OpenSpecFormatGenerator — requirement implementation anchors', () =>
     expect(userSpec.content).toContain('- **Implementation**: `doSomething::src/services/user.ts`');
   });
 
+  it('writes the anchor below the normative SHALL text (change: ground-generated-specs-in-the-graph)', () => {
+    const gen = new OpenSpecFormatGenerator();
+    const specs = gen.generateSpecs(
+      createMockPipelineResult(),
+      anchorMap('user', 'Getuser', 'doSomething', 'src/services/user.ts', 42),
+    );
+    const content = specs.find(s => s.domain === 'user')!.content;
+    const anchor = content.indexOf('- **Implementation**: `doSomething::src/services/user.ts`');
+    const heading = content.lastIndexOf('### Requirement:', anchor);
+    const shall = content.indexOf('The system SHALL', heading);
+    expect(anchor).toBeGreaterThan(0);
+    expect(heading).toBeGreaterThanOrEqual(0);
+    // Heading, then the normative sentence, then the anchor — never the anchor first.
+    expect(shall).toBeGreaterThan(heading);
+    expect(anchor).toBeGreaterThan(shall);
+  });
+
+  it('anchors a sub-component requirement whose proposal was verified', () => {
+    const result = createMockPipelineResult();
+    const service = result.services.find(sv => sv.domain === 'user') ?? result.services[0];
+    (service as { subSpecs?: unknown }).subSpecs = [{
+      name: 'InputValidation', callee: 'validateInput', purpose: 'Validates input.',
+      operations: [{ name: 'ValidateInput', description: 'validate the input', scenarios: [] }],
+    }];
+    const gen = new OpenSpecFormatGenerator();
+    const specs = gen.generateSpecs(result, anchorMap(service.domain || 'user', 'ValidateInput', 'validateInput', 'src/services/user.ts'));
+    const content = specs.find(s => s.domain === (service.domain || 'user'))!.content;
+    const heading = content.indexOf('#### Requirement: ');
+    expect(heading).toBeGreaterThanOrEqual(0);
+    expect(content.indexOf('- **Implementation**: `validateInput::src/services/user.ts`', heading)).toBeGreaterThan(heading);
+  });
+
   it('emits no anchor when no verified anchor exists for the requirement', () => {
     const gen = new OpenSpecFormatGenerator();
     const specs = gen.generateSpecs(
