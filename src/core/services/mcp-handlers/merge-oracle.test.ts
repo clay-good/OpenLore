@@ -359,6 +359,11 @@ describe('simulateMerge', () => {
     }
     for (const [key, value, pattern] of [
       ['pull.twohead', 'resolve', /pull\.twohead selects the "resolve"/],
+      ['pull.twohead', 'ORT', /pull\.twohead selects the "ORT"/],
+      ['pull.twohead', 'ort ', /pull\.twohead selects the "ort"/],
+      ['merge.stat', 'bogus', /merge\.stat has a value git merge cannot parse/],
+      ['commit.cleanup', 'bogus', /commit\.cleanup has a value git merge cannot parse/],
+      ['diff.algorithm', 'bogus', /diff\.algorithm "bogus"/],
       ['merge.conflictStyle', 'weird', /merge\.conflictStyle "weird"/],
     ] as const) {
       git(repo, 'config', key, value);
@@ -386,12 +391,33 @@ describe('simulateMerge', () => {
     const base = commitFiles(alg, empty, { f: 'x\nb\n{\nb\n{\na\n' }, 'alg-base');
     const a = commitFiles(alg, base, { f: 'x\n{\nc\nb\n{\n{\n' }, 'alg-a');
     const b = commitFiles(alg, base, { f: 'x\nb\n{\nb\n{\n' }, 'alg-b');
+    // Ground truth is a real `git merge` in a worktree: merge-tree itself ignores diff.algorithm config.
+    const realMerge = (x: string, y: string, name: string): 'clean-automerge' | 'textual-conflict' => {
+      const wt = join(root, `wt-${name}`);
+      git(alg, 'worktree', 'add', '-q', '--detach', wt, x);
+      try {
+        git(wt, 'merge', '--no-commit', '--no-ff', y);
+        return 'clean-automerge';
+      } catch {
+        return 'textual-conflict';
+      } finally {
+        git(alg, 'worktree', 'remove', '--force', wt);
+      }
+    };
+    const myersBase = commitFiles(alg, empty, { m: '{\na\na\n{\n{\nb\nc\nb\n' }, 'myers-base');
+    const ma = commitFiles(alg, myersBase, { m: '{\na\na\n{\n{\na\nb\nc\nb\n' }, 'myers-a');
+    const mb = commitFiles(alg, myersBase, { m: '{\na\na\nz\n{\nb\nb\nb\n' }, 'myers-b');
+    let differs = false;
     for (const algorithm of ['patience', 'myers', 'histogram']) {
       git(alg, 'config', 'diff.algorithm', algorithm);
-      let truth: 'clean-automerge' | 'textual-conflict' = 'clean-automerge';
-      try { git(alg, 'merge-tree', '--write-tree', a, b); } catch { truth = 'textual-conflict'; }
-      expect((await simulateMerge(alg, a, b)).verdict, algorithm).toBe(truth);
+      for (const [x, y, label] of [[a, b, 'alg'], [ma, mb, 'myers']] as const) {
+        const truth = realMerge(x, y, `${algorithm}-${label}`);
+        if (truth !== realMerge(x, y, `${algorithm}-${label}-again`)) throw new Error('unstable ground truth');
+        expect((await simulateMerge(alg, x, y)).verdict, `${algorithm} ${label}`).toBe(truth);
+        if (algorithm === 'myers' && label === 'myers') differs = truth === 'textual-conflict';
+      }
     }
+    expect(differs).toBe(true); // non-vacuity: myers really changes this merge
     git(alg, 'config', '--unset', 'diff.algorithm');
     // diff3 skips conflict refinement, so it can turn a clean merge into a conflict.
     const styleBase = commitFiles(alg, empty, { s: 'a\nc\nc\nb\nc\na\n' }, 'style-base');
@@ -474,5 +500,21 @@ describe('simulateMerge', () => {
     } finally {
       git(repo, 'config', '--unset', 'merge.renames');
     }
+  });
+
+  it('is not-assessed for a changed path with a .git component', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { 'g.txt': lines() }, 'dotgit-base');
+    // update-index refuses such a path (core.protectHFS/NTFS), so build the tree with mktree.
+    const edited = commitFiles(repo, base, { 'g.txt': lines({ 1: 'B' }) }, 'dotgit-edit');
+    const mktree = (entries: string) => execFileGitSync('git', ['mktree'], { cwd: repo, input: entries }).trim();
+    const blob = execFileGitSync('git', ['hash-object', '-w', '--stdin'], { cwd: repo, input: 'x\n' }).trim();
+    const dotGit = mktree(`100644 blob ${blob}\tx\n`);
+    const sub = mktree(`040000 tree ${dotGit}\t.GIT\n`);
+    const rootEntries = execFileGitSync('git', ['ls-tree', `${edited}^{tree}`], { cwd: repo });
+    const tree = mktree(`${rootEntries}040000 tree ${sub}\tsub\n`);
+    const a = execFileGitSync('git', ['commit-tree', tree, '-p', base, '-m', 'dotgit-a'], { cwd: repo }).trim();
+    const b = commitFiles(repo, base, { 'g.txt': lines({ 7: 'H' }) }, 'dotgit-b');
+    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.GIT\/x has a \.git path component/) });
   });
 });

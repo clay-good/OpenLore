@@ -62,7 +62,24 @@ const SPAWN_TIMEOUT_MS = 30_000;
 const SHARED_PATHS_CAP = 500;
 const SHARED_PATH_CHARS_CAP = 24_000;
 /** Repository settings that change merge results and are plain values, safe to forward with `-c`. */
-const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.renamelimit', 'diff.renamelimit', 'merge.directoryrenames', 'diff.algorithm', 'diff.indentheuristic', 'merge.conflictstyle']);
+const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.renamelimit', 'diff.renamelimit', 'merge.directoryrenames', 'diff.indentheuristic', 'merge.conflictstyle']);
+/**
+ * Keys `git merge` parses strictly (a bad value makes it die) that do not otherwise change the
+ * result: each value must parse, or the pair is not-assessed. Maps the key to its value check.
+ */
+const STRICT_VALUE_KEYS: Record<string, (value: string, hasValue: boolean) => boolean> = {
+  'merge.stat': isGitBoolText,
+  'merge.diffstat': isGitBoolText,
+  'merge.log': isGitBoolText,
+  'merge.autostash': isGitBoolText,
+  'merge.branchdesc': isGitBoolText,
+  'merge.defaulttoupstream': isGitBoolText,
+  'merge.verbosity': (value, hasValue) => hasValue && /^-?\d+$/.test(value),
+  'merge.ff': (value, hasValue) => value === 'only' || isGitBoolText(value, hasValue),
+  'commit.gpgsign': isGitBoolText,
+  'commit.cleanup': (value, hasValue) => hasValue && /^(strip|whitespace|verbatim|scissors|default)$/.test(value),
+  'core.bigfilethreshold': (value, hasValue) => hasValue && /^\d+[kmg]?$/i.test(value),
+};
 /** `merge` attribute values that mean the default text merge the simulation runs. */
 const DEFAULT_MERGE_ATTRIBUTE = new Set(['unspecified', 'set', 'text']);
 const GITLINK_MODE = '160000';
@@ -134,6 +151,10 @@ function isExitOne(error: unknown): boolean {
  * Git's boolean parsing. A key with no `=` at all (`hasValue` false) is true; an explicitly empty
  * value is false; otherwise `true`/`yes`/`on` or any non-zero integer.
  */
+function isGitBoolText(value: string, hasValue: boolean): boolean {
+  return !hasValue || value === '' || /^(true|false|yes|no|on|off)$/i.test(value) || /^-?\d+$/.test(value);
+}
+
 function isGitTrue(value: string, hasValue = true): boolean {
   if (!hasValue) return true;
   return /^(true|yes|on)$/i.test(value) || (/^-?\d+$/.test(value) && Number(value) !== 0);
@@ -160,11 +181,16 @@ export function gitVersionAtLeast(versionOutput: string, major: number, minor: n
  * harmless: diff3 skips conflict refinement, so it is forwarded instead.)
  */
 const HARMLESS_MERGE_KEYS = new Set([
-  'merge.verbosity', 'merge.ff', 'merge.log', 'merge.stat', 'merge.tool',
+  'merge.verbosity', 'merge.ff', 'merge.log', 'merge.stat', 'merge.diffstat', 'merge.tool',
   'merge.guitool', 'merge.autostash', 'merge.suppressdest', 'merge.branchdesc', 'merge.defaulttoupstream',
 ]);
 
-interface MergeConfig { args: string[] }
+interface MergeConfig {
+  /** Global `-c` options, placed before the subcommand. */
+  args: string[];
+  /** Merge strategy options (`-X`), placed after `merge-tree`. */
+  strategyArgs: string[];
+}
 
 /**
  * Repository merge settings the scratch repository would not see: `-c` arguments to forward, or a
@@ -176,25 +202,38 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
   let listing: string;
   try {
     // -z: `key LF value NUL`, so a value containing a newline cannot forge another entry.
-    listing = await readGit(repoPath, ['config', '-z', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|pull\\.twohead|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
+    listing = await readGit(repoPath, ['config', '-z', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|pull\\.twohead|commit\\.(cleanup|gpgsign)|core\\.bigfilethreshold|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
   } catch (error) {
-    if (isExitOne(error)) return { args: [] };
+    if (isExitOne(error)) return { args: [], strategyArgs: [] };
     throw error;
   }
   const args: string[] = [];
   let partialClone = false;
+  let algorithm: string | undefined;
   for (const entry of listing.split('\0').filter(Boolean)) {
     const newline = entry.indexOf('\n');
     const hasValue = newline >= 0;
     const key = (hasValue ? entry.slice(0, newline) : entry).toLowerCase();
-    const value = hasValue ? entry.slice(newline + 1).trim() : '';
+    const rawValue = hasValue ? entry.slice(newline + 1) : '';
+    const value = rawValue.trim();
     if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && isGitTrue(value, hasValue))) {
       partialClone = true;
       continue;
     }
     if (key === 'pull.twohead') {
-      if (!hasValue || !/^(ort|recursive)$/i.test(value)) return { detail: `pull.twohead selects the "${value.slice(0, 40)}" merge strategy, which is not simulated` };
+      // Strategy names are case-sensitive and space-split by git: compare the raw value exactly.
+      if (!hasValue || !/^(ort|recursive)$/.test(rawValue)) return { detail: `pull.twohead selects the "${value.slice(0, 40)}" merge strategy, which is not simulated` };
       continue;
+    }
+    if (key === 'diff.algorithm') {
+      // merge-tree ignores `-c diff.algorithm` (it is read only for porcelain merges); `-X` applies it.
+      if (!hasValue || !/^(myers|minimal|patience|histogram)$/.test(rawValue)) return { detail: `diff.algorithm "${value.slice(0, 40)}" is not simulated` };
+      algorithm = rawValue;
+      continue;
+    }
+    if (STRICT_VALUE_KEYS[key]) {
+      if (!STRICT_VALUE_KEYS[key](value, hasValue)) return { detail: `${key} has a value git merge cannot parse` };
+      if (!key.startsWith('merge.')) continue;
     }
     if (key.startsWith('branch.') && key.endsWith('.mergeoptions')) {
       return { detail: `${key.slice(0, 80)} is set, and those merge options are not simulated` };
@@ -232,7 +271,8 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       return { detail: 'this is a partial clone, and git older than 2.45 cannot turn off lazy fetch' };
     }
   }
-  return { args };
+  // Last value wins, as in git; histogram is merge-ort's own default.
+  return { args, strategyArgs: algorithm ? ['-X', `diff-algorithm=${algorithm}`] : [] };
 }
 
 /**
@@ -249,6 +289,9 @@ async function mergeAttributeBlocker(
   );
   const shared = [...new Set([...(await changed(tipA)), ...(await changed(tipB))])].sort();
   if (shared.length === 0) return undefined;
+  // A real merge refuses to check out a path with a `.git` component (verify_path); merge-tree does not.
+  const gitComponent = shared.find(path => path.split('/').some(part => part.toLowerCase() === '.git'));
+  if (gitComponent) return `${capPath(gitComponent)} has a .git path component, which a real merge refuses to check out`;
   const chars = shared.reduce((n, path) => n + path.length + 1, 0);
   if (shared.length > SHARED_PATHS_CAP || chars > SHARED_PATH_CHARS_CAP) {
     return `${shared.length} changed paths (${chars} characters) exceed the merge-attribute check limit of ${SHARED_PATHS_CAP} paths or ${SHARED_PATH_CHARS_CAP} characters`;
@@ -371,7 +414,7 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
     try {
       ({ stdout } = await execFileGit(
         'git',
-        gitPathArgs(...config.args, `--git-dir=${scratch}`, 'merge-tree', '--write-tree', '-z', '--no-messages', `--merge-base=${bases[0]}`, tipA, tipB),
+        gitPathArgs(...config.args, `--git-dir=${scratch}`, 'merge-tree', '--write-tree', '-z', '--no-messages', ...config.strategyArgs, `--merge-base=${bases[0]}`, tipA, tipB),
         { env, maxBuffer: 16 * 1024 * 1024, timeout: spawnTimeout(deadline) },
       ));
     } catch (error) {
