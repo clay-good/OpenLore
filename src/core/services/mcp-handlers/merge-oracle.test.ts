@@ -710,6 +710,14 @@ describe('simulateMerge', () => {
     const other = commitFiles(repo, start, { 'f.txt': lines({ 8: 'I' }) }, 'attr-ident-b');
     const ident = commitFiles(repo, start, { '.gitattributes': '.gitattributes ident\n', 'f.txt': lines({ 0: 'A' }) }, 'attr-ident-a');
     expect(await simulateMerge(repo, ident, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.gitattributes has attribute "ident"/) });
+    // A local info/attributes (never in a fresh clone) must not hide the tree's rule.
+    const info = join(repo, '.git', 'info', 'attributes');
+    writeFileSync(info, '.gitattributes !ident\n');
+    try {
+      expect(await simulateMerge(repo, ident, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.gitattributes has attribute "ident"/) });
+    } finally {
+      rmSync(info, { force: true });
+    }
     const long = commitFiles(repo, start, { '.gitattributes': `f.txt${' '.repeat(2000)}text\n`, 'f.txt': lines({ 0: 'A' }) }, 'attr-long-a');
     expect(await simulateMerge(repo, long, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/line-length limit/) });
   });

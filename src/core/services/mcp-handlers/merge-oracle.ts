@@ -339,7 +339,7 @@ function attributeBlocker(fields: string[]): string | undefined {
 
 async function mergeAttributeBlocker(
   repoPath: string, base: string, tipA: string, tipB: string, deadline: number | undefined,
-  changedPathsOut: string[],
+  changedPathsOut: string[], scratchGitDir: string,
 ): Promise<string | undefined> {
   // `--raw` entries: `:<old mode> <new mode> <old id> <new id> <status>` NUL `<path>` NUL.
   let gitlinkTypeChange: string | undefined;
@@ -390,7 +390,12 @@ async function mergeAttributeBlocker(
   for (const source of [undefined, base, tipA, tipB]) {
     // precomposeunicode=false: keep path bytes as the tree stores them, so a decomposed (NFD) path
     // still matches its decomposed `.gitattributes` pattern on macOS.
-    const args = ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', ...(source ? [`--source=${source}`] : []), '-a', '--', ...shared];
+    // A tree read runs in the scratch repository: the analyzed repository's own `info/attributes`
+    // outranks a tree's `.gitattributes` and could hide a rule a fresh clone applies. The work-tree read
+    // stays in the analyzed repository, where local attributes can only add restrictions.
+    const args = source
+      ? [`--git-dir=${scratchGitDir}`, '-c', 'core.precomposeunicode=false', 'check-attr', '-z', `--source=${source}`, '-a', '--', ...shared]
+      : ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', '-a', '--', ...shared];
     const blocked = attributeBlocker((await readGit(repoPath, args, deadline)).split('\0'));
     if (blocked) return blocked;
   }
@@ -477,7 +482,7 @@ async function mergeAttributeBlocker(
     // the file a real merge reads from disk; apply the same allowlist to the attributes files.
     for (const [tree, files] of attributeFilesByTree) {
       if (files.length === 0) continue;
-      const fields = (await readGit(repoPath, ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', `--source=${tree}`, '-a', '--', ...files], deadline)).split('\0');
+      const fields = (await readGit(repoPath, [`--git-dir=${scratchGitDir}`, '-c', 'core.precomposeunicode=false', 'check-attr', '-z', `--source=${tree}`, '-a', '--', ...files], deadline)).split('\0');
       const blocked = attributeBlocker(fields);
       if (blocked) return blocked;
     }
@@ -532,9 +537,6 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
   const [objectsDir, graftsFile, objectFormat] = (await readGit(repoPath, ['rev-parse', '--path-format=absolute', '--git-path', 'objects', '--git-path', 'info/grafts', '--show-object-format'], deadline))
     .split('\n').map(s => s.trim()).filter(Boolean);
   if (!objectsDir || !graftsFile || !objectFormat) throw new Error('could not locate the object store');
-  const changedPaths: string[] = [];
-  const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline, changedPaths);
-  if (attributeDetail) return { verdict: 'not-assessed', detail: attributeDetail };
   const replaceRefs = (await readGit(repoPath, ['for-each-ref', '--count=1', '--format=replace', 'refs/replace/'], deadline)).trim();
   if (replaceRefs || existsSync(graftsFile)) {
     return { verdict: 'not-assessed', detail: 'the repository has replace refs or grafts, which change history the simulation cannot see' };
@@ -545,6 +547,9 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
     const env = scratchEnv();
     await execFileGit('git', ['init', '--quiet', '--bare', '--template=', `--object-format=${objectFormat}`, scratch], { env, timeout: spawnTimeout(deadline) });
     await writeFile(join(scratch, 'objects', 'info', 'alternates'), `${objectsDir}\n`);
+    const changedPaths: string[] = [];
+    const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline, changedPaths, scratch);
+    if (attributeDetail) return { verdict: 'not-assessed', detail: attributeDetail };
     let stdout: string;
     let conflicted = false;
     try {
