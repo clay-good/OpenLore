@@ -641,4 +641,17 @@ describe('simulateMerge', () => {
     expect(await simulateMerge(repo, a, withLink('z'.repeat(1024), 'symlink-long'))).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/lnk is a symlink whose target is longer/) });
     expect((await simulateMerge(repo, a, withLink('target.txt', 'symlink-short'))).verdict).toBe('clean-automerge');
   });
+
+  it('is not-assessed when a changed file differs from another entry only by letter case', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { readme: 'r\n', f: 'f\n' }, 'filecase-base');
+    const a = commitFiles(repo, base, { README: 'R\n' }, 'filecase-a');
+    const b = commitFiles(repo, base, { readme: 'r2\n' }, 'filecase-b');
+    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/only by letter case/) });
+    // An unchanged case variant already beside a changed file is caught through the directory listing.
+    const both = commitFiles(repo, main, { readme: 'r\n', README: 'R\n', f: 'f\n' }, 'filecase-both');
+    const e1 = commitFiles(repo, both, { readme: 'r2\n' }, 'filecase-edit');
+    const e2 = commitFiles(repo, both, { f: 'f2\n' }, 'filecase-other');
+    expect(await simulateMerge(repo, e1, e2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/README differs from a changed path only by letter case/) });
+  });
 });

@@ -407,6 +407,15 @@ async function mergeAttributeBlocker(
     const nonAsciiDir = [...dirs].find(nonAscii);
     if (nonAsciiDir) return `${capPath(nonAsciiDir)} is a non-ASCII directory name, and filesystem case folding cannot be checked for it`;
     const dirsLower = new Map([...dirs].map(dir => [dir.toLowerCase(), dir] as const));
+    // Two changed files that differ only by case (`README`, `readme`) overwrite each other on a
+    // case-insensitive checkout, which fails a real merge.
+    const sharedSet = new Set(shared);
+    const sharedLower = new Map<string, string>();
+    for (const path of shared) {
+      const other = sharedLower.get(path.toLowerCase());
+      if (other !== undefined && other !== path) return `${capPath(path)} differs from changed path ${capPath(other)} only by letter case`;
+      sharedLower.set(path.toLowerCase(), path);
+    }
     if (dirsLower.size < dirs.size) {
       const spellings = [...dirs].filter(dir => dirsLower.get(dir.toLowerCase()) !== dir);
       return `${capPath(spellings[0])} differs from another changed directory only by letter case`;
@@ -423,7 +432,8 @@ async function mergeAttributeBlocker(
         }
         const variantAttributes = name !== '.gitattributes' && name.toLowerCase() === '.gitattributes';
         const variantDir = !dirs.has(entry) && dirsLower.has(entry.toLowerCase());
-        if (variantAttributes || variantDir) {
+        const variantFile = !sharedSet.has(entry) && sharedLower.has(entry.toLowerCase());
+        if (variantAttributes || variantDir || variantFile) {
           return `${capPath(entry)} differs from a changed path only by letter case`;
         }
       }
