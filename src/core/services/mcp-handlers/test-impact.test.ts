@@ -680,7 +680,10 @@ describe('select_tests safeguard tiers', () => {
   it('caps untracked tier files with a count, and skips control-character and off-disk paths', async () => {
     changed([]);
     const names = Array.from({ length: 205 }, (_, i) => `gen/g${String(i).padStart(3, '0')}.test.ts`);
-    await touch(...names, 'bad\u001b[31m.test.ts');
+    await touch(...names);
+    // Windows cannot create a name with a control character; elsewhere the file exists, so only the
+    // control-character rule can skip it.
+    if (process.platform !== 'win32') await touch('bad\u001b[31m.test.ts');
     git.untracked = [...names, 'bad\u001b[31m.test.ts', 'gone.test.ts'].join('\0');
     const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
     expect(r.selectedTests).toHaveLength(200);
