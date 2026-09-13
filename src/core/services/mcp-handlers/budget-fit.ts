@@ -4,7 +4,7 @@
  * A budget that trims one section over a fixed candidate cap can both overshoot a small budget (the
  * other sections still render in full) and waste a large one (the cap binds first). This fits the
  * RENDERED payload instead: list sections are trimmed from their lowest-ranked end, whole entries only,
- * in a fixed peripheral-first order, and a binary search finds the fewest removals that fit.
+ * in a fixed peripheral-first order, keeping the fewest removals that fit.
  * Deterministic — same payload, budget, and order give the same result — and costed with the same
  * character-based estimator every other budget in the server uses.
  */
@@ -26,7 +26,8 @@ export interface BudgetFit {
  * Fit `payload` to `budget` tokens by dropping whole trailing entries from the list sections named in
  * `order` (most peripheral first; each section is drained before the next is touched), keeping at least
  * `minimum[section]` entries in each. `decorate` renders the trimmed payload with its receipts, so the
- * receipts are costed too. Sections not named, and non-array values, are never trimmed.
+ * receipts are costed too, and `measure` costs the rendering the caller actually sends (compact JSON by
+ * default). Sections not named, and non-array values, are never trimmed.
  */
 export function fitPayloadToBudget<T extends Record<string, unknown>>(
   payload: T,
@@ -34,6 +35,7 @@ export function fitPayloadToBudget<T extends Record<string, unknown>>(
   order: readonly string[],
   minimum: Readonly<Record<string, number>>,
   decorate: (trimmed: T, omitted: Record<string, number>) => Record<string, unknown>,
+  measure: (rendered: Record<string, unknown>) => number = rendered => estimateTokens(JSON.stringify(rendered)),
 ): BudgetFit {
   const steps: string[] = [];
   for (const section of order) {
@@ -52,23 +54,13 @@ export function fitPayloadToBudget<T extends Record<string, unknown>>(
       trimmed[section] = list.slice(0, list.length - dropped);
     }
     const rendered = decorate(trimmed as T, omitted);
-    return { rendered, omitted, tokens: estimateTokens(JSON.stringify(rendered)) };
+    return { rendered, omitted, tokens: measure(rendered) };
   };
 
+  // Cost is not strictly monotone in the removal count (a receipt key appears the first time a section
+  // loses an entry), so a binary search can skip the smallest cut that fits. The removal count is bounded
+  // by the payload's own entries, so a scan from zero finds it exactly.
   let best = build(0);
-  if (best.tokens > budget && steps.length > 0) {
-    // Removing a whole entry always shrinks the payload far more than a receipt grows it, so cost is
-    // monotone in practice; the linear walk after the search guarantees the result really fits.
-    let lo = 1;
-    let hi = steps.length;
-    while (lo < hi) {
-      const mid = Math.floor((lo + hi) / 2);
-      if (build(mid).tokens <= budget) hi = mid;
-      else lo = mid + 1;
-    }
-    let removals = lo;
-    best = build(removals);
-    while (best.tokens > budget && removals < steps.length) best = build(++removals);
-  }
+  for (let removals = 1; best.tokens > budget && removals <= steps.length; removals++) best = build(removals);
   return { payload: best.rendered, omitted: best.omitted, estimatedTokens: best.tokens, fits: best.tokens <= budget };
 }

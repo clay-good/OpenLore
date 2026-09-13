@@ -203,7 +203,7 @@ export const TOOL_DEFINITIONS = [
         },
         tokenBudget: {
           type: 'number',
-          description: 'Optional: fit the whole response to ~this many tokens (lowest-ranked entries dropped first, per-section counts in `budget`); each item carries an `expand` handle for get_function_body',
+          description: 'Optional: fit the whole response to ~this many tokens: functions ranked past `limit` are added while they fit, or lowest-ranked entries are dropped (decisions never); counts in `budget`',
         },
         lean: {
           type: 'boolean',

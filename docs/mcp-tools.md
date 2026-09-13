@@ -58,12 +58,12 @@ live registry.
 | Preset | Tools | Measured tokens | Budget |
 |---|---:|---:|---:|
 | `minimal` | 6 | 2,741 | 2,950 |
-| `navigation` | 10 | 3,538 | 3,800 |
-| `memory` | 3 | 1,221 | 1,300 |
-| `verify` | 3 | 1,267 | 1,350 |
+| `navigation` | 10 | 3,539 | 3,800 |
+| `memory` | 3 | 1,222 | 1,300 |
+| `verify` | 3 | 1,268 | 1,350 |
 | `federation` | 10 | 3,870 | 4,100 |
-| `coordination` | 5 | 2,492 | 2,650 |
-| `substrate` | 15 | 5,136 | 5,500 |
+| `coordination` | 5 | 2,493 | 2,650 |
+| `substrate` | 15 | 5,137 | 5,500 |
 | `full` | 76 | 24,242 | 25,500 |
 <!-- standing-context-cost:end -->
 
@@ -370,9 +370,11 @@ Registered only under `openlore mcp --preset coordination`.
 directory    string   Absolute path to the project directory
 task         string   Natural-language description of the task, e.g. "add rate limiting to the API"
 limit        number   Max relevant functions to return (default: 5, max: 20)
-tokenBudget  number   Optional: fit the whole response to ~this many tokens — lowest-ranked entries
-                      dropped first across sections, governance context kept, per-section omitted
-                      counts in `budget`; each item carries an `expand` handle
+tokenBudget  number   Optional: fit the whole response to ~this many tokens. When the default answer
+                      fits, functions ranked past `limit` (with their call paths) are added while
+                      they fit; otherwise the lowest-ranked entries are dropped, peripheral sections
+                      first. Decisions, memories, and matching specs are never dropped. The `budget`
+                      receipt gives estimated tokens (as sent), `fits`, and per-section counts.
 lean         boolean  Optional: return only the navigation core (relevantFunctions + callPaths +
                       specDomains + suggestedTools), dropping enrichment (Spec 27). See below.
 ```

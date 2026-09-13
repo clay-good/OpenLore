@@ -157,6 +157,14 @@ function printHuman(result: Record<string, unknown>): void {
     console.log('\nInsertion points:');
     for (const ip of ips) console.log(`  ${ip.rank}. ${safe(ip.name)}  (${safe(ip.filePath)}) — ${safe(ip.reason)}`);
   }
+  const budget = result.budget as { tokenBudget: number; estimatedTokens: number; fits: boolean; omitted?: Record<string, number>; addedBeyondLimit?: number } | undefined;
+  if (budget) {
+    const omitted = Object.entries(budget.omitted ?? {}).map(([section, count]) => `${count} ${section}`).join(', ');
+    const met = budget.fits ? '' : ' (not met)';
+    const added = budget.addedBeyondLimit ? `; ${safe(String(budget.addedBeyondLimit))} more function(s) added` : '';
+    console.log(`\nToken budget: ~${safe(String(budget.estimatedTokens))} of ${safe(String(budget.tokenBudget))}${safe(met)}` +
+      added + (omitted ? `; omitted ${safe(omitted)}` : ''));
+  }
   if (next.length > 0) {
     console.log('\nNext steps:');
     for (const s of next) console.log(`  - ${safe(s)}`);
@@ -172,7 +180,7 @@ export const orientCommand = new Command('orient')
   .option('--task <task>', 'Natural-language task description (e.g. "add rate limiting to the API")')
   .option('--directory <path>', 'Project directory to orient in (default: current directory)')
   .option('--limit <n>', 'Number of relevant functions to return (default: 5)')
-  .option('--token-budget <n>', 'Cap relevantFunctions to ~this many tokens (Spec 25 P4); highest-scored kept, exact duplicates collapsed')
+  .option('--token-budget <n>', 'Fit the whole answer to ~this many tokens: more ranked functions are added while they fit, or the lowest-ranked entries are dropped; decisions are never dropped')
   .option('--lean', 'Return only the navigation core — drop provenance/change-coupling/insertion-points/specs/decisions enrichment (Spec 27)', false)
   .option('--json', 'Emit the full result as JSON instead of a human-readable summary', false)
   .option('--metrics', 'Report wall time and output size to stderr (opt-in; off by default)', false)

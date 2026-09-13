@@ -37,16 +37,46 @@ describe('fitPayloadToBudget', () => {
   });
 
   it('finds the fewest removals that fit, including the receipt in the cost', () => {
+    const order = ['peripheral', 'core'];
+    // Oracle: the same removal sequence, tried at every count.
+    const cut = (removals: number) => {
+      const base = payload();
+      const steps = order.flatMap(section => Array(section === 'core' ? base.core.length - 1 : base.peripheral.length).fill(section) as string[]);
+      const omitted: Record<string, number> = {};
+      for (const section of steps.slice(0, removals)) omitted[section] = (omitted[section] ?? 0) + 1;
+      return decorate({
+        ...base,
+        peripheral: base.peripheral.slice(0, base.peripheral.length - (omitted.peripheral ?? 0)),
+        core: base.core.slice(0, base.core.length - (omitted.core ?? 0)),
+      }, omitted);
+    };
     const full = tokensOf(payload());
-    for (const budget of [full - 30, full - 200, full - 500]) {
-      const fit = fitPayloadToBudget(payload(), budget, ['peripheral', 'core'], { core: 1 }, decorate);
-      expect(tokensOf(fit.payload)).toBe(fit.estimatedTokens);
-      expect(fit.estimatedTokens).toBeLessThanOrEqual(budget);
+    for (let budget = full; budget > 100; budget -= 37) {
+      const fit = fitPayloadToBudget(payload(), budget, order, { core: 1 }, decorate);
       const removed = Object.values(fit.omitted).reduce((a, b) => a + b, 0);
-      // One fewer removal would not fit.
-      const lessTrimmed = fitPayloadToBudget(payload(), fit.estimatedTokens - 1, ['peripheral', 'core'], { core: 1 }, decorate);
-      expect(Object.values(lessTrimmed.omitted).reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(removed);
+      let smallest = 0;
+      while (smallest < 19 && tokensOf(cut(smallest)) > budget) smallest++;
+      expect(removed).toBe(smallest);
+      expect(tokensOf(fit.payload)).toBe(fit.estimatedTokens);
     }
+  });
+
+  it('finds a smaller cut a binary search would skip when a receipt makes cost non-monotone', () => {
+    const skewed = { big: ['x'.repeat(400)], tiny: Array.from({ length: 64 }, () => '') };
+    const receipt = (trimmed: typeof skewed, omitted: Record<string, number>) =>
+      Object.keys(omitted).length > 0 ? { ...trimmed, omitted } : trimmed;
+    const budget = tokensOf(receipt({ big: [], tiny: skewed.tiny }, { big: 1 }));
+    const fit = fitPayloadToBudget(skewed, budget, ['big', 'tiny'], {}, receipt);
+    expect(fit.omitted).toEqual({ big: 1 });
+  });
+
+  it('costs the rendering the caller passes', () => {
+    const pretty = (value: Record<string, unknown>) => estimateTokens(JSON.stringify(value, null, 2));
+    const budget = tokensOf(payload());
+    const fit = fitPayloadToBudget(payload(), budget, ['peripheral', 'core'], {}, decorate, pretty);
+    expect(pretty(fit.payload)).toBe(fit.estimatedTokens);
+    expect(fit.estimatedTokens).toBeLessThanOrEqual(budget);
+    expect(Object.keys(fit.omitted).length).toBeGreaterThan(0);
   });
 
   it('never trims unnamed sections or below the minimum, and reports when the budget cannot be met', () => {

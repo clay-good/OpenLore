@@ -92,7 +92,7 @@ openlore orient [options]
   --task <task>          # Natural-language task (e.g. "add rate limiting")
   --directory <path>     # Project directory to orient in (default: cwd)
   --limit <n>            # Number of relevant functions to return (default: 5)
-  --token-budget <n>     # Cap relevantFunctions to ~this many tokens
+  --token-budget <n>     # Fit the whole answer to ~this many tokens (adds functions past --limit while they fit)
   --lean                 # Return only the navigation core (drop heavier sections)
   --json                 # Emit the full result as JSON instead of the human view
   --metrics              # Report wall time + output size to stderr (opt-in)

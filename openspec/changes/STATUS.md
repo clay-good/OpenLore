@@ -38,8 +38,9 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 
 ## In flight — 1
 
-`refine-orient-context-budgeting` — `orient` fits `tokenBudget` across sections with receipts, broadens
-a cold-start orientation, and keeps the no-budget default unchanged. On a branch with its `change:`
+`refine-orient-context-budgeting` — `orient` fits `tokenBudget` to the whole response: adds ranked
+functions past `limit` while they fit, or trims peripheral entries first, with a receipt; the no-budget
+default is unchanged. On a branch with its `change:`
 marker in `src/`.
 
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
