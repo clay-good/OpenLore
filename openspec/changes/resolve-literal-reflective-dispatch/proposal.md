@@ -17,6 +17,12 @@
 > `disclose-dynamic-boundary-regions` shipped (`no-static-target`, `ambiguous-target`, …) plus a new
 > `over-cap`. Retraction keys on the construct's identity, not on caller and name. Shipped as
 > `literal-reflection.ts` (Pass 7a) with a `literalReflection` capability for TS/JS/Python/Ruby.
+> Four adversarial reviews then narrowed it further: dispatch tables are JS/TS module-private
+> `const` objects only (a Python module dict can be mutated by any importer), their stability is
+> decided by every USE of the name, each entry binds by its same-file declaration span (an import is
+> refused), a self receiver counts only in the lexical instance context of a class it names uniquely,
+> a subset rebuild binds nothing, and directly-resolved-only dead code keeps the qualification the
+> bound site used to carry.
 
 ## The gap
 

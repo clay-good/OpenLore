@@ -5194,7 +5194,13 @@ function finalizeDynamicBoundaries(
       refusalFor: (c) => literalReflection?.refusals.get(key(c)),
     };
     const sites = finalizeDynamicBoundarySites(candidates, probe);
-    const record = buildFileDynamicBoundary(filePath, language, sites, maxMatchedTotal(candidates));
+    // Constructs the matcher counted but did not retain are never resolved, so each is a site. The
+    // exact total is the finalized sites plus those — never the raw match count, which would still
+    // include retained constructs that bound to an edge.
+    const unretained = Math.max((maxMatchedTotal(candidates) ?? 0) - candidates.length, 0);
+    const record = buildFileDynamicBoundary(
+      filePath, language, sites, unretained > 0 ? sites.length + unretained : undefined,
+    );
     if (record) out.set(filePath, record);
   }
   return out.size > 0 ? out : undefined;
@@ -6450,7 +6456,10 @@ export class CallGraphBuilder {
     // self-typed receiver needs the class hierarchy, so this runs here rather than with Pass 2d.
     // Additive and provenance-labeled; a failure binds nothing, so every candidate stays a site.
     let literalReflection: LiteralReflectionResult | undefined;
-    try {
+    // A subset rebuild (`resolutionNodes` supplied) sees only part of the class hierarchy, so a
+    // subclass override or a homonym in an unchanged file is invisible and a binding could be false.
+    // It binds nothing: every candidate stays a disclosed site until the next full build.
+    if (!resolutionNodes) try {
       literalReflection = resolveLiteralReflection({
         candidatesByFile: dynamicBoundaryCandidates,
         nodes: allNodes,

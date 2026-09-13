@@ -6,12 +6,23 @@
 
 The call-graph builder SHALL recover a call edge for a reflective dispatch construct whose target
 is a **symbol reference the resolver can bind structurally**, in two families: a literal-keyed
-dispatch table — a module-level literal map of literal keys to named functions, declared once and
-neither rebound nor mutated in its file — indexed at a call site; and a literal-keyed member access
+dispatch table — a module-private (not exported) JavaScript/TypeScript `const` object of literal
+keys to names, each name bound by a function declared once at module level in the same file, and
+the table name used nowhere in the file except its declaration, a type query, and as the receiver of
+an immediately invoked subscript — indexed at a call site; and a literal-keyed member access
 on a receiver whose type is statically recovered, which is the enclosing class for a self-like
-receiver (`this["m"]()`, `getattr(self, "m")()`, Ruby `send(:m)`), resolved within that class and its
-subclasses, or within its ancestors only when none of those defines the member and every base up
-the chain resolves to an indexed class.
+receiver (`this["m"]()`, `getattr(self, "m")()`, Ruby `send(:m)`), resolved over the methods a
+receiver of that class or any subclass can reach — the class's own or else its nearest ancestor's
+definition, plus every subclass override — only when every class involved has at most one resolved
+parent, the class name is declared once in its file (and, in Ruby, in one file), and the construct
+sits in the lexical instance context of that class: not in a static or singleton method, a nested
+non-arrow function, an object literal, a module, or a block evaluated against another receiver.
+
+A Python module-level dict SHALL NOT be treated as a table: its attributes can be rebound or mutated
+through any importer, which no single-file read can rule out.
+
+A rebuild that supplies only part of the repository's nodes SHALL bind nothing, leaving every
+candidate a disclosed site, because a subclass override or homonym in an unbuilt file is invisible.
 
 A table SHALL bind all of its entries or none; a table whose distinct bound names exceed the
 existing synthesis fan-out cap SHALL bind none.
@@ -57,6 +68,18 @@ Language coverage SHALL be registered in the language-capability registry, deriv
 rule tables, so a language with no rules is reported as unsupported rather than as containing no
 reflection.
 
+This family extends the dynamic-dispatch synthesis pass (`SynthesizedDynamicDispatchEdges`) under
+its existing additivity guarantee: it SHALL only add edges and SHALL NOT modify or remove a
+directly-resolved edge. The Pass-1 ignore tables and the external-module set SHALL NOT be modified to
+accommodate it; the resolver reads the recorded candidates and is not subject to them.
+
+#### Scenario: The directly-resolved graph is unchanged by the new family
+
+- **GIVEN** a repository containing reflective constructs in every recovered family
+- **WHEN** it is analyzed with and without the literal-reflection rules
+- **THEN** every edge not labeled `literal-reflective` is identical, and the reflective builtins
+  remain ignored as ordinary calls
+
 #### Scenario: A dispatch table wires its bound references
 
 - **GIVEN** a module-level literal map of literal keys to named internal functions, indexed at a
@@ -100,11 +123,24 @@ reflection.
 - **THEN** no edge is emitted and the dispatch site is disclosed with refusal reason
   `no-static-target`
 
-#### Scenario: Disabling the rules restores today's graph
+#### Scenario: Disabling the rules adds nothing else
 
-- **GIVEN** the fixture corpus analyzed with the literal-reflection rules disabled
-- **WHEN** the graph is compared with the pre-change graph
-- **THEN** it is byte-identical
+- **GIVEN** the fixture corpus analyzed with and without the literal-reflection rules
+- **WHEN** the two graphs are compared
+- **THEN** their nodes and every edge not labeled `literal-reflective` are identical
+
+#### Scenario: A table value bound by an import is not guessed
+
+- **GIVEN** `import { createUser } from 'lib'` and a table `{ create: createUser }`, while another file
+  declares its own `createUser`
+- **WHEN** the repository is analyzed
+- **THEN** no edge is emitted and the site's refusal reason is `unresolved-in-file-scope`
+
+#### Scenario: Strict traversal keeps the qualification
+
+- **GIVEN** a symbol reached only through a `literal-reflective` edge
+- **WHEN** dead code is computed with directly-resolved edges only
+- **THEN** the symbol is not reported as high-confidence dead
 
 ### Requirement: ReflectionRefusalsArePartitionedByResolutionOutcome
 
@@ -168,20 +204,82 @@ boundaries, concatenated-name reconstruction, or evaluation of generated code.
 
 ## MODIFIED Requirements
 
-### Requirement: SynthesizedDynamicDispatchEdges
+### Requirement: DynamicBoundaryVocabularyIsClosedAndGroundedInSyntax
 
-The enumerated family list of the dynamic-dispatch synthesis pass gains literal reflective
-dispatch, restricted to the structurally-resolvable families above. The existing additivity
-guarantee — synthesis SHALL only add edges and SHALL NOT modify or remove any directly-resolved
-edge — covers this change unchanged, and this delta does not restate it.
+The `kind` of a site SHALL be drawn from a closed, source-declared vocabulary —
+`reflective-invoke`, `computed-member`, `code-eval`, `dynamic-import`,
+`metaprogrammed-definition`, `container-resolution` — covered by a test that fails when a matcher
+emits a kind outside it.
 
-The Pass-1 ignore tables and the external-module set SHALL NOT be modified to accommodate this
-change: the synthesis pass re-parses each candidate file and is not subject to them, so the
-directly-resolved graph is unaffected.
+A matcher SHALL be grounded in a construct's **syntactic form or a declared framework binding,
+never in a bare callee name**. In particular, a `container-resolution` site SHALL be recorded only
+where the receiver is bound to an identified dependency-injection container — an import from a
+declared DI package, a declared decorator or annotation, or a resolution API named in the
+source-declared framework table. A call to a method merely *named* `get`, `resolve`, or `make`
+SHALL NOT be recorded.
 
-#### Scenario: The directly-resolved graph is unchanged by the new family
+The vocabulary SHALL carry a measured **density budget**: on the substrate's own repository and
+on each language fixture, recorded sites SHALL NOT exceed a declared per-thousand-lines ceiling,
+and a matcher that exceeds it SHALL fail the test suite rather than ship.
 
-- **GIVEN** a repository containing reflective constructs in every recognized family
-- **WHEN** it is analyzed before and after this change
-- **THEN** every non-synthesized edge is identical, and the reflective builtins remain ignored as
-  ordinary calls
+The refusal reason SHALL likewise be drawn from a closed, source-declared vocabulary, and SHALL
+never state something the analyzer did not establish: `no-static-target` (the selector is computed
+at runtime), `unresolved-external` (a literal selector naming no symbol in the index),
+`resolvable-but-unbound` (a literal selector naming exactly one symbol the resolver did not bind —
+its own reason, because folding it into `unresolved-external` would assert that a symbol plainly
+present resolves to nothing), `ambiguous-target` (naming more than one),
+`unresolved-in-file-scope` (a record derived from a single file, which has no repository-wide
+symbol table and therefore SHALL NOT claim a repository-wide absence it never checked, and a table
+entry bound by an import rather than a same-file declaration), `over-cap` (a literal dispatch table
+whose distinct targets exceed the synthesis fan-out cap), `unresolved-in-type` (a literal member
+that names no method of the statically recovered receiver type, whatever other symbols carry the
+name), and `unattributed-caller` (a construct whose targets resolve but that no indexed symbol
+contains, so no edge has a caller).
+
+A construct whose target the literal-reflection resolver binds yields an edge and no site; the
+retained-construct bound and the exact per-file total SHALL count each construct at most once, as
+an edge or as a site.
+
+#### Scenario: An ordinary map lookup is not a container resolution
+
+- **GIVEN** `this.cache.get(key)` and `Promise.resolve(x)` in a file with no DI framework import
+- **WHEN** the repository is analyzed
+- **THEN** no `container-resolution` site is recorded for either
+
+#### Scenario: A literal that resolves to nothing is still a boundary
+
+- **GIVEN** `getattr(handler, "process")()` where no internal symbol named `process` resolves
+- **WHEN** the repository is analyzed
+- **THEN** no edge is emitted and a site of kind `reflective-invoke` IS recorded with refusal
+  reason `unresolved-external`
+
+#### Scenario: A refusal never states something that is not so
+
+- **GIVEN** `getattr(handler, "process")()` where an internal symbol named `process` DOES exist
+- **WHEN** the repository is analyzed
+- **THEN** the refusal is `resolvable-but-unbound`, never `unresolved-external`
+
+#### Scenario: Density stays within budget
+
+- **GIVEN** the substrate's own repository and each language fixture
+- **WHEN** sites are recorded
+- **THEN** the site density is at or below the declared per-thousand-lines ceiling
+
+#### Scenario: The vocabulary cannot drift
+
+- **GIVEN** a matcher that emits a `kind` outside the declared vocabulary
+- **WHEN** the test suite runs
+- **THEN** the vocabulary-completeness test fails
+
+#### Scenario: A refusal never names a reason the resolver did not establish
+
+- **GIVEN** `this["run"]()` in a class whose type defines no `run`, while another class defines one
+- **WHEN** the repository is analyzed
+- **THEN** the site's refusal reason is `unresolved-in-type`, not `resolvable-but-unbound`
+
+#### Scenario: A bound construct does not consume the disclosure of another
+
+- **GIVEN** a file with more bindable self-receiver constructs than the per-file retained-site bound,
+  followed by one `eval(code)`
+- **WHEN** the repository is analyzed
+- **THEN** the `eval` is recorded as a site, and the file's total counts only unbound constructs

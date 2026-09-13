@@ -51,11 +51,13 @@ It is **disclosure only** — never resolution, and never the opposite conclusio
 withhold a negative claim; it can never report a symbol as live, tested, or unsafe.
 
 The statically decidable subset is recovered as edges instead (`literalReflection` in
-`docs/language-support.md`): a module-level literal dispatch table and a literal member on a
+`docs/language-support.md`): a stable module-private dispatch table and a literal member on a
 self-typed receiver bind under strict uniqueness, as `synthesized` edges labeled
-`literal-reflective` that `directResolvedOnly` removes. A construct that binds stops being a site; one
-that does not stays a site with its refusal reason (`over-cap`, `ambiguous-target`, …), so recovery
-shrinks the disclosed boundary without removing the disclosure. A language
+`literal-reflective`. A construct that binds stops being a site; one that does not stays a site with
+its refusal reason (`over-cap`, `ambiguous-target`, `unresolved-in-type`, …), so recovery shrinks the
+disclosed boundary without removing the disclosure. `directResolvedOnly` drops those edges from the
+walk but not their meaning: a symbol reached only through one is reported `low` with the rule named,
+and is left out of the dead set other conclusions (such as the `also-dead` gap label) read. A language
 with no matcher records no site and is reported as *unsupported* by the capability registry, never as
 containing no dynamic dispatch.
 

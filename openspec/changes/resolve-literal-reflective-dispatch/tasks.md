@@ -6,7 +6,8 @@
 
 ## Implementation
 
-- [x] Per-language static-literal reader. NOTE: `staticChannelKey` (`call-graph.ts:2893`) handles
+- [x] Per-language static-literal reader (reads a literal only from a pure wrapper node, so
+      `"get_" + name` yields no partial name). NOTE: `staticChannelKey` (`call-graph.ts:2893`) handles
       **JS/TS node types only** — Ruby symbol literals and Python/PHP string nodes are a
       per-language addition, not an extraction of existing code
 - [x] Strict-uniqueness resolver as a **distinct entry point** — exactly one internal candidate
@@ -27,17 +28,18 @@
 - [x] Dedup on `(callerId, calleeId)` against the full accumulated edge set; extend the CHA
       exclusion set (`call-graph.ts:4832-4841`, which currently skips synthesized edges and runs
       after synthesis) so one dispatch is not emitted twice under two labels
-- [x] Candidate→site discharge shared with `disclose-dynamic-boundary-regions`: a candidate that
-      produced no edge emits a site with reason `non-literal` / `unresolved-external` /
-      `ambiguous` / `over-cap`, **after** resolution
-- [x] Container pairing computes over the full file set, or is omitted on a subset rebuild with
-      its sites disclosed (synthesis iterates only the files it is handed, so a registration in
-      an unchanged file is otherwise invisible)
-- [x] Construct-anchored pre-filters (e.g. the table/registration shape), NOT bare `require(` /
+- [x] Candidate→site discharge shared with `disclose-dynamic-boundary-regions`, keyed on the
+      construct's file and offset: a candidate that bound no edge emits a site with the shipped
+      vocabulary (`no-static-target` / `unresolved-external` / `ambiguous-target` / …) plus `over-cap`,
+      `unresolved-in-type`, `unattributed-caller`, **after** resolution
+- [x] A subset rebuild (`resolutionNodes` supplied) binds nothing and discloses every candidate
+- [ ] ~~Construct-anchored pre-filters~~ — not needed: recovery reads the candidates the Pass-1 matcher
+      already records, so there is no second parse to pre-filter. Original task: (e.g. the table/registration shape), NOT bare `require(` /
       `.send(` / `get(` — those select nearly every file and the pass re-parses each match
 - [x] `language-support.ts`: closed `CAPABILITIES` union entry + description +
       `deriveCapabilities` line sourced from the live rule table + the drift test + a
-      behavioral-faithfulness test; update `docs/language-support.md` and CODEBASE.md's matrix
+      behavioral-faithfulness test; update `docs/language-support.md` (CODEBASE.md is generated and already lacked the
+      `dynamicBoundary` column; it refreshes on the next `analyze`)
 - [x] Do **NOT** modify `call-graph-builtins.ts` or `call-graph-external.ts`: the synthesis pass
       re-parses each file (`call-graph.ts:3540`) and is not subject to the Pass-1 ignore tables
 
@@ -46,15 +48,21 @@
 - [x] Per-family recovery fixtures asserting caller, callee, line, confidence, `synthesizedBy`
 - [x] Strict-uniqueness test: a same-file homonym coexisting with other internal homonyms is
       REFUSED (the case today's handler resolver would wrongly bind)
+- [x] Review-driven guards, each with a fixture: table stability decided by use (alias, argument,
+      export, shadowing, `Reflect.set`), import-bound entries refused, Python dicts not tables,
+      instance context only (static, nested `function`, object literal, Ruby singleton /
+      `class << self` / `instance_eval`, Python staticmethod/classmethod), duplicate class names,
+      multiple parents, ancestor-plus-override refusal, retention budget and exact totals,
+      strict-mode dead-code qualification
 - [x] Refusal fixtures, one per reason, each asserting exactly one site and zero edges
 - [x] Partition totality test (shared with the sibling): every recognized construct yields
       exactly one of edge / site — never both, never neither; includes the literal-but-external
       case and the over-cap case
 - [x] Dedup test: a call both CHA and this change would wire yields exactly one edge
-- [x] Incremental-stability test: full analyze vs. subset rebuild reaching the same tree state
-      produce identical synthesized edge sets (or the site is disclosed)
+- [x] Incremental-stability test: a subset rebuild binds nothing and discloses every candidate;
+      the full build is file-order independent
 - [x] `directResolvedOnly` test; additive-only test (rules disabled ⇒ byte-identical graph)
-- [x] Pre-filter cost test: report the measured second-parse file count on the self-index; a
-      family whose filter selects more than the declared fraction fails
+- [ ] ~~Pre-filter cost test~~ — no second parse exists (see above); the extra table walk runs only
+      for a file whose subscript call names a module-level `const` table
 - [x] Determinism: analyze-twice byte-diff e2e unchanged
 - [x] Full suite green; docs updated
