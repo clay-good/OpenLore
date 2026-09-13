@@ -570,4 +570,14 @@ describe('simulateMerge', () => {
       rmSync(attributes, { force: true });
     }
   });
+
+  it('checks attributes that only the merged .gitattributes holds', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const rules = (keepFirst: boolean, keepSecond: boolean) =>
+      ['f.txt filter=x', '# pad', '# pad', ...(keepFirst ? ['f.txt !filter'] : []), '# pad', '# pad', '# pad', ...(keepSecond ? ['f.txt !filter'] : []), ''].join('\n');
+    const base = commitFiles(repo, main, { 'f.txt': lines(), '.gitattributes': rules(true, true) }, 'merged-attr-base');
+    const a = commitFiles(repo, base, { '.gitattributes': rules(false, true) }, 'merged-attr-a');
+    const b = commitFiles(repo, base, { '.gitattributes': rules(true, false), 'f.txt': lines({ 7: 'H' }) }, 'merged-attr-b');
+    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/in the merged tree, f\.txt has attribute "filter"/) });
+  });
 });

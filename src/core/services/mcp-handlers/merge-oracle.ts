@@ -313,13 +313,34 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
  * rename on one side moves an edit from the other side onto a new name with its own attributes.
  * Returns a detail, or undefined.
  */
+/**
+ * The first attribute in `check-attr -z -a` output that the simulation does not apply: a non-default
+ * `merge`, or any attribute outside the allowlist. Returns a detail, or undefined.
+ */
+function attributeBlocker(fields: string[]): string | undefined {
+  let otherAttribute: string | undefined;
+  for (let i = 0; i + 2 < fields.length; i += 3) {
+    const [path, attribute, value] = [fields[i], fields[i + 1], fields[i + 2]];
+    if (attribute === 'merge') {
+      if (!DEFAULT_MERGE_ATTRIBUTE.has(value)) {
+        return `${capPath(path)} has merge attribute "${value.slice(0, 40)}", which the simulation does not apply`;
+      }
+    } else if (!otherAttribute && !HARMLESS_ATTRIBUTES.has(attribute) && !attribute.startsWith('linguist-')) {
+      otherAttribute = `${capPath(path)} has attribute "${attribute.slice(0, 40)}", which the simulation does not apply`;
+    }
+  }
+  return otherAttribute;
+}
+
 async function mergeAttributeBlocker(
   repoPath: string, base: string, tipA: string, tipB: string, deadline: number | undefined,
+  changedPathsOut: string[],
 ): Promise<string | undefined> {
   const changed = async (tip: string) => new Set(
     (await readGit(repoPath, gitPathArgs('diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--no-renames', base, tip), deadline)).split('\0').filter(Boolean),
   );
   const shared = [...new Set([...(await changed(tipA)), ...(await changed(tipB))])].sort();
+  changedPathsOut.push(...shared);
   if (shared.length === 0) return undefined;
   // A real merge refuses to check out a path with a `.git` component (verify_path); merge-tree does not.
   const gitComponent = shared.find(path => path.split('/').some(part => part.toLowerCase() === '.git'));
@@ -332,19 +353,8 @@ async function mergeAttributeBlocker(
     // precomposeunicode=false: keep path bytes as the tree stores them, so a decomposed (NFD) path
     // still matches its decomposed `.gitattributes` pattern on macOS.
     const args = ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', ...(source ? [`--source=${source}`] : []), '-a', '--', ...shared];
-    const fields = (await readGit(repoPath, args, deadline)).split('\0');
-    let otherAttribute: string | undefined;
-    for (let i = 0; i + 2 < fields.length; i += 3) {
-      const [path, attribute, value] = [fields[i], fields[i + 1], fields[i + 2]];
-      if (attribute === 'merge') {
-        if (!DEFAULT_MERGE_ATTRIBUTE.has(value)) {
-          return `${capPath(path)} has merge attribute "${value.slice(0, 40)}", which the simulation does not apply`;
-        }
-      } else if (!otherAttribute && !HARMLESS_ATTRIBUTES.has(attribute) && !attribute.startsWith('linguist-')) {
-        otherAttribute = `${capPath(path)} has attribute "${attribute.slice(0, 40)}", which the simulation does not apply`;
-      }
-    }
-    if (otherAttribute) return otherAttribute;
+    const blocked = attributeBlocker((await readGit(repoPath, args, deadline)).split('\0'));
+    if (blocked) return blocked;
   }
   {
     // On a case-insensitive filesystem a real merge also reads `.GITATTRIBUTES`, or `Sub/.gitattributes`
@@ -436,7 +446,8 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
   const [objectsDir, graftsFile, objectFormat] = (await readGit(repoPath, ['rev-parse', '--path-format=absolute', '--git-path', 'objects', '--git-path', 'info/grafts', '--show-object-format'], deadline))
     .split('\n').map(s => s.trim()).filter(Boolean);
   if (!objectsDir || !graftsFile || !objectFormat) throw new Error('could not locate the object store');
-  const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline);
+  const changedPaths: string[] = [];
+  const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline, changedPaths);
   if (attributeDetail) return { verdict: 'not-assessed', detail: attributeDetail };
   const replaceRefs = (await readGit(repoPath, ['for-each-ref', '--count=1', '--format=replace', 'refs/replace/'], deadline)).trim();
   if (replaceRefs || existsSync(graftsFile)) {
@@ -479,6 +490,16 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
         if (deadline !== undefined && Date.now() >= deadline) throw error;
         return { verdict: 'not-assessed', detail: `${label} contains a path a real checkout refuses: ${failureDetail(error)}` };
       }
+    }
+    // The merged `.gitattributes` can hold an attribute none of the inputs has (each side removes a
+    // different line that cleared it), and a real merge writes files with it. Check it the same way,
+    // in the scratch repository, which has no config and so runs no filter or driver.
+    if (changedPaths.length > 0) {
+      const merged = await execFileGit('git', [`--git-dir=${scratch}`, '-c', 'core.precomposeunicode=false', 'check-attr', '-z', `--source=${tree.trim()}`, '-a', '--', ...changedPaths], {
+        env, maxBuffer: 16 * 1024 * 1024, timeout: spawnTimeout(deadline),
+      });
+      const blocked = attributeBlocker(merged.stdout.split('\0'));
+      if (blocked) return { verdict: 'not-assessed', detail: `in the merged tree, ${blocked}` };
     }
     if (!conflicted) return { verdict: 'clean-automerge' };
     // Conflicted file info: `<mode> <object> <stage>\t<path>`, one entry per conflicted stage.
