@@ -195,6 +195,34 @@ describe('collectExternalWiring — runner syntax', () => {
     ]);
   });
 
+  it('keeps scripts after switches, restores the directory after a subshell, and reads inline shell code', async () => {
+    for (const f of ['main.ts', 'runme', 'build.js', 'server.js', 'root.js', 'inner.js', 'app.js', 'script.sh', 'quoted.js']) await put(f);
+    await put('package.json', JSON.stringify({
+      scripts: {
+        deno: 'deno run --allow-read --allow-net main.ts',
+        norc: 'bash --norc runme',
+        watch: 'node --watch build && node --no-warnings server',
+        subshell: '(cd sub && make); node root.js',
+        inline: 'sh -c "node inner.js"',
+        profile: 'node --cpu-prof-dir ./prof app.js && bash --rcfile ./rc script.sh',
+        escaped: 'node "quo\\"ted.js" || node quoted.js',
+        quiet: 'bun test && bun install && deno fmt && deno task dev && python - <<EOF\nprint(1)\nEOF',
+      },
+    }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['app.js', 'build.js', 'inner.js', 'main.ts', 'quoted.js', 'root.js', 'runme', 'script.sh', 'server.js']);
+    expect(report.boundaries).toEqual([
+      { config: 'package.json', key: 'scripts.escaped', reference: 'quo"ted.js', reason: 'target-not-found' },
+    ]);
+  });
+
+  it('tokenizes a long command substitution run in linear time', async () => {
+    await put('.github/workflows/subst.yml', `jobs:\n  a:\n    steps:\n      - run: ${JSON.stringify('$('.repeat(250_000))}\n`);
+    const started = Date.now();
+    await collectExternalWiring(root);
+    expect(Date.now() - started).toBeLessThan(3_000);
+  }, 20_000);
+
   it('parses a hostile unclosed setup-file string in linear time', async () => {
     await put('vitest.config.ts', `export default { test: { setupFiles: '${"\\'".repeat(200_000)}` );
     const started = Date.now();
@@ -251,6 +279,20 @@ describe('collectExternalWiring — tsconfig and test runners', () => {
     await put('package.json', '\uFEFF' + JSON.stringify({ main: 'bom.ts' }));
     const report = await collectExternalWiring(root);
     expect(files(report)).toEqual(['bom.ts', 'quoted.ts']);
+    expect(report.boundaries).toEqual([]);
+  });
+
+  it('reads a key after regex and template literals that contain quotes, and not a ternary branch', async () => {
+    await put('after-regex.ts');
+    await put('vitest.config.ts', [
+      "const quote = /'/;",
+      'const t = `x ${"`"} z`;',
+      "const pick = flag ? \"setupFiles\" : \"b\";",
+      "export default { test: { setupFiles: ['./after-regex.ts'] } };",
+      '',
+    ].join('\n'));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['after-regex.ts']);
     expect(report.boundaries).toEqual([]);
   });
 

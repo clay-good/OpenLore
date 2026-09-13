@@ -360,7 +360,9 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     caveats.push('Symbol scope resolves by name (exact preferred, substring fallback); a short or partial symbol name may widen the scope to several functions.');
   }
   // The also-dead label rests on config-wired roots too (change: add-framework-entry-point-adapters).
-  if (gaps.some(g => g.externallyWired || g.alsoFlaggedDead)) caveats.push(...externalWiringCaveats(wiring.report));
+  if (wiring.report.wired.length > 0 || wiring.report.boundaries.length > 0 || gaps.some(g => g.alsoFlaggedDead)) {
+    caveats.push(...externalWiringCaveats(wiring.report));
+  }
   // Emitted only when the returned page actually carries the reason — a caveat about
   // a signal that is not present is noise of the kind this change exists to remove.
   if (returned.some(g => g.deadReason === 'dead-via-unreachable-callers')) {

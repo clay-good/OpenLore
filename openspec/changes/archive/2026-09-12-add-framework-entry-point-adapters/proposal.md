@@ -72,7 +72,9 @@ format parsers, each deterministic and individually testable.
     through its step handling), relative to each step's working directory.
 - **Commands** count only executed files: the script after a runner (past wrappers such as `cross-env`
   or `npx`, shell keywords, subshells, and brace groups), a `--require`/`--import` preload, or a relative
-  path in command position, using each runner's own value and inline flags. Arguments, redirect
+  path in command position, using each runner's own value and inline flags; a bare name is tried as the
+  runner would resolve it (`node build` → `build.js`), a `cd` holds only within its subshell, and
+  `sh -c` contents are read as a command. Arguments, redirect
   targets, heredoc bodies, package scripts run by name, and `node_modules` tools are ignored; a
   variable, glob, `-m module`, or path after `cd` is a boundary.
 - **Reading** uses the no-follow, non-blocking bounded reader (a FIFO or linked config is an

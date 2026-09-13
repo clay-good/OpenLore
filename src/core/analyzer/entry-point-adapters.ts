@@ -65,6 +65,8 @@ const MAX_WORKFLOW_FILES = 200;
 const MAX_WORKFLOW_DIR_ENTRIES = 5_000;
 /** References taken from one config file; more is disclosed. */
 const MAX_REFERENCES_PER_CONFIG = 1_000;
+/** `setupFiles`-style keys read from one test-runner config; more is disclosed. */
+const MAX_KEY_MATCHES_PER_CONFIG = 20;
 /** Distinct boundaries kept from one config file; more is counted. */
 const MAX_BOUNDARIES_PER_CONFIG = 100;
 const MAX_REPORTED_BOUNDARIES = 50;
@@ -85,9 +87,16 @@ interface RunnerSyntax {
   subcommands?: Set<string>;
   /** Names a module rather than a file (`python -m pkg`). */
   moduleFlag?: string;
+  /** Subcommands after which nothing file-like runs (`bun test`, `deno fmt`). */
+  toolSubcommands?: Set<string>;
+  /** Whether the inline flag's value is itself a shell command (`sh -c "node x.js"`). */
+  runsInline?: boolean;
 }
 const NODE_LIKE: RunnerSyntax = {
-  valueFlags: new Set(['--env-file', '--inspect-port', '--title', '--stack-size', '--max-old-space-size', '--conditions', '-C', '--input-type']),
+  valueFlags: new Set([
+    '--env-file', '--inspect-port', '--title', '--stack-size', '--max-old-space-size', '--conditions', '-C', '--input-type',
+    '--cpu-prof-dir', '--heap-prof-dir', '--diagnostic-dir', '--redirect-warnings', '--experimental-config-file', '--watch-path',
+  ]),
   inlineFlags: new Set(['-e', '--eval', '-p', '--print']),
   preloadFlags: new Set(['-r', '--require', '--import', '--loader', '--experimental-loader']),
   subcommands: new Set(['watch']),
@@ -96,13 +105,27 @@ const TS_RUNNER: RunnerSyntax = {
   ...NODE_LIKE,
   valueFlags: new Set([...NODE_LIKE.valueFlags, '--tsconfig', '-P', '--project', '--compiler', '-O', '--compiler-options']),
 };
-const SHELL: RunnerSyntax = { valueFlags: new Set(['-o', '-O', '+o', '+O']), inlineFlags: new Set(['-c']) };
+const SHELL: RunnerSyntax = {
+  valueFlags: new Set(['-o', '-O', '+o', '+O', '--rcfile', '--init-file']),
+  inlineFlags: new Set(['-c']),
+  runsInline: true,
+};
 const RUNNERS = new Map<string, RunnerSyntax>([
   ['node', NODE_LIKE],
   ['tsx', TS_RUNNER],
   ['ts-node', TS_RUNNER],
-  ['bun', { ...NODE_LIKE, subcommands: new Set(['run']) }],
-  ['deno', { valueFlags: new Set(['--config', '-c', '--import-map', '--lock', '--allow-read', '--allow-write', '--allow-net', '--allow-env']), inlineFlags: new Set(['eval']), subcommands: new Set(['run', 'task']) }],
+  ['bun', {
+    ...NODE_LIKE,
+    subcommands: new Set(['run']),
+    toolSubcommands: new Set(['test', 'install', 'i', 'add', 'remove', 'rm', 'update', 'x', 'build', 'upgrade', 'pm', 'create', 'init', 'link', 'unlink', 'publish', 'outdated']),
+  }],
+  ['deno', {
+    // Deno's permission flags take a value only with `=`; they are not listed here.
+    valueFlags: new Set(['--config', '-c', '--import-map']),
+    inlineFlags: new Set(['eval']),
+    subcommands: new Set(['run']),
+    toolSubcommands: new Set(['task', 'test', 'fmt', 'lint', 'check', 'install', 'compile', 'bench', 'doc', 'info', 'repl', 'serve', 'upgrade', 'cache', 'coverage', 'publish', 'add', 'remove', 'init']),
+  }],
   ['python', { valueFlags: new Set(['-W', '-X', '-Q']), inlineFlags: new Set(['-c']), moduleFlag: '-m' }],
   ['python3', { valueFlags: new Set(['-W', '-X', '-Q']), inlineFlags: new Set(['-c']), moduleFlag: '-m' }],
   ['sh', SHELL], ['bash', SHELL], ['zsh', SHELL],
@@ -257,16 +280,25 @@ function commandReferences(
   key: string,
   workingDirectory: string | undefined,
   out: Collector,
+  nesting = 0,
 ): void {
-  let changedDirectory = false;
-  for (const segment of shellSegments(command)) {
+  if (nesting > 3) return;
+  // A `cd` holds for the rest of its subshell: one flag per subshell depth.
+  const changedAt: boolean[] = [];
+  for (const { words: segment, depth } of shellSegments(command)) {
+    changedAt.length = Math.min(changedAt.length, depth + 1);
+    const changedDirectory = changedAt.some(Boolean);
     const executed = executedWords(segment);
     for (const item of executed) {
       const text = item.word.text;
+      if (item.kind === 'inline') {
+        if (!changedDirectory) commandReferences(text, config, key, workingDirectory, out, nesting + 1);
+        continue;
+      }
       if (text.includes('$') || text.includes(GHA_EXPR)) {
         out.boundary({ config, key, reference: text.replaceAll(GHA_EXPR, '${{ }}'), reason: 'dynamic-reference' });
       } else if (item.kind === 'cd') {
-        changedDirectory = true;
+        changedAt[depth] = true;
       } else if (item.kind === 'module') {
         out.boundary({ config, key, reference: text, reason: 'unsupported-form' });
       } else if (/[*?[\]{}]/.test(text) && !item.word.quoted) {
@@ -283,7 +315,7 @@ function commandReferences(
   }
 }
 
-type Executed = { kind: 'file' | 'module' | 'cd'; word: Word };
+type Executed = { kind: 'file' | 'module' | 'cd' | 'inline'; word: Word };
 
 /** The command a word names: the basename of an absolute system path (`/usr/bin/env` → `env`). */
 function systemCommandName(text: string): string {
@@ -330,9 +362,14 @@ function executedWords(words: Word[]): Executed[] {
   const executed: Executed[] = [];
   for (let j = i + 1; j < words.length; j++) {
     const word = words[j];
-    const isFlag = word.text.startsWith('-') && !word.quoted && word.text !== '-';
+    if (word.text === '-' && !word.quoted) return executed;  // the script is read from stdin
+    const isFlag = word.text.startsWith('-') && !word.quoted;
     const [flag, inline] = isFlag ? word.text.split(/=(.*)/s, 2) : [word.text, undefined];
-    if (syntax.inlineFlags.has(flag)) return executed;
+    if (syntax.inlineFlags.has(flag)) {
+      const code = inline ?? words[j + 1]?.text;
+      if (syntax.runsInline && code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
+      return executed;
+    }
     if (syntax.moduleFlag && flag === syntax.moduleFlag) {
       const module = inline ?? words[j + 1]?.text;
       if (module) executed.push({ kind: 'module', word: { text: `${flag} ${module}`, quoted: false } });
@@ -345,20 +382,13 @@ function executedWords(words: Word[]): Executed[] {
       continue;
     }
     if (isFlag && syntax.valueFlags.has(flag) && inline === undefined) { j++; continue; }
-    if (isFlag) {
-      // An unknown flag may take a value: a following word that cannot be a script is that value.
-      const next = words[j + 1];
-      if (inline === undefined && next && !next.text.startsWith('-') && !looksLikeScript(next.text)) j++;
-      continue;
-    }
+    // An unknown flag is taken as a switch: the next word is still considered as the script.
+    if (isFlag) continue;
+    if (j === i + 1 && syntax.toolSubcommands?.has(word.text)) return executed;
     if (j === i + 1 && syntax.subcommands?.has(word.text)) continue;
-    if (!looksLikeScript(word.text) && !/[$*?[\]{}]/.test(word.text) && !word.text.includes(GHA_EXPR)) {
-      // A bare name (`bun run build`, `deno task dev`) names a package script or task, not a file.
-      if (!syntax.subcommands?.has(words[i + 1]?.text ?? '')) {
-        executed.push({ kind: 'module', word: { text: `${name} ${word.text}`, quoted: false } });
-      }
-      return executed;
-    }
+    // After `bun run` / `deno run`, a bare name is a package script, not a file.
+    if (!looksLikeScript(word.text) && syntax.subcommands?.has(words[i + 1]?.text ?? '')) return executed;
+    // A bare name (`node build`, `bash test`) is tried as a file; resolution discloses a miss.
     executed.push({ kind: 'file', word });
     return executed;
   }
@@ -374,8 +404,9 @@ function looksLikeScript(text: string): boolean {
  * A command line as simple commands of words: split on `&&`, `||`, `;`, `|`, `&`, and newlines,
  * honoring quotes; `#` comments, redirect targets, and heredoc bodies are dropped.
  */
-function shellSegments(command: string): Word[][] {
-  const segments: Word[][] = [];
+function shellSegments(command: string): Array<{ words: Word[]; depth: number }> {
+  const segments: Array<{ words: Word[]; depth: number }> = [];
+  let depth = 0;
   let words: Word[] = [];
   let word = '';
   let quoted = false;
@@ -389,7 +420,7 @@ function shellSegments(command: string): Word[][] {
       else if ((word === '{' || word === '}') && !quoted) {
         // A brace group's words are a command of their own.
         word = ''; quoted = false; inWord = false;
-        if (words.length > 0) segments.push(words);
+        if (words.length > 0) segments.push({ words, depth });
         words = [];
         return;
       } else words.push({ text: word, quoted });
@@ -398,7 +429,7 @@ function shellSegments(command: string): Word[][] {
   };
   const endSegment = () => {
     endWord();
-    if (words.length > 0) segments.push(words);
+    if (words.length > 0) segments.push({ words, depth });
     words = [];
     redirect = false;
   };
@@ -420,12 +451,22 @@ function shellSegments(command: string): Word[][] {
     }
     if (ch === '\\' && command[i + 1] === '\n') { i++; continue; }  // line continuation
     if (ch === '\\' && command[i + 1] === '\r' && command[i + 2] === '\n') { i += 2; continue; }
-    if (ch === "'" || ch === '"') {
-      const close = command.indexOf(ch, i + 1);
+    if (ch === "'") {
+      const close = command.indexOf("'", i + 1);
       const end = close < 0 ? command.length : close;
       word += command.slice(i + 1, end);
       quoted = true; inWord = true;
       i = end;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < command.length && command[j] !== '"') {
+        if (command[j] === '\\' && j + 1 < command.length) { word += command[j + 1]; j += 2; continue; }
+        word += command[j++];
+      }
+      quoted = true; inWord = true;
+      i = j;
       continue;
     }
     if (ch === '#' && !inWord) {
@@ -434,10 +475,11 @@ function shellSegments(command: string): Word[][] {
       continue;
     }
     if (ch === ' ' || ch === '\t') { endWord(); continue; }
-    if ((ch === '(' || ch === ')') && !(ch === '(' && word.endsWith('$'))) {
-      // Subshells and command substitutions: their commands are segments of their own.
+    if ((ch === '(' || ch === ')') && !(ch === '(' && i > 0 && command[i - 1] === '$')) {
+      // Subshells: their commands are segments of their own, and a `cd` inside ends with them.
       if (ch === '(' && inWord) { word += ch; continue; }
       endSegment();
+      depth = ch === '(' ? depth + 1 : Math.max(0, depth - 1);
       continue;
     }
     if (ch === ';' || ch === '|' || ch === '&') {
@@ -499,7 +541,12 @@ async function readTestRunnerConfigs(root: string, out: Collector): Promise<void
     // Keys are matched where string contents are blanked, so a key inside a string is not a key.
     const keysOnly = blankStringValues(code);
     for (const key of TEST_RUNNER_KEYS) {
+      let matches = 0;
       for (const match of keysOnly.matchAll(new RegExp(`(?:\\b|['"])${key}['"]?\\s*:\\s*`, 'g'))) {
+        if (++matches > MAX_KEY_MATCHES_PER_CONFIG) {
+          out.boundary({ config, key, reference: `more than ${MAX_KEY_MATCHES_PER_CONFIG} ${key} entries`, reason: 'unsupported-form' });
+          break;
+        }
         const value = readValueExpression(code, match.index + match[0].length);
         // A type annotation (`setupFiles: string[]`) declares the key; it wires nothing.
         if (/^(?:string|readonly\s+string)(?:\[\])?\s*[;,]?\s*$|^Array<string>/.test(value.trim())) continue;
@@ -569,10 +616,17 @@ function blankStringValues(code: string): string {
   let out = '';
   for (let i = 0; i < code.length; i++) {
     const ch = code[i];
+    const regexEnd = regexLiteralEnd(code, i);
+    if (regexEnd > 0) {
+      out += ' '.repeat(regexEnd - i);
+      i = regexEnd - 1;
+      continue;
+    }
     if (ch !== "'" && ch !== '"' && ch !== '`') { out += ch; continue; }
     const close = closingQuote(code, i);
     const end = close < 0 ? code.length - 1 : close;
-    const isKey = /^\s*:/.test(code.slice(end + 1, end + 64));
+    // A key string follows `{` or `,` and precedes `:` (a ternary's `? 'x' : 'y'` is not a key).
+    const isKey = /^\s*:/.test(code.slice(end + 1, end + 64)) && /[{,]\s*$/.test(code.slice(Math.max(0, i - 64), i));
     out += isKey ? code.slice(i, end + 1) : ch + ' '.repeat(Math.max(0, end - i - 1)) + (close < 0 ? '' : ch);
     i = end;
   }
@@ -722,12 +776,17 @@ async function repositorySpelling(
 /** The path itself, then the TypeScript sources a JavaScript build output is compiled from. */
 function sourceVariants(path: string): string[] {
   const swap = (from: RegExp, to: string[]) => from.test(path) ? to.map(ext => path.replace(from, ext)) : [];
+  // An extensionless reference is tried as the runner would resolve it (`node build` → `build.js`).
+  const extensionless = /\.[A-Za-z0-9]{1,5}$/.test(posix.basename(path))
+    ? []
+    : ['.js', '.mjs', '.cjs', '.ts', '/index.js', '/index.ts'].map(ext => path + ext);
   return [
     ...swap(/\.js$/, ['.ts', '.tsx']),
     ...swap(/\.jsx$/, ['.tsx']),
     ...swap(/\.mjs$/, ['.mts']),
     ...swap(/\.cjs$/, ['.cts']),
     path,
+    ...extensionless,
   ];
 }
 
@@ -771,8 +830,45 @@ async function readJsonConfig(
 function closingQuote(source: string, start: number): number {
   const quote = source[start];
   let i = start + 1;
-  while (i < source.length && source[i] !== quote) i += source[i] === '\\' ? 2 : 1;
+  while (i < source.length && source[i] !== quote) {
+    if (source[i] === '\\') { i += 2; continue; }
+    // A template substitution may hold its own strings, including backticks.
+    if (quote === '`' && source[i] === '$' && source[i + 1] === '{') {
+      let depth = 1;
+      i += 2;
+      while (i < source.length && depth > 0) {
+        const ch = source[i];
+        if (ch === "'" || ch === '"' || ch === '`') {
+          const close = closingQuote(source, i);
+          if (close < 0) return -1;
+          i = close + 1;
+          continue;
+        }
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        i++;
+      }
+      continue;
+    }
+    i++;
+  }
   return i < source.length ? i : -1;
+}
+
+/** The index just past a regex literal opening at `start`, or -1 when `start` does not open one. */
+function regexLiteralEnd(source: string, start: number): number {
+  if (source[start] !== '/' || source[start + 1] === '/' || source[start + 1] === '*') return -1;
+  let k = start - 1;
+  while (k >= 0 && (source[k] === ' ' || source[k] === '\t')) k--;
+  if (k >= 0 && !'(,=:[!&|?{};\n'.includes(source[k])) return -1;
+  let inClass = false;
+  for (let i = start + 1; i < source.length && source[i] !== '\n'; i++) {
+    if (source[i] === '\\') { i++; continue; }
+    if (source[i] === '[') inClass = true;
+    else if (source[i] === ']') inClass = false;
+    else if (source[i] === '/' && !inClass) return i + 1;
+  }
+  return -1;
 }
 
 /** The index of the closing quote of the string opening at `start`, or the last index. */
@@ -786,6 +882,12 @@ function stripCodeComments(source: string): string {
   let out = '';
   for (let i = 0; i < source.length; i++) {
     const ch = source[i];
+    const regexEnd = regexLiteralEnd(source, i);
+    if (regexEnd > 0) {
+      out += source.slice(i, regexEnd);
+      i = regexEnd - 1;
+      continue;
+    }
     if (ch === '"' || ch === "'" || ch === '`') {
       const end = skipString(source, i);
       out += source.slice(i, end + 1);
