@@ -192,7 +192,8 @@ describe('simulateMerge', () => {
     expect((await simulateMerge(repo, moved, edited)).verdict).toBe('clean-automerge');
     git(repo, 'config', 'merge.renames', 'false');
     try {
-      expect((await simulateMerge(repo, moved, edited)).verdict).toBe('textual-conflict');
+      // A fresh clone or hosted merge does not carry the local setting, so it is not assessed.
+      expect(await simulateMerge(repo, moved, edited)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/merge\.renames=false in git config can hide a conflict/) });
     } finally {
       git(repo, 'config', '--unset', 'merge.renames');
     }
@@ -388,7 +389,7 @@ describe('simulateMerge', () => {
     }
   });
 
-  it('forwards diff.algorithm so the verdict matches a merge in the repository itself', async () => {
+  it('assesses only the default diff.algorithm, and matches a real merge for it', async () => {
     const alg = join(root, 'alg');
     execFileGitSync('git', ['init', '-q', '-b', 'main', alg]);
     git(alg, 'config', 'user.email', 't@example.com');
@@ -414,17 +415,23 @@ describe('simulateMerge', () => {
     const myersBase = commitFiles(alg, empty, { m: '{\na\na\n{\n{\nb\nc\nb\n' }, 'myers-base');
     const ma = commitFiles(alg, myersBase, { m: '{\na\na\n{\n{\na\nb\nc\nb\n' }, 'myers-a');
     const mb = commitFiles(alg, myersBase, { m: '{\na\na\nz\n{\nb\nb\nb\n' }, 'myers-b');
+    // Only git's default algorithm is assessed; a local non-default one can hide a conflict a fresh clone reports.
     let differs = false;
+    let myersTruth: string | undefined;
     for (const algorithm of ['patience', 'myers', 'histogram']) {
       git(alg, 'config', 'diff.algorithm', algorithm);
       for (const [x, y, label] of [[a, b, 'alg'], [ma, mb, 'myers']] as const) {
         const truth = realMerge(x, y, `${algorithm}-${label}`);
-        if (truth !== realMerge(x, y, `${algorithm}-${label}-again`)) throw new Error('unstable ground truth');
-        expect((await simulateMerge(alg, x, y)).verdict, `${algorithm} ${label}`).toBe(truth);
-        if (algorithm === 'myers' && label === 'myers') differs = truth === 'textual-conflict';
+        if (algorithm === 'histogram') {
+          expect((await simulateMerge(alg, x, y)).verdict, `${algorithm} ${label}`).toBe(truth);
+          if (label === 'myers') differs = myersTruth !== undefined && truth !== myersTruth;
+        } else {
+          expect(await simulateMerge(alg, x, y), `${algorithm} ${label}`).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/can hide a conflict/) });
+          if (algorithm === 'myers' && label === 'myers') myersTruth = truth;
+        }
       }
     }
-    expect(differs).toBe(true); // non-vacuity: myers really changes this merge
+    expect(differs).toBe(true); // non-vacuity: the algorithm really changes this merge
     git(alg, 'config', '--unset', 'diff.algorithm');
     // diff3 skips conflict refinement, so it can turn a clean merge into a conflict.
     const styleBase = commitFiles(alg, empty, { s: 'a\nc\nc\nb\nc\na\n' }, 'style-base');
@@ -595,7 +602,7 @@ describe('simulateMerge', () => {
     expect((await simulateMerge(repo, a, b)).verdict).toBe('textual-conflict');
     git(repo, 'config', 'merge.directoryRenames', 'true');
     try {
-      expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/places e\/y, which neither change touched/) });
+      expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/merge\.directoryrenames=true in git config can hide a conflict/) });
     } finally {
       git(repo, 'config', '--unset', 'merge.directoryRenames');
     }

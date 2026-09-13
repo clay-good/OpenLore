@@ -218,8 +218,6 @@ const HARMLESS_MERGE_KEYS = new Set([
 interface MergeConfig {
   /** Global `-c` options, placed before the subcommand. */
   args: string[];
-  /** Merge strategy options (`-X`), placed after `merge-tree`. */
-  strategyArgs: string[];
 }
 
 /**
@@ -234,12 +232,11 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
     // -z: `key LF value NUL`, so a value containing a newline cannot forge another entry.
     listing = await readGit(repoPath, ['config', '-z', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|pull\\.twohead|commit\\.(cleanup|gpgsign)|core\\.bigfilethreshold|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
   } catch (error) {
-    if (isExitOne(error)) return { args: [], strategyArgs: [] };
+    if (isExitOne(error)) return { args: [] };
     throw error;
   }
   const args: string[] = [];
   let partialClone = false;
-  let algorithm: string | undefined;
   for (const entry of listing.split('\0').filter(Boolean)) {
     const newline = entry.indexOf('\n');
     const hasValue = newline >= 0;
@@ -258,7 +255,9 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
     if (key === 'diff.algorithm') {
       // merge-tree ignores `-c diff.algorithm` (it is read only for porcelain merges); `-X` applies it.
       if (!hasValue || !/^(myers|minimal|patience|histogram)$/i.test(rawValue)) return { detail: `diff.algorithm "${value.slice(0, 40)}" is not simulated` };
-      algorithm = rawValue.toLowerCase();
+      // Only the default is assessed: a fresh clone or a hosted merge does not carry a local setting,
+      // and another algorithm can hide a conflict they would report.
+      if (rawValue.toLowerCase() !== 'histogram') return { detail: `diff.algorithm "${rawValue}" in git config can hide a conflict that a fresh clone or hosted merge reports` };
       continue;
     }
     if (STRICT_VALUE_KEYS[key]) {
@@ -289,6 +288,12 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       // A forwarded key with no value makes a real merge die ("missing value"), so it is not assessed.
       if (!hasValue || !/^[A-Za-z0-9_-]{1,32}$/.test(rawValue)) return { detail: `${key} has a value the simulation cannot forward` };
       if (key === 'merge.conflictstyle' && !/^(merge|diff3|zdiff3)$/i.test(value)) return { detail: `merge.conflictStyle "${value}" is not simulated` };
+      // Settings that can weaken rename or conflict detection relative to git's defaults are not assessed:
+      // a fresh clone or a hosted merge does not carry them and would report the conflict they hide.
+      const weakens = ((key === 'merge.renames' || key === 'diff.renames') && !/^(copies|copy)$/i.test(value) && !isGitTrue(value))
+        || key === 'merge.renamelimit' || key === 'diff.renamelimit'
+        || (key === 'merge.directoryrenames' && value.toLowerCase() !== 'conflict');
+      if (weakens) return { detail: `${key}=${value.slice(0, 40)} in git config can hide a conflict that a fresh clone or hosted merge reports` };
       args.push('-c', `${key}=${value}`);
       continue;
     }
@@ -304,7 +309,7 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
     }
   }
   // Last value wins, as in git; histogram is merge-ort's own default.
-  return { args, strategyArgs: algorithm ? ['-X', `diff-algorithm=${algorithm}`] : [] };
+  return { args };
 }
 
 /**
@@ -507,7 +512,7 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
     try {
       ({ stdout } = await execFileGit(
         'git',
-        gitPathArgs(...config.args, `--git-dir=${scratch}`, 'merge-tree', '--write-tree', '-z', '--no-messages', ...config.strategyArgs, `--merge-base=${bases[0]}`, tipA, tipB),
+        gitPathArgs(...config.args, `--git-dir=${scratch}`, 'merge-tree', '--write-tree', '-z', '--no-messages', `--merge-base=${bases[0]}`, tipA, tipB),
         { env, maxBuffer: 16 * 1024 * 1024, timeout: spawnTimeout(deadline) },
       ));
     } catch (error) {
