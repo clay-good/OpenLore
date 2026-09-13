@@ -67,6 +67,7 @@ import {
 import {
   matchDynamicBoundaries,
   finalizeDynamicBoundarySites,
+  boundDynamicBoundarySites,
   buildFileDynamicBoundary,
   REFLECTIVE_RESOLUTION_RULE,
   type AttributedCandidate,
@@ -5193,13 +5194,17 @@ function finalizeDynamicBoundaries(
       countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
       refusalFor: (c) => literalReflection?.refusals.get(key(c)),
     };
-    const sites = finalizeDynamicBoundarySites(candidates, probe);
+    const sites = finalizeDynamicBoundarySites(candidates.filter(c => !c.recoverable), probe);
+    const deferred = finalizeDynamicBoundarySites(candidates.filter(c => c.recoverable), probe);
+    const bound = boundDynamicBoundarySites(candidates, probe);
     // Constructs the matcher counted but did not retain are never resolved, so each is a site. The
     // exact total is the finalized sites plus those — never the raw match count, which would still
     // include retained constructs that bound to an edge.
     const unretained = Math.max((maxMatchedTotal(candidates) ?? 0) - candidates.length, 0);
     const record = buildFileDynamicBoundary(
-      filePath, language, sites, unretained > 0 ? sites.length + unretained : undefined,
+      filePath, language, sites,
+      unretained > 0 ? sites.length + deferred.length + unretained : undefined,
+      { deferred, bound },
     );
     if (record) out.set(filePath, record);
   }
@@ -6452,19 +6457,17 @@ export class CallGraphBuilder {
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);
 
-    // Pass 7a: literal reflective dispatch (change: resolve-literal-reflective-dispatch). A
-    // self-typed receiver needs the class hierarchy, so this runs here rather than with Pass 2d.
+    // Pass 7a: literal reflective dispatch (change: resolve-literal-reflective-dispatch). Runs after
+    // every other edge exists, so its dedup and CHA's exclusion both see the whole accumulated set.
     // Additive and provenance-labeled; a failure binds nothing, so every candidate stays a site.
     let literalReflection: LiteralReflectionResult | undefined;
-    // A subset rebuild (`resolutionNodes` supplied) sees only part of the class hierarchy, so a
-    // subclass override or a homonym in an unchanged file is invisible and a binding could be false.
-    // It binds nothing: every candidate stays a disclosed site until the next full build.
+    // A subset rebuild (`resolutionNodes` supplied) binds nothing: every candidate stays a disclosed
+    // site until the next full build, so an incremental graph never carries an edge the full build
+    // was not the one to decide.
     if (!resolutionNodes) try {
       literalReflection = resolveLiteralReflection({
         candidatesByFile: dynamicBoundaryCandidates,
         nodes: allNodes,
-        classes,
-        inheritanceEdges,
         edges,
         fanOutCap: EVENT_CHANNEL_FANOUT_CAP,
       });
@@ -6814,7 +6817,7 @@ export async function extractFileDynamicBoundary(
   const result = await dispatchFileExtract(file);
   const candidates = result?.dynamicBoundary;
   if (!candidates?.length) return undefined;
-  const sites = finalizeDynamicBoundarySites(candidates, {
+  const singleFileProbe: ResolutionProbe = {
     // Pass-1 raw edges predate resolution entirely — no reflective-resolution edge can exist here,
     // so nothing retracts on this lane. Deliberate and sound in the disclosing direction: a
     // single-file re-derive can only ever report MORE boundaries than the full build, never fewer,
@@ -6826,8 +6829,10 @@ export async function extractFileDynamicBoundary(
     // when this file establishes only a lower bound of one and five more may exist elsewhere. Both
     // are exactly the repository-wide claim `unresolved-in-file-scope` exists to refuse.
     countSymbolsNamed: () => null,
-  });
-  return buildFileDynamicBoundary(file.path, file.language, sites, maxMatchedTotal(candidates));
+  };
+  const sites = finalizeDynamicBoundarySites(candidates.filter(c => !c.recoverable), singleFileProbe);
+  const deferred = finalizeDynamicBoundarySites(candidates.filter(c => c.recoverable), singleFileProbe);
+  return buildFileDynamicBoundary(file.path, file.language, sites, maxMatchedTotal(candidates), { deferred });
 }
 
 export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph {

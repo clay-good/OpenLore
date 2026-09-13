@@ -43,7 +43,6 @@ import {
   qualificationReason,
 } from './dynamic-boundary-disclosure.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
-import { REFLECTIVE_RESOLUTION_RULE } from '../../analyzer/dynamic-boundary.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
@@ -192,16 +191,7 @@ export async function deadCodeIds(
   const codeNodes = cg.nodes.filter(isCodeNode);
   const seedIds = codeNodes.filter(isRoot).map(r => r.id).sort();
   const live = traversal.reachAll(seedIds, 'forward', { directResolvedOnly: strict });
-  // A callee of a literal-reflective edge has a caller: strict mode ignores the edge for liveness,
-  // but must not let a consumer read the symbol as caller-less (change:
-  // resolve-literal-reflective-dispatch). It stays out of the dead set.
-  const reflectiveCallees = new Set<string>();
-  if (strict) {
-    for (const e of cg.edges) {
-      if (e.synthesizedBy === REFLECTIVE_RESOLUTION_RULE && e.calleeId) reflectiveCallees.add(e.calleeId);
-    }
-  }
-  return new Set(codeNodes.filter(n => !n.isTest && !live.has(n.id) && !reflectiveCallees.has(n.id)).map(n => n.id));
+  return new Set(codeNodes.filter(n => !n.isTest && !live.has(n.id)).map(n => n.id));
 }
 
 export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unknown> {
@@ -232,15 +222,6 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (e.confidence === 'synthesized' && e.calleeId) {
         synthRuleByCallee.set(e.calleeId, e.synthesizedBy ?? 'synthesized');
       }
-    }
-  }
-  // Strict mode drops every synthesized edge from the walk. A literal-reflective edge REPLACED a
-  // disclosed dynamic-boundary site, so dropping the edge must not also drop the qualification the
-  // site used to carry (change: resolve-literal-reflective-dispatch).
-  const reflectiveCalleeIds = new Set<string>();
-  if (input.directResolvedOnly) {
-    for (const e of cg.edges) {
-      if (e.synthesizedBy === REFLECTIVE_RESOLUTION_RULE && e.calleeId) reflectiveCalleeIds.add(e.calleeId);
     }
   }
 
@@ -285,7 +266,9 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions). Read once per invocation —
   // and not at all beyond this, since a repository with no site has no artifact. The crossing itself
   // is assembled per answer, from the files THAT answer touched, never from the repository.
-  const dynamicReport = await loadDynamicBoundaryReport(absDir);
+  // Strict mode folds bound literal-reflection constructs back in as sites: it ignores their edges
+  // (change: resolve-literal-reflective-dispatch).
+  const dynamicReport = await loadDynamicBoundaryReport(absDir, undefined, { directResolvedOnly: input.directResolvedOnly });
   const qualifyDynamic = buildQualifier(dynamicReport, dep?.imports ?? new Map());
 
   // ── Delete-impact mode: "what becomes dead if I delete X?" ──────────────────
@@ -364,10 +347,6 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (synthRule) {
         confidence = 'low';
         reasons.push(`reachable via a synthesized ${synthRule} edge whose dispatcher is not itself reached — likely live through dynamic dispatch`);
-      }
-      if (reflectiveCalleeIds.has(n.id)) {
-        confidence = 'low';
-        reasons.push(`reached by a synthesized ${REFLECTIVE_RESOLUTION_RULE} edge that directly-resolved-only traversal ignores — likely live through reflective dispatch`);
       }
 
       // A node named by an unresolved-ambiguous call site has a potential caller the

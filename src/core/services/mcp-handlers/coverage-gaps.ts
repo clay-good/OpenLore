@@ -227,7 +227,7 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // the SAME edge basis as the gap partition (no strict/non-strict disagreement).
   const deadIds = await deadCodeIds(absDir, cg, { directResolvedOnly: input.directResolvedOnly });
   // Dynamic-boundary sites (change: disclose-dynamic-boundary-regions), read once per invocation.
-  const dynamicReport = await loadDynamicBoundaryReport(absDir);
+  const dynamicReport = await loadDynamicBoundaryReport(absDir, undefined, { directResolvedOnly: input.directResolvedOnly });
   const qualifyDynamic = buildQualifier(
     dynamicReport,
     dynamicReport ? await loadImportAdjacency(absDir) : new Map(),

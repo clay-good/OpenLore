@@ -1278,6 +1278,8 @@ export class McpWatcher {
     let previousGenerationId: string | undefined;
     let context: CachedContext;
     const changedFiles: ChangedFile[] = [];
+    // Caller files recomputed by the incremental closure, whose boundary records must be re-derived.
+    const boundaryRecomputed = new Set<string>();
     const changedNodes: FunctionNode[] = [];
     const graphVerdictInputs: GraphVerdictInput[] = [];
     try {
@@ -1492,6 +1494,7 @@ export class McpWatcher {
           const staleNow = [...new Set([...dropped, ...skipped])];
           this.appliedClosureFiles?.add(f.rel);
           for (const cf of recomputed) this.appliedClosureFiles?.add(cf);
+          for (const cf of recomputed) boundaryRecomputed.add(cf);
           // Atomic swap so concurrent MCP reads never see a torn graph.
           store.transaction(() => {
             store.deleteEdgesForFile(f.rel);
@@ -1668,7 +1671,21 @@ export class McpWatcher {
       //      must be able to create it, and a repaired file must be able to remove its entry (and the
       //      artifact once empty).
       await this.updateParseHealth(changedFiles);
-      await this.updateDynamicBoundary(changedFiles);
+      // A recomputed caller lost its outgoing edges and was rebuilt by a subset build, which binds no
+      // literal-reflection edge, so its boundary record is re-derived too. Otherwise a construct whose
+      // site the full build retracted would be left with neither an edge nor a site
+      // (change: resolve-literal-reflective-dispatch).
+      const boundaryFiles = [...changedFiles];
+      const changedRels = new Set(changedFiles.map(f => f.rel));
+      for (const rel of [...boundaryRecomputed].sort()) {
+        if (changedRels.has(rel)) continue;
+        try {
+          boundaryFiles.push({ rel, content: await readFileConfined(this.rootPath, rel, MAX_EDIT_VERDICT_BASIS_FILE_BYTES) });
+        } catch {
+          // Unreadable now: the file keeps its last record, and the next full build re-derives it.
+        }
+      }
+      await this.updateDynamicBoundary(boundaryFiles);
       const generationId = await this.republishGeneration();
       if (generationId && graphVerdictInputs.length > 0) {
         const derived = await Promise.all(graphVerdictInputs.map(async input => {

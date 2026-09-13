@@ -911,7 +911,7 @@ export async function handleAnalyzeImpact(
   // `involvedFiles` is the seed plus every upstream/downstream/infra neighbour's file — exactly the
   // subgraph this answer traversed, and already assembled above for the governing-decisions join.
   const dynamicCrossing = dynamicBoundaryCrossing(
-    await loadDynamicBoundaryReport(absDir),
+    await loadDynamicBoundaryReport(absDir, undefined, { directResolvedOnly }),
     involvedFiles,
   );
   const confidenceBoundary = assembleBoundary({

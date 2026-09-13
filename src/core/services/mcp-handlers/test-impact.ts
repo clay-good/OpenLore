@@ -387,7 +387,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   }
 
   const dynamicCrossing = dynamicBoundaryCrossing(
-    await loadDynamicBoundaryReport(absDir),
+    await loadDynamicBoundaryReport(absDir, undefined, { directResolvedOnly: input.directResolvedOnly }),
     [...seeds.map(s => s.filePath), ...selectedTests.map(t => t.file)],
   );
 

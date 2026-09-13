@@ -120,7 +120,6 @@ function memoized<T>(
 }
 
 const KNOWN_KINDS = new Set<string>(DYNAMIC_BOUNDARY_KINDS);
-const KNOWN_REFUSALS = new Set<string>(DYNAMIC_BOUNDARY_REFUSALS);
 
 /**
  * Is this parsed value a usable site record? Anything else is dropped, never trusted.
@@ -134,6 +133,25 @@ const KNOWN_REFUSALS = new Set<string>(DYNAMIC_BOUNDARY_REFUSALS);
  * into the crossing's `count`: an artifact carrying `"09"`, `1e308` or an object turns that number
  * into a string, an infinity, or `"0[object Object]"` in a sentence a human reads.
  */
+function validSite(site: unknown): site is DynamicBoundarySite {
+  return !!site && typeof site === 'object'
+    && Number.isSafeInteger((site as DynamicBoundarySite).line)
+    && KNOWN_KINDS.has((site as DynamicBoundarySite).kind)
+    && isServableRefusal((site as DynamicBoundarySite).refusal);
+}
+
+/**
+ * A refusal this reader may serve. An unrecognised name is kept — every render resolves it with
+ * `Object.hasOwn` and falls back to a neutral phrase — because dropping the whole file for it would
+ * turn a newer writer's vocabulary into a false "no boundary" (change:
+ * resolve-literal-reflective-dispatch). An `Object.prototype` name (`toString`, `constructor`) is still
+ * refused: it is never a vocabulary word, only a lookup trap.
+ */
+function isServableRefusal(refusal: unknown): boolean {
+  return typeof refusal === 'string' && refusal.length > 0
+    && ((DYNAMIC_BOUNDARY_REFUSALS as readonly string[]).includes(refusal) || !(refusal in Object.prototype));
+}
+
 function validRecord(f: unknown): f is FileDynamicBoundary {
   if (!f || typeof f !== 'object') return false;
   const r = f as Partial<FileDynamicBoundary>;
@@ -142,10 +160,46 @@ function validRecord(f: unknown): f is FileDynamicBoundary {
   }
   if (r.totalSites !== undefined
     && (!Number.isSafeInteger(r.totalSites) || r.totalSites < r.sites.length)) return false;
-  return r.sites.every(site => !!site && typeof site === 'object'
-    && Number.isSafeInteger((site as DynamicBoundarySite).line)
-    && KNOWN_KINDS.has((site as DynamicBoundarySite).kind)
-    && KNOWN_REFUSALS.has((site as DynamicBoundarySite).refusal));
+  if (r.bound !== undefined && (!Array.isArray(r.bound) || !r.bound.every(validSite))) return false;
+  return r.sites.every(validSite);
+}
+
+/**
+ * The report a conclusion reads (change: resolve-literal-reflective-dispatch). By default a construct
+ * literal reflection bound is not a boundary — the edge carries it — so bound-only records are hidden.
+ * A directly-resolved-only conclusion ignores that edge, so for it every bound construct is folded
+ * back in as a `synthesized-binding` site: removing the site must never make a strict answer more
+ * confident than it was before the edge existed.
+ */
+const viewMemo = new WeakMap<DynamicBoundaryReport, { plain?: DynamicBoundaryReport | null; strict?: DynamicBoundaryReport | null }>();
+
+function viewFor(raw: DynamicBoundaryReport, directResolvedOnly: boolean): DynamicBoundaryReport | null {
+  // Views are memoized per raw report, so repeated reads inside the memo window return the same
+  // object, exactly as the raw report does.
+  const cached = viewMemo.get(raw) ?? {};
+  const slot = directResolvedOnly ? 'strict' : 'plain';
+  if (slot in cached) return cached[slot]!;
+  const view = composeView(raw, directResolvedOnly);
+  viewMemo.set(raw, { ...cached, [slot]: view });
+  return view;
+}
+
+function composeView(raw: DynamicBoundaryReport, directResolvedOnly: boolean): DynamicBoundaryReport | null {
+  const files = raw.files.flatMap((f): FileDynamicBoundary[] => {
+    const bound = directResolvedOnly ? (f.bound ?? []) : [];
+    const sites = bound.length > 0
+      ? [...f.sites, ...bound].sort((a, b) => a.line - b.line || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
+      : f.sites;
+    if (sites.length === 0) return [];
+    const { bound: _hidden, ...rest } = f;
+    void _hidden;
+    return [{
+      ...rest,
+      sites,
+      ...(f.totalSites !== undefined ? { totalSites: f.totalSites + bound.length } : {}),
+    }];
+  });
+  return files.length > 0 ? { ...raw, files } : null;
 }
 
 /**
@@ -161,7 +215,13 @@ function validRecord(f: unknown): f is FileDynamicBoundary {
 export async function loadDynamicBoundaryReport(
   absDir: string,
   now: number = Date.now(),
+  opts?: { directResolvedOnly?: boolean },
 ): Promise<DynamicBoundaryReport | null> {
+  const raw = await loadRawDynamicBoundaryReport(absDir, now);
+  return raw ? viewFor(raw, opts?.directResolvedOnly === true) : null;
+}
+
+function loadRawDynamicBoundaryReport(absDir: string, now: number): Promise<DynamicBoundaryReport | null> {
   return memoized(reportMemo, absDir, now, async () => {
     const path = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DYNAMIC_BOUNDARY);
     try {

@@ -38,8 +38,8 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 
 ## In flight — 1
 
-`resolve-literal-reflective-dispatch` — literal dispatch tables and literal members on a self-typed
-receiver become `literal-reflective` edges; refusals stay disclosed boundary sites. On a branch with
+`resolve-literal-reflective-dispatch` — stable JS/TS literal dispatch tables become
+`literal-reflective` edges; refusals stay disclosed boundary sites. On a branch with
 its `change:` markers in `src/`. Archive it the moment it merges. (`shrink-receiver-resolution-boundary`
 merged in #465 and awaits archiving.)
 

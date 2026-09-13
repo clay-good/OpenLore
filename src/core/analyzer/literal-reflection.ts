@@ -2,28 +2,23 @@
  * Literal reflective dispatch resolution (change: resolve-literal-reflective-dispatch).
  *
  * The dynamic-boundary matcher records every reflective construct as a CANDIDATE. This module
- * decides, after the class hierarchy exists (Pass 7), which candidates bind structurally:
+ * decides, after every other edge exists (Pass 7a), which candidates bind structurally. One family is
+ * recovered: a **literal dispatch table** — `HANDLERS[k]()` / `HANDLERS["create"]()` over a
+ * module-private JS/TS `const` table the matcher proved stable in its file. Each entry binds by the
+ * byte span of its same-file module-level declaration, never by name; an entry the matcher could
+ * not prove local (an import, a reassigned or `this`-using function) keeps the construct a site. A
+ * non-literal key binds every entry or none, and a table over the synthesis fan-out cap binds none.
  *
- *  - **Literal dispatch table** — `HANDLERS[k]()` / `HANDLERS["create"]()` over a module-private
- *    `const` table the matcher proved stable in its file, whose every entry names a function declared
- *    at module level in that same file. The binding is by declaration span, never by name: an entry
- *    bound by an import is a reference this file cannot resolve. Every entry must bind; a table over
- *    the synthesis fan-out cap binds nothing (`over-cap`).
- *  - **Literal member on a self-typed receiver** — `this["m"]()`, `getattr(self, "m")()`, Ruby
- *    `send(:m)`, recorded by the matcher only in the lexical instance context of a class. A receiver
- *    of that class or any subclass reaches the class's own definition (or else its nearest
- *    ancestor's) plus every subclass override; exactly one such method binds.
- *
- * Resolution is STRICT-UNIQUENESS. Hierarchy shapes whose method resolution order a class graph
- * cannot establish — more than one parent anywhere involved, an unresolved base above a class with
- * no own definition, a Ruby class reopened across files — are not attempted, and the name count
- * decides the refusal. Reflection by bare method name on an untyped receiver is never resolved.
+ * Deliberately NOT recovered: a literal member on a self-typed receiver (`this["m"]()`,
+ * `getattr(self, "m")()`, Ruby `send(:m)`). Two rounds of adversarial review showed the class graph
+ * cannot bound that type soundly — members added by assignment or mixins, and subclasses whose
+ * parent never resolved, are invisible — so those constructs stay disclosed sites.
  *
  * The output is additive: synthesized edges plus the bound and refused candidate keys that decide
  * the dynamic-boundary partition. Deterministic: inputs in build order, targets in id order.
  */
 
-import type { CallEdge, ClassNode, FunctionNode, InheritanceEdge } from './call-graph-types.js';
+import type { CallEdge, FunctionNode } from './call-graph-types.js';
 import {
   REFLECTIVE_RESOLUTION_RULE,
   type AttributedCandidate,
@@ -33,8 +28,6 @@ import {
 export interface LiteralReflectionInput {
   candidatesByFile: ReadonlyMap<string, { language: string; candidates: AttributedCandidate[] }>;
   nodes: ReadonlyMap<string, FunctionNode>;
-  classes: readonly ClassNode[];
-  inheritanceEdges: readonly InheritanceEdge[];
   /** Every edge accumulated so far. An emitted caller→callee pair never duplicates one of these. */
   edges: readonly CallEdge[];
   /** The synthesis per-site fan-out cap, passed in so this module stays a leaf. */
@@ -58,15 +51,13 @@ export function literalReflectionKey(filePath: string, startIndex: number): stri
   return `${startIndex}:${filePath}`;
 }
 
-type Outcome = { targets?: FunctionNode[]; refusal?: DynamicBoundaryRefusal };
+type Outcome = { targets: FunctionNode[] } | { refusal: DynamicBoundaryRefusal };
 
 export function resolveLiteralReflection(input: LiteralReflectionInput): LiteralReflectionResult {
   const result: LiteralReflectionResult = { edges: [], bound: new Set(), refusals: new Map() };
-  const work: Array<{ filePath: string; language: string; c: AttributedCandidate }> = [];
-  for (const [filePath, { language, candidates }] of input.candidatesByFile) {
-    for (const c of candidates) {
-      if (c.table || (c.receiver === 'self' && c.literalTarget)) work.push({ filePath, language, c });
-    }
+  const work: Array<{ filePath: string; c: AttributedCandidate & { table: NonNullable<AttributedCandidate['table']> } }> = [];
+  for (const [filePath, { candidates }] of input.candidatesByFile) {
+    for (const c of candidates) if (c.table) work.push({ filePath, c: c as typeof work[number]['c'] });
   }
   if (work.length === 0) return result;
 
@@ -79,18 +70,13 @@ export function resolveLiteralReflection(input: LiteralReflectionInput): Literal
   for (const e of input.edges) if (callers.has(e.callerId)) add(e.callerId, e.calleeId);
 
   let byFile: Map<string, FunctionNode[]> | undefined;
-  let hierarchy: Hierarchy | undefined;
-  for (const { filePath, language, c } of work) {
+  for (const { filePath, c } of work) {
     const key = literalReflectionKey(filePath, c.startIndex);
-    const outcome = c.table
-      ? resolveTable(c.table, (byFile ??= nodesByFile(input.nodes)).get(filePath) ?? [], input.fanOutCap)
-      : resolveSelf(c, language, input.nodes,
-        (hierarchy ??= buildHierarchy(input.classes, input.inheritanceEdges)));
-    if (outcome.refusal) {
+    const outcome = resolveTable(c.table, (byFile ??= nodesByFile(input.nodes)).get(filePath) ?? [], input.fanOutCap);
+    if ('refusal' in outcome) {
       result.refusals.set(key, outcome.refusal);
       continue;
     }
-    if (!outcome.targets) continue;
     if (!c.symbolId) {
       result.refusals.set(key, 'unattributed-caller');
       continue;
@@ -139,114 +125,12 @@ function resolveTable(
     // The node the extractor emitted for THIS declaration: same name, overlapping span.
     const found = fileNodes.filter(n =>
       n.name === table.names[i] && n.startIndex < end && start < n.endIndex);
-    // All or nothing: a partial edge set with the construct retracted would hide a target.
-    if (found.length !== 1) return { refusal: found.length === 0 ? 'unresolved-external' : 'ambiguous-target' };
+    // All or nothing: a partial edge set with the construct retracted would hide a target. A
+    // declaration the extractor emitted no matching node for is still a same-file symbol, so the
+    // refusal must not claim it resolves to nothing.
+    if (found.length > 1) return { refusal: 'ambiguous-target' };
+    if (found.length === 0) return { refusal: 'unresolved-in-file-scope' };
     targets.set(found[0].id, found[0]);
   }
-  return { targets: byId([...targets.values()]) };
-}
-
-interface Hierarchy {
-  byFileAndName: Map<string, ClassNode>;
-  byName: Map<string, ClassNode[]>;
-  byId: Map<string, ClassNode>;
-  parents: Map<string, string[]>;
-  children: Map<string, string[]>;
-}
-
-function buildHierarchy(classes: readonly ClassNode[], inheritance: readonly InheritanceEdge[]): Hierarchy {
-  const h: Hierarchy = {
-    byFileAndName: new Map(), byName: new Map(), byId: new Map(), parents: new Map(), children: new Map(),
-  };
-  for (const cls of classes) {
-    h.byId.set(cls.id, cls);
-    if (cls.isModule) continue;
-    h.byFileAndName.set(`${cls.name} ${cls.filePath}`, cls);
-    (h.byName.get(cls.name) ?? h.byName.set(cls.name, []).get(cls.name)!).push(cls);
-  }
-  for (const e of inheritance) {
-    // Method inheritance only; an implemented interface contributes no body.
-    if (e.kind !== 'extends' && e.kind !== 'embeds') continue;
-    (h.parents.get(e.childId) ?? h.parents.set(e.childId, []).get(e.childId)!).push(e.parentId);
-    (h.children.get(e.parentId) ?? h.children.set(e.parentId, []).get(e.parentId)!).push(e.childId);
-  }
-  return h;
-}
-
-/** Every class reachable from `start` over `links`, excluding `start`. Iterative, cycle-safe. */
-function closure(start: ClassNode, links: Map<string, string[]>, h: Hierarchy): ClassNode[] {
-  const seen = new Set([start.id]);
-  const out: ClassNode[] = [];
-  const stack = [...(links.get(start.id) ?? [])];
-  while (stack.length > 0) {
-    const id = stack.pop()!;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const cls = h.byId.get(id);
-    if (!cls) continue;
-    out.push(cls);
-    for (const next of links.get(id) ?? []) stack.push(next);
-  }
-  return out;
-}
-
-function methodsNamed(classes: ClassNode[], name: string, nodes: ReadonlyMap<string, FunctionNode>): FunctionNode[] {
-  const out = new Map<string, FunctionNode>();
-  for (const cls of classes) {
-    for (const id of cls.methodIds) {
-      const n = nodes.get(id);
-      if (n && !n.isExternal && n.name === name) out.set(n.id, n);
-    }
-  }
-  return [...out.values()];
-}
-
-function resolveSelf(
-  c: AttributedCandidate,
-  language: string,
-  nodes: ReadonlyMap<string, FunctionNode>,
-  h: Hierarchy,
-): Outcome {
-  const caller = c.symbolId ? nodes.get(c.symbolId) : undefined;
-  const member = c.literalTarget;
-  if (!caller?.className || !member) return {};
-  const cls = h.byFileAndName.get(`${caller.className} ${caller.filePath}`);
-  if (!cls) return {};
-  // A Ruby class reopened in another file is ONE class split across ClassNodes.
-  if (language === 'Ruby' && (h.byName.get(cls.name)?.length ?? 0) > 1) return {};
-
-  const subclasses = closure(cls, h.children, h);
-  const ancestors = closure(cls, h.parents, h);
-  // More than one parent anywhere makes the resolution order (Python MRO, mixin order) a question the
-  // class graph cannot answer.
-  if ([cls, ...subclasses, ...ancestors].some(k => k.parentClasses.length > 1)) return {};
-
-  let base = methodsNamed([cls], member, nodes);
-  if (base.length === 0) {
-    // An unresolved base could define the member before any indexed ancestor does.
-    const fullyResolved = [cls, ...ancestors]
-      .every(k => (h.parents.get(k.id)?.length ?? 0) >= k.parentClasses.length);
-    if (!fullyResolved) return {};
-    // Single-parent chain upward; the nearest definition wins.
-    let current: ClassNode | undefined = cls;
-    const walked = new Set<string>([cls.id]);
-    while (current && base.length === 0) {
-      const parentId: string | undefined = h.parents.get(current.id)?.[0];
-      current = parentId && !walked.has(parentId) ? h.byId.get(parentId) : undefined;
-      if (current) {
-        walked.add(current.id);
-        base = methodsNamed([current], member, nodes);
-      }
-    }
-  }
-  const targets = new Map<string, FunctionNode>();
-  for (const n of [...base, ...methodsNamed(subclasses, member, nodes)]) targets.set(n.id, n);
-  if (targets.size > 1) return { refusal: 'ambiguous-target' };
-  if (targets.size === 1) return { targets: [...targets.values()] };
-  // The whole type is visible (every base resolved) and nothing in it carries the member.
-  return { refusal: 'unresolved-in-type' };
-}
-
-function byId(list: FunctionNode[]): FunctionNode[] {
-  return [...list].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { targets: [...targets.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) };
 }
