@@ -38,11 +38,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 
 ## In flight — 1
 
-`ground-generated-specs-in-the-graph` (narrowed) — anchors written below normative text, the
-verifier's description no longer the anchor, colliding anchor proposals write nothing, and
-`not-assessed` instead of a false `stale` for citations the analysis cannot vouch for. On a branch with
-its `change:` markers in `src/`. (`shrink-receiver-resolution-boundary` merged in #465 and awaits
-archiving.)
+None. (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
@@ -213,6 +209,16 @@ conclusions still disclose them, a subset rebuild or an over-bound file binds no
 re-derives rebuilt callers. Three rounds of four adversarial reviews re-scoped it twice: self-typed
 receivers (`this["m"]()`, `getattr(self, "m")()`) were built and then removed because the class graph
 cannot bound the receiver type soundly, and container resolution and Python dicts stay disclosed.
+
+Shipped and archived since: `ground-generated-specs-in-the-graph` (2026-09-12, narrowed) — a pre-build
+evidence audit found most of it superseded by the shipped deterministic spec link index, so it closes
+the defects that remained: generated anchors are written below the normative text (the verifier no
+longer describes a requirement by its anchor), requirements sharing an anchor key must agree or get
+no anchor, and an anchor whose symbol is absent from a file the analysis cannot vouch for is
+`not-assessed` with a named boundary (`language-not-extracted`, `file-not-analyzed`) instead of a false
+`stale`, matched by the file's real spelling and re-assessed before a cached index is served. Two
+review rounds withdrew `#### Requirement:` recovery (OpenSpec counts only `###`) and a parse-health
+boundary (wrong extractor's evidence).
 
 ## Maintenance rules (what kept this table honest)
 
