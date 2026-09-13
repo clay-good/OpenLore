@@ -38,7 +38,10 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 
 ## In flight — 1
 
-None. (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
+`add-test-selection-safeguard-tiers` — `select_tests` always selects changed, new, and untracked test
+files, gives every selection a `reason` receipt and a per-test structural qualifier, and discloses
+flakiness as not assessed. On a branch with its `change:` marker in `src/`.
+(`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.

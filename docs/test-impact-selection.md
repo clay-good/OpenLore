@@ -86,3 +86,29 @@ honesty, seed resolution) in
 > than the build committed; or `mismatched` — a different schema), the response carries that verdict in
 > `confidenceBoundary.integrity` and is not marked `complete`, so a too-small selection over a half-built
 > index is disclosed rather than trusted. Re-run `analyze_codebase` to rebuild.
+
+## Always-select tiers and per-test receipts
+
+Reachability alone can miss the test that matters most: the one you just edited or added. When
+`select_tests` selects from a diff, it unions three deterministic, git-derived tiers (change:
+`add-test-selection-safeguard-tiers`):
+
+| Tier | Selected | `reason` |
+|---|---|---|
+| New test | a test file added since the base ref, or an **untracked**, non-ignored test file (which `git diff` never lists) | `included: new test` |
+| Changed test | a test file modified since the base ref | `included: test file itself changed` |
+| Reachability | a test that transitively reaches a changed symbol (the existing walk) | `included: reaches changed symbol at depth N` |
+
+Tiers only **add** selections, never remove one. A deleted test file is not selected. A test file the
+analysis has not indexed yet is selected whole (`test: "*"`). A diff that touches only test files now
+selects them, instead of reporting that no production function changed.
+
+Every selected test carries its strongest `reason`, and `alsoIncludedBecause` lists any other reason
+that selected it. A selection whose reaching path crosses a synthesized (heuristically recovered)
+edge carries `structuralBasis: { synthesizedEdges, synthesizedBy }`, built from the existing edge
+provenance labels (a direct edge for the same pair wins). A directly-resolved selection carries none,
+and the response-level `confidenceBoundary` is unchanged.
+
+`flakiness: { assessed: false }` states that no test-outcome history is read, so no test is labeled
+flaky. A reader that flags a test only when runs at identical tree-hash inputs disagreed is deferred:
+no local source records per-test outcomes against a tree hash.

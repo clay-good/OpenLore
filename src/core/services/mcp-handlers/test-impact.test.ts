@@ -15,10 +15,18 @@ vi.mock('../../drift/git-diff.js', () => ({
   getChangedFiles: vi.fn(async () => ({ files: [] })),
 }));
 
+// The untracked-test listing goes through the hardened git helper; keep every other export real.
+vi.mock('../../../utils/git-exec.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../utils/git-exec.js')>()),
+  execFileGit: vi.fn(async () => ({ stdout: '', stderr: '' })),
+}));
+
 import { handleSelectTests, seedsFromSymbols, seedsFromFiles } from './test-impact.js';
 import { handleReportCoverageGaps } from './coverage-gaps.js';
 import { readCachedContext } from './utils.js';
 import { getChangedFiles } from '../../drift/git-diff.js';
+import { execFileGit } from '../../../utils/git-exec.js';
+import { SELECTION_REASON } from './test-impact.js';
 import { CallGraphBuilder, serializeCallGraph, type FunctionNode, type SerializedCallGraph, type CallEdge } from '../../analyzer/call-graph.js';
 
 function node(over: Partial<FunctionNode> & { id: string }): FunctionNode {
@@ -475,5 +483,84 @@ describe('seed resolution helpers', () => {
     const seeds = seedsFromFiles(cg, ['src/foo.ts']).map(n => n.name).sort();
     expect(seeds).toEqual(['bar', 'foo']);
     expect(seedsFromFiles(cg, ['/abs/repo/src/foo.ts']).length).toBe(2); // absolute form
+  });
+});
+
+// ── Always-select tiers, reason receipts, structural qualifier (change: add-test-selection-safeguard-tiers)
+describe('select_tests safeguard tiers', () => {
+  type Selected = {
+    test: string; file: string; confidence: string; reason: string;
+    alsoIncludedBecause?: string[]; structuralBasis?: { synthesizedEdges: number; synthesizedBy: string[] };
+  };
+  type Result = { selectedTests: Selected[]; message?: string; flakiness: { assessed: boolean; reason: string } };
+  const OTHER = node({ id: 'src/other.test.ts::testOther', isTest: true });
+  const changed = (files: Array<{ path: string; status: string; isTest: boolean }>) =>
+    vi.mocked(getChangedFiles).mockResolvedValue({ files } as never);
+  const find = (r: Result, test: string) => r.selectedTests.find(t => t.test === test);
+
+  beforeEach(() => {
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph([...NODES, OTHER], EDGES) } as never);
+    vi.mocked(execFileGit).mockResolvedValue({ stdout: '', stderr: '' } as never);
+  });
+
+  it('selects a changed test file that reaches no changed symbol, with its reason', async () => {
+    changed([{ path: 'src/other.test.ts', status: 'modified', isTest: true }]);
+    const r = await handleSelectTests({ directory: '/p', diffRef: 'HEAD' }) as Result;
+    expect(r.message).toBeUndefined();
+    expect(find(r, 'testOther')).toMatchObject({ file: 'src/other.test.ts', reason: SELECTION_REASON.changedTest, confidence: 'high' });
+  });
+
+  it('selects a new test file whole when the analysis has not indexed it yet', async () => {
+    changed([{ path: 'src/brand-new.test.ts', status: 'added', isTest: true }]);
+    const r = await handleSelectTests({ directory: '/p', diffRef: 'HEAD' }) as Result;
+    expect(find(r, '*')).toMatchObject({ file: 'src/brand-new.test.ts', reason: SELECTION_REASON.newTest });
+  });
+
+  it('selects an untracked new test file that a diff never lists, and ignores non-test files', async () => {
+    changed([]);
+    vi.mocked(execFileGit).mockResolvedValue({ stdout: 'src/untracked.test.ts\0docs/readme.md\0', stderr: '' } as never);
+    const r = await handleSelectTests({ directory: '/p', diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests.map(t => [t.file, t.test, t.reason])).toEqual([['src/untracked.test.ts', '*', SELECTION_REASON.newTest]]);
+  });
+
+  it('never selects a deleted test file', async () => {
+    changed([{ path: 'src/other.test.ts', status: 'deleted', isTest: true }]);
+    const r = await handleSelectTests({ directory: '/p', diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests).toEqual([]);
+  });
+
+  it('only adds: a test selected by a tier and by reachability keeps both reasons', async () => {
+    changed([
+      { path: 'src/foo.ts', status: 'modified', isTest: false },
+      { path: 'src/foo.test.ts', status: 'modified', isTest: true },
+    ]);
+    const r = await handleSelectTests({ directory: '/p', diffRef: 'HEAD' }) as Result;
+    expect(find(r, 'testFoo')).toMatchObject({
+      reason: SELECTION_REASON.changedTest,
+      alsoIncludedBecause: [SELECTION_REASON.reaches(1)],
+    });
+  });
+
+  it('gives every reachability selection its depth receipt', async () => {
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as Result;
+    expect(find(r, 'testFoo')?.reason).toBe(SELECTION_REASON.reaches(2));
+    expect(find(r, 'testBar')?.reason).toBe(SELECTION_REASON.reaches(1));
+  });
+
+  it('discloses that flakiness was not assessed and labels no test flaky', async () => {
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as Result;
+    expect(r.flakiness.assessed).toBe(false);
+    expect(JSON.stringify(r.selectedTests)).not.toMatch(/flaky/i);
+  });
+
+  it('labels a selection whose path crosses a synthesized edge, and not a direct one', async () => {
+    const synthEdges: CallEdge[] = [
+      { callerId: 'src/foo.test.ts::testFoo', calleeId: 'src/foo.ts::foo', calleeName: 'foo', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'route-handler' },
+      ...EDGES.slice(1),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, synthEdges) } as never);
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as Result;
+    expect(find(r, 'testFoo')?.structuralBasis).toEqual({ synthesizedEdges: 1, synthesizedBy: ['route-handler'] });
+    expect(find(r, 'testBar')?.structuralBasis).toBeUndefined();
   });
 });

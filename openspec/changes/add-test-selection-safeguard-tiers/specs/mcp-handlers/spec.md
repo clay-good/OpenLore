@@ -4,11 +4,15 @@
 
 ### Requirement: AlwaysSelectTiersWithReasonReceipts
 
-`select_tests` SHALL union three deterministic, git-derived selection tiers: (1) tests whose own
-file changed since the base ref, (2) test files new since the base ref, and (3) tests transitively
-reaching a changed symbol (the existing mechanism). Every selected test SHALL carry a `reason`
-receipt naming its tier ("included: test file itself changed", "included: new test",
-"included: reaches changed symbol at depth N") beside the existing `confidence` field. The tiers
+`select_tests`, when selecting from a diff, SHALL union three deterministic, git-derived selection
+tiers: (1) tests whose own file changed since the base ref, (2) test files new since the base ref —
+including untracked, non-ignored test files that a diff never lists — and (3) tests transitively
+reaching a changed symbol (the existing mechanism). A deleted test file SHALL NOT be selected. A test
+file the analysis has not yet indexed SHALL be selected whole. A diff that touches only test files
+SHALL still select them rather than report that nothing changed. Every selected test SHALL carry a `reason`
+receipt naming its strongest tier ("included: new test", then "included: test file itself changed",
+then "included: reaches changed symbol at depth N") beside the existing `confidence` field, and SHALL
+list any other reason that also selected it. The tiers
 SHALL only add selections — a tier SHALL never remove a test the reachability walk selected — and
 SHALL be computed locally from the diff already derived for seeding, with no network dependency.
 
@@ -32,25 +36,23 @@ SHALL be computed locally from the diff already derived for seeding, with no net
 
 ### Requirement: FlakinessAndStructuralConfidenceDisclosure
 
-Where a local test-outcome history source exists (JUnit XML artifacts, or `gh run` history via the
-established fail-soft `gh` precedent), `select_tests` SHALL disclose per test when identical
-tree-hash runs produced differing outcomes ("historically flaky at identical inputs") — advisory
-only, never auto-quarantine, never a selection change. When no history source exists, the absence
-SHALL be disclosed, never guessed. Additionally, a selection whose reaching path traverses
-synthesized or heuristic edges SHALL carry a per-test structural-confidence qualifier derived from
-the existing edge-provenance labels — no new scoring constants and no blended score.
+A selection whose reaching path traverses synthesized edges SHALL carry a per-test
+structural-confidence qualifier naming how many such edges the path crosses and the rules that
+produced them, derived from the existing edge-provenance labels (a direct edge for the same pair
+takes precedence) — no new scoring constants and no blended score. A directly-resolved selection, and
+one selected by an always-select tier, SHALL carry none. The response-level confidence boundary SHALL
+be unchanged.
 
-#### Scenario: Flakiness is rule-based and advisory
-
-- **GIVEN** history showing the same test passing and failing at the same tree hash
-- **WHEN** that test is selected
-- **THEN** it carries the flaky disclosure, and its selection and ordering are unchanged
+`select_tests` SHALL disclose flakiness as not assessed, and SHALL label no test flaky, while it reads
+no test-outcome history. A history reader that labels a test flaky only when runs at identical
+tree-hash inputs produced differing outcomes — advisory only, never a selection change — is deferred:
+no local history source in the repository records per-test outcomes against a tree hash.
 
 #### Scenario: No history source, no guess
 
-- **GIVEN** a repo with no JUnit artifacts and no `gh` available
+- **GIVEN** a repository with no test-outcome history
 - **WHEN** `select_tests` runs
-- **THEN** the output discloses that flakiness history was unavailable and labels no test flaky
+- **THEN** the output discloses that flakiness was not assessed and labels no test flaky
 
 #### Scenario: A heuristic-path selection says so
 
