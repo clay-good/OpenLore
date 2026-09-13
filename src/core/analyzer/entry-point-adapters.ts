@@ -379,9 +379,26 @@ function executedWords(words: Word[]): Executed[] {
     // A group of short flags (`-euo pipefail`, `-ec`): its letters are flags, and the group takes a value
     // when its last letter does.
     if (isFlag && /^-[A-Za-z]{2,}$/.test(flag) && inline === undefined) {
-      // Read the group as getopt does: letters are switches until one takes a value, which is the rest
-      // of the group, or the next word when it is the last letter.
       const letters = flag.slice(1);
+      // A shell takes every value its group letters need from the following words, in order
+      // (`bash -oe pipefail x.sh`, `bash -ce 'cmd'`).
+      if (syntax.runsInline) {
+        let next = j + 1;
+        let code: string | undefined;
+        for (const l of letters) {
+          const letter = `-${l}`;
+          if (syntax.valueFlags.has(letter)) next++;
+          else if (syntax.inlineFlags.has(letter) && code === undefined) code = words[next++]?.text ?? '';
+        }
+        if (code !== undefined) {
+          if (code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
+          return executed;
+        }
+        j = next - 1;
+        continue;
+      }
+      // Other runners read the group as getopt does: letters are switches until one takes a value, which
+      // is the rest of the group, or the next word when it is the last letter.
       let group: Executed[] | 'continue' = 'continue';
       for (let k = 0; k < letters.length; k++) {
         const letter = `-${letters[k]}`;
@@ -531,7 +548,8 @@ function shellSegments(command: string): Array<{ words: Word[]; depth: number }>
       // `$(`, `<(`, and `>(` run their commands in a subshell: segments of their own, and a `cd` inside
       // ends with them.
       if (ch === '(' && '$<>'.includes(previous) && previous !== '') {
-        if (previous === '$' && word.endsWith('$')) word = word.slice(0, -1);
+        // The `$` stays in the word it interrupts, so an argument built from a substitution
+        // (`node dist/$(cat f).js`) still reads as dynamic.
         if (previous !== '$') redirect = false;
         endSegment();
         parens.push('subshell');
@@ -544,7 +562,15 @@ function shellSegments(command: string): Array<{ words: Word[]; depth: number }>
         continue;
       }
       endSegment();
-      if (ch === '(') { parens.push('subshell'); depth++; } else { parens.pop(); depth = Math.max(0, depth - 1); }
+      if (ch === '(') {
+        parens.push('subshell');
+        depth++;
+      } else {
+        parens.pop();
+        depth = Math.max(0, depth - 1);
+        // An empty segment marks the close, so a `cd` inside does not reach a sibling subshell.
+        segments.push({ words: [], depth });
+      }
       continue;
     }
     if (ch === ';' || ch === '|' || ch === '&') {

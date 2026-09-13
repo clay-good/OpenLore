@@ -258,6 +258,25 @@ describe('collectExternalWiring — runner syntax', () => {
     ]);
   });
 
+  it('reads shell flag groups from the following words, and keeps substitution arguments dynamic', async () => {
+    for (const f of ['z.js', 'w.js', 'x.sh', 'b.js']) await put(f);
+    await put('package.json', JSON.stringify({
+      scripts: {
+        ce: "bash -ce 'node z.js'",
+        cx: "sh -cx 'node w.js'",
+        oe: 'bash -oe pipefail x.sh',
+        substArg: 'node $(echo a.js) && node dist/$(cat f).js',
+        siblings: 'diff <(cd a; true) <(node b.js)',
+      },
+    }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['b.js', 'w.js', 'x.sh', 'z.js']);
+    expect(report.boundaries.map(b => [b.key, b.reason])).toEqual([
+      ['scripts.substArg', 'dynamic-reference'],
+      ['scripts.substArg', 'dynamic-reference'],
+    ]);
+  });
+
   it('bounds cd tracking and regex and template scanning on hostile input', async () => {
     const commands = `${'('.repeat(200_000)}cd a;${'x;'.repeat(100_000)}`;
     await put('.github/workflows/deep.yml', `jobs:\n  a:\n    steps:\n      - run: ${JSON.stringify(commands)}\n`);
