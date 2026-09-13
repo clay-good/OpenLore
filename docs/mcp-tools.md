@@ -61,10 +61,10 @@ live registry.
 | `navigation` | 10 | 3,539 | 3,800 |
 | `memory` | 3 | 1,222 | 1,300 |
 | `verify` | 3 | 1,268 | 1,350 |
-| `federation` | 10 | 3,901 | 4,100 |
-| `coordination` | 5 | 2,524 | 2,650 |
+| `federation` | 10 | 3,876 | 4,100 |
+| `coordination` | 5 | 2,499 | 2,650 |
 | `substrate` | 15 | 5,137 | 5,500 |
-| `full` | 76 | 24,273 | 25,500 |
+| `full` | 76 | 24,248 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line

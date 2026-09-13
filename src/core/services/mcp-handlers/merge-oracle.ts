@@ -25,6 +25,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileGit } from '../../../utils/git-exec.js';
+import { gitPathArgs } from '../../../utils/git-args.js';
 
 export type TextualMergeVerdict = 'textual-conflict' | 'clean-automerge' | 'not-assessed';
 
@@ -109,7 +110,7 @@ export async function simulateMerge(repoPath: string, tipA: string, tipB: string
     try {
       ({ stdout } = await execFileGit(
         'git',
-        [`--git-dir=${scratch}`, 'merge-tree', '--write-tree', '-z', '--name-only', '--no-messages', `--merge-base=${bases[0]}`, tipA, tipB],
+        gitPathArgs(`--git-dir=${scratch}`, 'merge-tree', '--write-tree', '-z', '--name-only', '--no-messages', `--merge-base=${bases[0]}`, tipA, tipB),
         { env, maxBuffer: 16 * 1024 * 1024, timeout: 30_000 },
       ));
     } catch (error) {
