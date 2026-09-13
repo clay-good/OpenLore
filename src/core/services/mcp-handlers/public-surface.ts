@@ -52,7 +52,7 @@ const MAX_SURFACE = 500;
 const MAX_CONSUMERS = 25;
 const SOURCE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py)$/i;
 /** Code extensions the canonical language map does not know (C/C++ headers, Python stubs, …). */
-const EXTRA_CODE_RE = /\.(pyi|hxx|hh|mm|m|fs|fsx|vb|erl|hrl|clj|cljs|hs|ml|mli|zig|nim|jl|r)$/i;
+const EXTRA_CODE_RE = /\.(pyi|pyx|pxd|pyw|hxx|hh|inl|ipp|tpp|cu|cuh|mm|m|fs|fsi|fsx|vb|erl|hrl|clj|cljs|cljc|hs|lhs|ml|mli|zig|nim|jl|r|groovy|razor|cshtml|erb|rake|gemspec|coffee|pl|pm|ps1|psm1|zsh|fish|bat|cmd|sol|elm|purs|gleam|cr|hx|tcl|wat|move)$/i;
 
 /**
  * A code file in a language whose public signatures are not classified. It never reaches the

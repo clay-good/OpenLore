@@ -311,6 +311,7 @@ describe('handleCertifyPublicSurface — base-ref is fatal on non-resolution (fi
   it.each([
     [{ path: 'src/Button.vue', status: 'modified' }],
     [{ path: 'pkg/api.pyi', status: 'modified' }],
+    [{ path: 'pkg/_speedups.pyx', status: 'modified' }],
     [{ path: 'scripts/release.sh', status: 'modified' }],
     [{ path: 'lib.txt', oldPath: 'lib.go', status: 'renamed' }],
   ])('withholds the bump for an unclassified code file: %o', async (file) => {
@@ -322,6 +323,7 @@ describe('handleCertifyPublicSurface — base-ref is fatal on non-resolution (fi
   it.each([
     [{ path: 'pkg/a_test.go', status: 'modified' }],
     [{ path: 'infra/main.tf', status: 'modified' }],
+    [{ path: 'infra/main.bicep', status: 'modified' }],
     [{ path: 'package.json', status: 'modified' }],
   ])('does not withhold the bump for a test, infrastructure, or config file: %o', async (file) => {
     vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [file], resolvedBase: 'main' } as never);
