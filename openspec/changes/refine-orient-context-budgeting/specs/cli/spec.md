@@ -7,7 +7,7 @@
 The orient and search_code tools SHALL accept an optional tokenBudget parameter. For search_code it
 caps returned results to approximately the specified token count, retaining highest-scored items and
 collapsing exact duplicates. For orient it fits the whole response to the budget, collapsing exact
-duplicates, as the `mcp-handlers` requirement ExactFitTokenBudgeting specifies: more ranked functions
+duplicates among the functions it adds, as the `mcp-handlers` requirement ExactFitTokenBudgeting specifies: more ranked functions
 are added while they fit, or the lowest-ranked entries are dropped.
 
 > Decision recorded: dbe1a253

@@ -960,14 +960,26 @@ describe('handleOrient', () => {
       expect(fitted.relevantFiles).toEqual(plain.relevantFiles);
     });
 
-    it('keeps one call path per collapsed function', async () => {
+    it('keeps the default answer as is and never adds an exact duplicate of it', async () => {
       const dup = (filePath: string) => makeSearchResult({ name: 'sharedHelper', filePath });
-      vi.mocked(VectorIndex.search).mockResolvedValue([dup('src/a.ts'), dup('src/b.ts'), ...results(10)]);
+      // Two same-name results in one file inside `limit`, and a duplicate of them ranked past it.
+      vi.mocked(VectorIndex.search).mockResolvedValue([
+        dup('src/a.ts'), dup('src/a.ts'), ...results(3), ...results(10).slice(3, 6), dup('src/b.ts'), ...results(10).slice(6),
+      ]);
+      const plain = await handleOrient('/tmp/proj', 'handler', 5) as Record<string, unknown>;
       const wide = await handleOrient('/tmp/proj', 'handler', 5, 1_000_000) as Payload;
-      const fns = wide.relevantFunctions as Array<{ name: string; filePath: string; duplicateOf?: string[] }>;
-      expect(fns.filter(f => f.name === 'sharedHelper')).toHaveLength(1);
+      const fns = wide.relevantFunctions as Array<{ name: string; filePath: string }>;
+      expect(fns.slice(0, 5)).toEqual(plain.relevantFunctions);
+      expect(fns.filter(f => f.name === 'sharedHelper').map(f => f.filePath)).toEqual(['src/a.ts', 'src/a.ts']);
+      expect((wide.callPaths as unknown[]).length).toBe(fns.length);
       expect((wide.callPaths as Array<{ function: string; filePath: string }>).map(p => `${p.function}@${p.filePath}`))
         .toEqual(fns.map(f => `${f.name}@${f.filePath}`));
+    });
+
+    it('treats a null budget as no budget', async () => {
+      const plain = await handleOrient('/tmp/proj', 'handler', 5);
+      const nullBudget = await handleOrient('/tmp/proj', 'handler', 5, null as unknown as number);
+      expect(JSON.stringify(nullBudget)).toBe(JSON.stringify(plain));
     });
 
     it('never trims governance context and keeps at least one function', async () => {

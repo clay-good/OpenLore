@@ -9,14 +9,15 @@ sent (pretty-printed JSON, including the index-staleness note and the receipt), 
 SHALL first build the answer for the top `limit` functions exactly as without a budget, with every
 file-scoped section computed for that answer's files. When that answer fits, the handler SHALL add
 functions ranked past `limit`, each with its call path, from a bounded pool, while the response still
-fits, so a budget at least the size of the default answer never returns less than it. When the answer
+fits, so a budget at least the size of the default answer with its receipt never returns less than it;
+exact duplicates among added functions collapse, and a duplicate of an answer function is not added. When the answer
 does not fit, the handler SHALL drop whole entries from the lowest-ranked end of its list sections, in a
 fixed peripheral-first order, choosing the fewest removals that fit and keeping at least one function;
 a call path SHALL be kept exactly when its function is. Governance context (pending, stale, reversed,
 and governing decisions, and unreconciled memories), architecture violations, matching specs, and the
 file scope SHALL never be dropped. The response SHALL carry a `budget` receipt with the budget, the
 estimated tokens of the response as sent, whether it fits, the functions added past `limit`, and the
-entries omitted per section. A budget that is not a finite number of at least 1 SHALL be rejected.
+entries omitted per section. A budget that is not a finite number of at least 1 SHALL be rejected; a `null` budget means no budget.
 Fitting SHALL be deterministic. When no budget is passed, output SHALL be unchanged.
 
 #### Scenario: A budget that covers the default answer only adds

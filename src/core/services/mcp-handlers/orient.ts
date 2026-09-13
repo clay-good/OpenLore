@@ -20,7 +20,7 @@ import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
 import { readJsonArtifactCached, readDependencyGraphOrPartial } from './artifact-cache.js';
-import { expandHandle, collapseExactDuplicates, omissionNote } from './progressive.js';
+import { expandHandle, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
@@ -209,6 +209,8 @@ export async function handleOrient(
   rankBy: 'distance' | 'pagerank' = 'distance',
 ): Promise<unknown> {
   const tooLong = queryTooLongError(task, 'task'); if (tooLong) return tooLong;
+  // A JSON `null` budget means no budget, as before.
+  if ((tokenBudget as unknown) === null) tokenBudget = undefined;
   if (tokenBudget !== undefined && !(Number.isFinite(tokenBudget) && tokenBudget >= 1)) {
     return { error: 'tokenBudget must be a finite number of at least 1.' };
   }
@@ -291,14 +293,12 @@ export async function handleOrient(
     };
   });
 
-  // Progressive disclosure (Spec 25 P2–P4): when a tokenBudget is set, collapse exact duplicates. The
-  // answer is built from the top `limit` functions exactly as without a budget; functions ranked past
-  // `limit` are held back and added only while the budget allows (fitOrientToBudget). Default (no budget)
-  // is unchanged. The `expand` handle on every kept item means a dropped/collapsed body is one cheap
-  // get_function_body call away.
-  const pooledFunctions = tokenBudget ? collapseExactDuplicates(relevantFunctionsAll) : relevantFunctionsAll;
-  const relevantFunctions = tokenBudget ? pooledFunctions.slice(0, clampedLimit) : pooledFunctions;
-  const extraFunctions = tokenBudget ? pooledFunctions.slice(clampedLimit) : [];
+  // Progressive disclosure (Spec 25 P2–P4): the answer is built from the top `limit` functions exactly as
+  // without a budget. With a budget, functions ranked past `limit` are held back and added only while the
+  // budget allows (fitOrientToBudget); exact duplicates among them collapse, and one that duplicates a
+  // function already in the answer is not added. Default (no budget) is unchanged. The `expand` handle on
+  // every kept item means a dropped/collapsed body is one cheap get_function_body call away.
+  const relevantFunctions = tokenBudget ? relevantFunctionsAll.slice(0, clampedLimit) : relevantFunctionsAll;
 
   const emptyResult = relevantFunctions.length === 0
     ? {
@@ -351,14 +351,9 @@ export async function handleOrient(
     }));
 
   // ── Call paths for each top function ──────────────────────────────────────
-  const functionKey = (name: string, filePath: string) => `${name}\0${filePath}`;
-  const baseKeys = new Set(relevantFunctions.map(f => functionKey(f.name, f.filePath)));
-  const extraKeys = new Set(extraFunctions.map(f => functionKey(f.name, f.filePath)));
-  // With a budget, a call path exists exactly for a function in the answer (a collapsed duplicate has
-  // none); without one, one per top result as before.
-  const callPathResults = tokenBudget
-    ? topResults.filter(r => baseKeys.has(functionKey(r.record.name, r.record.filePath)))
-    : topResults;
+  // One call path per top result, in the same order as the functions, so a function and its call path
+  // share a position.
+  const callPathResults = tokenBudget ? topResults.slice(0, clampedLimit) : topResults;
   const toCallPath = (r: (typeof topResults)[number]): OrientCallPath => {
     if (!llmCtx?.edgeStore) {
       return { function: r.record.name, filePath: r.record.filePath, callers: [], callees: [], provenance: analysisProvenance };
@@ -380,9 +375,27 @@ export async function handleOrient(
     return { function: r.record.name, filePath: r.record.filePath, callers, callees, provenance: analysisProvenance };
   };
   const callPaths: OrientCallPath[] = callPathResults.map(toCallPath);
-  const extraCallPaths: OrientCallPath[] = tokenBudget
-    ? topResults.filter(r => extraKeys.has(functionKey(r.record.name, r.record.filePath))).map(toCallPath)
-    : [];
+  // Functions ranked past `limit`, each paired with its call path: exact duplicates of an answer function
+  // are skipped, and duplicates among themselves collapse onto the first (`duplicateOf`).
+  const extraPairs: Array<{ fn: OrientFunction; path: OrientCallPath }> = [];
+  if (tokenBudget) {
+    const identity = (f: OrientFunction) => `${f.name}\0${f.signature ?? ''}\0${f.docstring ?? ''}`;
+    const inAnswer = new Set(relevantFunctions.map(identity));
+    const added = new Map<string, OrientFunction & { duplicateOf?: string[] }>();
+    for (let i = clampedLimit; i < relevantFunctionsAll.length; i++) {
+      const fn = relevantFunctionsAll[i];
+      const key = identity(fn);
+      if (inAnswer.has(key)) continue;
+      const first = added.get(key);
+      if (first) {
+        (first.duplicateOf ??= []).push(fn.filePath);
+        continue;
+      }
+      const copy = { ...fn };
+      added.set(key, copy);
+      extraPairs.push({ fn: copy, path: toCallPath(topResults[i]) });
+    }
+  }
 
   // ── Insertion points (lightweight: reuse rawResults with structural scoring) ──
   // Normalise search scores to [0, 1] for compositeScore (scores are RRF/BM25: higher = better)
@@ -1023,7 +1036,7 @@ export async function handleOrient(
   // below are pure overhead on a shallow "who calls X" lookup and each is one
   // exact `expand` handle or one dedicated tool call away — so we trim bytes per
   // turn without forcing a follow-up round-trip. The rich default is unchanged.
-  const extras = { functions: extraFunctions, callPaths: extraCallPaths };
+  const extras = extraPairs;
   if (lean) {
     const leanPayload = { ...core, lean: true };
     return tokenBudget
@@ -1075,9 +1088,9 @@ function servedTokens(value: unknown): number {
 /**
  * Fit an orient payload to `tokenBudget` (change: refine-orient-context-budgeting).
  *
- * The payload is the top-`limit` answer, computed exactly as without a budget. When it fits, functions
- * ranked past `limit` (each with its call path) are added while the budget still allows, so a budget at
- * least the size of the default answer never returns less than it. When it does not fit, whole
+ * The payload is the top-`limit` answer, computed exactly as without a budget. When it fits (with its
+ * receipt), functions ranked past `limit` (each with its call path) are added while the budget still
+ * allows, so a budget at least the size of the default answer and its receipt never returns less than it. When it does not fit, whole
  * lowest-ranked entries are dropped in {@link ORIENT_BUDGET_TRIM_ORDER}, keeping at least one function.
  * Costs are measured on the sent rendering, including the index-staleness note and the `budget` receipt.
  */
@@ -1085,17 +1098,15 @@ async function fitOrientToBudget(
   absDir: string,
   payload: Record<string, unknown> & { relevantFunctions: OrientFunction[]; relevantFiles: string[]; callPaths: OrientCallPath[] },
   tokenBudget: number,
-  extras: { functions: OrientFunction[]; callPaths: OrientCallPath[] },
+  extras: Array<{ fn: OrientFunction; path: OrientCallPath }>,
   llmCtx: Awaited<ReturnType<typeof readCachedContext>>,
 ): Promise<Record<string, unknown>> {
-  // The receipt is costed with its widest values, then filled in: the final payload is never larger.
-  const draft = (body: Record<string, unknown>, receipt: Record<string, unknown>) =>
-    ({ ...body, budget: { tokenBudget, ...receipt, estimatedTokens: 9_999_999, fits: false } });
-  // The drafted cost bounds the final one from above; settle `estimatedTokens` on the final rendering.
+  // The final response with its receipt settled: `estimatedTokens` is the size of exactly this rendering,
+  // so every candidate is measured as it would be sent.
   const finish = (body: Record<string, unknown>, receipt: Record<string, unknown>) => {
-    let estimatedTokens = servedTokens(draft(body, receipt));
+    let estimatedTokens = servedTokens({ ...body, budget: { tokenBudget, ...receipt, estimatedTokens: 0, fits: false } });
     let final = { ...body, budget: { tokenBudget, ...receipt, estimatedTokens, fits: estimatedTokens <= tokenBudget } };
-    for (let settle = 0; settle < 3; settle++) {
+    for (let settle = 0; settle < 4; settle++) {
       const actual = servedTokens(final);
       if (actual === estimatedTokens) break;
       estimatedTokens = actual;
@@ -1103,57 +1114,53 @@ async function fitOrientToBudget(
     }
     return final;
   };
+  const fitsBudget = (final: Record<string, unknown>) => servedTokens(final) <= tokenBudget;
 
   const base = await withIndexStaleness(absDir, payload, llmCtx);
-  if (servedTokens(draft(base, {})) <= tokenBudget) {
-    const keyOf = (name: string, filePath: string) => `${name}\0${filePath}`;
+  const baseFinal = finish(base, {});
+  if (fitsBudget(baseFinal)) {
     const extend = (count: number) => {
-      const added = extras.functions.slice(0, count);
-      const keys = new Set(added.map(f => keyOf(f.name, f.filePath)));
+      const added = extras.slice(0, count);
       return {
         ...payload,
-        relevantFiles: [...new Set([...payload.relevantFiles, ...added.map(f => f.filePath)])],
-        relevantFunctions: [...payload.relevantFunctions, ...added],
-        callPaths: [...payload.callPaths, ...extras.callPaths.filter(p => keys.has(keyOf(p.function, p.filePath)))],
+        relevantFiles: [...new Set([...payload.relevantFiles, ...added.map(pair => pair.fn.filePath)])],
+        relevantFunctions: [...payload.relevantFunctions, ...added.map(pair => pair.fn)],
+        callPaths: [...payload.callPaths, ...added.map(pair => pair.path)],
       };
     };
     const receiptFor = (count: number): Record<string, unknown> => (count > 0 ? { addedBeyondLimit: count } : {});
+    // Measured without the staleness note for the added files (it only grows), then confirmed with it.
     let lo = 0;
-    let hi = extras.functions.length;
+    let hi = extras.length;
     while (lo < hi) {
       const mid = Math.ceil((lo + hi) / 2);
-      if (servedTokens(draft(extend(mid), receiptFor(mid))) <= tokenBudget) lo = mid;
+      if (fitsBudget(finish(extend(mid), receiptFor(mid)))) lo = mid;
       else hi = mid - 1;
     }
-    // The staleness note covers the files actually cited, so it is recomputed for the extended answer.
-    let count = lo;
-    let body: Record<string, unknown> = count > 0 ? await withIndexStaleness(absDir, extend(count), llmCtx) : base;
-    while (count > 0 && servedTokens(draft(body, receiptFor(count))) > tokenBudget) {
-      count--;
-      body = count > 0 ? await withIndexStaleness(absDir, extend(count), llmCtx) : base;
+    for (let count = lo; count > 0; count--) {
+      const final = finish(await withIndexStaleness(absDir, extend(count), llmCtx), receiptFor(count));
+      if (fitsBudget(final)) return final;
     }
-    return finish(body, receiptFor(count));
+    return baseFinal;
   }
 
-  const keyOf = (name: string, filePath: string) => `${name}\0${filePath}`;
   const fit = fitPayloadToBudget(base, tokenBudget, ORIENT_BUDGET_TRIM_ORDER, { relevantFunctions: 1 }, (trimmed, omitted) => {
-    const kept = new Set((trimmed.relevantFunctions as OrientFunction[]).map(f => keyOf(f.name, f.filePath)));
+    const kept = (trimmed.relevantFunctions as OrientFunction[]).length;
     const receipt: Record<string, number> = { ...omitted };
     const allPaths = (trimmed.callPaths ?? []) as OrientCallPath[];
-    const callPaths = allPaths.filter(p => kept.has(keyOf(p.function, p.filePath)));
+    // Functions and call paths share positions, so the paths of dropped functions drop with them.
+    const callPaths = allPaths.slice(0, kept);
     if (allPaths.length > callPaths.length) receipt.callPaths = allPaths.length - callPaths.length;
     const droppedFunctions = omitted.relevantFunctions ?? 0;
-    return draft({
+    return finish({
       ...trimmed,
       callPaths,
       ...(droppedFunctions > 0
-        ? { relevantFunctionsOmitted: omissionNote(droppedFunctions, 'raise tokenBudget, or call search_code') }
+        ? { relevantFunctionsOmitted: omissionNote(droppedFunctions, 'raise tokenBudget, or call search_code; relevantFiles still lists every file this answer covers') }
         : {}),
     }, Object.keys(receipt).length > 0 ? { omitted: receipt } : {});
   }, servedTokens);
-  const { budget, ...body } = fit.payload;
-  const omitted = (budget as { omitted?: Record<string, number> }).omitted;
-  return finish(body, omitted ? { omitted } : {});
+  return fit.payload;
 }
 
 // ============================================================================
