@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  validateToolArgs, withToolTimeout, ToolTimeoutError, toolTimeoutMs,
+  validateToolArgs, exampleToolArguments, invalidArgumentsMessage, withToolTimeout, ToolTimeoutError, toolTimeoutMs,
   capOutput, capStructuredResult, classifyToolError,
 } from './tool-guard.js';
 
@@ -34,8 +34,13 @@ describe('validateToolArgs', () => {
   it('rejects a missing required field', () => {
     expect(validateToolArgs({ depth: 2 }, schema)).toMatch(/directory.*type string.*example: "example"/);
   });
-  it('rejects a wrong type', () => {
-    expect(validateToolArgs({ directory: 5 }, schema)).toMatch(/directory/);
+  it('rejects a wrong type with the expected type and an example of it', () => {
+    expect(validateToolArgs({ directory: 5 }, schema)).toBe('/directory: expected type string, got integer; example: "example"');
+    expect(validateToolArgs({ directory: '/p', depth: 'deep' }, schema)).toBe('/depth: expected type number, got string; example: 1');
+  });
+  it('gives an out-of-enum value an allowed example', () => {
+    const enumSchema = { type: 'object', properties: { kind: { type: 'string', enum: ['calls', 'dead'] } } };
+    expect(validateToolArgs({ kind: 'nope' }, enumSchema)).toMatch(/\/kind: value "nope" not in enum .*; example: "calls"$/);
   });
   it('passes when no schema is declared', () => {
     expect(validateToolArgs({ anything: true }, undefined)).toBeNull();
@@ -70,6 +75,32 @@ describe('validateToolArgs', () => {
       required: ['tasks'],
     };
     expect(validateToolArgs({ tasks: [{}] }, nested)).toMatch(/\/tasks\/0\/id.*type string.*example: "example"/);
+  });
+});
+
+// change: adopt-mcp-protocol-conformance — validation failures are self-correctable tool errors.
+describe('invalidArgumentsMessage', () => {
+  const tool = {
+    type: 'object',
+    properties: {
+      directory: { type: 'string' }, functionName: { type: 'string' }, maxDepth: { type: 'number', minimum: 1 },
+      kind: { type: 'string', enum: ['calls', 'dead'] },
+    },
+    required: ['directory', 'functionName', 'maxDepth', 'kind'],
+  };
+  it('builds a corrected example from every required parameter', () => {
+    expect(exampleToolArguments(tool)).toEqual({
+      directory: '/absolute/path/to/project', functionName: 'example', maxDepth: 1, kind: 'calls',
+    });
+    expect(exampleToolArguments(undefined)).toEqual({});
+  });
+  it('names the tool, the parameter and its shape, and a call to retry with', () => {
+    const detail = validateToolArgs({ directory: '/p', functionName: 'f', maxDepth: 2 }, tool)!;
+    expect(invalidArgumentsMessage('get_subgraph', detail, tool)).toBe(
+      'Invalid arguments for "get_subgraph": /kind: missing required property; expected type string; example: "calls". ' +
+      'Fix the arguments and call "get_subgraph" again, for example with: ' +
+      '{"directory":"/absolute/path/to/project","functionName":"example","maxDepth":1,"kind":"calls"}',
+    );
   });
 });
 

@@ -7,7 +7,9 @@
  *
  *   - Input validation BEFORE the handler runs, against the tool's own declared
  *     `inputSchema` (reusing the hand-written JSON-Schema-subset validator from
- *     spec-05 — no Ajv). Invalid args map to JSON-RPC -32602 (spec-12).
+ *     spec-05 — no Ajv). Invalid args are a Tool Execution Error (`isError: true`) whose text
+ *     names the parameter, the expected shape, and a corrected example call, so the calling
+ *     model can self-correct (change: adopt-mcp-protocol-conformance; SEP-1303).
  *   - Per-tool timeout via Promise.race, with slow tools overridden.
  *   - Output size cap: oversized results are truncated DETERMINISTICALLY with a
  *     `truncated: true` note telling the agent how to narrow the query — never a
@@ -57,6 +59,45 @@ function schemaAtPath(schema: Record<string, unknown>, path: string): Record<str
   return current;
 }
 
+/** A value of the shape a property schema declares, for a corrected-call example. */
+function exampleValue(propertySchema: Record<string, unknown>, key?: string): unknown {
+  if (Array.isArray(propertySchema.enum) && propertySchema.enum.length > 0) return propertySchema.enum[0];
+  if ('const' in propertySchema) return propertySchema.const;
+  const expected = Array.isArray(propertySchema.type)
+    ? propertySchema.type.join('|')
+    : typeof propertySchema.type === 'string' ? propertySchema.type : 'value';
+  if (expected.includes('string')) return key === 'directory' ? '/absolute/path/to/project' : 'example';
+  if (expected.includes('number') || expected.includes('integer')) {
+    return typeof propertySchema.minimum === 'number' ? propertySchema.minimum : 1;
+  }
+  if (expected.includes('boolean')) return true;
+  if (expected.includes('array')) return [];
+  return {};
+}
+
+/**
+ * A minimal argument object that satisfies a tool's top-level `required` list, each value an
+ * example of its declared shape — the "corrected example" half of an actionable validation error.
+ */
+export function exampleToolArguments(inputSchema: unknown): Record<string, unknown> {
+  if (!inputSchema || typeof inputSchema !== 'object') return {};
+  const schema = inputSchema as Record<string, unknown>;
+  const properties = schema.properties && typeof schema.properties === 'object'
+    ? schema.properties as Record<string, Record<string, unknown>>
+    : {};
+  const required = Array.isArray(schema.required) ? schema.required.filter((k): k is string => typeof k === 'string') : [];
+  return Object.fromEntries(required.map(key => [key, exampleValue(properties[key] ?? {}, key)]));
+}
+
+/**
+ * The text of an actionable Tool Execution Error for rejected arguments: the tool, what is wrong
+ * (parameter path and expected shape), and a corrected example call to retry with.
+ */
+export function invalidArgumentsMessage(toolName: string, detail: string, inputSchema: unknown): string {
+  return `Invalid arguments for "${toolName}": ${detail}. Fix the arguments and call "${toolName}" again, ` +
+    `for example with: ${JSON.stringify(exampleToolArguments(inputSchema))}`;
+}
+
 /**
  * Validate args against a tool's inputSchema. Returns a human-readable message on
  * failure, or null when valid (or when no schema is declared).
@@ -74,20 +115,19 @@ export function validateToolArgs(args: unknown, inputSchema: unknown): string | 
   const errors = validateAgainstSchema(args ?? {}, schema);
   if (errors.length === 0) return null;
   return errors.map(error => {
-    if (error.path && error.message === 'missing required property') {
-      const propertySchema = schemaAtPath(schema, error.path);
+    if (!error.path) return error.message;
+    const propertySchema = schemaAtPath(schema, error.path);
+    const example = JSON.stringify(exampleValue(propertySchema));
+    if (error.message === 'missing required property') {
       const expected = Array.isArray(propertySchema.type)
         ? propertySchema.type.join('|')
         : typeof propertySchema.type === 'string' ? propertySchema.type : 'value';
-      const example = Array.isArray(propertySchema.enum) && propertySchema.enum.length > 0
-        ? propertySchema.enum[0]
-        : expected.includes('string') ? 'example'
-          : expected.includes('number') || expected.includes('integer') ? 1
-            : expected.includes('boolean') ? true
-              : expected.includes('array') ? [] : {};
-      return `${error.path}: missing required property; expected type ${expected}; example: ${JSON.stringify(example)}`;
+      return `${error.path}: missing required property; expected type ${expected}; example: ${example}`;
     }
-    return error.path ? `${error.path}: ${error.message}` : error.message;
+    // Every other rejection of a known parameter carries an example of the declared shape too.
+    return Object.keys(propertySchema).length > 0
+      ? `${error.path}: ${error.message}; example: ${example}`
+      : `${error.path}: ${error.message}`;
   }).join('; ');
 }
 

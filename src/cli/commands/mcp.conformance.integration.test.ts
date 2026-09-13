@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { ErrorCode, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
+import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS } from './mcp.js';
 import { startServe } from './serve.js';
 import { SERVE_PROTOCOL_VERSION } from './serve-descriptor.js';
@@ -148,12 +148,15 @@ describe('spec-12 MCP protocol conformance (via SDK Client over stdio)', () => {
     }
   });
 
-  it('maps an invalid-argument CallTool to JSON-RPC -32602 (not an isError result)', async () => {
+  it('returns an invalid-argument CallTool as a self-correctable isError result, not -32602', async () => {
     if (guard()) return;
-    // get_subgraph requires functionName; omitting it must be a protocol error.
-    await expect(
-      client!.callTool({ name: 'get_subgraph', arguments: { directory: REPO_ROOT } }),
-    ).rejects.toMatchObject({ code: ErrorCode.InvalidParams }); // -32602
+    // get_subgraph requires functionName; omitting it is a Tool Execution Error that names the
+    // parameter and carries a corrected example (change: adopt-mcp-protocol-conformance; SEP-1303).
+    const res = await client!.callTool({ name: 'get_subgraph', arguments: { directory: REPO_ROOT } });
+    expect(res.isError).toBe(true);
+    const text = (res.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+    expect(text).toMatch(/Invalid arguments for "get_subgraph": \/functionName: missing required property/);
+    expect(text).toMatch(/call "get_subgraph" again, for example with: \{.*"functionName":"example"/);
   });
 
   it('returns an unknown tool as an isError result (documented posture), not a crash', async () => {
@@ -212,14 +215,14 @@ describe('fix-mcp-argument-contract self-contained stdio acceptance', () => {
         '  const total = amount + 1;',
         '  return total;',
       ]);
-      await expect(c.callTool({
+      expect((await c.callTool({
         name: 'get_function_body',
         arguments: { filePath: 'src/payments.ts', functionName: 'chargeCard', focus: 'total' },
-      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
-      await expect(c.callTool({
+      })).isError).toBe(true);
+      expect((await c.callTool({
         name: 'get_function_body',
         arguments: { filePath: 'src/payments.ts', functionName: 'chargeCard', focusKind: 'variable' },
-      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      })).isError).toBe(true);
     } finally {
       await c.close();
       rmSync(dir, { recursive: true, force: true });
@@ -264,10 +267,12 @@ describe('fix-mcp-argument-contract self-contained stdio acceptance', () => {
     const c = new Client({ name: 'strict-write-probe', version: '1.0.0' });
     await c.connect(t);
     try {
-      await expect(c.callTool({
+      const rejected = await c.callTool({
         name: 'remember',
         arguments: { directory: missingTarget, content: 'must not persist', anchor: 'chargeCard' },
-      })).rejects.toThrow(/anchor.*did you mean.*anchors/i);
+      });
+      expect(rejected.isError).toBe(true);
+      expect(JSON.stringify(rejected.content)).toMatch(/anchor.*did you mean.*anchors/i);
       expect(existsSync(missingTarget)).toBe(false);
     } finally {
       await c.close();
@@ -285,8 +290,9 @@ describe('fix-mcp-argument-contract invalid launch root', () => {
     await c.connect(t);
     rmSync(dir, { recursive: true, force: true });
     try {
-      await expect(c.callTool({ name: 'list_spec_domains', arguments: {} }))
-        .rejects.toThrow(/launch root.*example.*directory/i);
+      const rejected = await c.callTool({ name: 'list_spec_domains', arguments: {} });
+      expect(rejected.isError).toBe(true);
+      expect(JSON.stringify(rejected.content)).toMatch(/launch root.*example.*directory/i);
     } finally {
       await c.close();
     }

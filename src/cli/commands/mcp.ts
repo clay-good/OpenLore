@@ -30,6 +30,7 @@ import { Command } from 'commander';
 import { loadMcpSdk, OptionalFeatureError } from './optional-features.js';
 import {
   validateToolArgs,
+  invalidArgumentsMessage,
   withToolTimeout,
   capStructuredResult,
   classifyToolError,
@@ -2315,7 +2316,10 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   detect_changes: _RO, get_health_map: _RO, get_surprising_connections: _RO, record_decision: _RW, list_decisions: _RO,
   approve_decision: _RWI, reject_decision: _RWI, sync_decisions: _RWI,
   remember: _RW, recall: _RO, verify_claim: _RO,
-  spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RO,
+  // Audited writers (change: adopt-mcp-protocol-conformance): `persist: true` writes a certificate,
+  // and federation_status adopts newly indexed fingerprints into the federation manifest.
+  spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RWI, federation_status: _RWI,
+  get_landmarks: _RO, get_map: _RO, find_path: _RO,
   plan_parallel_work: _RO, map_in_flight_conflicts: _RO, get_language_support: _RO,
   report_coverage_gaps: _RO,
   certify_public_surface: _RO,
@@ -2326,6 +2330,9 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   analyze_env_impact: _RO,
   locate_symbol_span: _RO,
 };
+
+/** Tool names with an explicit read/write annotation entry, for the coverage guard. */
+export const ANNOTATED_TOOL_NAMES: readonly string[] = Object.keys(TOOL_ANNOTATIONS);
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
 // Everything else is local, deterministic, closed-world analysis.
@@ -2346,7 +2353,10 @@ function toolTitle(name: string): string {
 export function toolAnnotations(name: string): Record<string, unknown> {
   return {
     title: toolTitle(name),
-    ...(TOOL_ANNOTATIONS[name] ?? _RO),
+    // No fallback (change: adopt-mcp-protocol-conformance): a tool without an explicit entry carries
+    // no read/write hints, which MCP clients read as the conservative defaults (not read-only,
+    // possibly destructive) — never as read-only. `mcp-annotations.test.ts` fails CI on the gap.
+    ...(Object.prototype.hasOwnProperty.call(TOOL_ANNOTATIONS, name) ? TOOL_ANNOTATIONS[name] : {}),
     openWorldHint: OPEN_WORLD_TOOLS.has(name),
     ...(capabilityFamily(name) ? { family: capabilityFamily(name) } : {}),
   };
@@ -2634,7 +2644,6 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     InitializeRequestSchema,
     ListToolsRequestSchema,
     McpError,
-    ErrorCode,
     LATEST_PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
   } = sdk.types;
@@ -2742,6 +2751,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // Agent identity captured from initialize handshake
   let agentName = 'unknown';
   let agentVersion = 'unknown';
+  // WATCH (change: adopt-mcp-protocol-conformance): the MCP 2026-07-28 release-candidate direction
+  // (a stateless core, `initialize` removed) would bypass this custom handler, which is where the
+  // client identity, the negotiated version, the real package version, and the `instructions`
+  // pointer are set. Revisit when that revision is final; nothing is built against the draft.
   server.setRequestHandler(InitializeRequestSchema, async (request) => {
     agentName = request.params.clientInfo?.name ?? 'unknown';
     agentVersion = request.params.clientInfo?.version ?? 'unknown';
@@ -2816,7 +2829,13 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       if (argError) {
         // Do not emit under `directory` here: it has not been validated yet, and
         // telemetry itself creates files. A rejected request must be side-effect free.
-        throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for "${name}": ${argError}`);
+        // A Tool Execution Error, not a JSON-RPC -32602: hosts often swallow protocol errors, while
+        // an `isError` result reaches the model, which can retry with the example
+        // (change: adopt-mcp-protocol-conformance; SEP-1303).
+        return {
+          content: [{ type: 'text', text: invalidArgumentsMessage(name, argError, toolDef.inputSchema) }],
+          isError: true,
+        };
       }
       try {
         directory = await validateDirectory(directory);
@@ -2826,7 +2845,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         const defaultHint = hadExplicitDirectory
           ? ''
           : ' The server launch root could not be used; replace the placeholder in this example with an existing absolute project path: {"directory":"/absolute/path/to/project"}.';
-        throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for "${name}": /directory: ${detail}.${defaultHint}`);
+        return {
+          content: [{ type: 'text', text: invalidArgumentsMessage(name, `/directory: ${detail}.${defaultHint}`, toolDef.inputSchema) }],
+          isError: true,
+        };
       }
     }
 
@@ -3124,8 +3146,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
 
       return { content };
     } catch (err) {
-      // A thrown McpError is a protocol-level error (e.g. -32602) — let the SDK
-      // serialize it as a JSON-RPC error response, not a tool isError result.
+      // A thrown McpError is a protocol-level error — let the SDK serialize it as a JSON-RPC
+      // error response. Argument validation no longer throws one (it returns an `isError` result).
       if (err instanceof McpError) throw err;
       // Error normalization (spec-10): a stable code taxonomy, distinguishing
       // "repo not analyzed yet" (actionable) from real failures and timeouts.

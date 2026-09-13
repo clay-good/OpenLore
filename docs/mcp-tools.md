@@ -61,7 +61,7 @@ live registry.
 | `navigation` | 10 | 3,533 | 3,800 |
 | `memory` | 3 | 1,216 | 1,300 |
 | `verify` | 3 | 1,262 | 1,350 |
-| `federation` | 10 | 3,858 | 4,100 |
+| `federation` | 10 | 3,859 | 4,100 |
 | `coordination` | 5 | 2,487 | 2,650 |
 | `substrate` | 15 | 5,131 | 5,500 |
 | `full` | 76 | 24,231 | 25,500 |
@@ -75,6 +75,10 @@ conclusion. Use `openlore` CLI commands for scripts, CI, or shell-capable agents
 on demand and want zero standing context cost before invocation. Paired capabilities route through
 the same conclusion implementation. Successful semantic conclusions agree before transport;
 protocol error envelopes, human rendering, and MCP's final byte cap may differ.
+
+Rejected arguments are a tool result, not a protocol error. A call with a missing, unknown, or
+wrongly typed parameter returns `isError: true` with text that names the parameter, the expected
+shape, and a corrected example call, so the model can retry. Nothing runs, and nothing is written.
 
 The shared input projection is guarded. MCP additionally exposes `orient.rankBy`,
 `search_code.mode`, `blast_radius.depth` / `maxSymbols`, and

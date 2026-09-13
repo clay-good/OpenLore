@@ -1,6 +1,6 @@
 # Adopt MCP protocol conformance: guarded annotations, output schemas, actionable errors, elicitation
 
-> Status: PROPOSED (2026-07-03, e2e audit). Brings the MCP surface up to the now-standard protocol
+> Status: BUILT (2026-09-12), narrowed — see *Scope as built*. Originally PROPOSED (2026-07-03, e2e audit). Brings the MCP surface up to the now-standard protocol
 > features it is ideally placed to use — all local, all deterministic, no behavior change to any
 > conclusion. Prior art: the MCP specification rev 2025-06-18
 > (https://modelcontextprotocol.io/specification/2025-06-18) and SEP-1303 (tool-error shape).
@@ -56,6 +56,21 @@
 Deliberately NOT borrowed from the protocol surface: server-initiated sampling (would put an LLM in
 the hot path), `listChanged` (the tool list is static per session — advertising it would be
 dishonest, per the existing comment at `mcp.ts:2413-2414`), and remote/HTTP transports (local-first).
+
+## Scope as built
+
+- **Built:** the annotation guard (no `?? _RO` fallback; a coverage test plus an audited
+  read-only/mutating check), actionable `isError` validation errors with a corrected example call,
+  and the WATCH comment on the custom initialize handler.
+- **Deferred — `outputSchema` + `structuredContent`:** since this proposal, the default surface gained
+  guarded standing-context token budgets (`STANDING_CONTEXT_BUDGETS`, at most 10% headroom over a
+  measured baseline, published in `docs/mcp-tools.md`). Output schemas for the 15 `substrate` tools
+  would be a large standing-cost increase on the surface ADR-0023 keeps lean, for a benefit no
+  current client consumes. It needs its own measured change.
+- **Deferred — elicitation for decision approval:** the decisions gate runs in a git pre-commit hook,
+  outside any MCP session, so no in-flight MCP request exists to carry an elicitation when it fires.
+  An approval flow inside `approve_decision` changes the human-authorization design and needs its own
+  change.
 
 ## Why this is in scope
 

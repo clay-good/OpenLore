@@ -36,14 +36,18 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 0
+## In flight — 1
+
+`adopt-mcp-protocol-conformance` — guarded, audited tool annotations and actionable (`isError`)
+argument-validation errors; output schemas and elicitation deferred. On a branch with its `change:`
+marker in `src/`.
 
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 102
+## To build — 101
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -134,7 +138,6 @@ trust boundary for served content.
 | `add-symbol-provenance-conclusions` | when did this exist, what changed it last, what moves with it |
 | `add-vuln-reachability-triage` | is the vulnerable function actually reachable from my code? |
 | `adopt-agent-context-interop` | AGENTS.md first-class, the orient skill portable, the injected digest evidence-slim |
-| `adopt-mcp-protocol-conformance` | guarded annotations, output schemas, actionable errors, elicitation |
 | `adopt-mcp-tasks-and-cache-hints` | cache hints carry the lease, tasks carry long builds |
 | `adopt-spec-link-status-vocabulary` | name "Unwanted", "Predated", and shallow-vs-deep coverage, from OpenFastTrace |
 | `align-api-layer-with-cli-core` | The programmatic API is a fork of the CLI pipeline, not a facade over it — realign and make its contract embedder-safe |
