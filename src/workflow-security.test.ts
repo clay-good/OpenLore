@@ -17,6 +17,7 @@
  *   3. `run:` scripts take untrusted values through `env:`, never inline `${{ }}`.
  *   4. Every executed workflow declares a top-level `permissions` block.
  *   5. Every job declares its own `permissions` block.
+ *   6. Every repository path has an explicit code owner.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -266,6 +267,22 @@ describe('workflow security: least-privilege tokens', () => {
         `"contents: write" to publish a release) is visible in review and does not silently ` +
         `apply to the others.\n\n` + offenders.join('\n')
     ).toEqual([]);
+  });
+});
+
+describe('workflow security: review ownership', () => {
+  it('designates a repository owner for every path', () => {
+    const codeowners = read(join(REPO_ROOT, '.github', 'CODEOWNERS'));
+    const globalRule = codeowners
+      .split('\n')
+      .map(line => line.replace(/\s+#.*$/, '').trim())
+      .filter(line => line && !line.startsWith('#'))
+      .find(line => line.split(/\s+/)[0] === '*');
+
+    expect(
+      globalRule?.split(/\s+/).slice(1),
+      'CODEOWNERS must assign every path to the repository owner so branch protection can require an accountable review.'
+    ).toContain('@clay-good');
   });
 });
 
