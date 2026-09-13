@@ -190,7 +190,8 @@ function composeView(raw: DynamicBoundaryReport, directResolvedOnly: boolean): D
     const sites = bound.length > 0
       ? [...f.sites, ...bound].sort((a, b) => a.line - b.line || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
       : f.sites;
-    if (sites.length === 0) return [];
+    // A record with no listed site can still carry an exact count of unretained constructs; it stays.
+    if (sites.length === 0 && (f.totalSites ?? 0) === 0) return [];
     const { bound: _hidden, ...rest } = f;
     void _hidden;
     return [{

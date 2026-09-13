@@ -7,15 +7,20 @@
 The call-graph builder SHALL recover a call edge for a **literal dispatch table**: a module-private
 (not exported) JavaScript/TypeScript `const` object of literal keys to names, whose name is used
 nowhere in its file except its declaration, a type query, and as the receiver of an immediately
-invoked subscript (`NAME[k]()`), in a file that evaluates no code (`eval`, `new Function`).
+invoked subscript (`NAME[k]()`), in a file that neither evaluates code nor opens a dynamic scope
+(any reference to `eval`, `Function(…)` with or without `new`, or a `with` statement).
 
 Each entry SHALL bind by the span of its same-file module-level declaration — a function declaration
-or a `const` arrow or function expression, bound once, never written, and not referring to `this` —
+or a `const` arrow or function expression, bound once (counting a `var` nested in a top-level block),
+never written (including through a destructuring or `for` target), and not referring to `this` —
 and never by name. An entry bound any other way, including by an import, SHALL keep the construct a
 site with refusal reason `unresolved-in-file-scope`. A literal key SHALL bind only its own entry; a
 non-literal key SHALL bind every entry or none, and SHALL bind none when the table's distinct
 targets exceed the existing synthesis fan-out cap. Keys SHALL compare as JavaScript property keys
-(`1` and `1.0` are one key); a key carrying an escape SHALL NOT be decoded.
+(`1` and `1.0` are one key); a key carrying an escape, a legacy octal or separator number, or a
+`__proto__` key (which sets the prototype rather than an entry) SHALL NOT be accepted. A variable
+key's target set covers the table's own entries only; a prototype polluted elsewhere is outside what
+a single file can establish.
 
 The following SHALL NOT be recovered and SHALL remain disclosed sites:
 
@@ -39,7 +44,9 @@ tuning constant. An emitted edge SHALL NOT duplicate an edge already present for
 caller→callee pair, and the class-hierarchy pass's exclusion set SHALL cover literal-reflection
 edges.
 
-A full analysis SHALL produce the same synthesized edge set regardless of file order. A rebuild that
+A file whose recorded constructs exceed the per-file retention bound SHALL bind nothing, so every
+retained construct stays a listed site and the unretained ones stay counted. A full analysis SHALL
+produce the same synthesized edge set regardless of file order. A rebuild that
 supplies only part of the repository's nodes SHALL bind nothing and SHALL disclose every candidate,
 and an incremental update SHALL re-derive the boundary record of every caller file it rebuilds, so
 no construct is left with neither an edge nor a site.

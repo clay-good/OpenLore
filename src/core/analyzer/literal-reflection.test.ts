@@ -148,12 +148,44 @@ function one() { return TABLE["k3"](); }
     }
   });
 
+  it('a write through a pattern, a nested var, eval in any spelling, with, Function, or __proto__ defeats a table', async () => {
+    const entryNotLocal = [
+      'function createUser() { return 1; }\nfunction evil() { return 2; }\n[createUser] = [evil];\nconst H = { a: createUser };\nexport function d(k: string) { return H[k](); }',
+      'function createUser() { return 1; }\nfunction evil() { return 2; }\n({ createUser } = { createUser: evil });\nconst H = { a: createUser };\nexport function d(k: string) { return H[k](); }',
+      'function createUser() { return 1; }\nfunction evil() { return 2; }\nfor (createUser of [evil]);\nconst H = { a: createUser };\nexport function d(k: string) { return H[k](); }',
+    ];
+    for (const content of entryNotLocal) {
+      const g = await build(ts(content));
+      expect(reflective(g), content).toEqual([]);
+      expect(refusalsIn(g, 'a.ts'), content).toEqual(['unresolved-in-file-scope']);
+    }
+    const nestedVar = await build([{ path: 'a.js', language: 'JavaScript', content: 'function createUser() { return 1; }\nfunction evil() { return 2; }\nif (true) { var createUser = evil; }\nconst H = { a: createUser };\nexport function d(k) { return H[k](); }\n' }]);
+    expect(reflective(nestedVar)).toEqual([]);
+    expect(refusalsIn(nestedVar, 'a.js')).toEqual(['unresolved-in-file-scope']);
+
+    const noTable = [
+      { path: 'a.ts', language: 'TypeScript', content: 'function f() { return 1; }\nconst H = { a: f };\nexport function d(k: string) { (eval)("H.b = f"); return H[k](); }\n' },
+      { path: 'a.js', language: 'JavaScript', content: 'function f() { return 1; }\nconst H = { a: f };\nfunction d(k, o) { with (o) { return H[k](); } }\n' },
+      { path: 'a.ts', language: 'TypeScript', content: 'function f() { return 1; }\nconst H = { a: f };\nexport function d(k: string) { Function("return 1")(); return H[k](); }\n' },
+      { path: 'a.ts', language: 'TypeScript', content: 'function f() { return 1; }\nconst H = { __proto__: f, a: f };\nexport function d(k: string) { return H[k](); }\n' },
+    ];
+    for (const file of noTable) {
+      const g = await build([file]);
+      expect(reflective(g), file.content).toEqual([]);
+      expect(sitesIn(g, file.path).filter(s => s.kind === 'computed-member').map(s => s.refusal), file.content)
+        .toEqual(['no-static-target']);
+    }
+  });
+
   it('keys compare the way JavaScript does, and an escaped key is not guessed at', async () => {
     const numeric = await build(ts('function f() { return 1; }\nfunction g() { return 2; }\nconst T = { 1: f, 2: g };\nexport function d() { return T[1.0](); }\n'));
     expect(reflectivePairs(numeric)).toEqual(['d->f']);
 
     const template = await build(ts('function f() { return 1; }\nfunction g() { return 2; }\nconst T = { a: f, b: g };\nexport function d() { return T[`a`](); }\n'));
     expect(reflectivePairs(template)).toEqual(['d->f']);
+
+    const octal = await build([{ path: 'a.js', language: 'JavaScript', content: 'function f() { return 1; }\nconst T = { 010: f };\nexport function e() { return T[10](); }\n' }]);
+    expect(reflective(octal)).toEqual([]);
 
     const escaped = await build(ts('function f() { return 1; }\nconst T = { "\\u0061": f };\nexport function d(k: string) { return T[k](); }\n'));
     expect(reflective(escaped)).toEqual([]);
@@ -280,10 +312,15 @@ export function d(k: string) {
     expect(bound.dynamicBoundaryByFile?.get('a.ts')?.sites.map(s => s.refusal)).toEqual(['no-static-target']);
     expect(bound.dynamicBoundaryByFile?.get('a.ts')?.totalSites).toBeUndefined();
 
+    // Past the retention budget the file binds nothing: every retained construct stays a listed site,
+    // the real boundary is listed first, and the total counts every construct exactly once.
     const past = await build(ts(`function f() { return 1; }\nconst T = { a: f };\nexport function d(o: any, k: string) {\n${calls(DYNAMIC_BOUNDARY_SITE_CAP + 10)}\n  o[k]();\n}\n`));
-    // One unbound computed call, plus the ten constructs past the retention budget that were never decided.
-    expect(past.dynamicBoundaryByFile?.get('a.ts')?.sites.map(s => s.refusal)).toEqual(['no-static-target']);
-    expect(past.dynamicBoundaryByFile?.get('a.ts')?.totalSites).toBe(11);
+    const pastRecord = past.dynamicBoundaryByFile?.get('a.ts');
+    expect(reflective(past)).toEqual([]);
+    expect(pastRecord?.bound).toBeUndefined();
+    expect(pastRecord?.sites).toHaveLength(DYNAMIC_BOUNDARY_SITE_CAP);
+    expect(pastRecord?.sites.filter(s => s.refusal === 'no-static-target')).toHaveLength(1);
+    expect(pastRecord?.totalSites).toBe(DYNAMIC_BOUNDARY_SITE_CAP + 10 + 1);
 
     const unbound = await build(ts(`import { ext } from 'lib';\nconst T = { a: ext };\nexport function d(o: any, k: string) {\n${calls(DYNAMIC_BOUNDARY_SITE_CAP + 10)}\n  o[k](); o[k](); o[k]();\n}\n`));
     const record = unbound.dynamicBoundaryByFile?.get('a.ts');
@@ -291,6 +328,26 @@ export function d(k: string) {
     // All three real boundaries are listed ahead of the deferred literal-key sites.
     expect(record?.sites.filter(s => s.refusal === 'no-static-target')).toHaveLength(3);
     expect(record?.totalSites).toBe(DYNAMIC_BOUNDARY_SITE_CAP + 10 + 3);
+  });
+
+  it('bound variable-key dispatches never crowd a real boundary out, and strict counts every bound one', async () => {
+    const calls = Array.from({ length: DYNAMIC_BOUNDARY_SITE_CAP }, () => '  H[k]();').join('\n');
+    const g = await build(ts(`function fa() { return 1; }\nconst H = { a: fa };\nexport function d(o: any, k: string, x: string) {\n${calls}\n  o[x]();\n}\n`));
+    const record = g.dynamicBoundaryByFile?.get('a.ts');
+    // The real boundary keeps its own budget, and the strict view counts every bound construct.
+    expect(record?.sites.map(s => s.refusal)).toEqual(['no-static-target']);
+    expect(record?.totalSites).toBeUndefined();
+    expect(record?.bound).toHaveLength(DYNAMIC_BOUNDARY_SITE_CAP);
+  });
+
+  it('a file past the budget with only table dispatches still discloses them', async () => {
+    const calls = Array.from({ length: DYNAMIC_BOUNDARY_SITE_CAP + 5 }, () => '  H[k]();').join('\n');
+    const g = await build(ts(`function fa() { return 1; }\nconst H = { a: fa };\nexport function d(k: string) {\n${calls}\n}\n`));
+    const record = g.dynamicBoundaryByFile?.get('a.ts');
+    expect(reflective(g)).toEqual([]);
+    expect(record?.sites).toHaveLength(DYNAMIC_BOUNDARY_SITE_CAP);
+    expect(record?.totalSites).toBe(DYNAMIC_BOUNDARY_SITE_CAP + 5);
+    expect(buildDynamicBoundaryReport([record!])?.totalSites).toBe(DYNAMIC_BOUNDARY_SITE_CAP + 5);
   });
 
   it('a single-file derivation reports a table as file-scoped, never as runtime-computed', async () => {
@@ -343,6 +400,12 @@ describe('a directly-resolved-only consumer still sees what an edge discharged',
     expect(await loadDynamicBoundaryReport(root)).toBeNull();
     const strict = await loadDynamicBoundaryReport(root, undefined, { directResolvedOnly: true });
     expect(strict?.files[0].sites.map(s => s.refusal)).toEqual(['synthesized-binding']);
+  });
+
+  it('a record whose only disclosure is an exact count is still served', async () => {
+    await writeArtifacts([{ filePath: 'a.ts', language: 'TypeScript', sites: [], totalSites: 5, truncated: true, bound: [boundSite] }]);
+    expect((await loadDynamicBoundaryReport(root))?.files[0].totalSites).toBe(5);
+    expect((await loadDynamicBoundaryReport(root, undefined, { directResolvedOnly: true }))?.files[0].totalSites).toBe(6);
   });
 
   it('an unrecognised refusal from a newer writer does not drop the file', async () => {

@@ -57,6 +57,10 @@ export function resolveLiteralReflection(input: LiteralReflectionInput): Literal
   const result: LiteralReflectionResult = { edges: [], bound: new Set(), refusals: new Map() };
   const work: Array<{ filePath: string; c: AttributedCandidate & { table: NonNullable<AttributedCandidate['table']> } }> = [];
   for (const [filePath, { candidates }] of input.candidatesByFile) {
+    // A file whose matcher counted more constructs than it retained binds nothing. The unretained
+    // constructs are disclosed only as a count, so a binding that emptied the listed sites would leave
+    // that count with no line to name — and a conclusion with nothing to qualify it.
+    if (candidates.some(c => (c.matchedTotal ?? 0) > candidates.length)) continue;
     for (const c of candidates) if (c.table) work.push({ filePath, c: c as typeof work[number]['c'] });
   }
   if (work.length === 0) return result;

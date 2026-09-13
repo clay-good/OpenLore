@@ -973,7 +973,9 @@ export function matchDynamicBoundaries(
             record('computed-member', n);
           }
         } else if (!staticIndex && !isGenericSubscription(source, fn, spec)) {
-          const c = record('computed-member', n);
+          // A dispatch into a stable table is retained under the recoverable budget too, so a file of
+          // bindable table dispatches can never crowd a real boundary out of the retained candidates.
+          const c = record('computed-member', n, undefined, !!table);
           if (c && table) c.table = tableFact(table, [...table.entries.values()]);
         }
       } else if (text) {
@@ -1165,6 +1167,8 @@ function pushChildren(stack: DynamicBoundaryNode[], n: DynamicBoundaryNode): voi
 function staticKeyOf(source: string, node: DynamicBoundaryNode): string | undefined {
   const text = textOf(source, node).trim();
   if (node.type === 'number') {
+    // A legacy octal (`010` is 8), a separator or a BigInt suffix is refused rather than canonicalized.
+    if (/^0\d/.test(text) || /[_n]/.test(text)) return undefined;
     const value = Number(text);
     return Number.isFinite(value) ? String(value) : undefined;
   }
@@ -1188,6 +1192,7 @@ function jsTable(source: string, value: DynamicBoundaryNode | undefined): Map<st
   for (const e of childrenOf(v)) {
     if (e.type === '{' || e.type === '}' || e.type === ',' || e.type === 'comment') continue;
     if (e.type === 'shorthand_property_identifier') {
+      if (textOf(source, e) === '__proto__') return null;
       table.set(textOf(source, e), textOf(source, e));
       continue;
     }
@@ -1196,6 +1201,9 @@ function jsTable(source: string, value: DynamicBoundaryNode | undefined): Map<st
     const val = field(e, 'value');
     const key = keyNode ? staticKeyOf(source, keyNode) : undefined;
     if (key === undefined || val?.type !== 'identifier') return null;
+    // `__proto__: x` sets the prototype instead of an entry, so a variable key could reach an inherited
+    // target the table does not list.
+    if (key === '__proto__') return null;
     table.set(key, textOf(source, val));
   }
   return table.size > 0 ? table : null;
@@ -1220,10 +1228,23 @@ function tableFact(t: StableTable, values: string[]): NonNullable<DynamicBoundar
 /** Identifier-shaped node types that can REFER to a module-level binding. */
 const REFERENCE_TYPES = new Set(['identifier', 'shorthand_property_identifier', 'shorthand_property_identifier_pattern']);
 
-/** Node types whose `left` (or `argument`) WRITES the identifier it names. */
-const WRITE_PARENTS: Record<string, string> = {
+/** Node types whose named field is a write target: every binding identifier in it is written. */
+const WRITE_TARGET_FIELDS: Record<string, string> = {
   assignment_expression: 'left', augmented_assignment_expression: 'left', update_expression: 'argument',
+  for_in_statement: 'left',
 };
+
+/** Pattern shapes a write target descends through (`[a, { b }] = …`); anything else stops it. */
+const WRITE_PATTERN_TYPES = new Set([
+  'array_pattern', 'object_pattern', 'pair_pattern', 'assignment_pattern', 'object_assignment_pattern',
+  'rest_pattern', 'parenthesized_expression',
+]);
+
+/** Node types that open a function scope, where a `var` no longer declares a module binding. */
+const FUNCTION_SCOPE_TYPES = new Set([
+  'function_declaration', 'function_expression', 'function', 'arrow_function', 'generator_function',
+  'generator_function_declaration', 'method_definition', 'class_body',
+]);
 
 /**
  * Module-private `const` dispatch tables that are STABLE in this file (JS/TS).
@@ -1304,23 +1325,45 @@ function collectStableTables(root: DynamicBoundaryNode, source: string): Map<str
 
   const unstable = new Set<string>();
   const written = new Set<string>();
+  const nestedVarBindings = new Set<string>();
   const thisAt: number[] = [];
   let evaluatesCode = false;
-  const walk: Array<{ n: DynamicBoundaryNode; parent?: DynamicBoundaryNode; grand?: DynamicBoundaryNode }> = [{ n: root }];
+  const same = (x: DynamicBoundaryNode | undefined, y: DynamicBoundaryNode): boolean =>
+    !!x && x.startIndex === y.startIndex && x.endIndex === y.endIndex;
+  type Frame = {
+    n: DynamicBoundaryNode; parent?: DynamicBoundaryNode; grand?: DynamicBoundaryNode;
+    writing: boolean; inFunction: boolean;
+  };
+  const walk: Frame[] = [{ n: root, writing: false, inFunction: false }];
   while (walk.length > 0) {
-    const { n, parent, grand } = walk.pop()!;
+    const { n, parent, grand, writing, inFunction } = walk.pop()!;
     if (n.type === 'this') thisAt.push(n.startIndex);
-    if (n.type === 'call_expression' && field(n, 'function')?.type === 'identifier'
-      && textOf(source, field(n, 'function')!) === 'eval') evaluatesCode = true;
-    if (n.type === 'new_expression' && textOf(source, field(n, 'constructor') ?? n).trim() === 'Function') {
-      evaluatesCode = true;
+    // Code evaluation or dynamic scope anywhere makes every table in the file unprovable: `eval` in any
+    // spelling (`(eval)(…)` is still a direct eval), `Function(…)` with or without `new`, and `with`.
+    if (n.type === 'with_statement') evaluatesCode = true;
+    if (n.type === 'identifier') {
+      const name = textOf(source, n);
+      if (name === 'eval') evaluatesCode = true;
+      if (name === 'Function' && (parent?.type === 'new_expression' || parent?.type === 'call_expression')) {
+        evaluatesCode = true;
+      }
+    }
+    // A `var` nested in a top-level block (not in a function) declares a MODULE binding too.
+    if (!inFunction && n.type === 'variable_declaration' && parent && parent !== root) {
+      for (const d of childrenOf(n)) {
+        const name = d.type === 'variable_declarator' ? field(d, 'name') : undefined;
+        if (!name) continue;
+        const stack = [name];
+        while (stack.length > 0) {
+          const m = stack.pop()!;
+          if (REFERENCE_TYPES.has(m.type)) nestedVarBindings.add(textOf(source, m));
+          for (const k of childrenOf(m)) stack.push(k);
+        }
+      }
     }
     if (REFERENCE_TYPES.has(n.type)) {
       const text = textOf(source, n);
-      const writeField = parent ? WRITE_PARENTS[parent.type] : undefined;
-      if (entryNames.has(text) && writeField && field(parent!, writeField)?.startIndex === n.startIndex) {
-        written.add(text);
-      }
+      if (writing && entryNames.has(text)) written.add(text);
       if (names.has(text) && !unstable.has(text)) {
         const callee = grand?.type === 'call_expression' ? field(grand, 'function') : undefined;
         const allowed = n.startIndex === declared.get(text)!.nameStart
@@ -1331,17 +1374,23 @@ function collectStableTables(root: DynamicBoundaryNode, source: string): Map<str
         if (!allowed) unstable.add(text);
       }
     }
-    for (const k of childrenOf(n)) walk.push({ n: k, parent: n, grand: parent });
+    const targetField = WRITE_TARGET_FIELDS[n.type];
+    const target = targetField ? field(n, targetField) : undefined;
+    const childInFunction = inFunction || FUNCTION_SCOPE_TYPES.has(n.type);
+    for (const k of childrenOf(n)) {
+      const childWriting = (writing && WRITE_PATTERN_TYPES.has(n.type)) || same(target, k);
+      walk.push({ n: k, parent: n, grand: parent, writing: childWriting, inFunction: childInFunction });
+    }
   }
   if (evaluatesCode) return stable;
 
   for (const name of names) {
-    if (unstable.has(name)) continue;
+    if (unstable.has(name) || nestedVarBindings.has(name)) continue;
     const { entries } = declared.get(name)!;
     const local = new Map<string, [number, number]>();
     for (const value of new Set(entries.values())) {
       const span = functionSpans.get(value);
-      if (!span || bindings.get(value) !== 1 || written.has(value)) continue;
+      if (!span || bindings.get(value) !== 1 || written.has(value) || nestedVarBindings.has(value)) continue;
       if (thisAt.some(at => at >= span[0] && at < span[1])) continue;
       local.set(value, span);
     }
@@ -1495,7 +1544,9 @@ export function buildFileDynamicBoundary(
     language,
     sites: kept,
     ...(total > kept.length ? { totalSites: total, truncated: true as const } : {}),
-    ...(bound.length > 0 ? { bound: [...bound].sort(byLine).slice(0, DYNAMIC_BOUNDARY_SITE_CAP) } : {}),
+    // Not sliced: bound constructs come only from retained candidates, which the two retention budgets
+    // already bound, and a strict consumer must count every one of them.
+    ...(bound.length > 0 ? { bound: [...bound].sort(byLine) } : {}),
   };
 }
 
@@ -1514,7 +1565,7 @@ export function buildDynamicBoundaryReport(
 ): DynamicBoundaryReport | undefined {
   // A record carrying only bound constructs is kept (a directly-resolved-only consumer discloses it)
   // but contributes nothing to the site rollups.
-  const files = records.filter(r => r.sites.length > 0 || (r.bound?.length ?? 0) > 0);
+  const files = records.filter(r => fileSiteCount(r) > 0 || (r.bound?.length ?? 0) > 0);
   if (files.length === 0) return undefined;
 
   const kindCounts = new Map<DynamicBoundaryKind, number>();
@@ -1522,7 +1573,7 @@ export function buildDynamicBoundaryReport(
   let totalSites = 0;
 
   for (const f of files) {
-    if (f.sites.length === 0) continue;
+    if (fileSiteCount(f) === 0) continue;
     totalSites += fileSiteCount(f);
     for (const s of f.sites) kindCounts.set(s.kind, (kindCounts.get(s.kind) ?? 0) + 1);
     const l = langCounts.get(f.language) ?? { files: 0, sites: 0 };
@@ -1534,7 +1585,7 @@ export function buildDynamicBoundaryReport(
   return {
     version: DYNAMIC_BOUNDARY_SCHEMA_VERSION,
     totalSites,
-    totalFiles: files.filter(f => f.sites.length > 0).length,
+    totalFiles: files.filter(f => fileSiteCount(f) > 0).length,
     byKind: DYNAMIC_BOUNDARY_KINDS
       .filter(k => kindCounts.has(k))
       .map(k => ({ kind: k, count: kindCounts.get(k)! })),
