@@ -43,7 +43,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 98
+## To build — 97
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -294,6 +294,14 @@ rules; `signature-unprovable` is never breaking-classed. The false "sibling repo
 disclosure now states in-repo only. The bump is withheld when compatibility is unproven, and `signature-unprovable` is a warning finding.
 Deferred to `add-public-surface-acceptance-baseline`: the `--accept` baseline and the consumed/unconsumed
 split with the federation consumer union. `openlore enforce` does not run the tool.
+
+Shipped and archived since: `add-sarif-finding-emission` (2026-09-13, narrowed) — `openlore enforce
+--sarif <path>` and `openlore review --sarif <path>` also write the classified governance findings as
+a deterministic SARIF 2.1.0 log (every registered code as a rule; results with verbatim messages, a
+fixed severity→level table, the enforcement class as a property, and an identity hash). A recorded
+repository-relative location becomes a physical location; anything else is a logical location, never
+a fabricated line. Printed output and exit codes are unchanged. Narrowed: no graph span lookup, no
+per-rule `helpUri`, no vendored schema validator.
 
 ## Maintenance rules (what kept this table honest)
 

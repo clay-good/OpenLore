@@ -10,7 +10,7 @@
  * Runs end-to-end over a real decision store + an .openlore/config.json. Plain
  * .test.ts so CI runs it.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -1252,3 +1252,35 @@ describe('dynamicBoundaryFindings', () => {
     expect(policed.blocking).toHaveLength(1);
   });
 });
+
+describe('openlore enforce --sarif (add-sarif-finding-emission)', () => {
+  it('writes a SARIF log without changing stdout or the exit code', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-enforce-sarif-'));
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => { writes.push(String(chunk)); return true; }) as never);
+    try {
+      const plain = await runEnforceCli({ cwd: root, json: true });
+      const plainOut = writes.splice(0).join('');
+      const sarifPath = join(root, 'out.sarif');
+      const withSarif = await runEnforceCli({ cwd: root, json: true, sarif: sarifPath });
+      expect(withSarif).toBe(plain);
+      expect(writes.join('')).toBe(plainOut);
+      const log = JSON.parse(await readFile(sarifPath, 'utf-8'));
+      expect(log.version).toBe('2.1.0');
+      expect(log.runs[0].tool.driver.name).toBe('openlore');
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses --sarif with --agent-hook', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
+    try {
+      expect(await runEnforceCli({ cwd: tmpdir(), agentHook: true, sarif: 'x.sarif' })).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+

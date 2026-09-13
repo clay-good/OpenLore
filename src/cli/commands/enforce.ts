@@ -29,7 +29,8 @@ import { Command } from 'commander';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
-import { writeStdout } from '../output.js';
+import { writeStdout, writeStderr } from '../output.js';
+import { writeSarifLog } from '../../core/services/sarif.js';
 import { sanitizeForTerminal } from '../../utils/misc.js';
 import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
 import {
@@ -615,11 +616,13 @@ export interface EnforceCliOptions {
   agentHook?: boolean;
   installHook?: boolean;
   uninstallHook?: boolean;
+  /** Also write the classified findings as a SARIF 2.1.0 log to this path (transport only). */
+  sarif?: string;
 }
 
 export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
-  if (opts.agentHook && (opts.hook || opts.json || opts.installHook || opts.uninstallHook)) {
-    process.stderr.write('openlore enforce: --agent-hook cannot be combined with --hook, --json, --install-hook, or --uninstall-hook.\n');
+  if (opts.agentHook && (opts.hook || opts.json || opts.installHook || opts.uninstallHook || opts.sarif)) {
+    process.stderr.write('openlore enforce: --agent-hook cannot be combined with --hook, --json, --sarif, --install-hook, or --uninstall-hook.\n');
     return 1;
   }
 
@@ -831,6 +834,12 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
     else await writeStdout(safeOut);
   }
 
+  if (opts.sarif) {
+    // Transport only: the gate's output above and the exit code below are unchanged by this write.
+    const sarifError = await writeSarifLog(opts.sarif, cwd, result.classified, collected.caveats);
+    if (sarifError) await writeStderr(`[warn] openlore enforce: could not write SARIF to ${opts.sarif}: ${sarifError}\n`);
+  }
+
   if (opts.hook && result.gated) {
     process.stderr.write(
       `\n⛔ enforce: commit blocked by the configured enforcement policy.\n` +
@@ -937,14 +946,15 @@ export const enforceCommand = new Command('enforce')
   .description('Unified finding-enforcement gate: each source declares its default; frozen adopts existing debt and blocks only new findings.')
   .option('--base <ref>', 'Git ref to diff the working tree against for diff-based sources (default HEAD)')
   .option('--json', 'Emit the gate result as JSON', false)
+  .option('--sarif <path>', 'Also write every classified finding as a SARIF 2.1.0 log to this path (output and exit code unchanged)')
   .option('--hook', 'Hook mode: exit 1 on blocking/new frozen findings, invalid config, incomplete frozen assessment, or unverifiable staged bytes', false)
   .option('--agent-hook', 'Agent-loop hook mode: exit 2 only on blocking findings; infrastructure failures exit 0', false)
   .option('--git-root', 'Resolve the repository root with Git before enforcement', false)
   .option('--install-hook', 'Install the unified enforcement pre-commit hook', false)
   .option('--uninstall-hook', 'Remove the unified enforcement pre-commit hook', false)
-  .action(async (opts: { base?: string; json?: boolean; hook?: boolean; agentHook?: boolean; gitRoot?: boolean; installHook?: boolean; uninstallHook?: boolean }) => {
+  .action(async (opts: { base?: string; json?: boolean; sarif?: string; hook?: boolean; agentHook?: boolean; gitRoot?: boolean; installHook?: boolean; uninstallHook?: boolean }) => {
     const code = await runEnforceCli({
-      base: opts.base, json: opts.json, hook: opts.hook, agentHook: opts.agentHook, gitRoot: opts.gitRoot,
+      base: opts.base, json: opts.json, sarif: opts.sarif, hook: opts.hook, agentHook: opts.agentHook, gitRoot: opts.gitRoot,
       installHook: opts.installHook, uninstallHook: opts.uninstallHook,
     });
     process.exit(code);

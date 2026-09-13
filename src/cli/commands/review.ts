@@ -27,6 +27,7 @@ import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
 import { writeStdout, writeStderr } from '../output.js';
+import { writeSarifLog } from '../../core/services/sarif.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
 import { isGitRepositoryRoot } from '../../core/drift/git-diff.js';
@@ -565,6 +566,8 @@ export interface ReviewCliOptions {
   out?: string;
   /** Hook/gating mode: govern blast-radius orphan findings through the effective policy. */
   hook?: boolean;
+  /** Also write the classified findings as a SARIF 2.1.0 log to this path (transport only). */
+  sarif?: string;
 }
 
 export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
@@ -696,6 +699,12 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
     if (process.stderr.isTTY) await writeStderr(renderHuman(briefing) + '\n');
   }
 
+  if (opts.sarif) {
+    // Transport only: the briefing above and the exit code below are unchanged by this write.
+    const sarifError = await writeSarifLog(opts.sarif, cwd, reconciled.gate.classified, briefing.caveats);
+    if (sarifError) await writeStderr(`[warn] openlore review: could not write SARIF to ${opts.sarif}: ${sarifError}\n`);
+  }
+
   if (opts.hook && enforcementGated) {
     process.stderr.write('\n⛔ openlore review: enforcement found blocking, new, uninitialized, unverifiable, or invalid-config state.\n\n');
     return REVIEW_GATE_EXIT_CODE;
@@ -709,8 +718,9 @@ export const reviewCommand = new Command('review')
   .option('--head <ref>', 'Head git ref (default: working tree)')
   .option('--format <fmt>', 'Output format: markdown (default) or json', 'markdown')
   .option('--out <path>', 'Write the briefing to a file instead of stdout')
+  .option('--sarif <path>', 'Also write the classified findings as a SARIF 2.1.0 log to this path (briefing and exit code unchanged)')
   .option('--hook', 'Gate blocking, frozen-new, uninitialized, or unverifiable blast-radius orphan enforcement, plus invalid candidate config', false)
-  .action(async (opts: { base?: string; head?: string; format?: string; out?: string; hook?: boolean }) => {
+  .action(async (opts: { base?: string; head?: string; format?: string; out?: string; sarif?: string; hook?: boolean }) => {
     const format = opts.format === 'json' ? 'json' : 'markdown';
     if (opts.format && opts.format !== 'json' && opts.format !== 'markdown') {
       logger.error(`Unknown --format "${opts.format}". Use "markdown" or "json".`);
@@ -731,6 +741,7 @@ export const reviewCommand = new Command('review')
       head: opts.head,
       format,
       out: opts.out,
+      sarif: opts.sarif,
       hook: opts.hook,
     });
     process.exit(code);

@@ -43,7 +43,7 @@
 | `openlore spec-store status` | Report the health of the spec-store binding (read-only, advisory) | No |
 | `openlore working-set context` | Assemble the working-set briefing for an active change across its targets (read-only, advisory) | Targets indexed |
 | `openlore impact-certificate` | Certify what the current diff opens into declared covering surfaces, before it lands (advisory; opt-in blocking) | Yes |
-| `openlore enforce` | Unified finding-enforcement gate: blocks on `blocking`, new debt under `frozen`, or an unverifiable frozen baseline (advisory by default) | Decisions/specs present |
+| `openlore enforce` | Unified finding-enforcement gate: blocks on `blocking`, new debt under `frozen`, or an unverifiable frozen baseline (advisory by default); `--sarif <path>` also writes every classified finding as SARIF 2.1.0 | Decisions/specs present |
 | `openlore plugin-manifest emit\|validate` | Inspect/validate the OpenSpec plugin manifest (distinct from the federation `manifest`) | No |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
@@ -434,6 +434,20 @@ Features reported (active/inactive detected from config + markers):
 | Spec-store binding | `specStore` in config |
 | Federation registry | `openlore federation add <path> --name <name>` |
 
+### SARIF output (`--sarif <path>`)
+
+`openlore enforce --sarif <path>` and `openlore review --sarif <path>` also write the findings they classified as a
+SARIF 2.1.0 log, so a CI job can upload them to a code-scanning surface (for example
+`github/codeql-action/upload-sarif`). It is transport, not policy: what the command prints and its exit code are the
+same with or without the flag, and a write failure is a warning on stderr. Every registered finding code is a rule
+(with its registry description, source, and default class). Each finding is a result with its message verbatim, its
+intrinsic severity mapped to a level (`critical`/`error` → `error`, `warning` → `warning`, `info` → `note`), its
+resolved enforcement class and subject as properties, and a stable identity hash in `partialFingerprints`. A finding
+with a recorded repository-relative location gets a physical location (with a line only when the source recorded
+one); every other finding gets a logical location named by its subject — a line is never invented. The run carries
+the tool version, the call-graph fingerprint when an index exists, and the command's caveats, and no timestamps, so
+the same findings and graph produce a byte-identical log.
+
 ### PR review (`openlore review`)
 
 `openlore review` composes the structural delta (`structural_diff`) and the blast radius
@@ -447,6 +461,7 @@ openlore review                                  # markdown briefing for the cur
 openlore review --base main --head HEAD          # explicit range
 openlore review --format json                    # schemaVersion:2 briefing on stdout
 openlore review --out review.md                  # write the markdown to a file (used by the Action)
+openlore review --sarif review.sarif             # also write the classified findings as SARIF 2.1.0
 openlore review --hook                           # gate orphan enforcement and invalid candidate config
 ```
 
