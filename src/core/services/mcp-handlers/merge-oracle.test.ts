@@ -320,4 +320,95 @@ describe('simulateMerge', () => {
       git(repo, 'switch', '-q', '-f', 'main');
     }
   });
+
+  /** Commit file contents on top of `parent` through a temporary index, keeping path bytes exact. */
+  const commitFiles = (cwd: string, parent: string, files: Record<string, string>, message: string) => {
+    const env = { ...process.env, GIT_INDEX_FILE: join(root, `index-${message}`) };
+    execFileGitSync('git', ['read-tree', parent], { cwd, env });
+    const entries = Object.entries(files).map(([path, content]) => {
+      const blob = execFileGitSync('git', ['hash-object', '-w', '--stdin'], { cwd, input: content }).trim();
+      return `100644 ${blob}\t${path}\n`;
+    }).join('');
+    execFileGitSync('git', ['update-index', '--index-info'], { cwd, env, input: entries });
+    const tree = execFileGitSync('git', ['write-tree'], { cwd, env }).trim();
+    rmSync(env.GIT_INDEX_FILE, { force: true });
+    return execFileGitSync('git', ['commit-tree', tree, '-p', parent, '-m', message], { cwd }).trim();
+  };
+  const lines = (edit: Record<number, string> = {}) => ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((l, i) => edit[i] ?? l).join('\n') + '\n';
+
+  it('is not-assessed for any merge driver section named like a default state, and for unknown repository merge keys', async () => {
+    const i1 = git(repo, 'rev-parse', 'info-a');
+    const i2 = git(repo, 'rev-parse', 'info-b');
+    for (const [key, value, pattern] of [
+      ['merge.text.name', 'foo', /merge driver named "text"/],
+      ['merge.unspecified.recursive', 'binary', /merge driver named "unspecified"/],
+      ['merge.somethingNew', 'x', /merge\.somethingnew is set in the repository config/],
+    ] as const) {
+      git(repo, 'config', key, value);
+      try {
+        expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(pattern) });
+      } finally {
+        git(repo, 'config', '--unset', key);
+      }
+    }
+    git(repo, 'config', 'merge.conflictStyle', 'diff3');
+    try {
+      expect((await simulateMerge(repo, i1, i2)).verdict).toBe('clean-automerge');
+    } finally {
+      git(repo, 'config', '--unset', 'merge.conflictStyle');
+    }
+  });
+
+  it('forwards diff.algorithm so the verdict matches a merge in the repository itself', async () => {
+    const alg = join(root, 'alg');
+    execFileGitSync('git', ['init', '-q', '-b', 'main', alg]);
+    git(alg, 'config', 'user.email', 't@example.com');
+    git(alg, 'config', 'user.name', 't');
+    const emptyTree = execFileGitSync('git', ['mktree'], { cwd: alg, input: '' }).trim();
+    const empty = execFileGitSync('git', ['commit-tree', emptyTree, '-m', 'root'], { cwd: alg }).trim();
+    const base = commitFiles(alg, empty, { f: 'x\nb\n{\nb\n{\na\n' }, 'alg-base');
+    const a = commitFiles(alg, base, { f: 'x\n{\nc\nb\n{\n{\n' }, 'alg-a');
+    const b = commitFiles(alg, base, { f: 'x\nb\n{\nb\n{\n' }, 'alg-b');
+    for (const algorithm of ['patience', 'myers', 'histogram']) {
+      git(alg, 'config', 'diff.algorithm', algorithm);
+      let truth: 'clean-automerge' | 'textual-conflict' = 'clean-automerge';
+      try { git(alg, 'merge-tree', '--write-tree', a, b); } catch { truth = 'textual-conflict'; }
+      expect((await simulateMerge(alg, a, b)).verdict, algorithm).toBe(truth);
+    }
+  });
+
+  it('matches decomposed (NFD) attribute patterns and case-variant attributes files', async () => {
+    const nfd = 'é.txt';
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { [nfd]: lines(), '.gitattributes': `${nfd} merge=binary\n` }, 'nfd-base');
+    const a = commitFiles(repo, base, { [nfd]: lines({ 1: 'B' }) }, 'nfd-a');
+    const b = commitFiles(repo, base, { [nfd]: lines({ 7: 'H' }) }, 'nfd-b');
+    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/merge attribute "binary"/) });
+
+    const plain = commitFiles(repo, main, { 'k.txt': lines() }, 'case-base');
+    const upper = commitFiles(repo, plain, { 'k.txt': lines({ 1: 'B' }), '.GITATTRIBUTES': '* merge=binary\n' }, 'case-a');
+    const other = commitFiles(repo, plain, { 'k.txt': lines({ 7: 'H' }) }, 'case-b');
+    const ignoreCase = git(repo, 'config', '--get', 'core.ignorecase') || 'unset';
+    git(repo, 'config', 'core.ignorecase', 'true');
+    try {
+      expect(await simulateMerge(repo, upper, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.GITATTRIBUTES differs from a changed path only by letter case/) });
+      const dirBase = commitFiles(repo, main, { 'sub/k.txt': lines(), 'Sub/.gitattributes': 'k.txt merge=binary\n' }, 'dircase-base');
+      const d1 = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 1: 'B' }) }, 'dircase-a');
+      const d2 = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 7: 'H' }) }, 'dircase-b');
+      expect(await simulateMerge(repo, d1, d2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/Sub differs from a changed path only by letter case/) });
+    } finally {
+      if (ignoreCase === 'unset') git(repo, 'config', '--unset', 'core.ignorecase');
+      else git(repo, 'config', 'core.ignorecase', ignoreCase);
+    }
+  });
+
+  it('is not-assessed when core.worktree points at another repository', async () => {
+    const other = join(root, 'other-worktree');
+    execFileGitSync('git', ['clone', '-q', repo, other]);
+    const lone = join(root, 'lone');
+    execFileGitSync('git', ['init', '-q', lone]);
+    git(lone, 'config', 'core.worktree', other);
+    const main = git(repo, 'rev-parse', 'main');
+    expect(await simulateMerge(join(lone, '.git'), main, main)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/different git directory/) });
+  });
 });

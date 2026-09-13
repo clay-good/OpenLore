@@ -62,7 +62,7 @@ const SPAWN_TIMEOUT_MS = 30_000;
 const SHARED_PATHS_CAP = 500;
 const SHARED_PATH_CHARS_CAP = 24_000;
 /** Repository settings that change merge results and are plain values, safe to forward with `-c`. */
-const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.renamelimit', 'diff.renamelimit', 'merge.directoryrenames']);
+const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.renamelimit', 'diff.renamelimit', 'merge.directoryrenames', 'diff.algorithm', 'diff.indentheuristic']);
 /** `merge` attribute values that mean the default text merge the simulation runs. */
 const DEFAULT_MERGE_ATTRIBUTE = new Set(['unspecified', 'set', 'text']);
 const GITLINK_MODE = '160000';
@@ -150,29 +150,57 @@ export function gitVersionAtLeast(versionOutput: string, major: number, minor: n
 }
 
 /**
+ * Repository-local `merge.*` keys known not to change the merge result (output, tooling, and
+ * fast-forward choices). Any other repository-local `merge.*` key makes the pair not-assessed:
+ * an allowlist, so an unanticipated setting can never produce a silent `clean-automerge`.
+ */
+const HARMLESS_MERGE_KEYS = new Set([
+  'merge.conflictstyle', 'merge.verbosity', 'merge.ff', 'merge.log', 'merge.stat', 'merge.tool',
+  'merge.guitool', 'merge.autostash', 'merge.suppressdest', 'merge.branchdesc', 'merge.defaulttoupstream',
+]);
+
+interface MergeConfig { args: string[]; ignoreCase: boolean }
+
+/**
  * Repository merge settings the scratch repository would not see: `-c` arguments to forward, or a
  * reason the merge cannot be simulated faithfully. Only reads config values, which fetches nothing.
+ * Global and system config is read by the scratch repository too, so only repository-local scopes
+ * need forwarding or refusal (ambiguous driver names are refused from any scope).
  */
-async function repositoryMergeConfig(repoPath: string, deadline: number | undefined): Promise<{ args: string[] } | { detail: string }> {
+async function repositoryMergeConfig(repoPath: string, deadline: number | undefined): Promise<MergeConfig | { detail: string }> {
   let listing: string;
   try {
-    listing = await readGit(repoPath, ['config', '--get-regexp', '^((merge|diff)\\.(renames|renamelimit|directoryrenames|renormalize|default)|merge\\..+\\.driver|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
+    listing = await readGit(repoPath, ['config', '--show-scope', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor|core\\.ignorecase)$'], deadline);
   } catch (error) {
-    if (isExitOne(error)) return { args: [] };
+    if (isExitOne(error)) return { args: [], ignoreCase: false };
     throw error;
   }
   const args: string[] = [];
   let partialClone = false;
+  let ignoreCase = false;
   for (const line of listing.split('\n').filter(Boolean)) {
-    const space = line.indexOf(' ');
-    const key = (space < 0 ? line : line.slice(0, space)).toLowerCase();
-    const value = space < 0 ? '' : line.slice(space + 1).trim();
+    const tab = line.indexOf('\t');
+    const scope = tab < 0 ? '' : line.slice(0, tab);
+    const entry = tab < 0 ? line : line.slice(tab + 1);
+    const space = entry.indexOf(' ');
+    const key = (space < 0 ? entry : entry.slice(0, space)).toLowerCase();
+    const value = space < 0 ? '' : entry.slice(space + 1).trim();
+    const repositoryScope = scope === 'local' || scope === 'worktree' || scope === 'command';
     if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && isGitTrue(value))) {
       partialClone = true;
       continue;
     }
-    if (key.startsWith('merge.') && key.endsWith('.driver') && key !== 'merge.default') {
-      const name = key.slice('merge.'.length, -'.driver'.length).toLowerCase();
+    if (key === 'core.ignorecase') {
+      ignoreCase = isGitTrue(value);
+      continue;
+    }
+    if (key.startsWith('branch.') && key.endsWith('.mergeoptions')) {
+      return { detail: `${key.slice(0, 80)} is set, and those merge options are not simulated` };
+    }
+    const parts = key.split('.');
+    if (parts[0] === 'merge' && parts.length >= 3) {
+      // Any `merge.<name>.<key>` defines a user merge driver, with or without a `.driver` line.
+      const name = parts.slice(1, -1).join('.');
       if (AMBIGUOUS_DRIVER_NAMES.has(name)) return { detail: `a merge driver named "${name}" is configured, which the attribute check cannot tell from the default merge` };
       continue;
     }
@@ -180,16 +208,18 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       if (value.toLowerCase() !== 'text') return { detail: `merge.default is "${value.slice(0, 40)}", which the simulation does not apply` };
       continue;
     }
-    if (key.startsWith('branch.') && key.endsWith('.mergeoptions')) {
-      return { detail: `${key.slice(0, 80)} is set, and those merge options are not simulated` };
-    }
     if (key === 'merge.renormalize') {
       if (isGitTrue(value)) return { detail: 'merge.renormalize is set, and renormalization depends on attributes the simulation ignores' };
       continue;
     }
-    if (!FORWARDED_CONFIG.has(key)) continue;
-    if (!/^[A-Za-z0-9_-]{1,32}$/.test(value)) return { detail: `${key} has a value the simulation cannot forward` };
-    args.push('-c', `${key}=${value}`);
+    if (FORWARDED_CONFIG.has(key)) {
+      if (!/^[A-Za-z0-9_-]{0,32}$/.test(value)) return { detail: `${key} has a value the simulation cannot forward` };
+      args.push('-c', `${key}=${value || 'true'}`);
+      continue;
+    }
+    if (parts[0] === 'merge' && repositoryScope && !HARMLESS_MERGE_KEYS.has(key)) {
+      return { detail: `${key.slice(0, 80)} is set in the repository config and is not simulated` };
+    }
   }
   if (partialClone) {
     // GIT_NO_LAZY_FETCH needs git 2.45; an older git would still run the promisor fetch.
@@ -198,7 +228,7 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       return { detail: 'this is a partial clone, and git older than 2.45 cannot turn off lazy fetch' };
     }
   }
-  return { args };
+  return { args, ignoreCase };
 }
 
 /**
@@ -207,7 +237,10 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
  * rename on one side moves an edit from the other side onto a new name with its own attributes.
  * Returns a detail, or undefined.
  */
-async function mergeAttributeBlocker(repoPath: string, base: string, tipA: string, tipB: string, deadline: number | undefined): Promise<string | undefined> {
+async function mergeAttributeBlocker(
+  repoPath: string, base: string, tipA: string, tipB: string, deadline: number | undefined,
+  ignoreCase: boolean,
+): Promise<string | undefined> {
   const changed = async (tip: string) => new Set(
     (await readGit(repoPath, gitPathArgs('diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--no-renames', base, tip), deadline)).split('\0').filter(Boolean),
   );
@@ -218,7 +251,9 @@ async function mergeAttributeBlocker(repoPath: string, base: string, tipA: strin
     return `${shared.length} changed paths (${chars} characters) exceed the merge-attribute check limit of ${SHARED_PATHS_CAP} paths or ${SHARED_PATH_CHARS_CAP} characters`;
   }
   for (const source of [undefined, base, tipA, tipB]) {
-    const args = ['check-attr', '-z', ...(source ? [`--source=${source}`] : []), 'merge', '--', ...shared];
+    // precomposeunicode=false: keep path bytes as the tree stores them, so a decomposed (NFD) path
+    // still matches its decomposed `.gitattributes` pattern on macOS.
+    const args = ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', ...(source ? [`--source=${source}`] : []), 'merge', '--', ...shared];
     const fields = (await readGit(repoPath, args, deadline)).split('\0');
     for (let i = 0; i + 2 < fields.length; i += 3) {
       if (!DEFAULT_MERGE_ATTRIBUTE.has(fields[i + 2])) {
@@ -226,9 +261,32 @@ async function mergeAttributeBlocker(repoPath: string, base: string, tipA: strin
       }
     }
   }
+  if (ignoreCase) {
+    // On a case-insensitive checkout a real merge also reads `.GITATTRIBUTES`, or `Sub/.gitattributes`
+    // for `sub/f.txt`; `--source` reads trees by exact name and would miss both. List the root and
+    // every ancestor directory of a changed path (not the whole tree) and refuse any case variant.
+    const dirs = new Set<string>();
+    for (const path of shared) {
+      const parts = path.split('/');
+      for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+    }
+    const dirsLower = new Map([...dirs].map(dir => [dir.toLowerCase(), dir] as const));
+    for (const tree of [base, tipA, tipB]) {
+      const listing = gitPathArgs('-c', 'core.precomposeunicode=false', 'ls-tree', '-z', '--name-only', '--full-tree', tree);
+      const entries = (await readGit(repoPath, listing, deadline)).split('\0');
+      if (dirs.size > 0) entries.push(...(await readGit(repoPath, [...listing, '--', ...[...dirs].map(dir => `${dir}/`)], deadline)).split('\0'));
+      for (const entry of entries.filter(Boolean)) {
+        const name = entry.slice(entry.lastIndexOf('/') + 1);
+        const variantAttributes = name !== '.gitattributes' && name.toLowerCase() === '.gitattributes';
+        const variantDir = !dirs.has(entry) && dirsLower.has(entry.toLowerCase());
+        if (variantAttributes || variantDir) {
+          return `${capPath(entry)} differs from a changed path only by letter case, and the checkout ignores case`;
+        }
+      }
+    }
+  }
   return undefined;
 }
-
 
 /**
  * Simulate merging commit `tipA` with commit `tipB` in `repoPath`. Both tips must be object ids.
@@ -251,8 +309,14 @@ export async function simulateMerge(repoPath: string, tipA: string, tipB: string
 async function simulate(startPath: string, tipA: string, tipB: string, deadline: number | undefined, scratchParent: string): Promise<TextualMerge> {
   // Run every read from the top level: `diff --name-only` prints top-relative paths, while
   // `check-attr` resolves paths against the current directory.
-  const repoPath = (await readGit(startPath, ['rev-parse', '--show-toplevel'], deadline)).trim();
-  if (!repoPath) throw new Error('could not locate the repository top level');
+  const [repoPath, gitDir] = (await readGit(startPath, ['rev-parse', '--show-toplevel', '--absolute-git-dir'], deadline)).split('\n').map(s => s.trim());
+  if (!repoPath || !gitDir) throw new Error('could not locate the repository top level');
+  // `core.worktree` can name a work tree that belongs to another repository; reads from there
+  // would describe the wrong repository.
+  const topGitDir = (await readGit(repoPath, ['rev-parse', '--absolute-git-dir'], deadline)).trim();
+  if (topGitDir !== gitDir) {
+    return { verdict: 'not-assessed', detail: 'the work tree resolves to a different git directory (core.worktree), so its attributes cannot be trusted' };
+  }
   const config = await repositoryMergeConfig(repoPath, deadline);
   if ('detail' in config) return { verdict: 'not-assessed', detail: config.detail };
   let bases: string[];
@@ -268,11 +332,11 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
   if (bases.length > 1) {
     return { verdict: 'not-assessed', detail: `history has ${bases.length} merge bases (criss-cross); a single-base simulation could mislead` };
   }
-  const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline);
-  if (attributeDetail) return { verdict: 'not-assessed', detail: attributeDetail };
   const [objectsDir, graftsFile, objectFormat] = (await readGit(repoPath, ['rev-parse', '--path-format=absolute', '--git-path', 'objects', '--git-path', 'info/grafts', '--show-object-format'], deadline))
     .split('\n').map(s => s.trim()).filter(Boolean);
   if (!objectsDir || !graftsFile || !objectFormat) throw new Error('could not locate the object store');
+  const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline, config.ignoreCase);
+  if (attributeDetail) return { verdict: 'not-assessed', detail: attributeDetail };
   const replaceRefs = (await readGit(repoPath, ['for-each-ref', '--count=1', '--format=replace', 'refs/replace/'], deadline)).trim();
   if (replaceRefs || existsSync(graftsFile)) {
     return { verdict: 'not-assessed', detail: 'the repository has replace refs or grafts, which change history the simulation cannot see' };
