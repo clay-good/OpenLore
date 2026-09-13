@@ -270,7 +270,8 @@ with `-z`, and lists names literally (four more in a fifth round), non-ASCII nam
 empty config values read as false (two more in a sixth round), `merge.conflictStyle` forwarding
 and `pull.twohead` (two more in a seventh round), and after a systematic pass over the config keys
 `git merge` reads: `diff.algorithm` as `-X`, exact `pull.twohead`, strict value parsing, and `.git`
-path components (four more in an eighth round), submodule conflicts, a 20-second budget, and a
+path components (four more in an eighth round), and untrimmed value parsing, value ranges, and git's
+own path protection via `read-tree` (three more in a ninth round), submodule conflicts, a 20-second budget, and a
 response-size loop. A missing or criss-cross
 merge base, a PR head that is not local, an agent task, a cross-repo pair, or a cap is
 `not-assessed`, never clean. Per-symbol hunk mapping is deferred.

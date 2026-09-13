@@ -362,6 +362,10 @@ describe('simulateMerge', () => {
       ['pull.twohead', 'ORT', /pull\.twohead selects the "ORT"/],
       ['pull.twohead', 'ort ', /pull\.twohead selects the "ort"/],
       ['merge.stat', 'bogus', /merge\.stat has a value git merge cannot parse/],
+      ['merge.stat', ' true', /merge\.stat has a value git merge cannot parse/],
+      ['merge.log', '-1', /merge\.log has a value git merge cannot parse/],
+      ['merge.verbosity', '6', /merge\.verbosity has a value git merge cannot parse/],
+      ['merge.renames', ' true', /merge\.renames has a value the simulation cannot forward/],
       ['commit.cleanup', 'bogus', /commit\.cleanup has a value git merge cannot parse/],
       ['diff.algorithm', 'bogus', /diff\.algorithm "bogus"/],
       ['merge.conflictStyle', 'weird', /merge\.conflictStyle "weird"/],
@@ -516,5 +520,27 @@ describe('simulateMerge', () => {
     const a = execFileGitSync('git', ['commit-tree', tree, '-p', base, '-m', 'dotgit-a'], { cwd: repo }).trim();
     const b = commitFiles(repo, base, { 'g.txt': lines({ 7: 'H' }) }, 'dotgit-b');
     expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.GIT\/x has a \.git path component/) });
+  });
+
+  it('is not-assessed for paths a real checkout refuses (NTFS/HFS .git aliases, .gitmodules symlinks)', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const base = commitFiles(repo, main, { 'g.txt': lines() }, 'protect-base');
+    const b = commitFiles(repo, base, { 'g.txt': lines({ 7: 'H' }) }, 'protect-b');
+    const edited = commitFiles(repo, base, { 'g.txt': lines({ 1: 'B' }) }, 'protect-edit');
+    const mktree = (entries: string) => execFileGitSync('git', ['mktree'], { cwd: repo, input: entries }).trim();
+    const blob = execFileGitSync('git', ['hash-object', '-w', '--stdin'], { cwd: repo, input: 'x\n' }).trim();
+    const rootEntries = execFileGitSync('git', ['ls-tree', `${edited}^{tree}`], { cwd: repo });
+    const withEntry = (entry: string, message: string) =>
+      execFileGitSync('git', ['commit-tree', mktree(`${rootEntries}${entry}`), '-p', base, '-m', message], { cwd: repo }).trim();
+    const inner = mktree(`100644 blob ${blob}\tx\n`);
+    for (const [entry, message] of [
+      [`040000 tree ${mktree(`040000 tree ${inner}\t.git.\n`)}\tsub\n`, 'protect-dot'],
+      [`040000 tree ${mktree(`040000 tree ${inner}\tGIT~1\n`)}\tsub\n`, 'protect-short'],
+      [`120000 blob ${blob}\t.gitmodules\n`, 'protect-symlink'],
+    ] as const) {
+      expect(await simulateMerge(repo, withEntry(entry, message), b), message).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/contains a path a real checkout refuses/) });
+    }
+    // A plain symlink elsewhere is fine.
+    expect((await simulateMerge(repo, withEntry(`120000 blob ${blob}\tlink\n`, 'protect-ok'), b)).verdict).toBe('clean-automerge');
   });
 });

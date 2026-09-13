@@ -70,12 +70,14 @@ const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.rename
 const STRICT_VALUE_KEYS: Record<string, (value: string, hasValue: boolean) => boolean> = {
   'merge.stat': isGitBoolText,
   'merge.diffstat': isGitBoolText,
-  'merge.log': isGitBoolText,
+  'merge.log': (value, hasValue) => isGitBoolWord(value, hasValue) || /^\s*\d+[kmg]?$/i.test(value),
   'merge.autostash': isGitBoolText,
-  'merge.branchdesc': isGitBoolText,
+  'merge.branchdesc': (value, hasValue) => isGitBoolWord(value, hasValue) || /^\s*-?\d+[kmg]?$/i.test(value),
   'merge.defaulttoupstream': isGitBoolText,
-  'merge.verbosity': (value, hasValue) => hasValue && /^-?\d+$/.test(value),
-  'merge.ff': (value, hasValue) => value === 'only' || isGitBoolText(value, hasValue),
+  // merge-ort asserts 0 <= verbosity <= 5.
+  'merge.verbosity': (value, hasValue) => hasValue && /^\s*[0-5]$/.test(value),
+  // git ignores an unrecognized merge.ff value.
+  'merge.ff': () => true,
   'commit.gpgsign': isGitBoolText,
   'commit.cleanup': (value, hasValue) => hasValue && /^(strip|whitespace|verbatim|scissors|default)$/.test(value),
   'core.bigfilethreshold': (value, hasValue) => hasValue && /^\d+[kmg]?$/i.test(value),
@@ -151,8 +153,13 @@ function isExitOne(error: unknown): boolean {
  * Git's boolean parsing. A key with no `=` at all (`hasValue` false) is true; an explicitly empty
  * value is false; otherwise `true`/`yes`/`on` or any non-zero integer.
  */
+/** A value git's strict boolean parser accepts, untrimmed: a bool word, empty, no value, or an int. */
 function isGitBoolText(value: string, hasValue: boolean): boolean {
-  return !hasValue || value === '' || /^(true|false|yes|no|on|off)$/i.test(value) || /^-?\d+$/.test(value);
+  return isGitBoolWord(value, hasValue) || /^\s*-?\d+[kmg]?$/i.test(value);
+}
+
+function isGitBoolWord(value: string, hasValue: boolean): boolean {
+  return !hasValue || value === '' || /^(true|false|yes|no|on|off)$/i.test(value);
 }
 
 function isGitTrue(value: string, hasValue = true): boolean {
@@ -227,12 +234,13 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
     }
     if (key === 'diff.algorithm') {
       // merge-tree ignores `-c diff.algorithm` (it is read only for porcelain merges); `-X` applies it.
-      if (!hasValue || !/^(myers|minimal|patience|histogram)$/.test(rawValue)) return { detail: `diff.algorithm "${value.slice(0, 40)}" is not simulated` };
-      algorithm = rawValue;
+      if (!hasValue || !/^(myers|minimal|patience|histogram)$/i.test(rawValue)) return { detail: `diff.algorithm "${value.slice(0, 40)}" is not simulated` };
+      algorithm = rawValue.toLowerCase();
       continue;
     }
     if (STRICT_VALUE_KEYS[key]) {
-      if (!STRICT_VALUE_KEYS[key](value, hasValue)) return { detail: `${key} has a value git merge cannot parse` };
+      // Checked on the raw value: git does not trim a quoted value (" true" is a fatal bad boolean).
+      if (!STRICT_VALUE_KEYS[key](rawValue, hasValue)) return { detail: `${key} has a value git merge cannot parse` };
       if (!key.startsWith('merge.')) continue;
     }
     if (key.startsWith('branch.') && key.endsWith('.mergeoptions')) {
@@ -250,12 +258,13 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       continue;
     }
     if (key === 'merge.renormalize') {
+      if (!isGitBoolText(rawValue, hasValue)) return { detail: 'merge.renormalize has a value git merge cannot parse' };
       if (isGitTrue(value, hasValue)) return { detail: 'merge.renormalize is set, and renormalization depends on attributes the simulation ignores' };
       continue;
     }
     if (FORWARDED_CONFIG.has(key)) {
       // A forwarded key with no value makes a real merge die ("missing value"), so it is not assessed.
-      if (!hasValue || !/^[A-Za-z0-9_-]{1,32}$/.test(value)) return { detail: `${key} has a value the simulation cannot forward` };
+      if (!hasValue || !/^[A-Za-z0-9_-]{1,32}$/.test(rawValue)) return { detail: `${key} has a value the simulation cannot forward` };
       if (key === 'merge.conflictstyle' && !/^(merge|diff3|zdiff3)$/i.test(value)) return { detail: `merge.conflictStyle "${value}" is not simulated` };
       args.push('-c', `${key}=${value}`);
       continue;
@@ -427,6 +436,20 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
     }
     const [tree, ...entries] = stdout.split('\0');
     if (!OBJECT_ID.test(tree.trim())) throw new Error(`unexpected merge-tree output: ${firstLine(stdout) || '(empty)'}`);
+    // A real merge checks out paths, and refuses ones git's path protection rejects (`.git.`, `GIT~1`,
+    // `.git::$DATA`, a `.gitmodules` symlink). Let git decide, with both protections on, for both tips
+    // and the merged tree.
+    for (const [label, candidate] of [['a change tip', tipA], ['a change tip', tipB], ['the merged tree', tree.trim()]] as const) {
+      try {
+        await execFileGit('git', [`--git-dir=${scratch}`, '-c', 'core.protectNTFS=true', '-c', 'core.protectHFS=true', 'read-tree', candidate], {
+          env: { ...env, GIT_INDEX_FILE: join(scratch, 'verify-index') },
+          timeout: spawnTimeout(deadline),
+        });
+      } catch (error) {
+        if (deadline !== undefined && Date.now() >= deadline) throw error;
+        return { verdict: 'not-assessed', detail: `${label} contains a path a real checkout refuses: ${failureDetail(error)}` };
+      }
+    }
     if (!conflicted) return { verdict: 'clean-automerge' };
     // Conflicted file info: `<mode> <object> <stage>\t<path>`, one entry per conflicted stage.
     const paths = new Set<string>();
