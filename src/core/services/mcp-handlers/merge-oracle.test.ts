@@ -388,18 +388,29 @@ describe('simulateMerge', () => {
     const plain = commitFiles(repo, main, { 'k.txt': lines() }, 'case-base');
     const upper = commitFiles(repo, plain, { 'k.txt': lines({ 1: 'B' }), '.GITATTRIBUTES': '* merge=binary\n' }, 'case-a');
     const other = commitFiles(repo, plain, { 'k.txt': lines({ 7: 'H' }) }, 'case-b');
-    const ignoreCase = git(repo, 'config', '--get', 'core.ignorecase') || 'unset';
-    git(repo, 'config', 'core.ignorecase', 'true');
+    // The case check runs whatever core.ignorecase says (a real merge reads the filesystem).
+    git(repo, 'config', 'core.ignorecase', 'false');
     try {
       expect(await simulateMerge(repo, upper, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.GITATTRIBUTES differs from a changed path only by letter case/) });
-      const dirBase = commitFiles(repo, main, { 'sub/k.txt': lines(), 'Sub/.gitattributes': 'k.txt merge=binary\n' }, 'dircase-base');
-      const d1 = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 1: 'B' }) }, 'dircase-a');
-      const d2 = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 7: 'H' }) }, 'dircase-b');
-      expect(await simulateMerge(repo, d1, d2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/Sub differs from a changed path only by letter case/) });
+      // A newline in a config value must not forge a config entry.
+      git(repo, 'config', 'merge.tool', 'vimdiff\ncore.ignorecase false');
+      expect(await simulateMerge(repo, upper, other)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/\.GITATTRIBUTES differs/) });
     } finally {
-      if (ignoreCase === 'unset') git(repo, 'config', '--unset', 'core.ignorecase');
-      else git(repo, 'config', 'core.ignorecase', ignoreCase);
+      git(repo, 'config', '--unset', 'core.ignorecase');
+      try { git(repo, 'config', '--unset', 'merge.tool'); } catch { /* not set */ }
     }
+    const dirBase = commitFiles(repo, main, { 'sub/k.txt': lines(), 'Sub/.gitattributes': 'k.txt merge=binary\n', 'Sub/other.txt': 'o\n' }, 'dircase-base');
+    const d1 = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 1: 'B' }) }, 'dircase-a');
+    const d2 = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 7: 'H' }) }, 'dircase-b');
+    expect(await simulateMerge(repo, d1, d2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/Sub differs from a changed path only by letter case/) });
+    // Both spellings are ancestors of changed paths.
+    const both = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 1: 'B' }), 'Sub/other.txt': 'O\n' }, 'dircase-both');
+    expect(await simulateMerge(repo, both, d2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/differs from another changed directory only by letter case/) });
+    // Names that look like pathspec magic are listed literally.
+    const colonBase = commitFiles(repo, main, { ':/sub/k.txt': lines(), ':/Sub/.gitattributes': 'k.txt merge=binary\n' }, 'colon-base');
+    const c1 = commitFiles(repo, colonBase, { ':/sub/k.txt': lines({ 1: 'B' }) }, 'colon-a');
+    const c2 = commitFiles(repo, colonBase, { ':/sub/k.txt': lines({ 7: 'H' }) }, 'colon-b');
+    expect(await simulateMerge(repo, c1, c2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/:\/Sub differs/) });
   });
 
   it('is not-assessed when core.worktree points at another repository', async () => {

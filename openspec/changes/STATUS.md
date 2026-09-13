@@ -265,7 +265,8 @@ clean), `merge.default`, branch merge options, replace refs, and renames onto an
 (three more false cleans in verification), merge drivers named like a default state and
 subdirectory analysis roots (two more in a third round), then an allowlist for repository merge
 settings plus `diff.algorithm` forwarding, decomposed-Unicode and case-variant attribute files, and
-foreign `core.worktree` (five more in a fourth round), submodule conflicts, a 20-second budget, and a
+foreign `core.worktree` (five more in a fourth round), and a case check that always runs, reads config
+with `-z`, and lists names literally (four more in a fifth round), submodule conflicts, a 20-second budget, and a
 response-size loop. A missing or criss-cross
 merge base, a PR head that is not local, an agent task, a cross-repo pair, or a cap is
 `not-assessed`, never clean. Per-symbol hunk mapping is deferred.

@@ -159,7 +159,7 @@ const HARMLESS_MERGE_KEYS = new Set([
   'merge.guitool', 'merge.autostash', 'merge.suppressdest', 'merge.branchdesc', 'merge.defaulttoupstream',
 ]);
 
-interface MergeConfig { args: string[]; ignoreCase: boolean }
+interface MergeConfig { args: string[] }
 
 /**
  * Repository merge settings the scratch repository would not see: `-c` arguments to forward, or a
@@ -170,28 +170,24 @@ interface MergeConfig { args: string[]; ignoreCase: boolean }
 async function repositoryMergeConfig(repoPath: string, deadline: number | undefined): Promise<MergeConfig | { detail: string }> {
   let listing: string;
   try {
-    listing = await readGit(repoPath, ['config', '--show-scope', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor|core\\.ignorecase)$'], deadline);
+    // -z: `scope NUL key LF value NUL`, so a value containing a newline cannot forge another entry.
+    listing = await readGit(repoPath, ['config', '-z', '--show-scope', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
   } catch (error) {
-    if (isExitOne(error)) return { args: [], ignoreCase: false };
+    if (isExitOne(error)) return { args: [] };
     throw error;
   }
   const args: string[] = [];
   let partialClone = false;
-  let ignoreCase = false;
-  for (const line of listing.split('\n').filter(Boolean)) {
-    const tab = line.indexOf('\t');
-    const scope = tab < 0 ? '' : line.slice(0, tab);
-    const entry = tab < 0 ? line : line.slice(tab + 1);
-    const space = entry.indexOf(' ');
-    const key = (space < 0 ? entry : entry.slice(0, space)).toLowerCase();
-    const value = space < 0 ? '' : entry.slice(space + 1).trim();
+  const fields = listing.split('\0');
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const scope = fields[i];
+    const entry = fields[i + 1];
+    const newline = entry.indexOf('\n');
+    const key = (newline < 0 ? entry : entry.slice(0, newline)).toLowerCase();
+    const value = newline < 0 ? '' : entry.slice(newline + 1).trim();
     const repositoryScope = scope === 'local' || scope === 'worktree' || scope === 'command';
     if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && isGitTrue(value))) {
       partialClone = true;
-      continue;
-    }
-    if (key === 'core.ignorecase') {
-      ignoreCase = isGitTrue(value);
       continue;
     }
     if (key.startsWith('branch.') && key.endsWith('.mergeoptions')) {
@@ -228,7 +224,7 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       return { detail: 'this is a partial clone, and git older than 2.45 cannot turn off lazy fetch' };
     }
   }
-  return { args, ignoreCase };
+  return { args };
 }
 
 /**
@@ -239,7 +235,6 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
  */
 async function mergeAttributeBlocker(
   repoPath: string, base: string, tipA: string, tipB: string, deadline: number | undefined,
-  ignoreCase: boolean,
 ): Promise<string | undefined> {
   const changed = async (tip: string) => new Set(
     (await readGit(repoPath, gitPathArgs('diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--no-renames', base, tip), deadline)).split('\0').filter(Boolean),
@@ -261,18 +256,23 @@ async function mergeAttributeBlocker(
       }
     }
   }
-  if (ignoreCase) {
-    // On a case-insensitive checkout a real merge also reads `.GITATTRIBUTES`, or `Sub/.gitattributes`
-    // for `sub/f.txt`; `--source` reads trees by exact name and would miss both. List the root and
-    // every ancestor directory of a changed path (not the whole tree) and refuse any case variant.
+  {
+    // On a case-insensitive filesystem a real merge also reads `.GITATTRIBUTES`, or `Sub/.gitattributes`
+    // for `sub/f.txt`; `--source` reads trees by exact name and would miss both. `core.ignorecase` is
+    // not a reliable signal of the filesystem, so this runs everywhere: list the root and every
+    // ancestor directory of a changed path (not the whole tree) and refuse any case variant.
     const dirs = new Set<string>();
     for (const path of shared) {
       const parts = path.split('/');
       for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
     }
     const dirsLower = new Map([...dirs].map(dir => [dir.toLowerCase(), dir] as const));
+    if (dirsLower.size < dirs.size) {
+      const spellings = [...dirs].filter(dir => dirsLower.get(dir.toLowerCase()) !== dir);
+      return `${capPath(spellings[0])} differs from another changed directory only by letter case`;
+    }
     for (const tree of [base, tipA, tipB]) {
-      const listing = gitPathArgs('-c', 'core.precomposeunicode=false', 'ls-tree', '-z', '--name-only', '--full-tree', tree);
+      const listing = gitPathArgs('-c', 'core.precomposeunicode=false', '--literal-pathspecs', 'ls-tree', '-z', '--name-only', '--full-tree', tree);
       const entries = (await readGit(repoPath, listing, deadline)).split('\0');
       if (dirs.size > 0) entries.push(...(await readGit(repoPath, [...listing, '--', ...[...dirs].map(dir => `${dir}/`)], deadline)).split('\0'));
       for (const entry of entries.filter(Boolean)) {
@@ -280,7 +280,7 @@ async function mergeAttributeBlocker(
         const variantAttributes = name !== '.gitattributes' && name.toLowerCase() === '.gitattributes';
         const variantDir = !dirs.has(entry) && dirsLower.has(entry.toLowerCase());
         if (variantAttributes || variantDir) {
-          return `${capPath(entry)} differs from a changed path only by letter case, and the checkout ignores case`;
+          return `${capPath(entry)} differs from a changed path only by letter case`;
         }
       }
     }
@@ -335,7 +335,7 @@ async function simulate(startPath: string, tipA: string, tipB: string, deadline:
   const [objectsDir, graftsFile, objectFormat] = (await readGit(repoPath, ['rev-parse', '--path-format=absolute', '--git-path', 'objects', '--git-path', 'info/grafts', '--show-object-format'], deadline))
     .split('\n').map(s => s.trim()).filter(Boolean);
   if (!objectsDir || !graftsFile || !objectFormat) throw new Error('could not locate the object store');
-  const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline, config.ignoreCase);
+  const attributeDetail = await mergeAttributeBlocker(repoPath, bases[0], tipA, tipB, deadline);
   if (attributeDetail) return { verdict: 'not-assessed', detail: attributeDetail };
   const replaceRefs = (await readGit(repoPath, ['for-each-ref', '--count=1', '--format=replace', 'refs/replace/'], deadline)).trim();
   if (replaceRefs || existsSync(graftsFile)) {
