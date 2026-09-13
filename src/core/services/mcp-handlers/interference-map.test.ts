@@ -1106,12 +1106,12 @@ describe('InFlightConflictsCarryATextualMergeVerdict (add-merge-tree-conflict-or
   it('keeps a WAW hazard and annotates a disjoint edit as clean-automerge', async () => {
     const sim = vi.fn(async () => ({ verdict: 'clean-automerge' as const }));
     const map = await run({ directory: '/p', includePullRequests: false }, withMerge(wawPair({ x: TIP_X, y: TIP_Y }), sim));
-    expect(sim).toHaveBeenCalledWith('/p', TIP_X, TIP_Y);
+    expect(sim).toHaveBeenCalledWith('/p', TIP_X, TIP_Y, { deadline: expect.any(Number) });
     expect(map.conflicts[0]).toMatchObject({ hazard: 'WAW', textualMerge: { verdict: 'clean-automerge' } });
     expect(map.conflicts[0].suggestion).toMatch(/merges the text cleanly/i);
     expect(map.findingCount).toBe(1);
     expect(map.textualConflictCount).toBe(0);
-    expect(map.caveats.some(c => /merge-tree.*ignores this repository's merge drivers/i.test(c))).toBe(true);
+    expect(map.caveats.some(c => /merge-tree.*no merge driver of this repository runs/i.test(c))).toBe(true);
   });
 
   it('annotates same-line edits as textual-conflict, names the files, and counts them in the headline', async () => {
@@ -1213,5 +1213,56 @@ describe('InFlightConflictsCarryATextualMergeVerdict (add-merge-tree-conflict-or
     expect(absent.changes[0].tip).toBeUndefined();
     const forged = await defaultEnumeratePullRequests('/repo', 'this-repo', 'main', gh('--output=/tmp/x'), async () => 'main\n');
     expect(forged.changes[0].tip).toBeUndefined();
+  });
+});
+
+describe('textual merge verdict — determinism, time budget, and response size', () => {
+  const pairOf = (n: number, path = 'a.ts') => Array.from({ length: n }, (_, i) => change({
+    ref: `b${String(i).padStart(2, '0')}`, actor: 'x', repo: 'this-repo', kind: 'branch', tip: String(i % 10).repeat(40),
+    files: [{ path, status: 'modified', hunks: [modifyHunk(4, 1)] }],
+    baseSymbolsByFile: new Map([[path, [baseSym(`${path}::foo`, 1, 10)]]]),
+  }));
+
+  it('simulates the same capped pairs in the same order on every call', async () => {
+    const calls: string[][] = [[], []];
+    for (const k of [0, 1]) {
+      const branches = pairOf(12);
+      await run(
+        { directory: '/p', includePullRequests: false },
+        { ...providers({ branchesByRepo: { 'this-repo': branches } }), simulateMerge: async (_r, a, b) => { calls[k].push([a, b].sort().join('+')); return { verdict: 'clean-automerge' }; } },
+      );
+    }
+    expect(calls[0]).toHaveLength(60);
+    expect(calls[1]).toEqual(calls[0]);
+  });
+
+  it('marks pairs past the wall-clock budget as not assessed, with a caveat', async () => {
+    let now = 1_000_000;
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const map = await run(
+        { directory: '/p', includePullRequests: false },
+        { ...providers({ branchesByRepo: { 'this-repo': pairOf(3) } }), simulateMerge: async (_r, _a, _b, options) => { expect(options?.deadline).toBe(1_020_000); now += 21_000; return { verdict: 'clean-automerge' }; } },
+      );
+      expect(map.conflicts.filter(c => c.textualMerge.verdict === 'clean-automerge')).toHaveLength(1);
+      expect(map.conflicts.filter(c => /20-second merge simulation budget/.test(c.textualMerge.detail ?? ''))).toHaveLength(2);
+      expect(map.caveats.some(c => /2 conflict pair\(s\) were not merge-simulated because the 20-second/.test(c))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('stays under the response budget with long paths and many conflicted files', async () => {
+    const longPath = `${'p'.repeat(1_000)}.ts`;
+    const branches = pairOf(40, longPath).map((c, i) => ({ ...c, ref: `${'r'.repeat(240)}${i}`, actor: 'a'.repeat(200) }));
+    const files = Array.from({ length: 50 }, (_, i) => `${'q'.repeat(239)}${i}`);
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      { ...providers({ branchesByRepo: { 'this-repo': branches } }), simulateMerge: async () => ({ verdict: 'textual-conflict', conflictedFiles: files.slice(0, 8) }) },
+    );
+    expect(map.conflictCount).toBe(780);
+    expect(Buffer.byteLength(JSON.stringify(map))).toBeLessThanOrEqual(200 * 1024);
+    expect(map.conflictsTruncated).toBe(true);
+    expect(map.truncationNote).toBeDefined();
   });
 });

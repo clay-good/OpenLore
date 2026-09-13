@@ -2804,10 +2804,11 @@ textual merge verdict from a read-only `git merge-tree` simulation between the t
 their merge base: `textual-conflict` (git will not auto-merge; the conflicted files are named),
 `clean-automerge` (git merges the text; the hazard is behavioral only), or `not-assessed` with a
 detail. The simulation SHALL NOT modify the work tree, index, HEAD, refs, or object store of the
-analyzed repository, and SHALL NOT run a merge driver or read an attribute that the analyzed
-repository chooses. A pair SHALL be `not-assessed`, never `clean-automerge`, when the merge base is
+analyzed repository, and SHALL NOT run a merge driver or lazy-fetch command that the analyzed
+repository chooses. A path changed by both sides with a non-default `merge` attribute,
+`merge.renormalize`, or a submodule conflict SHALL make the pair `not-assessed`. A pair SHALL be `not-assessed`, never `clean-automerge`, when the merge base is
 missing or ambiguous, a tip commit is not present locally, one side is an agent task, the pair spans
-repositories, or the per-call simulation cap is reached. The symbol-level hazard classes are
+repositories, or the per-call simulation cap or time budget is reached. The symbol-level hazard classes are
 unchanged. The landing suggestion for a `textual-conflict` pair SHALL say so and SHALL NOT call the
 pair safe to land in either order.
 

@@ -258,8 +258,11 @@ files named, `clean-automerge`, or `not-assessed` with a reason) from `git merge
 tip commits over a merge base resolved in the real repository. The merge runs in a scratch bare
 repository that reads the real objects through an alternates file: a pre-build probe showed that
 `merge-tree` writes objects and runs a repository-chosen merge driver (even from `info/attributes`,
-past `--attr-source`), and the scratch repository prevents both. A missing or criss-cross merge base,
-a PR head that is not local, an agent task, a cross-repo pair, or the 60-simulation cap is
+past `--attr-source`), and the scratch repository prevents both. Four adversarial reviews added:
+lazy fetch disabled (a partial clone's `uploadpack` command ran), merge attributes and
+`merge.renormalize` checked in the real repository and rename settings forwarded (each gave a false
+clean), submodule conflicts, a 20-second budget, and a response-size loop. A missing or criss-cross
+merge base, a PR head that is not local, an agent task, a cross-repo pair, or a cap is
 `not-assessed`, never clean. Per-symbol hunk mapping is deferred.
 
 ## Maintenance rules (what kept this table honest)

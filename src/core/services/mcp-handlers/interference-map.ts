@@ -51,7 +51,7 @@ import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
 import type { ServedContentProvenance } from '../served-content.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
-import { simulateMerge, type TextualMerge } from './merge-oracle.js';
+import { simulateMerge, noLazyFetchEnv, type TextualMerge, type SimulateMergeOptions } from './merge-oracle.js';
 
 
 // ── caps (mirrors plan_parallel_work: the schedule is O(N), evidence lists O(N²)) ──
@@ -65,6 +65,8 @@ const FINDINGS_LIST_CAP = 100;
 const WITNESS_CAP = 8;
 /** `git merge-tree` simulations run per call; further conflict pairs are disclosed as not assessed. */
 const MAX_MERGE_SIMULATIONS = 60;
+/** Wall-clock budget for all merge simulations in one call (tool calls time out at 60 s). */
+const MERGE_SIMULATION_BUDGET_MS = 20_000;
 /** Files re-parsed per change for its base snapshot (a huge diff is the slow path). */
 const MAX_FILES_PER_CHANGE = 400;
 /**
@@ -425,7 +427,10 @@ function shortName(id: string): string {
 function suggestionFor(v: HazardVerdict, labels: string[], a: ChangeNode, b: ChangeNode, merge: TextualMerge): string {
   const base = hazardSuggestion(v, labels, a, b, merge);
   if (merge.verdict === 'textual-conflict') {
-    return `${base} Git reports a textual merge conflict in ${merge.conflictedFiles?.join(', ') || 'the shared files'}: whichever lands second must resolve it by hand.`;
+    const files = merge.conflictedFiles ?? [];
+    const total = Math.max(merge.conflictedFileCount ?? 0, files.length);
+    const named = files.length === 0 ? 'the shared files' : total === 1 ? files[0] : `${files[0]} (+${total - 1} more)`;
+    return `${base} Git reports a textual merge conflict in ${named}: whichever lands second must resolve it by hand.`;
   }
   if (merge.verdict === 'clean-automerge' && (v.kind === 'WAW' || v.kind === 'RAW')) {
     return `${base} Git merges the text cleanly, so the risk is behavioral, not a merge conflict.`;
@@ -495,11 +500,13 @@ export interface InFlightProviders {
   /** Whether `gh` is available at all (drives the "PRs not enumerated" caveat). */
   ghAvailable(repoPath: string): Promise<boolean>;
   /** Simulate merging two tip commits (default: a read-only `git merge-tree` in a scratch repository). */
-  simulateMerge?(repoPath: string, tipA: string, tipB: string): Promise<TextualMerge>;
+  simulateMerge?(repoPath: string, tipA: string, tipB: string, options?: SimulateMergeOptions): Promise<TextualMerge>;
 }
 
 async function git(repoPath: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', args, { cwd: repoPath, maxBuffer: 64 * 1024 * 1024 });
+  // No lazy fetch: a partial clone's promisor remote would otherwise run a repository-chosen
+  // `uploadpack` command for any object this read-only tool asks for that is not present locally.
+  const { stdout } = await execFileAsync('git', args, { cwd: repoPath, env: noLazyFetchEnv(), maxBuffer: 64 * 1024 * 1024 });
   return stdout;
 }
 
@@ -686,7 +693,7 @@ export async function defaultEnumerateBranches(
     }
     if (mergeBase === tip) continue; // branch not ahead of base → nothing in flight
     let patch: string;
-    try { patch = await runGit(repoPath, ['diff', '--unified=0', '--no-color', `${mergeBase}..${branch}`]); }
+    try { patch = await runGit(repoPath, ['diff', '--unified=0', '--no-color', `${mergeBase}..${tip}`]); }
     catch (error) {
       out.push(failedBranch(repoName, branch, 'diff', error));
       continue;
@@ -1090,6 +1097,8 @@ export async function computeInterferenceMap(
   const conflicts: InterferenceConflict[] = [];
   let simulations = 0;
   let simulationCapped = 0;
+  let simulationTimedOut = 0;
+  const simulationDeadline = Date.now() + MERGE_SIMULATION_BUDGET_MS;
   for (const p of pairs) {
     let textualMerge: TextualMerge;
     if (p.conflict.crossRepo) {
@@ -1102,15 +1111,21 @@ export async function computeInterferenceMap(
     } else if (simulations >= MAX_MERGE_SIMULATIONS) {
       simulationCapped++;
       textualMerge = { verdict: 'not-assessed', detail: `the ${MAX_MERGE_SIMULATIONS}-simulation cap for one call was reached` };
+    } else if (Date.now() >= simulationDeadline) {
+      simulationTimedOut++;
+      textualMerge = { verdict: 'not-assessed', detail: `the ${MERGE_SIMULATION_BUDGET_MS / 1000}-second merge simulation budget for one call was spent` };
     } else {
       simulations++;
       const repoPath = cgByRepo.get(p.A.node.repo)?.path ?? absDir;
-      textualMerge = await merge(repoPath, p.A.tip, p.B.tip).catch((error: unknown) => ({ verdict: 'not-assessed' as const, detail: errorDetail(error) }));
+      textualMerge = await merge(repoPath, p.A.tip, p.B.tip, { deadline: simulationDeadline }).catch((error: unknown) => ({ verdict: 'not-assessed' as const, detail: errorDetail(error) }));
     }
     conflicts.push({ ...p.conflict, suggestion: suggestionFor(p.v, p.labels, p.A.node, p.B.node, textualMerge), textualMerge });
   }
   if (simulations > 0) {
-    caveats.push('Textual merge verdicts come from a read-only `git merge-tree` simulation in a scratch repository that ignores this repository\'s merge drivers and attributes; a repository that relies on a custom merge driver or `merge=union` may merge differently.');
+    caveats.push('Textual merge verdicts come from a read-only `git merge-tree` simulation of the two tips with each other, not with the current base. It runs in a scratch repository, so no merge driver of this repository runs: a path changed by both sides with a non-default merge attribute, `merge.renormalize`, or a submodule conflict is not assessed, and rename settings are forwarded. Your global and system git config still apply.');
+  }
+  if (simulationTimedOut > 0) {
+    caveats.push(`${simulationTimedOut} conflict pair(s) were not merge-simulated because the ${MERGE_SIMULATION_BUDGET_MS / 1000}-second simulation budget was spent.`);
   }
   if (simulationCapped > 0) {
     caveats.push(`${simulationCapped} conflict pair(s) were not merge-simulated because the ${MAX_MERGE_SIMULATIONS}-simulation cap was reached.`);
@@ -1203,6 +1218,13 @@ function boundResponse(map: InterferenceMap): InterferenceMap {
   map.conflicts = map.conflicts.slice(0, 50).map(trimWit);
   map.conflictsTruncated = map.conflictCount > map.conflicts.length;
   map.findings = map.findings.slice(0, 25);
+  map.findingsTruncated = map.findingCount > map.findings.length;
+  // Long repository paths and refs can keep a 50-conflict list over budget: halve it until it fits.
+  while (jsonBytes(map) > SOFT_BUDGET_BYTES && (map.conflicts.length > 0 || map.findings.length > 0)) {
+    map.conflicts = map.conflicts.slice(0, Math.floor(map.conflicts.length / 2));
+    map.findings = map.findings.slice(0, Math.floor(map.findings.length / 2));
+  }
+  map.conflictsTruncated = map.conflictCount > map.conflicts.length;
   map.findingsTruncated = map.findingCount > map.findings.length;
   map.truncationNote =
     'Large map: the conflict/finding evidence lists were trimmed to keep the response within budget. ' +
