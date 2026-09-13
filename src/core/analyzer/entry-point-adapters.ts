@@ -371,6 +371,8 @@ function executedWords(words: Word[]): Executed[] {
   if (!syntax) return [];
 
   const executed: Executed[] = [];
+  // A shell's `-c` code is the first word that is not an option, after all of them (`bash -co pipefail 'cmd'`).
+  let wantsShellCode = false;
   for (let j = i + 1; j < words.length; j++) {
     const word = words[j];
     if (word.text === '-' && !word.quoted) return executed;  // the script is read from stdin
@@ -384,15 +386,10 @@ function executedWords(words: Word[]): Executed[] {
       // (`bash -oe pipefail x.sh`, `bash -ce 'cmd'`).
       if (syntax.runsInline) {
         let next = j + 1;
-        let code: string | undefined;
         for (const l of letters) {
           const letter = `-${l}`;
           if (syntax.valueFlags.has(letter)) next++;
-          else if (syntax.inlineFlags.has(letter) && code === undefined) code = words[next++]?.text ?? '';
-        }
-        if (code !== undefined) {
-          if (code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
-          return executed;
+          else if (syntax.inlineFlags.has(letter)) wantsShellCode = true;
         }
         j = next - 1;
         continue;
@@ -423,6 +420,10 @@ function executedWords(words: Word[]): Executed[] {
       if (group !== 'continue') return group;
       continue;
     }
+    if (syntax.runsInline && syntax.inlineFlags.has(flag) && inline === undefined) {
+      wantsShellCode = true;
+      continue;
+    }
     if (syntax.inlineFlags.has(flag)) {
       const code = inline ?? words[j + 1]?.text;
       if (syntax.runsInline && code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
@@ -442,6 +443,10 @@ function executedWords(words: Word[]): Executed[] {
     if (isFlag && syntax.valueFlags.has(flag) && inline === undefined) { j++; continue; }
     // An unknown flag is taken as a switch: the next word is still considered as the script.
     if (isFlag) continue;
+    if (wantsShellCode) {
+      executed.push({ kind: 'inline', word: { text: word.text, quoted: true } });
+      return executed;
+    }
     if (j === i + 1 && syntax.toolSubcommands?.has(word.text)) return executed;
     if (j === i + 1 && syntax.subcommands?.has(word.text)) continue;
     // After `bun run` / `deno run`, a bare name is a package script, not a file.
