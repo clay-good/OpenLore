@@ -91,6 +91,8 @@ interface RunnerSyntax {
   toolSubcommands?: Set<string>;
   /** Whether the inline flag's value is itself a shell command (`sh -c "node x.js"`). */
   runsInline?: boolean;
+  /** A value letter inside a flag group takes the rest of the group, as zsh reads `-oc x`. */
+  groupValueTakesRest?: boolean;
 }
 const NODE_LIKE: RunnerSyntax = {
   valueFlags: new Set([
@@ -128,7 +130,7 @@ const RUNNERS = new Map<string, RunnerSyntax>([
   }],
   ['python', { valueFlags: new Set(['-W', '-X', '-Q']), inlineFlags: new Set(['-c']), moduleFlag: '-m' }],
   ['python3', { valueFlags: new Set(['-W', '-X', '-Q']), inlineFlags: new Set(['-c']), moduleFlag: '-m' }],
-  ['sh', SHELL], ['bash', SHELL], ['zsh', SHELL],
+  ['sh', SHELL], ['bash', SHELL], ['zsh', { ...SHELL, groupValueTakesRest: true }],
   ['ruby', { valueFlags: new Set(['-I', '-r', '-C', '-E']), inlineFlags: new Set(['-e']) }],
 ]);
 /** Runners that resolve an extensionless script the way Node does. */
@@ -375,8 +377,12 @@ function executedWords(words: Word[]): Executed[] {
   let wantsShellCode = false;
   for (let j = i + 1; j < words.length; j++) {
     const word = words[j];
-    if (word.text === '-' && !word.quoted) return executed;  // the script is read from stdin
-    const isFlag = word.text.startsWith('-') && !word.quoted;
+    if (word.text === '-' && !word.quoted) {
+      if (wantsShellCode) continue;  // `bash -c - 'cmd'`: `-` ends the options
+      return executed;  // the script is read from stdin
+    }
+    // A shell also takes `+o` / `+O` options.
+    const isFlag = !word.quoted && (word.text.startsWith('-') || (syntax.runsInline === true && /^\+[A-Za-z]$/.test(word.text)));
     const [flag, inline] = isFlag ? word.text.split(/=(.*)/s, 2) : [word.text, undefined];
     // A group of short flags (`-euo pipefail`, `-ec`): its letters are flags, and the group takes a value
     // when its last letter does.
@@ -386,10 +392,12 @@ function executedWords(words: Word[]): Executed[] {
       // (`bash -oe pipefail x.sh`, `bash -ce 'cmd'`).
       if (syntax.runsInline) {
         let next = j + 1;
-        for (const l of letters) {
-          const letter = `-${l}`;
-          if (syntax.valueFlags.has(letter)) next++;
-          else if (syntax.inlineFlags.has(letter)) wantsShellCode = true;
+        for (let k = 0; k < letters.length; k++) {
+          const letter = `-${letters[k]}`;
+          if (syntax.valueFlags.has(letter)) {
+            if (syntax.groupValueTakesRest && k < letters.length - 1) break;
+            next++;
+          } else if (syntax.inlineFlags.has(letter)) wantsShellCode = true;
         }
         j = next - 1;
         continue;

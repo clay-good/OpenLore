@@ -259,22 +259,25 @@ describe('collectExternalWiring — runner syntax', () => {
   });
 
   it('reads shell flag groups from the following words, and keeps substitution arguments dynamic', async () => {
-    for (const f of ['z.js', 'w.js', 'x.sh', 'b.js', 'q.js', 'q2.js']) await put(f);
+    for (const f of ['z.js', 'w.js', 'x.sh', 'b.js', 'q.js', 'q2.js', 'd.js', 'e.js', 'never.js']) await put(f);
     await put('package.json', JSON.stringify({
       scripts: {
         ce: "bash -ce 'node z.js'",
         cx: "sh -cx 'node w.js'",
         oe: 'bash -oe pipefail x.sh',
         co: "bash -co pipefail 'node q.js' && bash -ec -o pipefail 'node q2.js' && sh -c",
+        dash: "bash -c - 'node d.js' && bash +O extglob -c 'node e.js'",
+        zshGroup: "zsh -oc x 'node never.js'",
         substArg: 'node $(echo a.js) && node dist/$(cat f).js',
         siblings: 'diff <(cd a; true) <(node b.js)',
       },
     }));
     const report = await collectExternalWiring(root);
-    expect(files(report)).toEqual(['b.js', 'q.js', 'q2.js', 'w.js', 'x.sh', 'z.js']);
+    expect(files(report)).toEqual(['b.js', 'd.js', 'e.js', 'q.js', 'q2.js', 'w.js', 'x.sh', 'z.js']);
     expect(report.boundaries.map(b => [b.key, b.reason])).toEqual([
       ['scripts.substArg', 'dynamic-reference'],
       ['scripts.substArg', 'dynamic-reference'],
+      ['scripts.zshGroup', 'target-not-found'],
     ]);
   });
 
