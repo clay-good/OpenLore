@@ -51,6 +51,11 @@ import { FINDING_CODE_REGISTRY, type GovernanceFinding } from './enforcement-pol
 const MAX_SURFACE = 500;
 const MAX_CONSUMERS = 25;
 const SOURCE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py)$/i;
+/**
+ * Code files in a language whose public signatures are not classified. They never reach the
+ * classifier, so a diff that changes one cannot earn a `minor`/`patch` bump on its evidence.
+ */
+const UNCLASSIFIED_CODE_RE = /\.(go|rs|java|kt|kts|scala|cs|fs|vb|rb|php|swift|c|cc|cpp|cxx|h|hh|hpp|m|mm|dart|lua|ex|exs|erl|clj|hs|ml)$/i;
 
 export interface CertifyPublicSurfaceInput {
   directory: string;
@@ -370,12 +375,15 @@ async function listSurface(absDir: string, ctx: Awaited<ReturnType<typeof readCa
   };
 }
 
-async function changedSourceFiles(absDir: string, base: string): Promise<Array<{ path: string; oldPath?: string; status: string }>> {
+async function changedSourceFiles(absDir: string, base: string): Promise<{ files: Array<{ path: string; oldPath?: string; status: string }>; unassessedCodeFiles: number }> {
   const { getChangedFiles } = await import('../../drift/git-diff.js');
   const diff = await getChangedFiles({ rootPath: absDir, baseRef: base, includeUnstaged: true });
   // A test file is not part of the public API surface — exclude it (it also tends to embed
   // `export …` strings in fixtures that would otherwise read as phantom contract symbols).
   const eligible = (p: string): boolean => SOURCE_RE.test(p) && !isTestFile(p);
+  const unassessed = new Set<string>();
+  const noteUnassessed = (p: string): void => { if (UNCLASSIFIED_CODE_RE.test(p) && !isTestFile(p)) unassessed.add(p); };
+  for (const f of diff.files) noteUnassessed(f.path);
   const out = diff.files
     .filter((f) => eligible(f.path))
     .map((f) => ({ path: f.path, status: f.status as string, ...(f.oldPath ? { oldPath: f.oldPath } : {}) }));
@@ -384,9 +392,10 @@ async function changedSourceFiles(absDir: string, base: string): Promise<Array<{
     const { stdout } = await execFileAsync('git', gitPathArgs('ls-files', '--others', '--exclude-standard'), { cwd: absDir, maxBuffer: 16 * 1024 * 1024 });
     for (const path of stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
       if (eligible(path) && !seen.has(path)) { seen.add(path); out.push({ path, status: 'added' }); }
+      noteUnassessed(path);
     }
   } catch { /* best-effort */ }
-  return out;
+  return { files: out, unassessedCodeFiles: unassessed.size };
 }
 
 async function diffSurface(
@@ -407,7 +416,7 @@ async function diffSurface(
   const resolvedBase = base.resolved;
   const oldRef = await mergeBase(absDir, resolvedBase);
 
-  const changed = await changedSourceFiles(absDir, resolvedBase);
+  const { files: changed, unassessedCodeFiles } = await changedSourceFiles(absDir, resolvedBase);
   // Read base + head content for every changed file.
   const baseFiles: Array<{ path: string; content: string; language: string }> = [];
   const headFiles: Array<{ path: string; content: string; language: string }> = [];
@@ -427,7 +436,7 @@ async function diffSurface(
   const headPathOf = new Map<string, string>();
   for (const f of changed) if (f.oldPath) headPathOf.set(f.oldPath, f.path);
 
-  const { extraCrossings, ...diff } = await assembleSurfaceDiff(baseFiles, headFiles, headPathOf, ctx?.edgeStore as EdgeStoreLike | undefined);
+  const { extraCrossings, ...diff } = await assembleSurfaceDiff(baseFiles, headFiles, headPathOf, ctx?.edgeStore as EdgeStoreLike | undefined, unassessedCodeFiles);
   return {
     mode: 'diff',
     base: resolvedBase,
@@ -451,6 +460,8 @@ export async function assembleSurfaceDiff(
   headFiles: Array<{ path: string; content: string; language: string }>,
   headPathOf: Map<string, string>,
   edgeStore?: EdgeStoreLike,
+  /** Changed code files in a language whose signatures are not classified (they never reach this core). */
+  unassessedCodeFiles = 0,
 ): Promise<{
   overall: ChangeClass;
   summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number };
@@ -644,7 +655,7 @@ export async function assembleSurfaceDiff(
     },
     changes,
     breaking,
-    ...bumpVerdict(changes, anyClassifiable || (baseFiles.length === 0 && headFiles.length === 0)),
+    ...bumpVerdict(changes, unassessedCodeFiles === 0 && (anyClassifiable || (baseFiles.length === 0 && headFiles.length === 0)), unassessedCodeFiles),
     findings: publicSurfaceFindings(changes),
     soundness: {
       posture: anyClassifiable
@@ -659,7 +670,7 @@ export async function assembleSurfaceDiff(
 const BREAKING_CODE_SET: ReadonlySet<string> = new Set(BREAKING_SURFACE_RULE_CODES);
 
 /** The suggested bump plus, when it is withheld, the reason. */
-function bumpVerdict(changes: readonly SurfaceChange[], signaturesAssessed: boolean): { suggestedBump: SuggestedBump | null; suggestedBumpWithheld?: string } {
+function bumpVerdict(changes: readonly SurfaceChange[], signaturesAssessed: boolean, unassessedCodeFiles: number): { suggestedBump: SuggestedBump | null; suggestedBumpWithheld?: string } {
   const bump = suggestedBump(changes, signaturesAssessed);
   if (bump !== null) return { suggestedBump: bump };
   const unproven = changes.filter((c) => c.class === 'potentially-breaking').length;
@@ -667,7 +678,9 @@ function bumpVerdict(changes: readonly SurfaceChange[], signaturesAssessed: bool
     suggestedBump: null,
     suggestedBumpWithheld: unproven > 0
       ? `${unproven} change(s) could not be proven compatible (potentially-breaking)`
-      : 'the changed files are in no signature-classifiable language, so compatibility was not assessed',
+      : unassessedCodeFiles > 0
+        ? `${unassessedCodeFiles} changed code file(s) are in a language whose signatures are not classified (for example Go or Rust), so compatibility was not assessed`
+        : 'the changed files are in no signature-classifiable language, so compatibility was not assessed',
   };
 }
 
@@ -692,7 +705,7 @@ export function publicSurfaceFindings(changes: readonly SurfaceChange[]): Govern
         subject,
         // The reasons stay on the change itself; a finding names the rule, so a large diff does not
         // repeat every reason a third time in the response.
-        message: `${change.changeKind} of exported "${change.name}" breaks rule ${code}`,
+        message: `${change.changeKind} of exported "${change.name}" ${breaking ? 'breaks' : 'triggers'} rule ${code}`,
         // A function replacement: a subject such as `app/routes/$$id.tsx` must not be read as a `$` pattern.
         remediation: FINDING_CODE_REGISTRY[code]?.remediation?.replace('{subject}', () => subject),
         // A rename's finding points at the file that exists after the change.

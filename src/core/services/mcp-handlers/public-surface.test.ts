@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assembleSurfaceDiff, computeCertifyPublicSurface, publicSurfaceFindings } from './public-surface.js';
+import { getChangedFiles } from '../../drift/git-diff.js';
 import { FINDING_CODE_REGISTRY, resolveEnforcementClass } from './enforcement-policy.js';
 import { BREAKING_SURFACE_RULE_CODES } from '../../analyzer/public-surface.js';
 
@@ -298,6 +299,20 @@ describe('handleCertifyPublicSurface — base-ref is fatal on non-resolution (fi
     expect(r.baseRefFallback).toEqual({ requested: 'bogus-ref', resolved: 'main' });
   });
 
+  it('withholds the bump when a changed code file is in a language the classifier does not read', async () => {
+    vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [{ path: 'pkg/a.go', status: 'modified' }], resolvedBase: 'main' } as never);
+    const r = (await computeCertifyPublicSurface({ directory: dir, baseRef: 'HEAD' })) as Record<string, unknown>;
+    expect(r.mode).toBe('diff');
+    expect(r.suggestedBump).toBeNull();
+    expect(r.suggestedBumpWithheld).toMatch(/1 changed code file\(s\) are in a language whose signatures are not classified/);
+  });
+
+  it('a docs-only change still gets a patch bump (non-code files do not withhold it)', async () => {
+    vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [{ path: 'README.md', status: 'modified' }], resolvedBase: 'main' } as never);
+    const r = (await computeCertifyPublicSurface({ directory: dir, baseRef: 'HEAD' })) as Record<string, unknown>;
+    expect(r.suggestedBump).toBe('patch');
+  });
+
   it('a resolvable --base produces a verdict with no fallback disclosure', async () => {
     const r = (await computeCertifyPublicSurface({ directory: dir, baseRef: 'HEAD' })) as Record<string, unknown>;
     expect(r.error).toBeUndefined();
@@ -363,7 +378,7 @@ describe('rule codes, suggested bump, and findings (refine-public-surface-certif
       severity: 'warning',
       source: 'public-surface',
       subject: 'a.ts::x',
-      message: 'signature of exported "x" breaks rule signature-unprovable',
+      message: 'signature of exported "x" triggers rule signature-unprovable',
       remediation: 'Unprovable signature change: a.ts::x; restore the type annotations so compatibility can be classified, or review consumers by hand.',
       location: { path: 'a.ts' },
     }]);
