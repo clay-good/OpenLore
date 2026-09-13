@@ -10,8 +10,9 @@ their merge base: `textual-conflict` (git will not auto-merge; the conflicted fi
 `clean-automerge` (git merges the text; the hazard is behavioral only), or `not-assessed` with a
 detail. The simulation SHALL NOT modify the work tree, index, HEAD, refs, or object store of the
 analyzed repository, and SHALL NOT run a merge driver or lazy-fetch command that the analyzed
-repository chooses. A path changed by both sides with a non-default `merge` attribute,
-`merge.renormalize`, or a submodule conflict SHALL make the pair `not-assessed`. A pair SHALL be `not-assessed`, never `clean-automerge`, when the merge base is
+repository chooses. A changed path with a non-default `merge` attribute, `merge.default`,
+`merge.renormalize`, branch merge options, replace refs or grafts, or a submodule conflict SHALL
+make the pair `not-assessed`. A pair SHALL be `not-assessed`, never `clean-automerge`, when the merge base is
 missing or ambiguous, a tip commit is not present locally, one side is an agent task, the pair spans
 repositories, or the per-call simulation cap or time budget is reached. The symbol-level hazard classes are
 unchanged. The landing suggestion for a `textual-conflict` pair SHALL say so and SHALL NOT call the

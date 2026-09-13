@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileGitSync } from '../../../utils/git-exec.js';
-import { simulateMerge } from './merge-oracle.js';
+import { simulateMerge, gitVersionAtLeast } from './merge-oracle.js';
 import { defaultEnumeratePullRequests } from './interference-map.js';
 
 let root: string;
@@ -223,5 +223,61 @@ describe('simulateMerge', () => {
     const main = git(repo, 'rev-parse', 'main');
     const top = git(repo, 'rev-parse', 'top');
     expect(await simulateMerge(repo, main, top, { deadline: Date.now() - 1 })).toEqual({ verdict: 'not-assessed', detail: 'the merge simulation time budget was spent' });
+  });
+
+  it('is not-assessed for merge.default, branch merge options, replace refs, and a rename onto an attributed name', async () => {
+    const i1 = git(repo, 'rev-parse', 'info-a');
+    const i2 = git(repo, 'rev-parse', 'info-b');
+    expect((await simulateMerge(repo, i1, i2)).verdict).toBe('clean-automerge');
+    for (const [key, value, pattern] of [
+      ['merge.default', 'binary', /merge\.default is "binary"/],
+      ['branch.info-a.mergeOptions', '-Xno-renames', /mergeoptions is set/],
+    ] as const) {
+      git(repo, 'config', key, value);
+      try {
+        expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(pattern) });
+      } finally {
+        git(repo, 'config', '--unset', key);
+      }
+    }
+    git(repo, 'config', 'merge.default', 'text');
+    try {
+      expect((await simulateMerge(repo, i1, i2)).verdict).toBe('clean-automerge');
+    } finally {
+      git(repo, 'config', '--unset', 'merge.default');
+    }
+
+    git(repo, 'replace', i2, i1);
+    try {
+      expect(await simulateMerge(repo, i1, git(repo, 'rev-parse', 'top'))).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/replace refs or grafts/) });
+    } finally {
+      git(repo, 'replace', '-d', i2);
+    }
+
+    // A renames f.txt onto *.bin (-merge) and edits it; B edits f.txt elsewhere.
+    git(repo, 'switch', '-q', '-c', 'mv-base', 'main');
+    writeFileSync(join(repo, 'm.txt'), Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n') + '\n');
+    writeFileSync(join(repo, '.gitattributes'), '*.bin -merge\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'mv-base');
+    git(repo, 'switch', '-q', '-c', 'mv-a');
+    git(repo, 'mv', 'm.txt', 'm.bin');
+    writeFileSync(join(repo, 'm.bin'), ['LINE 0', ...Array.from({ length: 39 }, (_, i) => `line ${i + 1}`)].join('\n') + '\n');
+    git(repo, 'commit', '-q', '-am', 'mv-a');
+    const moved = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'switch', '-q', '-c', 'mv-b', 'mv-base');
+    writeFileSync(join(repo, 'm.txt'), [...Array.from({ length: 39 }, (_, i) => `line ${i}`), 'LINE 39'].join('\n') + '\n');
+    git(repo, 'commit', '-q', '-am', 'mv-b');
+    const edited = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'switch', '-q', 'main');
+    expect(await simulateMerge(repo, moved, edited)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/m\.bin has merge attribute "unset"/) });
+  });
+
+  it('parses git versions for the lazy-fetch guard', () => {
+    expect(gitVersionAtLeast('git version 2.50.1 (Apple Git-155)', 2, 45)).toBe(true);
+    expect(gitVersionAtLeast('git version 2.45.0', 2, 45)).toBe(true);
+    expect(gitVersionAtLeast('git version 2.44.2.windows.1', 2, 45)).toBe(false);
+    expect(gitVersionAtLeast('git version 3.0.0', 2, 45)).toBe(true);
+    expect(gitVersionAtLeast('not git', 2, 45)).toBe(false);
   });
 });

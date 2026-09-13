@@ -261,7 +261,9 @@ repository that reads the real objects through an alternates file: a pre-build p
 past `--attr-source`), and the scratch repository prevents both. Four adversarial reviews added:
 lazy fetch disabled (a partial clone's `uploadpack` command ran), merge attributes and
 `merge.renormalize` checked in the real repository and rename settings forwarded (each gave a false
-clean), submodule conflicts, a 20-second budget, and a response-size loop. A missing or criss-cross
+clean), `merge.default`, branch merge options, replace refs, and renames onto an attributed name
+(three more false cleans in verification), submodule conflicts, a 20-second budget, and a
+response-size loop. A missing or criss-cross
 merge base, a PR head that is not local, an agent task, a cross-repo pair, or a cap is
 `not-assessed`, never clean. Per-symbol hunk mapping is deferred.
 
