@@ -36,11 +36,7 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 1
-
-`adopt-mcp-protocol-conformance` — guarded, audited tool annotations and actionable (`isError`)
-argument-validation errors; output schemas and elicitation deferred. On a branch with its `change:`
-marker in `src/`.
+## In flight — 0
 
 (`shrink-receiver-resolution-boundary` merged in #465 and awaits archiving.)
 
@@ -230,6 +226,15 @@ served path and any other reasons, a path across synthesized edges carries a `st
 adversarial reviews fixed path frames for subdirectory analysis, over-broad test classification,
 string-sorted depth reasons, cyclic `tested_by` paths, and an unbounded, silently failing untracked
 listing (now capped at 200 with disclosure).
+
+Shipped and archived since: `adopt-mcp-protocol-conformance` (2026-09-12, narrowed) — tool
+annotations have no read-only fallback, and a TypeScript-checker trace from every dispatch branch to
+write, spawn, and worker primitives fails CI when a read-only tool reaches a write outside a reasoned
+allowlist. The audit corrected seven tools (two unlisted writers, `audit_spec_coverage` now dispatched
+with `save: false`, destructive and open-world hints). Argument-validation failures are `isError`
+results that name the parameter, the expected shape, and a schema-valid corrected call, bounded and
+redacted. Output schemas (measured +19% to +96% of the substrate standing cost) and elicitation for
+decision approval are deferred to their own changes.
 
 ## Maintenance rules (what kept this table honest)
 
