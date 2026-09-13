@@ -434,11 +434,14 @@ describe('simulateMerge', () => {
     // Both spellings are ancestors of changed paths.
     const both = commitFiles(repo, dirBase, { 'sub/k.txt': lines({ 1: 'B' }), 'Sub/other.txt': 'O\n' }, 'dircase-both');
     expect(await simulateMerge(repo, both, d2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/differs from another changed directory only by letter case/) });
-    // Names that look like pathspec magic are listed literally.
-    const colonBase = commitFiles(repo, main, { ':/sub/k.txt': lines(), ':/Sub/.gitattributes': 'k.txt merge=binary\n' }, 'colon-base');
-    const c1 = commitFiles(repo, colonBase, { ':/sub/k.txt': lines({ 1: 'B' }) }, 'colon-a');
-    const c2 = commitFiles(repo, colonBase, { ':/sub/k.txt': lines({ 7: 'H' }) }, 'colon-b');
-    expect(await simulateMerge(repo, c1, c2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/:\/Sub differs/) });
+    // Names that look like pathspec magic are listed literally. Skipped on Windows: NTFS cannot hold a
+    // path containing ':', and git for Windows refuses to check one out (core.protectNTFS).
+    if (process.platform !== 'win32') {
+      const colonBase = commitFiles(repo, main, { ':/sub/k.txt': lines(), ':/Sub/.gitattributes': 'k.txt merge=binary\n' }, 'colon-base');
+      const c1 = commitFiles(repo, colonBase, { ':/sub/k.txt': lines({ 1: 'B' }) }, 'colon-a');
+      const c2 = commitFiles(repo, colonBase, { ':/sub/k.txt': lines({ 7: 'H' }) }, 'colon-b');
+      expect(await simulateMerge(repo, c1, c2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/:\/Sub differs/) });
+    }
   });
 
   it('is not-assessed when core.worktree points at another repository', async () => {
