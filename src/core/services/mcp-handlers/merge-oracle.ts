@@ -336,10 +336,24 @@ async function mergeAttributeBlocker(
   repoPath: string, base: string, tipA: string, tipB: string, deadline: number | undefined,
   changedPathsOut: string[],
 ): Promise<string | undefined> {
-  const changed = async (tip: string) => new Set(
-    (await readGit(repoPath, gitPathArgs('diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--no-renames', base, tip), deadline)).split('\0').filter(Boolean),
-  );
+  // `--raw` entries: `:<old mode> <new mode> <old id> <new id> <status>` NUL `<path>` NUL.
+  let gitlinkTypeChange: string | undefined;
+  const changed = async (tip: string) => {
+    const fields = (await readGit(repoPath, gitPathArgs('diff', '--no-ext-diff', '--no-textconv', '--raw', '-z', '--no-renames', base, tip), deadline)).split('\0');
+    const paths = new Set<string>();
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      const [oldMode, newMode] = fields[i].replace(/^:/, '').split(' ');
+      const path = fields[i + 1];
+      if (!path) continue;
+      paths.add(path);
+      // A submodule replaced by (or removed for) ordinary files collides with the checked-out
+      // submodule's files in a real merge; the simulation cannot see that working-tree state.
+      if (!gitlinkTypeChange && (oldMode === GITLINK_MODE) !== (newMode === GITLINK_MODE)) gitlinkTypeChange = path;
+    }
+    return paths;
+  };
   const shared = [...new Set([...(await changed(tipA)), ...(await changed(tipB))])].sort();
+  if (gitlinkTypeChange) return `${capPath(gitlinkTypeChange)} changes between a submodule and a regular entry, which the simulation cannot see into`;
   changedPathsOut.push(...shared);
   if (shared.length === 0) return undefined;
   // A real merge refuses to check out a path with a `.git` component (verify_path); merge-tree does not.

@@ -600,4 +600,18 @@ describe('simulateMerge', () => {
       git(repo, 'config', '--unset', 'merge.directoryRenames');
     }
   });
+
+  it('is not-assessed when a submodule is replaced by ordinary files (vendoring)', async () => {
+    const base = git(repo, 'rev-parse', 'sub-base'); // has a gitlink at `mod`
+    const edited = commitFiles(repo, base, { 'code.txt': 'x\n' }, 'vendor-edit');
+    const env = { ...process.env, GIT_INDEX_FILE: join(root, 'index-vendor') };
+    execFileGitSync('git', ['read-tree', base], { cwd: repo, env });
+    execFileGitSync('git', ['update-index', '--force-remove', 'mod'], { cwd: repo, env });
+    const blob = execFileGitSync('git', ['hash-object', '-w', '--stdin'], { cwd: repo, input: 's\n' }).trim();
+    execFileGitSync('git', ['update-index', '--index-info'], { cwd: repo, env, input: `100644 ${blob}\tmod/s.txt\n` });
+    const tree = execFileGitSync('git', ['write-tree'], { cwd: repo, env }).trim();
+    rmSync(env.GIT_INDEX_FILE, { force: true });
+    const vendored = execFileGitSync('git', ['commit-tree', tree, '-p', base, '-m', 'vendor'], { cwd: repo }).trim();
+    expect(await simulateMerge(repo, edited, vendored)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/mod changes between a submodule and a regular entry/) });
+  });
 });
