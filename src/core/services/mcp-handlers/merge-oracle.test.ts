@@ -364,6 +364,9 @@ describe('simulateMerge', () => {
       ['merge.stat', 'bogus', /merge\.stat has a value git merge cannot parse/],
       ['merge.stat', ' true', /merge\.stat has a value git merge cannot parse/],
       ['merge.log', '-1', /merge\.log has a value git merge cannot parse/],
+      ['merge.log', '2g', /merge\.log has a value git merge cannot parse/],
+      ['merge.stat', '3g', /merge\.stat has a value git merge cannot parse/],
+      ['core.bigFileThreshold', '17179869184g', /core\.bigfilethreshold has a value git merge cannot parse/],
       ['merge.verbosity', '6', /merge\.verbosity has a value git merge cannot parse/],
       ['merge.renames', ' true', /merge\.renames has a value the simulation cannot forward/],
       ['commit.cleanup', 'bogus', /commit\.cleanup has a value git merge cannot parse/],
@@ -542,5 +545,29 @@ describe('simulateMerge', () => {
     }
     // A plain symlink elsewhere is fine.
     expect((await simulateMerge(repo, withEntry(`120000 blob ${blob}\tlink\n`, 'protect-ok'), b)).verdict).toBe('clean-automerge');
+  });
+
+  it('accepts in-range git numbers and harmless attributes, and refuses any other attribute', async () => {
+    const i1 = git(repo, 'rev-parse', 'info-a');
+    const i2 = git(repo, 'rev-parse', 'info-b');
+    for (const [key, value] of [['merge.stat', '1k'], ['merge.log', ' 7'], ['merge.verbosity', '+3']] as const) {
+      git(repo, 'config', key, value);
+      try {
+        expect((await simulateMerge(repo, i1, i2)).verdict, `${key}=${value}`).toBe('clean-automerge');
+      } finally {
+        git(repo, 'config', '--unset', key);
+      }
+    }
+    const attributes = join(repo, '.git', 'info', 'attributes');
+    try {
+      writeFileSync(attributes, '* text=auto eol=lf whitespace=trailing-space linguist-generated\n');
+      expect((await simulateMerge(repo, i1, i2)).verdict).toBe('clean-automerge');
+      writeFileSync(attributes, 'g.txt -diff\n');
+      expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/g\.txt has attribute "diff"/) });
+      writeFileSync(attributes, 'g.txt filter=lfs\n');
+      expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/g\.txt has attribute "filter"/) });
+    } finally {
+      rmSync(attributes, { force: true });
+    }
   });
 });

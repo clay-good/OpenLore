@@ -70,18 +70,26 @@ const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.rename
 const STRICT_VALUE_KEYS: Record<string, (value: string, hasValue: boolean) => boolean> = {
   'merge.stat': isGitBoolText,
   'merge.diffstat': isGitBoolText,
-  'merge.log': (value, hasValue) => isGitBoolWord(value, hasValue) || /^\s*\d+[kmg]?$/i.test(value),
+  'merge.log': (value, hasValue) => isGitBoolWord(value, hasValue) || parsesAsGitInt(value, 0n, INT_MAX),
   'merge.autostash': isGitBoolText,
-  'merge.branchdesc': (value, hasValue) => isGitBoolWord(value, hasValue) || /^\s*-?\d+[kmg]?$/i.test(value),
+  'merge.branchdesc': isGitBoolText,
   'merge.defaulttoupstream': isGitBoolText,
   // merge-ort asserts 0 <= verbosity <= 5.
-  'merge.verbosity': (value, hasValue) => hasValue && /^\s*[0-5]$/.test(value),
+  'merge.verbosity': (value, hasValue) => hasValue && parsesAsGitInt(value, 0n, 5n),
   // git ignores an unrecognized merge.ff value.
   'merge.ff': () => true,
   'commit.gpgsign': isGitBoolText,
   'commit.cleanup': (value, hasValue) => hasValue && /^(strip|whitespace|verbatim|scissors|default)$/.test(value),
-  'core.bigfilethreshold': (value, hasValue) => hasValue && /^\d+[kmg]?$/i.test(value),
+  // An unsigned long in git: 32 bits on Windows, so larger values are refused everywhere.
+  'core.bigfilethreshold': (value, hasValue) => hasValue && parsesAsGitInt(value, 0n, 4294967295n),
 };
+/**
+ * Attributes known not to change a merge result without `merge.renormalize` (which is refused).
+ * Any other attribute on a changed path makes the pair not-assessed: an allowlist, so an unanticipated
+ * attribute (`diff`, which changes rename detection, a filter, an encoding) cannot produce a false clean.
+ */
+const HARMLESS_ATTRIBUTES = new Set(['text', 'eol', 'crlf', 'whitespace', 'export-ignore', 'export-subst']);
+
 /** `merge` attribute values that mean the default text merge the simulation runs. */
 const DEFAULT_MERGE_ATTRIBUTE = new Set(['unspecified', 'set', 'text']);
 const GITLINK_MODE = '160000';
@@ -153,9 +161,24 @@ function isExitOne(error: unknown): boolean {
  * Git's boolean parsing. A key with no `=` at all (`hasValue` false) is true; an explicitly empty
  * value is false; otherwise `true`/`yes`/`on` or any non-zero integer.
  */
-/** A value git's strict boolean parser accepts, untrimmed: a bool word, empty, no value, or an int. */
+const INT_MIN = -2147483648n;
+const INT_MAX = 2147483647n;
+
+/**
+ * Git's integer config parsing: optional leading whitespace and sign, digits, and an optional
+ * k/m/g unit (powers of 1024), with the scaled result inside [min, max]. No trailing characters.
+ */
+function parsesAsGitInt(value: string, min: bigint, max: bigint): boolean {
+  const match = /^\s*([+-]?\d{1,40})([kmg]?)$/i.exec(value);
+  if (!match) return false;
+  const unit = { '': 1n, k: 1024n, m: 1048576n, g: 1073741824n }[match[2].toLowerCase() as '' | 'k' | 'm' | 'g'];
+  const scaled = BigInt(match[1]) * unit;
+  return scaled >= min && scaled <= max;
+}
+
+/** A value git's strict boolean parser accepts, untrimmed: a bool word, empty, no value, or a 32-bit int. */
 function isGitBoolText(value: string, hasValue: boolean): boolean {
-  return isGitBoolWord(value, hasValue) || /^\s*-?\d+[kmg]?$/i.test(value);
+  return isGitBoolWord(value, hasValue) || parsesAsGitInt(value, INT_MIN, INT_MAX);
 }
 
 function isGitBoolWord(value: string, hasValue: boolean): boolean {
@@ -308,13 +331,20 @@ async function mergeAttributeBlocker(
   for (const source of [undefined, base, tipA, tipB]) {
     // precomposeunicode=false: keep path bytes as the tree stores them, so a decomposed (NFD) path
     // still matches its decomposed `.gitattributes` pattern on macOS.
-    const args = ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', ...(source ? [`--source=${source}`] : []), 'merge', '--', ...shared];
+    const args = ['-c', 'core.precomposeunicode=false', 'check-attr', '-z', ...(source ? [`--source=${source}`] : []), '-a', '--', ...shared];
     const fields = (await readGit(repoPath, args, deadline)).split('\0');
+    let otherAttribute: string | undefined;
     for (let i = 0; i + 2 < fields.length; i += 3) {
-      if (!DEFAULT_MERGE_ATTRIBUTE.has(fields[i + 2])) {
-        return `${capPath(fields[i])} has merge attribute "${fields[i + 2].slice(0, 40)}", which the simulation does not apply`;
+      const [path, attribute, value] = [fields[i], fields[i + 1], fields[i + 2]];
+      if (attribute === 'merge') {
+        if (!DEFAULT_MERGE_ATTRIBUTE.has(value)) {
+          return `${capPath(path)} has merge attribute "${value.slice(0, 40)}", which the simulation does not apply`;
+        }
+      } else if (!otherAttribute && !HARMLESS_ATTRIBUTES.has(attribute) && !attribute.startsWith('linguist-')) {
+        otherAttribute = `${capPath(path)} has attribute "${attribute.slice(0, 40)}", which the simulation does not apply`;
       }
     }
+    if (otherAttribute) return otherAttribute;
   }
   {
     // On a case-insensitive filesystem a real merge also reads `.GITATTRIBUTES`, or `Sub/.gitattributes`
