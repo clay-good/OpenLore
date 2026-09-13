@@ -237,6 +237,27 @@ describe('collectExternalWiring — runner syntax', () => {
     ]);
   });
 
+  it('reads value-taking flag groups, process substitutions, and one name run by two runners', async () => {
+    for (const f of ['script.py', 'test.rb', 'scripts/gen.js', 'c.js', 'build2.js']) await put(f);
+    await put('package.json', JSON.stringify({
+      scripts: {
+        pyW: 'python -Wonce script.py',
+        rubyI: 'ruby -Iexe test.rb',
+        pyModule: 'python -um pkg',
+        procsub: 'diff <(node scripts/gen.js) x.js',
+        substCd: 'echo $(cd a; node b.js); node c.js',
+        twice: 'bash build2 && node build2',
+      },
+    }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['build2.js', 'c.js', 'script.py', 'scripts/gen.js', 'test.rb']);
+    expect(report.boundaries).toEqual([
+      { config: 'package.json', key: 'scripts.pyModule', reference: '-m pkg', reason: 'unsupported-form' },
+      { config: 'package.json', key: 'scripts.substCd', reference: 'b.js', reason: 'unsupported-form' },
+      { config: 'package.json', key: 'scripts.twice', reference: 'build2', reason: 'target-not-found' },
+    ]);
+  });
+
   it('bounds cd tracking and regex and template scanning on hostile input', async () => {
     const commands = `${'('.repeat(200_000)}cd a;${'x;'.repeat(100_000)}`;
     await put('.github/workflows/deep.yml', `jobs:\n  a:\n    steps:\n      - run: ${JSON.stringify(commands)}\n`);

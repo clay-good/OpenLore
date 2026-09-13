@@ -161,7 +161,7 @@ class Collector {
   private seenBoundaries = new Set<string>();
 
   reference(ref: Reference): void {
-    const key = JSON.stringify([ref.config, ref.key, ref.reference]);
+    const key = JSON.stringify([ref.config, ref.key, ref.reference, ref.resolvesLikeNode === true]);
     if (this.seenReferences.has(key)) return;
     this.seenReferences.add(key);
     const count = (this.referencesPerConfig.get(ref.config) ?? 0) + 1;
@@ -290,7 +290,7 @@ function commandReferences(
   // A `cd` holds for the rest of its subshell: remember the shallowest depth a `cd` ran at.
   let cdDepth = Infinity;
   for (const { words: segment, depth } of shellSegments(command)) {
-    if (depth < cdDepth && cdDepth !== Infinity && depthLeft(cdDepth, depth)) cdDepth = Infinity;
+    if (depth < cdDepth) cdDepth = Infinity;
     const changedDirectory = cdDepth <= depth;
     const executed = executedWords(segment);
     for (const item of executed) {
@@ -327,11 +327,6 @@ function commandReferences(
 }
 
 type Executed = { kind: 'file' | 'module' | 'cd' | 'inline'; word: Word; resolvesLikeNode?: boolean };
-
-/** Whether leaving to `depth` closed the subshell a `cd` at `cdDepth` ran in. */
-function depthLeft(cdDepth: number, depth: number): boolean {
-  return depth < cdDepth;
-}
 
 /** The command a word names: the basename of an absolute system path (`/usr/bin/env` → `env`). */
 function systemCommandName(text: string): string {
@@ -384,13 +379,31 @@ function executedWords(words: Word[]): Executed[] {
     // A group of short flags (`-euo pipefail`, `-ec`): its letters are flags, and the group takes a value
     // when its last letter does.
     if (isFlag && /^-[A-Za-z]{2,}$/.test(flag) && inline === undefined) {
-      const letters = flag.slice(1).split('').map(l => `-${l}`);
-      if (letters.some(l => syntax.inlineFlags.has(l))) {
-        const code = words[j + 1]?.text;
-        if (syntax.runsInline && code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
-        return executed;
+      // Read the group as getopt does: letters are switches until one takes a value, which is the rest
+      // of the group, or the next word when it is the last letter.
+      const letters = flag.slice(1);
+      let group: Executed[] | 'continue' = 'continue';
+      for (let k = 0; k < letters.length; k++) {
+        const letter = `-${letters[k]}`;
+        const rest = letters.slice(k + 1);
+        if (syntax.inlineFlags.has(letter)) {
+          const code = rest || words[j + 1]?.text;
+          if (syntax.runsInline && code) executed.push({ kind: 'inline', word: { text: code, quoted: true } });
+          group = executed;
+          break;
+        }
+        if (syntax.moduleFlag === letter) {
+          const module = rest || words[j + 1]?.text;
+          if (module) executed.push({ kind: 'module', word: { text: `${letter} ${module}`, quoted: false } });
+          group = executed;
+          break;
+        }
+        if (syntax.valueFlags.has(letter)) {
+          if (!rest) j++;
+          break;
+        }
       }
-      if (syntax.valueFlags.has(letters[letters.length - 1])) j++;
+      if (group !== 'continue') return group;
       continue;
     }
     if (syntax.inlineFlags.has(flag)) {
@@ -508,9 +521,21 @@ function shellSegments(command: string): Array<{ words: Word[]; depth: number }>
     if (ch === '(' || ch === ')') {
       // `$(`, `$((`, `<(`, and `@(` open substitutions or patterns, not subshells: their `)` must not
       // close a subshell. A plain `(` opens a subshell whose commands are segments of their own.
-      if (ch === '(' && (inWord || (i > 0 && '$<>@'.includes(command[i - 1])))) {
+      const previous = i > 0 ? command[i - 1] : '';
+      // `$((` arithmetic and extglob patterns (`@(`, `?(`, …) are part of a word.
+      if (ch === '(' && ((previous === '$' && command[i + 1] === '(') || (inWord && previous !== '$'))) {
         parens.push('word');
         word += ch; inWord = true;
+        continue;
+      }
+      // `$(`, `<(`, and `>(` run their commands in a subshell: segments of their own, and a `cd` inside
+      // ends with them.
+      if (ch === '(' && '$<>'.includes(previous) && previous !== '') {
+        if (previous === '$' && word.endsWith('$')) word = word.slice(0, -1);
+        if (previous !== '$') redirect = false;
+        endSegment();
+        parens.push('subshell');
+        depth++;
         continue;
       }
       if (ch === ')' && parens.length > 0 && parens[parens.length - 1] === 'word') {
