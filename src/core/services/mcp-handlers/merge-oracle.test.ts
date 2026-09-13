@@ -389,6 +389,8 @@ describe('simulateMerge', () => {
     }
   });
 
+  // This case creates six real worktrees and runs real merges. It completes well within the
+  // default budget on POSIX, but Git for Windows can exceed 30s on a hosted runner.
   it('assesses only the default diff.algorithm, and matches a real merge for it', async () => {
     const alg = join(root, 'alg');
     execFileGitSync('git', ['init', '-q', '-b', 'main', alg]);
@@ -443,7 +445,7 @@ describe('simulateMerge', () => {
       try { git(alg, 'merge-tree', '--write-tree', sa, sb); } catch { truth = 'textual-conflict'; }
       expect((await simulateMerge(alg, sa, sb)).verdict, style).toBe(truth);
     }
-  });
+  }, process.platform === 'win32' ? 90_000 : 30_000);
 
   it('matches decomposed (NFD) attribute patterns and case-variant attributes files', async () => {
     const nfd = 'é.txt';
