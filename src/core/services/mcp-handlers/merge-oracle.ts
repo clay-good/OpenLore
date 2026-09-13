@@ -62,7 +62,7 @@ const SPAWN_TIMEOUT_MS = 30_000;
 const SHARED_PATHS_CAP = 500;
 const SHARED_PATH_CHARS_CAP = 24_000;
 /** Repository settings that change merge results and are plain values, safe to forward with `-c`. */
-const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.renamelimit', 'diff.renamelimit', 'merge.directoryrenames', 'diff.algorithm', 'diff.indentheuristic']);
+const FORWARDED_CONFIG = new Set(['merge.renames', 'diff.renames', 'merge.renamelimit', 'diff.renamelimit', 'merge.directoryrenames', 'diff.algorithm', 'diff.indentheuristic', 'merge.conflictstyle']);
 /** `merge` attribute values that mean the default text merge the simulation runs. */
 const DEFAULT_MERGE_ATTRIBUTE = new Set(['unspecified', 'set', 'text']);
 const GITLINK_MODE = '160000';
@@ -155,11 +155,12 @@ export function gitVersionAtLeast(versionOutput: string, major: number, minor: n
 
 /**
  * Repository-local `merge.*` keys known not to change the merge result (output, tooling, and
- * fast-forward choices). Any other repository-local `merge.*` key makes the pair not-assessed:
- * an allowlist, so an unanticipated setting can never produce a silent `clean-automerge`.
+ * fast-forward choices). Any other `merge.*` key makes the pair not-assessed: an allowlist, so an
+ * unanticipated setting can never produce a silent `clean-automerge`. (`merge.conflictStyle` is not
+ * harmless: diff3 skips conflict refinement, so it is forwarded instead.)
  */
 const HARMLESS_MERGE_KEYS = new Set([
-  'merge.conflictstyle', 'merge.verbosity', 'merge.ff', 'merge.log', 'merge.stat', 'merge.tool',
+  'merge.verbosity', 'merge.ff', 'merge.log', 'merge.stat', 'merge.tool',
   'merge.guitool', 'merge.autostash', 'merge.suppressdest', 'merge.branchdesc', 'merge.defaulttoupstream',
 ]);
 
@@ -168,31 +169,31 @@ interface MergeConfig { args: string[] }
 /**
  * Repository merge settings the scratch repository would not see: `-c` arguments to forward, or a
  * reason the merge cannot be simulated faithfully. Only reads config values, which fetches nothing.
- * Global and system config is read by the scratch repository too, so only repository-local scopes
- * need forwarding or refusal (ambiguous driver names are refused from any scope).
+ * Every scope is checked: global config can reach only the real repository through
+ * `includeIf "gitdir:..."`, so the scratch repository cannot be assumed to see it.
  */
 async function repositoryMergeConfig(repoPath: string, deadline: number | undefined): Promise<MergeConfig | { detail: string }> {
   let listing: string;
   try {
-    // -z: `scope NUL key LF value NUL`, so a value containing a newline cannot forge another entry.
-    listing = await readGit(repoPath, ['config', '-z', '--show-scope', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
+    // -z: `key LF value NUL`, so a value containing a newline cannot forge another entry.
+    listing = await readGit(repoPath, ['config', '-z', '--get-regexp', '^(merge\\..+|diff\\.(renames|renamelimit|algorithm|indentheuristic)|pull\\.twohead|branch\\..+\\.mergeoptions|extensions\\.partialclone|remote\\..+\\.promisor)$'], deadline);
   } catch (error) {
     if (isExitOne(error)) return { args: [] };
     throw error;
   }
   const args: string[] = [];
   let partialClone = false;
-  const fields = listing.split('\0');
-  for (let i = 0; i + 1 < fields.length; i += 2) {
-    const scope = fields[i];
-    const entry = fields[i + 1];
+  for (const entry of listing.split('\0').filter(Boolean)) {
     const newline = entry.indexOf('\n');
     const hasValue = newline >= 0;
     const key = (hasValue ? entry.slice(0, newline) : entry).toLowerCase();
     const value = hasValue ? entry.slice(newline + 1).trim() : '';
-    const repositoryScope = scope === 'local' || scope === 'worktree' || scope === 'command';
     if (key === 'extensions.partialclone' || (key.startsWith('remote.') && key.endsWith('.promisor') && isGitTrue(value, hasValue))) {
       partialClone = true;
+      continue;
+    }
+    if (key === 'pull.twohead') {
+      if (!hasValue || !/^(ort|recursive)$/i.test(value)) return { detail: `pull.twohead selects the "${value.slice(0, 40)}" merge strategy, which is not simulated` };
       continue;
     }
     if (key.startsWith('branch.') && key.endsWith('.mergeoptions')) {
@@ -214,12 +215,14 @@ async function repositoryMergeConfig(repoPath: string, deadline: number | undefi
       continue;
     }
     if (FORWARDED_CONFIG.has(key)) {
-      if (hasValue && !/^[A-Za-z0-9_-]{1,32}$/.test(value)) return { detail: `${key} has a value the simulation cannot forward` };
-      args.push('-c', `${key}=${hasValue ? value : 'true'}`);
+      // A forwarded key with no value makes a real merge die ("missing value"), so it is not assessed.
+      if (!hasValue || !/^[A-Za-z0-9_-]{1,32}$/.test(value)) return { detail: `${key} has a value the simulation cannot forward` };
+      if (key === 'merge.conflictstyle' && !/^(merge|diff3|zdiff3)$/i.test(value)) return { detail: `merge.conflictStyle "${value}" is not simulated` };
+      args.push('-c', `${key}=${value}`);
       continue;
     }
-    if (parts[0] === 'merge' && repositoryScope && !HARMLESS_MERGE_KEYS.has(key)) {
-      return { detail: `${key.slice(0, 80)} is set in the repository config and is not simulated` };
+    if (parts[0] === 'merge' && !HARMLESS_MERGE_KEYS.has(key)) {
+      return { detail: `${key.slice(0, 80)} is set in git config and is not simulated` };
     }
   }
   if (partialClone) {
@@ -289,8 +292,9 @@ async function mergeAttributeBlocker(
       if (dirs.size > 0) entries.push(...(await readGit(repoPath, [...listing, '--', ...[...dirs].map(dir => `${dir}/`)], deadline)).split('\0'));
       for (const entry of entries.filter(Boolean)) {
         const name = entry.slice(entry.lastIndexOf('/') + 1);
-        if (nonAscii(name)) {
-          return `${capPath(entry)} is a non-ASCII name beside a changed path, and filesystem case folding cannot be checked for it`;
+        // NTFS drops trailing dots and spaces and has 8.3 short names (`GITATT~1`), so those alias too.
+        if (nonAscii(name) || /[. ]$/.test(name) || /~\d/.test(name)) {
+          return `${capPath(entry)} is a name beside a changed path that a filesystem may alias (non-ASCII, trailing dot or space, or a short name)`;
         }
         const variantAttributes = name !== '.gitattributes' && name.toLowerCase() === '.gitattributes';
         const variantDir = !dirs.has(entry) && dirsLower.has(entry.toLowerCase());

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -342,7 +342,7 @@ describe('simulateMerge', () => {
     for (const [key, value, pattern] of [
       ['merge.text.name', 'foo', /merge driver named "text"/],
       ['merge.unspecified.recursive', 'binary', /merge driver named "unspecified"/],
-      ['merge.somethingNew', 'x', /merge\.somethingnew is set in the repository config/],
+      ['merge.somethingNew', 'x', /merge\.somethingnew is set in git config/],
     ] as const) {
       git(repo, 'config', key, value);
       try {
@@ -351,11 +351,28 @@ describe('simulateMerge', () => {
         git(repo, 'config', '--unset', key);
       }
     }
-    git(repo, 'config', 'merge.conflictStyle', 'diff3');
+    git(repo, 'config', 'merge.tool', 'vimdiff');
     try {
       expect((await simulateMerge(repo, i1, i2)).verdict).toBe('clean-automerge');
     } finally {
-      git(repo, 'config', '--unset', 'merge.conflictStyle');
+      git(repo, 'config', '--unset', 'merge.tool');
+    }
+    for (const [key, value, pattern] of [
+      ['pull.twohead', 'resolve', /pull\.twohead selects the "resolve"/],
+      ['merge.conflictStyle', 'weird', /merge\.conflictStyle "weird"/],
+    ] as const) {
+      git(repo, 'config', key, value);
+      try {
+        expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(pattern) });
+      } finally {
+        git(repo, 'config', '--unset', key);
+      }
+    }
+    writeFileSync(join(repo, '.git', 'config'), `${readFileSync(join(repo, '.git', 'config'), 'utf8')}[merge]\n\trenames\n`);
+    try {
+      expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/merge\.renames has a value the simulation cannot forward/) });
+    } finally {
+      git(repo, 'config', '--unset', 'merge.renames');
     }
   });
 
@@ -374,6 +391,17 @@ describe('simulateMerge', () => {
       let truth: 'clean-automerge' | 'textual-conflict' = 'clean-automerge';
       try { git(alg, 'merge-tree', '--write-tree', a, b); } catch { truth = 'textual-conflict'; }
       expect((await simulateMerge(alg, a, b)).verdict, algorithm).toBe(truth);
+    }
+    git(alg, 'config', '--unset', 'diff.algorithm');
+    // diff3 skips conflict refinement, so it can turn a clean merge into a conflict.
+    const styleBase = commitFiles(alg, empty, { s: 'a\nc\nc\nb\nc\na\n' }, 'style-base');
+    const sa = commitFiles(alg, styleBase, { s: 'a\nc\nb\nc\na\n' }, 'style-a');
+    const sb = commitFiles(alg, styleBase, { s: 'y\na\na\nc\nb\nc\nb\n' }, 'style-b');
+    for (const style of ['merge', 'diff3', 'zdiff3']) {
+      git(alg, 'config', 'merge.conflictStyle', style);
+      let truth: 'clean-automerge' | 'textual-conflict' = 'clean-automerge';
+      try { git(alg, 'merge-tree', '--write-tree', sa, sb); } catch { truth = 'textual-conflict'; }
+      expect((await simulateMerge(alg, sa, sb)).verdict, style).toBe(truth);
     }
   });
 
@@ -428,7 +456,7 @@ describe('simulateMerge', () => {
     const base = commitFiles(repo, main, { 'sub/f.txt': lines() }, 'fold-base');
     const a = commitFiles(repo, base, { 'sub/f.txt': lines({ 1: 'B' }), 'sub/.gitattributeſ': 'f.txt -merge\n' }, 'fold-a');
     const b = commitFiles(repo, base, { 'sub/f.txt': lines({ 7: 'H' }), 'sub/.gitattributeſ': 'f.txt -merge\n' }, 'fold-b');
-    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/non-ASCII name beside a changed path/) });
+    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/may alias \(non-ASCII/) });
     const sigmaBase = commitFiles(repo, main, { 'σ/f.txt': lines() }, 'sigma-base');
     const s1 = commitFiles(repo, sigmaBase, { 'σ/f.txt': lines({ 1: 'B' }), 'ς/.gitattributes': 'f.txt -merge\n' }, 'sigma-a');
     const s2 = commitFiles(repo, sigmaBase, { 'σ/f.txt': lines({ 7: 'H' }), 'ς/.gitattributes': 'f.txt -merge\n' }, 'sigma-b');
