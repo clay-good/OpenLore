@@ -661,4 +661,21 @@ describe('simulateMerge', () => {
     const e2 = commitFiles(repo, both, { f: 'f2\n' }, 'filecase-other');
     expect(await simulateMerge(repo, e1, e2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/README differs from a changed path only by letter case/) });
   });
+
+  it('is not-assessed when a .gitattributes is a symlink', async () => {
+    const main = git(repo, 'rev-parse', 'main');
+    const env = { ...process.env, GIT_INDEX_FILE: join(root, 'index-attr-symlink') };
+    const blob = (content: string) => execFileGitSync('git', ['hash-object', '-w', '--stdin'], { cwd: repo, input: content }).trim();
+    execFileGitSync('git', ['read-tree', main], { cwd: repo, env });
+    execFileGitSync('git', ['update-index', '--index-info'], {
+      cwd: repo, env,
+      input: `100644 ${blob('d/f merge=binary\n')}\t.gitattributes\n100644 ${blob(lines())}\td/f\n120000 ${blob('f merge')}\td/.gitattributes\n`,
+    });
+    const tree = execFileGitSync('git', ['write-tree'], { cwd: repo, env }).trim();
+    rmSync(env.GIT_INDEX_FILE, { force: true });
+    const base = execFileGitSync('git', ['commit-tree', tree, '-p', main, '-m', 'attr-symlink-base'], { cwd: repo }).trim();
+    const a = commitFiles(repo, base, { 'd/f': lines({ 0: 'A' }) }, 'attr-symlink-a');
+    const b = commitFiles(repo, base, { 'd/f': lines({ 8: 'I' }) }, 'attr-symlink-b');
+    expect(await simulateMerge(repo, a, b)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/d\/\.gitattributes is a symlink/) });
+  });
 });

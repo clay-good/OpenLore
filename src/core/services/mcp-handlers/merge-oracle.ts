@@ -426,11 +426,20 @@ async function mergeAttributeBlocker(
       return `${capPath(spellings[0])} differs from another changed directory only by letter case`;
     }
     for (const tree of [base, tipA, tipB]) {
-      const listing = gitPathArgs('-c', 'core.precomposeunicode=false', '--literal-pathspecs', 'ls-tree', '-z', '--name-only', '--full-tree', tree);
-      const entries = (await readGit(repoPath, listing, deadline)).split('\0');
-      if (dirs.size > 0) entries.push(...(await readGit(repoPath, [...listing, '--', ...[...dirs].map(dir => `${dir}/`)], deadline)).split('\0'));
-      for (const entry of entries.filter(Boolean)) {
+      // Records are `<mode> <type> <id>` TAB `<path>`; the mode shows a symlinked `.gitattributes`.
+      const listing = gitPathArgs('-c', 'core.precomposeunicode=false', '--literal-pathspecs', 'ls-tree', '-z', '--full-tree', tree);
+      const records = (await readGit(repoPath, listing, deadline)).split('\0');
+      if (dirs.size > 0) records.push(...(await readGit(repoPath, [...listing, '--', ...[...dirs].map(dir => `${dir}/`)], deadline)).split('\0'));
+      for (const record of records.filter(Boolean)) {
+        const tab = record.indexOf('\t');
+        const mode = record.slice(0, record.indexOf(' '));
+        const entry = record.slice(tab + 1);
         const name = entry.slice(entry.lastIndexOf('/') + 1);
+        // A real merge ignores a symlinked `.gitattributes`, but `check-attr --source` reads its target
+        // text as attribute lines, which can hide a rule (such as `merge=binary`) the merge applies.
+        if (mode === '120000' && name.toLowerCase() === '.gitattributes') {
+          return `${capPath(entry)} is a symlink, which a real merge ignores but the attribute check would read`;
+        }
         // NTFS drops trailing dots and spaces and has 8.3 short names (`GITATT~1`), so those alias too.
         if (nonAscii(name) || /[. ]$/.test(name) || /~\d/.test(name)) {
           return `${capPath(entry)} is a name beside a changed path that a filesystem may alias (non-ASCII, trailing dot or space, or a short name)`;
