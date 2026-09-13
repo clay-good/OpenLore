@@ -1,5 +1,11 @@
 # Refine public-surface certification: rule codes + semver bump, an accepted-breakage baseline, consumer-weighted verdicts
 
+> **Narrowed at archive (2026-09-13, PR #498).** Only part 1 shipped: rule codes, a suggested bump
+> (withheld when compatibility is unproven), and registered findings in the verdict's `findings[]`
+> for the caller that runs the tool (`openlore enforce` does not run it). Parts 2 and 3 — the
+> `--accept` baseline and the consumer-weighted split with the federation consumer union — moved to
+> the open change `add-public-surface-acceptance-baseline`.
+
 > Status: PROPOSED (2026-07-03, e2e audit pass 3). `certify_public_surface` classifies breaking
 > changes but its evidence is prose-only, its verdicts are un-gateable, an intentional break
 > re-reports forever, and a break with zero indexed consumers reads identically to one with 40.

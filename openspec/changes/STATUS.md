@@ -43,7 +43,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 97
+## To build — 98
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -103,6 +103,7 @@ trust boundary for served content.
 
 | Change | What it is |
 |---|---|
+| `add-public-surface-acceptance-baseline` | accepted-breakage baseline with required justifications, and consumer-weighted breaking verdicts (split out of refine-public-surface-certification) |
 | `add-assumption-anchored-resolutions` | a governed way to answer a disclosed boundary |
 | `add-benchmark-harness-protocol` | A checked-in benchmark protocol for default-surface decisions |
 | `add-build-graph-ingest` | declared monorepo target structure as provenance-tagged evidence |
@@ -290,8 +291,9 @@ Shipped and archived since: `refine-public-surface-certification` (2026-09-13, n
 (major/minor/patch as a total function of the classification). The eight breaking-classed codes are
 registered findings (source `public-surface`) emitted in `findings[]`, so a policy gates individual
 rules; `signature-unprovable` is never breaking-classed. The false "sibling repos are also checked"
-disclosure now states in-repo only. Deferred: the `--accept` baseline, the consumed/unconsumed
-split with the federation consumer union, and running the tool inside `openlore enforce`.
+disclosure now states in-repo only. The bump is withheld when compatibility is unproven, and `signature-unprovable` is a warning finding.
+Deferred to `add-public-surface-acceptance-baseline`: the `--accept` baseline and the consumed/unconsumed
+split with the federation consumer union. `openlore enforce` does not run the tool.
 
 ## Maintenance rules (what kept this table honest)
 

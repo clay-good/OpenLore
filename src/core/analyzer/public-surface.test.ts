@@ -214,18 +214,27 @@ describe('rule codes and suggested bump (refine-public-surface-certification)', 
     expect(classifySignatureChange(before, after, 'TypeScript').ruleCodes).toEqual(codes);
   });
 
-  it('a potentially-breaking change never carries a breaking-classed code', () => {
-    const r = classifySignatureChange('function f(a: string): void', 'function f(a): void', 'TypeScript');
-    expect(r.class).not.toBe('breaking');
-    expect(r.ruleCodes.every((c) => c === 'signature-unprovable')).toBe(true);
+  it.each([
+    ['untyped parameter', 'function f(a: string): void', 'function f(a): void', 'TypeScript'],
+    ['untyped return', 'function f(): string', 'function f()', 'TypeScript'],
+    ['incomparable return', 'function f(): string', 'function f(): boolean', 'TypeScript'],
+    ['unparsed signature', 'function f(a: string): void', 'const f = 1', 'TypeScript'],
+    ['non-classifiable language', 'func F(a string)', 'func F(a int)', 'Go'],
+  ])('%s is potentially-breaking with exactly signature-unprovable', (_label, before, after, language) => {
+    const r = classifySignatureChange(before, after, language);
+    expect(r.class).toBe('potentially-breaking');
+    expect(r.ruleCodes).toEqual(['signature-unprovable']);
   });
 
   const mk = (cls: SurfaceChange['class'], changeKind: SurfaceChange['changeKind'] = 'signature'): SurfaceChange =>
     ({ changeKind, class: cls, name: 'x', file: 'a.ts', kind: 'function', reasons: [], ruleCodes: [] });
-  it('suggestedBump: breaking → major, added export → minor, otherwise patch', () => {
-    expect(suggestedBump([mk('breaking'), mk('non-breaking', 'added')])).toBe('major');
-    expect(suggestedBump([mk('non-breaking', 'added'), mk('potentially-breaking')])).toBe('minor');
-    expect(suggestedBump([mk('potentially-breaking'), mk('non-breaking')])).toBe('patch');
+  it('suggestedBump: breaking → major, unproven → withheld, added export → minor, otherwise patch', () => {
+    expect(suggestedBump([mk('breaking'), mk('potentially-breaking')])).toBe('major');
+    expect(suggestedBump([mk('non-breaking', 'added'), mk('potentially-breaking')])).toBeNull();
+    expect(suggestedBump([mk('potentially-breaking'), mk('non-breaking')])).toBeNull();
+    expect(suggestedBump([mk('non-breaking', 'added')], false)).toBeNull();
+    expect(suggestedBump([mk('non-breaking', 'added')])).toBe('minor');
+    expect(suggestedBump([mk('non-breaking')])).toBe('patch');
     expect(suggestedBump([])).toBe('patch');
   });
 });

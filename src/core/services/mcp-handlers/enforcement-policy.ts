@@ -161,7 +161,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     remediation: 'Instability inversion: {subject}; invert the dependency through a stable interface.',
   },
   // ── public-surface certification (refine-public-surface-certification) ──
-  // One code per breaking contract rule, so a policy gates an individual rule. Emitted only by
+  // One code per contract rule, so a policy gates an individual rule. Emitted only by
   // `certify_public_surface` (it needs a base ref); `openlore enforce` does not run it.
   'export-removed': {
     defaultClass: 'advisory', source: 'public-surface',
@@ -202,6 +202,11 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     defaultClass: 'advisory', source: 'public-surface',
     description: 'The return type of an exported signature was narrowed.',
     remediation: 'Return type narrowed: {subject}; keep the wider return type, or release as a major version.',
+  },
+  'signature-unprovable': {
+    defaultClass: 'advisory', source: 'public-surface',
+    description: 'An exported signature changed and its compatibility cannot be proven from the available types (potentially-breaking, never breaking-classed).',
+    remediation: 'Unprovable signature change: {subject}; restore the type annotations so compatibility can be classified, or review consumers by hand.',
   },
   // ── dynamic-boundary disclosure (disclose-dynamic-boundary-regions) ──
   'dynamic-boundary-in-conclusion-scope': {

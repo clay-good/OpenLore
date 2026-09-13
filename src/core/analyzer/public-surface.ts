@@ -58,7 +58,7 @@ export type SurfaceRuleCode =
   | 'return-type-narrowed'
   | 'signature-unprovable';
 
-/** The breaking-classed rule codes; each is a registered governance finding code. */
+/** The breaking-classed rule codes; each is a registered governance finding code (severity `error`). */
 export const BREAKING_SURFACE_RULE_CODES: readonly SurfaceRuleCode[] = [
   'export-removed',
   'export-renamed',
@@ -350,12 +350,14 @@ export function classifySignatureChange(
 }
 
 /**
- * The semver bump a surface diff calls for, as a total function of the classification: `major`
- * when any change is breaking, else `minor` when an export was added, else `patch`. A
- * `potentially-breaking` change keeps its meaning and is never escalated to `major` here.
+ * The semver bump a surface diff calls for: `major` when any change is breaking; otherwise WITHHELD
+ * (`null`) when compatibility was not proven — any `potentially-breaking` change, or changed files in
+ * no signature-classifiable language — so a `minor`/`patch` never reads as "safe" on evidence the
+ * classifier does not have; otherwise `minor` when an export was added, else `patch`.
  */
-export function suggestedBump(changes: readonly SurfaceChange[]): SuggestedBump {
+export function suggestedBump(changes: readonly SurfaceChange[], signaturesAssessed = true): SuggestedBump | null {
   if (changes.some((c) => c.class === 'breaking')) return 'major';
+  if (!signaturesAssessed || changes.some((c) => c.class === 'potentially-breaking')) return null;
   if (changes.some((c) => c.changeKind === 'added')) return 'minor';
   return 'patch';
 }

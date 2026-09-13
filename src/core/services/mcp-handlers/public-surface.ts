@@ -456,7 +456,9 @@ export async function assembleSurfaceDiff(
   summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number };
   changes: SurfaceChange[];
   breaking: Array<SurfaceChange & { consumers: Consumer[]; consumersTruncated: number }>;
-  suggestedBump: SuggestedBump;
+  suggestedBump: SuggestedBump | null;
+  /** Why the bump is withheld, when `suggestedBump` is null. */
+  suggestedBumpWithheld?: string;
   findings: GovernanceFinding[];
   soundness: { posture: string; languages: string };
   extraCrossings: Array<{ kind: 'unindexed-repo'; count: number; detail: string }>;
@@ -642,7 +644,7 @@ export async function assembleSurfaceDiff(
     },
     changes,
     breaking,
-    suggestedBump: suggestedBump(changes),
+    ...bumpVerdict(changes, anyClassifiable || (baseFiles.length === 0 && headFiles.length === 0)),
     findings: publicSurfaceFindings(changes),
     soundness: {
       posture: anyClassifiable
@@ -656,27 +658,45 @@ export async function assembleSurfaceDiff(
 
 const BREAKING_CODE_SET: ReadonlySet<string> = new Set(BREAKING_SURFACE_RULE_CODES);
 
+/** The suggested bump plus, when it is withheld, the reason. */
+function bumpVerdict(changes: readonly SurfaceChange[], signaturesAssessed: boolean): { suggestedBump: SuggestedBump | null; suggestedBumpWithheld?: string } {
+  const bump = suggestedBump(changes, signaturesAssessed);
+  if (bump !== null) return { suggestedBump: bump };
+  const unproven = changes.filter((c) => c.class === 'potentially-breaking').length;
+  return {
+    suggestedBump: null,
+    suggestedBumpWithheld: unproven > 0
+      ? `${unproven} change(s) could not be proven compatible (potentially-breaking)`
+      : 'the changed files are in no signature-classifiable language, so compatibility was not assessed',
+  };
+}
+
 /**
- * Governance findings for a surface diff: one per breaking-classed rule code per changed symbol, so
- * an `enforcement.policy` can gate an individual rule (for example block `export-removed` but not
- * `param-type-narrowed`). A `potentially-breaking` change emits none: `signature-unprovable` is not
- * a breaking-classed code. Deterministic order (the changes are already sorted).
+ * Governance findings for a surface diff, one per rule code per changed symbol, so an
+ * `enforcement.policy` can gate an individual rule (for example block `export-removed` but not
+ * `param-type-narrowed`). Breaking-classed codes are severity `error`; `signature-unprovable` is a
+ * `warning` a caller can choose to gate, so removing a type annotation cannot hide a narrowing from
+ * a policy. `export-added` is not a finding. Deterministic order (the changes are already sorted).
  */
 export function publicSurfaceFindings(changes: readonly SurfaceChange[]): GovernanceFinding[] {
   const findings: GovernanceFinding[] = [];
   for (const change of changes) {
-    if (change.class !== 'breaking') continue;
     for (const code of change.ruleCodes) {
-      if (!BREAKING_CODE_SET.has(code)) continue;
+      const breaking = BREAKING_CODE_SET.has(code);
+      if (!breaking && code !== 'signature-unprovable') continue;
       const subject = `${change.file}::${change.name}`;
       findings.push({
         code,
-        severity: 'error',
+        severity: breaking ? 'error' : 'warning',
         source: 'public-surface',
         subject,
-        message: `${change.changeKind} of exported "${change.name}": ${change.reasons.join('; ')}`,
-        remediation: FINDING_CODE_REGISTRY[code]?.remediation?.replace('{subject}', subject),
-        location: { path: change.file },
+        // The reasons stay on the change itself; a finding names the rule, so a large diff does not
+        // repeat every reason a third time in the response.
+        message: `${change.changeKind} of exported "${change.name}" breaks rule ${code}`,
+        // A function replacement: a subject such as `app/routes/$$id.tsx` must not be read as a `$` pattern.
+        remediation: FINDING_CODE_REGISTRY[code]?.remediation?.replace('{subject}', () => subject),
+        // A rename's finding points at the file that exists after the change.
+        location: { path: change.rename?.file ?? change.file },
       });
     }
   }

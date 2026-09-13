@@ -43,7 +43,9 @@ interface DiffResult {
   summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number };
   changes: SurfaceChangeOut[];
   breaking: SurfaceChangeOut[];
-  suggestedBump?: 'major' | 'minor' | 'patch';
+  suggestedBump?: 'major' | 'minor' | 'patch' | null;
+  suggestedBumpWithheld?: string;
+  findings?: Array<{ code: string; severity: string; subject: string; message: string }>;
   soundness: { posture: string; languages: string };
   confidenceBoundary?: { knownUnknowable?: Array<{ detail: string }>; integrity?: { verdict?: string; detail?: string }; staleness?: { detail?: string } };
 }
@@ -66,6 +68,7 @@ function renderDiff(r: DiffResult): string {
   if (r.baseRefFallback) lines.push(`   ⚠ requested base "${r.baseRefFallback.requested}" did not resolve — certified against "${r.baseRefFallback.resolved}" (--allow-base-fallback)`);
   lines.push(`   ${r.summary.breaking} breaking · ${r.summary.potentiallyBreaking} potentially-breaking · ${r.summary.nonBreaking} non-breaking`);
   if (r.suggestedBump) lines.push(`   suggested version bump: ${r.suggestedBump}`);
+  else if (r.suggestedBump === null) lines.push(`   suggested version bump: withheld (${r.suggestedBumpWithheld ?? 'compatibility not proven'})`);
   if (r.confidenceBoundary?.integrity?.detail) lines.push(`   ⚠ index integrity ${r.confidenceBoundary.integrity.verdict}: ${r.confidenceBoundary.integrity.detail}`);
   if (r.confidenceBoundary?.staleness?.detail) lines.push(`   ⚠ ${r.confidenceBoundary.staleness.detail}`);
   const ranked = [...r.changes].sort((a, b) => order(a.class) - order(b.class));
