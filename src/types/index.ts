@@ -130,6 +130,13 @@ export interface PiConfig {
    * unaffected. The `OPENLORE_PI_NO_SPAWN` environment variable overrides this.
    */
   spawnDaemon?: boolean;
+  /**
+   * Which OpenLore tools are active when a Pi session starts. Default `'lean'`: the tools of the
+   * MCP `substrate` preset plus `openlore_configure` and `openlore_activate_tools`, which turns on
+   * the other tool groups on demand. `'all'` activates every OpenLore tool at session start
+   * (change: add-pi-lean-tool-surface).
+   */
+  toolSurface?: 'lean' | 'all';
 }
 
 export interface WorkspaceShardConfig {

@@ -190,14 +190,19 @@ function buildMcpSection(
   if (has('record_decision')) {
     lines.push(DECISIONS_BODY);
   } else {
-    // Honest form: state the prerequisite instead of prescribing a tool the
-    // agent cannot call. This is the exact failure this change exists to fix.
+    // Honest form: never prescribe a tool the agent cannot call. The CLI records
+    // the same draft on any preset (change: add-decisions-record-cli).
     lines.push(
-      `\`record_decision\` is **not** part of the wired \`${preset}\` surface, so the decision-recording workflow is unavailable in this repository.`,
+      `\`record_decision\` is **not** part of the wired \`${preset}\` surface, so do not plan around calling it.`,
       '',
-      `To enable it: \`${enablingCommand}\`  — then this section regenerates with the full workflow.`,
+      'When making a significant design choice, record it with the CLI **before** writing the code:',
       '',
-      'Until then, do not plan around `record_decision`: it will not be callable.',
+      '```bash',
+      'openlore decisions record --title "Use JWTs for stateless auth" --rationale "Avoids session store in infra" \\',
+      '  --consequences "Tokens can\'t be revoked early" --files src/auth/middleware.ts',
+      '```',
+      '',
+      `To expose the MCP tool as well: \`${enablingCommand}\`  — then this section regenerates with the MCP workflow.`,
     );
   }
 
