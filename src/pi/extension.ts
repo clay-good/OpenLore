@@ -9,10 +9,12 @@
  *       architecture digest + spec index + task-grounded orient call, so weak
  *       tool-callers benefit even without calling a tool.
  *   B — native tools (registerTool): the substrate surface for on-demand structural
- *       queries — NAV_TOOLS spans navigate + change + remember + verify + governance
- *       (it already supersets the MCP `substrate` preset; the family taxonomy and the
- *       preset/breadth selectors are MCP-wire concepts the native Pi host does not use),
- *       each round-tripping to the warm daemon via fetch.
+ *       queries — NAV_TOOLS spans navigate + change + remember + verify + governance,
+ *       each round-tripping to the warm daemon via fetch. Every tool is registered, but a
+ *       session starts with only the lean set active (the MCP `substrate` preset, the same
+ *       default Claude Code gets); openlore_activate_tools turns on the task groups in
+ *       PI_TOOL_GROUPS. `pi.toolSurface: "all"` keeps every tool active.
+ *       (change: add-pi-lean-tool-surface)
  *
  * Uses ctx.mode (0.78.1+): full injection in tui/rpc (interactive), none in
  * json/print (one-shot). rpc = headless interactive over stdin/stdout (IDE,
@@ -176,6 +178,23 @@ export async function piMaySpawnDaemon(cwd: string): Promise<boolean> {
     return pi?.spawnDaemon !== false;
   } catch {
     return true; // no config, or unreadable — the default is unchanged
+  }
+}
+
+export type PiToolSurface = 'lean' | 'all';
+
+/**
+ * Which OpenLore tools a Pi session starts with. Read like `piMaySpawnDaemon`, so it works before
+ * a provider is configured. Only the exact string `"all"` widens the surface; an absent,
+ * malformed, or unreadable value keeps the lean default.
+ */
+export async function piToolSurface(cwd: string): Promise<PiToolSurface> {
+  try {
+    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8')) as unknown;
+    const pi = raw && typeof raw === 'object' ? (raw as { pi?: { toolSurface?: unknown } | null }).pi : undefined;
+    return pi?.toolSurface === 'all' ? 'all' : 'lean';
+  } catch {
+    return 'lean';
   }
 }
 
@@ -1335,6 +1354,191 @@ export const NAV_TOOLS: NavToolSpec[] = [
   },
 ];
 
+// One-line entries for Pi's "Available tools" prompt section. The full description
+// already reaches the model with the tool schema; repeating it here doubled the
+// standing context (spec: PiStandingContextIsBudgeted).
+export const PI_TOOL_SNIPPETS: Record<string, string> = {
+  orient: 'Start any new task here: relevant functions, files, specs, and where to add code.',
+  search_code: 'Find code by concept or name, instead of grepping.',
+  get_subgraph: 'Callers and callees of one function.',
+  trace_execution_path: 'Every call path from one function to another.',
+  find_path: 'Cheapest call route from A to B.',
+  analyze_impact: 'Everything that depends on a function or type.',
+  select_tests: 'Tests to run for given functions or your uncommitted changes.',
+  get_test_coverage: 'Which code has tests and which does not.',
+  blast_radius: 'Pre-commit briefing: callers, tests to run, specs and decisions at risk.',
+  structural_diff: 'Functions, edges, and signatures changed between two states, plus stale callers.',
+  verify_claim: 'Check a structural fact or a decision citation before you state it.',
+  suggest_insertion_points: 'Ranked places to add new code.',
+  get_function_skeleton: 'Signatures and control flow of a file, without bodies.',
+  get_health_map: 'Riskiest code areas, ranked.',
+  get_surprising_connections: 'Unexpected coupling between code regions.',
+  get_architecture_overview: 'Domain clusters, dependencies, entry points, and hubs.',
+  get_map: 'Region map of the codebase and how the regions connect.',
+  get_landmarks: 'Hubs, chokepoints, entry points, and dead code, with evidence.',
+  get_refactor_report: 'Refactoring targets ranked by priority.',
+  get_critical_hubs: 'Most-called functions, the riskiest to change.',
+  get_god_functions: 'Functions that call too many things.',
+  find_clones: 'Existing near-duplicates of code you are about to write.',
+  analyze_error_propagation: 'Errors that can escape a function, and the ones it handles.',
+  analyze_env_impact: 'Read sites and blast radius of an environment variable.',
+  certify_public_surface: 'Breaking-change check for exported code.',
+  get_style_fingerprint: 'House coding style to match in your edit.',
+  briefing_since: 'Changes since a ref that matter structurally, ranked.',
+  search_specs: 'Find spec requirements by meaning.',
+  search_unified: 'Search code and specs in one call.',
+  get_spec: 'Full spec for one domain.',
+  get_function_body: 'Source of one function, or a slice on one variable or callee.',
+  get_file_dependencies: 'Imports of a file and the files that import it.',
+  remember: 'Save a code-anchored fact for later sessions.',
+  recall: 'Notes from earlier sessions about the code you touch.',
+  check_spec_drift: 'Changed code that no longer matches its spec.',
+  audit_spec_coverage: 'Code with no spec, and stale or orphan requirements.',
+  list_spec_domains: 'Names of the spec domains.',
+  record_decision: 'Record a design decision before you write the code.',
+  list_decisions: 'Recorded decisions and their status.',
+  approve_decision: 'Approve a decision, only after the user says yes.',
+  reject_decision: 'Reject a pending decision.',
+  sync_decisions: 'Write approved decisions into the specs.',
+};
+
+// Tools active when a Pi session starts (names without the `openlore_` prefix):
+// the MCP `substrate` preset — the default `openlore install` wires for Claude
+// Code — plus the two Pi-only utilities. extension.test.ts derives this set from
+// TOOL_PRESETS.substrate so the two surfaces cannot drift.
+export const PI_LEAN_TOOLS: readonly string[] = [
+  'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
+  'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
+  'get_landmarks', 'get_map', 'find_path',
+  'recall', 'verify_claim', 'blast_radius',
+  'prepare_spec_generation', 'prepare_spec_repair',
+  'configure', 'activate_tools',
+];
+
+// Task groups openlore_activate_tools turns on. Every registered tool outside
+// PI_LEAN_TOOLS belongs to exactly one group (guarded in extension.test.ts).
+// Groups are task-shaped, not capability families: `navigate` alone holds most tools.
+export const PI_TOOL_GROUPS: Record<string, readonly string[]> = {
+  specs: ['search_specs', 'get_spec', 'list_spec_domains', 'search_unified', 'check_spec_drift', 'audit_spec_coverage'],
+  memory: ['remember', 'record_decision', 'list_decisions', 'approve_decision', 'reject_decision', 'sync_decisions'],
+  review: ['structural_diff', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
+  quality: [
+    'get_refactor_report', 'get_health_map', 'get_critical_hubs', 'get_god_functions',
+    'get_architecture_overview', 'get_surprising_connections', 'find_clones', 'get_style_fingerprint',
+  ],
+  inspect: ['get_function_body', 'get_file_dependencies', 'analyze_error_propagation', 'analyze_env_impact'],
+};
+
+const PI_TOOL_PREFIX = 'openlore_';
+export const PI_ACTIVATOR_TOOL = `${PI_TOOL_PREFIX}activate_tools`;
+
+/** Every tool name the extension registers, with the `openlore_` prefix. */
+export function piRegisteredToolNames(): string[] {
+  return [
+    ...NAV_TOOLS.map((tool) => tool.name),
+    'prepare_spec_generation', 'prepare_spec_repair', 'configure', 'activate_tools',
+  ].map((name) => PI_TOOL_PREFIX + name);
+}
+
+/**
+ * The active set a session starts with. Non-OpenLore tools keep their state; OpenLore
+ * tools the host had already turned off (`hostExcluded`) stay off.
+ */
+export function piSessionActiveTools(
+  surface: PiToolSurface,
+  active: readonly string[],
+  hostExcluded: ReadonlySet<string>,
+): string[] {
+  const registered = new Set(piRegisteredToolNames());
+  const wanted = surface === 'all'
+    ? [...registered].filter((name) => name !== PI_ACTIVATOR_TOOL)
+    : PI_LEAN_TOOLS.map((name) => PI_TOOL_PREFIX + name);
+  return [
+    ...active.filter((name) => !registered.has(name)),
+    ...wanted.filter((name) => !hostExcluded.has(name)),
+  ];
+}
+
+export type PiActivationPlan =
+  | { ok: false; error: string }
+  | { ok: true; nextActive: string[]; activated: string[]; alreadyActive: string[]; hostExcluded: string[] };
+
+/**
+ * Resolve activator names (a group, or a tool with or without the `openlore_` prefix) into the
+ * next active set. All-or-nothing: one unknown name activates nothing. A lean tool name is
+ * valid and changes nothing, because it is already on.
+ */
+export function planPiToolActivation(
+  names: readonly string[],
+  active: readonly string[],
+  hostExcluded: ReadonlySet<string>,
+): PiActivationPlan {
+  const groups = new Set<string>();
+  const unknown: string[] = [];
+  for (const raw of names) {
+    const name = raw.trim().replace(/^openlore_/, '');
+    if (name in PI_TOOL_GROUPS) { groups.add(name); continue; }
+    const owner = Object.keys(PI_TOOL_GROUPS).find((group) => PI_TOOL_GROUPS[group].includes(name));
+    if (owner) groups.add(owner);
+    else if (!PI_LEAN_TOOLS.includes(name)) unknown.push(raw);
+  }
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      error: `Unknown openlore tool group or tool: ${unknown.join(', ')}. Nothing was activated. Valid groups: ${Object.keys(PI_TOOL_GROUPS).join(', ')}.`,
+    };
+  }
+  const current = new Set(active);
+  const activated: string[] = [];
+  const alreadyActive: string[] = [];
+  const excluded: string[] = [];
+  for (const group of groups) {
+    const tools = PI_TOOL_GROUPS[group].map((name) => PI_TOOL_PREFIX + name);
+    const blocked = tools.filter((name) => hostExcluded.has(name));
+    const added = tools.filter((name) => !hostExcluded.has(name) && !current.has(name));
+    excluded.push(...blocked);
+    if (added.length === 0) alreadyActive.push(group);
+    for (const name of added) { current.add(name); activated.push(name); }
+  }
+  return { ok: true, nextActive: [...current], activated, alreadyActive, hostExcluded: excluded };
+}
+
+/** The activator description: every group with the tools it turns on. */
+export function piActivatorDescription(): string {
+  const lines = Object.entries(PI_TOOL_GROUPS)
+    .map(([group, tools]) => `- ${group}: ${tools.map((name) => PI_TOOL_PREFIX + name).join(', ')}`);
+  return [
+    'Turn on more openlore tools for the rest of this session. Pass group names, or the name of any tool below.',
+    ...lines,
+  ].join('\n');
+}
+
+/**
+ * Reviewed ceilings for the standing context OpenLore tools add to the Pi prompt, estimated by
+ * `estimatePiStandingTokens`. Each entry records its measured baseline and bounded headroom, so
+ * raising a budget changes both a number and its rationale (the STANDING_CONTEXT_BUDGETS pattern).
+ */
+export const PI_STANDING_CONTEXT_BUDGETS: Record<PiToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
+  lean: { baselineTokens: 3_089, maxTokens: 3_300, rationale: 'Measured baseline plus 6.8% headroom.' },
+  all: { baselineTokens: 7_445, maxTokens: 7_950, rationale: 'Measured baseline plus 6.8% headroom.' },
+};
+
+/** Deterministic estimate (characters / 4) of what the given registered tools add to the prompt. */
+export function estimatePiStandingTokens(tools: ReadonlyArray<{
+  description: string;
+  promptSnippet?: string;
+  promptGuidelines?: readonly string[];
+  parameters: unknown;
+}>): number {
+  let chars = 0;
+  for (const tool of tools) {
+    chars += tool.description.length + (tool.promptSnippet?.length ?? 0);
+    chars += (tool.promptGuidelines ?? []).reduce((sum, line) => sum + line.length, 0);
+    chars += JSON.stringify(tool.parameters).length;
+  }
+  return Math.ceil(chars / 4);
+}
+
 // Conclusion tools deliberately NOT surfaced natively in Pi, each with a stated
 // reason (project doctrine: "if parity is intentionally skipped, say why").
 // The two-direction parity guard (extension.test.ts) requires every dispatchable
@@ -1626,6 +1830,29 @@ function registerOpenlore(
   const failedUntil = new Map<string, number>();
   const DAEMON_RETRY_COOLDOWN_MS = 30_000;
   const primed = new Set<string>();
+  // Tool-surface state for the current session (spec: PiToolGroupsAreActivatable).
+  // hostExcluded: OpenLore tools the host had turned off before the surface was applied.
+  // suppressed: tools this extension turned off, so a later session_start does not
+  // mistake them for host exclusions.
+  let hostExcluded = new Set<string>();
+  let suppressed = new Set<string>();
+  const hostSupportsActiveTools = (): boolean =>
+    typeof pi.getActiveTools === 'function' && typeof pi.setActiveTools === 'function';
+  async function applyToolSurface(cwd: string): Promise<void> {
+    if (!hostSupportsActiveTools()) return; // older host: every tool stays active
+    try {
+      const active = pi.getActiveTools();
+      const activeSet = new Set(active);
+      const registered = piRegisteredToolNames();
+      hostExcluded = new Set(registered.filter((name) => !activeSet.has(name) && !suppressed.has(name)));
+      const next = piSessionActiveTools(await piToolSurface(cwd), active, hostExcluded);
+      const nextSet = new Set(next);
+      suppressed = new Set(registered.filter((name) => !nextSet.has(name) && !hostExcluded.has(name)));
+      pi.setActiveTools(next);
+    } catch {
+      // The host refused the change: every tool stays active, onboarding continues.
+    }
+  }
   async function getDaemon(cwd: string): Promise<Daemon | null> {
     const cached = daemons.get(cwd);
     if (cached) return cached;
@@ -1680,7 +1907,7 @@ function registerOpenlore(
       name: `openlore_${tool.name}`,
       label: tool.label,
       description: tool.description,
-      promptSnippet: tool.description,
+      promptSnippet: PI_TOOL_SNIPPETS[tool.name],
       promptGuidelines: [tool.guideline],
       parameters: tool.parameters as TSchema,
       async execute(_id, params, signal, _onUpdate, ctx) {
@@ -1802,6 +2029,38 @@ function registerOpenlore(
     },
   });
 
+  // ── Tool-group activator ──
+  pi.registerTool({
+    name: PI_ACTIVATOR_TOOL,
+    label: 'openlore activate tools',
+    description: piActivatorDescription(),
+    promptSnippet: 'Turn on more openlore tools by group or by tool name.',
+    promptGuidelines: [
+      'When you need an openlore tool that is not in your tool list (including one named in an openlore result), call openlore_activate_tools with its group or tool name first.',
+    ],
+    parameters: Type.Object({
+      names: Type.Array(Type.String(), {
+        minItems: 1,
+        description: `REQUIRED. Group names (${Object.keys(PI_TOOL_GROUPS).join(', ')}) or tool names, e.g. ["specs"] or ["check_spec_drift"].`,
+      }),
+    }),
+    async execute(_id, params) {
+      if (!hostSupportsActiveTools()) return toolResult('Every openlore tool is already active in this Pi version.');
+      const { names } = params as { names: string[] };
+      const plan = planPiToolActivation(names, pi.getActiveTools(), hostExcluded);
+      if (!plan.ok) return toolResult(plan.error, plan);
+      if (plan.activated.length > 0) pi.setActiveTools(plan.nextActive);
+      for (const name of plan.activated) suppressed.delete(name);
+      const summary = {
+        activated: plan.activated,
+        alreadyActive: plan.alreadyActive,
+        hostExcluded: plan.hostExcluded,
+        note: plan.activated.length > 0 ? 'Activated tools are available from your next step.' : 'No tool state changed.',
+      };
+      return toolResult(JSON.stringify(summary, null, 2), summary);
+    },
+  });
+
   // ── /configure slash command ──
   pi.registerCommand('openlore', {
     description: 'Open the openlore configuration wizard',
@@ -1819,8 +2078,11 @@ function registerOpenlore(
     },
   });
 
-  // ── session_start: onboarding + daemon warmup ──
+  // ── session_start: tool surface + onboarding + daemon warmup ──
   pi.on('session_start', async (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    // Lean tool surface first, in every mode (spec: PiDefaultToolSurfaceIsLean).
+    await applyToolSurface(ctx.cwd);
+
     if (ctx.hasUI) {
       const loaded = await loadExistingConfig(ctx.cwd);
       if (loaded.state === 'absent') {
