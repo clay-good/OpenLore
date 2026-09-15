@@ -358,6 +358,12 @@ openlore decisions [options]
   --json                 # Machine-readable output
   --uninstall-hook       # Remove decisions pre-commit hook (install via: openlore setup --tools claude)
 
+# Record a draft decision — the same draft the record_decision MCP tool records, on any wired preset
+openlore decisions record --title <text> --rationale <text>
+  [--consequences <text>] [--files <a.ts,b.ts>] [--supersedes <id>]
+  [--scope local|component|cross-domain|system] [--constraints-file <path.json>] [--json]
+                         # Prints the draft id and `openlore decisions status <id>` for its verdict
+
 # Decision autopilot (opt-in: { "governance": { "autopilot": true } } in .openlore/config.json):
 # the gate auto-accepts verified decisions (distinct `auto-approved` status), syncs them to
 # specs with an "Auto-accepted (unreviewed)" marker, and never blocks a commit. Every status
@@ -744,6 +750,10 @@ field in openlore's `package.json`) and `openlore setup --tools pi --global`
 serve daemon, injecting structural context and exposing Pi's curated tool surface.
 Pi starts a full-preset backing daemon and curates the model-visible tools itself;
 if an existing narrow daemon owns the repository, stop it before starting Pi.
+A session starts with the `substrate` tools (the MCP default), `openlore_configure`,
+and `openlore_activate_tools`, which turns on the `specs`, `memory`, `review`,
+`quality`, or `inspect` group. `"pi": { "toolSurface": "all" }` in
+`.openlore/config.json` keeps every tool active.
 Its `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` tools
 compose the same deterministic daemon evidence used by MCP hosts; Pi writes or
 reconciles the specification itself and OpenLore makes no internal LLM call.
