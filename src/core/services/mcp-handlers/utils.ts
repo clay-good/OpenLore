@@ -19,12 +19,14 @@ import { isAnalysisLockHeld } from '../../runtime/advisory-lock.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
+import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, FINGERPRINT_BUDGET_TOP_OFFENDERS, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
 import { readPartialArtifact, readPartialIndexStamp } from '../../runtime/partial-index.js';
 import { notePartialIndexServed } from './partial-request.js';
 import { FileWalker } from '../../analyzer/file-walker.js';
+import { formatBytes } from '../../analyzer/memory-strategy.js';
+import type { FileMetadata } from '../../../types/index.js';
 import { artifactStamp, readJsonArtifactCached, _resetJsonArtifactCacheForTesting } from './artifact-cache.js';
 
 /**
@@ -892,6 +894,93 @@ export async function waitForGraphRebuild(
 const DEFAULT_FINGERPRINT_MAX_FILES = 100_000;
 const DEFAULT_FINGERPRINT_MAX_BYTES = 1024 * 1024 * 1024;
 
+/**
+ * The largest non-overlapping paths in a walked corpus, for the byte-budget error (issue #504).
+ *
+ * Every file's size is rolled into each of its ancestor directories, then the totals are read from
+ * largest down, keeping an entry only when no ancestor or descendant of it has been kept already.
+ * Non-overlapping is the property that makes the list usable: each line can go straight into
+ * `excludePatterns` without two of them claiming the same bytes.
+ *
+ * Files are candidates alongside directories, and ties break toward the deeper path, so the name
+ * that comes back is the most specific one that still accounts for the bytes. A vector store whose
+ * weight sits under `data/vectors` is reported there rather than at `data`, and a single oversized
+ * archive is reported as the file rather than as the directory that happens to hold it.
+ *
+ * The repository root is never a candidate. It is the largest subtree by construction and naming it
+ * tells a user only that their repository is large, which is what they already know.
+ */
+export function largestCorpusPaths(
+  files: readonly Pick<FileMetadata, 'path' | 'size'>[],
+  limit: number
+): Array<{ path: string; bytes: number }> {
+  const totals = new Map<string, number>();
+  for (const file of files) {
+    totals.set(file.path, (totals.get(file.path) ?? 0) + file.size);
+    const segments = file.path.split('/');
+    segments.pop();
+    let prefix = '';
+    for (const segment of segments) {
+      prefix = prefix === '' ? segment : `${prefix}/${segment}`;
+      totals.set(prefix, (totals.get(prefix) ?? 0) + file.size);
+    }
+  }
+
+  const ranked = [...totals].sort(([leftPath, leftBytes], [rightPath, rightBytes]) => {
+    if (leftBytes !== rightBytes) return rightBytes - leftBytes;
+    const depth = rightPath.split('/').length - leftPath.split('/').length;
+    if (depth !== 0) return depth;
+    return leftPath.localeCompare(rightPath);
+  });
+
+  const chosen: Array<{ path: string; bytes: number }> = [];
+  for (const [path, bytes] of ranked) {
+    if (chosen.length >= limit) break;
+    const overlaps = chosen.some(kept => kept.path === path
+      || path.startsWith(`${kept.path}/`)
+      || kept.path.startsWith(`${path}/`));
+    if (!overlaps) chosen.push({ path, bytes });
+  }
+  return chosen;
+}
+
+/**
+ * The byte-budget failure, written so a user can act on it without a filesystem hunt (issue #504).
+ *
+ * The budget aborts partway through reading, so this message is the only account anyone gets of
+ * what filled it. The bare limit that used to be reported named no path, did not say what kind of
+ * limit it was, and left users scanning directories by hand to find the weight. The sizes here come
+ * from the walk, which has already stat'd every admitted file, so the totals cover the whole corpus
+ * and not merely the prefix that had been read when the budget tripped.
+ */
+export function fingerprintBudgetExceededMessage(
+  maxBytes: number,
+  files: readonly Pick<FileMetadata, 'path' | 'size'>[],
+  corpusTruncated = false
+): string {
+  const offenders = largestCorpusPaths(files, FINGERPRINT_BUDGET_TOP_OFFENDERS);
+  const selected = files.reduce((total, file) => total + file.size, 0);
+  const lines = [
+    `Project fingerprint byte budget exceeded: the files selected for indexing total ${formatBytes(selected)}, `
+      + `over the ${formatBytes(maxBytes)} cap on how much one analysis will read (${maxBytes} bytes). `
+      + 'This is a safety cap in openlore, not a limit on your machine.',
+  ];
+  if (offenders.length > 0) {
+    lines.push('', 'Largest contributors:');
+    for (const offender of offenders) {
+      lines.push(`  ${formatBytes(offender.bytes).padStart(8)}  ${offender.path}`);
+    }
+  }
+  if (corpusTruncated) {
+    lines.push('', 'The file walk hit its own maxFiles cap first, so these totals cover only the files it admitted.');
+  }
+  lines.push(
+    '',
+    'Add the paths you do not want indexed to excludePatterns in .openlore/config.json, then re-run.',
+  );
+  return lines.join('\n');
+}
+
 export interface FingerprintLimits {
   maxFiles?: number;
   maxBytes?: number;
@@ -936,7 +1025,11 @@ export async function computeProjectFingerprint(rootDir: string, limits: Fingerp
         if (bytesRead === 0) break;
         bytes += bytesRead;
         if (bytes > (limits.maxBytes ?? DEFAULT_FINGERPRINT_MAX_BYTES)) {
-          throw new Error(`Project fingerprint byte budget exceeded (${limits.maxBytes ?? DEFAULT_FINGERPRINT_MAX_BYTES})`);
+          throw new Error(fingerprintBudgetExceededMessage(
+            limits.maxBytes ?? DEFAULT_FINGERPRINT_MAX_BYTES,
+            walk.files,
+            walk.summary.truncated !== undefined,
+          ));
         }
         contentHash.update(buffer.subarray(0, bytesRead));
         position += bytesRead;

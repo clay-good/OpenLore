@@ -216,6 +216,16 @@ export const ANALYSIS_REUSE_THRESHOLD_MS = 60 * 60 * 1000;
  */
 export const STALE_REGION_REPAIR_THRESHOLD = 1;
 
+/**
+ * How many offending paths the fingerprint byte-budget error names (issue #504).
+ * The budget aborts mid-read, so the message is the only place a user learns what
+ * filled it; without a list they are left scanning the filesystem by hand. Kept
+ * small deliberately: the entries are disjoint subtrees ordered by size, so the
+ * first few already account for the overflow, and a long list in an error message
+ * is skimmed rather than read.
+ */
+export const FINGERPRINT_BUDGET_TOP_OFFENDERS = 5;
+
 /** Grace period after consolidation during which the gate skips the no_decisions_recorded check (1 hour) */
 export const CONSOLIDATION_GRACE_PERIOD_MS = 60 * 60 * 1000;
 
