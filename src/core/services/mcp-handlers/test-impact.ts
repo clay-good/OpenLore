@@ -37,6 +37,7 @@ import {
   granularityCaveat,
   granularityReceipt,
   importsAddedCaveat,
+  noChangeClaim,
   narrowSeedsToChangedSymbols,
   seededNotChanged,
   type ChangeGranularityReceipt,
@@ -653,14 +654,13 @@ function noSymbolChangedMessage(
   receipt: ChangeGranularityReceipt | undefined,
 ): string {
   const base = `vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}`;
-  const unassessed = receipt?.fileGranularFiles ?? 0;
-  const assessed = receipt?.symbolExactFiles ?? 0;
-  const core = fileSeedCount > 0 && assessed > 0
-    ? `No production symbol differs from the base ${base}: in every changed code file that was hashed, the symbols are unchanged — the edits are formatting or comments only, or were reverted in the working tree before this call.`
-    : `No changed production functions ${base}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`;
-  return unassessed === 0
-    ? core
-    : `${core} ${unassessed} changed file(s) were not assessed at symbol level (see changeGranularity.fallbacks) — "not assessed", not "unchanged".`;
+  if (!receipt || (fileSeedCount === 0 && receipt.changedSymbolsFound === 0)) {
+    return `No changed production functions ${base}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`;
+  }
+  const claim = noChangeClaim(receipt);
+  return claim.kind === 'unchanged'
+    ? `No production symbol differs from the base ${base}: ${claim.text[0].toLowerCase()}${claim.text.slice(1)}`
+    : `No test was selected ${base}: ${claim.text}`;
 }
 
 /**
@@ -681,13 +681,23 @@ export async function narrowToChangedSymbols(
   if (fileSeeds.length === 0) return { seeds: fileSeeds };
   let set: SymbolChangedSet;
   try {
-    set = precomputedSet ?? await computeSymbolChangedSet({ absDir, baseRef, diff, callGraph: cg });
+    // A reused set is only the same answer when it was computed against the same base; a mismatch
+    // re-computes rather than narrowing against the wrong revision.
+    const reusable = precomputedSet && (precomputedSet.baseRef === undefined || precomputedSet.baseRef === baseRef)
+      ? precomputedSet : undefined;
+    set = reusable ?? await computeSymbolChangedSet({ absDir, baseRef, diff, callGraph: cg });
   } catch {
     set = { byFile: new Map(), carried: [] };
   }
   set = coverSeedFiles(set, fileSeeds);
   const seeds = narrowSeedsToChangedSymbols(fileSeeds, set);
-  return { seeds, receipt: granularityReceipt(set), set, seededUnchanged: seededNotChanged(set, seeds) };
+  const indexed = new Set(cg.nodes.map(n => n.id));
+  return {
+    seeds,
+    receipt: granularityReceipt(set, id => indexed.has(id)),
+    set,
+    seededUnchanged: seededNotChanged(set, seeds),
+  };
 }
 
 /**

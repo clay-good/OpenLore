@@ -14,6 +14,7 @@ import {
   granularityCaveat,
   granularityReceipt,
   importsAddedCaveat,
+  noChangeClaim,
   narrowSeedsToChangedSymbols,
   type DiffEntry,
   type SymbolGranularChange,
@@ -45,10 +46,10 @@ async function index(root: string, paths: string[]): Promise<SerializedCallGraph
   return serializeCallGraph(await new CallGraphBuilder().build(files));
 }
 
-async function changedSet(diff: DiffEntry[], paths: string[], opts: { root?: string; maxFiles?: number; maxBytes?: number } = {}) {
+async function changedSet(diff: DiffEntry[], paths: string[], opts: { root?: string; maxFiles?: number; maxBytes?: number; budgetMs?: number } = {}) {
   const root = opts.root ?? repo;
   const callGraph = await index(root, paths);
-  const set = await computeSymbolChangedSet({ absDir: root, baseRef: 'HEAD', diff, callGraph, maxFiles: opts.maxFiles, maxBytes: opts.maxBytes });
+  const set = await computeSymbolChangedSet({ absDir: root, baseRef: 'HEAD', diff, callGraph, maxFiles: opts.maxFiles, maxBytes: opts.maxBytes, budgetMs: opts.budgetMs });
   return { set, callGraph };
 }
 
@@ -291,6 +292,93 @@ describe('computeSymbolChangedSet', () => {
     // is not what selects its tests.
     expect(ids).not.toContain('src/svc.ts::serve');
     expect(ids).toEqual(['src/other.ts::reads', 'src/util.ts::added', 'src/util.ts::helper']);
+  });
+
+  it('refuses a carried pair when an identical body also sits in a file kept whole', async () => {
+    const body = 'export function old(x: number) { return x * 3 + 1; }\n';
+    await put('src/a.ts', `${body}export function keep() { return 1; }\n`);
+    await put('src/b.ts', 'export const SETTING = 1;\nexport function existing() { return 2; }\n');
+    await put('src/c.ts', 'export function other() { return 4; }\n');
+    await commitAll();
+    // `old` really moves to b.ts as `moved`; b.ts is kept whole (its constant changed), and a decoy
+    // with the same body appears in c.ts. Carrying onto the decoy would be a wrong conclusion.
+    await put('src/a.ts', 'export function keep() { return 1; }\n');
+    await put('src/b.ts', 'export const SETTING = 2;\nexport function existing() { return 2; }\nexport function moved(x: number) { return x * 3 + 1; }\n');
+    await put('src/c.ts', 'export function other() { return 4; }\nexport function decoy(x: number) { return x * 3 + 1; }\n');
+    const { set } = await changedSet([
+      { path: 'src/a.ts', status: 'modified' }, { path: 'src/b.ts', status: 'modified' }, { path: 'src/c.ts', status: 'modified' },
+    ], ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+    expect(set.byFile.get('src/b.ts')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+    expect(set.carried).toEqual([]);
+  });
+
+  it('a moved import is a module-level change, while an added one is not', async () => {
+    const base = "import { a } from './a';\nexport const READY = compute();\nexport function one() { return a(1); }\n";
+    await put('src/mv.ts', base);
+    await commitAll();
+    await put('src/mv.ts', "export const READY = compute();\nimport { a } from './a';\nexport function one() { return a(1); }\n");
+    const { set } = await changedSet([{ path: 'src/mv.ts', status: 'modified' }], ['src/mv.ts']);
+    expect(set.byFile.get('src/mv.ts')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+  });
+
+  it('a wildcard or blank import is never treated as purely additive', async () => {
+    const py = 'from a import *\n\ndef user():\n    return run()\n';
+    await put('w.py', py);
+    await put('g.go', 'package p\n\nimport "fmt"\n\nfunc F() { fmt.Println() }\n');
+    await commitAll();
+    await put('w.py', 'from a import *\nfrom b import *\n\ndef user():\n    return run()\n');
+    await put('g.go', 'package p\n\nimport (\n\t"fmt"\n\t_ "net/http/pprof"\n)\n\nfunc F() { fmt.Println() }\n');
+    const { set } = await changedSet(
+      [{ path: 'w.py', status: 'modified' }, { path: 'g.go', status: 'modified' }], ['w.py', 'g.go'],
+    );
+    expect(set.byFile.get('w.py')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+    expect(set.byFile.get('g.go')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+  });
+
+  it('a symbol that changed but is absent from the index is reported as not indexed, never unchanged', async () => {
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    const callGraph = await index(repo, ['src/ten.ts']);   // indexed BEFORE the edit
+    await put('src/ten.ts', `${TEN}\nexport function brandNew() { return 11; }\n`);
+    const set = await computeSymbolChangedSet({ absDir: repo, baseRef: 'HEAD', diff: [{ path: 'src/ten.ts', status: 'modified' }], callGraph });
+    const indexed = new Set(callGraph.nodes.map(n => n.id));
+    const receipt = granularityReceipt(set, id => indexed.has(id));
+    expect(receipt).toMatchObject({ changedSymbolsFound: 1, changedSymbolsNotIndexed: 1 });
+    const claim = noChangeClaim(receipt);
+    expect(claim.kind).toBe('not-indexed');
+    expect(claim.text).toContain('Re-run analyze_codebase');
+  });
+
+  it('stops hashing when the time budget is spent, and says so', async () => {
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    await put('src/ten.ts', TEN.replace('return x + 1;', 'return 1;'));
+    const { set, callGraph } = await changedSet([{ path: 'src/ten.ts', status: 'modified' }], ['src/ten.ts'], { budgetMs: 0 });
+    expect(set.byFile.get('src/ten.ts')).toEqual({ granularity: 'file', reason: 'time-cap' });
+    // Degrading is always the conservative direction: every symbol stays seeded.
+    expect(narrowSeedsToChangedSymbols(callGraph.nodes.filter(n => !n.isExternal), set)).toHaveLength(10);
+  });
+
+  it('a working-tree entry that is not a regular file is unreadable, never a hang', async () => {
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    const callGraph = await index(repo, ['src/ten.ts']);   // index it while it is still a file
+    await rm(join(repo, 'src/ten.ts'));
+    execFileSync('mkfifo', [join(repo, 'src/ten.ts')]);
+    const set = await computeSymbolChangedSet({
+      absDir: repo, baseRef: 'HEAD', diff: [{ path: 'src/ten.ts', status: 'modified' }], callGraph,
+    });
+    expect(set.byFile.get('src/ten.ts')).toEqual({ granularity: 'file', reason: 'unreadable' });
+  }, 15_000);
+
+  it('a path git prints C-quoted is disclosed, not dropped', async () => {
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    const { set } = await changedSet(
+      [{ path: '"src/we\\011ird.ts"', status: 'modified' }, { path: 'src/ten.ts', status: 'modified' }],
+      ['src/ten.ts'],
+    );
+    expect([...set.byFile.entries()].some(([, c]) => c.granularity === 'file' && c.reason === 'not-assessed')).toBe(true);
   });
 
   it('parse errors on either side keep the file whole', async () => {

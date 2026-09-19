@@ -148,6 +148,11 @@ function renderHuman(b: BlastRadiusBriefing): string {
   if (b.changeGranularity && b.changeGranularity.importsAddedFiles > 0) {
     lines.push(`   ⚠ ${b.changeGranularity.importsAddedFiles} changed file(s) only gained imports at module level; their unchanged symbols were seeded only if they name a new binding.`);
   }
+  for (const caveat of b.caveats ?? []) {
+    if (/did not themselves change|renamed or moved with an unchanged body|not in the index|reverted in the working tree|not assessed/i.test(caveat)) {
+      lines.push(`   ⚠ ${caveat}`);
+    }
+  }
   if (b.impact.hubsTouched.length > 0) {
     lines.push('   Hubs: ' + b.impact.hubsTouched.map(h => `${h.symbol} (${h.fanIn} callers)`).join(', '));
   }

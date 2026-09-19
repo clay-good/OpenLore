@@ -62,9 +62,11 @@ differs, appeared or disappeared when present on one side only. A disappeared/ap
 by symbol-identity continuity (exact-body or exact-signature) SHALL be reported as a carried rename
 or move. A file SHALL stay at file granularity, with a reason from a closed vocabulary, whenever the
 evidence is incomplete: a side that cannot be read, parsed without errors, or hashed; a change
-outside every symbol span, including a reordering of symbols; an index that lists a symbol neither
-revision extracts to; a file past the per-call file or byte bound; or a file the changed-set could
-not assess. A file whose path changed SHALL have its base revision extracted under the old path, so
+outside every symbol span, including a reordering of symbols or module-level code that NAMES a
+changed symbol and may bind it; an index that lists a symbol neither
+revision extracts to; a file past the per-call file, byte, or time bound; or a file the changed-set could
+not assess. A bound that degrades a file to file granularity SHALL keep every one of its symbols
+seeded, so a bound can only ever cost precision, never soundness. A file whose path changed SHALL have its base revision extracted under the old path, so
 that a move reads as every symbol disappearing and reappearing rather than as no change at all. A
 changed code file the index holds no symbol for SHALL still be assessed, so a consumer never reports
 a diff as unchanged on the strength of files it never hashed. Imports that are purely ADDED and bind
@@ -74,7 +76,9 @@ the file's other symbols. Within a symbol-granular file, a symbol that names a c
 dispatch site, SHALL stay in the impact seed set, and a consumer publishing the seed set as
 "changed" SHALL disclose how many of them did not themselves change. `blast_radius`, `select_tests`, and
 `briefing_since` SHALL seed from the symbol-level changed-set and SHALL report which files were
-symbol-exact and which stayed file-granular and why.
+symbol-exact and which stayed file-granular and why. A consumer SHALL state that nothing changed
+only when every changed code file was hashed AND no symbol changed in any of them; a symbol that
+changed but is absent from the index SHALL be reported as not indexed, never as unchanged.
 
 #### Scenario: A formatting-only diff changes no symbol
 
@@ -104,6 +108,14 @@ symbol-exact and which stayed file-granular and why.
 - **WHEN** `briefing_since` briefs the change
 - **THEN** it names the pair under `carried` and briefs the symbol — its id and every caller changed —
   with a caveat stating that the body did not
+
+#### Scenario: A changed symbol the index does not know is "not indexed"
+
+- **GIVEN** a working-tree edit that adds a function to an already-indexed file, with an index that
+  predates the edit
+- **WHEN** `select_tests` or `blast_radius` resolves the diff
+- **THEN** it reports that symbols differ but are absent from the index and that analyze must be
+  re-run, never that the edits were formatting or comments only
 
 #### Scenario: A moved file is never "unchanged"
 

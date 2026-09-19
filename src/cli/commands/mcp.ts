@@ -622,7 +622,9 @@ export const TOOL_DEFINITIONS = [
       'USE THIS WHEN: before committing/editing, you want one briefing of what your diff actually ' +
       'touches — "what is the blast radius of my changes?", "is this change safe to commit?". ' +
       'Composes existing deterministic analyses over the staged/working diff into a single ' +
-      'conclusion-shaped briefing: affected callers and layers crossed (analyze_impact), the tests ' +
+      'conclusion-shaped briefing over the symbols the diff ACTUALLY changed (normalized per-symbol ' +
+      'hashes, so formatting and comments are not changes; a file kept whole is named with its reason ' +
+      'in changeGranularity): affected callers and layers crossed (analyze_impact), the tests ' +
       'to run (select_tests), the anchored memories/decisions the diff will turn drifted/orphaned and ' +
       'the specs it will make stale (check_spec_drift). No LLM, no new analysis — pure orchestration. ' +
       'Advisory: it informs, you act. Distinct from its change-family siblings: structural_diff is the raw ' +

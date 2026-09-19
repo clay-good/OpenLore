@@ -30,14 +30,22 @@ Narrowing never removes a seed the old file-level behavior would have kept for a
 holds. A file stays whole, and says why, when the evidence is incomplete — `module-level-change`
 (imports, module-level statements, class fields, or code that moved across a symbol),
 `module-level-reference` (module-level code names a changed symbol, so it may bind it),
-`parse-errors`, `language-not-hashed`, `unreadable`, `index-mismatch`, `file-cap`, `size-cap`,
-`not-assessed`. Inside a narrowed file, a symbol that names a changed symbol, names a newly bound
+`parse-errors`, `language-not-hashed`, `unreadable`, `index-mismatch`, `span-not-contiguous`,
+`invalid-span`, `file-cap`, `size-cap`, `time-cap`, `not-assessed`. Inside a narrowed file, a symbol that names a changed symbol, names a newly bound
 import, or holds a dynamic-dispatch site stays seeded too. The counts and the per-file reasons come
 back in `changeGranularity`, and the caveats name them.
 
-Two claims this deliberately does **not** make: a file that was never hashed is "not assessed", never
-"unchanged"; and an added import's own load-time side effects are not attributed to the file's other
-symbols.
+Claims this deliberately does **not** make: a file that was never hashed is "not assessed", never
+"unchanged"; a symbol that changed but is absent from the index is "not indexed" (re-run
+`analyze_codebase`), never "unchanged"; an added import's own load-time side effects are not
+attributed to the file's other symbols; and text in comment syntax that changes how a file is built,
+parsed, or run — a shebang, a build tag, `@ts-expect-error`, `frozen_string_literal` — is hashed as
+code from a **closed list**, so a language directive that is not on that list reads as an ordinary
+comment and flipping it is not seen as a change.
+
+The bounds are disclosed too: a diff past 200 code files, a file over 256 KB, a diff past the 1 MB
+hashing budget, or a pass past its 8-second budget keeps the remaining files whole — always the
+conservative direction, so a slower machine seeds more, never less.
 
 ## Honest soundness — read this
 

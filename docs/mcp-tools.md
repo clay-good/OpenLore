@@ -63,8 +63,8 @@ live registry.
 | `verify` | 3 | 1,268 | 1,350 |
 | `federation` | 10 | 3,925 | 4,100 |
 | `coordination` | 5 | 2,499 | 2,650 |
-| `substrate` | 15 | 5,137 | 5,500 |
-| `full` | 76 | 24,346 | 25,500 |
+| `substrate` | 15 | 5,183 | 5,500 |
+| `full` | 76 | 24,392 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line

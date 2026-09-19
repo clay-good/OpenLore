@@ -20,7 +20,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
-import { granularityCaveat, importsAddedCaveat, type ChangeGranularityReceipt } from '../symbol-changed-set.js';
+import { granularityCaveat, importsAddedCaveat, noChangeClaim, type ChangeGranularityReceipt } from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -370,6 +370,7 @@ export async function computeBlastRadius(
   if (granularityNote) caveats.push(granularityNote);
   const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
   if (importsNote) caveats.push(importsNote);
+  if (changeGranularity && seeds.length === 0) caveats.push(noChangeClaim(changeGranularity).text);
   if ((narrowed.seededUnchanged ?? 0) > 0) {
     caveats.push(`${narrowed.seededUnchanged} of the listed changed symbols did not themselves change: they are analyzed because they name a changed symbol, or hold a dynamic-dispatch site, in the same file.`);
   }
@@ -496,10 +497,12 @@ function renderHeadline(b: BlastRadiusBriefing): string {
     `${b.changed.files} file${b.changed.files === 1 ? '' : 's'} / ${b.changed.symbols} symbol${b.changed.symbols === 1 ? '' : 's'} changed`,
   ];
   // Zero symbols over changed code files means every code edit hashed as formatting or comments.
-  if (b.changed.symbols === 0 && (b.changeGranularity?.symbolExactFiles ?? 0) > 0) {
-    parts.push((b.changeGranularity?.fileGranularFiles ?? 0) === 0
-      ? 'no symbol differs from the base (formatting or comments only, or already reverted)'
-      : `${b.changeGranularity!.fileGranularFiles} changed file(s) not assessed at symbol level`);
+  if (b.changed.symbols === 0 && b.changeGranularity) {
+    const claim = noChangeClaim(b.changeGranularity);
+    parts.push(
+      claim.kind === 'unchanged' ? 'no symbol differs from the base (formatting or comments only, or already reverted)'
+      : claim.kind === 'not-indexed' ? `${b.changeGranularity.changedSymbolsFound} symbol(s) differ but are not in the index — re-run analyze`
+      : `${b.changeGranularity.fileGranularFiles} changed file(s) not assessed at symbol level`);
   }
   if (b.impact.highestRiskLevel !== 'none') parts.push(`highest risk: ${b.impact.highestRiskLevel}`);
   if (b.impact.hubsTouched.length > 0) parts.push(`${b.impact.hubsTouched.length} hub${b.impact.hubsTouched.length === 1 ? '' : 's'} affected`);

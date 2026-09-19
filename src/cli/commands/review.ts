@@ -228,6 +228,16 @@ export async function composeReview(opts: { cwd: string; base?: string; head?: s
   if (blast && !('error' in blast) && blast.tests.unavailable) {
     caveats.push(`Tests to run could not be computed (${blast.tests.unavailable}) — this is not the same as "no tests are impacted".`);
   }
+  // The briefing now narrows to the symbols the diff actually changed, so HOW it narrowed belongs in
+  // the comment too: a reviewer cannot judge a short hub list or test set without it
+  // (change: add-symbol-content-hashes).
+  if (blast && !('error' in blast)) {
+    for (const caveat of blast.caveats) {
+      if (/FILE granularity|did not themselves change|renamed or moved with an unchanged body|module level was imports|not in the index|not assessed/i.test(caveat)) {
+        caveats.push(caveat);
+      }
+    }
+  }
 
   const resolvedBase = (!('error' in blast) && blast.resolvedBaseRef) || structural.base || opts.base || 'HEAD';
   return {

@@ -26,7 +26,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
-import { changedSymbolIds, granularityCaveat, importsAddedCaveat, type CarriedSymbol, type DiffEntry, type SymbolChangedSet } from '../symbol-changed-set.js';
+import { changedSymbolIds, granularityCaveat, importsAddedCaveat, noChangeClaim, type CarriedSymbol, type DiffEntry, type SymbolChangedSet } from '../symbol-changed-set.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
 import { computeLandmarkSignals } from '../../analyzer/landmark-signals.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
@@ -216,8 +216,8 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     } else {
       note = changedFiles.length === 0
         ? `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
-        : fileSymbols.length > 0 && (changeGranularity?.symbolExactFiles ?? 0) > 0
-          ? `No production symbol differs from ${resolvedBase} in the working tree: in every changed code file that was hashed, the symbols are unchanged — the edits are formatting or comments only, or were reverted before this call.${(changeGranularity?.fileGranularFiles ?? 0) > 0 ? ` ${changeGranularity!.fileGranularFiles} changed file(s) were not assessed at symbol level — "not assessed", not "unchanged".` : ''}`
+        : changeGranularity && (fileSymbols.length > 0 || changeGranularity.changedSymbolsFound > 0)
+          ? `Nothing was briefed against ${resolvedBase}: ${noChangeClaim(changeGranularity).text}`
           : 'The changed file(s) contain no analyzed production symbol (not yet analyzed, or only tests/generated) — "nothing matched", NOT "nothing significant".';
     }
   }

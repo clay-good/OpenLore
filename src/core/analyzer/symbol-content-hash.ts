@@ -67,7 +67,12 @@ export interface ImportStatementHash {
   hash: string;
   /** Identifier texts inside the statement — an over-approximation of what it binds. */
   names: string[];
-  /** False for a bare side-effect import (`import './polyfill'`), which binds nothing and runs code. */
+  /**
+   * False when the statement binds nothing nameable, so it cannot be treated as purely additive: a
+   * bare side-effect import (`import './polyfill'`), a Go blank import (`import _ "x"`), or a
+   * WILDCARD (`from x import *`, `use x::*`, `import java.util.*`, `using namespace x`) — a wildcard
+   * binds names this walk cannot enumerate, so it may shadow what the file's other symbols resolve.
+   */
   binds: boolean;
 }
 
@@ -92,7 +97,7 @@ export interface FileContentHashes {
   imports: ImportStatementHash[];
   /**
    * The file's shape: `T:<n>` for a run of `n` residual tokens, `S:<id>` for a run of one span's
-   * tokens, in file order. Comparing two revisions' layouts projected onto the symbols they share
+   * tokens, `I:<hash>` for one import statement, in file order. Comparing two revisions' layouts projected onto the symbols they share
    * (dropping the other spans and summing the runs that then adjoin) is what detects a reordering,
    * or module-level code moving across a symbol — `main()` before a definition versus after it,
    * which no token or residual hash can see because the tokens themselves are identical.
@@ -256,6 +261,10 @@ export function computeFileContentHashes(
   const takeImport = (n: HashTreeNode): void => {
     const h = createHash('sha256');
     const names: string[] = [];
+    const statementText = content.slice(n.startIndex, n.endIndex);
+    // A wildcard binds names this walk cannot enumerate. `*` in an import statement is a wildcard in
+    // every language that has one; C++'s `using namespace` is the same idea spelled without a star.
+    let wildcard = statementText.includes('*') || /\busing\s+namespace\b/.test(statementText);
     const stack: HashTreeNode[] = [n];
     while (stack.length > 0) {
       const cur = stack.pop()!;
@@ -264,13 +273,19 @@ export function computeFileContentHashes(
       if (kids.length === 0) {
         if (isDroppedComment(cur.type, () => text)) continue;
         h.update(frame('L', cur.type, text));
-        if (/identifier|name/i.test(cur.type) && /^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(text)) names.push(text);
+        if (/wildcard|asterisk|glob/i.test(cur.type)) wildcard = true;
+        // `_` is Go's blank import: it binds nothing and exists only to run the package's `init`.
+        if (text !== '_' && /identifier|name/i.test(cur.type) && /^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(text)) names.push(text);
         continue;
       }
       h.update(frame('(', cur.type));
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
     }
-    imports.push({ hash: hash16(h), names: [...new Set(names)].sort(), binds: names.length > 0 });
+    const hash = hash16(h);
+    // The statement's PLACE is recorded in the layout: an import that MOVES (across module-level
+    // code, or past another import) is a real change, and it would otherwise be hashed nowhere.
+    layout.push(`I:${hash}`);
+    imports.push({ hash, names: [...new Set(names)].sort(), binds: !wildcard && names.length > 0 });
   };
 
   const stack: Frame[] = [];
