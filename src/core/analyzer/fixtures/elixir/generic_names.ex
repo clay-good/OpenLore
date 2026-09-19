@@ -38,3 +38,14 @@ defmodule Multi do
   defp visit(x), do: normalize(x)
   defp normalize(x), do: x
 end
+
+defmodule Shadow do
+  def to_string(v, _opts), do: v
+  def send(a, _b, _c), do: a
+
+  def run(x) do
+    to_string(x, [])
+    send(x, 1, 2)
+    x |> to_string() |> send(self())
+  end
+end

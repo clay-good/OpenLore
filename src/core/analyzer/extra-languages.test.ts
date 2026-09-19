@@ -102,8 +102,8 @@ describe('spec-08 additional languages', () => {
   it('Elixir — bare calls to generic names resolve; Kernel builtins and function heads do not', async () => {
     const g = await buildOne('elixir/generic_names.ex', 'Elixir');
     expect(fnNames(g, 'Elixir')).toEqual([
-      'delete', 'fallback', 'find', 'format', 'insert', 'map', 'new', 'normalize', 'parse', 'visit', 'walk',
-      'with_default',
+      'delete', 'fallback', 'find', 'format', 'insert', 'map', 'new', 'normalize', 'parse', 'run', 'send',
+      'to_string', 'visit', 'walk', 'with_default',
     ]);
     expect(edge(g, 'new', 'parse')).toBe(true);
     expect(edge(g, 'new', 'format')).toBe(true);   // piped
@@ -125,6 +125,11 @@ describe('spec-08 additional languages', () => {
     }
     // Remote `Enum.map` reaches resolution by bare name; it must not bind to `map`.
     expect(edge(g, 'delete', 'map')).toBe(false);
+    // A project function sharing a Kernel name at another arity is still called;
+    // the piped `x |> to_string()` is Kernel's to_string/1 and adds no external node.
+    expect(edge(g, 'run', 'to_string')).toBe(true);
+    expect(edge(g, 'run', 'send')).toBe(true);
+    expect(external).not.toContain('to_string');
   });
 
   it('Bash — defined-function call, NO edge to external binaries', async () => {
