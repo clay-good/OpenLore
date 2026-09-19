@@ -19,6 +19,8 @@ import {
   isCacheFresh,
   isAnalysisCacheFresh,
   computeProjectFingerprint,
+  fingerprintBudgetExceededMessage,
+  largestCorpusPaths,
   fingerprintHashOfConfiguration,
   loadMappingIndex,
   clearMappingCache,
@@ -513,6 +515,125 @@ describe('isCacheFresh', () => {
 // ============================================================================
 // loadMappingIndex
 // ============================================================================
+
+describe('fingerprint byte budget diagnostics', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'mcp-budget-test-'));
+  });
+
+  /**
+   * The question a user could not answer from the old message: which paths filled the budget.
+   * A tight cap over a tree whose weight sits in one subdirectory must come back naming that
+   * subdirectory, and saying what to do about it.
+   */
+  it('names the heaviest path and the way out when the budget is exceeded', async () => {
+    await mkdir(join(tmpDir, 'data', 'vectors'), { recursive: true });
+    await writeFile(join(tmpDir, 'app.ts'), 'export const app = 1;\n');
+    await writeFile(join(tmpDir, 'data', 'vectors', 'part-1.ts'), `// ${'x'.repeat(20_000)}\n`);
+    await writeFile(join(tmpDir, 'data', 'vectors', 'part-2.ts'), `// ${'x'.repeat(20_000)}\n`);
+
+    const failure = await computeProjectFingerprint(tmpDir, { maxBytes: 1024 }).catch((error: Error) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toMatch(/fingerprint byte budget/i);
+    expect(message).toContain('Largest contributors:');
+    expect(message).toContain('data/vectors');
+    expect(message).toContain('1024 bytes');
+    expect(message).toContain('excludePatterns');
+  });
+
+  /** The same tree under a cap it fits: no failure, and so no diagnostic to read. */
+  it('emits no diagnostic when the corpus fits the budget', async () => {
+    await mkdir(join(tmpDir, 'data', 'vectors'), { recursive: true });
+    await writeFile(join(tmpDir, 'app.ts'), 'export const app = 1;\n');
+    await writeFile(join(tmpDir, 'data', 'vectors', 'part-1.ts'), `// ${'x'.repeat(20_000)}\n`);
+    await writeFile(join(tmpDir, 'data', 'vectors', 'part-2.ts'), `// ${'x'.repeat(20_000)}\n`);
+
+    const fingerprint = await computeProjectFingerprint(tmpDir, { maxBytes: 10 * 1024 * 1024 });
+
+    expect(fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(fingerprint).not.toContain('Largest contributors');
+  });
+
+  it('discloses a truncated walk only when the walk was truncated', () => {
+    const files = [{ path: 'data/big.ts', size: 4096 }];
+
+    expect(fingerprintBudgetExceededMessage(1024, files, true)).toContain('maxFiles cap');
+    expect(fingerprintBudgetExceededMessage(1024, files, false)).not.toContain('maxFiles cap');
+  });
+
+  it('names the config key the walker actually reads', () => {
+    const message = fingerprintBudgetExceededMessage(1024, [{ path: 'data/big.ts', size: 4096 }]);
+
+    expect(message).toContain('analysis.excludePatterns');
+  });
+
+  /**
+   * The paths are repository-controlled and the message keeps its own newlines when logged, so a
+   * file name carrying a newline or an escape sequence could forge an extra line in the output.
+   */
+  it('strips control characters from repository paths so a file name cannot forge a line', () => {
+    const files = [{ path: 'data/evil\nAll clear: nothing to exclude[2J.ts', size: 4096 }];
+
+    const message = fingerprintBudgetExceededMessage(1024, files);
+
+    expect(message).not.toContain('\nAll clear');
+    expect(message).not.toContain('');
+    expect(message).toContain('data/evilAll clear: nothing to exclude[2J.ts');
+  });
+});
+
+describe('largestCorpusPaths', () => {
+  it('names the deepest path that accounts for the bytes, not a parent that merely contains it', () => {
+    const files = [
+      { path: 'data/vectors/part-1.ts', size: 400 },
+      { path: 'data/vectors/part-2.ts', size: 400 },
+      { path: 'src/app.ts', size: 10 },
+    ];
+
+    expect(largestCorpusPaths(files, 1)).toEqual([{ path: 'data/vectors', bytes: 800 }]);
+  });
+
+  it('names a single heavy file rather than the directory holding it', () => {
+    const files = [
+      { path: 'assets/demo.ts', size: 900 },
+      { path: 'src/app.ts', size: 10 },
+    ];
+
+    expect(largestCorpusPaths(files, 1)[0]?.path).toBe('assets/demo.ts');
+  });
+
+  it('never returns a path that contains another, so each line is its own bytes', () => {
+    const files = [
+      { path: 'a/b/c/one.ts', size: 100 },
+      { path: 'a/b/c/two.ts', size: 100 },
+      { path: 'z/other.ts', size: 5 },
+    ];
+
+    const paths = largestCorpusPaths(files, 5).map(entry => entry.path);
+
+    for (const outer of paths) {
+      for (const inner of paths) {
+        if (outer !== inner) expect(inner.startsWith(`${outer}/`)).toBe(false);
+      }
+    }
+  });
+
+  it('never names the repository root', () => {
+    const files = [{ path: 'only.ts', size: 10 }];
+
+    expect(largestCorpusPaths(files, 5).map(entry => entry.path)).toEqual(['only.ts']);
+  });
+
+  it('returns at most the requested number of paths', () => {
+    const files = Array.from({ length: 20 }, (_, index) => ({ path: `d${index}/f.ts`, size: 100 - index }));
+
+    expect(largestCorpusPaths(files, 3)).toHaveLength(3);
+  });
+});
 
 describe('loadMappingIndex', () => {
   let tmpDir: string;
