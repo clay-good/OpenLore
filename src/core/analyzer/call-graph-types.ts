@@ -11,6 +11,7 @@
 
 import type { FunctionCfg } from './cfg.js';
 import type { FileStyleRaw } from './style-fingerprint.js';
+import type { FileContentHashes } from './symbol-content-hash.js';
 import type { FileParseHealth, GrammarUnavailableBoundary } from './parse-health.js';
 import type { AttributedCandidate, FileDynamicBoundary } from './dynamic-boundary.js';
 import type { ExtractionLaneDisclosure } from './extraction-pool.js';
@@ -456,6 +457,11 @@ export type FileExtractResult = {
     reason: 'budget-exceeded' | 'parse-failure' | 'traversal-budget';
     budgetMs?: number;
   }>;
+  /**
+   * Normalized per-symbol and residual content hashes (change: add-symbol-content-hashes). Present
+   * only for an extraction run inside `withContentHashes`; never produced by analyze, never cached.
+   */
+  contentHashes?: FileContentHashes;
   /** Plain-data receipt that survives the worker-thread structured-clone boundary. */
   grammarUnavailable?: Omit<GrammarUnavailableBoundary, 'fileCount'>;
   /** Multiple unavailable parser lanes, used by mixed-language script containers. */
