@@ -97,7 +97,14 @@ export interface BlastRadiusBriefing {
    * requested ref did not resolve and resolveBaseRef fell back (main → master →
    * HEAD~1); a caveat is emitted when they differ. */
   resolvedBaseRef: string;
-  changed: { files: number; symbols: number; symbolNames: string[] };
+  changed: {
+    files: number;
+    /** Symbols that CHANGED. Symbols seeded for another reason are counted in `alsoSeeded`. */
+    symbols: number;
+    symbolNames: string[];
+    /** Seeded because they name a changed symbol, or hold a dynamic-dispatch site — not changed. */
+    alsoSeeded?: number;
+  };
   /**
    * How precisely the changed symbols were identified (change: add-symbol-content-hashes): files
    * whose changed symbols are exact, and files kept whole with the reason. Absent when the diff
@@ -380,8 +387,8 @@ export async function computeBlastRadius(
   if (seeds.length > analyzed.length) {
     caveats.push(`Impact analyzed the ${analyzed.length} highest-fan-in changed symbols; ${seeds.length - analyzed.length} lower-risk symbols were not individually analyzed.`);
   }
-  if (seeds.length > 30) {
-    caveats.push(`changed.symbolNames lists the first 30 of ${seeds.length} changed symbols (count is in changed.symbols).`);
+  if (seeds.length - (narrowed.seededUnchanged ?? 0) > 30) {
+    caveats.push(`changed.symbolNames lists the first 30 of ${seeds.length - (narrowed.seededUnchanged ?? 0)} changed symbols (count is in changed.symbols).`);
   }
   if (driftUnavailable) {
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
@@ -446,8 +453,11 @@ export async function computeBlastRadius(
     ...(confidenceBoundary.complete ? {} : { confidenceBoundary }),
     changed: {
       files: changedFiles.length,
-      symbols: seeds.length,
-      symbolNames: seeds.slice(0, 30).map(s => s.name),
+      // The seed set is what was ANALYZED; what CHANGED is the seed set minus the symbols kept for
+      // another reason. Reporting the seed count as "changed" would name unchanged symbols.
+      symbols: seeds.length - (narrowed.seededUnchanged ?? 0),
+      symbolNames: seeds.filter(s => !narrowed.unchangedSeedIds?.has(s.id)).slice(0, 30).map(s => s.name),
+      ...((narrowed.seededUnchanged ?? 0) > 0 ? { alsoSeeded: narrowed.seededUnchanged } : {}),
     },
     ...(changeGranularity ? { changeGranularity } : {}),
     impact: {

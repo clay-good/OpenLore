@@ -29,6 +29,7 @@
  * also reported as a carried rename or move. Both ids stay in the seed set.
  */
 
+import { escapeRegExp } from '../../utils/misc.js';
 import type { ChangedFile } from '../../types/index.js';
 import type { FunctionNode, SerializedCallGraph } from '../analyzer/call-graph.js';
 import { extractFileWithContentHashes } from '../analyzer/call-graph.js';
@@ -45,7 +46,8 @@ import {
 } from '../analyzer/continuity.js';
 import { hashSpan } from '../decisions/anchor.js';
 import { getRepoPrefix, reframeRepoPath, resolveBaseRef } from '../drift/git-diff.js';
-import { execFileGit, spawnGit } from '../../utils/git-exec.js';
+import { execFileGit } from '../../utils/git-exec.js';
+import { gitPathArgs } from '../../utils/git-args.js';
 import { readFileConfined, safeJoin } from '../../utils/path-confinement.js';
 import { lstat } from 'node:fs/promises';
 import { SOURCE_SCAN_MAX_FILE_BYTES } from '../../constants.js';
@@ -84,6 +86,9 @@ export const SYMBOL_HASHING_BUDGET_MS = 8_000;
 
 /** Base blobs read concurrently. Each is a `git cat-file` spawn; the byte bound caps what is held. */
 const READ_CONCURRENCY = 8;
+
+/** Bound on the one `ls-tree` listing; past it, sizes are unknown and the files are read as before. */
+const LS_TREE_MAX_BYTES = 8 * 1024 * 1024;
 
 /** Per-read git timeout. A slow read falls back to file granularity; it never blocks the tool. */
 const GIT_READ_TIMEOUT_MS = 10_000;
@@ -203,39 +208,29 @@ async function readHead(absDir: string, localPath: string): Promise<string | und
 }
 
 /**
- * Blob sizes for `<commit>:<path>` keys, in ONE `git cat-file --batch-check` rather than a spawn per
- * file. A key git cannot resolve is simply absent from the result.
+ * Blob sizes for the base revision's paths, from ONE `git ls-tree -r --long -z` rather than a spawn
+ * per file — and without a stdin-fed child, so the read-only tools that reach this code still reach
+ * no process primitive beyond the audited git helper. A path git cannot resolve is simply absent.
  */
-async function batchBlobSizes(absDir: string, keys: readonly string[]): Promise<Map<string, number>> {
+async function baseBlobSizes(absDir: string, commit: string, paths: readonly string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>();
-  if (keys.length === 0) return out;
-  const child = spawnGit('git', ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], {
-    cwd: absDir, stdio: ['pipe', 'pipe', 'ignore'],
-  });
-  let stdout = '';
-  child.stdout?.setEncoding('utf-8');
-  child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
-  const done = new Promise<void>(resolve => {
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
-  });
-  const timer = setTimeout(() => child.kill('SIGKILL'), GIT_READ_TIMEOUT_MS);
+  if (paths.length === 0) return out;
   try {
-    // A key with a newline in it would desynchronize the stream, so it is never sent.
-    const sendable = keys.filter(key => !/[\r\n]/.test(key));
-    child.stdin?.end(sendable.map(key => `${key}\n`).join(''));
-    await done;
-    const lines = stdout.split('\n').filter(line => line.length > 0);
-    for (const [i, line] of lines.entries()) {
-      const parts = line.split(' ');
-      if (parts.length !== 3 || parts[1] !== 'blob') continue;
-      const size = Number(parts[2]);
-      if (Number.isFinite(size) && sendable[i] !== undefined) out.set(sendable[i], size);
+    const { stdout } = await execFileGit(
+      'git', [...gitPathArgs('ls-tree', '-r', '--long', '-z', commit, '--'), ...paths],
+      { cwd: absDir, timeout: GIT_READ_TIMEOUT_MS, maxBuffer: LS_TREE_MAX_BYTES, encoding: 'utf-8' },
+    );
+    for (const record of String(stdout).split('\0')) {
+      // `<mode> blob <sha> <size>\t<path>`; the size column is right-aligned with spaces.
+      const tab = record.indexOf('\t');
+      if (tab < 0) continue;
+      const fields = record.slice(0, tab).split(/\s+/);
+      if (fields[1] !== 'blob') continue;
+      const size = Number(fields[3]);
+      if (Number.isFinite(size)) out.set(record.slice(tab + 1), size);
     }
   } catch {
-    // No sizes: every file then reads as unknown-size, which the caller treats as 0 and reads.
-  } finally {
-    clearTimeout(timer);
+    // No sizes: every file reads as unknown-size, which the caller treats as 0 and reads anyway.
   }
   return out;
 }
@@ -324,14 +319,30 @@ function sharedImportCounts(
   return out;
 }
 
-/** Every whole identifier in a text, as a set. One scan, whatever the number of names of interest. */
-function identifiersIn(text: string): Set<string> {
-  const out = new Set<string>();
-  for (const match of text.matchAll(IDENTIFIER_RE)) out.add(match[0]);
-  return out;
+const IDENTIFIER_RE = /[\p{L}_$][\p{L}\p{N}_$]*/gu;
+
+/**
+ * Does `text` name any of `wanted`, as a whole identifier? Two strategies, same answer: a few names
+ * are cheapest as precompiled whole-word probes that stop at the first hit, while many names are
+ * cheapest as one identifier scan intersected against the set. Without the second strategy a file
+ * where hundreds of symbols changed costs names × symbols regex passes; without the first, a
+ * one-symbol edit pays a full tokenization of every sibling.
+ */
+function namesAppearIn(text: string, wanted: ReadonlySet<string>, probes: readonly RegExp[]): boolean {
+  if (probes.length > 0) return probes.some(probe => probe.test(text));
+  IDENTIFIER_RE.lastIndex = 0;
+  for (const match of text.matchAll(IDENTIFIER_RE)) if (wanted.has(match[0])) return true;
+  return false;
 }
 
-const IDENTIFIER_RE = /[\p{L}_$][\p{L}\p{N}_$]*/gu;
+/** Above this many names, one scan per text beats one regex pass per name. */
+const NAME_PROBE_LIMIT = 8;
+
+/** Whole-identifier probes for a small name set, compiled once and reused across every text. */
+function nameProbes(names: ReadonlySet<string>): RegExp[] {
+  if (names.size === 0 || names.size > NAME_PROBE_LIMIT) return [];
+  return [...names].map(name => new RegExp(`(?<![\\p{L}\\p{N}_$])${escapeRegExp(name)}(?![\\p{L}\\p{N}_$])`, 'u'));
+}
 
 function sideUsable(side: Side): FileGranularityReason | undefined {
   if (!side.present) return undefined;
@@ -407,9 +418,10 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
   // One pass over each text collecting its identifiers, intersected with the names of interest —
   // never a regex per (symbol, name) pair, which is quadratic on a file with many changed symbols.
   const wanted = new Set([...names, ...importedNames].filter(n => n.length > 0));
+  const wantedProbes = nameProbes(wanted);
   if (base.present && head.present && names.size > 0) {
-    const moduleNames = identifiersIn(`${residualText(base)}\n${residualText(head)}`);
-    if ([...names].some(name => moduleNames.has(name))) {
+    const changedProbes = nameProbes(names);
+    if (namesAppearIn(`${residualText(base)}\n${residualText(head)}`, names, changedProbes)) {
       // Module-level code that NAMES a changed symbol may bind it (`const h = get;`, a handler
       // table) and hand it to a sibling that never spells the name.
       return { granularity: 'file', reason: 'module-level-reference' };
@@ -423,10 +435,7 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
     for (const id of all) {
       if (moved.has(id)) continue;
       const texts = textsById.flatMap(index => index.get(id) ?? []);
-      if (texts.some(text => {
-        for (const identifier of identifiersIn(text)) if (wanted.has(identifier)) return true;
-        return false;
-      })) referencing.add(id);
+      if (texts.some(text => namesAppearIn(text, wanted, wantedProbes))) referencing.add(id);
     }
   }
   for (const side of [base, head]) {
@@ -525,7 +534,8 @@ export async function computeSymbolChangedSet(input: {
       wantHead: entry.status !== 'deleted',
     });
   }
-  const baseSizes = await batchBlobSizes(input.absDir, planned.flatMap(p => p.baseKey ? [p.baseKey] : []));
+  const basePaths = [...new Set(planned.flatMap(p => (p.baseKey ? [p.baseKey.slice(p.baseKey.indexOf(':') + 1)] : [])))];
+  const baseSizes = await baseBlobSizes(input.absDir, commit, basePaths);
   const headSizes = new Map<string, number>();
   await Promise.all(planned.filter(p => p.wantHead).map(async p => {
     try {
@@ -538,7 +548,7 @@ export async function computeSymbolChangedSet(input: {
   const selected: Planned[] = [];
   let budget = input.maxBytes ?? MAX_SYMBOL_HASHED_BYTES;
   for (const p of planned) {
-    const baseBytes = p.baseKey ? baseSizes.get(p.baseKey) : 0;
+    const baseBytes = p.baseKey ? baseSizes.get(p.baseKey.slice(p.baseKey.indexOf(':') + 1)) : 0;
     const headBytes = p.wantHead ? headSizes.get(p.local) : 0;
     // An unknown size is a missing blob or a non-regular working-tree entry; the read reports it.
     const bytes = (baseBytes ?? 0) + (headBytes ?? 0);

@@ -590,9 +590,9 @@ export const TOOL_DEFINITIONS = [
       'with the reaching path per test, and always includes changed and new test files; each test says why it was selected. ' +
       'Deterministic, offline, no test run. ' +
       'It is an over-approximate PRIORITIZER (run these first), not a sound replacement for the full ' +
-      'suite — the response states its confidence and coverage. A diff is resolved to the symbols that ' +
-      'actually changed (normalized per-symbol hashes: formatting and comments are not changes); a file ' +
-      'kept whole is named with its reason in changeGranularity. The exact inverse of report_coverage_gaps ' +
+      'suite — the response states its confidence and coverage. A diff resolves to the symbols that ' +
+      'actually changed (formatting and comments are not changes); a file kept whole says why in ' +
+      'changeGranularity. The exact inverse of report_coverage_gaps ' +
       '(which finds important code NO test reaches); this finds the reaching tests FOR a change. ' +
       'Run analyze_codebase first.',
     inputSchema: {
@@ -622,9 +622,9 @@ export const TOOL_DEFINITIONS = [
       'USE THIS WHEN: before committing/editing, you want one briefing of what your diff actually ' +
       'touches — "what is the blast radius of my changes?", "is this change safe to commit?". ' +
       'Composes existing deterministic analyses over the staged/working diff into a single ' +
-      'conclusion-shaped briefing over the symbols the diff ACTUALLY changed (normalized per-symbol ' +
-      'hashes, so formatting and comments are not changes; a file kept whole is named with its reason ' +
-      'in changeGranularity): affected callers and layers crossed (analyze_impact), the tests ' +
+      'conclusion-shaped briefing over the symbols the diff ACTUALLY changed (formatting and comments ' +
+      'are not changes; a file kept whole says why in changeGranularity): affected callers and ' +
+      'layers crossed (analyze_impact), the tests ' +
       'to run (select_tests), the anchored memories/decisions the diff will turn drifted/orphaned and ' +
       'the specs it will make stale (check_spec_drift). No LLM, no new analysis — pure orchestration. ' +
       'Advisory: it informs, you act. Distinct from its change-family siblings: structural_diff is the raw ' +
@@ -1861,8 +1861,8 @@ export const TOOL_DEFINITIONS = [
       'ordinary-change — using labels OpenLore already computes, NOT a weighted score. Each briefed ' +
       'symbol carries its labels and raw evidence (fan-in, fan-out, prior churn), grouped by region, ' +
       'with the tests to run for the whole change set. HONEST BY CONSTRUCTION: changed symbols are ' +
-      'exact where both revisions hash cleanly (formatting and comments are not changes; renames are ' +
-      'listed under carried), and a file kept whole names its reason; the surprising-change label is withheld when git history is too ' +
+      'exact where both revisions hash cleanly (renames are listed under carried), and a file kept ' +
+      'whole says why; the surprising-change label is withheld when git history is too ' +
       'shallow to say "rarely changed before"; a bounded briefing always carries a truncation receipt ' +
       '(omitted count + lowest tier reached) and never drops a higher tier for a lower one. The cursor ' +
       'is the base ref, never wall-clock time. Deterministic, offline, no LLM. Run analyze_codebase first.',

@@ -677,8 +677,17 @@ export async function narrowToChangedSymbols(
   fileSeeds: FunctionNode[],
   /** A changed-set a composing caller already computed for this base ref and diff. */
   precomputedSet?: SymbolChangedSet,
-): Promise<{ seeds: FunctionNode[]; receipt?: ChangeGranularityReceipt; set?: SymbolChangedSet; seededUnchanged?: number }> {
-  if (fileSeeds.length === 0) return { seeds: fileSeeds };
+): Promise<{
+  seeds: FunctionNode[];
+  receipt?: ChangeGranularityReceipt;
+  set?: SymbolChangedSet;
+  seededUnchanged?: number;
+  /** Seed ids that did not themselves change (they name a changed symbol, or hold a dispatch site). */
+  unchangedSeedIds?: ReadonlySet<string>;
+}> {
+  // No file-level seed does NOT mean nothing to say: a moved file's symbols carry ids the index has
+  // never seen, and so does a file added since the last analyze. Computing the set anyway is what
+  // lets the receipt name those files and the claim say "not indexed" instead of "nothing changed".
   let set: SymbolChangedSet;
   try {
     // A reused set is only the same answer when it was computed against the same base; a mismatch
@@ -692,11 +701,20 @@ export async function narrowToChangedSymbols(
   set = coverSeedFiles(set, fileSeeds);
   const seeds = narrowSeedsToChangedSymbols(fileSeeds, set);
   const indexed = new Set(cg.nodes.map(n => n.id));
+  const unchangedSeedIds = new Set<string>();
+  for (const seed of seeds) {
+    const change = set.byFile.get(seed.filePath);
+    if (change?.granularity === 'symbol'
+        && (change.referencing.includes(seed.id) || change.dynamicDispatch.includes(seed.id))) {
+      unchangedSeedIds.add(seed.id);
+    }
+  }
   return {
     seeds,
     receipt: granularityReceipt(set, id => indexed.has(id)),
     set,
     seededUnchanged: seededNotChanged(set, seeds),
+    unchangedSeedIds,
   };
 }
 

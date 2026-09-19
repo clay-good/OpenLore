@@ -118,6 +118,16 @@ are read concurrently, a byte budget bounds the worst case beside the file bound
 file with no indexed symbol is still assessed (so "formatting only" is never claimed over files that
 were never hashed), and the CLI renders the receipt, every caveat, and carried renames.
 
+A second round of four reviews (including an end-to-end pass over four real external repositories)
+closed four more: a moved file produced no receipt at all (so a hub-relocating rename read as
+"nothing to do"), a symbol that changed but is absent from a stale index was reported as unchanged
+rather than as not indexed, an import that MOVED hashed as unchanged (its position is now in the
+layout), and a wildcard or Go blank import counted as "purely additive" although it rebinds names
+the walk cannot enumerate. The same round replaced an unbounded read-everything-then-budget pass
+(measured at 1.9 GB peak RSS and a fatal OOM under a 700 MB heap) with a size probe and a
+deterministic byte budget, refused non-regular working-tree entries instead of blocking forever on a
+FIFO open (which starved Node's whole threadpool), and bounded the pass in wall clock.
+
 Deferred, deliberately: the change-coupling semantic-churn view (it needs per-commit re-extraction of
 history), the persisted column, a rename-aware churn join for `briefing_since`'s surprise caveat, and
 `report_coverage_gaps`' diff scope, which stays file-level because it is a whole-graph audit lens

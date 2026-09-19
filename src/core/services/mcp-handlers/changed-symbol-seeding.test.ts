@@ -50,6 +50,7 @@ import { computeBlastRadius } from './blast-radius.js';
 import { handleBriefingSince } from './briefing-since.js';
 import { readCachedContext } from './utils.js';
 import { computeSymbolChangedSet, type FileSymbolChange, type SymbolChangedSet } from '../symbol-changed-set.js';
+import { getChangedFiles } from '../../drift/git-diff.js';
 import type { CallEdge, FunctionNode, SerializedCallGraph } from '../../analyzer/call-graph.js';
 
 function node(over: Partial<FunctionNode> & { id: string }): FunctionNode {
@@ -84,6 +85,7 @@ function changedSet(change: FileSymbolChange, carried: SymbolChangedSet['carried
 }
 
 beforeEach(() => {
+  vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'src/m.ts', status: 'modified', isTest: false }] } as never);
   vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, EDGES) } as never);
   vi.mocked(computeSymbolChangedSet).mockResolvedValue(changedSet(symbolChange({ changed: ['src/m.ts::alpha'] })));
 });
@@ -150,6 +152,38 @@ describe('blast_radius seeds from the changed symbols', () => {
     const b = await computeBlastRadius({ directory: '/repo' }) as { headline: string; changed: { symbols: number } };
     expect(b.changed.symbols).toBe(0);
     expect(b.headline).toContain('formatting or comments only');
+  });
+
+  it('still reports a receipt when a changed file has no indexed symbol at all (a moved file)', async () => {
+    // A `git mv` gives every symbol a new id the index has never seen: no seed resolves, and the
+    // old behavior said "0 symbols changed" with no receipt and no reason.
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'src/moved.ts', status: 'renamed', oldPath: 'src/old.ts', isTest: false }] } as never);
+    vi.mocked(computeSymbolChangedSet).mockResolvedValue({
+      byFile: new Map([['src/moved.ts', symbolChange({ appeared: ['src/moved.ts::alpha'], disappeared: ['src/old.ts::alpha'] })]]),
+      carried: [{ from: 'src/old.ts::alpha', to: 'src/moved.ts::alpha', reason: 'moved', basis: 'exact-body' }],
+    });
+    const r = await handleSelectTests({ directory: '/repo', diffRef: 'HEAD' }) as {
+      message: string; changeGranularity: { changedSymbolsFound: number; changedSymbolsNotIndexed: number };
+    };
+    expect(r.changeGranularity).toMatchObject({ changedSymbolsFound: 2, changedSymbolsNotIndexed: 2 });
+    expect(r.message).toContain('is in the index');
+    expect(r.message).toContain('Re-run analyze_codebase');
+    expect(r.message).not.toContain('formatting or comments only');
+
+    const b = await computeBlastRadius({ directory: '/repo' }) as { headline: string; changeGranularity: unknown };
+    expect(b.changeGranularity).toBeDefined();
+    expect(b.headline).toContain('not in the index');
+  });
+
+  it('counts a symbol seeded for another reason under alsoSeeded, not under changed', async () => {
+    vi.mocked(computeSymbolChangedSet).mockResolvedValue(changedSet(symbolChange({
+      changed: ['src/m.ts::alpha'], referencing: ['src/m.ts::beta'],
+    })));
+    const b = await computeBlastRadius({ directory: '/repo' }) as {
+      changed: { symbols: number; symbolNames: string[]; alsoSeeded?: number }; caveats: string[];
+    };
+    expect(b.changed).toMatchObject({ symbols: 1, symbolNames: ['alpha'], alsoSeeded: 1 });
+    expect(b.caveats.some(c => c.includes('did not themselves change'))).toBe(true);
   });
 });
 

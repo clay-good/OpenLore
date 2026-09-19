@@ -43,6 +43,13 @@ parsed, or run — a shebang, a build tag, `@ts-expect-error`, `frozen_string_li
 code from a **closed list**, so a language directive that is not on that list reads as an ordinary
 comment and flipping it is not seen as a change.
 
+How much this narrows depends on the language and the diff. It lands most reliably in
+TypeScript/JavaScript. In a language where the call graph indexes only some of a file's functions
+(Python module-level helpers, Go files whose functions the extractor does not all capture), the
+unindexed bodies sit in the module-level residual, so editing one reads as `module-level-change` and
+the file stays whole — true given what the analyzer sees, and disclosed, but no narrower than before.
+A diff that also rewrites module-level code keeps those files whole too, which is common.
+
 The bounds are disclosed too: a diff past 200 code files, a file over 256 KB, a diff past the 1 MB
 hashing budget, or a pass past its 8-second budget keeps the remaining files whole — always the
 conservative direction, so a slower machine seeds more, never less.

@@ -60,6 +60,11 @@ const TIER_ICON: Record<string, string> = {
 };
 
 /** Compact human rendering of the briefing. */
+/** Caveats that qualify WHAT is in the ranked list, rather than how to read a single entry. */
+function isGranularityCaveat(caveat: string): boolean {
+  return /FILE granularity|module level was imports|renames or moves with an unchanged body|not in the index|not assessed/i.test(caveat);
+}
+
 function renderHuman(r: BriefingResult): string {
   const lines: string[] = [];
   lines.push('');
@@ -85,6 +90,11 @@ function renderHuman(r: BriefingResult): string {
     lines.push(`   ⚠ ${r.confidenceBoundary.staleness.detail}`);
   }
   if (r.note) lines.push(`   ⚠ ${r.note}`);
+  // A caveat that qualifies the ranked list must appear ABOVE it: "these files were kept whole, so
+  // every symbol in them is briefed" is exactly what a reader needs before reading the tiers.
+  for (const caveat of r.caveats) {
+    if (isGranularityCaveat(caveat)) lines.push(`   ⚠ ${caveat}`);
+  }
 
   if (r.briefing.length === 0) {
     lines.push(r.note ? '   (nothing in scope to brief)' : '   No changed symbols in scope.');
@@ -117,7 +127,9 @@ function renderHuman(r: BriefingResult): string {
   // Every standing caveat, not the one that happens to sit at index 0: this list grows (the
   // changed-set granularity note now leads it), and selecting by position silently drops whichever
   // disclosure a later change prepends.
-  for (const caveat of r.caveats) lines.push('   ' + caveat);
+  for (const caveat of r.caveats) {
+    if (!isGranularityCaveat(caveat)) lines.push('   ' + caveat);
+  }
   if (r.carried && r.carried.length > 0) {
     for (const c of r.carried.slice(0, 5)) lines.push(`   ↔ ${c.reason}: ${c.from} → ${c.to} (${c.basis})`);
     if (r.carried.length > 5) lines.push(`   … and ${r.carried.length - 5} more carried rename(s)/move(s)`);
