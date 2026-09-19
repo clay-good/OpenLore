@@ -27,6 +27,7 @@
  */
 
 import type {
+  AgentEndEvent,
   AgentToolResult,
   BeforeAgentStartEvent,
   BeforeAgentStartEventResult,
@@ -42,7 +43,7 @@ import { Type, type TObject, type TSchema } from 'typebox';
 
 import { spawn } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -87,6 +88,13 @@ import {
   reviewedFileContentProvenance,
 } from '../core/services/served-content.js';
 import { safeJoin } from '../utils/path-confinement.js';
+// Functional readiness for the footer status. `health.ts` is kept dependency-light on purpose so
+// importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
+import { openloreHealth, type HealthResult } from '../api/health.js';
+import { OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
+import { REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
+import { runtimeDirOf } from '../core/runtime/analysis-ownership.js';
+import { OWNERSHIP_LOCK_FILE } from '../core/runtime/advisory-lock.js';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -307,7 +315,11 @@ export async function loadExistingConfig(cwd: string): Promise<ExistingConfigLoa
   }
 }
 
-export async function runConfigWizard(ctx: ExtensionContext, existing?: ExistingOpenLoreConfig | null): Promise<void> {
+export async function runConfigWizard(
+  ctx: ExtensionContext,
+  existing?: ExistingOpenLoreConfig | null,
+  hooks: { afterAnalyze?: (ctx: ExtensionContext) => Promise<void> } = {},
+): Promise<void> {
   const { ui } = ctx;
 
   const existingGeneration = isPlainObject(existing?.generation) ? existing.generation : {};
@@ -547,6 +559,7 @@ export async function runConfigWizard(ctx: ExtensionContext, existing?: Existing
       } else {
         ui.notify(`openlore analyze failed — run it manually. ${errText ? '(' + errText.slice(0, 120) + ')' : ''}`.trim(), 'error');
       }
+      await hooks.afterAnalyze?.(ctx);
     }
   }
 }
@@ -881,6 +894,85 @@ export async function awaitWithSignal<T>(work: Promise<T>, signal: AbortSignal):
 
 export function isUsableDaemon(daemon: Daemon): boolean {
   return daemon.incompatibility === undefined;
+}
+
+// ── Footer status (change: add-pi-openlore-status) ────────────────────────────
+
+/** The Pi footer status key this extension owns. */
+export const PI_STATUS_KEY = 'openlore';
+
+/** What the extension last learned about the daemon for one working tree. */
+export type PiDaemonView = 'connecting' | 'usable' | 'incompatible' | 'spawn-disabled' | 'unavailable';
+
+/** Map a daemon resolution to the view the status reports. @internal */
+export function piDaemonView(result: EnsureDaemonResult): PiDaemonView {
+  if (result.daemon) return isUsableDaemon(result.daemon) ? 'usable' : 'incompatible';
+  return result.failureKind === 'spawn-disabled' ? 'spawn-disabled' : 'unavailable';
+}
+
+export interface PiStatusFacts {
+  daemon: PiDaemonView;
+  /** Absent when the health read failed: readiness is then unknown, never assumed. */
+  health?: Pick<HealthResult, 'index' | 'watcher'>;
+}
+
+/**
+ * Render the footer status (spec: PiStatusReportsFunctionalReadiness). Precedence: connecting, then
+ * an index that is not ready — no daemon can serve an absent index, so that is the actionable
+ * condition — then the daemon, then a watcher the daemon reported stopped. "ready" needs both a
+ * ready index and a usable daemon. @internal
+ */
+export function formatPiStatus(facts: PiStatusFacts): string {
+  const say = (text: string) => `${PI_STATUS_KEY}: ${text}`;
+  if (facts.daemon === 'connecting') return say('connecting…');
+  if (!facts.health) return say('status unknown');
+  switch (facts.health.index) {
+    case 'absent': return say('no index (run openlore analyze)');
+    case 'building': return say('analyzing…');
+    case 'degraded': return say('index degraded');
+    case 'ready': break;
+  }
+  switch (facts.daemon) {
+    case 'incompatible': return say('daemon incompatible');
+    case 'spawn-disabled': return say('daemon not started (spawn disabled)');
+    case 'unavailable': return say('daemon unavailable');
+    case 'usable': break;
+  }
+  return facts.health.watcher === 'stopped' ? say('ready (watcher stopped)') : say('ready');
+}
+
+/**
+ * The cache key for one health read: the stat of every required artifact, the ownership lock, and
+ * the daemon view. The full read parses every artifact (tens of MB on a large repository), so it
+ * reruns only when one of these moves. @internal
+ */
+export async function piHealthCacheKey(cwd: string, daemon: PiDaemonView): Promise<string> {
+  const analysisDir = safeJoin(cwd, OPENLORE_ANALYSIS_REL_PATH);
+  const stamp = async (path: string): Promise<string> => {
+    try {
+      const s = await stat(path);
+      return `${s.mtimeMs}:${s.size}`;
+    } catch {
+      return '-';
+    }
+  };
+  const parts = await Promise.all([
+    ...REQUIRED_ANALYSIS_ARTIFACTS.map((artifact) => stamp(join(analysisDir, artifact))),
+    stamp(join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE)),
+  ]);
+  return [daemon, ...parts].join('|');
+}
+
+type PiHealthReader = (cwd: string) => Promise<HealthResult>;
+const defaultHealthReader: PiHealthReader = (cwd) => openloreHealth({ rootPath: cwd });
+
+/** Set the status only where the host has a UI; a failing host call never escapes. */
+function setPiStatus(ctx: ExtensionContext, text: string | undefined): void {
+  try {
+    if (ctx.hasUI && typeof ctx.ui?.setStatus === 'function') ctx.ui.setStatus(PI_STATUS_KEY, text);
+  } catch {
+    // Advisory only (spec: PiStatusFollowsTheSessionLifecycle).
+  }
 }
 
 // ── Context injection helpers ─────────────────────────────────────────────────
@@ -1812,9 +1904,18 @@ export function formatToolResult(result: unknown, toolName?: string): string {
 
 // ── Extension entry point ─────────────────────────────────────────────────────
 
+/** Bounded runtime overrides for the extension. @internal */
+export interface PiExtensionRuntime {
+  orientTimeoutMs?: number;
+  /** Replaces the functional-readiness read behind the footer status. */
+  readHealth?: PiHealthReader;
+  /** Replaces daemon discovery/spawn. */
+  resolveDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
+}
+
 function registerOpenlore(
   pi: ExtensionAPI,
-  runtime: { orientTimeoutMs?: number } = {},
+  runtime: PiExtensionRuntime = {},
 ): void {
   // Stdout belongs to the Pi host (rpc/json modes stream protocol on it, and the TUI
   // renders none of it), so a library-level logger.warning written with console.log is
@@ -1830,6 +1931,12 @@ function registerOpenlore(
   const failedUntil = new Map<string, number>();
   const DAEMON_RETRY_COOLDOWN_MS = 30_000;
   const primed = new Set<string>();
+  // Footer status state (spec: PiStatusReportsFunctionalReadiness). Keyed by cwd like the daemon
+  // cache. No ExtensionContext is ever stored: each update uses the ctx of the event it handles.
+  const daemonViews = new Map<string, PiDaemonView>();
+  const healthCache = new Map<string, { key: string; health: HealthResult }>();
+  const readHealth = runtime.readHealth ?? defaultHealthReader;
+  const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
   // Tool-surface state for the current session (spec: PiToolGroupsAreActivatable).
   // hostExcluded: OpenLore tools the host had turned off before the surface was applied.
   // suppressed: tools this extension turned off, so a later session_start does not
@@ -1857,7 +1964,8 @@ function registerOpenlore(
     const cached = daemons.get(cwd);
     if (cached) return cached;
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
-    const result = await ensureDaemonResult(cwd);
+    const result = await resolveDaemon(cwd);
+    daemonViews.set(cwd, piDaemonView(result));
     const d = result.daemon;
     if (d) {
       failedUntil.delete(cwd);
@@ -1888,17 +1996,54 @@ function registerOpenlore(
   // answers (reaped/crashed) is dropped from the cache so the next tool call
   // re-spawns it. Fire-and-forget; failures are expected and ignored.
   let keepalive: ReturnType<typeof setInterval> | undefined;
+  function dropDaemon(cwd: string): void {
+    daemons.delete(cwd);
+    daemonViews.set(cwd, 'unavailable');
+  }
   function startKeepalive(): void {
     if (keepalive || daemons.size === 0) return;
     keepalive = setInterval(() => {
       for (const [cwd, daemon] of daemons) {
         const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
         void fetch(`${daemon.baseUrl}/health`, { headers, signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' })
-          .then((res) => { if (!res.ok) daemons.delete(cwd); })
-          .catch(() => daemons.delete(cwd));
+          .then((res) => { if (!res.ok) dropDaemon(cwd); })
+          .catch(() => dropDaemon(cwd));
       }
     }, KEEPALIVE_MS);
     keepalive.unref?.(); // never keep the host process alive for the keepalive alone
+  }
+
+  /**
+   * Recompute and show the footer status for this event's working tree (spec:
+   * PiStatusFollowsTheSessionLifecycle). Never rejects: a status is advisory and must not fail the
+   * event, the agent run, or a tool call.
+   */
+  async function refreshStatus(ctx: ExtensionContext): Promise<void> {
+    try {
+      if (!ctx.hasUI) return;
+      const cwd = ctx.cwd;
+      // A tree this session has not resolved yet (the cwd moved) is resolved the same way a tool
+      // call would, rather than reported as a daemon failure that never happened.
+      if (!daemonViews.has(cwd) && !daemons.has(cwd)) await getDaemon(cwd);
+      const daemon = daemons.has(cwd) ? 'usable' : (daemonViews.get(cwd) ?? 'unavailable');
+      let health: HealthResult | undefined;
+      try {
+        const key = await piHealthCacheKey(cwd, daemon);
+        const cached = healthCache.get(cwd);
+        if (cached && cached.key === key && cached.health.index !== 'building') {
+          health = cached.health;
+        } else {
+          health = await readHealth(cwd);
+          healthCache.set(cwd, { key, health });
+        }
+      } catch {
+        healthCache.delete(cwd);
+        health = undefined;
+      }
+      setPiStatus(ctx, formatPiStatus({ daemon, ...(health ? { health } : {}) }));
+    } catch {
+      // Advisory only.
+    }
   }
 
   // ── B: navigation tools ──
@@ -1917,7 +2062,7 @@ function registerOpenlore(
         try {
           result = await callTool(daemon, tool.name, params as Record<string, unknown>, ctx.cwd, signal ?? undefined);
         } catch (err) {
-          daemons.delete(ctx.cwd);
+          dropDaemon(ctx.cwd);
           return toolResult(
             `openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`,
           );
@@ -1974,7 +2119,7 @@ function registerOpenlore(
         );
         return compositeToolResult(result);
       } catch (err) {
-        daemons.delete(ctx.cwd);
+        dropDaemon(ctx.cwd);
         return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
       }
     },
@@ -2004,7 +2149,7 @@ function registerOpenlore(
         );
         return compositeToolResult(result);
       } catch (err) {
-        daemons.delete(ctx.cwd);
+        dropDaemon(ctx.cwd);
         return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
       }
     },
@@ -2024,7 +2169,7 @@ function registerOpenlore(
       if (loaded.state === 'invalid') {
         return toolResult(`Configuration not changed: ${loaded.detail}. Repair \`.openlore/config.json\` and retry.`);
       }
-      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null);
+      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null, { afterAnalyze: refreshStatus });
       return toolResult('Configuration saved to .openlore/config.json.');
     },
   });
@@ -2074,7 +2219,7 @@ function registerOpenlore(
         ctx.ui.notify(`Configuration not changed: ${loaded.detail}. Repair .openlore/config.json and retry.`, 'error');
         return;
       }
-      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null);
+      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null, { afterAnalyze: refreshStatus });
     },
   });
 
@@ -2086,23 +2231,32 @@ function registerOpenlore(
     if (ctx.hasUI) {
       const loaded = await loadExistingConfig(ctx.cwd);
       if (loaded.state === 'absent') {
-        await runConfigWizard(ctx, null);
+        await runConfigWizard(ctx, null, { afterAnalyze: refreshStatus });
       } else if (loaded.state === 'invalid') {
         ctx.ui.notify(`OpenLore config not changed: ${loaded.detail}. Repair .openlore/config.json to configure it.`, 'warning');
       }
     }
 
     if (ctx.mode !== 'json' && ctx.mode !== 'print') {
+      setPiStatus(ctx, formatPiStatus({ daemon: 'connecting' }));
       await getDaemon(ctx.cwd);
       startKeepalive();
+      await refreshStatus(ctx);
     }
+  });
+
+  // Readiness can change during a run (an analysis finishes, the daemon dies), so each run ends
+  // with a refresh. Cheap when nothing moved: a few stats against the cached key.
+  pi.on('agent_end', async (_event: AgentEndEvent, ctx: ExtensionContext) => {
+    await refreshStatus(ctx);
   });
 
   // Stop pinging when the session ends gracefully so the now-unused daemon can
   // idle out and free its RAM. (On a hard kill the interval dies with the host
   // process anyway — either way pings stop and the daemon reaps.)
-  pi.on('session_shutdown', (_event: SessionShutdownEvent) => {
+  pi.on('session_shutdown', (_event: SessionShutdownEvent, ctx?: ExtensionContext) => {
     if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
+    if (ctx) setPiStatus(ctx, undefined);
   });
 
   // ── C: context injection on the first turn ──
@@ -2170,7 +2324,7 @@ function registerOpenlore(
         } catch {
           // A first-turn deadline is not evidence that the daemon is unhealthy.
           // Discovery continues in the background and may warm the next call.
-          if (!injectionSignal.aborted) daemons.delete(ctx.cwd);
+          if (!injectionSignal.aborted) dropDaemon(ctx.cwd);
           blocks.push(pointerLineFor('error'));
         }
       }
@@ -2186,7 +2340,7 @@ function registerOpenlore(
 
 /** Build an extension registration function with bounded runtime overrides. @internal */
 export function createPiExtension(
-  runtime: { orientTimeoutMs?: number } = {},
+  runtime: PiExtensionRuntime = {},
 ): (pi: ExtensionAPI) => void {
   return (pi) => registerOpenlore(pi, runtime);
 }
