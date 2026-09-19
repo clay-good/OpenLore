@@ -19,7 +19,7 @@ import { isAnalysisLockHeld } from '../../runtime/advisory-lock.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, FINGERPRINT_BUDGET_TOP_OFFENDERS, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
+import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, FINGERPRINT_BUDGET_OFFENDER_MIN_SHARE, FINGERPRINT_BUDGET_TOP_OFFENDERS, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
 import { sanitizeForTerminal } from '../../../utils/misc.js';
@@ -909,14 +909,17 @@ export const DEFAULT_FINGERPRINT_MAX_BYTES = 1024 * 1024 * 1024;
  * archive is reported as the file rather than as the directory that happens to hold it.
  *
  * The repository root is never a candidate. It is the largest subtree by construction and naming it
- * tells a user only that their repository is large, which is what they already know.
+ * tells a user only that their repository is large, which is what they already know. A path holding
+ * less than FINGERPRINT_BUDGET_OFFENDER_MIN_SHARE of the corpus is filler and is not named either.
  */
 export function largestCorpusPaths(
   files: readonly Pick<FileMetadata, 'path' | 'size'>[],
   limit: number
 ): Array<{ path: string; bytes: number }> {
   const totals = new Map<string, number>();
+  let corpusBytes = 0;
   for (const file of files) {
+    corpusBytes += file.size;
     totals.set(file.path, (totals.get(file.path) ?? 0) + file.size);
     const segments = file.path.split('/');
     segments.pop();
@@ -935,8 +938,9 @@ export function largestCorpusPaths(
   });
 
   const chosen: Array<{ path: string; bytes: number }> = [];
+  const minBytes = corpusBytes * FINGERPRINT_BUDGET_OFFENDER_MIN_SHARE;
   for (const [path, bytes] of ranked) {
-    if (chosen.length >= limit) break;
+    if (chosen.length >= limit || bytes < minBytes) break;
     const overlaps = chosen.some(kept => kept.path === path
       || path.startsWith(`${kept.path}/`)
       || kept.path.startsWith(`${path}/`));

@@ -628,6 +628,15 @@ describe('largestCorpusPaths', () => {
     expect(largestCorpusPaths(files, 5).map(entry => entry.path)).toEqual(['only.ts']);
   });
 
+  it('does not name a path holding less than 1% of the corpus', () => {
+    const files = [
+      { path: 'docs/graph_vectors/index.bin', size: 1_300_000 },
+      { path: 'src/a.ts', size: 17 },
+    ];
+
+    expect(largestCorpusPaths(files, 5).map(entry => entry.path)).toEqual(['docs/graph_vectors/index.bin']);
+  });
+
   it('returns at most the requested number of paths', () => {
     const files = Array.from({ length: 20 }, (_, index) => ({ path: `d${index}/f.ts`, size: 100 - index }));
 

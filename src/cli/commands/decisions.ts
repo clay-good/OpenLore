@@ -578,7 +578,9 @@ export async function runAutopilotGate(
     if (unassessedDrafts.length > 0) parts.push(`${unassessedDrafts.length} unassessed decision(s) retained as drafts`);
     if (concurrentlyResolved > 0) parts.push(`${concurrentlyResolved} unassessed decision(s) resolved concurrently`);
     if (draftCount > 0) parts.push(`${draftCount} draft(s) pending background consolidation`);
-    if (syncErrors.length > 0) parts.push(`${syncErrors.length} sync error(s) — will retry next gate`);
+    // Retried every gate, but a decision with no sync target fails every time, so name
+    // where the cause is rather than promising a retry will fix it.
+    if (syncErrors.length > 0) parts.push(`${syncErrors.length} sync error(s) — see why with openlore decisions --sync`);
     if (unevidencedCount > 0) parts.push(`${unevidencedCount} unevidenced decision(s) require review`);
     if (parts.length > 0 || unreviewedCount > 0) {
       console.error(
@@ -855,7 +857,8 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
                 rootPath, openspecPath, specMap, dryRun: true,
               });
               if (result.modifiedSpecs.length > 0) {
-                console.log(`\nWould write to: ${result.modifiedSpecs.join(', ')}`);
+                // Spec paths come from repository directory names: strip control characters.
+                console.log(`\nWould write to: ${result.modifiedSpecs.map((p) => safe(p)).join(', ')}`);
                 console.log('Run "openlore decisions --sync" to apply.');
               }
               // Say now, not at sync time, when this decision has nowhere to go.
