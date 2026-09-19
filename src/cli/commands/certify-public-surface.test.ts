@@ -84,7 +84,7 @@ describe('certify-public-surface --accept', () => {
   it('writes the breaking findings (never the warning) with the justification', async () => {
     expect(await runCertifyPublicSurfaceCli({ cwd: dir, base: 'main', accept: true, justification: 'retired in v3', json: true })).toBe(0);
     expect(JSON.parse(out.join(''))).toMatchObject({ status: 'accepted', written: true, added: [{ code: 'export-removed', subject: 'a.ts::gone' }] });
-    expect(await baselineText()).toBe('# OpenLore accepted public-surface breakages v1\n["accept","export-removed","a.ts::gone","retired in v3",""]\n');
+    expect(await baselineText()).toBe('# OpenLore accepted public-surface breakages v1\n["accept","export-removed","a.ts::gone","","retired in v3",""]\n');
   });
 
   it('reports nothing to accept when every breaking finding is already accepted', async () => {
@@ -98,6 +98,25 @@ describe('certify-public-surface --accept', () => {
     await writeFile(join(dir, PUBLIC_SURFACE_BASELINE_REL_PATH), 'hand-edited\n');
     expect(await runCertifyPublicSurfaceCli({ cwd: dir, base: 'main', accept: true, justification: 'why', json: true })).toBe(1);
     expect(await baselineText()).toBe('hand-edited\n');
+  });
+
+  it('refuses to accept findings computed against a fallback base', async () => {
+    vi.mocked(dispatchTool).mockResolvedValue(diff({ baseRefFallback: { requested: 'release/1.x', resolved: 'main' } }) as never);
+    expect(await runCertifyPublicSurfaceCli({ cwd: dir, base: 'release/1.x', allowBaseFallback: true, accept: true, justification: 'why', json: true })).toBe(1);
+    expect(JSON.parse(out.join('')).error).toMatch(/base "release\/1\.x" did not resolve/);
+    await expect(baselineText()).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses --federation without --base', async () => {
+    expect(await runCertifyPublicSurfaceCli({ cwd: dir, federation: true, json: true })).toBe(1);
+    expect(dispatchTool).not.toHaveBeenCalled();
+  });
+
+  it('names what a re-accept replaced', async () => {
+    await runCertifyPublicSurfaceCli({ cwd: dir, base: 'main', accept: true, justification: 'first' });
+    out.length = 0;
+    expect(await runCertifyPublicSurfaceCli({ cwd: dir, base: 'main', accept: true, justification: 'second' })).toBe(0);
+    expect(out.join('')).toContain('re-accepted export-removed  a.ts::gone');
   });
 
   it('passes federation scope through to the tool', async () => {
@@ -121,9 +140,10 @@ describe('certify-public-surface --accept', () => {
     const text = out.join('');
     expect(text).toContain('breaking: 0 consumed, 1 with no indexed consumer in this repo or a federated repo (not "safe")');
     expect(text).toContain('federation: checked sib');
+    expect(text).not.toContain('is a federation registry set up');
     expect(text).toContain('accepted baseline .openlore/public-surface-baseline.jsonl: 1 accepted · 1 stale · 0 unmatched');
     expect(text).toContain('breaking-unconsumed-in-index');
-    expect(text).toContain('breaks 1 consumer(s) in federated repos: sib:main');
+    expect(text).toContain('breaks 1 consumer(s) in federated repos (matched by name): sib:main');
     expect(text).toContain('accepted export-removed: retired');
     expect(text).toContain('stale acceptance of param-removed, still reported: decision a1b2c3d4 was superseded');
   });

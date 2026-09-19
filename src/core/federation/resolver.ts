@@ -91,6 +91,8 @@ export interface CrossRepoConsumerBatch {
   /** symbol name → its consumers across scoped repos. */
   bySymbol: Map<string, CrossRepoConsumer[]>;
   truncated: number;
+  /** symbol name → consumers dropped by the cap for that symbol (sums to `truncated`). */
+  truncatedBySymbol: Map<string, number>;
   coverage: FederationCoverage;
 }
 
@@ -110,6 +112,7 @@ export async function findCrossRepoConsumersBatch(
   const reposSkipped: ConsultedRepo[] = [];
   let total = 0;
   let truncated = 0;
+  const truncatedBySymbol = new Map<string, number>();
 
   for (const entry of scope.repos) {
     const status = repoStatus(entry, true);
@@ -148,7 +151,11 @@ export async function findCrossRepoConsumersBatch(
           // exhausts the shared cap would leave a later, genuinely-consumed symbol
           // with an empty list — and find_dead_code would flip it to a false-positive
           // "dead" (a confidently-wrong "safe to delete"). See decision 67ca60fe.
-          if (list.length >= 1 && total >= cap) { truncated++; continue; }
+          if (list.length >= 1 && total >= cap) {
+            truncated++;
+            truncatedBySymbol.set(symbol, (truncatedBySymbol.get(symbol) ?? 0) + 1);
+            continue;
+          }
           total++;
           const node = ctx.edgeStore.getNode(edge.callerId);
           list.push({
@@ -185,7 +192,7 @@ export async function findCrossRepoConsumersBatch(
     caveats.push(`Requested repos not in the registry (ignored): ${scope.unknownNames.join(', ')}.`);
   }
 
-  return { bySymbol, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats } };
+  return { bySymbol, truncated, truncatedBySymbol, coverage: { applied: true, reposConsulted, reposSkipped, caveats } };
 }
 
 /**

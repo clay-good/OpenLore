@@ -430,7 +430,12 @@ interface DecisionReceipt {
  *
  * Pure decision-store read, no LLM (north star `c6d1ad07`).
  */
-export async function verifyDecisionCurrent(absDir: string, subject: string): Promise<unknown> {
+export async function verifyDecisionCurrent(
+  absDir: string,
+  subject: string,
+  /** Share one store read across many checks (the public-surface baseline checks several ids). */
+  loadStore: () => Promise<{ decisions?: PendingDecision[] }> = () => loadDecisionStore(absDir),
+): Promise<unknown> {
   const claim = { kind: 'decision-current' as const, subject };
   const cleanBoundary = assembleBoundary({});
   const id = subject.trim().toLowerCase();
@@ -444,7 +449,7 @@ export async function verifyDecisionCurrent(absDir: string, subject: string): Pr
     };
   }
 
-  const store = await loadDecisionStore(absDir);
+  const store = await loadStore();
   const decisions: PendingDecision[] = store.decisions ?? [];
   const target = decisions.find((d) => d.id === id);
   if (!target) {

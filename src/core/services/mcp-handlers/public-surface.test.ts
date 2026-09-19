@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileGitSync } from '../../../utils/git-exec.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,6 +43,7 @@ vi.mock('../../federation/resolver.js', () => ({
   findCrossRepoConsumersBatch: vi.fn(async (_scope: unknown, symbols: string[]) => ({
     bySymbol: new Map(symbols.map((s) => [s, [] as unknown[]])),
     truncated: 0,
+    truncatedBySymbol: new Map(),
     coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: ['matched by symbol name'] },
   })),
 }));
@@ -552,7 +553,14 @@ describe('certify_public_surface diff mode: federation census and accepted basel
 
   type Diff = {
     summary: Record<string, number>;
-    breaking: Array<{ name: string; breakingClass: string; crossRepoConsumers?: Array<{ repo: string; name: string }> }>;
+    breaking: Array<{
+      name: string;
+      breakingClass: string;
+      consumerCount?: number;
+      consumers?: Array<{ id: string; via: string }>;
+      crossRepoConsumers?: Array<{ repo: string; name: string }>;
+      crossRepoConsumersTruncated?: number;
+    }>;
     findings: Array<{ code: string; subject: string }>;
     consumerCensus: { scope: string; reposConsulted?: string[] };
     baseline?: { error?: string; accepted: Array<{ subject: string; justification: string }>; stale: Array<{ subject: string; supersededBy?: string; reason: string }>; unmatched: unknown[] };
@@ -586,6 +594,7 @@ describe('certify_public_surface diff mode: federation census and accepted basel
         ? [{ repo: 'sibling', repoPath: '/sibling', caller: { id: 'app.ts::main', name: 'main', file: 'app.ts' }, symbol: s }]
         : []])),
       truncated: 0,
+      truncatedBySymbol: new Map(),
       coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: [] },
     }) as never);
     const r = await run({ federation: true });
@@ -651,5 +660,82 @@ describe('certify_public_surface diff mode: federation census and accepted basel
     const r = await run();
     expect(r.breaking.find((b) => b.name === 'parseLegacy')!.breakingClass).toBe('breaking-consumed');
     expect(r.summary).toMatchObject({ breakingConsumed: 1, breakingUnconsumedInIndex: 1 });
+  });
+
+  const depGraph = async (edges: Array<{ source: string; target: string; importedNames: string[] }>): Promise<void> => {
+    const real = await realpath(dir);
+    await mkdir(join(dir, OPENLORE_DIR, 'analysis'), { recursive: true });
+    await writeFile(join(dir, OPENLORE_DIR, 'analysis', 'dependency-graph.json'), JSON.stringify({
+      nodes: [], edges: edges.map((e) => ({ source: join(real, e.source), target: join(real, e.target), importedNames: e.importedNames })),
+    }));
+  };
+
+  it('an index built after the edit still finds the callers of a removed export, but only in files that import it', async () => {
+    await depGraph([{ source: 'b.ts', target: 'a.ts', importedNames: ['parseLegacy'] }]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      callGraph: { nodes: [] },
+      edgeStore: {
+        getCallers: () => [],
+        getExternalConsumers: (name: string) => (name === 'parseLegacy' ? [{ callerId: 'b.ts::use' }, { callerId: 'z.ts::unrelated' }] : []),
+      },
+    } as never);
+    const r = await run();
+    const legacy = r.breaking.find((b) => b.name === 'parseLegacy')!;
+    expect(legacy.breakingClass).toBe('breaking-consumed');
+    expect(legacy.consumers).toEqual([{ id: 'b.ts::use', name: 'use', file: 'b.ts', via: 'unresolved-call' }]);
+    expect(r.breaking.find((b) => b.name === 'other')!.breakingClass).toBe('breaking-unconsumed-in-index');
+  });
+
+  it('a removed const that another file imports is consumed', async () => {
+    execFileGitSync('git', ['-C', dir, 'checkout', '-q', 'main']);
+    await writeFile(join(dir, 'a.ts'), `${A_BASE}export const LIMIT = 10;\n`);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-am', 'const']);
+    await writeFile(join(dir, 'a.ts'), A_HEAD);
+    await depGraph([{ source: 'c.ts', target: 'a.ts', importedNames: ['LIMIT'] }]);
+    const r = await run();
+    const limit = r.breaking.find((b) => b.name === 'LIMIT')!;
+    expect(limit.breakingClass).toBe('breaking-consumed');
+    expect(limit.consumers).toEqual([{ id: 'c.ts', name: 'c.ts', file: 'c.ts', via: 'import' }]);
+  });
+
+  it('federation with no sibling repo consulted does not claim siblings were checked', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((sym) => [sym, []])),
+      truncated: 0,
+      truncatedBySymbol: new Map(),
+      coverage: { reposConsulted: [], reposSkipped: [{ name: 'sibling', state: 'unindexed', reason: 'no index' }], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    const detail = r.confidenceBoundary.knownUnknowable?.map((k) => k.detail).join(' ') ?? '';
+    expect(detail).toMatch(/no sibling repo was consulted/);
+    expect(detail).not.toMatch(/were checked by symbol name/);
+  });
+
+  it('attributes capped cross-repo consumers to their own symbol', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((sym) => [sym, [{ repo: 'sibling', repoPath: '/s', caller: { id: `x.ts::${sym}User`, name: `${sym}User`, file: 'x.ts' }, symbol: sym }]])),
+      truncated: 40,
+      truncatedBySymbol: new Map([['parseLegacy', 40]]),
+      coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')).toMatchObject({ consumerCount: 41, crossRepoConsumersTruncated: 40 });
+    expect(r.breaking.find((b) => b.name === 'other')!.consumerCount).toBe(1);
+  });
+
+  it('accepting one narrowing does not hide a later narrowing of the same symbol', async () => {
+    execFileGitSync('git', ['-C', dir, 'checkout', '-q', 'main']);
+    await writeFile(join(dir, 'a.ts'), 'export function foo(a: string | number, b: string | number): void {}\n');
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-am', 'foo']);
+    await writeFile(join(dir, 'a.ts'), 'export function foo(a: string, b: string | number): void {}\n');
+    const first = await run();
+    expect(first.findings.map((f) => f.code)).toEqual(['param-type-narrowed']);
+    await writeAcceptedBreakages(dir, first.findings as never, 'narrow a on purpose');
+    expect((await run()).findings).toEqual([]);
+
+    await writeFile(join(dir, 'a.ts'), 'export function foo(a: string, b: string): void {}\n');
+    const second = await run();
+    expect(second.findings.map((f) => f.code)).toEqual(['param-type-narrowed']);
+    expect(second.baseline?.unmatched).toHaveLength(1);
   });
 });

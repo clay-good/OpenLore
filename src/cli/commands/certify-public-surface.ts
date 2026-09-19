@@ -35,6 +35,7 @@ interface SurfaceChangeOut {
   consumers?: Array<{ name: string; file: string }>;
   consumersTruncated?: number;
   crossRepoConsumers?: Array<{ repo: string; name: string; file: string }>;
+  crossRepoConsumersTruncated?: number;
   consumerCount?: number;
   breakingClass?: 'breaking-consumed' | 'breaking-unconsumed-in-index';
 }
@@ -65,7 +66,7 @@ interface DiffResult {
   suggestedBump?: 'major' | 'minor' | 'patch' | null;
   suggestedBumpWithheld?: string;
   findings?: GovernanceFinding[];
-  consumerCensus?: { scope: 'in-repo' | 'federation'; reposConsulted?: string[]; reposSkipped?: Array<{ name: string }>; unknownRepos?: string[] };
+  consumerCensus?: { scope: 'in-repo' | 'federation'; reposConsulted?: string[]; reposSkipped?: Array<{ name: string }>; unknownRepos?: string[]; sharedNames?: string[] };
   baseline?: {
     path: string;
     error?: string;
@@ -96,11 +97,11 @@ function renderDiff(r: DiffResult): string {
   if (r.baseRefFallback) lines.push(`   ⚠ requested base "${r.baseRefFallback.requested}" did not resolve — certified against "${r.baseRefFallback.resolved}" (--allow-base-fallback)`);
   lines.push(`   ${r.summary.breaking} breaking · ${r.summary.potentiallyBreaking} potentially-breaking · ${r.summary.nonBreaking} non-breaking`);
   if (r.summary.breaking > 0 && r.summary.breakingConsumed !== undefined) {
-    const scope = r.consumerCensus?.scope === 'federation' ? 'in this repo or a federated repo' : 'in this repo';
+    const scope = r.consumerCensus?.reposConsulted?.length ? 'in this repo or a federated repo' : 'in this repo';
     lines.push(`   breaking: ${r.summary.breakingConsumed} consumed, ${r.summary.breakingUnconsumedInIndex ?? 0} with no indexed consumer ${scope} (not "safe")`);
   }
   if (r.consumerCensus?.scope === 'federation') {
-    lines.push(`   federation: checked ${r.consumerCensus.reposConsulted?.length ? r.consumerCensus.reposConsulted.join(', ') : 'no repo'}${r.consumerCensus.reposSkipped?.length ? `; skipped ${r.consumerCensus.reposSkipped.map((x) => x.name).join(', ')}` : ''}${r.consumerCensus.unknownRepos?.length ? `; unknown ${r.consumerCensus.unknownRepos.join(', ')}` : ''}`);
+    lines.push(`   federation: checked ${r.consumerCensus.reposConsulted?.length ? r.consumerCensus.reposConsulted.join(', ') : 'no sibling repo (is a federation registry set up?)'}${r.consumerCensus.reposSkipped?.length ? `; skipped ${r.consumerCensus.reposSkipped.map((x) => x.name).join(', ')}` : ''}${r.consumerCensus.unknownRepos?.length ? `; unknown ${r.consumerCensus.unknownRepos.join(', ')}` : ''}`);
   }
   if (r.baseline?.error) lines.push(`   ⚠ ${r.baseline.path}: ${r.baseline.error}`);
   else if (r.baseline) lines.push(`   accepted baseline ${r.baseline.path}: ${r.baseline.accepted.length} accepted · ${r.baseline.stale.length} stale · ${r.baseline.unmatched.length} unmatched`);
@@ -118,7 +119,7 @@ function renderDiff(r: DiffResult): string {
       lines.push(`        breaks ${breaking.consumers.length}${breaking.consumersTruncated ? `+${breaking.consumersTruncated}` : ''} in-repo consumer(s): ${breaking.consumers.slice(0, 5).map((x) => x.name).join(', ')}${breaking.consumers.length > 5 ? ' …' : ''}`);
     }
     if (breaking?.crossRepoConsumers?.length) {
-      lines.push(`        breaks ${breaking.crossRepoConsumers.length} consumer(s) in federated repos: ${breaking.crossRepoConsumers.slice(0, 5).map((x) => `${x.repo}:${x.name}`).join(', ')}${breaking.crossRepoConsumers.length > 5 ? ' …' : ''}`);
+      lines.push(`        breaks ${breaking.crossRepoConsumers.length}${breaking.crossRepoConsumersTruncated ? `+${breaking.crossRepoConsumersTruncated}` : ''} consumer(s) in federated repos (matched by name): ${breaking.crossRepoConsumers.slice(0, 5).map((x) => `${x.repo}:${x.name}`).join(', ')}${breaking.crossRepoConsumers.length > 5 ? ' …' : ''}`);
     }
     const subject = `${c.file}::${c.name}`;
     for (const a of r.baseline?.accepted ?? []) {
@@ -163,6 +164,9 @@ export async function runCertifyPublicSurfaceCli(opts: CertifyPublicSurfaceCliOp
   const decision = opts.decision?.trim().toLowerCase();
   if (!opts.accept && (opts.justification !== undefined || opts.decision !== undefined)) {
     return refuse(opts, '--justification and --decision only apply with --accept');
+  }
+  if (!opts.base && (opts.federation || opts.federationRepos?.length)) {
+    return refuse(opts, '--federation only applies with --base: it counts the consumers of a diff\'s breaking changes');
   }
   if (opts.accept) {
     // Refuse before any analysis runs: an acceptance without a reason is never written.
@@ -213,6 +217,10 @@ export async function runCertifyPublicSurfaceCli(opts: CertifyPublicSurfaceCliOp
 async function acceptFindings(cwd: string, opts: CertifyPublicSurfaceCliOptions, r: DiffResult, decision: string | undefined): Promise<number> {
   // A baseline that could not be read is never overwritten: that would erase its entries.
   if (r.baseline?.error) return refuse(opts, `refusing to accept: ${r.baseline.error}`);
+  // Accept only what was computed against the base the operator named.
+  if (r.baseRefFallback) {
+    return refuse(opts, `refusing to accept: base "${r.baseRefFallback.requested}" did not resolve, and the findings were computed against "${r.baseRefFallback.resolved}"`);
+  }
   const acceptable = (r.findings ?? []).filter(isAcceptableFinding);
   if (acceptable.length === 0) {
     const message = 'no unaccepted breaking finding in this diff; nothing to accept';
@@ -229,8 +237,11 @@ async function acceptFindings(cwd: string, opts: CertifyPublicSurfaceCliOptions,
   if (opts.json) {
     await writeStdout(JSON.stringify({ status: 'accepted', ...written }, null, 2) + '\n');
   } else {
-    const lines = ['', `✍️  Accepted ${written.added.length} breaking finding(s)${written.replaced ? `, re-accepted ${written.replaced}` : ''} in ${written.path}`];
+    const lines = ['', `✍️  Accepted ${written.added.length} breaking finding(s)${written.replaced.length ? `, re-accepted ${written.replaced.length}` : ''} in ${written.path}`];
     for (const entry of written.added) lines.push(`   • ${entry.code}  ${entry.subject}`);
+    for (const { before, after } of written.replaced) {
+      lines.push(`   • re-accepted ${after.code}  ${after.subject}${before.decision !== after.decision ? `  (decision ${before.decision ?? 'none'} → ${after.decision ?? 'none'})` : ''}`);
+    }
     lines.push('   Commit this file so the acceptance is reviewed with the change.', '');
     await writeStdout(lines.join('\n') + '\n');
   }

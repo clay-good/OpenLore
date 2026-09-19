@@ -19,8 +19,11 @@ import type { GovernanceFinding } from './enforcement-policy.js';
 
 const HEADER = '# OpenLore accepted public-surface breakages v1\n';
 
-function finding(code: string, subject: string, source = 'public-surface'): GovernanceFinding {
-  return { code, severity: code === 'signature-unprovable' ? 'warning' : 'error', source, subject, message: `${code} on ${subject}` };
+function finding(code: string, subject: string, source = 'public-surface', discriminator?: string): GovernanceFinding {
+  return {
+    code, severity: code === 'signature-unprovable' ? 'warning' : 'error', source, subject, message: `${code} on ${subject}`,
+    ...(discriminator ? { discriminator } : {}),
+  };
 }
 
 const noDecisions = new Map<string, DecisionCurrency>();
@@ -28,14 +31,14 @@ const noDecisions = new Map<string, DecisionCurrency>();
 describe('accepted-baseline file format', () => {
   it('round-trips entries sorted by identity, one record per line', () => {
     const entries: AcceptedBreakage[] = [
-      { code: 'param-removed', subject: 'src/b.ts::b', justification: 'dropped in v3' },
+      { code: 'param-removed', subject: 'src/b.ts::b', discriminator: 'b(x) => b()', justification: 'dropped in v3' },
       { code: 'export-removed', subject: 'src/a.ts::parseLegacy', justification: 'legacy parser retired', decision: 'a1b2c3d4' },
     ];
     const text = serializeAcceptedBaseline(entries);
     expect(text).toBe(
       HEADER +
-      '["accept","export-removed","src/a.ts::parseLegacy","legacy parser retired","a1b2c3d4"]\n' +
-      '["accept","param-removed","src/b.ts::b","dropped in v3",""]\n',
+      '["accept","export-removed","src/a.ts::parseLegacy","","legacy parser retired","a1b2c3d4"]\n' +
+      '["accept","param-removed","src/b.ts::b","b(x) => b()","dropped in v3",""]\n',
     );
     expect(parseAcceptedBaseline(text)).toEqual([entries[1], entries[0]]);
     expect(serializeAcceptedBaseline([entries[1], entries[0]])).toBe(text);
@@ -50,15 +53,15 @@ describe('accepted-baseline file format', () => {
   it.each([
     ['a wrong header', '# something else\n'],
     ['invalid JSON', HEADER + '{nope\n'],
-    ['a wrong arity', HEADER + '["accept","export-removed","s","why"]\n'],
-    ['a non-breaking code', HEADER + '["accept","export-added","s","why",""]\n'],
-    ['the warning code', HEADER + '["accept","signature-unprovable","s","why",""]\n'],
-    ['an empty subject', HEADER + '["accept","export-removed","","why",""]\n'],
-    ['an empty justification', HEADER + '["accept","export-removed","s","  ",""]\n'],
-    ['a padded justification', HEADER + '["accept","export-removed","s"," why",""]\n'],
-    ['a control character', HEADER + '["accept","export-removed","s","why\\u001b[31m",""]\n'],
-    ['a malformed decision id', HEADER + '["accept","export-removed","s","why","A1B2C3D4"]\n'],
-    ['a duplicate identity', HEADER + '["accept","export-removed","s","why",""]\n["accept","export-removed","s","again",""]\n'],
+    ['a wrong arity', HEADER + '["accept","export-removed","s","why",""]\n'],
+    ['a non-breaking code', HEADER + '["accept","export-added","s","","why",""]\n'],
+    ['the warning code', HEADER + '["accept","signature-unprovable","s","","why",""]\n'],
+    ['an empty subject', HEADER + '["accept","export-removed","","","why",""]\n'],
+    ['an empty justification', HEADER + '["accept","export-removed","s","","  ",""]\n'],
+    ['a padded justification', HEADER + '["accept","export-removed","s",""," why",""]\n'],
+    ['a control character', HEADER + '["accept","export-removed","s","","why\\u001b[31m",""]\n'],
+    ['a malformed decision id', HEADER + '["accept","export-removed","s","","why","A1B2C3D4"]\n'],
+    ['a duplicate identity', HEADER + '["accept","export-removed","s","","why",""]\n["accept","export-removed","s","","again",""]\n'],
     ['a comment line', HEADER + '# note\n'],
   ])('rejects %s', (_label, text) => {
     expect(() => parseAcceptedBaseline(text)).toThrow();
@@ -83,6 +86,15 @@ describe('applyAcceptedBaseline', () => {
     expect(r.accepted).toEqual([{ ...accepted, finding: findings[0] }]);
     expect(r.stale).toEqual([]);
     expect(r.unmatched).toEqual([]);
+  });
+
+  it('a different break of the same rule on the same symbol still reports', () => {
+    const narrowedA: AcceptedBreakage = { code: 'param-type-narrowed', subject: 'src/a.ts::foo', discriminator: 'foo(a: A|B, b: A|B) => foo(a: A, b: A|B)', justification: 'narrowed a' };
+    const later = finding('param-type-narrowed', 'src/a.ts::foo', 'public-surface', 'foo(a: A|B, b: A|B) => foo(a: A, b: A)');
+    const r = applyAcceptedBaseline([later], [narrowedA], noDecisions);
+    expect(r.findings).toEqual([later]);
+    expect(r.accepted).toEqual([]);
+    expect(r.unmatched).toEqual([{ code: 'param-type-narrowed', subject: 'src/a.ts::foo', discriminator: narrowedA.discriminator }]);
   });
 
   it('matches on code AND subject: another rule on the same symbol still reports', () => {
@@ -138,7 +150,7 @@ describe('writeAcceptedBreakages and readAcceptedBaseline', () => {
       finding('export-removed', 'src/a.ts::a'),
       finding('signature-unprovable', 'src/a.ts::a'),
     ], ' retired in v3 ', 'a1b2c3d4');
-    expect(r).toMatchObject({ written: true, replaced: 0, path: PUBLIC_SURFACE_BASELINE_REL_PATH });
+    expect(r).toMatchObject({ written: true, replaced: [], path: PUBLIC_SURFACE_BASELINE_REL_PATH });
     expect(r.added).toEqual([{ code: 'export-removed', subject: 'src/a.ts::a', justification: 'retired in v3', decision: 'a1b2c3d4' }]);
     const read = await readAcceptedBaseline(root);
     expect(read.present).toBe(true);
@@ -148,13 +160,42 @@ describe('writeAcceptedBreakages and readAcceptedBaseline', () => {
   it('keeps existing entries and replaces a re-accepted identity', async () => {
     await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a'), finding('param-removed', 'src/b.ts::b')], 'first');
     const again = await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'second', 'b2c3d4e5');
-    expect(again).toMatchObject({ added: [], replaced: 1, written: true });
+    expect(again).toMatchObject({ added: [], written: true });
+    expect(again.replaced).toEqual([{
+      before: { code: 'export-removed', subject: 'src/a.ts::a', justification: 'first' },
+      after: { code: 'export-removed', subject: 'src/a.ts::a', justification: 'second', decision: 'b2c3d4e5' },
+    }]);
     expect((await readAcceptedBaseline(root)).entries).toEqual([
       { code: 'export-removed', subject: 'src/a.ts::a', justification: 'second', decision: 'b2c3d4e5' },
       { code: 'param-removed', subject: 'src/b.ts::b', justification: 'first' },
     ]);
     const unchanged = await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'second', 'b2c3d4e5');
     expect(unchanged.written).toBe(false);
+  });
+
+  it('never silently drops a decision anchor when re-accepting', async () => {
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'first', 'a1b2c3d4');
+    const before = await readFile(join(root, PUBLIC_SURFACE_BASELINE_REL_PATH), 'utf8');
+    await expect(writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a'), finding('export-removed', 'src/c.ts::c')], 'unrelated'))
+      .rejects.toThrow(/anchored to a decision that is no longer current.*export-removed src\/a\.ts::a → decision a1b2c3d4.*nothing was written/);
+    expect(await readFile(join(root, PUBLIC_SURFACE_BASELINE_REL_PATH), 'utf8')).toBe(before);
+    // Re-anchoring to another decision is allowed.
+    const reanchored = await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'first', 'b2c3d4e5');
+    expect(reanchored.replaced).toHaveLength(1);
+  });
+
+  it('keeps the discriminator, so the entry matches only that break', async () => {
+    await writeAcceptedBreakages(root, [finding('return-type-narrowed', 'src/a.ts::f', 'public-surface', 'f(): A|B => f(): A')], 'why');
+    const read = await readAcceptedBaseline(root);
+    expect(read.entries).toEqual([{ code: 'return-type-narrowed', subject: 'src/a.ts::f', discriminator: 'f(): A|B => f(): A', justification: 'why' }]);
+  });
+
+  it('bounds and quotes a hostile code in the parse error', () => {
+    const hostile = 'x"\n   ✅ forged line';
+    let message = '';
+    try { parseAcceptedBaseline(HEADER + JSON.stringify(['accept', hostile, 's', '', 'j', '']) + '\n'); } catch (e) { message = (e as Error).message; }
+    expect(message).toMatch(/not a breaking public-surface rule code/);
+    expect(message).not.toContain('\n');
   });
 
   it('refuses to overwrite a baseline it cannot parse', async () => {
@@ -174,26 +215,53 @@ describe('writeAcceptedBreakages and readAcceptedBaseline', () => {
     }
   });
 
-  it('makes the baseline trackable while .openlore/ stays ignored', async () => {
+  const RATCHET_BLOCK = '# openlore-enforcement-baseline\n!.openlore/\n.openlore/*\n!.openlore/config.json\n!.openlore/enforcement-baseline.jsonl\n# end-openlore-enforcement-baseline\n';
+  const status = (): string => execFileGitSync('git', ['status', '--short', '--untracked-files=all'], { cwd: root }).toString();
+
+  it('makes only the baseline trackable: config.json and runtime state stay ignored', async () => {
     execFileGitSync('git', ['init', '-q', root]);
     await writeFile(join(root, '.gitignore'), '.openlore/\n', 'utf8');
     await writeFile(join(root, OPENLORE_DIR, 'runtime.json'), '{}', 'utf8');
+    await writeFile(join(root, OPENLORE_DIR, 'config.json'), '{"embedding":{"apiKey":"secret"}}', 'utf8');
     await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why');
-    const status = execFileGitSync('git', ['status', '--short', '--untracked-files=all'], { cwd: root }).toString();
-    expect(status).toContain(`?? ${PUBLIC_SURFACE_BASELINE_REL_PATH}`);
-    expect(status).not.toContain('runtime.json');
-    expect(status).not.toContain('.public-surface-baseline.jsonl.lock');
+    const st = status();
+    expect(st).toContain(`?? ${PUBLIC_SURFACE_BASELINE_REL_PATH}`);
+    expect(st).not.toContain('runtime.json');
+    expect(st).not.toContain('config.json');
+    expect(st).not.toContain('.public-surface-baseline.jsonl.lock');
   });
 
-  it('upgrades the enforcement ratchet\'s earlier managed block instead of adding a second one', async () => {
+  it('never edits the enforcement ratchet block, and goes after it with one exception line', async () => {
     execFileGitSync('git', ['init', '-q', root]);
-    const legacy = '# openlore-enforcement-baseline\n!.openlore/\n.openlore/*\n!.openlore/config.json\n!.openlore/enforcement-baseline.jsonl\n# end-openlore-enforcement-baseline\n';
-    await writeFile(join(root, '.gitignore'), `.openlore/\n\n${legacy}`, 'utf8');
+    await writeFile(join(root, '.gitignore'), `.openlore/\n\n${RATCHET_BLOCK}`, 'utf8');
     await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why');
     const gitignore = await readFile(join(root, '.gitignore'), 'utf8');
-    expect(gitignore.split('# openlore-enforcement-baseline\n')).toHaveLength(2);
-    expect(gitignore).toContain('!.openlore/enforcement-baseline.jsonl\n!.openlore/public-surface-baseline.jsonl\n# end-openlore-enforcement-baseline');
-    const status = execFileGitSync('git', ['status', '--short', '--untracked-files=all'], { cwd: root }).toString();
-    expect(status).toContain(`?? ${PUBLIC_SURFACE_BASELINE_REL_PATH}`);
+    expect(gitignore.startsWith(`.openlore/\n\n${RATCHET_BLOCK}`)).toBe(true);
+    expect(gitignore.endsWith('# openlore-public-surface-baseline\n!.openlore/public-surface-baseline.jsonl\n# end-openlore-public-surface-baseline\n')).toBe(true);
+    expect(status()).toContain(`?? ${PUBLIC_SURFACE_BASELINE_REL_PATH}`);
+    // A second accept leaves the file alone.
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/b.ts::b')], 'why');
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe(gitignore);
+  });
+
+  it('moves its block after a ratchet block appended later, so the baseline is not re-ignored', async () => {
+    execFileGitSync('git', ['init', '-q', root]);
+    await writeFile(join(root, '.gitignore'), '.openlore/\n', 'utf8');
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why');
+    await writeFile(join(root, '.gitignore'), `${await readFile(join(root, '.gitignore'), 'utf8')}\n${RATCHET_BLOCK}`, 'utf8');
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/b.ts::b')], 'why');
+    const gitignore = await readFile(join(root, '.gitignore'), 'utf8');
+    expect(gitignore.split('# openlore-public-surface-baseline\n')).toHaveLength(2);
+    expect(gitignore.indexOf('# openlore-public-surface-baseline')).toBeGreaterThan(gitignore.indexOf('# openlore-enforcement-baseline'));
+    expect(gitignore).toContain(RATCHET_BLOCK);
+    expect(status()).toContain(`?? ${PUBLIC_SURFACE_BASELINE_REL_PATH}`);
+  });
+
+  it('fails closed on a malformed managed block and writes nothing', async () => {
+    const bad = '# openlore-public-surface-baseline\n!.openlore/\n';
+    await writeFile(join(root, '.gitignore'), bad, 'utf8');
+    await expect(writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why')).rejects.toThrow(/malformed/);
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe(bad);
+    await expect(readFile(join(root, PUBLIC_SURFACE_BASELINE_REL_PATH), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

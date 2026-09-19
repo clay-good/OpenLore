@@ -15,9 +15,9 @@
  * known-unknowable boundary rather than implied to be absent.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { readFileConfined } from '../../../utils/path-confinement.js';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -49,12 +49,15 @@ import { FINDING_CODE_REGISTRY, type GovernanceFinding } from './enforcement-pol
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
 import { PUBLIC_SURFACE_BASELINE_REL_PATH } from '../../../constants.js';
 import {
+  anchorsToCheck,
   applyAcceptedBaseline,
   readAcceptedBaseline,
   type AcceptedBreakage,
   type DecisionCurrency,
 } from './public-surface-baseline.js';
 import { verifyDecisionCurrent } from './claim-verification.js';
+import { loadDecisionStore } from '../../decisions/store.js';
+import type { PendingDecision } from '../../../types/index.js';
 
 
 const MAX_SURFACE = 500;
@@ -314,37 +317,105 @@ interface Consumer {
   id: string;
   name: string;
   file: string;
+  /**
+   * How the consumer binds the symbol: a resolved `call`, an `unresolved-call` by name from a file
+   * that imports it (the index was built after the symbol went away), or an `import` of it by a
+   * file with no call the index could attribute (a const, class, or type is never a call target).
+   */
+  via: 'call' | 'unresolved-call' | 'import';
 }
 
-function callerToConsumer(callerId: string): Consumer {
+function callerToConsumer(callerId: string, via: Consumer['via']): Consumer {
   const idx = callerId.lastIndexOf('::');
-  if (idx < 0) return { id: callerId, name: callerId, file: '' };
-  return { id: callerId, name: callerId.slice(idx + 2), file: callerId.slice(0, idx) };
+  if (idx < 0) return { id: callerId, name: callerId, file: '', via };
+  return { id: callerId, name: callerId.slice(idx + 2), file: callerId.slice(0, idx), via };
 }
 
 interface EdgeStoreLike {
   getCallers(nodeId: string): Array<{ callerId: string; calleeName?: string }>;
+  /** Unresolved (`external`) call sites to this exact name. */
+  getExternalConsumers?(symbolName: string): Array<{ callerId: string }>;
+}
+
+/** Files that import `name` (or `*`) from `file`, from the persisted dependency graph. */
+export type ImporterLookup = (file: string, name: string) => readonly string[];
+
+/**
+ * In-repo consumers of a breaking change, deduped + bounded; no index → empty (disclosed upstream).
+ *
+ * - Resolved callers of every id in `nodeIds`. A RENAME is looked up under BOTH the old id (the
+ *   index was built at the base) AND the new id (the index was built at HEAD).
+ * - Files that import the symbol from `files`. Without these, a removed const, class, or type (never
+ *   a call target) and any symbol whose index was rebuilt after the change would read as unconsumed.
+ * - For a symbol gone from HEAD under `unresolvedName`, the unresolved calls to that name made from
+ *   those importing files — the precise callers once the index no longer resolves the symbol.
+ *   Restricted to importing files so an unrelated `parse` elsewhere never counts.
+ * An importing file already represented by a function-level consumer is not listed again.
+ */
+function resolveConsumers(
+  edgeStore: EdgeStoreLike | undefined,
+  nodeIds: string[],
+  imported: { files: string[]; name: string; unresolvedName?: string },
+  importersOf?: ImporterLookup,
+): { consumers: Consumer[]; truncated: number } {
+  const byId = new Map<string, Consumer>();
+  const add = (c: Consumer): void => { if (!byId.has(c.id)) byId.set(c.id, c); };
+  for (const nodeId of edgeStore ? nodeIds : []) {
+    for (const e of edgeStore!.getCallers(nodeId)) add(callerToConsumer(e.callerId, 'call'));
+  }
+  const importingFiles = new Set<string>();
+  for (const file of importersOf ? imported.files : []) {
+    for (const importer of importersOf!(file, imported.name)) if (!imported.files.includes(importer)) importingFiles.add(importer);
+  }
+  if (imported.unresolvedName && edgeStore?.getExternalConsumers) {
+    for (const e of edgeStore.getExternalConsumers(imported.unresolvedName)) {
+      const c = callerToConsumer(e.callerId, 'unresolved-call');
+      if (importingFiles.has(c.file)) add(c);
+    }
+  }
+  const filesWithCallers = new Set([...byId.values()].map((c) => c.file));
+  for (const file of importingFiles) {
+    if (!filesWithCallers.has(file)) add({ id: file, name: file, file, via: 'import' });
+  }
+  const all = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+  return { consumers: all.slice(0, MAX_CONSUMERS), truncated: Math.max(0, all.length - MAX_CONSUMERS) };
 }
 
 /**
- * In-repo callers of one or more node ids, deduped + bounded; null edgeStore → empty (disclosed
- * upstream). Multiple ids are unioned so a RENAME can be looked up under BOTH the old id (the
- * index was built at the base, where the old name still resolves) AND the new id (the index was
- * built at HEAD) — either way the consumers that bind the symbol are surfaced.
+ * Build an {@link ImporterLookup} from `.openlore/analysis/dependency-graph.json` (edges carry the
+ * absolute source/target paths and the imported names). Missing or unreadable → undefined, and the
+ * census falls back to call edges alone. An import through a re-exporting module is attributed to
+ * that module, not to the definition, so it is not counted here.
  */
-function resolveConsumers(edgeStore: EdgeStoreLike | undefined, nodeIds: string[]): { consumers: Consumer[]; truncated: number } {
-  if (!edgeStore) return { consumers: [], truncated: 0 };
-  const seen = new Set<string>();
-  const all: Consumer[] = [];
-  for (const nodeId of nodeIds) {
-    for (const e of edgeStore.getCallers(nodeId)) {
-      if (seen.has(e.callerId)) continue;
-      seen.add(e.callerId);
-      all.push(callerToConsumer(e.callerId));
+async function loadImporterLookup(absDir: string): Promise<ImporterLookup | undefined> {
+  let graph: { edges?: Array<{ source?: unknown; target?: unknown; importedNames?: unknown }> };
+  try {
+    graph = JSON.parse(await readFile(join(absDir, '.openlore/analysis/dependency-graph.json'), 'utf-8'));
+  } catch {
+    return undefined;
+  }
+  const roots = [absDir];
+  try { const real = await realpath(absDir); if (real !== absDir) roots.push(real); } catch { /* keep absDir */ }
+  const rel = (p: string): string | null => {
+    for (const root of roots) {
+      const r = relative(root, p);
+      if (r && !r.startsWith('..') && !isAbsolute(r)) return r.split(sep).join('/');
+    }
+    return null;
+  };
+  const index = new Map<string, Set<string>>();
+  for (const edge of Array.isArray(graph.edges) ? graph.edges : []) {
+    if (typeof edge.source !== 'string' || typeof edge.target !== 'string' || !Array.isArray(edge.importedNames)) continue;
+    const source = rel(edge.source);
+    const target = rel(edge.target);
+    if (!source || !target) continue;
+    for (const name of edge.importedNames) {
+      if (typeof name !== 'string') continue;
+      const key = `${target}::${name}`;
+      (index.get(key) ?? index.set(key, new Set()).get(key)!).add(source);
     }
   }
-  all.sort((a, b) => a.id.localeCompare(b.id));
-  return { consumers: all.slice(0, MAX_CONSUMERS), truncated: Math.max(0, all.length - MAX_CONSUMERS) };
+  return (file, name) => [...new Set([...(index.get(`${file}::${name}`) ?? []), ...(index.get(`${file}::*`) ?? [])])].sort();
 }
 
 /**
@@ -366,6 +437,8 @@ export type WeightedBreakingChange = SurfaceChange & {
   consumersTruncated: number;
   /** Consumers in indexed sibling repos (federation scope only), matched by symbol name. */
   crossRepoConsumers?: CrossRepoConsumerOut[];
+  /** Cross-repo consumers found but not listed (a cap). */
+  crossRepoConsumersTruncated?: number;
   /** In-repo plus cross-repo consumers, including any dropped by a cap. */
   consumerCount: number;
   breakingClass: BreakingWeight;
@@ -387,12 +460,17 @@ function weightSummary(breaking: readonly WeightedBreakingChange[]): { breakingC
 }
 
 /** The external-consumer boundary for `count` breaking changes, stated for the census actually run. */
-function consumerBoundary(count: number, federation: boolean): Array<{ kind: 'unindexed-repo'; count: number; detail: string }> {
+function consumerBoundary(
+  count: number,
+  census: 'in-repo' | 'federation' | 'federation-none-consulted',
+): Array<{ kind: 'unindexed-repo'; count: number; detail: string }> {
   if (count === 0) return [];
   return [{
     kind: 'unindexed-repo',
     count,
-    detail: federation
+    detail: census === 'federation-none-consulted'
+      ? 'Consumers of these breaking changes that live OUTSIDE this repo are not visible: federation was requested, but no sibling repo was consulted (see consumerCensus), so the listed consumers are in-repo only. Zero listed consumers does not mean no consumer exists.'
+      : census === 'federation'
       ? 'Consumers of these breaking changes that live OUTSIDE any indexed repo (closed-source or external downstreams), or in a federated repo that was skipped, are not visible. Federated sibling repos were checked by symbol name (see consumerCensus); zero listed consumers does not mean no consumer exists.'
       : 'Consumers of these breaking changes that live OUTSIDE this repo (closed-source or external downstreams, and sibling repositories) are not visible; the listed consumers are in-repo only. Pass federation to also check indexed sibling repos; zero listed consumers does not mean no consumer exists.',
   }];
@@ -512,7 +590,7 @@ async function diffSurface(
   const headPathOf = new Map<string, string>();
   for (const f of changed) if (f.oldPath) headPathOf.set(f.oldPath, f.path);
 
-  const { extraCrossings, ...diff } = await assembleSurfaceDiff(baseFiles, headFiles, headPathOf, ctx?.edgeStore as EdgeStoreLike | undefined, unassessedCodeFiles);
+  const { extraCrossings, ...diff } = await assembleSurfaceDiff(baseFiles, headFiles, headPathOf, ctx?.edgeStore as EdgeStoreLike | undefined, unassessedCodeFiles, await loadImporterLookup(absDir));
 
   // Consumer census: in-repo always; indexed sibling repos too under federation scope.
   const fedScope = resolveFederationScope(absDir, federation);
@@ -538,9 +616,16 @@ async function diffSurface(
     confidenceBoundary: assembleBoundary({
       staleness: await computeStaleness(absDir),
       integrity: ctx?.integrity,
-      extraCrossings: fedScope.active ? consumerBoundary(breaking.length, true) : extraCrossings,
+      // "Checked sibling repos" is only true when at least one was actually read.
+      extraCrossings: !fedScope.active
+        ? extraCrossings
+        : consumerBoundary(breaking.length, consultedAny(census.block) ? 'federation' : 'federation-none-consulted'),
     }),
   };
+}
+
+function consultedAny(block: Record<string, unknown>): boolean {
+  return Array.isArray(block.reposConsulted) && block.reposConsulted.length > 0;
 }
 
 /** Add consumers in indexed sibling repos (federation scope) and re-weigh each breaking change. */
@@ -554,22 +639,34 @@ async function federatedCensus(
     ...(fedScope.unknownNames.length > 0 ? { unknownRepos: fedScope.unknownNames } : {}),
   };
   if (breaking.length === 0) return { breaking: [], block: { ...block, reposConsulted: [], reposSkipped: [], caveats: [] } };
-  // Consumers bind the name the symbol had at the base (for a rename, the old name).
-  const batch = await findCrossRepoConsumersBatch(fedScope, [...new Set(breaking.map((b) => b.name))], { maxConsumers: MAX_CONSUMERS * breaking.length });
+  // Consumers bind the name the symbol had at the base (for a rename, the old name). Matching is by
+  // name, so two breaking changes that share a name share one cross-repo list — disclosed below.
+  const names = [...new Set(breaking.map((b) => b.name))];
+  const batch = await findCrossRepoConsumersBatch(fedScope, names, { maxConsumers: MAX_CONSUMERS * names.length });
   const weighed = breaking.map((b) => {
     const cross = (batch.bySymbol.get(b.name) ?? [])
       .map((c) => ({ repo: c.repo, name: c.caller.name, file: c.caller.file }))
       .sort((x, y) => x.repo.localeCompare(y.repo) || x.file.localeCompare(y.file) || x.name.localeCompare(y.name));
-    return weigh({ ...b, crossRepoConsumers: cross.slice(0, MAX_CONSUMERS) }, Math.max(0, cross.length - MAX_CONSUMERS));
+    const dropped = Math.max(0, cross.length - MAX_CONSUMERS) + (batch.truncatedBySymbol.get(b.name) ?? 0);
+    return weigh({ ...b, crossRepoConsumers: cross.slice(0, MAX_CONSUMERS), ...(dropped > 0 ? { crossRepoConsumersTruncated: dropped } : {}) }, dropped);
   });
+  const nameCount = new Map<string, number>();
+  for (const b of breaking) nameCount.set(b.name, (nameCount.get(b.name) ?? 0) + 1);
+  const sharedNames = [...nameCount].filter(([, n]) => n > 1).map(([name]) => name).sort();
   return {
     breaking: weighed,
     block: {
       ...block,
+      ...(sharedNames.length > 0 ? { sharedNames } : {}),
       reposConsulted: batch.coverage.reposConsulted.map((r) => r.name),
       reposSkipped: batch.coverage.reposSkipped.map((r) => ({ name: r.name, state: r.state, reason: r.reason })),
       ...(batch.truncated > 0 ? { truncated: batch.truncated } : {}),
-      caveats: batch.coverage.caveats,
+      caveats: [
+        ...batch.coverage.caveats,
+        ...(sharedNames.length > 0
+          ? [`Breaking changes sharing a name (${sharedNames.join(', ')}) share one cross-repo consumer list, because sibling repos are matched by name.`]
+          : []),
+      ],
     },
   };
 }
@@ -600,9 +697,12 @@ async function applyBaselineFile(
       },
     };
   }
+  // Only anchors of entries that match a finding matter, and the store is read once for all of them.
   const currency = new Map<string, DecisionCurrency>();
-  for (const id of [...new Set(entries.map((e) => e.decision).filter((d): d is string => !!d))].sort()) {
-    currency.set(id, await decisionCurrency(absDir, id));
+  let store: Promise<{ decisions?: PendingDecision[] }> | undefined;
+  const loadStore = (): Promise<{ decisions?: PendingDecision[] }> => (store ??= loadDecisionStore(absDir));
+  for (const id of anchorsToCheck(findings, entries)) {
+    currency.set(id, await decisionCurrency(absDir, id, loadStore));
   }
   const applied = applyAcceptedBaseline(findings, entries, currency);
   const accepted = applied.accepted.map(({ code, subject, justification, decision }): AcceptedBreakage =>
@@ -621,9 +721,13 @@ async function applyBaselineFile(
 }
 
 /** Is decision `id` current? The same decision-store check `verify_claim`'s `decision-current` runs. */
-async function decisionCurrency(absDir: string, id: string): Promise<DecisionCurrency> {
+async function decisionCurrency(
+  absDir: string,
+  id: string,
+  loadStore: () => Promise<{ decisions?: PendingDecision[] }>,
+): Promise<DecisionCurrency> {
   try {
-    const result = await verifyDecisionCurrent(absDir, id) as {
+    const result = await verifyDecisionCurrent(absDir, id, loadStore) as {
       verdict?: string;
       reason?: string;
       receipt?: { decision?: { supersededBy?: string } };
@@ -653,6 +757,8 @@ export async function assembleSurfaceDiff(
   edgeStore?: EdgeStoreLike,
   /** Changed code files in a language whose signatures are not classified (they never reach this core). */
   unassessedCodeFiles = 0,
+  /** Files importing a symbol, for the consumer census (see {@link resolveConsumers}). */
+  importersOf?: ImporterLookup,
 ): Promise<{
   overall: ChangeClass;
   summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number; breakingConsumed: number; breakingUnconsumedInIndex: number };
@@ -821,7 +927,11 @@ export async function assembleSurfaceDiff(
     .map((c) => {
       const ids = [`${c.file}::${c.name}`];
       if (c.changeKind === 'renamed' && c.rename) ids.push(`${c.rename.file}::${c.rename.to}`);
-      const { consumers, truncated } = resolveConsumers(edgeStore, ids);
+      const files = c.rename && c.rename.file !== c.file ? [c.file, c.rename.file] : [c.file];
+      // The old name no longer exists at HEAD for a removal or a rename, so an index built after the
+      // change keeps its callers only as unresolved calls to that name.
+      const gone = c.changeKind === 'removed' || c.changeKind === 'renamed';
+      const { consumers, truncated } = resolveConsumers(edgeStore, ids, { files, name: c.name, ...(gone ? { unresolvedName: c.name } : {}) }, importersOf);
       return weigh({ ...c, consumers, consumersTruncated: truncated });
     });
 
@@ -829,7 +939,7 @@ export async function assembleSurfaceDiff(
   const anyClassifiable = headFiles.some((f) => signatureClassifiable(f.language)) || baseFiles.some((f) => signatureClassifiable(f.language));
 
   // Honesty: consumers in unindexed/external downstreams are never visible.
-  const extraCrossings = consumerBoundary(breaking.length, false);
+  const extraCrossings = consumerBoundary(breaking.length, 'in-repo');
 
   return {
     overall,
@@ -877,6 +987,23 @@ function bumpVerdict(changes: readonly SurfaceChange[], signaturesAssessed: bool
  * `warning` a caller can choose to gate, so removing a type annotation cannot hide a narrowing from
  * a policy. `export-added` is not a finding. Deterministic order (the changes are already sorted).
  */
+/** Discriminators longer than this are replaced by a hash, so a baseline line stays reviewable. */
+const MAX_DISCRIMINATOR_LENGTH = 300;
+
+/**
+ * What exactly broke, so an acceptance of one break never covers a different later break of the
+ * same rule on the same symbol (change: add-public-surface-acceptance-baseline): the rename target
+ * for a rename, the before → after signature for a signature change. A removal or a visibility
+ * reduction is the whole break, so it needs none.
+ */
+export function breakDiscriminator(change: SurfaceChange): string | undefined {
+  let text: string | undefined;
+  if (change.changeKind === 'renamed' && change.rename) text = `renamed to ${change.rename.file}::${change.rename.to}`;
+  else if (change.changeKind === 'signature' && (change.before || change.after)) text = `${change.before ?? ''} => ${change.after ?? ''}`;
+  if (text === undefined) return undefined;
+  return text.length <= MAX_DISCRIMINATOR_LENGTH ? text : `sha256:${hashSpan(text)}`;
+}
+
 export function publicSurfaceFindings(changes: readonly SurfaceChange[]): GovernanceFinding[] {
   const findings: GovernanceFinding[] = [];
   for (const change of changes) {
@@ -884,11 +1011,13 @@ export function publicSurfaceFindings(changes: readonly SurfaceChange[]): Govern
       const breaking = BREAKING_CODE_SET.has(code);
       if (!breaking && code !== 'signature-unprovable') continue;
       const subject = `${change.file}::${change.name}`;
+      const discriminator = breakDiscriminator(change);
       findings.push({
         code,
         severity: breaking ? 'error' : 'warning',
         source: 'public-surface',
         subject,
+        ...(discriminator ? { discriminator } : {}),
         // The reasons stay on the change itself; a finding names the rule, so a large diff does not
         // repeat every reason a third time in the response.
         message: `${change.changeKind} of exported "${change.name}" ${breaking ? 'breaks' : 'triggers'} rule ${code}`,
