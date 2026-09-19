@@ -858,6 +858,10 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
                 console.log(`\nWould write to: ${result.modifiedSpecs.join(', ')}`);
                 console.log('Run "openlore decisions --sync" to apply.');
               }
+              // Say now, not at sync time, when this decision has nowhere to go.
+              for (const e of result.errors.filter((err) => err.id === id)) {
+                logger.warning(`Will not sync: ${e.error}`);
+              }
             }
           }
         }

@@ -223,6 +223,28 @@ it does not add any change-lifecycle command (see
 - **WHEN** the syncer runs again
 - **THEN** no additional verbatim copy is appended to any other domain's spec
 
+### Requirement: DecisionSyncNeverPurgesAnUnwrittenDecision
+
+The decision syncer SHALL mark a decision synced, and purge it from the pending store, only after
+it wrote the decision to at least one durable target: an owning spec or an ADR. When no affected
+domain resolves to a spec file and the decision's scope is not ADR-eligible, or when the ADR
+could not be written, the syncer SHALL report a per-decision error that names the cause and the
+remedy, and SHALL leave the decision in the store with its status unchanged. This applies to
+every decision, not only to decisions that carry constraints.
+
+#### Scenario: A component decision with no spec domain is kept
+
+- **GIVEN** an approved `component` decision whose affected files map to no spec domain
+- **WHEN** `openlore decisions --sync` runs
+- **THEN** no file is written, the decision stays `approved` with its rationale in the store,
+  the sync reports an error naming the missing target, and the command exits non-zero
+
+#### Scenario: An ADR-eligible decision with no spec domain becomes an ADR
+
+- **GIVEN** an approved `cross-domain` decision whose affected files map to no spec domain
+- **WHEN** the syncer runs
+- **THEN** it writes an ADR, marks the decision synced, and purges it from the store
+
 ### Requirement: MergeNeverDeletesHumanContent
 
 In `writeMode: 'merge'`, the writer SHALL back up the file before writing (honoring

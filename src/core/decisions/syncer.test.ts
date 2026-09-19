@@ -662,6 +662,10 @@ describe('syncApprovedDecisions — filesystem writes', () => {
   });
 
   it('purges inactive decisions from store before saving', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, 'spec.md'), MINIMAL_SPEC, 'utf-8');
     const approved = makeDecision({ id: 'app00001', status: 'approved', affectedDomains: ['services'] });
     const rejected = makeDecision({ id: 'rej00001', status: 'rejected' });
     const synced = makeDecision({ id: 'syn00001', status: 'synced' });
@@ -682,6 +686,146 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     expect(ids).not.toContain('syn00001');
     expect(ids).not.toContain('app00001');
     expect(ids).toContain('ver00001');
+  });
+
+  // Issue #509: a decision that resolves to no spec and is not ADR-eligible was
+  // written nowhere, reported as synced, and purged from the store.
+  describe('decision with no durable target (#509)', () => {
+    async function listOpenspec(): Promise<string[]> {
+      const { readdir } = await import('node:fs/promises');
+      try {
+        return (await readdir(join(tmpDir, 'openspec'), { recursive: true })).map(String).sort();
+      } catch {
+        return [];
+      }
+    }
+
+    it('keeps an approved component decision with no domain and reports why', async () => {
+      const decision = makeDecision({ id: 'nodom001', scope: 'component', affectedDomains: [] });
+      const { store: persisted, result } = await syncApprovedDecisions(makeStore([decision]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+      });
+
+      expect(result.synced).toEqual([]);
+      expect(result.modifiedSpecs).toEqual([]);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].id).toBe('nodom001');
+      expect(result.errors[0].error).toContain('no durable owning spec or ADR target');
+      expect(result.errors[0].error).toContain('map to no spec domain');
+      expect(result.errors[0].error).toContain('scope "component" is not ADR-eligible');
+      expect(result.errors[0].error).toContain('--scope cross-domain');
+      expect(result.errors[0].error).toContain('openlore decisions --reject nodom001');
+      // Not purged, not marked synced: the rationale survives for a retry.
+      const kept = persisted.decisions.find((d) => d.id === 'nodom001');
+      expect(kept?.status).toBe('approved');
+      expect(kept?.rationale).toBe(decision.rationale);
+      expect(kept?.syncedToSpecs).toEqual([]);
+      expect(await listOpenspec()).toEqual([]);
+    });
+
+    it('names the unresolved domains when a local decision maps to a missing spec', async () => {
+      const decision = makeDecision({ id: 'nodom002', scope: 'local', affectedDomains: ['services'] });
+      const { store: persisted, result } = await syncApprovedDecisions(makeStore([decision]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+      });
+
+      expect(result.synced).toEqual([]);
+      expect(result.errors[0].error).toContain('none of its domains (services) resolves to a spec file');
+      expect(result.errors[0].error).toContain('scope "local"');
+      expect(persisted.decisions.find((d) => d.id === 'nodom002')?.status).toBe('approved');
+    });
+
+    it('treats an unset scope as component', async () => {
+      const decision = makeDecision({ id: 'nodom003', scope: undefined, affectedDomains: [] });
+      const { result } = await syncApprovedDecisions(makeStore([decision]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+      });
+      expect(result.synced).toEqual([]);
+      expect(result.errors[0].error).toContain('scope "component"');
+    });
+
+    it('reports the same error in a dry run', async () => {
+      const decision = makeDecision({ id: 'nodom004', scope: 'component', affectedDomains: [] });
+      const { result } = await syncApprovedDecisions(makeStore([decision]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+        dryRun: true,
+      });
+      expect(result.synced).toEqual([]);
+      expect(result.modifiedSpecs).toEqual([]);
+      expect(result.errors[0].error).toContain('no durable owning spec or ADR target');
+    });
+
+    it('does not report an auto-approved decision with no target as synced', async () => {
+      const decision = makeDecision({
+        id: 'nodom005', status: 'auto-approved', approvedBy: 'autopilot', scope: 'component', affectedDomains: [],
+      });
+      const { store: persisted, result } = await syncApprovedDecisions(makeStore([decision]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+        includeAutoApproved: true,
+      });
+      expect(result.synced).toEqual([]);
+      expect(result.errors[0].id).toBe('nodom005');
+      const kept = persisted.decisions.find((d) => d.id === 'nodom005');
+      expect(kept?.status).toBe('auto-approved');
+      expect(kept?.syncedAt).toBeUndefined();
+    });
+
+    it('still syncs an ADR-eligible decision with no domain as an ADR', async () => {
+      const decision = makeDecision({ id: 'nodom006', scope: 'cross-domain', affectedDomains: [] });
+      const { store: persisted, result } = await syncApprovedDecisions(makeStore([decision]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.synced.map((d) => d.id)).toEqual(['nodom006']);
+      expect(result.synced[0].syncedToSpecs[0]).toMatch(/^openspec\/decisions\/adr-0001-/);
+      expect(persisted.decisions.find((d) => d.id === 'nodom006')).toBeUndefined();
+    });
+
+    it('syncs the targetable decisions and keeps only the untargetable one', async () => {
+      const { writeFile } = await import('node:fs/promises');
+      const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+      await mkdir(specDir, { recursive: true });
+      await writeFile(join(specDir, 'spec.md'), MINIMAL_SPEC, 'utf-8');
+      const good = makeDecision({ id: 'good0001', scope: 'component' });
+      const stranded = makeDecision({ id: 'nodom007', title: 'Stranded choice', scope: 'component', affectedDomains: [] });
+      const { store: persisted, result } = await syncApprovedDecisions(makeStore([good, stranded]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+      });
+      expect(result.synced.map((d) => d.id)).toEqual(['good0001']);
+      expect(result.errors.map((e) => e.id)).toEqual(['nodom007']);
+      expect(persisted.decisions.map((d) => d.id)).toEqual(['nodom007']);
+    });
+
+    // skipIf(win32): same symlink premise as the constrained-decision test below.
+    it.skipIf(process.platform === 'win32')('keeps an unconstrained system decision when the ADR cannot be written', async () => {
+      const outside = await createTempDir();
+      await mkdir(join(tmpDir, 'openspec'), { recursive: true });
+      await symlink(outside, join(tmpDir, 'openspec', 'decisions'));
+      const decision = makeDecision({ id: 'nodom008', scope: 'system', affectedDomains: [] });
+      const { store: persisted, result } = await syncApprovedDecisions(makeStore([decision]), {
+        rootPath: tmpDir,
+        openspecPath: join(tmpDir, 'openspec'),
+        specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+      });
+      expect(result.synced).toEqual([]);
+      expect(result.errors[0].error).toContain('no durable projection was written');
+      expect(persisted.decisions.find((d) => d.id === 'nodom008')?.status).toBe('approved');
+      await rm(outside, { recursive: true, force: true });
+    });
   });
 
   it('preserves supersession authority after sync purges the pending store', async () => {
