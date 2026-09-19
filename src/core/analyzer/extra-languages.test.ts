@@ -97,6 +97,36 @@ describe('spec-08 additional languages', () => {
     expect(g.classes.some(c => c.name === 'Client')).toBe(true);
   });
 
+  // Issue #507: Elixir fell through to the cross-language ignore union, so bare
+  // calls to ordinary functions named map/find/new/parse/insert/delete/format vanished.
+  it('Elixir — bare calls to generic names resolve; Kernel builtins and function heads do not', async () => {
+    const g = await buildOne('elixir/generic_names.ex', 'Elixir');
+    expect(fnNames(g, 'Elixir')).toEqual([
+      'delete', 'fallback', 'find', 'format', 'insert', 'map', 'new', 'normalize', 'parse', 'visit', 'walk',
+      'with_default',
+    ]);
+    expect(edge(g, 'new', 'parse')).toBe(true);
+    expect(edge(g, 'new', 'format')).toBe(true);   // piped
+    expect(edge(g, 'new', 'insert')).toBe(true);   // piped
+    expect(edge(g, 'insert', 'delete')).toBe(true);
+    expect(edge(g, 'find', 'map')).toBe(true);     // body of a guarded head
+    expect(edge(g, 'with_default', 'fallback')).toBe(true); // default argument
+    // Calls in a multi-clause function's later clauses keep their caller.
+    expect(edge(g, 'walk', 'visit')).toBe(true);
+    expect(edge(g, 'visit', 'normalize')).toBe(true);
+    // A head declares its function; it is not a call to it. `walk` recurses for real.
+    const byId = new Map(g.nodes.map(n => [n.id, n.name]));
+    const selfEdges = g.edges.filter(e => e.callerId === e.calleeId).map(e => byId.get(e.callerId));
+    expect(selfEdges).toEqual(['walk']);
+    // Kernel forms and functions are not graph nodes.
+    const external = g.nodes.filter(n => n.isExternal).map(n => n.name);
+    for (const k of ['if', 'with', 'case', 'raise', 'send', 'self', 'inspect', 'is_map', 'is_list', 'length']) {
+      expect(external).not.toContain(k);
+    }
+    // Remote `Enum.map` reaches resolution by bare name; it must not bind to `map`.
+    expect(edge(g, 'delete', 'map')).toBe(false);
+  });
+
   it('Bash — defined-function call, NO edge to external binaries', async () => {
     const g = await buildOne('bash/app.sh', 'Bash');
     expect(fnNames(g, 'Bash')).toEqual(['helper', 'run']);

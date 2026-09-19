@@ -77,6 +77,31 @@ const CFAMILY_IGNORED = new Set([
   'static_cast', 'dynamic_cast', 'reinterpret_cast', 'const_cast',
 ]);
 
+// Elixir: the special forms plus Kernel's auto-imported functions and macros —
+// names a bare call can only mean as Kernel's own (a module cannot define a
+// same-arity function without `import Kernel, except:`). Deliberately NOT the
+// union's generic names (`map`, `find`, `new`, `parse`, `delete`, …): Kernel does
+// not define them, so in Elixir they are ordinary project functions. (issue #507)
+const ELIXIR_IGNORED = new Set([
+  // special forms and control-flow macros
+  'if', 'unless', 'case', 'cond', 'with', 'for', 'try', 'receive',
+  'quote', 'unquote', 'unquote_splicing', 'super', 'import', 'alias', 'require', 'use',
+  // errors and processes
+  'raise', 'reraise', 'throw', 'exit', 'send', 'spawn', 'spawn_link', 'spawn_monitor',
+  'self', 'make_ref', 'apply', 'node',
+  // guards
+  'is_atom', 'is_binary', 'is_bitstring', 'is_boolean', 'is_exception', 'is_float',
+  'is_function', 'is_integer', 'is_list', 'is_map', 'is_map_key', 'is_nil', 'is_number',
+  'is_pid', 'is_port', 'is_reference', 'is_struct', 'is_tuple',
+  // data and conversion
+  'elem', 'put_elem', 'hd', 'tl', 'length', 'map_size', 'tuple_size', 'byte_size', 'bit_size',
+  'binary_part', 'div', 'rem', 'abs', 'round', 'trunc', 'max', 'min', 'not',
+  'inspect', 'to_string', 'to_charlist', 'struct', 'struct!',
+  'get_in', 'put_in', 'update_in', 'pop_in', 'get_and_update_in',
+  'then', 'tap', 'dbg', 'match?', 'binding', 'var!', 'destructure',
+  'function_exported?', 'macro_exported?',
+]);
+
 const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
   Python: PYTHON_IGNORED,
   TypeScript: JS_IGNORED,
@@ -91,12 +116,16 @@ const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
   Swift: SWIFT_IGNORED,
   'C++': CFAMILY_IGNORED,
   C: CFAMILY_IGNORED,
+  Elixir: ELIXIR_IGNORED,
 };
 
-// Union of every language's set — the fallback for callers that pass no
+// Union of the legacy per-language sets — the fallback for callers that pass no
 // language (and languages without a dedicated set), preserving legacy behavior.
+// Listed explicitly rather than derived from IGNORED_BY_LANGUAGE, so adding a
+// language's set never widens what those other callers drop.
 const ALL_IGNORED_CALLEES = new Set<string>(
-  Object.values(IGNORED_BY_LANGUAGE).flatMap(s => Array.from(s))
+  [PYTHON_IGNORED, JS_IGNORED, GO_IGNORED, RUST_IGNORED, RUBY_IGNORED, JVM_IGNORED, SWIFT_IGNORED, CFAMILY_IGNORED]
+    .flatMap(s => Array.from(s))
 );
 
 /**
