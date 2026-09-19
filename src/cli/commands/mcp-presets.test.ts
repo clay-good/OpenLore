@@ -664,12 +664,16 @@ describe('tools/list payload budget (spec-28)', () => {
   // (change: add-retrieval-match-evidence). Measured full payload: 96,559 B; the
   // default and navigation presets are unchanged. This preserves useful search
   // guidance while accounting explicitly for the target/filter schema.
+  // Bumped 97_000 → 97_500 when `certify_public_surface` gained the shared federation
+  // inputs for its consumer census (change: add-public-surface-acceptance-baseline). Its
+  // description was tightened to absorb the new split and baseline wording; the measured
+  // full payload is 97,059 B, and the default and navigation presets are unchanged.
   it('full surface stays within its prefix budget', () => {
     // Strict advertised schemas add one `additionalProperties:false` token per
     // tool (fix-mcp-argument-contract), plus the typed v1 decision-constraint
     // block. 97 KB preserves a narrow ratchet around those intentional public
     // contracts rather than treating the added schema as free bytes.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(97_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(97_500);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

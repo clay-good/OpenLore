@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { execFileGitSync } from '../../../utils/git-exec.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,15 @@ import { assembleSurfaceDiff, computeCertifyPublicSurface, publicSurfaceFindings
 import { getChangedFiles } from '../../drift/git-diff.js';
 import { FINDING_CODE_REGISTRY, resolveEnforcementClass } from './enforcement-policy.js';
 import { BREAKING_SURFACE_RULE_CODES } from '../../analyzer/public-surface.js';
+import { readCachedContext } from './utils.js';
+import { findCrossRepoConsumersBatch } from '../../federation/resolver.js';
+import { writeAcceptedBreakages } from './public-surface-baseline.js';
+import {
+  DECISIONS_PENDING_FILE,
+  OPENLORE_DECISIONS_SUBDIR,
+  OPENLORE_DIR,
+  PUBLIC_SURFACE_BASELINE_REL_PATH,
+} from '../../../constants.js';
 
 // Mock only the two utils the handler reads; the pure assembleSurfaceDiff core below
 // does not touch them, so the existing suite is unaffected. git-diff is imported
@@ -22,6 +31,19 @@ vi.mock('../../drift/git-diff.js', () => ({
     requested,
     resolved: 'main',
     fellBack: requested === 'bogus-ref',
+  })),
+}));
+
+// Federation is opt-in: inactive unless the caller asks, and then one sibling repo is consulted.
+vi.mock('../../federation/resolver.js', () => ({
+  resolveFederationScope: vi.fn((_dir: string, opts: { federation?: boolean }) =>
+    opts.federation
+      ? { active: true, repos: [{ name: 'sibling', path: '/sibling' }], unknownNames: [] }
+      : { active: false, repos: [], unknownNames: [] }),
+  findCrossRepoConsumersBatch: vi.fn(async (_scope: unknown, symbols: string[]) => ({
+    bySymbol: new Map(symbols.map((s) => [s, [] as unknown[]])),
+    truncated: 0,
+    coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: ['matched by symbol name'] },
   })),
 }));
 
@@ -461,7 +483,173 @@ describe('rule codes, suggested bump, and findings (refine-public-surface-certif
     const r = await assembleSurfaceDiff([ts('a.ts', 'export function gone(): void {}\n')], [ts('a.ts', '\n')], noRename);
     const detail = r.extraCrossings.map((c) => c.detail).join(' ');
     expect(detail).not.toMatch(/sibling repos are also checked/i);
-    expect(detail).toMatch(/not checked, including under federation/);
+    expect(detail).toMatch(/in-repo only\. Pass federation to also check indexed sibling repos/);
   });
 });
 
+
+describe('consumer-weighted breaking verdicts (add-public-surface-acceptance-baseline)', () => {
+  const stubStore = (callers: Record<string, string[]>) => ({
+    getCallers: (id: string) => (callers[id] ?? []).map((callerId) => ({ callerId })),
+  });
+
+  it('a consumed break names its consumers', async () => {
+    const r = await assembleSurfaceDiff(
+      [ts('a.ts', 'export function gone(): void {}\n')],
+      [ts('a.ts', '\n')],
+      noRename,
+      stubStore({ 'a.ts::gone': ['x.ts::one', 'y.ts::two', 'z.ts::three'] }),
+    );
+    expect(r.breaking).toHaveLength(1);
+    expect(r.breaking[0].breakingClass).toBe('breaking-consumed');
+    expect(r.breaking[0].consumerCount).toBe(3);
+    expect(r.breaking[0].consumers.map((c) => c.name)).toEqual(['one', 'two', 'three']);
+    expect(r.summary).toMatchObject({ breaking: 1, breakingConsumed: 1, breakingUnconsumedInIndex: 0 });
+    expect(r.breaking[0].class).toBe('breaking'); // the class and bump are unchanged by the split
+    expect(r.suggestedBump).toBe('major');
+  });
+
+  it('zero indexed consumers is not "safe"', async () => {
+    const r = await assembleSurfaceDiff([ts('a.ts', 'export function gone(): void {}\n')], [ts('a.ts', '\n')], noRename, stubStore({}));
+    expect(r.breaking[0]).toMatchObject({ breakingClass: 'breaking-unconsumed-in-index', consumerCount: 0, consumers: [] });
+    expect(r.summary).toMatchObject({ breakingConsumed: 0, breakingUnconsumedInIndex: 1 });
+    expect(r.extraCrossings).toHaveLength(1);
+    expect(r.extraCrossings[0].detail).toMatch(/zero listed consumers does not mean no consumer exists/);
+  });
+
+  it('counts consumers beyond the listing cap', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => `c${String(i).padStart(2, '0')}.ts::f`);
+    const r = await assembleSurfaceDiff([ts('a.ts', 'export function gone(): void {}\n')], [ts('a.ts', '\n')], noRename, stubStore({ 'a.ts::gone': many }));
+    expect(r.breaking[0].consumers).toHaveLength(25);
+    expect(r.breaking[0].consumersTruncated).toBe(5);
+    expect(r.breaking[0].consumerCount).toBe(30);
+  });
+});
+
+describe('certify_public_surface diff mode: federation census and accepted baseline (handler)', () => {
+  let dir: string;
+  const A_BASE = 'export function parseLegacy(s: string): string { return s; }\nexport function keep(): void {}\nexport function other(): void {}\n';
+  const A_HEAD = 'export function keep(): void {}\n';
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-certaccept-'));
+    execFileGitSync('git', ['init', '-q', '-b', 'main', dir]);
+    execFileGitSync('git', ['-C', dir, 'config', 'user.email', 't@example.com']);
+    execFileGitSync('git', ['-C', dir, 'config', 'user.name', 't']);
+    execFileGitSync('git', ['-C', dir, 'config', 'commit.gpgsign', 'false']);
+    await writeFile(join(dir, 'a.ts'), A_BASE);
+    execFileGitSync('git', ['-C', dir, 'add', 'a.ts']);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-m', 'base']);
+    await writeFile(join(dir, 'a.ts'), A_HEAD);
+    await mkdir(join(dir, OPENLORE_DIR), { recursive: true });
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'a.ts', status: 'modified' }], resolvedBase: 'main' } as never);
+  });
+  afterEach(async () => {
+    vi.mocked(getChangedFiles).mockReset();
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [], resolvedBase: 'main' } as never);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  type Diff = {
+    summary: Record<string, number>;
+    breaking: Array<{ name: string; breakingClass: string; crossRepoConsumers?: Array<{ repo: string; name: string }> }>;
+    findings: Array<{ code: string; subject: string }>;
+    consumerCensus: { scope: string; reposConsulted?: string[] };
+    baseline?: { error?: string; accepted: Array<{ subject: string; justification: string }>; stale: Array<{ subject: string; supersededBy?: string; reason: string }>; unmatched: unknown[] };
+    confidenceBoundary: { knownUnknowable?: Array<{ detail: string }> };
+  };
+  const run = async (extra: Record<string, unknown> = {}): Promise<Diff> =>
+    (await computeCertifyPublicSurface({ directory: dir, baseRef: 'main', ...extra })) as Diff;
+  const decisionStore = async (decisions: Array<{ id: string; status?: string; supersedes?: string }>): Promise<void> => {
+    const d = join(dir, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
+    await mkdir(d, { recursive: true });
+    const full = decisions.map((x) => ({
+      status: 'approved', title: `decision ${x.id}`, rationale: 'r', consequences: 'c', proposedRequirement: null,
+      affectedDomains: [], affectedFiles: [], syncedToSpecs: [], sessionId: 's', recordedAt: '2026-06-01T00:00:00Z',
+      contentOrigin: 'agent-recorded', confidence: 'high', ...x,
+    }));
+    await writeFile(join(d, DECISIONS_PENDING_FILE), JSON.stringify({ version: '1', sessionId: 's', updatedAt: '2026-06-01T00:00:00Z', decisions: full }, null, 2));
+  };
+
+  it('without a baseline or federation: in-repo census, every break is a finding, no baseline block', async () => {
+    const r = await run();
+    expect(r.consumerCensus).toEqual({ scope: 'in-repo' });
+    expect(r.baseline).toBeUndefined();
+    expect(r.findings.map((f) => f.subject).sort()).toEqual(['a.ts::other', 'a.ts::parseLegacy']);
+    expect(r.summary).toMatchObject({ breaking: 2, breakingConsumed: 0, breakingUnconsumedInIndex: 2, accepted: 0 });
+    expect(r.confidenceBoundary.knownUnknowable?.map((k) => k.detail).join(' ')).toMatch(/Pass federation/);
+  });
+
+  it('federation widens the census honestly', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((s) => [s, s === 'parseLegacy'
+        ? [{ repo: 'sibling', repoPath: '/sibling', caller: { id: 'app.ts::main', name: 'main', file: 'app.ts' }, symbol: s }]
+        : []])),
+      truncated: 0,
+      coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    const legacy = r.breaking.find((b) => b.name === 'parseLegacy')!;
+    expect(legacy.breakingClass).toBe('breaking-consumed');
+    expect(legacy.crossRepoConsumers).toEqual([{ repo: 'sibling', name: 'main', file: 'app.ts' }]);
+    expect(r.breaking.find((b) => b.name === 'other')!.breakingClass).toBe('breaking-unconsumed-in-index');
+    expect(r.consumerCensus).toMatchObject({ scope: 'federation', reposConsulted: ['sibling'] });
+    expect(r.confidenceBoundary.knownUnknowable?.map((k) => k.detail).join(' ')).toMatch(/Federated sibling repos were checked by symbol name/);
+
+    const without = await run();
+    expect(without.breaking.find((b) => b.name === 'parseLegacy')!.breakingClass).toBe('breaking-unconsumed-in-index');
+  });
+
+  it('an accepted break is listed as accepted, leaves findings, and a new break still reports', async () => {
+    await writeAcceptedBreakages(dir, [{ code: 'export-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::parseLegacy', message: 'm' }], 'legacy parser retired in v3');
+    const r = await run();
+    expect(r.findings.map((f) => f.subject)).toEqual(['a.ts::other']);
+    expect(r.baseline?.accepted).toEqual([{ code: 'export-removed', subject: 'a.ts::parseLegacy', justification: 'legacy parser retired in v3' }]);
+    expect(r.summary).toMatchObject({ breaking: 2, accepted: 1 });
+    // The verdict still describes the diff honestly: the accepted break is still breaking.
+    expect(r.breaking.map((b) => b.name).sort()).toEqual(['other', 'parseLegacy']);
+  });
+
+  it('a superseded decision anchor expires the acceptance, citing the live superseder', async () => {
+    await decisionStore([{ id: 'a1b2c3d4' }]);
+    await writeAcceptedBreakages(dir, [{ code: 'export-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::parseLegacy', message: 'm' }], 'retired', 'a1b2c3d4');
+    expect((await run()).baseline?.accepted).toHaveLength(1);
+
+    await decisionStore([{ id: 'a1b2c3d4' }, { id: 'b2c3d4e5', supersedes: 'a1b2c3d4' }]);
+    const r = await run();
+    expect(r.baseline?.accepted).toEqual([]);
+    expect(r.baseline?.stale).toHaveLength(1);
+    expect(r.baseline?.stale[0]).toMatchObject({ subject: 'a.ts::parseLegacy', supersededBy: 'b2c3d4e5' });
+    expect(r.findings.map((f) => f.subject)).toContain('a.ts::parseLegacy');
+  });
+
+  it('an unrecorded decision anchor is not honored', async () => {
+    await writeAcceptedBreakages(dir, [{ code: 'export-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::parseLegacy', message: 'm' }], 'retired', 'deadbeef');
+    const r = await run();
+    expect(r.baseline?.stale[0].reason).toMatch(/No decision "deadbeef" is recorded/);
+    expect(r.findings.map((f) => f.subject)).toContain('a.ts::parseLegacy');
+  });
+
+  it('a corrupt baseline honors nothing and says why', async () => {
+    await writeFile(join(dir, PUBLIC_SURFACE_BASELINE_REL_PATH), '# OpenLore accepted public-surface breakages v1\n["accept","export-removed","a.ts::parseLegacy","",""]\n');
+    const r = await run();
+    expect(r.baseline?.error).toMatch(/no acceptance honored/);
+    expect(r.findings.map((f) => f.subject).sort()).toEqual(['a.ts::other', 'a.ts::parseLegacy']);
+  });
+
+  it('lists entries that no longer match any finding', async () => {
+    await writeAcceptedBreakages(dir, [{ code: 'param-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::fixed', message: 'm' }], 'old');
+    const r = await run();
+    expect(r.baseline?.unmatched).toEqual([{ code: 'param-removed', subject: 'a.ts::fixed' }]);
+  });
+
+  it('the census reads the edge store the analysis provides', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      callGraph: { nodes: [] },
+      edgeStore: { getCallers: (id: string) => (id === 'a.ts::parseLegacy' ? [{ callerId: 'b.ts::use' }] : []) },
+    } as never);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')!.breakingClass).toBe('breaking-consumed');
+    expect(r.summary).toMatchObject({ breakingConsumed: 1, breakingUnconsumedInIndex: 1 });
+  });
+});

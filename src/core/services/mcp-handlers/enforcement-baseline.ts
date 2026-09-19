@@ -9,7 +9,13 @@
 import { constants as fsConstants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ENFORCEMENT_BASELINE_FILENAME, ENFORCEMENT_BASELINE_REL_PATH, OPENLORE_DIR } from '../../../constants.js';
+import {
+  ENFORCEMENT_BASELINE_FILENAME,
+  ENFORCEMENT_BASELINE_REL_PATH,
+  OPENLORE_CONFIG_REL_PATH,
+  OPENLORE_DIR,
+  PUBLIC_SURFACE_BASELINE_FILENAME,
+} from '../../../constants.js';
 import { atomicWriteFile } from '../../decisions/atomic-store.js';
 import { acquireLockAt } from '../../runtime/advisory-lock.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
@@ -26,7 +32,18 @@ type BaselineRecord = CodeRecord | FindingRecord;
 
 const GITIGNORE_MARKER = '# openlore-enforcement-baseline';
 const GITIGNORE_END_MARKER = '# end-openlore-enforcement-baseline';
+// One managed block makes every reviewable `.openlore/` file trackable. Git applies the last
+// matching rule, so a second block with its own `.openlore/*` would re-ignore the files an earlier
+// block exposed; the public-surface baseline therefore shares this block rather than adding one.
 const GITIGNORE_BLOCK = `${GITIGNORE_MARKER}
+!.openlore/
+.openlore/*
+!.openlore/config.json
+!.openlore/${ENFORCEMENT_BASELINE_FILENAME}
+!.openlore/${PUBLIC_SURFACE_BASELINE_FILENAME}
+${GITIGNORE_END_MARKER}`;
+/** The block written before the public-surface baseline existed; upgraded in place when found. */
+const LEGACY_GITIGNORE_BLOCK = `${GITIGNORE_MARKER}
 !.openlore/
 .openlore/*
 !.openlore/config.json
@@ -116,7 +133,7 @@ function serializeBaseline(records: readonly BaselineRecord[]): string {
   return BASELINE_HEADER + '\n' + unique.map(recordKey).join('\n') + '\n';
 }
 
-async function readFileBoundedNoFollow(path: string, maxBytes: number, label: string): Promise<string> {
+export async function readFileBoundedNoFollow(path: string, maxBytes: number, label: string): Promise<string> {
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const handle = await open(path, fsConstants.O_RDONLY | noFollow);
   try {
@@ -141,7 +158,7 @@ function markerCount(text: string, marker: string): number {
   return text.split(marker).length - 1;
 }
 
-async function verifyGitTrackability(rootPath: string): Promise<void> {
+async function verifyGitTrackability(rootPath: string, relPaths: readonly string[]): Promise<void> {
   try {
     const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], {
       cwd: rootPath,
@@ -154,7 +171,7 @@ async function verifyGitTrackability(rootPath: string): Promise<void> {
     throw new Error(`Git repository status unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 
-  for (const path of ['.openlore/config.json', ENFORCEMENT_BASELINE_REL_PATH]) {
+  for (const path of relPaths) {
     try {
       await execFileAsync('git', ['check-ignore', '--no-index', '-q', '--', path], {
         cwd: rootPath,
@@ -169,8 +186,11 @@ async function verifyGitTrackability(rootPath: string): Promise<void> {
   }
 }
 
-/** Keep all runtime state ignored while making the one reviewable baseline trackable. */
-async function ensureBaselineTrackable(rootPath: string): Promise<void> {
+/**
+ * Keep all runtime state ignored while making the reviewable `.openlore/` files trackable, then
+ * verify that no higher-precedence rule still ignores `relPaths`.
+ */
+export async function ensureOpenloreFilesTrackable(rootPath: string, relPaths: readonly string[]): Promise<void> {
   const path = join(rootPath, '.gitignore');
   let existing = '';
   try {
@@ -181,13 +201,15 @@ async function ensureBaselineTrackable(rootPath: string): Promise<void> {
   const starts = markerCount(existing, GITIGNORE_MARKER);
   const ends = markerCount(existing, GITIGNORE_END_MARKER);
   if (starts > 0 || ends > 0) {
-    if (starts !== 1 || ends !== 1 || !existing.includes(GITIGNORE_BLOCK)) {
+    if (starts === 1 && ends === 1 && !existing.includes(GITIGNORE_BLOCK) && existing.includes(LEGACY_GITIGNORE_BLOCK)) {
+      await atomicWriteFile(path, existing.replace(LEGACY_GITIGNORE_BLOCK, () => GITIGNORE_BLOCK));
+    } else if (starts !== 1 || ends !== 1 || !existing.includes(GITIGNORE_BLOCK)) {
       throw new Error('managed .gitignore enforcement-baseline block is malformed or duplicated');
     }
   } else {
     await atomicWriteFile(path, `${existing.trimEnd()}${existing.trim() ? '\n\n' : ''}${GITIGNORE_BLOCK}\n`);
   }
-  await verifyGitTrackability(rootPath);
+  await verifyGitTrackability(rootPath, relPaths);
 }
 
 function validateCandidateAgainstTrusted(
@@ -436,7 +458,7 @@ export async function applyEnforcementBaseline(
   const changed = mayMutate && (mode === 'bootstrap' || initializedNow.length === 0) && (!existed || nextText !== existingText);
   if (mode === 'bootstrap') {
     try {
-      await ensureBaselineTrackable(rootPath);
+      await ensureOpenloreFilesTrackable(rootPath, [OPENLORE_CONFIG_REL_PATH, ENFORCEMENT_BASELINE_REL_PATH]);
     } catch (error) {
       return {
         gate: integrityGate(rebuildGate(classified)),

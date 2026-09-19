@@ -46,6 +46,15 @@ import {
   type SuggestedBump,
 } from '../../analyzer/public-surface.js';
 import { FINDING_CODE_REGISTRY, type GovernanceFinding } from './enforcement-policy.js';
+import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
+import { PUBLIC_SURFACE_BASELINE_REL_PATH } from '../../../constants.js';
+import {
+  applyAcceptedBaseline,
+  readAcceptedBaseline,
+  type AcceptedBreakage,
+  type DecisionCurrency,
+} from './public-surface-baseline.js';
+import { verifyDecisionCurrent } from './claim-verification.js';
 
 
 const MAX_SURFACE = 500;
@@ -79,6 +88,10 @@ export interface CertifyPublicSurfaceInput {
    * the disclosed main → master → HEAD~1 fallback instead (fix-cli-conclusion-honesty).
    */
   allowBaseFallback?: boolean;
+  /** Opt-in: count consumers in indexed sibling repos (`.openlore/federation.json`) too. */
+  federation?: boolean;
+  /** Limit the federation census to these registry repo names (default: all). */
+  federationRepos?: string[];
 }
 
 // ── exported-name extraction (the surface predicate, computable on any content) ──
@@ -334,6 +347,57 @@ function resolveConsumers(edgeStore: EdgeStoreLike | undefined, nodeIds: string[
   return { consumers: all.slice(0, MAX_CONSUMERS), truncated: Math.max(0, all.length - MAX_CONSUMERS) };
 }
 
+/**
+ * The consumer-weighted split of a breaking change (change: add-public-surface-acceptance-baseline):
+ * `breaking-consumed` when at least one indexed consumer binds the symbol, else
+ * `breaking-unconsumed-in-index`. The consumer list is the evidence; there is no score. Zero indexed
+ * consumers is never "safe" — the external-consumer boundary is disclosed on both.
+ */
+export type BreakingWeight = 'breaking-consumed' | 'breaking-unconsumed-in-index';
+
+interface CrossRepoConsumerOut {
+  repo: string;
+  name: string;
+  file: string;
+}
+
+export type WeightedBreakingChange = SurfaceChange & {
+  consumers: Consumer[];
+  consumersTruncated: number;
+  /** Consumers in indexed sibling repos (federation scope only), matched by symbol name. */
+  crossRepoConsumers?: CrossRepoConsumerOut[];
+  /** In-repo plus cross-repo consumers, including any dropped by a cap. */
+  consumerCount: number;
+  breakingClass: BreakingWeight;
+};
+
+function weigh<T extends SurfaceChange & { consumers: Consumer[]; consumersTruncated: number; crossRepoConsumers?: CrossRepoConsumerOut[] }>(
+  change: T,
+  crossRepoTruncated = 0,
+): T & { consumerCount: number; breakingClass: BreakingWeight } {
+  const consumerCount = change.consumers.length + change.consumersTruncated + (change.crossRepoConsumers?.length ?? 0) + crossRepoTruncated;
+  return { ...change, consumerCount, breakingClass: consumerCount > 0 ? 'breaking-consumed' : 'breaking-unconsumed-in-index' };
+}
+
+function weightSummary(breaking: readonly WeightedBreakingChange[]): { breakingConsumed: number; breakingUnconsumedInIndex: number } {
+  return {
+    breakingConsumed: breaking.filter((b) => b.breakingClass === 'breaking-consumed').length,
+    breakingUnconsumedInIndex: breaking.filter((b) => b.breakingClass === 'breaking-unconsumed-in-index').length,
+  };
+}
+
+/** The external-consumer boundary for `count` breaking changes, stated for the census actually run. */
+function consumerBoundary(count: number, federation: boolean): Array<{ kind: 'unindexed-repo'; count: number; detail: string }> {
+  if (count === 0) return [];
+  return [{
+    kind: 'unindexed-repo',
+    count,
+    detail: federation
+      ? 'Consumers of these breaking changes that live OUTSIDE any indexed repo (closed-source or external downstreams), or in a federated repo that was skipped, are not visible. Federated sibling repos were checked by symbol name (see consumerCensus); zero listed consumers does not mean no consumer exists.'
+      : 'Consumers of these breaking changes that live OUTSIDE this repo (closed-source or external downstreams, and sibling repositories) are not visible; the listed consumers are in-repo only. Pass federation to also check indexed sibling repos; zero listed consumers does not mean no consumer exists.',
+  }];
+}
+
 // ── the two modes ───────────────────────────────────────────────────────────
 
 interface SurfaceListResult {
@@ -414,6 +478,7 @@ async function diffSurface(
   ctx: Awaited<ReturnType<typeof readCachedContext>>,
   baseRef: string,
   allowBaseFallback: boolean,
+  federation: { federation?: boolean; federationRepos?: string[] },
 ): Promise<unknown> {
   const { resolveBaseRefDisclosed, validateGitRef } = await import('../../drift/git-diff.js');
   try { validateGitRef(baseRef); } catch (e) { return { error: (e as Error).message }; }
@@ -448,6 +513,15 @@ async function diffSurface(
   for (const f of changed) if (f.oldPath) headPathOf.set(f.oldPath, f.path);
 
   const { extraCrossings, ...diff } = await assembleSurfaceDiff(baseFiles, headFiles, headPathOf, ctx?.edgeStore as EdgeStoreLike | undefined, unassessedCodeFiles);
+
+  // Consumer census: in-repo always; indexed sibling repos too under federation scope.
+  const fedScope = resolveFederationScope(absDir, federation);
+  const census = await federatedCensus(fedScope, diff.breaking);
+  const breaking = census.breaking;
+
+  // Accepted-breakage baseline: honored entries leave `findings`, but stay listed.
+  const baseline = await applyBaselineFile(absDir, diff.findings);
+
   return {
     mode: 'diff',
     base: resolvedBase,
@@ -456,8 +530,114 @@ async function diffSurface(
     // is disclosed structurally so the verdict never hides the base it actually used.
     ...(base.fellBack ? { baseRefFallback: { requested: base.requested, resolved: resolvedBase } } : {}),
     ...diff,
-    confidenceBoundary: assembleBoundary({ staleness: await computeStaleness(absDir), integrity: ctx?.integrity, extraCrossings }),
+    summary: { ...diff.summary, ...weightSummary(breaking), accepted: baseline?.accepted.length ?? 0 },
+    breaking,
+    findings: baseline?.findings ?? diff.findings,
+    consumerCensus: census.block,
+    ...(baseline ? { baseline: baseline.block } : {}),
+    confidenceBoundary: assembleBoundary({
+      staleness: await computeStaleness(absDir),
+      integrity: ctx?.integrity,
+      extraCrossings: fedScope.active ? consumerBoundary(breaking.length, true) : extraCrossings,
+    }),
   };
+}
+
+/** Add consumers in indexed sibling repos (federation scope) and re-weigh each breaking change. */
+async function federatedCensus(
+  fedScope: ReturnType<typeof resolveFederationScope>,
+  breaking: readonly WeightedBreakingChange[],
+): Promise<{ breaking: WeightedBreakingChange[]; block: Record<string, unknown> }> {
+  if (!fedScope.active) return { breaking: [...breaking], block: { scope: 'in-repo' } };
+  const block: Record<string, unknown> = {
+    scope: 'federation',
+    ...(fedScope.unknownNames.length > 0 ? { unknownRepos: fedScope.unknownNames } : {}),
+  };
+  if (breaking.length === 0) return { breaking: [], block: { ...block, reposConsulted: [], reposSkipped: [], caveats: [] } };
+  // Consumers bind the name the symbol had at the base (for a rename, the old name).
+  const batch = await findCrossRepoConsumersBatch(fedScope, [...new Set(breaking.map((b) => b.name))], { maxConsumers: MAX_CONSUMERS * breaking.length });
+  const weighed = breaking.map((b) => {
+    const cross = (batch.bySymbol.get(b.name) ?? [])
+      .map((c) => ({ repo: c.repo, name: c.caller.name, file: c.caller.file }))
+      .sort((x, y) => x.repo.localeCompare(y.repo) || x.file.localeCompare(y.file) || x.name.localeCompare(y.name));
+    return weigh({ ...b, crossRepoConsumers: cross.slice(0, MAX_CONSUMERS) }, Math.max(0, cross.length - MAX_CONSUMERS));
+  });
+  return {
+    breaking: weighed,
+    block: {
+      ...block,
+      reposConsulted: batch.coverage.reposConsulted.map((r) => r.name),
+      reposSkipped: batch.coverage.reposSkipped.map((r) => ({ name: r.name, state: r.state, reason: r.reason })),
+      ...(batch.truncated > 0 ? { truncated: batch.truncated } : {}),
+      caveats: batch.coverage.caveats,
+    },
+  };
+}
+
+/**
+ * Read `.openlore/public-surface-baseline.jsonl` and apply it to `findings`. Returns null when the
+ * file is absent. A file that cannot be read or parsed honors NOTHING (fail-closed) and says why.
+ */
+async function applyBaselineFile(
+  absDir: string,
+  findings: readonly GovernanceFinding[],
+): Promise<{ findings: GovernanceFinding[]; accepted: AcceptedBreakage[]; block: Record<string, unknown> } | null> {
+  let entries: AcceptedBreakage[];
+  try {
+    const read = await readAcceptedBaseline(absDir);
+    if (!read.present) return null;
+    entries = read.entries;
+  } catch (error) {
+    return {
+      findings: [...findings],
+      accepted: [],
+      block: {
+        path: PUBLIC_SURFACE_BASELINE_REL_PATH,
+        error: `baseline ignored, no acceptance honored: ${error instanceof Error ? error.message : String(error)}`,
+        accepted: [],
+        stale: [],
+        unmatched: [],
+      },
+    };
+  }
+  const currency = new Map<string, DecisionCurrency>();
+  for (const id of [...new Set(entries.map((e) => e.decision).filter((d): d is string => !!d))].sort()) {
+    currency.set(id, await decisionCurrency(absDir, id));
+  }
+  const applied = applyAcceptedBaseline(findings, entries, currency);
+  const accepted = applied.accepted.map(({ code, subject, justification, decision }): AcceptedBreakage =>
+    ({ code, subject, justification, ...(decision ? { decision } : {}) }));
+  return {
+    findings: applied.findings,
+    accepted,
+    block: {
+      path: PUBLIC_SURFACE_BASELINE_REL_PATH,
+      entries: entries.length,
+      accepted,
+      stale: applied.stale,
+      unmatched: applied.unmatched,
+    },
+  };
+}
+
+/** Is decision `id` current? The same decision-store check `verify_claim`'s `decision-current` runs. */
+async function decisionCurrency(absDir: string, id: string): Promise<DecisionCurrency> {
+  try {
+    const result = await verifyDecisionCurrent(absDir, id) as {
+      verdict?: string;
+      reason?: string;
+      receipt?: { decision?: { supersededBy?: string } };
+    };
+    if (result.verdict === 'confirmed') return { current: true };
+    const supersededBy = result.receipt?.decision?.supersededBy;
+    return {
+      current: false,
+      reason: result.reason ?? `decision ${id} is not current`,
+      ...(supersededBy ? { supersededBy } : {}),
+    };
+  } catch (error) {
+    return { current: false, reason: `decision ${id} could not be checked: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 /**
@@ -475,9 +655,9 @@ export async function assembleSurfaceDiff(
   unassessedCodeFiles = 0,
 ): Promise<{
   overall: ChangeClass;
-  summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number };
+  summary: { breaking: number; potentiallyBreaking: number; nonBreaking: number; breakingConsumed: number; breakingUnconsumedInIndex: number };
   changes: SurfaceChange[];
-  breaking: Array<SurfaceChange & { consumers: Consumer[]; consumersTruncated: number }>;
+  breaking: WeightedBreakingChange[];
   suggestedBump: SuggestedBump | null;
   /** Why the bump is withheld, when `suggestedBump` is null. */
   suggestedBumpWithheld?: string;
@@ -642,20 +822,14 @@ export async function assembleSurfaceDiff(
       const ids = [`${c.file}::${c.name}`];
       if (c.changeKind === 'renamed' && c.rename) ids.push(`${c.rename.file}::${c.rename.to}`);
       const { consumers, truncated } = resolveConsumers(edgeStore, ids);
-      return { ...c, consumers, consumersTruncated: truncated };
+      return weigh({ ...c, consumers, consumersTruncated: truncated });
     });
 
   const overall: ChangeClass = overallClass(changes);
   const anyClassifiable = headFiles.some((f) => signatureClassifiable(f.language)) || baseFiles.some((f) => signatureClassifiable(f.language));
 
   // Honesty: consumers in unindexed/external downstreams are never visible.
-  const extraCrossings = breaking.length > 0
-    ? [{
-        kind: 'unindexed-repo' as const,
-        count: breaking.length,
-        detail: 'Consumers of these breaking changes that live OUTSIDE any indexed repo (closed-source or external downstreams) are not visible; the listed consumers are in-repo only. Consumers in sibling repositories are not checked, including under federation.',
-      }]
-    : [];
+  const extraCrossings = consumerBoundary(breaking.length, false);
 
   return {
     overall,
@@ -663,6 +837,7 @@ export async function assembleSurfaceDiff(
       breaking: changes.filter((c) => c.class === 'breaking').length,
       potentiallyBreaking: changes.filter((c) => c.class === 'potentially-breaking').length,
       nonBreaking: changes.filter((c) => c.class === 'non-breaking').length,
+      ...weightSummary(breaking),
     },
     changes,
     breaking,
@@ -734,7 +909,10 @@ export async function computeCertifyPublicSurface(input: CertifyPublicSurfaceInp
     return { error: 'No analysis found. Run analyze_codebase first.' };
   }
   if (input.baseRef && input.baseRef.trim().length > 0) {
-    return diffSurface(absDir, ctx, input.baseRef.trim(), input.allowBaseFallback ?? false);
+    return diffSurface(absDir, ctx, input.baseRef.trim(), input.allowBaseFallback ?? false, {
+      federation: input.federation,
+      federationRepos: input.federationRepos,
+    });
   }
   return listSurface(absDir, ctx, input.maxResults ?? 200);
 }

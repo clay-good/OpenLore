@@ -5,14 +5,26 @@
 ### Requirement: AcceptedBreakageBaselineRequiresJustification
 
 The system SHALL support recording intentionally accepted breaking changes in a checked-in,
-human-readable baseline (one sorted entry per line: rule code, symbol, justification). An
-acceptance entry SHALL require a justification — the accept operation refuses without one — and
-MAY anchor to a recorded decision id, in which case the acceptance participates in the decision
-store's supersede lifecycle: an acceptance citing a superseded decision SHALL be flagged stale
-rather than honored silently. Diff mode SHALL report only findings beyond the baseline, listing
-baseline-matched findings as `accepted` rather than omitting them. This baseline is the
-surface-specific complement of the generic frozen-class ratchet (`add-enforcement-baseline-ratchet`);
-the two share the code + subject identity vocabulary and compose rather than compete.
+human-readable baseline at `.openlore/public-surface-baseline.jsonl`: a fixed header line, then one
+sorted JSON record per accepted breakage naming the rule code, the subject (`file::symbol`), a
+justification, and an optional decision id. Only breaking-classed public-surface rule codes SHALL
+be acceptable. An acceptance entry SHALL require a justification — the accept operation
+(`openlore certify-public-surface --base <ref> --accept --justification <why>`) refuses without
+one, before any analysis runs, and writes nothing. An acceptance MAY anchor to a recorded decision
+id, which SHALL be current when the acceptance is written; the acceptance then participates in the
+decision store's supersede lifecycle: an acceptance whose decision is superseded, rejected, or not
+recorded SHALL be flagged stale (citing the live superseder when there is one) rather than honored
+silently. Diff mode SHALL report only findings beyond the baseline in `findings[]`, listing
+baseline-matched findings as `accepted` (with their justification) rather than omitting them;
+the verdict, per-class summary, and suggested bump SHALL still count an accepted breaking change.
+A baseline that cannot be read or parsed SHALL honor no acceptance and SHALL say why, and the accept
+operation SHALL NOT overwrite it. The baseline SHALL stay trackable by Git while the rest of
+`.openlore/` stays ignored, through the same managed `.gitignore` block as the enforcement baseline.
+This baseline is the surface-specific complement of the generic frozen-class ratchet
+(`EnforcementBaselineRatchet`); the two share the `code` + `subject` identity vocabulary and
+compose rather than compete.
+
+- **Implementation**: `applyAcceptedBaseline::src/core/services/mcp-handlers/public-surface-baseline.ts`
 
 #### Scenario: Acceptance requires a reason
 
@@ -24,8 +36,8 @@ the two share the code + subject identity vocabulary and compose rather than com
 
 - **GIVEN** a baseline entry for `export-removed` on symbol `parseLegacy` with a justification
 - **WHEN** the same finding fires on a later run
-- **THEN** it is reported as `accepted` (with the justification), contributes no blocking
-  finding, and any NEW breaking finding still reports normally
+- **THEN** it is reported as `accepted` (with the justification), contributes no finding to
+  `findings[]`, and any NEW breaking finding still reports normally
 
 #### Scenario: A superseded decision anchor expires the acceptance
 
@@ -34,15 +46,26 @@ the two share the code + subject identity vocabulary and compose rather than com
 - **THEN** the acceptance is flagged stale (citing the live superseder) instead of silently
   suppressing the finding
 
+#### Scenario: A corrupt baseline honors nothing
+
+- **GIVEN** a baseline file with an invalid record
+- **WHEN** the verdict is assembled
+- **THEN** every breaking finding is reported, and the baseline block states why no acceptance
+  was honored
+
 ### Requirement: ConsumerWeightedBreakingVerdicts
 
-The `breaking` class SHALL be split into `breaking-consumed` (at least one indexed consumer binds
-the symbol; the consumer list and fan-in are the evidence) and `breaking-unconsumed-in-index`
-(zero indexed consumers). The external/unindexed-consumer boundary SHALL remain disclosed on both
-splits — zero indexed consumers is NEVER presented as "safe". Under the federation preset,
-consumers in indexed sibling repos SHALL count toward `breaking-consumed` via the existing
-cross-repo consumer resolution; without federation, the disclosure SHALL honestly state that
-only in-repo consumers were checked.
+Each breaking change SHALL carry a split class: `breaking-consumed` (at least one indexed consumer
+binds the symbol; the consumer list and the consumer count are the evidence) or
+`breaking-unconsumed-in-index` (zero indexed consumers). The change's `breaking` class, the overall
+verdict, and the suggested bump SHALL be unchanged by the split. The external/unindexed-consumer
+boundary SHALL remain disclosed on both splits — zero indexed consumers is NEVER presented as
+"safe". With federation scope requested, consumers in indexed sibling repos SHALL count toward
+`breaking-consumed` via the existing cross-repo consumer resolution (matched by symbol name), and
+the verdict SHALL name the repos consulted and skipped; without federation scope, the disclosure
+SHALL honestly state that only in-repo consumers were checked.
+
+- **Implementation**: `assembleSurfaceDiff::src/core/services/mcp-handlers/public-surface.ts`
 
 #### Scenario: A consumed break names its consumers
 

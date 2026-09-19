@@ -430,7 +430,7 @@ interface DecisionReceipt {
  *
  * Pure decision-store read, no LLM (north star `c6d1ad07`).
  */
-async function verifyDecisionCurrent(absDir: string, subject: string): Promise<unknown> {
+export async function verifyDecisionCurrent(absDir: string, subject: string): Promise<unknown> {
   const claim = { kind: 'decision-current' as const, subject };
   const cleanBoundary = assembleBoundary({});
   const id = subject.trim().toLowerCase();

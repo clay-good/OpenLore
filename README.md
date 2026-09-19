@@ -245,7 +245,7 @@ Memory makes an agent fast. Governance makes it *safe*. As agents get more auton
 | Guardrail | What it certifies | Run it |
 |---|---|---|
 | **`change_impact_certificate`** | Whether a diff **newly opens a path into a sensitive boundary you declared** — reachable *after* the change but not before — plus blast radius, drifted specs, and tests to run. | `openlore impact-certificate --base main` |
-| **`certify_public_surface`** | A breaking-change verdict per changed export, each break paired with the in-repo consumers it hits. What it can't prove safe is never called safe. | `openlore certify-public-surface --base main` |
+| **`certify_public_surface`** | A breaking-change verdict per changed export, each break paired with the consumers it hits (`--federation` adds sibling repos). Intended breaks can be accepted with a justification. What it can't prove safe is never called safe. | `openlore certify-public-surface --base main` |
 | **`check_architecture`** | "May a file under A import B?" plus required dependencies, cycles, reachability, orphans, and instability checks — deterministic and cross-language. | declare rules in `.openlore/architecture.json` |
 | **`verify_claim`** | A `confirmed / refuted / unverifiable` verdict **with a citation receipt** before an agent asserts "X is dead" or "decision `abc12345` still governs this." | MCP tool (`verify` preset) |
 | **`openlore enforce`** | One commit gate over **every** governance finding. Map each finding → `blocking / frozen / advisory / off`; `frozen` adopts existing debt but blocks new findings. | `openlore enforce --hook` |

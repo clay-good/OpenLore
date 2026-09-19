@@ -48,6 +48,10 @@ export const OPENLORE_CONFIG_REL_PATH = `${OPENLORE_DIR}/${OPENLORE_CONFIG_FILEN
 export const ENFORCEMENT_BASELINE_FILENAME = 'enforcement-baseline.jsonl';
 export const ENFORCEMENT_BASELINE_REL_PATH = `${OPENLORE_DIR}/${ENFORCEMENT_BASELINE_FILENAME}`;
 
+/** Version-controlled accepted public-surface breakages (change: add-public-surface-acceptance-baseline). */
+export const PUBLIC_SURFACE_BASELINE_FILENAME = 'public-surface-baseline.jsonl';
+export const PUBLIC_SURFACE_BASELINE_REL_PATH = `${OPENLORE_DIR}/${PUBLIC_SURFACE_BASELINE_FILENAME}`;
+
 /** Relative path to the analysis output directory */
 export const OPENLORE_ANALYSIS_REL_PATH = `${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`;
 
