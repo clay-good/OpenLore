@@ -7,8 +7,9 @@
 The system SHALL support recording intentionally accepted breaking changes in a checked-in,
 human-readable baseline at `.openlore/public-surface-baseline.jsonl`: a fixed header line, then one
 sorted JSON record per accepted breakage naming the rule code, the subject (`file::symbol`), the
-finding's discriminator (which break: the canonical before and after contract — parameter and
-return types, not names or formatting — or the removed contract, or the rename target), a
+finding's discriminator (which break: the canonical before and after contract — parameter names,
+types, and return type, without formatting or comments — or the removed contract or declaration,
+or the rename target), a
 justification, and an optional decision id. An entry SHALL match only a finding with the same
 code, subject, and discriminator, so accepting one break never hides a later, different break of
 the same rule on the same symbol. Only breaking-classed public-surface rule codes SHALL
@@ -24,10 +25,9 @@ baseline-matched findings as `accepted` (with their justification) rather than o
 the verdict, per-class summary, and suggested bump SHALL still count an accepted breaking change.
 A baseline that cannot be read or parsed SHALL honor no acceptance and SHALL say why, and the accept
 operation SHALL NOT overwrite it, nor accept findings computed against a fallback base. The baseline
-SHALL stay trackable by Git while the rest of `.openlore/` (including `config.json`) stays ignored:
-`.gitignore` SHALL be changed only when Git would otherwise ignore the file, through a managed block
-of its own placed last, and verified with Git (restored exactly on failure); the enforcement
-ratchet's block SHALL NOT be edited.
+operation SHALL NOT edit `.gitignore`: it SHALL report whether Git tracks, would track, or ignores
+the baseline, and for an ignored baseline give the one command that adds it, so no ignore rule
+change can expose another `.openlore/` file such as `config.json`.
 This baseline is the surface-specific complement of the generic frozen-class ratchet
 (`EnforcementBaselineRatchet`); the two share the `code` + `subject` identity vocabulary and
 compose rather than compete.
@@ -78,7 +78,10 @@ the symbol under the name it had at the base: resolved callers; files that impor
 import its module whole (a default, namespace, or module import, labeled as possible use); and —
 for a symbol no longer defined under that name — unresolved calls to it from those files or its
 own file. Each consumer is labeled with how it binds. A caller already on a renamed symbol's new
-name, and a caller in the same file as a symbol whose export was only removed, SHALL NOT count. The change's `breaking` class, the overall
+name, and a caller in the same file as a symbol whose export was only removed, SHALL NOT count.
+The census SHALL say where its import evidence came from and what it cannot see (imports the
+analyzer does not resolve, aliased re-exports), and SHALL work from a checkout moved after the
+index was built. The change's `breaking` class, the overall
 verdict, and the suggested bump SHALL be unchanged by the split. The external/unindexed-consumer
 boundary SHALL remain disclosed on both splits — zero indexed consumers is NEVER presented as
 "safe". With federation scope requested, consumers in indexed sibling repos SHALL count toward

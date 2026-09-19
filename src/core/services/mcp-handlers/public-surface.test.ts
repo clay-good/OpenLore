@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileGitSync } from '../../../utils/git-exec.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assembleSurfaceDiff, computeCertifyPublicSurface, publicSurfaceFindings } from './public-surface.js';
+import { assembleSurfaceDiff, breakDiscriminator, computeCertifyPublicSurface, publicSurfaceFindings } from './public-surface.js';
 import { getChangedFiles } from '../../drift/git-diff.js';
 import { FINDING_CODE_REGISTRY, resolveEnforcementClass } from './enforcement-policy.js';
 import { BREAKING_SURFACE_RULE_CODES } from '../../analyzer/public-surface.js';
@@ -605,7 +605,8 @@ describe('certify_public_surface diff mode: federation census and accepted basel
 
   it('without a baseline or federation: in-repo census, every break is a finding, no baseline block', async () => {
     const r = await run();
-    expect(r.consumerCensus).toEqual({ scope: 'in-repo' });
+    expect(r.consumerCensus).toMatchObject({ scope: 'in-repo', importEvidence: 'unavailable' });
+    expect((r.consumerCensus as { inRepoCaveat?: string }).inRepoCaveat).toMatch(/resolved calls only/);
     expect(r.baseline).toBeUndefined();
     expect(r.findings.map((f) => f.subject).sort()).toEqual(['a.ts::other', 'a.ts::parseLegacy']);
     expect(r.summary).toMatchObject({ breaking: 2, breakingConsumed: 0, breakingUnconsumedInIndex: 2, accepted: 0 });
@@ -637,7 +638,7 @@ describe('certify_public_surface diff mode: federation census and accepted basel
     await writeAcceptedBreakages(dir, legacyFinding(await run()), 'legacy parser retired in v3');
     const r = await run();
     expect(r.findings.map((f) => f.subject)).toEqual(['a.ts::other']);
-    expect(r.baseline?.accepted).toEqual([{ code: 'export-removed', subject: 'a.ts::parseLegacy', discriminator: 'was (string)=>string', justification: 'legacy parser retired in v3' }]);
+    expect(r.baseline?.accepted).toEqual([{ code: 'export-removed', subject: 'a.ts::parseLegacy', discriminator: 'was (s:string)=>string', justification: 'legacy parser retired in v3' }]);
     expect(r.summary).toMatchObject({ breaking: 2, accepted: 1 });
     // The verdict still describes the diff honestly: the accepted break is still breaking.
     expect(r.breaking.map((b) => b.name).sort()).toEqual(['other', 'parseLegacy']);
@@ -686,11 +687,14 @@ describe('certify_public_surface diff mode: federation census and accepted basel
     expect(r.summary).toMatchObject({ breakingConsumed: 1, breakingUnconsumedInIndex: 1 });
   });
 
-  const depGraph = async (edges: Array<{ source: string; target: string; importedNames: string[]; importedSourceNames?: string[] | null }>): Promise<void> => {
+  const depGraph = async (
+    edges: Array<{ source: string; target: string; importedNames: string[]; importedSourceNames?: string[] | null }>,
+    nodes: Array<{ file: { path: string }; exports?: unknown[] }> = [],
+  ): Promise<void> => {
     const real = await realpath(dir);
     await mkdir(join(dir, OPENLORE_DIR, 'analysis'), { recursive: true });
     await writeFile(join(dir, OPENLORE_DIR, 'analysis', 'dependency-graph.json'), JSON.stringify({
-      nodes: [], edges: edges.map((e) => ({
+      nodes, edges: edges.map((e) => ({
         source: join(real, e.source), target: join(real, e.target), importedNames: e.importedNames,
         ...(e.importedSourceNames === null ? {} : { importedSourceNames: e.importedSourceNames ?? e.importedNames }),
       })),
@@ -771,8 +775,11 @@ describe('certify_public_surface diff mode: federation census and accepted basel
       { source: 'alias.ts', target: 'a.ts', importedNames: ['p'], importedSourceNames: ['parseLegacy'] },
       { source: 'ns.ts', target: 'a.ts', importedNames: ['A'], importedSourceNames: null },
       { source: 'decoy.ts', target: 'a.ts', importedNames: ['other'], importedSourceNames: ['keep'] },
-      { source: 'index.ts', target: 'a.ts', importedNames: ['parseLegacy'] },
       { source: 'app.ts', target: 'index.ts', importedNames: ['parseLegacy'] },
+    ], [
+      // The analyzer records a re-export on the barrel's node, not as an edge.
+      { file: { path: 'a.ts' } },
+      { file: { path: 'index.ts' }, exports: [{ name: 'parseLegacy', isReExport: true, reExportSource: './a.js' }] },
     ]);
     const r = await run();
     const legacy = r.breaking.find((b) => b.name === 'parseLegacy')!;
@@ -817,5 +824,76 @@ describe('certify_public_surface diff mode: federation census and accepted basel
     const r = await run({ federation: true });
     expect((r.consumerCensus as { truncated?: number }).truncated).toBe(15);
     expect(r.breaking.find((b) => b.name === 'parseLegacy')).toMatchObject({ consumerCount: 40, crossRepoConsumersTruncated: 15 });
+  });
+
+  it('still reads the import census when the checkout moved after the index was built', async () => {
+    const elsewhere = '/somewhere/else/repo';
+    await mkdir(join(dir, OPENLORE_DIR, 'analysis'), { recursive: true });
+    await writeFile(join(dir, OPENLORE_DIR, 'analysis', 'dependency-graph.json'), JSON.stringify({
+      nodes: [{ id: `${elsewhere}/a.ts`, file: { path: 'a.ts', absolutePath: `${elsewhere}/a.ts` } }],
+      edges: [{ source: `${elsewhere}/use.ts`, target: `${elsewhere}/a.ts`, importedNames: ['parseLegacy'], importedSourceNames: ['parseLegacy'] }],
+    }));
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')!.consumers).toEqual([{ id: 'use.ts', name: 'use.ts', file: 'use.ts', via: 'import' }]);
+  });
+
+  it('counts `from . import mod` as a whole-module import of the submodule', async () => {
+    await mkdir(join(dir, 'pkg'), { recursive: true });
+    await writeFile(join(dir, 'pkg', 'types.py'), 'class BoolParamType:\n    pass\n\ndef keep() -> None:\n    pass\n');
+    execFileGitSync('git', ['-C', dir, 'add', 'pkg/types.py']);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-m', 'py']);
+    await writeFile(join(dir, 'pkg', 'types.py'), 'def keep() -> None:\n    pass\n');
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'pkg/types.py', status: 'modified' }], resolvedBase: 'main' } as never);
+    await depGraph([{ source: 'pkg/core.py', target: 'pkg/__init__.py', importedNames: ['types'] }], [
+      { file: { path: 'pkg/__init__.py' } }, { file: { path: 'pkg/types.py' } }, { file: { path: 'pkg/core.py' } },
+    ]);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'BoolParamType')!.consumers).toEqual([{ id: 'pkg/core.py', name: 'pkg/core.py', file: 'pkg/core.py', via: 'module-import' }]);
+    expect(r.consumerCensus).toMatchObject({ importEvidence: 'dependency-graph' });
+  });
+
+  it('follows an `export *` barrel', async () => {
+    await depGraph([{ source: 'app.ts', target: 'lib/index.ts', importedNames: ['other'] }], [
+      { file: { path: 'a.ts' } },
+      { file: { path: 'lib/index.ts' }, exports: [{ name: '*', isReExport: true, reExportSource: '../a' }] },
+    ]);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'other')!.consumers?.map((c) => [c.id, c.via])).toEqual([['app.ts', 'import'], ['lib/index.ts', 'import']]);
+  });
+
+  it('counts consumers keyed by the old path when the defining file was renamed', async () => {
+    execFileGitSync('git', ['-C', dir, 'mv', 'a.ts', 'b.ts']);
+    await writeFile(join(dir, 'b.ts'), A_HEAD);
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'b.ts', oldPath: 'a.ts', status: 'renamed' }], resolvedBase: 'main' } as never);
+    await depGraph([{ source: 'use.ts', target: 'a.ts', importedNames: ['other'] }]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      callGraph: { nodes: [] },
+      edgeStore: { getCallers: (id: string) => (id === 'a.ts::parseLegacy' ? [{ callerId: 'x.ts::call' }] : []) },
+    } as never);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')!.consumers?.map((c) => c.id)).toEqual(['x.ts::call']);
+    expect(r.breaking.find((b) => b.name === 'other')!.consumers?.map((c) => c.id)).toEqual(['use.ts']);
+  });
+});
+
+describe('break discriminators (add-public-surface-acceptance-baseline)', () => {
+  const sig = (before: string, after: string, file = 'a.js') =>
+    breakDiscriminator({ changeKind: 'signature', class: 'breaking', name: 'f', file, kind: 'function', before, after, reasons: [], ruleCodes: [] });
+
+  it('keeps parameter names, so different untyped breaks differ', () => {
+    expect(sig('function f(a, b)', 'function f(a)')).not.toBe(sig('function f(a, b)', 'function f(b)'));
+    expect(sig('def f(a, *args)', 'def f(a)', 'a.py')).not.toBe(sig('def f(a, b)', 'def f(a)', 'a.py'));
+  });
+
+  it('ignores formatting and comments', () => {
+    const plain = sig('function f(a: string | number, b?: number): number', 'function f(a: string, b?: number): number', 'a.ts');
+    expect(sig('function f(a: string | number, b?: number): number', 'function f(\n  a: string /* opt */,\n  b?: number,\n): number', 'a.ts')).toBe(plain);
+  });
+
+  it('pins a name-level removal to its base declaration, so a different declaration removed later differs', async () => {
+    const r1 = await assembleSurfaceDiff([ts('a.ts', 'export const LIMIT = 10;\n')], [ts('a.ts', '\n')], noRename);
+    const r2 = await assembleSurfaceDiff([ts('a.ts', 'export const LIMIT: number = computeLimit();\n')], [ts('a.ts', '\n')], noRename);
+    expect(r1.findings[0].discriminator).toBe('was export const LIMIT = 10;');
+    expect(r2.findings[0].discriminator).not.toBe(r1.findings[0].discriminator);
   });
 });

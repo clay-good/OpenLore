@@ -13,16 +13,15 @@
  * baseline can never hide a breaking change. Only the CLI writes the file.
  */
 
-import { realpath, unlink } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Stats } from 'node:fs';
 import { OPENLORE_DIR, PUBLIC_SURFACE_BASELINE_FILENAME, PUBLIC_SURFACE_BASELINE_REL_PATH } from '../../../constants.js';
 import { confinedAtomicWriteFile, readFileConfinedWithStat } from '../../../utils/path-confinement.js';
 import { acquireLockAt } from '../../runtime/advisory-lock.js';
 import { BREAKING_SURFACE_RULE_CODES } from '../../analyzer/public-surface.js';
-import { readFileBoundedNoFollow } from './enforcement-baseline.js';
-import { atomicWriteFile } from '../../decisions/atomic-store.js';
 import { execFileGit } from '../../../utils/git-exec.js';
+import { gitPathArgs } from '../../../utils/git-args.js';
 import type { GovernanceFinding } from './enforcement-policy.js';
 
 const BASELINE_HEADER = '# OpenLore accepted public-surface breakages v1';
@@ -44,16 +43,6 @@ export interface AcceptedBreakage {
 
 type AcceptRecord = ['accept', string, string, string, string, string];
 
-const GITIGNORE_MARKER = '# openlore-public-surface-baseline';
-const GITIGNORE_END_MARKER = '# end-openlore-public-surface-baseline';
-/**
- * Enough when `.openlore/` itself is not excluded as a directory (for example after the enforcement
- * ratchet's block, which un-ignores it and re-ignores its contents): re-ignores nothing.
- */
-const GITIGNORE_SHORT_BLOCK = [GITIGNORE_MARKER, `!.openlore/${PUBLIC_SURFACE_BASELINE_FILENAME}`, GITIGNORE_END_MARKER];
-/** When `.openlore/` is excluded as a directory: expose only this file. `config.json` stays ignored. */
-const GITIGNORE_FULL_BLOCK = [GITIGNORE_MARKER, '!.openlore/', '.openlore/*', `!.openlore/${PUBLIC_SURFACE_BASELINE_FILENAME}`, GITIGNORE_END_MARKER];
-const MAX_GITIGNORE_BYTES = 1_048_576;
 
 /** Whether an anchored decision is still current, from the decision store. */
 export type DecisionCurrency =
@@ -230,12 +219,23 @@ export async function readAcceptedBaseline(rootPath: string): Promise<BaselineRe
   return { entries: parseAcceptedBaseline(read.content), present: true, text: read.content, stat: read.stat };
 }
 
+/**
+ * Whether Git will pick the baseline up. `.gitignore` is never edited (a `.openlore/` rule is the
+ * common case, and rewriting ignore rules in a cloned repository can expose `.openlore/config.json`).
+ * An ignored baseline needs one `git add -f`; once tracked, ignore rules no longer apply to it.
+ */
+export type BaselineGitTracking =
+  | { state: 'tracked' | 'trackable' | 'not-a-git-work-tree' }
+  | { state: 'ignored'; addCommand: string }
+  | { state: 'unknown'; reason: string };
+
 export interface AcceptResult {
   path: string;
   added: AcceptedBreakage[];
   /** Existing entries re-accepted with a new justification or decision, with what they were before. */
   replaced: Array<{ before: AcceptedBreakage; after: AcceptedBreakage }>;
   written: boolean;
+  git: BaselineGitTracking;
 }
 
 /**
@@ -244,7 +244,7 @@ export interface AcceptResult {
  * anchored to a decision is replaced only by another decision-anchored acceptance, so re-accepting
  * never silently turns an expiring acceptance into a permanent one. Serialized under an advisory
  * lock and written with compare-and-swap against the bytes read, so a concurrent edit is refused
- * instead of lost. Makes the file trackable by Git under the managed `.gitignore` block.
+ * instead of lost. Reports whether Git will pick the file up; never edits `.gitignore`.
  */
 export async function writeAcceptedBreakages(
   rootPath: string,
@@ -291,89 +291,43 @@ export async function writeAcceptedBreakages(
       );
     }
     if (added.length === 0 && replaced.length === 0) {
-      return { path: PUBLIC_SURFACE_BASELINE_REL_PATH, added, replaced, written: false };
+      return { path: PUBLIC_SURFACE_BASELINE_REL_PATH, added, replaced, written: false, git: await baselineGitTracking(canonicalRoot) };
     }
     const next = serializeAcceptedBaseline([...byIdentity.values()]);
     if (Buffer.byteLength(next, 'utf8') > MAX_BASELINE_BYTES) {
       throw new Error(`the baseline would exceed the ${MAX_BASELINE_BYTES} byte safety limit`);
     }
-    const restoreGitignore = await ensureBaselineTrackable(canonicalRoot);
-    try {
-      await confinedAtomicWriteFile(canonicalRoot, join(canonicalRoot, PUBLIC_SURFACE_BASELINE_REL_PATH), next, {
-        expectedIdentity: existing.present ? existing.stat : null,
-        ...(existing.present ? { expectedContent: existing.text } : {}),
-      });
-    } catch (error) {
-      await restoreGitignore();
-      throw error;
-    }
-    return { path: PUBLIC_SURFACE_BASELINE_REL_PATH, added, replaced, written: true };
+    await confinedAtomicWriteFile(canonicalRoot, join(canonicalRoot, PUBLIC_SURFACE_BASELINE_REL_PATH), next, {
+      expectedIdentity: existing.present ? existing.stat : null,
+      ...(existing.present ? { expectedContent: existing.text } : {}),
+    });
+    return { path: PUBLIC_SURFACE_BASELINE_REL_PATH, added, replaced, written: true, git: await baselineGitTracking(canonicalRoot) };
   } finally {
     await lock.release();
   }
 }
 
-/**
- * Keep the rest of `.openlore/` ignored while making this one file trackable, touching `.gitignore`
- * only when Git would otherwise ignore the file. The enforcement ratchet's managed block is never
- * edited (older OpenLore versions check it byte for byte). This file's own block is found by its
- * whole-line markers, dropped, and re-appended at the end — Git applies the last matching rule, so
- * a later `.openlore/` rule or ratchet block would otherwise re-ignore the file — first in its
- * one-line form, then, if Git still ignores the file, in its full form. Each candidate is checked
- * with Git, and any failure restores `.gitignore` exactly. Line endings are preserved. Returns a
- * function that restores the original `.gitignore` (the caller's later write may still fail).
- */
-async function ensureBaselineTrackable(rootPath: string): Promise<() => Promise<void>> {
-  const noop = async (): Promise<void> => {};
-  if (!(await insideWorkTree(rootPath)) || !(await isIgnored(rootPath))) return noop;
-  const path = join(rootPath, '.gitignore');
-  let original: string | null = null;
-  try {
-    original = await readFileBoundedNoFollow(path, MAX_GITIGNORE_BYTES, '.gitignore');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  const restore = async (): Promise<void> => {
-    if (original === null) await unlink(path).catch(() => {});
-    else await atomicWriteFile(path, original);
+/** Ask Git whether the baseline is tracked, trackable, or ignored. Never throws. */
+export async function baselineGitTracking(rootPath: string): Promise<BaselineGitTracking> {
+  const git = (args: string[]): Promise<{ stdout: string }> => execFileGit('git', args, { cwd: rootPath, maxBuffer: 65_536 });
+  const failure = (error: unknown): string => {
+    const e = error as { stderr?: unknown; message?: unknown };
+    return String(typeof e.stderr === 'string' && e.stderr.trim() ? e.stderr : e.message ?? error).replace(/\s+/g, ' ').trim().slice(0, 300);
   };
-  const eol = original?.includes('\r\n') ? '\r\n' : '\n';
-  const lines = (original ?? '').replace(/\r\n/g, '\n').split('\n');
-  const starts = lines.flatMap((line, i) => (line.trim() === GITIGNORE_MARKER ? [i] : []));
-  const ends = lines.flatMap((line, i) => (line.trim() === GITIGNORE_END_MARKER ? [i] : []));
-  if (starts.length > 1 || ends.length > 1 || starts.length !== ends.length || (starts.length === 1 && starts[0] > ends[0])) {
-    throw new Error('managed .gitignore public-surface-baseline block is malformed or duplicated');
-  }
-  const kept = (starts.length === 1 ? [...lines.slice(0, starts[0]), ...lines.slice(ends[0] + 1)] : lines).join('\n').trimEnd();
   try {
-    for (const block of [GITIGNORE_SHORT_BLOCK, GITIGNORE_FULL_BLOCK]) {
-      await atomicWriteFile(path, `${kept}${kept ? '\n\n' : ''}${block.join('\n')}\n`.replace(/\n/g, eol));
-      if (!(await isIgnored(rootPath))) return restore;
-    }
+    const { stdout } = await git(['rev-parse', '--is-inside-work-tree']);
+    if (stdout.trim() !== 'true') return { state: 'not-a-git-work-tree' };
   } catch (error) {
-    await restore();
-    throw error;
+    const reason = failure(error);
+    return /not a git repository/i.test(reason) ? { state: 'not-a-git-work-tree' } : { state: 'unknown', reason };
   }
-  await restore();
-  throw new Error(`${PUBLIC_SURFACE_BASELINE_REL_PATH} remains ignored by a higher-precedence Git ignore rule (a nested .gitignore or .git/info/exclude)`);
-}
-
-async function insideWorkTree(rootPath: string): Promise<boolean> {
   try {
-    const { stdout } = await execFileGit('git', ['rev-parse', '--is-inside-work-tree'], { cwd: rootPath, maxBuffer: 4_096 });
-    return stdout.trim() === 'true';
-  } catch {
-    return false; // not a Git work tree: nothing to make trackable
-  }
-}
-
-/** Would Git ignore the baseline if it were untracked? */
-async function isIgnored(rootPath: string): Promise<boolean> {
-  try {
-    await execFileGit('git', ['check-ignore', '--no-index', '-q', '--', PUBLIC_SURFACE_BASELINE_REL_PATH], { cwd: rootPath, maxBuffer: 4_096 });
-    return true;
+    const { stdout } = await git(gitPathArgs('ls-files', '--', PUBLIC_SURFACE_BASELINE_REL_PATH));
+    if (stdout.trim()) return { state: 'tracked' };
+    await git(['check-ignore', '--no-index', '-q', '--', PUBLIC_SURFACE_BASELINE_REL_PATH]);
+    return { state: 'ignored', addCommand: `git add -f ${PUBLIC_SURFACE_BASELINE_REL_PATH}` };
   } catch (error) {
-    if ((error as { code?: unknown }).code === 1) return false;
-    throw error;
+    if ((error as { code?: unknown }).code === 1) return { state: 'trackable' };
+    return { state: 'unknown', reason: failure(error) };
   }
 }

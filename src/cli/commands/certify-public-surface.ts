@@ -247,7 +247,14 @@ async function acceptFindings(cwd: string, opts: CertifyPublicSurfaceCliOptions,
     for (const { before, after } of written.replaced) {
       lines.push(`   • re-accepted ${after.code}  ${after.subject}${before.decision !== after.decision ? `  (decision ${before.decision ?? 'none'} → ${after.decision ?? 'none'})` : ''}`);
     }
-    lines.push('   Commit this file so the acceptance is reviewed with the change.', '');
+    if (written.git.state === 'ignored') {
+      lines.push(`   Git ignores this file (a .gitignore rule). Add it once so the acceptance is reviewed with the change:`, `     ${written.git.addCommand}`);
+    } else if (written.git.state === 'unknown') {
+      lines.push(`   ⚠ Could not ask Git whether it will pick this file up (${oneLine(written.git.reason)}). Check \`git status\`.`);
+    } else if (written.git.state !== 'not-a-git-work-tree') {
+      lines.push('   Commit this file so the acceptance is reviewed with the change.');
+    }
+    lines.push('');
     await writeStdout(lines.join('\n') + '\n');
   }
   return 0;

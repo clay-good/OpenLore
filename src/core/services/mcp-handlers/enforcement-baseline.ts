@@ -24,8 +24,7 @@ type CodeRecord = ['code', string];
 type FindingRecord = ['finding', string, string, string];
 type BaselineRecord = CodeRecord | FindingRecord;
 
-/** Exported so the public-surface baseline can place its own managed block after this one. */
-export const GITIGNORE_MARKER = '# openlore-enforcement-baseline';
+const GITIGNORE_MARKER = '# openlore-enforcement-baseline';
 const GITIGNORE_END_MARKER = '# end-openlore-enforcement-baseline';
 const GITIGNORE_BLOCK = `${GITIGNORE_MARKER}
 !.openlore/
@@ -117,7 +116,7 @@ function serializeBaseline(records: readonly BaselineRecord[]): string {
   return BASELINE_HEADER + '\n' + unique.map(recordKey).join('\n') + '\n';
 }
 
-export async function readFileBoundedNoFollow(path: string, maxBytes: number, label: string): Promise<string> {
+async function readFileBoundedNoFollow(path: string, maxBytes: number, label: string): Promise<string> {
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const handle = await open(path, fsConstants.O_RDONLY | noFollow);
   try {
