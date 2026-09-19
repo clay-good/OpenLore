@@ -31,6 +31,16 @@ import {
   loadDynamicBoundaryReport,
   dynamicBoundaryCrossing,
 } from './dynamic-boundary-disclosure.js';
+import {
+  computeSymbolChangedSet,
+  coverSeedFiles,
+  granularityCaveat,
+  granularityReceipt,
+  narrowSeedsToChangedSymbols,
+  type ChangeGranularityReceipt,
+  type DiffEntry,
+  type SymbolChangedSet,
+} from '../symbol-changed-set.js';
 
 export interface SelectTestsInput {
   directory: string;
@@ -239,6 +249,10 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   let untrackedAssessed = true;
   /** Untracked test files past {@link MAX_UNTRACKED_TIER_FILES}, disclosed rather than dropped silently. */
   let untrackedOmitted = 0;
+  /** How precise the diff's changed-set was (change: add-symbol-content-hashes). Diff path only. */
+  let changeGranularity: ChangeGranularityReceipt | undefined;
+  /** Production symbols in the changed files before narrowing to the ones that changed. */
+  let fileSeedCount = 0;
   if (hasSymbols) {
     const resolution = resolveSymbolSeeds(cg, input.changedSymbols!);
     seeds = resolution.seeds;
@@ -248,7 +262,11 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       const { getChangedFiles } = await import('../../drift/git-diff.js');
       const diff = await getChangedFiles({ rootPath: absDir, baseRef, includeUnstaged: true });
       changedFiles = diff.files.map(f => f.path);
-      seeds = seedsFromFiles(cg, changedFiles);
+      const fileSeeds = seedsFromFiles(cg, changedFiles);
+      fileSeedCount = fileSeeds.length;
+      const narrowed = await narrowToChangedSymbols(absDir, baseRef, diff.files, cg, fileSeeds);
+      seeds = narrowed.seeds;
+      changeGranularity = narrowed.receipt;
       // A test file the diff touched, or a new untracked one, is selected on its own standing — not
       // only if reachability happens to reach it. Only a file the analyzer's own rule calls a test, inside
       // the analyzed directory, and still on disk: a fixture under `test/`, another package's test, or a
@@ -290,7 +308,10 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       selectedTests: [],
       message: hasSymbols
         ? 'No matching production functions found for the given symbols.'
-        : `No changed production functions vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`,
+        : fileSeedCount > 0
+          ? `The diff changes no production symbol vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}: every edit in the changed code files was formatting or comments only (their normalized content hashes are equal), so no test is reached.`
+          : `No changed production functions vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`,
+      ...(changeGranularity ? { changeGranularity } : {}),
       ...(defaultedToHead ? { note: 'Called without changedSymbols/diffRef — diffed the working tree against HEAD. Pass changedSymbols or diffRef to target a specific change.' } : {}),
       ...(federationRequested ? { federationNote: 'Federation scope was requested, but no changed production symbol resolved in the home repo — cross-repo test selection keys off the home repo\'s changed published symbols, so nothing was propagated. Pass changedSymbols (or a diffRef with code changes) to select across the fleet.' } : {}),
       soundness: {
@@ -526,6 +547,8 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     caveats.push('Some seeds had no reaching test; sibling-file tests were included at low confidence (likely newly-added or untested functions).');
   }
   if (!untrackedAssessed) caveats.push(UNTRACKED_NOT_ASSESSED);
+  const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
+  if (granularityNote) caveats.push(granularityNote);
   if (untrackedOmitted > 0) {
     caveats.push(`${untrackedOmitted} more untracked test file(s) beyond the first ${MAX_UNTRACKED_TIER_FILES} were not selected; commit or ignore generated test files, or run the full suite.`);
   }
@@ -579,6 +602,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   return {
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
+    ...(changeGranularity ? { changeGranularity } : {}),
     selectedTests,
     ...(truncatedAtDepth !== undefined ? { truncatedAtDepth } : {}),
     ...(defaultedToHead ? { note: 'No changedSymbols/diffRef given — selected tests for your current working-tree changes vs HEAD.' } : {}),
@@ -598,6 +622,30 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
     }),
   };
+}
+
+/**
+ * Narrow a diff's file-level seeds to the production symbols that changed (change:
+ * add-symbol-content-hashes). Shared by `select_tests`, `blast_radius` and `briefing_since` so they
+ * agree on the changed-set. Fail-soft: a file the changed-set could not assess keeps all its seeds and
+ * is named in the receipt as `not-assessed`.
+ */
+export async function narrowToChangedSymbols(
+  absDir: string,
+  baseRef: string,
+  diff: readonly DiffEntry[],
+  cg: SerializedCallGraph,
+  fileSeeds: FunctionNode[],
+): Promise<{ seeds: FunctionNode[]; receipt?: ChangeGranularityReceipt; set?: SymbolChangedSet }> {
+  if (fileSeeds.length === 0) return { seeds: fileSeeds };
+  let set: SymbolChangedSet;
+  try {
+    set = await computeSymbolChangedSet({ absDir, baseRef, diff, callGraph: cg });
+  } catch {
+    set = { byFile: new Map(), carried: [] };
+  }
+  set = coverSeedFiles(set, fileSeeds);
+  return { seeds: narrowSeedsToChangedSymbols(fileSeeds, set), receipt: granularityReceipt(set), set };
 }
 
 /**

@@ -19,7 +19,8 @@
  */
 
 import { validateDirectory, readCachedContext } from './utils.js';
-import { seedsFromFiles, handleSelectTests } from './test-impact.js';
+import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
+import { granularityCaveat, type ChangeGranularityReceipt } from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -97,6 +98,12 @@ export interface BlastRadiusBriefing {
    * HEAD~1); a caveat is emitted when they differ. */
   resolvedBaseRef: string;
   changed: { files: number; symbols: number; symbolNames: string[] };
+  /**
+   * How precisely the changed symbols were identified (change: add-symbol-content-hashes): files
+   * whose changed symbols are exact, and files kept whole with the reason. Absent when the diff
+   * named no file with production symbols.
+   */
+  changeGranularity?: ChangeGranularityReceipt;
   impact: {
     highestRiskLevel: RiskLevel | 'none';
     maxAffectedCallers: number;
@@ -202,6 +209,7 @@ export async function computeBlastRadius(
 
   // ── 1. Resolve the diff → changed files → seed production symbols ───────────
   let changedFiles: string[];
+  let diffEntries: Awaited<ReturnType<typeof import('../../drift/git-diff.js')['getChangedFiles']>>['files'];
   // Resolve-or-disclose through the one shared helper (fix-cli-conclusion-honesty):
   // an explicit ref that git can't resolve falls back (main → master → HEAD~1) and is
   // disclosed, so the advisory briefing never misrepresents the base it diffed against.
@@ -214,12 +222,16 @@ export async function computeBlastRadius(
     baseFellBack = base.fellBack;
     const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBaseRef, includeUnstaged: true });
     changedFiles = diff.files.map(f => f.path);
+    diffEntries = diff.files;
   } catch (err) {
     return { error: `git diff failed (base ${baseRef}): ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  // Rank by fan-in: the highest-fan-in changed symbols dominate the blast radius.
-  const seeds = seedsFromFiles(cg, changedFiles).sort((a, b) => (b.fanIn ?? 0) - (a.fanIn ?? 0));
+  // Narrow to the symbols that changed (change: add-symbol-content-hashes), then rank by fan-in:
+  // the highest-fan-in changed symbols dominate the blast radius.
+  const narrowed = await narrowToChangedSymbols(absDir, resolvedBaseRef, diffEntries, cg, seedsFromFiles(cg, changedFiles));
+  const seeds = narrowed.seeds.sort((a, b) => (b.fanIn ?? 0) - (a.fanIn ?? 0));
+  const changeGranularity = narrowed.receipt;
   const analyzed = seeds.slice(0, maxSymbols);
 
   // ── 2. Impact per top symbol (reuse analyze_impact) ─────────────────────────
@@ -353,6 +365,8 @@ export async function computeBlastRadius(
   if (baseFellBack) {
     caveats.push(`Requested base ref "${baseRef}" did not resolve; diffed against "${resolvedBaseRef}" instead (main → master → HEAD~1 fallback).`);
   }
+  const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
+  if (granularityNote) caveats.push(granularityNote);
   if (seeds.length > analyzed.length) {
     caveats.push(`Impact analyzed the ${analyzed.length} highest-fan-in changed symbols; ${seeds.length - analyzed.length} lower-risk symbols were not individually analyzed.`);
   }
@@ -425,6 +439,7 @@ export async function computeBlastRadius(
       symbols: seeds.length,
       symbolNames: seeds.slice(0, 30).map(s => s.name),
     },
+    ...(changeGranularity ? { changeGranularity } : {}),
     impact: {
       highestRiskLevel,
       maxAffectedCallers,

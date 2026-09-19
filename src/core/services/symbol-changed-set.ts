@@ -67,7 +67,8 @@ export type FileGranularityReason =
   | 'invalid-span'
   | 'unreadable'
   | 'index-mismatch'
-  | 'file-cap';
+  | 'file-cap'
+  | 'not-assessed';
 
 export const FILE_GRANULARITY_REASONS: Record<FileGranularityReason, string> = {
   'language-not-hashed': 'the language has no native parse tree to hash (no extractor, a WASM grammar, or a script container)',
@@ -78,6 +79,7 @@ export const FILE_GRANULARITY_REASONS: Record<FileGranularityReason, string> = {
   'unreadable': 'one side could not be read (missing blob, over the size bound, or a failed read)',
   'index-mismatch': 'the index lists symbols in this file that neither revision extracts to (re-run analyze)',
   'file-cap': `the diff names more than ${MAX_SYMBOL_HASHED_FILES} code files; the rest are not hashed`,
+  'not-assessed': 'the diff path did not map onto this indexed file exactly, or the changed-set could not be computed',
 };
 
 export interface SymbolGranularChange {
@@ -357,6 +359,18 @@ export function narrowSeedsToChangedSymbols(seeds: FunctionNode[], set: SymbolCh
       ...change.referencing, ...change.dynamicDispatch]));
   }
   return seeds.filter(seed => keep.get(seed.filePath)?.has(seed.id) ?? true);
+}
+
+/**
+ * Record every seed file the changed-set did not cover as file-granular `not-assessed`, so the
+ * receipt accounts for each file that contributed seeds. Returns a new set; the input is unchanged.
+ */
+export function coverSeedFiles(set: SymbolChangedSet, seeds: readonly FunctionNode[]): SymbolChangedSet {
+  const byFile = new Map(set.byFile);
+  for (const seed of seeds) {
+    if (!byFile.has(seed.filePath)) byFile.set(seed.filePath, { granularity: 'file', reason: 'not-assessed' });
+  }
+  return { byFile, carried: set.carried };
 }
 
 /** The ids that genuinely changed in a symbol-granular file (for a "what changed" briefing). */
