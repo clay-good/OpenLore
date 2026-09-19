@@ -14,7 +14,7 @@
       reported; superseded decision anchor flagged stale
 - [x] Split tests: consumers → breaking-consumed with the list; zero → breaking-unconsumed-in-index
       with the boundary; federation widens the census
-- [ ] Full suite green
+- [x] Full suite green
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD AcceptedBreakageBaselineRequiresJustification, ConsumerWeightedBreakingVerdicts

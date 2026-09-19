@@ -308,7 +308,7 @@ export async function writeAcceptedBreakages(
 }
 
 /** Ask Git whether the baseline is tracked, trackable, or ignored. Never throws. */
-export async function baselineGitTracking(rootPath: string): Promise<BaselineGitTracking> {
+async function baselineGitTracking(rootPath: string): Promise<BaselineGitTracking> {
   const git = (args: string[]): Promise<{ stdout: string }> => execFileGit('git', args, { cwd: rootPath, maxBuffer: 65_536 });
   const failure = (error: unknown): string => {
     const e = error as { stderr?: unknown; message?: unknown };

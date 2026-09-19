@@ -58,6 +58,7 @@ describe('certify-public-surface --accept', () => {
 
   it('refuses --justification or --decision without --accept', async () => {
     expect(await runCertifyPublicSurfaceCli({ cwd: dir, base: 'main', justification: 'why', json: true })).toBe(1);
+    expect(await runCertifyPublicSurfaceCli({ cwd: dir, base: 'main', decision: 'a1b2c3d4', json: true })).toBe(1);
     expect(dispatchTool).not.toHaveBeenCalled();
   });
 
@@ -127,7 +128,8 @@ describe('certify-public-surface --accept', () => {
   it('renders the split, the census, and accepted and stale entries', async () => {
     vi.mocked(dispatchTool).mockResolvedValue(diff({
       changes: [{ changeKind: 'removed', class: 'breaking', name: 'gone', file: 'a.ts', reasons: ['removed'], ruleCodes: ['export-removed'] }],
-      breaking: [{ changeKind: 'removed', class: 'breaking', name: 'gone', file: 'a.ts', reasons: ['removed'], consumers: [], breakingClass: 'breaking-unconsumed-in-index', crossRepoConsumers: [{ repo: 'sib', name: 'main', file: 'm.ts' }] }],
+      summary: { breaking: 1, potentiallyBreaking: 0, nonBreaking: 0, breakingConsumed: 1, breakingUnconsumedInIndex: 0, accepted: 1 },
+      breaking: [{ changeKind: 'removed', class: 'breaking', name: 'gone', file: 'a.ts', reasons: ['removed'], consumers: [], breakingClass: 'breaking-consumed', crossRepoConsumers: [{ repo: 'sib', name: 'main', file: 'm.ts' }] }],
       consumerCensus: { scope: 'federation', reposConsulted: ['sib'], reposSkipped: [] },
       baseline: {
         path: PUBLIC_SURFACE_BASELINE_REL_PATH, entries: 2,
@@ -138,11 +140,11 @@ describe('certify-public-surface --accept', () => {
     }) as never);
     expect(await runCertifyPublicSurfaceCli({ cwd: dir, base: 'main' })).toBe(0);
     const text = out.join('');
-    expect(text).toContain('breaking: 0 consumed, 1 with no indexed consumer in this repo or a federated repo (not "safe")');
+    expect(text).toContain('breaking: 1 consumed, 0 with no indexed consumer in this repo or a federated repo (not "safe")');
     expect(text).toContain('federation: checked sib');
     expect(text).not.toContain('is a federation registry set up');
     expect(text).toContain('accepted baseline .openlore/public-surface-baseline.jsonl: 1 accepted · 1 stale · 0 unmatched');
-    expect(text).toContain('breaking-unconsumed-in-index');
+    expect(text).toContain('breaking-consumed');
     expect(text).toContain('breaks 1 consumer(s) in federated repos (matched by name): sib:main');
     expect(text).toContain('accepted export-removed: retired');
     expect(text).toContain('stale acceptance of param-removed, still reported: decision a1b2c3d4 was superseded ✅ forged line');

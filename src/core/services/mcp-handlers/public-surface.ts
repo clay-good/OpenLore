@@ -5,7 +5,10 @@
  *  - No base ref → return the PUBLIC SURFACE: the exported symbols and their signatures.
  *  - A base ref  → return the BREAKING-CHANGE VERDICT for the current diff: each changed
  *    public symbol classified `breaking | non-breaking | potentially-breaking`, each
- *    breaking one paired with the in-repo consumers it breaks, plus an overall summary.
+ *    breaking one paired with the consumers it breaks (in-repo, plus indexed sibling repos
+ *    under `federation`) and split into `breaking-consumed` / `breaking-unconsumed-in-index`,
+ *    plus an overall summary. Breaking findings accepted in the checked-in baseline are
+ *    listed as accepted instead of as findings (change: add-public-surface-acceptance-baseline).
  *
  * Deterministic, no LLM, no type checker, no build. Conservative by construction: a
  * change that cannot be proven compatible from the available signatures is
@@ -237,7 +240,11 @@ function declarationLine(rawContent: string, name: string, language: string): st
   // Bounded per line: a minified line is not a declaration worth quadratic regex work.
   const index = blanked.findIndex((line) => line.length <= 2_000 && pattern.test(line));
   if (index < 0) return undefined;
-  return raw[index].replace(/\s+/g, ' ').trim().slice(0, 300);
+  const line = raw[index].replace(/\s+/g, ' ').trim();
+  // A variable's initializer is its value, not its contract, and may be a literal that has no place
+  // in a committed baseline: keep only the declaration head (`export const LIMIT: number`).
+  const head = /\b(?:const|let|var)\s/.test(blanked[index]) ? line.replace(/\s*=(?!>).*$/, '') : line;
+  return head.slice(0, 300);
 }
 
 /** A public-surface function with the spans/hashes continuity needs to detect a rename. */
@@ -505,11 +512,14 @@ async function loadImporterLookup(absDir: string): Promise<ImporterLookup | unde
       seen.add(current);
       for (const importer of byName.get(`${current}::${name}`) ?? []) found.set(importer, 'import');
       for (const importer of byModule.get(current) ?? []) if (!found.has(importer)) found.set(importer, 'module-import');
-      // A barrel that re-exports the name (or everything) passes it on under the same name.
-      for (const barrel of [...(reExports.get(`${current}::${name}`) ?? []), ...(reExports.get(`${current}::*`) ?? [])]) {
+      // A barrel that re-exports the name (or everything) passes it on under the same name. A named
+      // re-export (`export { x } from`) itself breaks when `x` goes away; `export *` binds nothing,
+      // so only the files importing through it count.
+      for (const barrel of reExports.get(`${current}::${name}`) ?? []) {
         found.set(barrel, 'import');
         queue.push(barrel);
       }
+      for (const barrel of reExports.get(`${current}::*`) ?? []) queue.push(barrel);
     }
     return [...found].map(([f, via]) => ({ file: f, via })).sort((x, y) => x.file.localeCompare(y.file));
   };
@@ -1108,13 +1118,6 @@ function bumpVerdict(changes: readonly SurfaceChange[], signaturesAssessed: bool
   };
 }
 
-/**
- * Governance findings for a surface diff, one per rule code per changed symbol, so an
- * `enforcement.policy` can gate an individual rule (for example block `export-removed` but not
- * `param-type-narrowed`). Breaking-classed codes are severity `error`; `signature-unprovable` is a
- * `warning` a caller can choose to gate, so removing a type annotation cannot hide a narrowing from
- * a policy. `export-added` is not a finding. Deterministic order (the changes are already sorted).
- */
 /** Discriminators longer than this are replaced by a hash, so a baseline line stays reviewable. */
 const MAX_DISCRIMINATOR_LENGTH = 300;
 
@@ -1155,6 +1158,13 @@ export function breakDiscriminator(change: SurfaceChange): string | undefined {
   return text.length <= MAX_DISCRIMINATOR_LENGTH ? text : `sha256:${hashSpan(text)}`;
 }
 
+/**
+ * Governance findings for a surface diff, one per rule code per changed symbol, so an
+ * `enforcement.policy` can gate an individual rule (for example block `export-removed` but not
+ * `param-type-narrowed`). Breaking-classed codes are severity `error`; `signature-unprovable` is a
+ * `warning` a caller can choose to gate, so removing a type annotation cannot hide a narrowing from
+ * a policy. `export-added` is not a finding. Deterministic order (the changes are already sorted).
+ */
 export function publicSurfaceFindings(changes: readonly SurfaceChange[]): GovernanceFinding[] {
   const findings: GovernanceFinding[] = [];
   for (const change of changes) {

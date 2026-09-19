@@ -858,7 +858,8 @@ describe('certify_public_surface diff mode: federation census and accepted basel
       { file: { path: 'lib/index.ts' }, exports: [{ name: '*', isReExport: true, reExportSource: '../a' }] },
     ]);
     const r = await run();
-    expect(r.breaking.find((b) => b.name === 'other')!.consumers?.map((c) => [c.id, c.via])).toEqual([['app.ts', 'import'], ['lib/index.ts', 'import']]);
+    // `export *` binds nothing itself: only the file importing through it is a consumer.
+    expect(r.breaking.find((b) => b.name === 'other')!.consumers?.map((c) => [c.id, c.via])).toEqual([['app.ts', 'import']]);
   });
 
   it('counts consumers keyed by the old path when the defining file was renamed', async () => {
@@ -893,7 +894,8 @@ describe('break discriminators (add-public-surface-acceptance-baseline)', () => 
   it('pins a name-level removal to its base declaration, so a different declaration removed later differs', async () => {
     const r1 = await assembleSurfaceDiff([ts('a.ts', 'export const LIMIT = 10;\n')], [ts('a.ts', '\n')], noRename);
     const r2 = await assembleSurfaceDiff([ts('a.ts', 'export const LIMIT: number = computeLimit();\n')], [ts('a.ts', '\n')], noRename);
-    expect(r1.findings[0].discriminator).toBe('was export const LIMIT = 10;');
+    // The initializer is a value, not the contract, and stays out of the committed baseline.
+    expect(r1.findings[0].discriminator).toBe('was export const LIMIT');
     expect(r2.findings[0].discriminator).not.toBe(r1.findings[0].discriminator);
   });
 });
