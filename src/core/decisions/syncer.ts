@@ -309,7 +309,7 @@ function noDurableTargetMessage(decision: PendingDecision): string {
     'Nothing was written and the decision stays in the store. ' +
     `To keep it, reject this copy (openlore decisions --reject ${decision.id}), run openlore decisions --sync to clear it, ` +
     'then record it again with --files that map to a spec domain, or with --scope cross-domain or --scope system ' +
-    '(written as an ADR; consolidation can change the scope, so check it in openlore decisions --list before approving).'
+    '(written as an ADR).'
   );
 }
 

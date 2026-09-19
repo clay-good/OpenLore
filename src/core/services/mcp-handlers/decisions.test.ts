@@ -271,6 +271,16 @@ describe('handleRecordDecision', () => {
       undefined, undefined, undefined, 'system');
     const store = await readStore(tmpDir);
     expect(store.decisions[0].scope).toBe('system');
+    // Marked as the author's, so consolidation keeps it (issue #512).
+    expect(store.decisions[0].authorScope).toBe('system');
+  });
+
+  it('does not mark an inferred scope as the author\'s', async () => {
+    await handleRecordDecision(tmpDir, 'Shared cache layer', 'Cache used by both API and core services',
+      undefined, ['src/api/cache.ts', 'src/core/cache.ts']);
+    const store = await readStore(tmpDir);
+    expect(store.decisions[0].scope).toBe('cross-domain');
+    expect(store.decisions[0].authorScope).toBeUndefined();
   });
 
   it('structural trigger: files spanning 2+ top-level dirs → cross-domain', async () => {

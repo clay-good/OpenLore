@@ -249,6 +249,7 @@ export async function handleRecordDecision(
       id,
       status: 'draft',
       scope: resolvedScope,
+      ...(scope ? { authorScope: scope } : {}),
       title: title.trim(),
       rationale: rationale.trim(),
       consequences: consequences ?? '',

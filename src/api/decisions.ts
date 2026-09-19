@@ -130,6 +130,7 @@ async function recordDecision(options: RecordDecisionOptions): Promise<{ id: str
     id,
     status: 'draft',
     scope: resolvedScope,
+    ...(options.scope ? { authorScope: options.scope } : {}),
     title,
     rationale,
     consequences: options.consequences ?? '',

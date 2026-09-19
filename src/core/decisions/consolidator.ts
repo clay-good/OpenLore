@@ -243,6 +243,9 @@ export async function consolidateDrafts(
     const authorStatement = source && contentWasRewritten(source, {
       ...source, title: c.title, rationale: c.rationale,
     }) ? authorStatementOf(source) : undefined;
+    const authorScope = source?.authorScope && DECISION_SCOPES.has(source.authorScope)
+      ? source.authorScope
+      : undefined;
 
     return {
       id,
@@ -253,7 +256,9 @@ export async function consolidateDrafts(
       proposedRequirement: c.proposedRequirement,
       affectedDomains: resolvedDomains,
       affectedFiles: c.affectedFiles,
-      scope: c.scope ?? 'component',
+      // An author's explicit scope outranks the model's classification; the store is
+      // repo content, so it is honoured only when it is a known scope. (issue #512)
+      ...(authorScope ? { scope: authorScope, authorScope } : { scope: c.scope ?? 'component' }),
       confidence: 'medium',
       contentOrigin: 'llm-extracted',
       sessionId: store.sessionId,

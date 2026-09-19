@@ -146,6 +146,19 @@ describe('decision API boundary contract', () => {
     expect(updateDecisionStore).toHaveBeenCalledWith(resolve('relative-project'), expect.any(Function));
   });
 
+  it('marks only an explicit scope as the author\'s (issue #512)', async () => {
+    vi.mocked(loadDecisionStore).mockResolvedValue(makeStore([]));
+    const recorded = async (scope?: 'system'): Promise<PendingDecision | undefined> => {
+      vi.mocked(updateDecisionStore).mockClear();
+      await openloreRecordDecision({ rootPath: '/test/project', title: 'Pick a queue', rationale: 'Why', scope });
+      const mutate = vi.mocked(updateDecisionStore).mock.calls[0]?.[1] as ((s: DecisionStore) => DecisionStore) | undefined;
+      return mutate?.(makeStore([])).decisions[0];
+    };
+
+    expect((await recorded('system'))?.authorScope).toBe('system');
+    expect((await recorded())?.authorScope).toBeUndefined();
+  });
+
   it('is silent by default even when a decision helper logs an error', async () => {
     vi.mocked(loadDecisionStore).mockResolvedValue(makeStore([]));
     vi.mocked(syncApprovedDecisions).mockImplementationOnce(async (store) => {
