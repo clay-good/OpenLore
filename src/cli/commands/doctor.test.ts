@@ -33,6 +33,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 // function created at import time references our controllable vi.fn().
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
+// fs/promises is mocked above, so a real corpus walk would see fake stats. The corpus
+// check has its own unmocked tests (doctor-corpus.test.ts); here it sees an empty corpus.
+vi.mock('../../core/services/mcp-handlers/utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/services/mcp-handlers/utils.js')>();
+  return { ...actual, walkFingerprintCorpus: vi.fn().mockResolvedValue({ files: [], summary: {} }) };
+});
+
 vi.mock('../../core/services/config-manager.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../core/services/config-manager.js')>();
   return {
@@ -153,9 +160,9 @@ describe('doctor command', () => {
       expect(Array.isArray(checks)).toBe(true);
     });
 
-    it('should include exactly 13 checks', async () => {
+    it('should include exactly 14 checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(13);
+      expect(checks).toHaveLength(14);
     });
 
     it('should include a governance corpus integrity check', async () => {

@@ -8,7 +8,7 @@
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { embeddingTlsRelaxed, withRelaxedTls } from '../../core/services/tls-scope.js';
-import { access, stat, readFile } from 'node:fs/promises';
+import { access, stat, readFile, realpath } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { join, relative, isAbsolute, win32 } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -41,7 +41,16 @@ import {
   DEFAULT_OPENAI_COMPAT_MODEL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_COPILOT_MODEL,
+  DEFAULT_MAX_FILES,
+  FINGERPRINT_BUDGET_TOP_OFFENDERS,
 } from '../../constants.js';
+import { analysisConfigFingerprintInput, analysisGeneratedExcludes } from '../../core/analyzer/analysis-core.js';
+import { formatBytes } from '../../core/analyzer/memory-strategy.js';
+import {
+  DEFAULT_FINGERPRINT_MAX_BYTES,
+  largestCorpusPaths,
+  walkFingerprintCorpus,
+} from '../../core/services/mcp-handlers/utils.js';
 import {
   refuseRepoConfiguredEndpoint,
   rejectRepoConfiguredTlsOptOut,
@@ -469,6 +478,48 @@ async function checkAnalysis(rootPath: string): Promise<CheckResult> {
       fix: "Run 'openlore install' (one-command setup) or 'openlore analyze' to build the index",
       remediation: { kind: 'analyze', label: 'openlore analyze --force' },
     };
+  }
+}
+
+/**
+ * Corpus-size check (issue #504): walk exactly what `openlore analyze` would fingerprint
+ * and compare its size with the byte budget, so a repository that would abort analyze
+ * is caught here, with the paths to exclude, before anyone runs it. It costs one walk,
+ * the same walk analyze starts with (which reads files up to 10 MB to count lines); it
+ * does not hash content or read past the walk.
+ */
+export async function checkAnalysisCorpus(rootPath: string): Promise<CheckResult> {
+  const name = 'Analysis corpus size';
+  let config: Awaited<ReturnType<typeof readOpenLoreConfig>> = null;
+  try {
+    config = await readOpenLoreConfig(rootPath);
+  } catch {
+    // A malformed config is reported by its own check; size the default corpus.
+  }
+  try {
+    const root = await realpath(rootPath);
+    const protectedExcludePatterns = analysisGeneratedExcludes(
+      root, join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), config?.openspecPath,
+    );
+    const walk = await walkFingerprintCorpus(root, {
+      configuration: analysisConfigFingerprintInput(config?.analysis, [], [], DEFAULT_MAX_FILES, protectedExcludePatterns),
+      protectedExcludePatterns,
+    });
+    const total = walk.files.reduce((sum, file) => sum + file.size, 0);
+    const summary = `${walk.files.length} file(s), ${formatBytes(total)} selected for indexing `
+      + `(cap ${formatBytes(DEFAULT_FINGERPRINT_MAX_BYTES)})`;
+    if (total <= DEFAULT_FINGERPRINT_MAX_BYTES) return { name, status: 'ok', detail: summary };
+    const offenders = largestCorpusPaths(walk.files, FINGERPRINT_BUDGET_TOP_OFFENDERS)
+      .map(offender => `${offender.path} (${formatBytes(offender.bytes)})`);
+    return {
+      name,
+      status: 'fail',
+      detail: `${summary}: openlore analyze will stop with "fingerprint byte budget exceeded". `
+        + `Largest: ${offenders.join(', ')}`,
+      fix: 'Add the paths you do not want indexed to analysis.excludePatterns in .openlore/config.json',
+    };
+  } catch (err) {
+    return { name, status: 'warn', detail: `could not size the corpus: ${(err as Error).message}` };
   }
 }
 
@@ -990,6 +1041,7 @@ Checks performed:
   • LLM connection (live request with 10s timeout)
   • Embedding connection (if configured)
   • Available disk space
+  • Analysis corpus size (would analyze exceed its byte budget?)
 `
   )
   .option('--json', 'Output results as JSON', false)
@@ -1018,6 +1070,7 @@ Checks performed:
         checkCorpusIntegrity(rootPath),
         checkServedContentTrust(rootPath),
         checkDiskSpace(rootPath),
+        checkAnalysisCorpus(rootPath),
       ]),
       checkMcpWiring(rootPath),
       checkLLMConnection(rootPath),

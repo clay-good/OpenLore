@@ -77,6 +77,44 @@ const CFAMILY_IGNORED = new Set([
   'static_cast', 'dynamic_cast', 'reinterpret_cast', 'const_cast',
 ]);
 
+// Elixir special forms and control-flow macros: ignored at any argument count, since no
+// project function shadows them in practice. Deliberately NOT the union's generic names
+// (`map`, `find`, `new`, `parse`, `delete`, …): Kernel does not define them, so in Elixir
+// they are ordinary project functions. (issue #507)
+const ELIXIR_IGNORED = new Set([
+  'if', 'unless', 'case', 'cond', 'with', 'for', 'try', 'receive',
+  'quote', 'unquote', 'unquote_splicing', 'super', 'import', 'alias', 'require', 'use',
+]);
+
+// Kernel's auto-imported functions and macros, by arity. A module may define the same
+// name at another arity (`def send(a, b, c)` beside Kernel's `send/2`) and call it bare,
+// so a call is Kernel's only when its argument count is one of Kernel's.
+const ELIXIR_KERNEL_ARITIES: ReadonlyMap<string, readonly number[]> = new Map<string, readonly number[]>([
+  ['raise', [1, 2]], ['reraise', [2, 3]], ['throw', [1]], ['exit', [1]],
+  ['send', [2]], ['spawn', [1, 3]], ['spawn_link', [1, 3]], ['spawn_monitor', [1, 3]],
+  ['self', [0]], ['make_ref', [0]], ['apply', [2, 3]], ['node', [0, 1]],
+  ['is_atom', [1]], ['is_binary', [1]], ['is_bitstring', [1]], ['is_boolean', [1]],
+  ['is_exception', [1, 2]], ['is_float', [1]], ['is_function', [1, 2]], ['is_integer', [1]],
+  ['is_list', [1]], ['is_map', [1]], ['is_map_key', [2]], ['is_nil', [1]], ['is_number', [1]],
+  ['is_pid', [1]], ['is_port', [1]], ['is_reference', [1]], ['is_struct', [1, 2]], ['is_tuple', [1]],
+  ['elem', [2]], ['put_elem', [3]], ['hd', [1]], ['tl', [1]], ['length', [1]],
+  ['map_size', [1]], ['tuple_size', [1]], ['byte_size', [1]], ['bit_size', [1]], ['binary_part', [3]],
+  ['div', [2]], ['rem', [2]], ['abs', [1]], ['round', [1]], ['trunc', [1]], ['floor', [1]], ['ceil', [1]],
+  ['max', [2]], ['min', [2]], ['not', [1]],
+  ['inspect', [1, 2]], ['to_string', [1]], ['to_charlist', [1]], ['struct', [1, 2]], ['struct!', [1, 2]],
+  ['get_in', [2]], ['put_in', [2, 3]], ['update_in', [2, 3]], ['pop_in', [1, 2]], ['get_and_update_in', [2, 3]],
+  ['then', [2]], ['tap', [2]], ['dbg', [0, 1, 2]], ['match?', [2]], ['binding', [0, 1]],
+  ['var!', [1, 2]], ['destructure', [2]], ['function_exported?', [3]], ['macro_exported?', [3]],
+]);
+
+/**
+ * Is a BARE Elixir call language noise? `arity` is the call's argument count, counting
+ * the piped-in value of `x |> f()`. (issue #507)
+ */
+export function isIgnoredElixirCall(name: string, arity: number): boolean {
+  return ELIXIR_IGNORED.has(name) || (ELIXIR_KERNEL_ARITIES.get(name)?.includes(arity) ?? false);
+}
+
 const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
   Python: PYTHON_IGNORED,
   TypeScript: JS_IGNORED,
@@ -91,12 +129,16 @@ const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
   Swift: SWIFT_IGNORED,
   'C++': CFAMILY_IGNORED,
   C: CFAMILY_IGNORED,
+  Elixir: ELIXIR_IGNORED,
 };
 
-// Union of every language's set — the fallback for callers that pass no
+// Union of the legacy per-language sets — the fallback for callers that pass no
 // language (and languages without a dedicated set), preserving legacy behavior.
+// Listed explicitly rather than derived from IGNORED_BY_LANGUAGE, so adding a
+// language's set never widens what those other callers drop.
 const ALL_IGNORED_CALLEES = new Set<string>(
-  Object.values(IGNORED_BY_LANGUAGE).flatMap(s => Array.from(s))
+  [PYTHON_IGNORED, JS_IGNORED, GO_IGNORED, RUST_IGNORED, RUBY_IGNORED, JVM_IGNORED, SWIFT_IGNORED, CFAMILY_IGNORED]
+    .flatMap(s => Array.from(s))
 );
 
 /**
