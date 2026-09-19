@@ -191,6 +191,29 @@ describe('FileWalker', () => {
       expect(result.files[0].name).toBe('main.py');
     });
 
+    // Issue #504: vector stores and datasets filled the fingerprint byte budget.
+    it('should skip binary data stores and model weights', async () => {
+      for (const name of ['t.parquet', 'a.arrow', 'x.npy', 'm.pkl', 'w.safetensors', 'db.sqlite', 'model.onnx']) {
+        await writeFile(join(testDir, name), '');
+      }
+      await mkdir(join(testDir, 'vectors.lance', '_versions'), { recursive: true });
+      await writeFile(join(testDir, 'vectors.lance', '_versions', '1.manifest'), '');
+      await writeFile(join(testDir, 'app.py'), '');
+
+      const result = await walkDirectory(testDir);
+
+      expect(result.files.map(f => f.name)).toEqual(['app.py']);
+    });
+
+    it('lets includePatterns force a skipped data file back in', async () => {
+      await writeFile(join(testDir, 'fixture.parquet'), '');
+      await writeFile(join(testDir, 'app.py'), '');
+
+      const result = await walkDirectory(testDir, { includePatterns: ['*.parquet'] });
+
+      expect(result.files.map(f => f.name).sort()).toEqual(['app.py', 'fixture.parquet']);
+    });
+
     it('should skip minified files', async () => {
       await writeFile(join(testDir, 'bundle.min.js'), '');
       await writeFile(join(testDir, 'styles.min.css'), '');
