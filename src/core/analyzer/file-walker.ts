@@ -207,6 +207,29 @@ const SKIP_EXTENSIONS = new Set([
   '.so',
   '.dll',
   '.exe',
+  // Binary data stores and model weights (issue #504). No extractor reads them, and a
+  // vector store or dataset can hold gigabytes, enough to trip the fingerprint byte
+  // budget. `*.lance` also matches a LanceDB dataset directory. includePatterns can
+  // still force any of these back in.
+  '.lance',
+  '.parquet',
+  '.arrow',
+  '.feather',
+  '.orc',
+  '.avro',
+  '.npy',
+  '.npz',
+  '.pkl',
+  '.pickle',
+  '.h5',
+  '.hdf5',
+  '.sqlite',
+  '.sqlite3',
+  '.onnx',
+  '.safetensors',
+  '.pt',
+  '.pth',
+  '.ckpt',
 ]);
 
 /**

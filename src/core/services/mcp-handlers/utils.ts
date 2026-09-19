@@ -893,7 +893,7 @@ export async function waitForGraphRebuild(
 // ============================================================================
 
 const DEFAULT_FINGERPRINT_MAX_FILES = 100_000;
-const DEFAULT_FINGERPRINT_MAX_BYTES = 1024 * 1024 * 1024;
+export const DEFAULT_FINGERPRINT_MAX_BYTES = 1024 * 1024 * 1024;
 
 /**
  * The largest non-overlapping paths in a walked corpus, for the byte-budget error (issue #504).
@@ -994,12 +994,18 @@ export interface FingerprintLimits {
   maxEntries?: number;
 }
 
-/** Compute a SHA-256 fingerprint of source paths and bytes under rootDir. */
-export async function computeProjectFingerprint(rootDir: string, limits: FingerprintLimits = {}): Promise<string> {
-  const canonicalRoot = await realpath(rootDir);
+/**
+ * The corpus the fingerprint reads: the same walk, with the same limits, that
+ * {@link computeProjectFingerprint} hashes. Exposed so `openlore doctor` can size it
+ * without reading a byte (issue #504).
+ */
+export async function walkFingerprintCorpus(
+  canonicalRoot: string,
+  limits: FingerprintLimits = {},
+): Promise<Awaited<ReturnType<FileWalker['walk']>>> {
   const configured = limits.configuration as { includePatterns?: string[]; excludePatterns?: string[]; protectedExcludePatterns?: string[]; maxFiles?: number } | undefined;
   const maxFiles = limits.maxFiles ?? configured?.maxFiles ?? DEFAULT_FINGERPRINT_MAX_FILES;
-  const walk = await new FileWalker(canonicalRoot, {
+  return new FileWalker(canonicalRoot, {
     maxFiles,
     includePatterns: limits.includePatterns ?? configured?.includePatterns ?? [],
     excludePatterns: limits.excludePatterns ?? configured?.excludePatterns ?? [],
@@ -1007,6 +1013,12 @@ export async function computeProjectFingerprint(rootDir: string, limits: Fingerp
     maxDepth: limits.maxDepth,
     maxEntries: limits.maxEntries,
   }).walk();
+}
+
+/** Compute a SHA-256 fingerprint of source paths and bytes under rootDir. */
+export async function computeProjectFingerprint(rootDir: string, limits: FingerprintLimits = {}): Promise<string> {
+  const canonicalRoot = await realpath(rootDir);
+  const walk = await walkFingerprintCorpus(canonicalRoot, limits);
   const hash = createHash('sha256');
   hash.update(`configuration:${fingerprintHashOfConfiguration(limits.configuration)}\n`);
   hash.update(`corpus:${JSON.stringify(walk.summary.truncated ?? null)}\n`);
