@@ -177,7 +177,7 @@ describe('writeAcceptedBreakages and readAcceptedBaseline', () => {
     await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'first', 'a1b2c3d4');
     const before = await readFile(join(root, PUBLIC_SURFACE_BASELINE_REL_PATH), 'utf8');
     await expect(writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a'), finding('export-removed', 'src/c.ts::c')], 'unrelated'))
-      .rejects.toThrow(/anchored to a decision that is no longer current.*export-removed src\/a\.ts::a → decision a1b2c3d4.*nothing was written/);
+      .rejects.toThrow(/anchored to a decision that is not being honored.*export-removed src\/a\.ts::a → decision a1b2c3d4.*nothing was written/);
     expect(await readFile(join(root, PUBLIC_SURFACE_BASELINE_REL_PATH), 'utf8')).toBe(before);
     // Re-anchoring to another decision is allowed.
     const reanchored = await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'first', 'b2c3d4e5');
@@ -257,8 +257,47 @@ describe('writeAcceptedBreakages and readAcceptedBaseline', () => {
     expect(status()).toContain(`?? ${PUBLIC_SURFACE_BASELINE_REL_PATH}`);
   });
 
+  it('leaves .gitignore alone when the baseline is already trackable', async () => {
+    execFileGitSync('git', ['init', '-q', root]);
+    await writeFile(join(root, '.gitignore'), 'node_modules/\n', 'utf8');
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why');
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('node_modules/\n');
+  });
+
+  it('keeps CRLF line endings and still recognizes its own block', async () => {
+    execFileGitSync('git', ['init', '-q', root]);
+    await writeFile(join(root, '.gitignore'), '.openlore/\r\n', 'utf8');
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why');
+    const first = await readFile(join(root, '.gitignore'), 'utf8');
+    expect(first).toContain('# openlore-public-surface-baseline\r\n');
+    expect(first.replace(/\r\n/g, '')).not.toContain('\n');
+    await writeFile(join(root, '.gitignore'), `${first}.openlore/\r\n`, 'utf8'); // a later rule re-ignores it
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/b.ts::b')], 'why');
+    const second = await readFile(join(root, '.gitignore'), 'utf8');
+    expect(second.split('# openlore-public-surface-baseline').length).toBe(2);
+    expect(second.trimEnd().endsWith('# end-openlore-public-surface-baseline')).toBe(true);
+    expect(status()).toContain(`?? ${PUBLIC_SURFACE_BASELINE_REL_PATH}`);
+  });
+
+  it('restores .gitignore exactly when no block can make the baseline trackable', async () => {
+    execFileGitSync('git', ['init', '-q', root]);
+    const original = '.openlore/\n';
+    await writeFile(join(root, '.gitignore'), original, 'utf8');
+    await writeFile(join(root, OPENLORE_DIR, '.gitignore'), 'public-surface-baseline.jsonl\n', 'utf8');
+    await expect(writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why')).rejects.toThrow(/remains ignored/);
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe(original);
+    await expect(readFile(join(root, PUBLIC_SURFACE_BASELINE_REL_PATH), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not touch .gitignore outside a Git work tree', async () => {
+    await writeFile(join(root, '.gitignore'), '.openlore/\n', 'utf8');
+    await writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why');
+    expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe('.openlore/\n');
+  });
+
   it('fails closed on a malformed managed block and writes nothing', async () => {
-    const bad = '# openlore-public-surface-baseline\n!.openlore/\n';
+    execFileGitSync('git', ['init', '-q', root]);
+    const bad = '.openlore/\n# openlore-public-surface-baseline\n.openlore/\n';
     await writeFile(join(root, '.gitignore'), bad, 'utf8');
     await expect(writeAcceptedBreakages(root, [finding('export-removed', 'src/a.ts::a')], 'why')).rejects.toThrow(/malformed/);
     expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe(bad);

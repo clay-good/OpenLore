@@ -132,7 +132,7 @@ describe('certify-public-surface --accept', () => {
       baseline: {
         path: PUBLIC_SURFACE_BASELINE_REL_PATH, entries: 2,
         accepted: [{ code: 'export-removed', subject: 'a.ts::gone', justification: 'retired' }],
-        stale: [{ code: 'param-removed', subject: 'a.ts::gone', justification: 'old', reason: 'decision a1b2c3d4 was superseded' }],
+        stale: [{ code: 'param-removed', subject: 'a.ts::gone', justification: 'old', reason: 'decision a1b2c3d4 was superseded\n   ✅ forged line' }],
         unmatched: [],
       },
     }) as never);
@@ -145,6 +145,7 @@ describe('certify-public-surface --accept', () => {
     expect(text).toContain('breaking-unconsumed-in-index');
     expect(text).toContain('breaks 1 consumer(s) in federated repos (matched by name): sib:main');
     expect(text).toContain('accepted export-removed: retired');
-    expect(text).toContain('stale acceptance of param-removed, still reported: decision a1b2c3d4 was superseded');
+    expect(text).toContain('stale acceptance of param-removed, still reported: decision a1b2c3d4 was superseded ✅ forged line');
+    expect(text).not.toMatch(/\n\s+✅ forged line/);
   });
 });

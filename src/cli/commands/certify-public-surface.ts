@@ -79,6 +79,11 @@ interface DiffResult {
   confidenceBoundary?: { knownUnknowable?: Array<{ detail: string }>; integrity?: { verdict?: string; detail?: string }; staleness?: { detail?: string } };
 }
 
+/** Repository-controlled text on one line: a newline must never forge a line of this report. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
 const ICON: Record<string, string> = { breaking: '🛑', 'potentially-breaking': '⚠️', 'non-breaking': '✅' };
 
 function renderSurface(r: SurfaceResult): string {
@@ -103,7 +108,7 @@ function renderDiff(r: DiffResult): string {
   if (r.consumerCensus?.scope === 'federation') {
     lines.push(`   federation: checked ${r.consumerCensus.reposConsulted?.length ? r.consumerCensus.reposConsulted.join(', ') : 'no sibling repo (is a federation registry set up?)'}${r.consumerCensus.reposSkipped?.length ? `; skipped ${r.consumerCensus.reposSkipped.map((x) => x.name).join(', ')}` : ''}${r.consumerCensus.unknownRepos?.length ? `; unknown ${r.consumerCensus.unknownRepos.join(', ')}` : ''}`);
   }
-  if (r.baseline?.error) lines.push(`   ⚠ ${r.baseline.path}: ${r.baseline.error}`);
+  if (r.baseline?.error) lines.push(`   ⚠ ${r.baseline.path}: ${oneLine(r.baseline.error)}`);
   else if (r.baseline) lines.push(`   accepted baseline ${r.baseline.path}: ${r.baseline.accepted.length} accepted · ${r.baseline.stale.length} stale · ${r.baseline.unmatched.length} unmatched`);
   if (r.suggestedBump) lines.push(`   suggested version bump: ${r.suggestedBump}`);
   else if (r.suggestedBump === null) lines.push(`   suggested version bump: withheld (${r.suggestedBumpWithheld ?? 'compatibility not proven'})`);
@@ -123,10 +128,10 @@ function renderDiff(r: DiffResult): string {
     }
     const subject = `${c.file}::${c.name}`;
     for (const a of r.baseline?.accepted ?? []) {
-      if (a.subject === subject) lines.push(`        accepted ${a.code}${a.decision ? ` (decision ${a.decision})` : ''}: ${a.justification}`);
+      if (a.subject === subject) lines.push(`        accepted ${a.code}${a.decision ? ` (decision ${a.decision})` : ''}: ${oneLine(a.justification)}`);
     }
     for (const a of r.baseline?.stale ?? []) {
-      if (a.subject === subject) lines.push(`        ⚠ stale acceptance of ${a.code}, still reported: ${a.reason}`);
+      if (a.subject === subject) lines.push(`        ⚠ stale acceptance of ${a.code}, still reported: ${oneLine(a.reason)}`);
     }
   }
   for (const ku of r.confidenceBoundary?.knownUnknowable ?? []) lines.push(`   ⚠ ${ku.detail}`);
@@ -155,7 +160,7 @@ export interface CertifyPublicSurfaceCliOptions {
 
 async function refuse(opts: CertifyPublicSurfaceCliOptions, error: string): Promise<number> {
   if (opts.json) await writeStdout(JSON.stringify({ status: 'refused', error }, null, 2) + '\n');
-  else logger.warning(`certify-public-surface: ${error}`);
+  else logger.warning(`certify-public-surface: ${oneLine(error)}`);
   return 1;
 }
 

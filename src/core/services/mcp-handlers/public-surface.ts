@@ -16,6 +16,7 @@
  */
 
 import { readFile, realpath } from 'node:fs/promises';
+import { readDependencyGraphCached } from './artifact-cache.js';
 import { readFileConfined } from '../../../utils/path-confinement.js';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { gitPathArgs } from '../../../utils/git-args.js';
@@ -36,6 +37,7 @@ import {
 } from '../../analyzer/continuity.js';
 import {
   classifySignatureChange,
+  parseSignature,
   signatureClassifiable,
   overallClass,
   suggestedBump,
@@ -318,11 +320,13 @@ interface Consumer {
   name: string;
   file: string;
   /**
-   * How the consumer binds the symbol: a resolved `call`, an `unresolved-call` by name from a file
-   * that imports it (the index was built after the symbol went away), or an `import` of it by a
-   * file with no call the index could attribute (a const, class, or type is never a call target).
+   * How the consumer binds the symbol: a resolved `call`; an `unresolved-call` by name from a file
+   * that imports it (the index was built after the symbol went away); an `import` of the symbol by
+   * name (directly or through a re-exporting module) by a file with no call the index could
+   * attribute (a const, class, or type is never a call target); or a `module-import` — a default,
+   * namespace, or whole-module import of the defining module, which MAY use the symbol.
    */
-  via: 'call' | 'unresolved-call' | 'import';
+  via: 'call' | 'unresolved-call' | 'import' | 'module-import';
 }
 
 function callerToConsumer(callerId: string, via: Consumer['via']): Consumer {
@@ -337,63 +341,73 @@ interface EdgeStoreLike {
   getExternalConsumers?(symbolName: string): Array<{ callerId: string }>;
 }
 
-/** Files that import `name` (or `*`) from `file`, from the persisted dependency graph. */
-export type ImporterLookup = (file: string, name: string) => readonly string[];
+/** Files that import `name` from `file` (by name, or as a whole module), from the dependency graph. */
+export type ImporterLookup = (file: string, name: string) => ReadonlyArray<{ file: string; via: 'import' | 'module-import' }>;
 
 /**
  * In-repo consumers of a breaking change, deduped + bounded; no index → empty (disclosed upstream).
  *
- * - Resolved callers of every id in `nodeIds`. A RENAME is looked up under BOTH the old id (the
- *   index was built at the base) AND the new id (the index was built at HEAD).
+ * - Resolved callers of `nodeId` — the symbol under the name its consumers bind (for a rename, the
+ *   OLD name: callers already moved to the new name are not broken).
  * - Files that import the symbol from `files`. Without these, a removed const, class, or type (never
  *   a call target) and any symbol whose index was rebuilt after the change would read as unconsumed.
  * - For a symbol gone from HEAD under `unresolvedName`, the unresolved calls to that name made from
- *   those importing files — the precise callers once the index no longer resolves the symbol.
- *   Restricted to importing files so an unrelated `parse` elsewhere never counts.
+ *   those importing files or from the defining file itself — the precise callers once the index no
+ *   longer resolves the symbol. Restricted to those files so an unrelated `parse` never counts.
+ * - With `crossFileOnly` (a visibility reduction: the symbol is still defined, so only other files
+ *   break), consumers in the defining file are dropped.
  * An importing file already represented by a function-level consumer is not listed again.
  */
 function resolveConsumers(
   edgeStore: EdgeStoreLike | undefined,
-  nodeIds: string[],
-  imported: { files: string[]; name: string; unresolvedName?: string },
+  nodeId: string,
+  imported: { files: string[]; name: string; unresolvedName?: string; crossFileOnly?: boolean },
   importersOf?: ImporterLookup,
 ): { consumers: Consumer[]; truncated: number } {
   const byId = new Map<string, Consumer>();
-  const add = (c: Consumer): void => { if (!byId.has(c.id)) byId.set(c.id, c); };
-  for (const nodeId of edgeStore ? nodeIds : []) {
-    for (const e of edgeStore!.getCallers(nodeId)) add(callerToConsumer(e.callerId, 'call'));
-  }
-  const importingFiles = new Set<string>();
+  const add = (c: Consumer): void => {
+    if (imported.crossFileOnly && imported.files.includes(c.file)) return;
+    if (!byId.has(c.id)) byId.set(c.id, c);
+  };
+  for (const e of edgeStore ? edgeStore.getCallers(nodeId) : []) add(callerToConsumer(e.callerId, 'call'));
+  const importingFiles = new Map<string, 'import' | 'module-import'>();
   for (const file of importersOf ? imported.files : []) {
-    for (const importer of importersOf!(file, imported.name)) if (!imported.files.includes(importer)) importingFiles.add(importer);
+    for (const importer of importersOf!(file, imported.name)) {
+      if (imported.files.includes(importer.file)) continue;
+      // A by-name import is stronger evidence than a whole-module one for the same file.
+      if (importingFiles.get(importer.file) !== 'import') importingFiles.set(importer.file, importer.via);
+    }
   }
   if (imported.unresolvedName && edgeStore?.getExternalConsumers) {
     for (const e of edgeStore.getExternalConsumers(imported.unresolvedName)) {
       const c = callerToConsumer(e.callerId, 'unresolved-call');
-      if (importingFiles.has(c.file)) add(c);
+      if (importingFiles.has(c.file) || imported.files.includes(c.file)) add(c);
     }
   }
   const filesWithCallers = new Set([...byId.values()].map((c) => c.file));
-  for (const file of importingFiles) {
-    if (!filesWithCallers.has(file)) add({ id: file, name: file, file, via: 'import' });
+  for (const [file, via] of importingFiles) {
+    if (!filesWithCallers.has(file)) add({ id: file, name: file, file, via });
   }
   const all = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
   return { consumers: all.slice(0, MAX_CONSUMERS), truncated: Math.max(0, all.length - MAX_CONSUMERS) };
 }
 
 /**
- * Build an {@link ImporterLookup} from `.openlore/analysis/dependency-graph.json` (edges carry the
- * absolute source/target paths and the imported names). Missing or unreadable → undefined, and the
- * census falls back to call edges alone. An import through a re-exporting module is attributed to
- * that module, not to the definition, so it is not counted here.
+ * Build an {@link ImporterLookup} from `.openlore/analysis/dependency-graph.json`. Edges carry
+ * absolute source/target paths, the local binding names (`importedNames`), and — for statically
+ * named imports — the names bound FROM the target (`importedSourceNames`, aliases resolved). The
+ * lookup keys on the source names, so `import { parse as p }` counts for `parse` and
+ * `import { keep as helper }` never counts for `helper`. An import whose bindings the parser could
+ * not name (default, namespace, star, dynamic) or a Python import of the module itself is a
+ * `module-import` of every export. By-name imports are followed through re-exporting modules
+ * (a barrel) while the index still records the re-export. Absent or unusable → undefined, and the
+ * census falls back to call edges alone. Read through the shared bounded reader.
  */
 async function loadImporterLookup(absDir: string): Promise<ImporterLookup | undefined> {
-  let graph: { edges?: Array<{ source?: unknown; target?: unknown; importedNames?: unknown }> };
-  try {
-    graph = JSON.parse(await readFile(join(absDir, '.openlore/analysis/dependency-graph.json'), 'utf-8'));
-  } catch {
-    return undefined;
-  }
+  const graph = await readDependencyGraphCached<{ edges?: Array<Record<string, unknown>> }>(
+    join(absDir, '.openlore/analysis/dependency-graph.json'),
+  ).catch(() => null);
+  if (!graph || !Array.isArray(graph.edges)) return undefined;
   const roots = [absDir];
   try { const real = await realpath(absDir); if (real !== absDir) roots.push(real); } catch { /* keep absDir */ }
   const rel = (p: string): string | null => {
@@ -403,19 +417,48 @@ async function loadImporterLookup(absDir: string): Promise<ImporterLookup | unde
     }
     return null;
   };
-  const index = new Map<string, Set<string>>();
-  for (const edge of Array.isArray(graph.edges) ? graph.edges : []) {
+  const byName = new Map<string, Set<string>>();
+  const byModule = new Map<string, Set<string>>();
+  const put = (index: Map<string, Set<string>>, key: string, source: string): void => {
+    (index.get(key) ?? index.set(key, new Set()).get(key)!).add(source);
+  };
+  for (const edge of graph.edges) {
+    if (edge.httpEdge !== undefined || edge.isCallEdge === true) continue; // not an import
     if (typeof edge.source !== 'string' || typeof edge.target !== 'string' || !Array.isArray(edge.importedNames)) continue;
     const source = rel(edge.source);
     const target = rel(edge.target);
-    if (!source || !target) continue;
-    for (const name of edge.importedNames) {
-      if (typeof name !== 'string') continue;
-      const key = `${target}::${name}`;
-      (index.get(key) ?? index.set(key, new Set()).get(key)!).add(source);
+    if (!source || !target || source === target) continue;
+    const local = edge.importedNames.filter((n): n is string => typeof n === 'string');
+    const named = Array.isArray(edge.importedSourceNames)
+      ? edge.importedSourceNames.filter((n): n is string => typeof n === 'string')
+      : null;
+    const moduleName = target.replace(/\/__init__\.py$/, '').replace(/\.py$/, '').split('/').pop();
+    for (const name of named ?? []) {
+      if (target.endsWith('.py') && name === moduleName) put(byModule, target, source); // `from pkg import util`
+      else put(byName, `${target}::${name}`, source);
     }
+    // Bindings the parser could not name (a default or namespace binding beside named ones, or no
+    // named list at all) may use any export. A side-effect import binds nothing.
+    if (local.length > (named?.length ?? 0)) put(byModule, target, source);
   }
-  return (file, name) => [...new Set([...(index.get(`${file}::${name}`) ?? []), ...(index.get(`${file}::*`) ?? [])])].sort();
+  return (file, name) => {
+    const found = new Map<string, 'import' | 'module-import'>();
+    const seen = new Set<string>();
+    const queue = [file];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      for (const importer of byName.get(`${current}::${name}`) ?? []) {
+        found.set(importer, 'import');
+        queue.push(importer); // a re-exporting module passes the name on
+      }
+      if (current === file) {
+        for (const importer of byModule.get(current) ?? []) if (!found.has(importer)) found.set(importer, 'module-import');
+      }
+    }
+    return [...found].map(([f, via]) => ({ file: f, via })).sort((x, y) => x.file.localeCompare(y.file));
+  };
 }
 
 /**
@@ -650,6 +693,8 @@ async function federatedCensus(
     const dropped = Math.max(0, cross.length - MAX_CONSUMERS) + (batch.truncatedBySymbol.get(b.name) ?? 0);
     return weigh({ ...b, crossRepoConsumers: cross.slice(0, MAX_CONSUMERS), ...(dropped > 0 ? { crossRepoConsumersTruncated: dropped } : {}) }, dropped);
   });
+  const droppedTotal = names.reduce((sum, name) =>
+    sum + Math.max(0, (batch.bySymbol.get(name)?.length ?? 0) - MAX_CONSUMERS) + (batch.truncatedBySymbol.get(name) ?? 0), 0);
   const nameCount = new Map<string, number>();
   for (const b of breaking) nameCount.set(b.name, (nameCount.get(b.name) ?? 0) + 1);
   const sharedNames = [...nameCount].filter(([, n]) => n > 1).map(([name]) => name).sort();
@@ -660,9 +705,11 @@ async function federatedCensus(
       ...(sharedNames.length > 0 ? { sharedNames } : {}),
       reposConsulted: batch.coverage.reposConsulted.map((r) => r.name),
       reposSkipped: batch.coverage.reposSkipped.map((r) => ({ name: r.name, state: r.state, reason: r.reason })),
-      ...(batch.truncated > 0 ? { truncated: batch.truncated } : {}),
+      // Found but not listed, over every name (each change lists at most MAX_CONSUMERS).
+      ...(droppedTotal > 0 ? { truncated: droppedTotal } : {}),
       caveats: [
         ...batch.coverage.caveats,
+        'Sibling repos are matched on their unresolved call sites only: an import, `new`, or a const or type use of the symbol there is not counted.',
         ...(sharedNames.length > 0
           ? [`Breaking changes sharing a name (${sharedNames.join(', ')}) share one cross-repo consumer list, because sibling repos are matched by name.`]
           : []),
@@ -705,8 +752,8 @@ async function applyBaselineFile(
     currency.set(id, await decisionCurrency(absDir, id, loadStore));
   }
   const applied = applyAcceptedBaseline(findings, entries, currency);
-  const accepted = applied.accepted.map(({ code, subject, justification, decision }): AcceptedBreakage =>
-    ({ code, subject, justification, ...(decision ? { decision } : {}) }));
+  const accepted = applied.accepted.map(({ code, subject, discriminator, justification, decision }): AcceptedBreakage =>
+    ({ code, subject, ...(discriminator ? { discriminator } : {}), justification, ...(decision ? { decision } : {}) }));
   return {
     findings: applied.findings,
     accepted,
@@ -736,7 +783,8 @@ async function decisionCurrency(
     const supersededBy = result.receipt?.decision?.supersededBy;
     return {
       current: false,
-      reason: result.reason ?? `decision ${id} is not current`,
+      // One line: the reason quotes repository-controlled decision ids and titles.
+      reason: (result.reason ?? `decision ${id} is not current`).replace(/\s+/g, ' ').slice(0, 500),
       ...(supersededBy ? { supersededBy } : {}),
     };
   } catch (error) {
@@ -919,19 +967,21 @@ export async function assembleSurfaceDiff(
 
   changes.sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name) || a.changeKind.localeCompare(b.changeKind));
 
-  // Attach the in-repo consumers each breaking change affects. For a RENAME, look up BOTH the old
-  // id (`file::name`, resolved when the index is at the base) AND the new id (resolved when the
-  // index is at HEAD) so the broken consumers surface regardless of which side the index was built.
+  // Attach the in-repo consumers each breaking change affects: the consumers of the name as it was
+  // at the base. For a RENAME only the old name counts — a caller already on the new name is fine.
   const breaking = changes
     .filter((c) => c.class === 'breaking')
     .map((c) => {
-      const ids = [`${c.file}::${c.name}`];
-      if (c.changeKind === 'renamed' && c.rename) ids.push(`${c.rename.file}::${c.rename.to}`);
       const files = c.rename && c.rename.file !== c.file ? [c.file, c.rename.file] : [c.file];
       // The old name no longer exists at HEAD for a removal or a rename, so an index built after the
       // change keeps its callers only as unresolved calls to that name.
       const gone = c.changeKind === 'removed' || c.changeKind === 'renamed';
-      const { consumers, truncated } = resolveConsumers(edgeStore, ids, { files, name: c.name, ...(gone ? { unresolvedName: c.name } : {}) }, importersOf);
+      const { consumers, truncated } = resolveConsumers(edgeStore, `${c.file}::${c.name}`, {
+        files,
+        name: c.name,
+        ...(gone ? { unresolvedName: c.name } : {}),
+        ...(c.changeKind === 'visibility-reduced' ? { crossFileOnly: true } : {}),
+      }, importersOf);
       return weigh({ ...c, consumers, consumersTruncated: truncated });
     });
 
@@ -991,15 +1041,34 @@ function bumpVerdict(changes: readonly SurfaceChange[], signaturesAssessed: bool
 const MAX_DISCRIMINATOR_LENGTH = 300;
 
 /**
- * What exactly broke, so an acceptance of one break never covers a different later break of the
- * same rule on the same symbol (change: add-public-surface-acceptance-baseline): the rename target
- * for a rename, the before → after signature for a signature change. A removal or a visibility
- * reduction is the whole break, so it needs none.
+ * A signature reduced to what its contract is: parameter types, optionality, rest, and return type —
+ * no names, comments, or formatting. A reformat, a comment, or a renamed parameter then keeps the
+ * same discriminator, so an accepted break does not report again for an edit that changed nothing.
+ * A signature the parser cannot read falls back to its text with comments and spacing removed.
+ */
+function canonicalSignature(signature: string): string {
+  const parsed = parseSignature(signature, signature.includes('->') ? 'Python' : 'TypeScript');
+  const squash = (t: string): string => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, '');
+  if (parsed.confidence === 'unparsed') return squash(signature.replace(/\/\/[^\n]*/g, ''));
+  const params = parsed.params.map((p) => `${p.rest ? '...' : ''}${p.type !== undefined ? squash(p.type) : '?'}${p.optional && !p.rest ? '?' : ''}`);
+  return `(${params.join(',')})=>${parsed.returnType !== undefined ? squash(parsed.returnType) : '?'}`;
+}
+
+/**
+ * What exactly broke, so an acceptance of one break never covers a different break of the same
+ * rule on the same symbol (change: add-public-surface-acceptance-baseline): the rename target for a
+ * rename; the canonical before → after contract for a signature change; the canonical removed
+ * contract for a removal or a visibility reduction (a symbol that comes back and is removed again
+ * with a different contract is a new break). A name-level removal with no signature has none.
  */
 export function breakDiscriminator(change: SurfaceChange): string | undefined {
   let text: string | undefined;
   if (change.changeKind === 'renamed' && change.rename) text = `renamed to ${change.rename.file}::${change.rename.to}`;
-  else if (change.changeKind === 'signature' && (change.before || change.after)) text = `${change.before ?? ''} => ${change.after ?? ''}`;
+  else if (change.changeKind === 'signature' && (change.before || change.after)) {
+    text = `${canonicalSignature(change.before ?? '')} => ${canonicalSignature(change.after ?? '')}`;
+  } else if ((change.changeKind === 'removed' || change.changeKind === 'visibility-reduced') && change.before) {
+    text = `was ${canonicalSignature(change.before)}`;
+  }
   if (text === undefined) return undefined;
   return text.length <= MAX_DISCRIMINATOR_LENGTH ? text : `sha256:${hashSpan(text)}`;
 }

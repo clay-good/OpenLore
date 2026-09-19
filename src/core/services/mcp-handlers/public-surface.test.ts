@@ -229,18 +229,41 @@ describe('assembleSurfaceDiff — breaking-change classification over file conte
     expect(change(await assembleSurfaceDiff(base, head, noRename), 'api')?.changeKind).toBe('removed');
   });
 
-  it('a renamed export resolves consumers via BOTH old and new id (index built at base OR head)', async () => {
+  it('a renamed export counts only callers of the OLD name (a caller already on the new name is fine)', async () => {
     const body = 'export function computeTax(income: number): number {\n  const rate = 0.2;\n  return income * rate;\n}\n';
     const base = [ts('a.ts', body)];
     const head = [ts('a.ts', body.replace(/computeTax/g, 'calculateTax'))];
-    // Index built at HEAD: only the NEW id resolves. The union must still surface the consumer.
-    const headIndex = { getCallers: (id: string) => (id === 'a.ts::calculateTax' ? [{ callerId: 'b.ts::useIt' }] : []) };
-    const rHead = await assembleSurfaceDiff(base, head, noRename, headIndex);
-    expect(rHead.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => x.name)).toEqual(['useIt']);
-    // Index built at base: only the OLD id resolves. Still surfaced.
+    const importers = (): Array<{ file: string; via: 'import' }> => [{ file: 'b.ts', via: 'import' }];
+    // Index built at HEAD: a migrated caller resolves to the NEW id and is not broken; an unmigrated
+    // one in an importing file is an unresolved call to the old name.
+    const headIndex = {
+      getCallers: (id: string) => (id === 'a.ts::calculateTax' ? [{ callerId: 'c.ts::migrated' }] : []),
+      getExternalConsumers: (name: string) => (name === 'computeTax' ? [{ callerId: 'b.ts::useIt' }] : []),
+    };
+    const rHead = await assembleSurfaceDiff(base, head, noRename, headIndex, 0, importers);
+    expect(rHead.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => [x.name, x.via])).toEqual([['useIt', 'unresolved-call']]);
+    // Index built at base: the OLD id resolves.
     const baseIndex = { getCallers: (id: string) => (id === 'a.ts::computeTax' ? [{ callerId: 'b.ts::useIt' }] : []) };
     const rBase = await assembleSurfaceDiff(base, head, noRename, baseIndex);
     expect(rBase.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => x.name)).toEqual(['useIt']);
+  });
+
+  it('a visibility reduction counts only consumers in other files', async () => {
+    const base = [ts('m.ts', 'export function deepMerge(a: number): number { return a; }\nexport function use(): number { return deepMerge(1); }\n')];
+    const head = [ts('m.ts', 'function deepMerge(a: number): number { return a; }\nexport function use(): number { return deepMerge(1); }\n')];
+    const index = { getCallers: (id: string) => (id === 'm.ts::deepMerge' ? [{ callerId: 'm.ts::use' }, { callerId: 'm.ts::deepMerge' }] : []) };
+    const same = await assembleSurfaceDiff(base, head, noRename, index);
+    expect(same.breaking[0]).toMatchObject({ changeKind: 'visibility-reduced', breakingClass: 'breaking-unconsumed-in-index', consumers: [] });
+    const withOther = await assembleSurfaceDiff(base, head, noRename, { getCallers: (id: string) => [...index.getCallers(id), { callerId: 'x.ts::outside' }] });
+    expect(withOther.breaking[0].consumers.map((c) => c.id)).toEqual(['x.ts::outside']);
+  });
+
+  it('a removed export counts unresolved callers in its own file', async () => {
+    const base = [ts('m.ts', 'export function gone(): void {}\nexport function user(): void { gone(); }\n')];
+    const head = [ts('m.ts', 'export function user(): void { gone(); }\n')];
+    const index = { getCallers: () => [], getExternalConsumers: (n: string) => (n === 'gone' ? [{ callerId: 'm.ts::user' }] : []) };
+    const r = await assembleSurfaceDiff(base, head, noRename, index, 0, () => []);
+    expect(r.breaking[0]).toMatchObject({ breakingClass: 'breaking-consumed', consumers: [{ id: 'm.ts::user', via: 'unresolved-call' }] });
   });
 
   it('a regex literal containing a quote does NOT swallow a following real export (regex-aware scan)', async () => {
@@ -568,6 +591,7 @@ describe('certify_public_surface diff mode: federation census and accepted basel
   };
   const run = async (extra: Record<string, unknown> = {}): Promise<Diff> =>
     (await computeCertifyPublicSurface({ directory: dir, baseRef: 'main', ...extra })) as Diff;
+  const legacyFinding = (r: Diff) => r.findings.filter((f) => f.subject === 'a.ts::parseLegacy') as never;
   const decisionStore = async (decisions: Array<{ id: string; status?: string; supersedes?: string }>): Promise<void> => {
     const d = join(dir, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
     await mkdir(d, { recursive: true });
@@ -610,10 +634,10 @@ describe('certify_public_surface diff mode: federation census and accepted basel
   });
 
   it('an accepted break is listed as accepted, leaves findings, and a new break still reports', async () => {
-    await writeAcceptedBreakages(dir, [{ code: 'export-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::parseLegacy', message: 'm' }], 'legacy parser retired in v3');
+    await writeAcceptedBreakages(dir, legacyFinding(await run()), 'legacy parser retired in v3');
     const r = await run();
     expect(r.findings.map((f) => f.subject)).toEqual(['a.ts::other']);
-    expect(r.baseline?.accepted).toEqual([{ code: 'export-removed', subject: 'a.ts::parseLegacy', justification: 'legacy parser retired in v3' }]);
+    expect(r.baseline?.accepted).toEqual([{ code: 'export-removed', subject: 'a.ts::parseLegacy', discriminator: 'was (string)=>string', justification: 'legacy parser retired in v3' }]);
     expect(r.summary).toMatchObject({ breaking: 2, accepted: 1 });
     // The verdict still describes the diff honestly: the accepted break is still breaking.
     expect(r.breaking.map((b) => b.name).sort()).toEqual(['other', 'parseLegacy']);
@@ -621,7 +645,7 @@ describe('certify_public_surface diff mode: federation census and accepted basel
 
   it('a superseded decision anchor expires the acceptance, citing the live superseder', async () => {
     await decisionStore([{ id: 'a1b2c3d4' }]);
-    await writeAcceptedBreakages(dir, [{ code: 'export-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::parseLegacy', message: 'm' }], 'retired', 'a1b2c3d4');
+    await writeAcceptedBreakages(dir, legacyFinding(await run()), 'retired', 'a1b2c3d4');
     expect((await run()).baseline?.accepted).toHaveLength(1);
 
     await decisionStore([{ id: 'a1b2c3d4' }, { id: 'b2c3d4e5', supersedes: 'a1b2c3d4' }]);
@@ -633,7 +657,7 @@ describe('certify_public_surface diff mode: federation census and accepted basel
   });
 
   it('an unrecorded decision anchor is not honored', async () => {
-    await writeAcceptedBreakages(dir, [{ code: 'export-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::parseLegacy', message: 'm' }], 'retired', 'deadbeef');
+    await writeAcceptedBreakages(dir, legacyFinding(await run()), 'retired', 'deadbeef');
     const r = await run();
     expect(r.baseline?.stale[0].reason).toMatch(/No decision "deadbeef" is recorded/);
     expect(r.findings.map((f) => f.subject)).toContain('a.ts::parseLegacy');
@@ -662,11 +686,14 @@ describe('certify_public_surface diff mode: federation census and accepted basel
     expect(r.summary).toMatchObject({ breakingConsumed: 1, breakingUnconsumedInIndex: 1 });
   });
 
-  const depGraph = async (edges: Array<{ source: string; target: string; importedNames: string[] }>): Promise<void> => {
+  const depGraph = async (edges: Array<{ source: string; target: string; importedNames: string[]; importedSourceNames?: string[] | null }>): Promise<void> => {
     const real = await realpath(dir);
     await mkdir(join(dir, OPENLORE_DIR, 'analysis'), { recursive: true });
     await writeFile(join(dir, OPENLORE_DIR, 'analysis', 'dependency-graph.json'), JSON.stringify({
-      nodes: [], edges: edges.map((e) => ({ source: join(real, e.source), target: join(real, e.target), importedNames: e.importedNames })),
+      nodes: [], edges: edges.map((e) => ({
+        source: join(real, e.source), target: join(real, e.target), importedNames: e.importedNames,
+        ...(e.importedSourceNames === null ? {} : { importedSourceNames: e.importedSourceNames ?? e.importedNames }),
+      })),
     }));
   };
 
@@ -737,5 +764,58 @@ describe('certify_public_surface diff mode: federation census and accepted basel
     const second = await run();
     expect(second.findings.map((f) => f.code)).toEqual(['param-type-narrowed']);
     expect(second.baseline?.unmatched).toHaveLength(1);
+  });
+
+  it('reads imports by the name they bind FROM the module: aliases, namespaces, defaults, barrels, decoys', async () => {
+    await depGraph([
+      { source: 'alias.ts', target: 'a.ts', importedNames: ['p'], importedSourceNames: ['parseLegacy'] },
+      { source: 'ns.ts', target: 'a.ts', importedNames: ['A'], importedSourceNames: null },
+      { source: 'decoy.ts', target: 'a.ts', importedNames: ['other'], importedSourceNames: ['keep'] },
+      { source: 'index.ts', target: 'a.ts', importedNames: ['parseLegacy'] },
+      { source: 'app.ts', target: 'index.ts', importedNames: ['parseLegacy'] },
+    ]);
+    const r = await run();
+    const legacy = r.breaking.find((b) => b.name === 'parseLegacy')!;
+    expect(legacy.consumers).toEqual([
+      { id: 'alias.ts', name: 'alias.ts', file: 'alias.ts', via: 'import' },
+      { id: 'app.ts', name: 'app.ts', file: 'app.ts', via: 'import' },
+      { id: 'index.ts', name: 'index.ts', file: 'index.ts', via: 'import' },
+      { id: 'ns.ts', name: 'ns.ts', file: 'ns.ts', via: 'module-import' },
+    ]);
+    // `import { keep as other }` does not bind `other`; only the namespace import may.
+    expect(r.breaking.find((b) => b.name === 'other')!.consumers).toEqual([{ id: 'ns.ts', name: 'ns.ts', file: 'ns.ts', via: 'module-import' }]);
+  });
+
+  it('counts a Python import of the module itself as a module import', async () => {
+    await mkdir(join(dir, 'pkg'), { recursive: true });
+    await writeFile(join(dir, 'pkg', 'util.py'), 'def tokenize(s: str) -> str:\n    return s\n\ndef keep(s: str) -> str:\n    return s\n');
+    execFileGitSync('git', ['-C', dir, 'add', 'pkg/util.py']);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-m', 'py']);
+    await writeFile(join(dir, 'pkg', 'util.py'), 'def keep(s: str) -> str:\n    return s\n');
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'pkg/util.py', status: 'modified' }], resolvedBase: 'main' } as never);
+    await depGraph([
+      { source: 'main.py', target: 'pkg/util.py', importedNames: ['util'] },
+      { source: 'm2.py', target: 'pkg/util.py', importedNames: ['tk'], importedSourceNames: ['tokenize'] },
+      { source: 'other.py', target: 'pkg/util.py', importedNames: ['keep'] },
+    ]);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'tokenize')!.consumers).toEqual([
+      { id: 'm2.py', name: 'm2.py', file: 'm2.py', via: 'import' },
+      { id: 'main.py', name: 'main.py', file: 'main.py', via: 'module-import' },
+    ]);
+  });
+
+  it('reports the cross-repo consumers found but not listed, over every name', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((sym) => [sym, Array.from({ length: sym === 'parseLegacy' ? 30 : 0 }, (_, i) => ({
+        repo: 'sibling', repoPath: '/s', caller: { id: `x${i}.ts::f`, name: 'f', file: `x${i}.ts` }, symbol: sym,
+      }))])),
+      truncated: 10,
+      truncatedBySymbol: new Map([['parseLegacy', 10]]),
+      coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    expect((r.consumerCensus as { truncated?: number }).truncated).toBe(15);
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')).toMatchObject({ consumerCount: 40, crossRepoConsumersTruncated: 15 });
   });
 });
