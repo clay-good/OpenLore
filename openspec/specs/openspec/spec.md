@@ -253,6 +253,18 @@ so the next sync writes it or reports why it cannot.
 - **WHEN** the syncer runs
 - **THEN** it writes an ADR, marks the decision synced, and purges it from the store
 
+### Requirement: ConsolidationKeepsAnAuthorsExplicitScope
+
+A scope the author passes explicitly when recording a decision SHALL survive consolidation: the
+consolidated decision SHALL keep that scope rather than the model's classification. A scope the
+record path inferred SHALL remain open to the model's classification.
+
+#### Scenario: An explicit system scope survives consolidation
+
+- **GIVEN** a draft recorded with an explicit `--scope system`
+- **WHEN** background consolidation classifies it as `component`
+- **THEN** the consolidated decision keeps scope `system`, so the sync still writes it as an ADR
+
 ### Requirement: MergeNeverDeletesHumanContent
 
 In `writeMode: 'merge'`, the writer SHALL back up the file before writing (honoring

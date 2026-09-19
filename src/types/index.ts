@@ -888,6 +888,12 @@ export interface PendingDecision {
 
   // Scope — gates ADR creation: only cross-domain and system produce ADRs
   scope?: DecisionScope;
+  /**
+   * The scope the author passed explicitly at record time, if any. Consolidation keeps
+   * it instead of the LLM's classification, so an author's `--scope system` is not
+   * silently lowered. Absent when the scope was inferred. (issue #512)
+   */
+  authorScope?: DecisionScope;
 
   /**
    * Optional deterministic architecture constraints governed by this decision's

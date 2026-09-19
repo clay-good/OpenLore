@@ -520,6 +520,48 @@ describe('consolidateDrafts — ID reuse', () => {
     expect(decisions[0].scope).toBe('cross-domain');
   });
 
+  // Issue #512: an author's explicit scope was replaced by the model's classification.
+  describe('author scope (#512)', () => {
+    const keepDraftId = (scope?: string) => JSON.stringify([{
+      id: 'draft0000',
+      title: 'Pi starts with the substrate surface',
+      rationale: 'r',
+      consequences: 'c',
+      affectedDomains: [],
+      affectedFiles: ['src/pi/extension.ts'],
+      proposedRequirement: null,
+      supersededIds: [],
+      ...(scope ? { scope } : {}),
+    }]);
+
+    it('keeps an explicit author scope over the model classification', async () => {
+      const store = makeStore([{ title: 'Pi surface', scope: 'system', authorScope: 'system' }]);
+      const { decisions } = await consolidateDrafts(store, makeLLM(keepDraftId('component')));
+      expect(decisions[0].scope).toBe('system');
+      expect(decisions[0].authorScope).toBe('system');
+    });
+
+    it('keeps an explicit author scope when the model omits scope', async () => {
+      const store = makeStore([{ title: 'Pi surface', scope: 'cross-domain', authorScope: 'cross-domain' }]);
+      const { decisions } = await consolidateDrafts(store, makeLLM(keepDraftId()));
+      expect(decisions[0].scope).toBe('cross-domain');
+    });
+
+    it('lets the model classify an inferred scope', async () => {
+      const store = makeStore([{ title: 'Pi surface', scope: 'cross-domain' }]);
+      const { decisions } = await consolidateDrafts(store, makeLLM(keepDraftId('component')));
+      expect(decisions[0].scope).toBe('component');
+      expect(decisions[0].authorScope).toBeUndefined();
+    });
+
+    it('ignores an author scope that is not a known scope', async () => {
+      const store = makeStore([{ title: 'Pi surface', authorScope: 'galaxy' as never }]);
+      const { decisions } = await consolidateDrafts(store, makeLLM(keepDraftId('local')));
+      expect(decisions[0].scope).toBe('local');
+      expect(decisions[0].authorScope).toBeUndefined();
+    });
+  });
+
   it('defaults scope to component when LLM omits the field', async () => {
     const response = JSON.stringify([{
       title: 'Use retry helper',
