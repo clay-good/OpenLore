@@ -1857,7 +1857,8 @@ export const TOOL_DEFINITIONS = [
       'ordinary-change — using labels OpenLore already computes, NOT a weighted score. Each briefed ' +
       'symbol carries its labels and raw evidence (fan-in, fan-out, prior churn), grouped by region, ' +
       'with the tests to run for the whole change set. HONEST BY CONSTRUCTION: changed symbols are ' +
-      'file-granular (disclosed); the surprising-change label is withheld when git history is too ' +
+      'exact where both revisions hash cleanly (formatting and comments are not changes; renames are ' +
+      'listed under carried), and a file kept whole names its reason; the surprising-change label is withheld when git history is too ' +
       'shallow to say "rarely changed before"; a bounded briefing always carries a truncation receipt ' +
       '(omitted count + lowest tier reached) and never drops a higher tier for a lower one. The cursor ' +
       'is the base ref, never wall-clock time. Deterministic, offline, no LLM. Run analyze_codebase first.',

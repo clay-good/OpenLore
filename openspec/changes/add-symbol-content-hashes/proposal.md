@@ -1,6 +1,7 @@
 # Symbol content hashes: exact symbol-level changed-sets between revisions
 
-> Status: PROPOSED (2026-07-03, e2e audit follow-up). Persist a per-symbol content hash over the
+> Status: BUILT, narrowed (2026-09-19; proposed 2026-07-03, e2e audit follow-up). See "Build notes"
+> at the end for what shipped and what was deferred. Original summary: persist a per-symbol content hash over the
 > normalized extracted body (AST token stream — formatting/comment-only edits hash identically),
 > so two revisions' hash sets yield an EXACT symbol-level changed-set. Prior art: bazel-diff
 > (https://github.com/Tinder/bazel-diff), target-determinator, buck2-change-detector — hash
@@ -80,3 +81,24 @@ consumer keeps its shape — only its changed-set sharpens.
 - Tool surface: unchanged (no new tool; existing conclusions sharpen). No payload-budget impact.
 - Risk: schema bump on an additive nullable column (established precedent); base-ref
   re-extraction cost is bounded by the diff's file set and measured, not assumed.
+
+## Build notes (2026-09-19)
+
+What shipped differs from the proposal in three deliberate ways:
+
+- **Hashes are computed at query time, not persisted.** No consumer reads a stored hash yet, and
+  computing them for every file at analyze would cost every user a full extra tree walk for nothing.
+  The hash rides the extractor's existing parse behind an opt-in (`withContentHashes`), so only the
+  files a diff names are ever hashed, at both revisions. The `norm_hash` column (and its schema
+  bump) waits for `add-incremental-early-cutoff`, the first change that needs stored hashes.
+- **The hash covers structure and a residual.** A token stream alone is unsound for Python, where
+  indentation is structure, so the stream carries node open/close markers. A residual hash over
+  everything outside every symbol span (imports, module-level statements, class fields, symbol
+  order) makes narrowing sound: a file whose residual changed stays file-granular.
+- **Narrowing keeps what file-level seeding caught for a still-valid reason.** Same-file symbols
+  that name a changed symbol, or hold a dynamic-dispatch site, stay seeded, and every incomplete
+  case (unreadable side, parse errors, no native tree, index mismatch, file bound) stays
+  file-granular with a named reason.
+
+Deferred: the change-coupling semantic-churn view (it needs per-commit re-extraction of history),
+the persisted column, and a rename-aware churn join for `briefing_since`'s surprise caveat.
