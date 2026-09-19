@@ -327,7 +327,9 @@ describe('decision autopilot', () => {
     expect(stderr).not.toContain('will retry next gate');
   });
 
-  it('--approve preview strips control characters from spec paths', async () => {
+  // skipIf(win32): Windows forbids control characters in file names, so the premise (a
+  // spec directory whose name carries an escape sequence) cannot be built there.
+  it.skipIf(process.platform === 'win32')('--approve preview strips control characters from spec paths', async () => {
     await writeConfig();
     const evil = 'ca\u001b[2Jche';
     await mkdir(join(dir, 'openspec', 'specs', evil), { recursive: true });
