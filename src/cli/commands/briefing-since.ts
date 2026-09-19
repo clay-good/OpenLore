@@ -44,6 +44,8 @@ interface BriefingResult {
   surprisingChange: { available: boolean; reason?: string; historyCommitsScanned: number };
   note?: string;
   caveats: string[];
+  /** Renames and moves whose body did not change (change: add-symbol-content-hashes). */
+  carried?: Array<{ from: string; to: string; reason: string; basis: string }>;
   confidenceBoundary?: {
     staleness?: { detail?: string };
     integrity?: { verdict?: string; detail?: string };
@@ -112,7 +114,14 @@ function renderHuman(r: BriefingResult): string {
   for (const caveat of r.testsToRun.soundness?.caveats ?? []) {
     if (/substring fallback|may have widened/i.test(caveat)) lines.push(`   ⚠ ${caveat}`);
   }
-  lines.push('   ' + r.caveats[0]);
+  // Every standing caveat, not the one that happens to sit at index 0: this list grows (the
+  // changed-set granularity note now leads it), and selecting by position silently drops whichever
+  // disclosure a later change prepends.
+  for (const caveat of r.caveats) lines.push('   ' + caveat);
+  if (r.carried && r.carried.length > 0) {
+    for (const c of r.carried.slice(0, 5)) lines.push(`   ↔ ${c.reason}: ${c.from} → ${c.to} (${c.basis})`);
+    if (r.carried.length > 5) lines.push(`   … and ${r.carried.length - 5} more carried rename(s)/move(s)`);
+  }
   lines.push('');
   return lines.join('\n');
 }

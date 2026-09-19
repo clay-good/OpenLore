@@ -56,6 +56,24 @@ export interface HashSpan {
   endIndex: number;
 }
 
+/**
+ * One top-level import statement, hashed on its own rather than into the residual. An import that is
+ * purely ADDED — it takes a name that no other import bound — cannot change what the file's existing
+ * symbols do, so hashing imports apart lets an ordinary "new import plus an edited function" diff
+ * stay symbol-exact instead of collapsing the whole file. A removed or rewritten import DOES rebind
+ * a name the existing symbols may use, and is a module-level change like any other.
+ */
+export interface ImportStatementHash {
+  hash: string;
+  /** Identifier texts inside the statement — an over-approximation of what it binds. */
+  names: string[];
+  /** False for a bare side-effect import (`import './polyfill'`), which binds nothing and runs code. */
+  binds: boolean;
+}
+
+/** Node types that are a language's import/use statement. */
+const IMPORT_TYPE = /^(import|use|using|require)[_a-z]*$|_(import|use|using)_?[a-z]*$/i;
+
 /** Why a file's residual hash could not be computed. */
 export type ResidualUnavailableReason = 'invalid-span' | 'span-not-contiguous';
 
@@ -70,6 +88,8 @@ export interface FileContentHashes {
   residual?: string;
   /** Ids of the outermost spans in the order they occur in the file. */
   order: string[];
+  /** Top-level import statements, hashed individually and excluded from the residual and layout. */
+  imports: ImportStatementHash[];
   /**
    * The file's shape: `T:<n>` for a run of `n` residual tokens, `S:<id>` for a run of one span's
    * tokens, in file order. Comparing two revisions' layouts projected onto the symbols they share
@@ -231,12 +251,39 @@ export function computeFileContentHashes(
     if (text.length > 0) emit(f.within, frame('G', text));
   };
 
+  const imports: ImportStatementHash[] = [];
+  /** Hash one import statement on its own; its tokens never reach the residual or the layout. */
+  const takeImport = (n: HashTreeNode): void => {
+    const h = createHash('sha256');
+    const names: string[] = [];
+    const stack: HashTreeNode[] = [n];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      const kids = childrenOf(cur);
+      const text = content.slice(cur.startIndex, cur.endIndex);
+      if (kids.length === 0) {
+        if (isDroppedComment(cur.type, () => text)) continue;
+        h.update(frame('L', cur.type, text));
+        if (/identifier|name/i.test(cur.type) && /^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(text)) names.push(text);
+        continue;
+      }
+      h.update(frame('(', cur.type));
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    imports.push({ hash: hash16(h), names: [...new Set(names)].sort(), binds: names.length > 0 });
+  };
+
   const stack: Frame[] = [];
   const enter = (n: HashTreeNode, parentWithin: number[]): void => {
     // A dropped comment takes its whole subtree with it (Rust doc comments have children).
     if (isDroppedComment(n.type, () => content.slice(n.startIndex, n.endIndex))) return;
     const kids = childrenOf(n);
     const within = containing(n);
+    // A top-level import is hashed on its own (see {@link ImportStatementHash}).
+    if (within.length === 0 && parentWithin.length === 0 && stack.length === 1 && IMPORT_TYPE.test(n.type)) {
+      takeImport(n);
+      return;
+    }
     if (within.length > 0 && parentWithin.length === 0) markRun(within);
     if (kids.length === 0) {
       emit(within, frame('L', n.type, content.slice(n.startIndex, n.endIndex)));
@@ -265,6 +312,7 @@ export function computeFileContentHashes(
     symbols: spans.map((s, i) => ({ id: s.id, hash: hash16(hashers[i]) })),
     order,
     layout,
+    imports,
     ...(residualUnavailable ? { residualUnavailable } : { residual: hash16(residual) }),
   };
 }

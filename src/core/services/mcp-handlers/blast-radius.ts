@@ -20,7 +20,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
-import { granularityCaveat, type ChangeGranularityReceipt } from '../symbol-changed-set.js';
+import { granularityCaveat, importsAddedCaveat, type ChangeGranularityReceipt } from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -368,6 +368,8 @@ export async function computeBlastRadius(
   }
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   if (granularityNote) caveats.push(granularityNote);
+  const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
+  if (importsNote) caveats.push(importsNote);
   if ((narrowed.seededUnchanged ?? 0) > 0) {
     caveats.push(`${narrowed.seededUnchanged} of the listed changed symbols did not themselves change: they are analyzed because they name a changed symbol, or hold a dynamic-dispatch site, in the same file.`);
   }

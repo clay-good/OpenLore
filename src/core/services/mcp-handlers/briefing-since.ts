@@ -26,7 +26,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
-import { changedSymbolIds, granularityCaveat, type CarriedSymbol, type DiffEntry, type SymbolChangedSet } from '../symbol-changed-set.js';
+import { changedSymbolIds, granularityCaveat, importsAddedCaveat, type CarriedSymbol, type DiffEntry, type SymbolChangedSet } from '../symbol-changed-set.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
 import { computeLandmarkSignals } from '../../analyzer/landmark-signals.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
@@ -223,8 +223,10 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   }
 
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
+  const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
   const caveats: string[] = [
     ...(granularityNote ? [granularityNote] : []),
+    ...(importsNote ? [importsNote] : []),
     ...(carried.length > 0
       ? [`${carried.length} briefed symbol(s) are renames or moves whose body is unchanged (paired under carried): their id and every caller changed, so they are briefed, but the body did not.`]
       : []),

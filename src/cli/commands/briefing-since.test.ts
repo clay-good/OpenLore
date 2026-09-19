@@ -40,7 +40,7 @@ function fullResult(over: Record<string, unknown> = {}) {
     regions: [{ community: 'core', count: 1 }, { community: 'orch', count: 1 }],
     testsToRun: { count: 5, files: ['src/core.test.ts'] },
     surprisingChange: { available: true, historyCommitsScanned: 40 },
-    caveats: ['Changed symbols are at FILE granularity: …'],
+    caveats: ['Significance is a tier label from existing classifiers, not a weighted score.'],
     ...over,
   };
 }

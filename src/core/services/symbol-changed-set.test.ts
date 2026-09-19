@@ -13,6 +13,7 @@ import {
   computeSymbolChangedSet,
   granularityCaveat,
   granularityReceipt,
+  importsAddedCaveat,
   narrowSeedsToChangedSymbols,
   type DiffEntry,
   type SymbolGranularChange,
@@ -215,6 +216,81 @@ describe('computeSymbolChangedSet', () => {
     );
     expect(set.byFile.get('src/a.ts')).toMatchObject({ granularity: 'symbol' });
     expect(set.byFile.get('src/b.ts')).toEqual({ granularity: 'file', reason: 'size-cap' });
+  });
+
+  it('an added import plus an edited function stays symbol-exact, and seeds whoever names the import', async () => {
+    const before = "import { a } from './a';\nexport function one() { return a(1); }\nexport function two() { return 2; }\nexport function three() { return 3; }\n";
+    const after = "import { a } from './a';\nimport { b } from './b';\nexport function one() { return a(1) + b(); }\nexport function two() { return 2; }\nexport function three() { return b ? 3 : 4; }\n";
+    await put('src/i.ts', before);
+    await commitAll();
+    await put('src/i.ts', after);
+    const { set } = await changedSet([{ path: 'src/i.ts', status: 'modified' }], ['src/i.ts']);
+    const change = set.byFile.get('src/i.ts') as SymbolGranularChange;
+    expect(change.granularity).toBe('symbol');
+    expect(change.importsAdded).toBe(true);
+    expect(change.changed).toEqual(['src/i.ts::one', 'src/i.ts::three']);
+    expect(granularityReceipt(set).importsAddedFiles).toBe(1);
+    expect(importsAddedCaveat(granularityReceipt(set))).toContain('load-time side effects');
+  });
+
+  it('a rewritten or removed import keeps the file whole, and so does a bare side-effect import', async () => {
+    const base = "import { a } from './a';\nexport function one() { return a(1); }\nexport function two() { return 2; }\n";
+    await put('src/r1.ts', base);
+    await put('src/r2.ts', base);
+    await commitAll();
+    await put('src/r1.ts', base.replace("from './a'", "from './other'"));   // rebinds `a`
+    await put('src/r2.ts', `import './polyfill';\n${base}`);                 // runs code, binds nothing
+    const { set } = await changedSet(
+      [{ path: 'src/r1.ts', status: 'modified' }, { path: 'src/r2.ts', status: 'modified' }],
+      ['src/r1.ts', 'src/r2.ts'],
+    );
+    expect(set.byFile.get('src/r1.ts')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+    expect(set.byFile.get('src/r2.ts')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+  });
+
+  it('a realistic mixed diff: narrowing only ever removes seeds, and never the edited ones', async () => {
+    const util = (k: number) => `export function helper(x: number) { return x + ${k}; }\n` +
+      'export function untouched() { return 0; }\n' +
+      'export function alsoUntouched() { return 1; }\n';
+    const svc = (comment: string) => "import { helper } from './util';\n" +
+      `export function serve(x: number) {\n  // ${comment}\n  return helper(x);\n}\n` +
+      'export function idle() { return 7; }\n';
+    const other = 'export const TABLE = { a: 1 };\nexport function reads() { return TABLE.a; }\n';
+    await put('src/util.ts', util(1));
+    await put('src/svc.ts', svc('note'));
+    await put('src/other.ts', other);
+    await commitAll();
+    // one body edit, one added function, one added import, one comment-only edit, one module-level edit
+    await put('src/util.ts', `${util(2)}export function added() { return 9; }\n`);
+    await put('src/svc.ts', `import { added } from './util';\n${svc('reworded note')}`);
+    await put('src/other.ts', other.replace('{ a: 1 }', '{ a: 2 }'));
+    const diff: DiffEntry[] = [
+      { path: 'src/util.ts', status: 'modified' },
+      { path: 'src/svc.ts', status: 'modified' },
+      { path: 'src/other.ts', status: 'modified' },
+    ];
+    const { set, callGraph } = await changedSet(diff, ['src/util.ts', 'src/svc.ts', 'src/other.ts']);
+    const fileSeeds = callGraph.nodes.filter(n => !n.isExternal && !n.isTest);
+    const narrowed = narrowSeedsToChangedSymbols(fileSeeds, set);
+    const ids = narrowed.map(n => n.id).sort();
+
+    // Narrowing only ever removes: it can never invent a seed.
+    expect(fileSeeds.map(n => n.id)).toEqual(expect.arrayContaining(ids));
+    // The edited and added symbols are seeded.
+    expect(ids).toContain('src/util.ts::helper');
+    expect(ids).toContain('src/util.ts::added');
+    // The module-level edit keeps its whole file.
+    expect(ids).toContain('src/other.ts::reads');
+    // The comment-only edit does not seed its file's untouched sibling…
+    expect(ids).not.toContain('src/svc.ts::idle');
+    // …and neither do the untouched siblings of the edited function.
+    expect(ids).not.toContain('src/util.ts::untouched');
+    expect(ids).not.toContain('src/util.ts::alsoUntouched');
+    // `serve` itself did not change: only its comment and a new import above it. It is a CALLER of
+    // the changed `helper`, and callers are reached by the backward walk over the graph — seeding it
+    // is not what selects its tests.
+    expect(ids).not.toContain('src/svc.ts::serve');
+    expect(ids).toEqual(['src/other.ts::reads', 'src/util.ts::added', 'src/util.ts::helper']);
   });
 
   it('parse errors on either side keep the file whole', async () => {

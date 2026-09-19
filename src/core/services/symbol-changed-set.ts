@@ -33,6 +33,7 @@ import type { ChangedFile } from '../../types/index.js';
 import type { FunctionNode, SerializedCallGraph } from '../analyzer/call-graph.js';
 import { extractFileWithContentHashes } from '../analyzer/call-graph.js';
 import type { FileExtractResult } from '../analyzer/call-graph-types.js';
+import type { ImportStatementHash } from '../analyzer/symbol-content-hash.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { languageSupport } from '../analyzer/language-support.js';
 import { escapeRegExp } from '../../utils/misc.js';
@@ -109,6 +110,12 @@ export interface SymbolGranularChange {
   referencing: string[];
   /** Unchanged symbols that hold a dynamic-dispatch site the resolver cannot follow. */
   dynamicDispatch: string[];
+  /**
+   * Module-level code outside the imports is identical, and the imports gained bindings the file did
+   * not have. Present so a consumer can disclose the one thing this narrowing does not attribute to
+   * the file's other symbols: the load-time side effects of the newly imported module.
+   */
+  importsAdded?: true;
 }
 
 export interface FileGranularChange {
@@ -209,6 +216,19 @@ function spanTextsById(side: Side): Map<string, string[]> {
   return out;
 }
 
+/** Import statements in `a` that `b` does not have, as a multiset difference by hash. */
+function diffImports(a: readonly ImportStatementHash[], b: readonly ImportStatementHash[]): ImportStatementHash[] {
+  const remaining = new Map<string, number>();
+  for (const i of b) remaining.set(i.hash, (remaining.get(i.hash) ?? 0) + 1);
+  const out: ImportStatementHash[] = [];
+  for (const i of a) {
+    const left = remaining.get(i.hash) ?? 0;
+    if (left > 0) remaining.set(i.hash, left - 1);
+    else out.push(i);
+  }
+  return out;
+}
+
 /** Whole-identifier matcher for one name, compiled once and reused across every span. */
 function wordMatcher(name: string): RegExp {
   return new RegExp(`(?<![\\p{L}\\p{N}_$])${escapeRegExp(name)}(?![\\p{L}\\p{N}_$])`, 'u');
@@ -242,9 +262,12 @@ function residualText(side: Side): string {
 function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChange {
   const reason = sideUsable(base) ?? sideUsable(head);
   if (reason) return { granularity: 'file', reason };
+  /** Names the head revision imports and the base did not: a symbol naming one may now mean it. */
+  let importedNames = new Set<string>();
 
   const baseHashes = base.present ? hashesById(base.result!) : new Map<string, string>();
   const headHashes = head.present ? hashesById(head.result!) : new Map<string, string>();
+  let importsAdded = false;
   if (base.present && head.present) {
     if (base.result!.contentHashes!.residual !== head.result!.contentHashes!.residual) {
       return { granularity: 'file', reason: 'module-level-change' };
@@ -253,6 +276,16 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
     if (projectLayout(base.result!.contentHashes!.layout, shared) !== projectLayout(head.result!.contentHashes!.layout, shared)) {
       return { granularity: 'file', reason: 'module-level-change' };
     }
+    const added = diffImports(head.result!.contentHashes!.imports, base.result!.contentHashes!.imports);
+    const removed = diffImports(base.result!.contentHashes!.imports, head.result!.contentHashes!.imports);
+    // A removed or rewritten import REBINDS a name the file's existing symbols may use — module-level
+    // change. A bare side-effect import (binds nothing, runs code) is one too. Purely additive,
+    // name-binding imports are not: nothing an existing symbol referred to changed meaning.
+    if (removed.length > 0 || added.some(i => !i.binds)) {
+      return { granularity: 'file', reason: 'module-level-change' };
+    }
+    importedNames = new Set(added.flatMap(i => i.names));
+    importsAdded = added.length > 0;
   }
   if (indexIds.some(id => !baseHashes.has(id) && !headHashes.has(id))) {
     return { granularity: 'file', reason: 'index-mismatch' };
@@ -271,6 +304,9 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
   // and hand it to a sibling that never spells the name. The residual is unchanged here, so the
   // binding itself is invisible; keep the whole file rather than guess which sibling reaches it.
   const matchers = [...names].filter(n => n.length > 0).map(wordMatcher);
+  // A symbol that names a NEWLY BOUND import may resolve to something it did not before, even though
+  // its own tokens are unchanged — keep it seeded.
+  const importMatchers = [...importedNames].filter(n => n.length > 0).map(wordMatcher);
   if (base.present && head.present && matchers.length > 0) {
     const moduleText = `${residualText(base)}\n${residualText(head)}`;
     if (matchers.some(m => m.test(moduleText))) {
@@ -284,7 +320,7 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
   for (const id of all) {
     if (moved.has(id)) continue;
     const texts = textsById.flatMap(index => index.get(id) ?? []);
-    if (matchers.some(m => texts.some(text => m.test(text)))) referencing.add(id);
+    if ([...matchers, ...importMatchers].some(m => texts.some(text => m.test(text)))) referencing.add(id);
   }
   for (const side of [base, head]) {
     for (const c of side.result?.dynamicBoundary ?? []) {
@@ -294,6 +330,7 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
   const sorted = (xs: Iterable<string>) => [...xs].sort();
   return {
     granularity: 'symbol',
+    ...(importsAdded ? { importsAdded: true as const } : {}),
     changed: sorted(changed),
     appeared: sorted(appeared),
     disappeared: sorted(disappeared),
@@ -506,6 +543,8 @@ export function changedSymbolIds(change: SymbolGranularChange): Set<string> {
 export interface ChangeGranularityReceipt {
   symbolExactFiles: number;
   fileGranularFiles: number;
+  /** Symbol-exact files whose module level gained imports (see {@link SymbolGranularChange.importsAdded}). */
+  importsAddedFiles: number;
   /** How many file-granular files each reason accounts for (all of them, not the sample). */
   reasons: Partial<Record<FileGranularityReason, number>>;
   /** Which files stayed file-granular and why, bounded to {@link GRANULARITY_FALLBACK_SAMPLE}. */
@@ -519,8 +558,9 @@ export function granularityReceipt(set: SymbolChangedSet): ChangeGranularityRece
   const fallbacks: ChangeGranularityReceipt['fallbacks'] = [];
   const reasons: ChangeGranularityReceipt['reasons'] = {};
   let symbolExactFiles = 0;
+  let importsAddedFiles = 0;
   for (const [file, change] of [...set.byFile].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    if (change.granularity === 'symbol') { symbolExactFiles++; continue; }
+    if (change.granularity === 'symbol') { symbolExactFiles++; if (change.importsAdded) importsAddedFiles++; continue; }
     fallbacks.push({ file, reason: change.reason });
     reasons[change.reason] = (reasons[change.reason] ?? 0) + 1;
   }
@@ -528,6 +568,7 @@ export function granularityReceipt(set: SymbolChangedSet): ChangeGranularityRece
   return {
     symbolExactFiles,
     fileGranularFiles: fallbacks.length,
+    importsAddedFiles,
     reasons,
     fallbacks: shown,
     ...(fallbacks.length > shown.length ? { fallbacksOmitted: fallbacks.length - shown.length } : {}),
@@ -535,6 +576,12 @@ export function granularityReceipt(set: SymbolChangedSet): ChangeGranularityRece
 }
 
 /** One caveat line for a consumer, or undefined when every changed file was symbol-exact. */
+export function importsAddedCaveat(receipt: ChangeGranularityReceipt): string | undefined {
+  if (receipt.importsAddedFiles === 0) return undefined;
+  return `In ${receipt.importsAddedFiles} changed file(s) the only module-level change was imports that bind new names; ` +
+    'the file\'s unchanged symbols were seeded only if they name one. The imported module\'s own load-time side effects are not attributed to them.';
+}
+
 export function granularityCaveat(receipt: ChangeGranularityReceipt): string | undefined {
   if (receipt.fileGranularFiles === 0) return undefined;
   const reasons = (Object.keys(receipt.reasons) as FileGranularityReason[]).sort()

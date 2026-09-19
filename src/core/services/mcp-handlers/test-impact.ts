@@ -36,6 +36,7 @@ import {
   coverSeedFiles,
   granularityCaveat,
   granularityReceipt,
+  importsAddedCaveat,
   narrowSeedsToChangedSymbols,
   seededNotChanged,
   type ChangeGranularityReceipt,
@@ -560,6 +561,8 @@ export async function handleSelectTests(
   if (!untrackedAssessed) caveats.push(UNTRACKED_NOT_ASSESSED);
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   if (granularityNote) caveats.push(granularityNote);
+  const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
+  if (importsNote) caveats.push(importsNote);
   if (seededUnchanged > 0) {
     caveats.push(`${seededUnchanged} of the seeded symbols did not themselves change: they are seeded because they name a changed symbol, or hold a dynamic-dispatch site, in the same file.`);
   }
