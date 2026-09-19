@@ -50,8 +50,9 @@ For all other cases (reading a file, grepping, listing files) use native tools d
 > both tiers; decision c79ec7ca / ADR-0023, superseding ADR-0022). Narrower/wider is opt-in: the lean
 > navigate-only `navigation` preset (10 tools, the one-flag escape), `--minimal` (governance core),
 > `--preset memory` / `verify` / `federation` / `coordination`, or the full surface via `--preset full`
-> (`--all-tools`). The decisions-gate workflow below needs `record_decision`, which is **not** in the
-> default — install with `--preset full` (or `--minimal`) on repos that gate commits.
+> (`--all-tools`). The `record_decision` MCP tool is **not** in the default; on any preset, record a
+> decision for the commit gate with `openlore decisions record --title "…" --rationale "…"`, or
+> install with `--preset full` (or `--minimal`) to expose the MCP tool.
 
 > **OpenLore is one substrate with two faces (change `unify-navigation-and-governance-substrate`).**
 > Navigation (read the graph) and governance/memory (anchor facts, weigh changes) share one graph, one

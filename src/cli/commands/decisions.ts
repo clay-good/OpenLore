@@ -59,7 +59,8 @@ import {
   CONSOLIDATION_GRACE_PERIOD_MS,
   GATE_REASONS,
 } from '../../constants.js';
-import type { DecisionStore, PendingDecision } from '../../types/index.js';
+import type { DecisionConstraintBlock, DecisionScope, DecisionStore, PendingDecision } from '../../types/index.js';
+import { handleRecordDecision } from '../../core/services/mcp-handlers/decisions.js';
 import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
@@ -895,7 +896,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           console.log(`  git restore ${f}`);
         }
         console.log('\nOr to document why this approach was rejected:');
-        console.log('  openlore decisions --record');
+        console.log('  openlore decisions record --title "<decision>" --rationale "<why>"');
         console.log('  (then re-run --consolidate before committing)');
       }
       return;
@@ -1204,7 +1205,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       console.log('Sync all approved: openlore decisions --sync');
 
       if (options.gate && missing.length > 0) {
-        logger.warning(`\nCommit gated — ${missing.length} undocumented change(s) require a decision. Record with: openlore decisions --record or record_decision MCP tool.`);
+        logger.warning(`\nCommit gated — ${missing.length} undocumented change(s) require a decision. Record with: openlore decisions record --title "<decision>" --rationale "<why>" (or the record_decision MCP tool).`);
         process.exitCode = 1;
       } else if (options.gate && unresolvedPhantom.length > 0) {
         logger.warning(`\nCommit gated — ${unresolvedPhantom.length} phantom classification(s) changed concurrently and remain unresolved.`);
@@ -1646,6 +1647,90 @@ decisionsCommand
     } catch (err) {
       logger.error(`decisions status failed: ${(err as Error).message}`);
       process.exitCode = 1;
+    } finally {
+      restoreStdout?.();
+    }
+  });
+
+const DECISION_SCOPES: readonly DecisionScope[] = ['local', 'component', 'cross-domain', 'system'];
+
+// The CLI twin of the record_decision MCP tool, so any wired preset can record a
+// decision (change: add-decisions-record-cli). It calls the same handler, so ids,
+// scope inference, anchors, the already-decided verdict, and background
+// consolidation stay identical across both entry points.
+decisionsCommand
+  .command('record')
+  .description('Record a draft architectural decision (same as the record_decision MCP tool; works with any wired preset)')
+  .option('--title <text>', 'REQUIRED. Short imperative statement, e.g. "Use UUIDs for decision IDs"')
+  .option('--rationale <text>', 'REQUIRED. Why this decision was made')
+  .option('--consequences <text>', 'What changes as a result')
+  .option('--files <paths>', 'Comma-separated source files most relevant to this decision')
+  .option('--supersedes <id>', 'ID of a prior decision this one replaces')
+  .option('--scope <scope>', `Decision scope: ${DECISION_SCOPES.join(' | ')} (default: inferred)`)
+  .option('--constraints-file <path>', 'JSON file holding a versioned decision constraint block')
+  .option('--json', 'Output as JSON', false)
+  .action(async (opts: {
+    title?: string;
+    rationale?: string;
+    consequences?: string;
+    files?: string;
+    supersedes?: string;
+    scope?: string;
+    constraintsFile?: string;
+    json: boolean;
+  }, cmd: Command) => {
+    const parentOpts = (cmd.parent?.opts() ?? {}) as { json?: boolean };
+    const json = Boolean(opts.json || parentOpts.json);
+    const restoreStdout = json ? redirectConsoleToStderr() : null;
+    const fail = (message: string): void => {
+      if (json) process.stdout.write(JSON.stringify({ error: message }, null, 2) + '\n');
+      else logger.error(`decisions record failed: ${safe(message)}`);
+      process.exitCode = 1;
+    };
+    try {
+      const title = opts.title?.trim();
+      const rationale = opts.rationale?.trim();
+      if (!title) return fail('--title is required and must not be empty.');
+      if (!rationale) return fail('--rationale is required and must not be empty.');
+      if (opts.scope !== undefined && !DECISION_SCOPES.includes(opts.scope as DecisionScope)) {
+        return fail(`--scope must be one of: ${DECISION_SCOPES.join(', ')}.`);
+      }
+      let constraints: DecisionConstraintBlock | undefined;
+      if (opts.constraintsFile) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await readFile(opts.constraintsFile, 'utf-8'));
+        } catch (err) {
+          return fail(`--constraints-file could not be read as JSON: ${(err as Error).message}`);
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return fail('--constraints-file must contain a JSON object.');
+        }
+        constraints = parsed as DecisionConstraintBlock;
+      }
+      const files = (opts.files ?? '').split(',').map((file) => file.trim()).filter(Boolean);
+
+      const result = await handleRecordDecision(
+        process.cwd(),
+        title,
+        rationale,
+        opts.consequences,
+        files.length > 0 ? files : undefined,
+        opts.supersedes,
+        opts.scope as DecisionScope | undefined,
+        constraints,
+      ) as Record<string, unknown>;
+      if (typeof result.error === 'string') return fail(result.error);
+
+      if (json) {
+        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+        return;
+      }
+      if (result.alreadyDecided) logger.warning(safe(String(result.message)));
+      else logger.success(safe(String(result.message)));
+      console.log(`  id: ${safe(String(result.id))}`);
+    } catch (err) {
+      fail((err as Error).message);
     } finally {
       restoreStdout?.();
     }

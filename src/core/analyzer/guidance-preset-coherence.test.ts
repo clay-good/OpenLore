@@ -112,6 +112,8 @@ describe('generated guidance ↔ wired preset coherence', () => {
     expect(guidance).toContain('`record_decision` is **not** part of the wired');
     expect(guidance).toContain('openlore install --preset');
     expect(guidance).not.toContain('record_decision({');   // no callable example
+    // The CLI records the same draft on any preset (change: add-decisions-record-cli).
+    expect(guidance).toContain('openlore decisions record --title');
   });
 
   it('never advises a preset that would drop tools already wired', async () => {

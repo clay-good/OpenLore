@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon } from './extension.js';
+import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon, piToolSurface, PI_TOOL_SNIPPETS, PI_LEAN_TOOLS, PI_TOOL_GROUPS, PI_ACTIVATOR_TOOL, PI_STANDING_CONTEXT_BUDGETS, piRegisteredToolNames, estimatePiStandingTokens } from './extension.js';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
+import { TOOL_DEFINITIONS, TOOL_PRESETS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
 import { pointerLineFor } from '../cli/commands/orient-inject-render.js';
@@ -1394,3 +1394,267 @@ describe('Pi config wizard — repo-configured endpoints', () => {
   });
 });
 
+// change: add-pi-lean-tool-surface
+describe('Pi lean tool surface', () => {
+  interface RegisteredTool {
+    name: string;
+    description: string;
+    promptSnippet?: string;
+    promptGuidelines?: string[];
+    parameters: unknown;
+    execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details: unknown }>;
+  }
+
+  let dir: string;
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'openlore-pi-surface-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const prefixed = (names: readonly string[]) => names.map((name) => `openlore_${name}`);
+  const sorted = (names: Iterable<string>) => [...names].sort();
+
+  // A host double with Pi's active-tool semantics: registered extension tools start active.
+  function registerPiSurface(initialActive?: (registered: string[]) => string[]) {
+    const handlers = new Map<string, PiEventHandler>();
+    const tools = new Map<string, RegisteredTool>();
+    let active: string[] = [];
+    const setActiveTools = vi.fn((names: string[]) => { active = [...names]; });
+    const pi = {
+      registerTool: vi.fn((tool: RegisteredTool) => { tools.set(tool.name, tool); }),
+      registerCommand: vi.fn(),
+      on: vi.fn((event: string, handler: PiEventHandler) => { handlers.set(event, handler); }),
+      getActiveTools: () => [...active],
+      setActiveTools,
+    } as unknown as ExtensionAPI;
+    openloreExtension(pi);
+    const registered = [...tools.keys()];
+    active = initialActive ? initialActive(registered) : ['read', 'bash', ...registered];
+    const ctx = {
+      cwd: dir,
+      mode: 'json',
+      hasUI: false,
+      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+    return {
+      tools,
+      setActiveTools,
+      active: () => active,
+      activeOpenlore: () => sorted(active.filter((name) => name.startsWith('openlore_'))),
+      startSession: async () => { await handlers.get('session_start')!({}, ctx); },
+      activate: async (names: string[]) => tools.get(PI_ACTIVATOR_TOOL)!.execute('call', { names }, undefined, undefined, ctx),
+    };
+  }
+
+  async function writePiConfig(pi: unknown): Promise<void> {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ pi }));
+  }
+
+  describe('pi.toolSurface config', () => {
+    it('selects lean when the config is absent', async () => {
+      expect(await piToolSurface(dir)).toBe('lean');
+    });
+
+    it('selects all only for the exact string "all", without a provider', async () => {
+      await writePiConfig({ toolSurface: 'all' });
+      expect(await piToolSurface(dir)).toBe('all');
+    });
+
+    it('selects lean for "lean", malformed values, and a null pi block', async () => {
+      for (const pi of [{ toolSurface: 'lean' }, { toolSurface: 3 }, { toolSurface: 'ALL' }, null]) {
+        await writePiConfig(pi);
+        expect(await piToolSurface(dir), JSON.stringify(pi)).toBe('lean');
+      }
+    });
+
+    it('selects lean when the config is not valid JSON', async () => {
+      await mkdir(join(dir, '.openlore'), { recursive: true });
+      await writeFile(join(dir, '.openlore', 'config.json'), '{ not json');
+      expect(await piToolSurface(dir)).toBe('lean');
+    });
+  });
+
+  describe('groups', () => {
+    it('derives the lean set from the MCP substrate preset plus the Pi utilities', () => {
+      const expected = sorted([...TOOL_PRESETS.substrate, 'configure', 'activate_tools']);
+      expect(sorted(PI_LEAN_TOOLS)).toEqual(expected);
+      // The guard fails when the Pi lean set loses a substrate tool.
+      expect(sorted(PI_LEAN_TOOLS.filter((name) => name !== 'recall'))).not.toEqual(expected);
+    });
+
+    it('registers every lean tool', () => {
+      const registered = new Set(piRegisteredToolNames());
+      const missing = prefixed(PI_LEAN_TOOLS).filter((name) => !registered.has(name));
+      expect(missing, `lean tools not registered: ${missing.join(', ')}`).toEqual([]);
+    });
+
+    it('puts every registered non-lean tool in exactly one group', () => {
+      const lean = new Set(prefixed(PI_LEAN_TOOLS));
+      const memberships = new Map<string, string[]>();
+      for (const [group, names] of Object.entries(PI_TOOL_GROUPS)) {
+        for (const name of prefixed(names)) memberships.set(name, [...(memberships.get(name) ?? []), group]);
+      }
+      const problems = piRegisteredToolNames()
+        .filter((name) => !lean.has(name))
+        .map((name) => [name, memberships.get(name) ?? []] as const)
+        .filter(([, groups]) => groups.length !== 1)
+        .map(([name, groups]) => `${name} → [${groups.join(', ')}]`);
+      expect(problems, `each non-lean tool needs exactly one group: ${problems.join('; ')}`).toEqual([]);
+
+      const registered = new Set(piRegisteredToolNames());
+      const stale = [...memberships.keys()].filter((name) => !registered.has(name) || lean.has(name));
+      expect(stale, `group entries that are unregistered or lean: ${stale.join(', ')}`).toEqual([]);
+    });
+
+    it('counts a registered but inactive tool as surfaced for the parity guard', () => {
+      // The parity guard's surfaced set is NAV_TOOLS, which is registration, not activation.
+      const surfaced = new Set(NAV_TOOLS.map((tool) => tool.name));
+      for (const names of Object.values(PI_TOOL_GROUPS)) {
+        for (const name of names) expect(surfaced.has(name), `${name} is grouped but not registered`).toBe(true);
+      }
+    });
+  });
+
+  describe('session start', () => {
+    it('activates only the lean surface by default and keeps host tools unchanged', async () => {
+      const surface = registerPiSurface((registered) => ['read', ...registered]);
+      await surface.startSession();
+      expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_LEAN_TOOLS)));
+      expect(surface.active()).toContain('read');
+      expect(surface.active()).not.toContain('bash');
+    });
+
+    it('keeps every tool active except the activator for "all", with no provider configured', async () => {
+      await writePiConfig({ toolSurface: 'all' });
+      const surface = registerPiSurface();
+      await surface.startSession();
+      expect(surface.activeOpenlore()).toEqual(sorted(piRegisteredToolNames().filter((name) => name !== PI_ACTIVATOR_TOOL)));
+    });
+
+    it('falls back to the lean surface for a malformed value', async () => {
+      await writePiConfig({ toolSurface: 3 });
+      const surface = registerPiSurface();
+      await surface.startSession();
+      expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_LEAN_TOOLS)));
+    });
+
+    it('starts a new session lean without treating its own suppression as a host exclusion', async () => {
+      const surface = registerPiSurface();
+      await surface.startSession();
+      await surface.activate(['specs']);
+      await surface.startSession();
+      expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_LEAN_TOOLS)));
+      await surface.activate(['specs']);
+      expect(surface.active()).toEqual(expect.arrayContaining(prefixed(PI_TOOL_GROUPS.specs)));
+    });
+
+    it('leaves every tool active on a host without active-tool support', async () => {
+      const handlers = registerPiHandlers();
+      await expect(handlers.get('session_start')!({}, {
+        cwd: dir, mode: 'json', hasUI: false, ui: { notify: vi.fn() },
+      } as unknown as ExtensionContext)).resolves.toBeUndefined();
+    });
+  });
+
+  describe('activator', () => {
+    it('lists every group and every group tool in its description', () => {
+      const description = registerPiSurface().tools.get(PI_ACTIVATOR_TOOL)!.description;
+      for (const [group, names] of Object.entries(PI_TOOL_GROUPS)) {
+        expect(description).toContain(`${group}:`);
+        for (const name of prefixed(names)) expect(description, `${name} missing`).toContain(name);
+      }
+    });
+
+    it('activates a group and names the activated tools', async () => {
+      const surface = registerPiSurface();
+      await surface.startSession();
+      const result = await surface.activate(['specs']);
+      expect(surface.active()).toEqual(expect.arrayContaining(prefixed(PI_TOOL_GROUPS.specs)));
+      expect(result.details).toMatchObject({ activated: prefixed(PI_TOOL_GROUPS.specs), alreadyActive: [] });
+      expect(surface.activeOpenlore()).not.toContain('openlore_remember');
+    });
+
+    it('activates the owning group from a tool name, with or without the prefix', async () => {
+      const surface = registerPiSurface();
+      await surface.startSession();
+      await surface.activate(['check_spec_drift', 'openlore_remember']);
+      expect(surface.active()).toEqual(expect.arrayContaining([
+        ...prefixed(PI_TOOL_GROUPS.specs), ...prefixed(PI_TOOL_GROUPS.memory),
+      ]));
+    });
+
+    it('rejects an unknown name, lists the groups, and activates nothing', async () => {
+      const surface = registerPiSurface();
+      await surface.startSession();
+      const calls = surface.setActiveTools.mock.calls.length;
+      const before = surface.active();
+      const result = await surface.activate(['specs', 'not_a_tool']);
+      expect(result.content[0].text).toContain('not_a_tool');
+      expect(result.content[0].text).toContain(Object.keys(PI_TOOL_GROUPS).join(', '));
+      expect(surface.setActiveTools.mock.calls.length).toBe(calls);
+      expect(surface.active()).toEqual(before);
+    });
+
+    // PI_TOOL_GROUPS is a plain object: an `in` lookup also matches inherited keys, so a
+    // model passing "toString" crashed the activator instead of getting the unknown-name error.
+    it('treats inherited object keys as unknown names, not as groups', async () => {
+      const surface = registerPiSurface();
+      await surface.startSession();
+      const before = surface.active();
+      for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+        const result = await surface.activate([name]);
+        expect(result.content[0].text, name).toContain(`Unknown openlore tool group or tool: ${name}`);
+      }
+      expect(surface.active()).toEqual(before);
+    });
+
+    it('reports a repeated activation as already active and changes nothing', async () => {
+      const surface = registerPiSurface();
+      await surface.startSession();
+      await surface.activate(['review']);
+      const before = surface.active();
+      const result = await surface.activate(['review']);
+      expect(result.details).toMatchObject({ activated: [], alreadyActive: ['review'] });
+      expect(surface.active()).toEqual(before);
+    });
+
+    it('never activates a tool the host had turned off, and names it', async () => {
+      const surface = registerPiSurface((registered) => registered.filter((name) => name !== 'openlore_get_spec'));
+      await surface.startSession();
+      const result = await surface.activate(['specs']);
+      expect(surface.active()).not.toContain('openlore_get_spec');
+      expect(surface.active()).toContain('openlore_search_specs');
+      expect(result.details).toMatchObject({ hostExcluded: ['openlore_get_spec'] });
+    });
+  });
+
+  describe('standing context', () => {
+    it('gives every registered tool a one-line snippet that is not its description', () => {
+      const snippetProblem = (tool: { name: string; description: string; promptSnippet?: string }) =>
+        !tool.promptSnippet || /\n/.test(tool.promptSnippet) || tool.promptSnippet === tool.description || tool.promptSnippet.length > 90;
+      const problems = [...registerPiSurface().tools.values()].filter(snippetProblem).map((tool) => tool.name);
+      expect(problems, `bad snippets: ${problems.join(', ')}`).toEqual([]);
+      // The check flags a snippet that repeats the description.
+      expect(snippetProblem({ name: 'x', description: 'Same.', promptSnippet: 'Same.' })).toBe(true);
+    });
+
+    it('has a snippet for every NAV tool and no stale snippet entries', () => {
+      const names = new Set(NAV_TOOLS.map((tool) => tool.name));
+      expect(sorted(Object.keys(PI_TOOL_SNIPPETS))).toEqual(sorted(names));
+    });
+
+    it('keeps each surface within its reviewed budget', () => {
+      const tools = [...registerPiSurface().tools.values()];
+      const lean = new Set(prefixed(PI_LEAN_TOOLS));
+      const estimates = {
+        lean: estimatePiStandingTokens(tools.filter((tool) => lean.has(tool.name))),
+        all: estimatePiStandingTokens(tools.filter((tool) => tool.name !== PI_ACTIVATOR_TOOL)),
+      };
+      for (const [surface, estimate] of Object.entries(estimates)) {
+        const budget = PI_STANDING_CONTEXT_BUDGETS[surface as keyof typeof PI_STANDING_CONTEXT_BUDGETS];
+        expect(estimate, `${surface} surface: estimate ${estimate} exceeds budget ${budget.maxTokens}`).toBeLessThanOrEqual(budget.maxTokens);
+        expect(budget.maxTokens).toBeGreaterThanOrEqual(budget.baselineTokens);
+      }
+      expect(estimates.lean).toBeLessThan(estimates.all);
+    });
+  });
+});

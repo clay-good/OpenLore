@@ -13,10 +13,14 @@ fresh while you edit.
 - **Context injection** (no tool call needed): each session starts grounded with
   the architecture digest (`CODEBASE.md`), the spec-domain index, and a
   task-specific `orient` on your first message.
-- **Native tools**: the navigation surface as Pi tools —
-  `openlore_orient`, `openlore_search_code`, `openlore_get_subgraph`,
-  `openlore_trace_execution_path`, `openlore_analyze_impact`,
-  `openlore_suggest_insertion_points`, `openlore_get_function_skeleton`.
+- **Native tools**: a session starts with the same lean set Claude Code gets
+  by default (the `substrate` preset) — `openlore_orient`,
+  `openlore_search_code`, `openlore_get_subgraph`, `openlore_analyze_impact`,
+  `openlore_recall`, `openlore_verify_claim`, `openlore_blast_radius`, and more.
+  The agent calls `openlore_activate_tools` to turn on a group when a task needs
+  it: `specs`, `memory`, `review`, `quality`, or `inspect`. Set
+  `"pi": { "toolSurface": "all" }` in `.openlore/config.json` to keep every tool
+  active.
 - **Config wizard**: interactive setup on first run, or anytime via `/openlore`
   slash command or `openlore_configure` tool.
 

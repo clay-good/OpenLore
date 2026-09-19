@@ -274,7 +274,7 @@ const workspaceRule: ConfigRule = {
 const piRule: ConfigRule = {
   kind: 'object',
   strict: true,
-  fields: fieldsFor<PiConfig>({ spawnDaemon: booleanRule }),
+  fields: fieldsFor<PiConfig>({ spawnDaemon: booleanRule, toolSurface: { kind: 'enum', values: ['lean', 'all'] } }),
   required: requiredFor<PiConfig>({}),
 };
 
