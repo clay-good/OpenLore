@@ -193,6 +193,9 @@ describe('computeBlastRadius', () => {
     // The opt-in reached the composed selection verbatim.
     expect(vi.mocked(handleSelectTests)).toHaveBeenCalledWith(
       expect.objectContaining({ federation: true, federationRepos: ['consumer'] }),
+      // The briefing also hands over the changed-set it already computed, so the composed
+      // selection does not re-read and re-parse the diff (change: add-symbol-content-hashes).
+      expect.objectContaining({ changedSet: expect.anything() }),
     );
     // The briefing carries the evaluated cross-repo result + coverage disclosures.
     expect(b.federation.evaluated).toBe(true);

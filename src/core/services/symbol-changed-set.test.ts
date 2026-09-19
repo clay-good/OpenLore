@@ -44,10 +44,10 @@ async function index(root: string, paths: string[]): Promise<SerializedCallGraph
   return serializeCallGraph(await new CallGraphBuilder().build(files));
 }
 
-async function changedSet(diff: DiffEntry[], paths: string[], opts: { root?: string; maxFiles?: number } = {}) {
+async function changedSet(diff: DiffEntry[], paths: string[], opts: { root?: string; maxFiles?: number; maxBytes?: number } = {}) {
   const root = opts.root ?? repo;
   const callGraph = await index(root, paths);
-  const set = await computeSymbolChangedSet({ absDir: root, baseRef: 'HEAD', diff, callGraph, maxFiles: opts.maxFiles });
+  const set = await computeSymbolChangedSet({ absDir: root, baseRef: 'HEAD', diff, callGraph, maxFiles: opts.maxFiles, maxBytes: opts.maxBytes });
   return { set, callGraph };
 }
 
@@ -147,6 +147,76 @@ describe('computeSymbolChangedSet', () => {
     expect(set.byFile.get('m.py')).toMatchObject({ granularity: 'symbol', changed: ['m.py::f'] });
   });
 
+  it('adding a function narrows to the new function, not the whole file', async () => {
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    await put('src/ten.ts', `${TEN}\nexport function fresh(): number {\n  return 11;\n}\n`);
+    const { set } = await changedSet([{ path: 'src/ten.ts', status: 'modified' }], ['src/ten.ts']);
+    expect(set.byFile.get('src/ten.ts')).toMatchObject({
+      granularity: 'symbol', changed: [], appeared: ['src/ten.ts::fresh'], disappeared: [],
+    });
+  });
+
+  it('deleting a function narrows to that function', async () => {
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    await put('src/ten.ts', TEN.replace('export function f3(x: number): number {\n  return x + 3;\n}\n', ''));
+    const { set } = await changedSet([{ path: 'src/ten.ts', status: 'modified' }], ['src/ten.ts']);
+    expect(set.byFile.get('src/ten.ts')).toMatchObject({
+      granularity: 'symbol', changed: [], appeared: [], disappeared: ['src/ten.ts::f3'],
+    });
+  });
+
+  it('module-level code moving across a symbol keeps the file whole', async () => {
+    await put('src/lay.ts', 'main();\nexport function main() { return 1; }\nexport function other() { return 2; }\n');
+    await commitAll();
+    await put('src/lay.ts', 'export function main() { return 1; }\nmain();\nexport function other() { return 2; }\n');
+    const { set } = await changedSet([{ path: 'src/lay.ts', status: 'modified' }], ['src/lay.ts']);
+    expect(set.byFile.get('src/lay.ts')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+  });
+
+  it('a module-level alias of a changed symbol keeps the file whole', async () => {
+    const src = (k: number) => `export function get(): number { return ${k}; }\n` +
+      'const h = get;\n' +
+      'export function use(): number { return h(); }\n';
+    await put('src/alias.ts', src(1));
+    await commitAll();
+    await put('src/alias.ts', src(2));
+    const { set, callGraph } = await changedSet([{ path: 'src/alias.ts', status: 'modified' }], ['src/alias.ts']);
+    expect(set.byFile.get('src/alias.ts')).toEqual({ granularity: 'file', reason: 'module-level-reference' });
+    expect(narrowSeedsToChangedSymbols(callGraph.nodes.filter(n => !n.isExternal), set).map(n => n.name).sort()).toEqual(['get', 'use']);
+  });
+
+  it('a changed code file the index holds no symbol for is still assessed', async () => {
+    await put('src/constants.ts', 'export const LIMIT = 1;\n');
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    await put('src/constants.ts', 'export const LIMIT = 2;\n');
+    const { set } = await changedSet(
+      [{ path: 'src/constants.ts', status: 'modified' }], ['src/ten.ts'],
+    );
+    // It seeds nothing (no indexed symbol), but it must not vanish: a caller that saw an empty
+    // changed-set here would claim the diff was formatting only.
+    expect(set.byFile.get('src/constants.ts')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+    expect(granularityReceipt(set).fileGranularFiles).toBe(1);
+  });
+
+  it('stops hashing past the byte budget and discloses it', async () => {
+    const big = `${TEN}\n// ${'x'.repeat(4000)}\n`;
+    await put('src/a.ts', big);
+    await put('src/b.ts', big);
+    await commitAll();
+    await put('src/a.ts', big.replace('return x + 1;', 'return 1;'));
+    await put('src/b.ts', big.replace('return x + 1;', 'return 1;'));
+    const { set } = await changedSet(
+      [{ path: 'src/a.ts', status: 'modified' }, { path: 'src/b.ts', status: 'modified' }],
+      ['src/a.ts', 'src/b.ts'],
+      { maxBytes: big.length * 2 + 10 },
+    );
+    expect(set.byFile.get('src/a.ts')).toMatchObject({ granularity: 'symbol' });
+    expect(set.byFile.get('src/b.ts')).toEqual({ granularity: 'file', reason: 'size-cap' });
+  });
+
   it('parse errors on either side keep the file whole', async () => {
     await put('src/p.ts', 'export function a() { return 1; }\nexport function b() { return 2; }\n');
     await commitAll();
@@ -183,13 +253,31 @@ describe('computeSymbolChangedSet', () => {
     expect(set.byFile.get('src/new.ts')).toMatchObject({ granularity: 'symbol', appeared: ['src/new.ts::fresh'] });
   });
 
-  it('a renamed file compares against its old path', async () => {
+  it('a moved file keeps every symbol seeded and reports the moves as carried', async () => {
+    await put('src/a.ts', TEN);
+    await commitAll();
+    git('mv', 'src/a.ts', 'src/b.ts');
+    const { set, callGraph } = await changedSet([{ path: 'src/b.ts', status: 'renamed', oldPath: 'src/a.ts' }], ['src/b.ts']);
+    const change = set.byFile.get('src/b.ts') as SymbolGranularChange;
+    // Every symbol has a NEW id that the index has never seen, and every importer must be updated:
+    // a move is never "formatting only".
+    expect(change.appeared).toHaveLength(10);
+    expect(change.disappeared).toHaveLength(10);
+    expect(narrowSeedsToChangedSymbols(callGraph.nodes.filter(n => !n.isExternal), set)).toHaveLength(10);
+    expect(set.carried).toHaveLength(10);
+    expect(set.carried[0]).toMatchObject({ from: 'src/a.ts::f0', to: 'src/b.ts::f0', reason: 'moved', basis: 'exact-body' });
+  });
+
+  it('a moved-and-edited file still seeds everything it moved', async () => {
     await put('src/a.ts', TEN);
     await commitAll();
     git('mv', 'src/a.ts', 'src/b.ts');
     await put('src/b.ts', TEN.replace('return x + 7;', 'return x + 70;'));
     const { set } = await changedSet([{ path: 'src/b.ts', status: 'renamed', oldPath: 'src/a.ts' }], ['src/b.ts']);
-    expect(set.byFile.get('src/b.ts')).toMatchObject({ granularity: 'symbol', changed: ['src/b.ts::f7'], appeared: [], disappeared: [] });
+    const change = set.byFile.get('src/b.ts') as SymbolGranularChange;
+    expect(change.appeared).toContain('src/b.ts::f7');
+    expect(change.appeared).toHaveLength(10);
+    expect(set.carried.map(c => c.to)).not.toContain('src/b.ts::f7'); // edited: no carry
   });
 
   it('maps repository paths into an analyzed subdirectory', async () => {

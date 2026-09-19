@@ -296,7 +296,8 @@ export async function computeBlastRadius(
       diffRef: resolvedBaseRef,
       ...(input.federation ? { federation: true } : {}),
       ...(input.federationRepos ? { federationRepos: input.federationRepos } : {}),
-    }) as {
+    // Reuse the changed-set computed above: same base ref, same diff, provably the same answer.
+    }, { changedSet: narrowed.set }) as {
       selectedTests?: Array<{ test: string; file: string; confidence: string }>;
       soundness?: unknown;
       truncatedAtDepth?: number;
@@ -367,6 +368,12 @@ export async function computeBlastRadius(
   }
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   if (granularityNote) caveats.push(granularityNote);
+  if ((narrowed.seededUnchanged ?? 0) > 0) {
+    caveats.push(`${narrowed.seededUnchanged} of the listed changed symbols did not themselves change: they are analyzed because they name a changed symbol, or hold a dynamic-dispatch site, in the same file.`);
+  }
+  if (narrowed.set && narrowed.set.carried.length > 0) {
+    caveats.push(`${narrowed.set.carried.length} symbol(s) were renamed or moved with an unchanged body (e.g. ${narrowed.set.carried[0].from} → ${narrowed.set.carried[0].to}); their callers change even though their behavior does not.`);
+  }
   if (seeds.length > analyzed.length) {
     caveats.push(`Impact analyzed the ${analyzed.length} highest-fan-in changed symbols; ${seeds.length - analyzed.length} lower-risk symbols were not individually analyzed.`);
   }
@@ -488,7 +495,9 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   ];
   // Zero symbols over changed code files means every code edit hashed as formatting or comments.
   if (b.changed.symbols === 0 && (b.changeGranularity?.symbolExactFiles ?? 0) > 0) {
-    parts.push('the code edits are formatting or comments only');
+    parts.push((b.changeGranularity?.fileGranularFiles ?? 0) === 0
+      ? 'no symbol differs from the base (formatting or comments only, or already reverted)'
+      : `${b.changeGranularity!.fileGranularFiles} changed file(s) not assessed at symbol level`);
   }
   if (b.impact.highestRiskLevel !== 'none') parts.push(`highest risk: ${b.impact.highestRiskLevel}`);
   if (b.impact.hubsTouched.length > 0) parts.push(`${b.impact.hubsTouched.length} hub${b.impact.hubsTouched.length === 1 ? '' : 's'} affected`);

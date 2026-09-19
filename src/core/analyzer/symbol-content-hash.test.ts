@@ -12,7 +12,7 @@ async function hashesOf(path: string, content: string, language: string) {
   expect(r?.contentHashes).toBeDefined();
   const bySymbol = new Map<string, string>();
   for (const s of r!.contentHashes!.symbols) bySymbol.set(s.id, s.hash);
-  return { bySymbol, residual: r!.contentHashes!.residual, order: r!.contentHashes!.order, result: r! };
+  return { bySymbol, residual: r!.contentHashes!.residual, order: r!.contentHashes!.order, layout: r!.contentHashes!.layout, result: r! };
 }
 
 const TEN = Array.from({ length: 10 }, (_, i) => `export function f${i}(x: number): number {\n  return x + ${i};\n}\n`).join('\n');
@@ -97,6 +97,45 @@ describe('normalized symbol content hashes', () => {
     expect(directive.bySymbol.get('p.go::F')).not.toBe(b.bySymbol.get('p.go::F'));
   });
 
+  it('text in comment syntax that changes behavior is hashed as code', async () => {
+    const rb = (flag: string) => `# frozen_string_literal: ${flag}\ndef build\n  +"x"\nend\n`;
+    const a = await hashesOf('lib/a.rb', rb('true'), 'Ruby');
+    const b = await hashesOf('lib/a.rb', rb('false'), 'Ruby');
+    expect(b.residual).not.toBe(a.residual);
+
+    const sh = (interp: string) => `#!/bin/${interp}\nrun() {\n  echo hi\n}\n`;
+    const s1 = await hashesOf('s.sh', sh('bash'), 'Bash');
+    const s2 = await hashesOf('s.sh', sh('sh'), 'Bash');
+    expect(s2.residual).not.toBe(s1.residual);
+
+    const ts = (pragma: string) => `export function f(x: number) {\n  ${pragma}\n  return x;\n}\n`;
+    const t1 = await hashesOf('src/p.ts', ts('// @ts-expect-error legacy'), 'TypeScript');
+    const t2 = await hashesOf('src/p.ts', ts('// ordinary note'), 'TypeScript');
+    const t3 = await hashesOf('src/p.ts', ts('// another ordinary note'), 'TypeScript');
+    expect(t1.bySymbol.get('src/p.ts::f')).not.toBe(t2.bySymbol.get('src/p.ts::f'));
+    expect(t3.bySymbol.get('src/p.ts::f')).toBe(t2.bySymbol.get('src/p.ts::f'));
+  });
+
+  it('adding a symbol leaves the residual and every other hash alone', async () => {
+    const before = 'const LIMIT = 1;\nfunction a() { return LIMIT; }\nfunction b() { return 2; }\n';
+    const after = 'const LIMIT = 1;\nfunction a() { return LIMIT; }\nfunction b() { return 2; }\nfunction c() { return 3; }\n';
+    const x = await hashesOf('src/add.ts', before, 'TypeScript');
+    const y = await hashesOf('src/add.ts', after, 'TypeScript');
+    expect(y.residual).toBe(x.residual);
+    expect(y.bySymbol.get('src/add.ts::a')).toBe(x.bySymbol.get('src/add.ts::a'));
+    expect(y.bySymbol.get('src/add.ts::b')).toBe(x.bySymbol.get('src/add.ts::b'));
+    expect(y.order).toEqual([...x.order, 'src/add.ts::c']);
+  });
+
+  it('module-level code moving across a symbol changes the layout', async () => {
+    const before = 'main();\nfunction main() { return 1; }\n';
+    const after = 'function main() { return 1; }\nmain();\n';
+    const x = await hashesOf('src/lay.ts', before, 'TypeScript');
+    const y = await hashesOf('src/lay.ts', after, 'TypeScript');
+    expect(y.residual).toBe(x.residual);            // the same module-level tokens
+    expect(y.layout).not.toEqual(x.layout);         // in a different place
+  });
+
   it('a normal extraction carries no content hashes (analyze never pays for the walk)', async () => {
     const r = await dispatchFileExtract({ path: 'src/m.ts', content: 'function f() { return 1; }\n', language: 'TypeScript' });
     expect(r).toBeDefined();
@@ -106,7 +145,7 @@ describe('normalized symbol content hashes', () => {
   it('is iterative: a deeply nested tree does not overflow the stack', () => {
     let node: HashTreeNode = { type: 'leaf', startIndex: 0, endIndex: 1, children: [] };
     for (let i = 0; i < 200_000; i++) node = { type: 'n', startIndex: 0, endIndex: 1, children: [node] };
-    const r = computeFileContentHashes(node, [{ id: 'x', startIndex: 0, endIndex: 1 }], 'a', 'TypeScript');
+    const r = computeFileContentHashes(node, [{ id: 'x', startIndex: 0, endIndex: 1 }], 'a');
     expect(r.symbols[0].hash).toMatch(/^[0-9a-f]{16}$/);
   });
 
@@ -117,11 +156,11 @@ describe('normalized symbol content hashes', () => {
       type: 'R', startIndex: 0, endIndex: 4,
       children: [leaf('a', 0), { type: 'X', startIndex: 1, endIndex: 4, children: [leaf('b', 1), leaf('c', 2), leaf('d', 3)] }],
     };
-    const r = computeFileContentHashes(root, [{ id: 's', startIndex: 0, endIndex: 3 }], 'abcd', 'TypeScript');
+    const r = computeFileContentHashes(root, [{ id: 's', startIndex: 0, endIndex: 3 }], 'abcd');
     expect(r.residual).toBeUndefined();
     expect(r.residualUnavailable).toBe('span-not-contiguous');
-    const whole = computeFileContentHashes(root, [{ id: 's', startIndex: 1, endIndex: 4 }], 'abcd', 'TypeScript');
+    const whole = computeFileContentHashes(root, [{ id: 's', startIndex: 1, endIndex: 4 }], 'abcd');
     expect(whole.residual).toMatch(/^[0-9a-f]{16}$/);
-    expect(computeFileContentHashes(root, [{ id: 'bad', startIndex: 5, endIndex: 2 }], 'abcd', 'TypeScript').residualUnavailable).toBe('invalid-span');
+    expect(computeFileContentHashes(root, [{ id: 'bad', startIndex: 5, endIndex: 2 }], 'abcd').residualUnavailable).toBe('invalid-span');
   });
 });

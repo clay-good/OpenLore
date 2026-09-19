@@ -26,7 +26,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
-import { changedSymbolIds, granularityCaveat, type CarriedSymbol, type DiffEntry } from '../symbol-changed-set.js';
+import { changedSymbolIds, granularityCaveat, type CarriedSymbol, type DiffEntry, type SymbolChangedSet } from '../symbol-changed-set.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
 import { computeLandmarkSignals } from '../../analyzer/landmark-signals.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
@@ -133,14 +133,14 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   }
   // Brief only the symbols that changed (change: add-symbol-content-hashes). A symbol kept by the
   // changed-set only because it references a changed one, or holds a dynamic-dispatch site, did not
-  // change and is not briefed; a rename continuity carried is listed under `carried` instead.
+  // change and is not briefed. A rename or move IS briefed — its id and every caller changed, and a
+  // renamed hub is exactly what a returning reader must see — and the pair is named under `carried`.
   const narrowed = await narrowToChangedSymbols(absDir, resolvedBase, diffEntries, cg, fileSymbols);
   const carried: CarriedSymbol[] = narrowed.set?.carried ?? [];
-  const carriedTo = new Set(carried.map(c => c.to));
   const changedSymbols = fileSymbols.filter(n => {
     const change = narrowed.set?.byFile.get(n.filePath);
     if (!change || change.granularity === 'file') return true;
-    return changedSymbolIds(change).has(n.id) && !carriedTo.has(n.id);
+    return changedSymbolIds(change).has(n.id);
   });
   const changeGranularity = narrowed.receipt;
 
@@ -200,7 +200,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     .sort((a, b) => b.count - a.count || a.community.localeCompare(b.community));
 
   // ── Tests to run for the whole change set (reused select_tests) ─────────────
-  const testsToRun = await selectTestsSummary(absDir, resolvedBase);
+  const testsToRun = await selectTestsSummary(absDir, resolvedBase, narrowed.set);
 
   // ── Honesty: a base ref that matched no production symbol is "nothing changed",
   // never the reassuring "nothing significant changed". ───────────────────────
@@ -216,8 +216,8 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     } else {
       note = changedFiles.length === 0
         ? `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
-        : fileSymbols.length > 0
-          ? `No production symbol changed since ${resolvedBase}: every edit in the changed code files was formatting or comments only${carried.length > 0 ? ', or a rename listed under carried' : ''} (normalized content hashes are equal).`
+        : fileSymbols.length > 0 && (changeGranularity?.symbolExactFiles ?? 0) > 0
+          ? `No production symbol differs from ${resolvedBase} in the working tree: in every changed code file that was hashed, the symbols are unchanged — the edits are formatting or comments only, or were reverted before this call.${(changeGranularity?.fileGranularFiles ?? 0) > 0 ? ` ${changeGranularity!.fileGranularFiles} changed file(s) were not assessed at symbol level — "not assessed", not "unchanged".` : ''}`
           : 'The changed file(s) contain no analyzed production symbol (not yet analyzed, or only tests/generated) — "nothing matched", NOT "nothing significant".';
     }
   }
@@ -225,6 +225,9 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   const caveats: string[] = [
     ...(granularityNote ? [granularityNote] : []),
+    ...(carried.length > 0
+      ? [`${carried.length} briefed symbol(s) are renames or moves whose body is unchanged (paired under carried): their id and every caller changed, so they are briefed, but the body did not.`]
+      : []),
     'Significance is a tier label from existing classifiers (hub/orchestrator/chokepoint) plus raw evidence — not a weighted score. The caller makes the final judgment.',
     'Scope is hand-authored source code: infrastructure (IaC) resources and generated/vendored files are excluded (their change-impact has its own lens — blast_radius / analyze_impact). Non-code changed files still count toward changedFiles.',
   ];
@@ -301,9 +304,11 @@ function buildTruncationReceipt(returned: LabeledChange[], omitted: LabeledChang
 async function selectTestsSummary(
   absDir: string,
   baseRef: string,
+  /** The changed-set this briefing already computed for the same base ref and diff. */
+  changedSet?: SymbolChangedSet,
 ): Promise<{ count: number; files: string[]; note?: string; truncatedAtDepth?: number; soundness?: unknown }> {
   try {
-    const result = (await handleSelectTests({ directory: absDir, diffRef: baseRef })) as {
+    const result = (await handleSelectTests({ directory: absDir, diffRef: baseRef }, { changedSet })) as {
       selectedTests?: Array<{ file: string }>;
       error?: string;
       truncatedAtDepth?: number;

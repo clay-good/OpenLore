@@ -10,16 +10,23 @@
  * alone but changes the nesting, so it changes the hash.
  *
  * The same walk yields a RESIDUAL hash over everything no symbol span contains — imports,
- * module-level statements, class fields, decorators outside a span, and where each symbol sits
- * among them (an anonymous marker per span; the spans' order is returned beside it). Every non-comment token of the file lands in exactly one of the two, so two
+ * module-level statements, class fields, decorators outside a span — and, separately, a LAYOUT: the
+ * sequence of symbol spans and residual runs as they occur in the file. The two are kept apart on
+ * purpose. If the residual carried a marker per span, adding or deleting one function would move it
+ * and every other symbol in the file would read as changed; with the layout beside it, an added
+ * symbol is just a new entry, while moving module-level code across a symbol (`main()` before
+ * versus after a definition — a real difference in every language that executes a module top to
+ * bottom) still shows up. Every non-comment token of the file lands in exactly one of the two, so two
  * revisions whose symbol hashes and residual hash all agree have the same non-comment tree. That is
  * the property a symbol-level changed-set rests on: a change can only hide from the per-symbol
  * hashes by showing up in the residual.
  *
  * Text a node owns but no child covers (a template literal's raw text in some grammars) is hashed
  * too: verbatim inside string-like nodes, where whitespace is content, and whitespace-collapsed
- * elsewhere. A directive comment that changes behavior (Go `//go:embed`, `//go:build`, cgo
- * `//export`) is kept as a token rather than dropped.
+ * elsewhere. Text in comment syntax that changes how the file is built, parsed, or run — a shebang,
+ * a Go pragma, a Ruby `frozen_string_literal` magic comment, an encoding cookie, `@ts-expect-error`,
+ * `@jsx`, a lint or coverage pragma — is kept as a token rather than dropped; see
+ * {@link DIRECTIVE_COMMENT} for the closed list and the limit it names.
  *
  * Hashing discipline matches `decisions/anchor.ts` `hashSpan` (sha256, first 16 hex characters),
  * but the hash is a different one: `hashSpan` is deliberately unnormalized and stays the freshness
@@ -57,13 +64,20 @@ export interface FileContentHashes {
   /** One entry per input span, same order. Ids may repeat when an extractor emits a twin. */
   symbols: Array<{ id: string; hash: string }>;
   /**
-   * Hash of everything outside every symbol span, with each span's position marked by an anonymous
-   * placeholder. The placeholder carries no id, so renaming a symbol leaves the residual alone; the
-   * order of the spans is reported separately in {@link order}.
+   * Hash of every token outside every symbol span: imports, module-level statements, class bodies.
+   * It carries no marker for the spans themselves, so adding or removing a symbol leaves it alone.
    */
   residual?: string;
   /** Ids of the outermost spans in the order they occur in the file. */
   order: string[];
+  /**
+   * The file's shape: `T:<n>` for a run of `n` residual tokens, `S:<id>` for a run of one span's
+   * tokens, in file order. Comparing two revisions' layouts projected onto the symbols they share
+   * (dropping the other spans and summing the runs that then adjoin) is what detects a reordering,
+   * or module-level code moving across a symbol — `main()` before a definition versus after it,
+   * which no token or residual hash can see because the tokens themselves are identical.
+   */
+  layout: string[];
   /** Set when `residual` is absent. */
   residualUnavailable?: ResidualUnavailableReason;
 }
@@ -91,13 +105,35 @@ function hash16(h: Hash): string {
 /** Node types whose uncovered text is content (whitespace included), not layout. */
 const STRING_LIKE = /string|template|heredoc|literal|regex|sigil|char|interpolat|raw_text|text/i;
 
-/** Go directive comments that change the build or the binary. They are code, not comments. */
-const GO_DIRECTIVE = /^\/\/(go:|export\s|extern\s|line\s|\s*\+build)/;
+/**
+ * Comments that are not comments: text in comment syntax that changes how the file is built, parsed,
+ * or run. They are hashed as code. The list is a closed, documented allowlist rather than a guess —
+ * an unrecognized directive still hashes away, which is the one disclosed limit of this hash (a
+ * language's own directive that is not listed here reads as a comment). Additions are cheap and
+ * safe: keeping more text can only ever report a change that did not happen, never hide one.
+ */
+const DIRECTIVE_COMMENT: readonly RegExp[] = [
+  /^#!/,                                              // shebang — chooses the interpreter
+  /^\/\/(go:|export\s|extern\s|line\s)/,                // Go pragmas and cgo
+  /^(\/\/|#)\s*\+build\b/,                             // legacy Go build tags
+  /^\/\/\/\s*</,                                        // TypeScript triple-slash directives
+  /@ts-(ignore|expect-error|nocheck|check)\b/,
+  /@(jsx|jsxImportSource|jsxRuntime|flow)\b/,
+  /eslint-(disable|enable)|^\/[/*]\s*eslint\s/,
+  /prettier-ignore|@format\b|@formatter:(on|off)|clang-format (on|off)/,
+  /@__PURE__|webpackChunkName|webpackIgnore|vite-ignore|@vite-ignore/,
+  /(istanbul|c8|v8|coverage) ignore/,
+  /NOLINT|noinspection\b|@SuppressWarnings/,
+  /^#\s*(-\*-\s*coding|coding[:=]|encoding[:=])/,       // Python / Ruby encoding cookie
+  /^#\s*frozen_string_literal\s*:/,                    // Ruby: literals become frozen
+  /^#\s*(type:|noqa|pragma|pylint:|mypy:|ruff:|fmt:|nosec|rubocop:|shellcheck\b)/,
+  /^#\s*(warn_indent|encoding)\s*:/,
+];
 
-function isDroppedComment(type: string, text: () => string, language: string): boolean {
+function isDroppedComment(type: string, text: () => string): boolean {
   if (!type.toLowerCase().includes('comment')) return false;
-  if (language === 'Go' && GO_DIRECTIVE.test(text())) return false;
-  return true;
+  const body = text().trimStart();
+  return !DIRECTIVE_COMMENT.some(rule => rule.test(body));
 }
 
 function childrenOf(n: HashTreeNode): HashTreeNode[] {
@@ -135,7 +171,6 @@ export function computeFileContentHashes(
   root: HashTreeNode,
   spans: readonly HashSpan[],
   content: string,
-  language: string,
 ): FileContentHashes {
   const hashers = spans.map(() => createHash('sha256'));
   const residual = createHash('sha256');
@@ -155,11 +190,11 @@ export function computeFileContentHashes(
   let cursor = 0;
   let active: number[] = [];
 
-  // Residual placeholders: the last one written, and every span already given one.
-  let lastPlaceholder = -1;
-  let residualTokenSinceLast = true;
+  // Layout: the run structure of the file. `placed` catches a span whose tokens are interleaved with
+  // residual tokens, which would make the two signals impossible to compare revision to revision.
   const placed = new Set<number>();
   const order: string[] = [];
+  const layout: string[] = [];
 
   const containing = (n: HashTreeNode): number[] => {
     while (cursor < outerFirst.length && spans[outerFirst[cursor]].startIndex <= n.startIndex) active.push(outerFirst[cursor++]);
@@ -170,22 +205,23 @@ export function computeFileContentHashes(
   const emit = (within: number[], token: string): void => {
     if (within.length === 0) {
       residual.update(token);
-      residualTokenSinceLast = true;
+      const last = layout[layout.length - 1];
+      if (last !== undefined && last.startsWith('T:')) layout[layout.length - 1] = `T:${Number(last.slice(2)) + 1}`;
+      else layout.push('T:1');
       return;
     }
     for (const i of within) hashers[i].update(token);
   };
 
-  /** A node fully inside a span whose parent is not: mark the span's position in the residual. */
+  /** A node fully inside a span whose parent is not: record where that span's run starts. */
   const markRun = (within: number[]): void => {
     const outer = within.reduce((best, i) => (rank[i] < rank[best] ? i : best), within[0]);
-    if (outer === lastPlaceholder && !residualTokenSinceLast) return;
+    const entry = `S:${spans[outer].id}`;
+    if (layout[layout.length - 1] === entry) return;
     if (placed.has(outer)) residualUnavailable ??= 'span-not-contiguous';
     placed.add(outer);
     order.push(spans[outer].id);
-    residual.update(frame('P', ''));
-    lastPlaceholder = outer;
-    residualTokenSinceLast = false;
+    layout.push(entry);
   };
 
   const emitGap = (f: Frame, from: number, to: number): void => {
@@ -198,7 +234,7 @@ export function computeFileContentHashes(
   const stack: Frame[] = [];
   const enter = (n: HashTreeNode, parentWithin: number[]): void => {
     // A dropped comment takes its whole subtree with it (Rust doc comments have children).
-    if (isDroppedComment(n.type, () => content.slice(n.startIndex, n.endIndex), language)) return;
+    if (isDroppedComment(n.type, () => content.slice(n.startIndex, n.endIndex))) return;
     const kids = childrenOf(n);
     const within = containing(n);
     if (within.length > 0 && parentWithin.length === 0) markRun(within);
@@ -228,6 +264,7 @@ export function computeFileContentHashes(
   return {
     symbols: spans.map((s, i) => ({ id: s.id, hash: hash16(hashers[i]) })),
     order,
+    layout,
     ...(residualUnavailable ? { residualUnavailable } : { residual: hash16(residual) }),
   };
 }

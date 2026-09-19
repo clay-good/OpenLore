@@ -34,10 +34,11 @@ import type { FunctionNode, SerializedCallGraph } from '../analyzer/call-graph.j
 import { extractFileWithContentHashes } from '../analyzer/call-graph.js';
 import type { FileExtractResult } from '../analyzer/call-graph-types.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
+import { languageSupport } from '../analyzer/language-support.js';
+import { escapeRegExp } from '../../utils/misc.js';
 import {
   computeContinuity,
   normalizedBodyHash,
-  renameIdentifier,
   type AppearedSymbol,
   type ContinuityPair,
   type DisappearedSymbol,
@@ -55,6 +56,16 @@ import { SOURCE_SCAN_MAX_FILE_BYTES } from '../../constants.js';
  */
 export const MAX_SYMBOL_HASHED_FILES = 200;
 
+/**
+ * Cumulative source bytes (both revisions) hashed per call. The file bound alone says nothing about
+ * cost — 200 large files parse far longer than 200 small ones — so the byte bound is what keeps the
+ * worst case bounded. Deterministic (files are read in path order), and disclosed as `size-cap`.
+ */
+export const MAX_SYMBOL_HASHED_BYTES = 2 * 1024 * 1024;
+
+/** Base blobs read concurrently. Each is a `git cat-file` spawn; the byte bound caps what is held. */
+const READ_CONCURRENCY = 8;
+
 /** Per-read git timeout. A slow read falls back to file granularity; it never blocks the tool. */
 const GIT_READ_TIMEOUT_MS = 10_000;
 
@@ -63,22 +74,26 @@ export type FileGranularityReason =
   | 'language-not-hashed'
   | 'parse-errors'
   | 'module-level-change'
+  | 'module-level-reference'
   | 'span-not-contiguous'
   | 'invalid-span'
   | 'unreadable'
   | 'index-mismatch'
   | 'file-cap'
+  | 'size-cap'
   | 'not-assessed';
 
 export const FILE_GRANULARITY_REASONS: Record<FileGranularityReason, string> = {
   'language-not-hashed': 'the language has no native parse tree to hash (no extractor, a WASM grammar, or a script container)',
   'parse-errors': 'one side has parse errors, so its tree is not trustworthy evidence',
-  'module-level-change': 'code outside every symbol changed (imports, module-level statements, class fields, or symbol order)',
+  'module-level-change': 'code outside every symbol changed (imports, module-level statements, class fields), or moved across a symbol',
+  'module-level-reference': 'module-level code names a changed symbol, so it may reach it through a binding no call edge records',
   'span-not-contiguous': 'a symbol span does not map to one contiguous run of the parse tree',
   'invalid-span': 'a symbol span lies outside its file',
   'unreadable': 'one side could not be read (missing blob, over the size bound, or a failed read)',
   'index-mismatch': 'the index lists symbols in this file that neither revision extracts to (re-run analyze)',
   'file-cap': `the diff names more than ${MAX_SYMBOL_HASHED_FILES} code files; the rest are not hashed`,
+  'size-cap': `the diff's code files exceed the ${Math.round(MAX_SYMBOL_HASHED_BYTES / 1024)} KB hashing budget; the rest are not hashed`,
   'not-assessed': 'the diff path did not map onto this indexed file exactly, or the changed-set could not be computed',
 };
 
@@ -165,18 +180,38 @@ function hashesById(result: FileExtractResult): Map<string, string> {
   return out;
 }
 
-/** The order of the ids both sides share: a pure reorder is a module-level change. */
-function sharedOrder(order: string[], shared: Set<string>): string {
-  return order.filter(id => shared.has(id)).join('\0');
+/**
+ * The file's shape projected onto the symbols both revisions have: residual runs (`T:<count>`) and
+ * the shared symbols' runs, with runs that adjoin after a dropped symbol summed. Equal projections
+ * mean no module-level code moved across a symbol; an added or removed symbol never changes it.
+ */
+function projectLayout(layout: readonly string[], shared: ReadonlySet<string>): string {
+  const out: string[] = [];
+  for (const entry of layout) {
+    if (entry.startsWith('S:')) {
+      if (!shared.has(entry.slice(2))) continue;   // a symbol only one revision has
+      out.push(entry);
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (last !== undefined && last.startsWith('T:')) out[out.length - 1] = `T:${Number(last.slice(2)) + Number(entry.slice(2))}`;
+    else out.push(entry);
+  }
+  return out.join('\u0000');
 }
 
-function namesWord(text: string, name: string): boolean {
-  return name.length > 0 && renameIdentifier(text, name, '\uFFFF') !== text;
+/** Every symbol's span text, indexed once per side rather than re-scanned per symbol. */
+function spanTextsById(side: Side): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const n of side.result?.nodes ?? []) {
+    (out.get(n.id) ?? out.set(n.id, []).get(n.id)!).push(side.content.slice(n.startIndex, n.endIndex));
+  }
+  return out;
 }
 
-function spanTexts(side: Side, id: string): string[] {
-  if (!side.result) return [];
-  return side.result.nodes.filter(n => n.id === id).map(n => side.content.slice(n.startIndex, n.endIndex));
+/** Whole-identifier matcher for one name, compiled once and reused across every span. */
+function wordMatcher(name: string): RegExp {
+  return new RegExp(`(?<![\\p{L}\\p{N}_$])${escapeRegExp(name)}(?![\\p{L}\\p{N}_$])`, 'u');
 }
 
 function sideUsable(side: Side): FileGranularityReason | undefined {
@@ -186,6 +221,21 @@ function sideUsable(side: Side): FileGranularityReason | undefined {
   if (r.parseHealth) return 'parse-errors';
   if (r.contentHashes.residualUnavailable) return r.contentHashes.residualUnavailable;
   return undefined;
+}
+
+/** The file's text outside every symbol span: module-level code, imports, class bodies. */
+function residualText(side: Side): string {
+  if (!side.present || !side.result) return '';
+  const spans = [...side.result.nodes]
+    .map(n => [n.startIndex, n.endIndex] as const)
+    .sort((a, b) => a[0] - b[0]);
+  let out = '';
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    if (start > cursor) out += side.content.slice(cursor, start);
+    cursor = Math.max(cursor, end);
+  }
+  return out + side.content.slice(cursor);
 }
 
 /** Compare one file's two sides. `indexIds` are the index's production symbols in the file. */
@@ -200,7 +250,7 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
       return { granularity: 'file', reason: 'module-level-change' };
     }
     const shared = new Set([...baseHashes.keys()].filter(id => headHashes.has(id)));
-    if (sharedOrder(base.result!.contentHashes!.order, shared) !== sharedOrder(head.result!.contentHashes!.order, shared)) {
+    if (projectLayout(base.result!.contentHashes!.layout, shared) !== projectLayout(head.result!.contentHashes!.layout, shared)) {
       return { granularity: 'file', reason: 'module-level-change' };
     }
   }
@@ -217,13 +267,24 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
   for (const side of [base, head]) {
     for (const n of side.result?.nodes ?? []) if (moved.has(n.id)) names.add(n.name);
   }
+  // Module-level code that NAMES a changed symbol may bind it (`const h = get;`, a handler table)
+  // and hand it to a sibling that never spells the name. The residual is unchanged here, so the
+  // binding itself is invisible; keep the whole file rather than guess which sibling reaches it.
+  const matchers = [...names].filter(n => n.length > 0).map(wordMatcher);
+  if (base.present && head.present && matchers.length > 0) {
+    const moduleText = `${residualText(base)}\n${residualText(head)}`;
+    if (matchers.some(m => m.test(moduleText))) {
+      return { granularity: 'file', reason: 'module-level-reference' };
+    }
+  }
   const referencing = new Set<string>();
   const dynamicDispatch = new Set<string>();
   const all = new Set([...baseHashes.keys(), ...headHashes.keys()]);
+  const textsById = [spanTextsById(base), spanTextsById(head)];
   for (const id of all) {
     if (moved.has(id)) continue;
-    const texts = [...spanTexts(base, id), ...spanTexts(head, id)];
-    if ([...names].some(name => texts.some(text => namesWord(text, name)))) referencing.add(id);
+    const texts = textsById.flatMap(index => index.get(id) ?? []);
+    if (matchers.some(m => texts.some(text => m.test(text)))) referencing.add(id);
   }
   for (const side of [base, head]) {
     for (const c of side.result?.dynamicBoundary ?? []) {
@@ -253,6 +314,8 @@ export async function computeSymbolChangedSet(input: {
   callGraph: SerializedCallGraph;
   /** Overrides {@link MAX_SYMBOL_HASHED_FILES} (tests). */
   maxFiles?: number;
+  /** Overrides {@link MAX_SYMBOL_HASHED_BYTES} (tests). */
+  maxBytes?: number;
 }): Promise<SymbolChangedSet> {
   const maxFiles = input.maxFiles ?? MAX_SYMBOL_HASHED_FILES;
   const byFile = new Map<string, FileSymbolChange>();
@@ -265,10 +328,15 @@ export async function computeSymbolChangedSet(input: {
     (indexByFile.get(n.filePath) ?? indexByFile.set(n.filePath, []).get(n.filePath)!).push(n);
   }
 
-  // Only files the index holds production symbols for can seed anything; sorted for a stable cap.
+  // Every changed file in a call-graph language, whether or not the index holds a symbol for it:
+  // a file of constants seeds nothing, but a change in it must still stop the callers of this
+  // changed-set from reporting "the code edits are formatting or comments only". Sorted for a
+  // stable cap.
   const work = input.diff
     .map(entry => ({ entry, local: reframeRepoPath(entry.path, prefix) }))
-    .filter((w): w is { entry: DiffEntry; local: string } => w.local !== null && indexByFile.has(w.local))
+    .filter((w): w is { entry: DiffEntry; local: string } =>
+      w.local !== null
+      && (indexByFile.has(w.local) || languageSupport(detectLanguage(w.local)).capabilities.includes('callGraph')))
     .sort((a, b) => (a.local < b.local ? -1 : a.local > b.local ? 1 : 0));
   if (work.length === 0) return { byFile, carried: [] };
 
@@ -280,35 +348,69 @@ export async function computeSymbolChangedSet(input: {
     return { byFile, carried: [] };
   }
 
-  const sides = new Map<string, { base: Side; head: Side }>();
-  for (const [i, { entry, local }] of work.entries()) {
-    if (i >= maxFiles) {
-      byFile.set(local, { granularity: 'file', reason: 'file-cap' });
-      continue;
+  // Phase 1 — read both revisions of each file, base blobs a few at a time (one `git cat-file`
+  // spawn each, ~20 ms serially). The byte budget bounds what is held in memory at once.
+  interface Loaded { entry: DiffEntry; local: string; basePath: string; baseContent?: string; headContent?: string; failed?: boolean }
+  const loaded: Loaded[] = [];
+  let budget = input.maxBytes ?? MAX_SYMBOL_HASHED_BYTES;
+  const queue = [...work.entries()];
+  const readOne = async ([i, { entry, local }]: [number, { entry: DiffEntry; local: string }]): Promise<Loaded | undefined> => {
+    if (i >= maxFiles) { byFile.set(local, { granularity: 'file', reason: 'file-cap' }); return undefined; }
+    const renamed = entry.status === 'renamed' && !!entry.oldPath && entry.oldPath !== entry.path;
+    const oldRepoPath = renamed ? entry.oldPath! : entry.path;
+    // A moved file's symbols carry NEW ids: every importer must be updated, and the index has never
+    // seen them. Extract the base side under the path its ids were minted at, so the move reads as
+    // disappeared + appeared (every symbol seeded, continuity reporting the carry) rather than as
+    // an identical hash set — which would silently drop every symbol in the file.
+    const basePath = renamed ? (reframeRepoPath(oldRepoPath, prefix) ?? oldRepoPath) : local;
+    const [baseContent, headContent] = await Promise.all([
+      entry.status === 'added' ? undefined : readBase(input.absDir, commit, oldRepoPath),
+      entry.status === 'deleted' ? undefined : readHead(input.absDir, local),
+    ]);
+    const failed = (entry.status !== 'added' && baseContent === undefined)
+      || (entry.status !== 'deleted' && headContent === undefined);
+    return { entry, local, basePath, baseContent, headContent, failed };
+  };
+  const workers = Array.from({ length: Math.min(READ_CONCURRENCY, queue.length) }, async () => {
+    for (;;) {
+      const next = queue.shift();
+      if (!next) return;
+      const item = await readOne(next);
+      if (item) loaded.push(item);
     }
+  });
+  await Promise.all(workers);
+  loaded.sort((a, b) => (a.local < b.local ? -1 : a.local > b.local ? 1 : 0));
+
+  // Phase 2 — extract and compare, in path order, until the byte budget is spent.
+  const sides = new Map<string, { base: Side; head: Side }>();
+  for (const item of loaded) {
+    const { entry, local, basePath } = item;
+    if (item.failed) { byFile.set(local, { granularity: 'file', reason: 'unreadable' }); continue; }
+    const bytes = (item.baseContent?.length ?? 0) + (item.headContent?.length ?? 0);
+    if (bytes > budget) { byFile.set(local, { granularity: 'file', reason: 'size-cap' }); continue; }
+    budget -= bytes;
     const language = detectLanguage(local);
-    const load = async (present: boolean, read: () => Promise<string | undefined>): Promise<Side | undefined> => {
-      if (!present) return { present: false, content: '' };
-      const content = await read();
-      if (content === undefined) return undefined;
+    const load = async (content: string | undefined, path: string): Promise<Side> => {
+      if (content === undefined) return { present: false, content: '' };
       let result: FileExtractResult | undefined;
       try {
-        result = await extractFileWithContentHashes({ path: local, content, language });
+        result = await extractFileWithContentHashes({ path, content, language });
       } catch {
         result = undefined;
       }
       return { present: true, content, result };
     };
-    const oldRepoPath = entry.status === 'renamed' && entry.oldPath ? entry.oldPath : entry.path;
-    const base = await load(entry.status !== 'added', () => readBase(input.absDir, commit, oldRepoPath));
-    const head = await load(entry.status !== 'deleted', () => readHead(input.absDir, local));
-    if (!base || !head) {
-      byFile.set(local, { granularity: 'file', reason: 'unreadable' });
-      continue;
-    }
-    const change = compareFile(base, head, indexByFile.get(local)!.map(n => n.id));
+    const base = await load(entry.status === 'added' ? undefined : item.baseContent, basePath);
+    const head = await load(entry.status === 'deleted' ? undefined : item.headContent, local);
+    const change = compareFile(base, head, (indexByFile.get(local) ?? []).map(n => n.id));
     byFile.set(local, change);
-    if (change.granularity === 'symbol') sides.set(local, { base, head });
+    // Only a file that lost or gained a symbol can take part in a continuity pair (a move crosses
+    // two files); retaining the rest would hold every changed file's contents and extract result
+    // for nothing.
+    if (change.granularity === 'symbol' && (change.disappeared.length > 0 || change.appeared.length > 0)) {
+      sides.set(local, { base, head });
+    }
   }
 
   return { byFile, carried: carriedSymbols(byFile, sides) };
@@ -324,6 +426,14 @@ function carriedSymbols(
   byFile: Map<string, FileSymbolChange>,
   sides: Map<string, { base: Side; head: Side }>,
 ): CarriedSymbol[] {
+  // Nothing disappeared means nothing can be carried — skip the name-normalized body hashing of
+  // every appeared symbol, which is the common case on an ordinary diff.
+  const anyGone = [...sides.keys()].some(file => {
+    const change = byFile.get(file);
+    return change?.granularity === 'symbol' && change.disappeared.length > 0;
+  });
+  if (!anyGone) return [];
+
   const disappeared: DisappearedSymbol[] = [];
   const appeared: AppearedSymbol[] = [];
   const newNormBodyCount = new Map<string, number>();
@@ -371,6 +481,20 @@ export function coverSeedFiles(set: SymbolChangedSet, seeds: readonly FunctionNo
     if (!byFile.has(seed.filePath)) byFile.set(seed.filePath, { granularity: 'file', reason: 'not-assessed' });
   }
   return { byFile, carried: set.carried };
+}
+
+/**
+ * Seeds that did NOT change: they are in the set because they name a changed symbol or hold a
+ * dynamic-dispatch site. Callers that publish the seed list as "changed" must disclose this count.
+ */
+export function seededNotChanged(set: SymbolChangedSet, seeds: readonly FunctionNode[]): number {
+  let n = 0;
+  for (const seed of seeds) {
+    const change = set.byFile.get(seed.filePath);
+    if (!change || change.granularity === 'file') continue;
+    if (change.referencing.includes(seed.id) || change.dynamicDispatch.includes(seed.id)) n++;
+  }
+  return n;
 }
 
 /** The ids that genuinely changed in a symbol-granular file (for a "what changed" briefing). */

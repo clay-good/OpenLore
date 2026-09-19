@@ -217,9 +217,9 @@ export function __resetAnalyzerWorkCountersForTests(clearQueries = false): void 
  * when the caller asked for them through `withContentHashes` (change: add-symbol-content-hashes).
  * A normal analyze leaves this `undefined`, so its facts and its cost are unchanged.
  */
-function contentHashesFor(root: unknown, nodes: FunctionNode[], content: string, language: string): FileContentHashes | undefined {
+function contentHashesFor(root: unknown, nodes: FunctionNode[], content: string): FileContentHashes | undefined {
   if (!contentHashesRequested()) return undefined;
-  return computeFileContentHashes(root as HashTreeNode, nodes, content, language);
+  return computeFileContentHashes(root as HashTreeNode, nodes, content);
 }
 
 /**
@@ -1414,7 +1414,7 @@ async function extractTSGraph(
     : [];
   const dynamicDispatch = collectPass1DynamicDispatch('TypeScript', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpCalls = await extractHttpCalls(filePath, content);
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, language);
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, receiverFields, dynamicDispatch, httpCalls, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -1650,7 +1650,7 @@ async function extractPyGraph(
   const dynamicDispatch = collectPass1DynamicDispatch('Python', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpDegradations: HttpExtractionDegradation[] = [];
   const httpCalls = extractPythonHttpCallsFromRoot(filePath, tree.rootNode, d => httpDegradations.push(d));
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, 'Python');
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, receiverFields, dynamicDispatch, httpCalls, httpDegradations, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -1753,7 +1753,7 @@ async function extractGoGraph(
   const dynamicDispatch = collectPass1DynamicDispatch('Go', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpDegradations: HttpExtractionDegradation[] = [];
   const httpCalls = extractGoHttpCallsFromRoot(filePath, tree.rootNode, d => httpDegradations.push(d));
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, 'Go');
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, dynamicDispatch, httpCalls, httpDegradations, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -1855,7 +1855,7 @@ async function extractRustGraph(
   }
 
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, 'Rust');
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, parseHealth, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -1966,7 +1966,7 @@ async function extractRubyGraph(
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Ruby', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const dynamicBoundary = tallyDynamicBoundary('Ruby', tree.rootNode, nodes, content);
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, 'Ruby');
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -2185,7 +2185,7 @@ async function extractJavaGraph(
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Java', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const dynamicBoundary = tallyDynamicBoundary('Java', tree.rootNode, nodes, content);
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, 'Java');
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -2357,7 +2357,7 @@ async function extractCppGraph(
   const classRelationships = collectClassRelationshipFacts('C++', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('C++', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, 'C++');
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -2484,7 +2484,7 @@ async function extractSwiftGraph(
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Swift', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  const contentHashes = contentHashesFor(tree.rootNode, nodes, content, 'Swift');
+  const contentHashes = contentHashesFor(tree.rootNode, nodes, content);
   return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, ...(contentHashes ? { contentHashes } : {}) };
 }
 
@@ -2964,7 +2964,7 @@ async function extractByQueries(
     const dynamicDispatch = collectPass1DynamicDispatch(spec.language, content, _root, nodes, filePath);
     const dynamicBoundary = tallyDynamicBoundary(spec.language, _root, nodes, content);
     // WASM trees are not reliable across parses (see parseHealthReliable) — no content hashes there.
-    const contentHashes = handle.parseHealthReliable === false ? undefined : contentHashesFor(_root, nodes, content, spec.language);
+    const contentHashes = handle.parseHealthReliable === false ? undefined : contentHashesFor(_root, nodes, content);
     return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary, ...(contentHashes ? { contentHashes } : {}) };
   });
   return grammarStatus(spec.language) === 'unavailable'
@@ -3398,7 +3398,7 @@ async function extractElixirGraph(
   }
   const parseHealth = tallyParseHealth('', root as unknown as ParseHealthNode, filePath);
   const dynamicDispatch = collectPass1DynamicDispatch('Elixir', content, root, nodes, filePath);
-  const contentHashes = contentHashesFor(root, nodes, content, 'Elixir');
+  const contentHashes = contentHashesFor(root, nodes, content);
   return { nodes, rawEdges, parseHealth, dynamicDispatch, ...(contentHashes ? { contentHashes } : {}) };
   });
 }

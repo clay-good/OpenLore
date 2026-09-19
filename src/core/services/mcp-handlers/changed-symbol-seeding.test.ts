@@ -163,17 +163,18 @@ describe('briefing_since briefs the changed symbols', () => {
     expect(r.caveats.some(c => c.includes('FILE granularity'))).toBe(false);
   });
 
-  it('reports a carried rename instead of briefing it as a changed symbol', async () => {
+  it('briefs a carried rename and names the pair, because its callers changed', async () => {
     vi.mocked(computeSymbolChangedSet).mockResolvedValue(changedSet(
       symbolChange({ appeared: ['src/m.ts::beta'], disappeared: ['src/m.ts::betaOld'] }),
       [{ from: 'src/m.ts::betaOld', to: 'src/m.ts::beta', reason: 'renamed', basis: 'exact-signature' }],
     ));
     const r = await handleBriefingSince({ directory: '/repo', baseRef: 'HEAD' }) as {
-      changedSymbols: number; carried: Array<{ from: string; to: string }>; note?: string;
+      changedSymbols: number; briefing: Array<{ name: string }>; carried: Array<{ from: string; to: string }>; caveats: string[];
     };
     expect(r.carried).toEqual([{ from: 'src/m.ts::betaOld', to: 'src/m.ts::beta', reason: 'renamed', basis: 'exact-signature' }]);
-    expect(r.changedSymbols).toBe(0);
-    expect(r.note).toContain('rename');
+    expect(r.briefing.map(c => c.name)).toEqual(['beta']);
+    expect(r.changedSymbols).toBe(1);
+    expect(r.caveats.some(c => c.includes('renames or moves'))).toBe(true);
   });
 
   it('keeps the file-granular disclosure when a file could not be hashed', async () => {
