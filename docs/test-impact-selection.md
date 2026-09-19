@@ -18,6 +18,27 @@ Why it matters:
 - **a deterministic graph does it instantly** — backward reachability over edges already stored.
 - **it saves real money** — agents running full suites or guessing wrong is a major time sink.
 
+## What counts as a change
+
+A diff names files; `select_tests` seeds from the **symbols inside them that actually changed**
+(change: `add-symbol-content-hashes`). Each changed file is hashed twice — once at the base
+revision, once in the working tree — over the parse tree the extractor already built, with comments
+dropped and whitespace between tokens ignored. A re-indent, a rewrapped call, or a rewritten comment
+is therefore not a change, and a one-function edit in a forty-function file seeds one function.
+
+Narrowing never removes a seed the old file-level behavior would have kept for a reason that still
+holds. A file stays whole, and says why, when the evidence is incomplete — `module-level-change`
+(imports, module-level statements, class fields, or code that moved across a symbol),
+`module-level-reference` (module-level code names a changed symbol, so it may bind it),
+`parse-errors`, `language-not-hashed`, `unreadable`, `index-mismatch`, `file-cap`, `size-cap`,
+`not-assessed`. Inside a narrowed file, a symbol that names a changed symbol, names a newly bound
+import, or holds a dynamic-dispatch site stays seeded too. The counts and the per-file reasons come
+back in `changeGranularity`, and the caveats name them.
+
+Two claims this deliberately does **not** make: a file that was never hashed is "not assessed", never
+"unchanged"; and an added import's own load-time side effects are not attributed to the file's other
+symbols.
+
 ## Honest soundness — read this
 
 Static call-graph RTS is an **approximation**, and the tool says so in every response:

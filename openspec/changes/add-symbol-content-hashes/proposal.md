@@ -100,5 +100,25 @@ What shipped differs from the proposal in three deliberate ways:
   case (unreadable side, parse errors, no native tree, index mismatch, file bound) stays
   file-granular with a named reason.
 
-Deferred: the change-coupling semantic-churn view (it needs per-commit re-extraction of history),
-the persisted column, and a rename-aware churn join for `briefing_since`'s surprise caveat.
+Four adversarial reviews during the build changed the design three more times:
+
+- **A moved file was silently "unchanged".** Extracting the base side under the NEW path made a
+  `git mv` hash identically — every symbol in the file dropped out of the seed set, reported as
+  formatting-only. The base side is now extracted under the path its ids were minted at.
+- **Only Go directives survived the comment filter.** A Ruby `frozen_string_literal` flip, a changed
+  shebang, a removed `@ts-expect-error` all hashed away. Directive comments are now a closed,
+  documented list across languages, and an unrecognized directive is the hash's one stated limit.
+- **The residual made narrowing inert.** With a marker per span in the residual, adding or deleting
+  ANY function collapsed the whole file — measured at 5–14x the latency for ~0% narrowing on real
+  diffs. The residual now covers module-level tokens only, with the file's layout and the imports as
+  separate signals, and purely additive name-binding imports keep a file symbol-exact.
+
+Also from the reviews: the changed-set is computed once per user call rather than twice, base blobs
+are read concurrently, a byte budget bounds the worst case beside the file bound, a changed code
+file with no indexed symbol is still assessed (so "formatting only" is never claimed over files that
+were never hashed), and the CLI renders the receipt, every caveat, and carried renames.
+
+Deferred, deliberately: the change-coupling semantic-churn view (it needs per-commit re-extraction of
+history), the persisted column, a rename-aware churn join for `briefing_since`'s surprise caveat, and
+`report_coverage_gaps`' diff scope, which stays file-level because it is a whole-graph audit lens
+rather than a change briefing.

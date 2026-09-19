@@ -590,7 +590,9 @@ export const TOOL_DEFINITIONS = [
       'with the reaching path per test, and always includes changed and new test files; each test says why it was selected. ' +
       'Deterministic, offline, no test run. ' +
       'It is an over-approximate PRIORITIZER (run these first), not a sound replacement for the full ' +
-      'suite — the response states its confidence and coverage. The exact inverse of report_coverage_gaps ' +
+      'suite — the response states its confidence and coverage. A diff is resolved to the symbols that ' +
+      'actually changed (normalized per-symbol hashes: formatting and comments are not changes); a file ' +
+      'kept whole is named with its reason in changeGranularity. The exact inverse of report_coverage_gaps ' +
       '(which finds important code NO test reaches); this finds the reaching tests FOR a change. ' +
       'Run analyze_codebase first.',
     inputSchema: {

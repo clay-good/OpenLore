@@ -10,10 +10,14 @@ pre-order stream of node types, leaf token texts, and node open/close markers, w
 excluded and whitespace between tokens irrelevant by construction, so that formatting-only and
 comment-only edits produce an identical hash while a change in nesting (including indentation that
 a layout-significant language parses as structure) changes it. Text a node owns that no child
-covers SHALL be hashed too, verbatim inside string-like nodes. A comment that is a build or
-compiler directive (Go `//go:`, cgo `//export`, `+build`) SHALL be hashed as code. The same walk
-SHALL produce a residual hash over everything outside every symbol span, with each span's position
-marked, and the order of the spans. The hash SHALL reuse the established hashing discipline
+covers SHALL be hashed too, verbatim inside string-like nodes. Text in comment syntax that changes
+how the file is built, parsed, or run — a shebang, a compiler or build directive, an encoding
+cookie, a language-level magic comment, a type-checker or tooling pragma — SHALL be hashed as code,
+from a closed documented list whose incompleteness is the one disclosed limit of the hash. The same
+walk SHALL produce, separately: a residual hash over the module-level tokens outside every symbol
+span and outside the import statements; a per-statement hash of each top-level import; and a layout
+of the file's runs (residual token counts and span occurrences) so that a symbol added or removed
+does not disturb the other signals while module-level code moving across a symbol does. The hash SHALL reuse the established hashing discipline
 (sha256, first 16 hex characters) while remaining distinct from the unnormalized span hash used for
 anchor freshness, which is unchanged. The hashes SHALL be computed only when a caller requests them
 for specific files; a normal analyze SHALL NOT compute or persist them, and persistence is deferred
@@ -35,6 +39,13 @@ equality only.
 - **WHEN** the normalized content hashes of the two versions are compared
 - **THEN** they differ
 
+#### Scenario: A behavior-bearing comment is code
+
+- **GIVEN** a Ruby file whose `# frozen_string_literal:` magic comment flips, or a shell script whose
+  shebang names a different interpreter
+- **WHEN** the hashes are computed
+- **THEN** they differ, while an ordinary comment rewritten in the same file does not change them
+
 #### Scenario: A language without a native parse tree stays honest
 
 - **GIVEN** a file whose language has no native tree-sitter extractor (a WASM grammar or a script
@@ -52,9 +63,16 @@ by symbol-identity continuity (exact-body or exact-signature) SHALL be reported 
 or move. A file SHALL stay at file granularity, with a reason from a closed vocabulary, whenever the
 evidence is incomplete: a side that cannot be read, parsed without errors, or hashed; a change
 outside every symbol span, including a reordering of symbols; an index that lists a symbol neither
-revision extracts to; a file past the per-call file bound; or a file the changed-set could not
-assess. Within a symbol-granular file, a symbol that names a changed symbol, or holds a dynamic
-dispatch site, SHALL stay in the impact seed set. `blast_radius`, `select_tests`, and
+revision extracts to; a file past the per-call file or byte bound; or a file the changed-set could
+not assess. A file whose path changed SHALL have its base revision extracted under the old path, so
+that a move reads as every symbol disappearing and reappearing rather than as no change at all. A
+changed code file the index holds no symbol for SHALL still be assessed, so a consumer never reports
+a diff as unchanged on the strength of files it never hashed. Imports that are purely ADDED and bind
+a name MAY leave a file symbol-exact, provided every symbol naming a newly bound name stays seeded
+and the consumer discloses that the imported module's load-time side effects are not attributed to
+the file's other symbols. Within a symbol-granular file, a symbol that names a changed symbol, or holds a dynamic
+dispatch site, SHALL stay in the impact seed set, and a consumer publishing the seed set as
+"changed" SHALL disclose how many of them did not themselves change. `blast_radius`, `select_tests`, and
 `briefing_since` SHALL seed from the symbol-level changed-set and SHALL report which files were
 symbol-exact and which stayed file-granular and why.
 
@@ -62,8 +80,9 @@ symbol-exact and which stayed file-granular and why.
 
 - **GIVEN** a working-tree edit that only reformats and re-comments a hash-covered file
 - **WHEN** `select_tests` runs against HEAD
-- **THEN** no production symbol is seeded, and the result says every edit was formatting or comments
-  only rather than "nothing changed"
+- **THEN** no production symbol is seeded, and — when every changed code file was hashed — the result
+  says the symbols are unchanged (formatting or comments only, or reverted in the working tree)
+  rather than "nothing changed"; any file it could not assess is named as not assessed
 
 #### Scenario: A one-function edit seeds one function
 
@@ -83,7 +102,15 @@ symbol-exact and which stayed file-granular and why.
 
 - **GIVEN** a diff that renames `computeTax` to `calculateTax` without editing its body
 - **WHEN** `briefing_since` briefs the change
-- **THEN** it lists the pair under `carried` and does not brief `calculateTax` as a changed symbol
+- **THEN** it names the pair under `carried` and briefs the symbol — its id and every caller changed —
+  with a caveat stating that the body did not
+
+#### Scenario: A moved file is never "unchanged"
+
+- **GIVEN** a diff that moves a file to a new path without editing it
+- **WHEN** the changed-set is computed
+- **THEN** every symbol in it is reported as disappeared at the old path and appeared at the new one,
+  all of them stay seeded, and the moves are listed under `carried`
 
 #### Scenario: Hashing is bounded by the diff
 
