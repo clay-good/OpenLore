@@ -279,6 +279,35 @@ describe('decision autopilot', () => {
     expect(spec).not.toContain('**Status:** Auto-accepted (unreviewed)');
   });
 
+  // Issue #509: promoting a never-written auto-approved decision to `synced` let
+  // the next sync purge it. It must become human-approved and wait for a sync.
+  it('review --promote keeps a decision that is in no spec as approved, and --sync does not purge it', async () => {
+    await writeConfig({ autopilot: true });
+    await saveDecisionStore(dir, makeStore([makeDecision({
+      status: 'auto-approved',
+      approvedBy: 'autopilot',
+      scope: 'component',
+      affectedDomains: [],
+      affectedFiles: ['src/pi/extension.ts'],
+    })]));
+
+    await decisionsCommand.parseAsync(['review', '--promote', 'all'], { from: 'user' });
+
+    expect(process.exitCode ?? 0).toBe(0);
+    let d = (await loadDecisionStore(dir)).decisions.find((x) => x.id === 'aaaabbbb');
+    expect(d?.status).toBe('approved');
+    expect(d?.approvedBy).toBe('human');
+    expect(d?.humanReviewedAt).toBeTruthy();
+
+    resetCommanderState(decisionsCommand);
+    await decisionsCommand.parseAsync(['--sync'], { from: 'user' });
+
+    expect(process.exitCode).toBe(1);
+    d = (await loadDecisionStore(dir)).decisions.find((x) => x.id === 'aaaabbbb');
+    expect(d?.status).toBe('approved');
+    expect(d?.rationale).toBe('Reduces DB load');
+  });
+
   it('repeated gates are idempotent: no duplicate spec entries, no duplicate transitions', async () => {
     await writeConfig({ autopilot: true });
     await saveDecisionStore(dir, makeStore([makeDecision()]));

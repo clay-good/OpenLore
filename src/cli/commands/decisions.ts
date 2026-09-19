@@ -1787,7 +1787,8 @@ decisionsCommand
       }
 
       const now = new Date().toISOString();
-      const results: Array<{ id: string; title: string; disposition: 'promoted' | 'rejected'; specsUpdated: string[] }> = [];
+      const results: Array<{ id: string; title: string; disposition: 'promoted' | 'rejected'; specsUpdated: string[]; pendingSync?: true }> = [];
+      const unwrittenPromotions = new Set<string>();
 
       for (const [raw, disposition] of [[promoteRaw, 'promoted'], [rejectRaw, 'rejected']] as const) {
         if (!raw) continue;
@@ -1795,11 +1796,20 @@ decisionsCommand
         for (const id of ids) {
           const decision = queue.find((d) => d.id === id)!;
           await updateDecisionStore(rootPath, (s) => {
+            // The CAS may re-run this callback; the flag reflects the attempt that commits.
+            unwrittenPromotions.delete(id);
             const cur = s.decisions.find((d) => d.id === id);
             // Legality: only a still-unreviewed auto-approved decision transitions.
             if (!cur || cur.status !== 'auto-approved' || cur.humanReviewedAt) return s;
+            // Promoting to `synced` purges the decision at the next sync, which is only
+            // safe once it is in a spec or ADR. One never written anywhere becomes a
+            // human-approved decision instead, so `--sync` writes it or reports why it
+            // cannot. (issue #509)
+            const written = cur.syncedToSpecs.length > 0;
+            if (disposition === 'promoted' && !written) unwrittenPromotions.add(id);
             return patchDecision(s, id, {
-              status: disposition === 'promoted' ? 'synced' : 'rejected',
+              status: disposition === 'promoted' ? (written ? 'synced' : 'approved') : 'rejected',
+              ...(disposition === 'promoted' && !written ? { approvedBy: 'human' as const } : {}),
               humanReviewedAt: now,
               reviewedAt: now,
               ...(note ? { reviewNote: note } : {}),
@@ -1810,7 +1820,10 @@ decisionsCommand
             event: disposition === 'promoted' ? 'decision_review_promoted' : 'decision_review_rejected',
             id, title: decision.title, transport: 'cli-review',
           });
-          results.push({ id, title: decision.title, disposition, specsUpdated });
+          results.push({
+            id, title: decision.title, disposition, specsUpdated,
+            ...(unwrittenPromotions.has(id) ? { pendingSync: true as const } : {}),
+          });
         }
       }
 
@@ -1834,6 +1847,7 @@ decisionsCommand
         const verb = r.disposition === 'promoted' ? 'promoted to Approved' : 'rejected (retired from specs)';
         logger.success(`[${r.id}] ${verb} — ${r.title}`);
         for (const p of r.specsUpdated) console.log(`   → ${safe(p)}`);
+        if (r.pendingSync) console.log('   Not in any spec yet. Run "openlore decisions --sync" to write it.');
       }
       if (remaining.length === 0) {
         console.log(results.length > 0 ? '\nReview queue is empty.' : 'No auto-accepted decisions await review.');

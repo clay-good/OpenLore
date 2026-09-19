@@ -230,7 +230,9 @@ it wrote the decision to at least one durable target: an owning spec or an ADR. 
 domain resolves to a spec file and the decision's scope is not ADR-eligible, or when the ADR
 could not be written, the syncer SHALL report a per-decision error that names the cause and the
 remedy, and SHALL leave the decision in the store with its status unchanged. This applies to
-every decision, not only to decisions that carry constraints.
+every decision, not only to decisions that carry constraints. A human review that promotes an
+auto-approved decision not yet written to any spec or ADR SHALL make it `approved`, not `synced`,
+so the next sync writes it or reports why it cannot.
 
 #### Scenario: A component decision with no spec domain is kept
 
@@ -238,6 +240,12 @@ every decision, not only to decisions that carry constraints.
 - **WHEN** `openlore decisions --sync` runs
 - **THEN** no file is written, the decision stays `approved` with its rationale in the store,
   the sync reports an error naming the missing target, and the command exits non-zero
+
+#### Scenario: Promoting an unwritten auto-approved decision does not purge it
+
+- **GIVEN** an auto-approved decision with no entry in any spec or ADR
+- **WHEN** a human runs `openlore decisions review --promote` on it
+- **THEN** the decision becomes `approved` and stays in the store until a sync writes it
 
 #### Scenario: An ADR-eligible decision with no spec domain becomes an ADR
 
