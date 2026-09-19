@@ -1,12 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileGitSync } from '../../../utils/git-exec.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assembleSurfaceDiff, computeCertifyPublicSurface, publicSurfaceFindings } from './public-surface.js';
+import { assembleSurfaceDiff, breakDiscriminator, computeCertifyPublicSurface, publicSurfaceFindings } from './public-surface.js';
 import { getChangedFiles } from '../../drift/git-diff.js';
 import { FINDING_CODE_REGISTRY, resolveEnforcementClass } from './enforcement-policy.js';
 import { BREAKING_SURFACE_RULE_CODES } from '../../analyzer/public-surface.js';
+import { readCachedContext } from './utils.js';
+import { findCrossRepoConsumersBatch } from '../../federation/resolver.js';
+import { writeAcceptedBreakages } from './public-surface-baseline.js';
+import {
+  DECISIONS_PENDING_FILE,
+  OPENLORE_DECISIONS_SUBDIR,
+  OPENLORE_DIR,
+  PUBLIC_SURFACE_BASELINE_REL_PATH,
+} from '../../../constants.js';
 
 // Mock only the two utils the handler reads; the pure assembleSurfaceDiff core below
 // does not touch them, so the existing suite is unaffected. git-diff is imported
@@ -22,6 +31,20 @@ vi.mock('../../drift/git-diff.js', () => ({
     requested,
     resolved: 'main',
     fellBack: requested === 'bogus-ref',
+  })),
+}));
+
+// Federation is opt-in: inactive unless the caller asks, and then one sibling repo is consulted.
+vi.mock('../../federation/resolver.js', () => ({
+  resolveFederationScope: vi.fn((_dir: string, opts: { federation?: boolean }) =>
+    opts.federation
+      ? { active: true, repos: [{ name: 'sibling', path: '/sibling' }], unknownNames: [] }
+      : { active: false, repos: [], unknownNames: [] }),
+  findCrossRepoConsumersBatch: vi.fn(async (_scope: unknown, symbols: string[]) => ({
+    bySymbol: new Map(symbols.map((s) => [s, [] as unknown[]])),
+    truncated: 0,
+    truncatedBySymbol: new Map(),
+    coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: ['matched by symbol name'] },
   })),
 }));
 
@@ -206,18 +229,41 @@ describe('assembleSurfaceDiff — breaking-change classification over file conte
     expect(change(await assembleSurfaceDiff(base, head, noRename), 'api')?.changeKind).toBe('removed');
   });
 
-  it('a renamed export resolves consumers via BOTH old and new id (index built at base OR head)', async () => {
+  it('a renamed export counts only callers of the OLD name (a caller already on the new name is fine)', async () => {
     const body = 'export function computeTax(income: number): number {\n  const rate = 0.2;\n  return income * rate;\n}\n';
     const base = [ts('a.ts', body)];
     const head = [ts('a.ts', body.replace(/computeTax/g, 'calculateTax'))];
-    // Index built at HEAD: only the NEW id resolves. The union must still surface the consumer.
-    const headIndex = { getCallers: (id: string) => (id === 'a.ts::calculateTax' ? [{ callerId: 'b.ts::useIt' }] : []) };
-    const rHead = await assembleSurfaceDiff(base, head, noRename, headIndex);
-    expect(rHead.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => x.name)).toEqual(['useIt']);
-    // Index built at base: only the OLD id resolves. Still surfaced.
+    const importers = (): Array<{ file: string; via: 'import' }> => [{ file: 'b.ts', via: 'import' }];
+    // Index built at HEAD: a migrated caller resolves to the NEW id and is not broken; an unmigrated
+    // one in an importing file is an unresolved call to the old name.
+    const headIndex = {
+      getCallers: (id: string) => (id === 'a.ts::calculateTax' ? [{ callerId: 'c.ts::migrated' }] : []),
+      getExternalConsumers: (name: string) => (name === 'computeTax' ? [{ callerId: 'b.ts::useIt' }] : []),
+    };
+    const rHead = await assembleSurfaceDiff(base, head, noRename, headIndex, 0, importers);
+    expect(rHead.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => [x.name, x.via])).toEqual([['useIt', 'unresolved-call']]);
+    // Index built at base: the OLD id resolves.
     const baseIndex = { getCallers: (id: string) => (id === 'a.ts::computeTax' ? [{ callerId: 'b.ts::useIt' }] : []) };
     const rBase = await assembleSurfaceDiff(base, head, noRename, baseIndex);
     expect(rBase.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => x.name)).toEqual(['useIt']);
+  });
+
+  it('a visibility reduction counts only consumers in other files', async () => {
+    const base = [ts('m.ts', 'export function deepMerge(a: number): number { return a; }\nexport function use(): number { return deepMerge(1); }\n')];
+    const head = [ts('m.ts', 'function deepMerge(a: number): number { return a; }\nexport function use(): number { return deepMerge(1); }\n')];
+    const index = { getCallers: (id: string) => (id === 'm.ts::deepMerge' ? [{ callerId: 'm.ts::use' }, { callerId: 'm.ts::deepMerge' }] : []) };
+    const same = await assembleSurfaceDiff(base, head, noRename, index);
+    expect(same.breaking[0]).toMatchObject({ changeKind: 'visibility-reduced', breakingClass: 'breaking-unconsumed-in-index', consumers: [] });
+    const withOther = await assembleSurfaceDiff(base, head, noRename, { getCallers: (id: string) => [...index.getCallers(id), { callerId: 'x.ts::outside' }] });
+    expect(withOther.breaking[0].consumers.map((c) => c.id)).toEqual(['x.ts::outside']);
+  });
+
+  it('a removed export counts unresolved callers in its own file', async () => {
+    const base = [ts('m.ts', 'export function gone(): void {}\nexport function user(): void { gone(); }\n')];
+    const head = [ts('m.ts', 'export function user(): void { gone(); }\n')];
+    const index = { getCallers: () => [], getExternalConsumers: (n: string) => (n === 'gone' ? [{ callerId: 'm.ts::user' }] : []) };
+    const r = await assembleSurfaceDiff(base, head, noRename, index, 0, () => []);
+    expect(r.breaking[0]).toMatchObject({ breakingClass: 'breaking-consumed', consumers: [{ id: 'm.ts::user', via: 'unresolved-call' }] });
   });
 
   it('a regex literal containing a quote does NOT swallow a following real export (regex-aware scan)', async () => {
@@ -461,7 +507,395 @@ describe('rule codes, suggested bump, and findings (refine-public-surface-certif
     const r = await assembleSurfaceDiff([ts('a.ts', 'export function gone(): void {}\n')], [ts('a.ts', '\n')], noRename);
     const detail = r.extraCrossings.map((c) => c.detail).join(' ');
     expect(detail).not.toMatch(/sibling repos are also checked/i);
-    expect(detail).toMatch(/not checked, including under federation/);
+    expect(detail).toMatch(/in-repo only\. Pass federation to also check indexed sibling repos/);
   });
 });
 
+
+describe('consumer-weighted breaking verdicts (add-public-surface-acceptance-baseline)', () => {
+  const stubStore = (callers: Record<string, string[]>) => ({
+    getCallers: (id: string) => (callers[id] ?? []).map((callerId) => ({ callerId })),
+  });
+
+  it('a consumed break names its consumers', async () => {
+    const r = await assembleSurfaceDiff(
+      [ts('a.ts', 'export function gone(): void {}\n')],
+      [ts('a.ts', '\n')],
+      noRename,
+      stubStore({ 'a.ts::gone': ['x.ts::one', 'y.ts::two', 'z.ts::three'] }),
+    );
+    expect(r.breaking).toHaveLength(1);
+    expect(r.breaking[0].breakingClass).toBe('breaking-consumed');
+    expect(r.breaking[0].consumerCount).toBe(3);
+    expect(r.breaking[0].consumers.map((c) => c.name)).toEqual(['one', 'two', 'three']);
+    expect(r.summary).toMatchObject({ breaking: 1, breakingConsumed: 1, breakingUnconsumedInIndex: 0 });
+    expect(r.breaking[0].class).toBe('breaking'); // the class and bump are unchanged by the split
+    expect(r.suggestedBump).toBe('major');
+  });
+
+  it('zero indexed consumers is not "safe"', async () => {
+    const r = await assembleSurfaceDiff([ts('a.ts', 'export function gone(): void {}\n')], [ts('a.ts', '\n')], noRename, stubStore({}));
+    expect(r.breaking[0]).toMatchObject({ breakingClass: 'breaking-unconsumed-in-index', consumerCount: 0, consumers: [] });
+    expect(r.summary).toMatchObject({ breakingConsumed: 0, breakingUnconsumedInIndex: 1 });
+    expect(r.extraCrossings).toHaveLength(1);
+    expect(r.extraCrossings[0].detail).toMatch(/zero listed consumers does not mean no consumer exists/);
+  });
+
+  it('counts consumers beyond the listing cap', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => `c${String(i).padStart(2, '0')}.ts::f`);
+    const r = await assembleSurfaceDiff([ts('a.ts', 'export function gone(): void {}\n')], [ts('a.ts', '\n')], noRename, stubStore({ 'a.ts::gone': many }));
+    expect(r.breaking[0].consumers).toHaveLength(25);
+    expect(r.breaking[0].consumersTruncated).toBe(5);
+    expect(r.breaking[0].consumerCount).toBe(30);
+  });
+});
+
+describe('certify_public_surface diff mode: federation census and accepted baseline (handler)', () => {
+  let dir: string;
+  const A_BASE = 'export function parseLegacy(s: string): string { return s; }\nexport function keep(): void {}\nexport function other(): void {}\n';
+  const A_HEAD = 'export function keep(): void {}\n';
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-certaccept-'));
+    execFileGitSync('git', ['init', '-q', '-b', 'main', dir]);
+    execFileGitSync('git', ['-C', dir, 'config', 'user.email', 't@example.com']);
+    execFileGitSync('git', ['-C', dir, 'config', 'user.name', 't']);
+    execFileGitSync('git', ['-C', dir, 'config', 'commit.gpgsign', 'false']);
+    await writeFile(join(dir, 'a.ts'), A_BASE);
+    execFileGitSync('git', ['-C', dir, 'add', 'a.ts']);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-m', 'base']);
+    await writeFile(join(dir, 'a.ts'), A_HEAD);
+    await mkdir(join(dir, OPENLORE_DIR), { recursive: true });
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'a.ts', status: 'modified' }], resolvedBase: 'main' } as never);
+  });
+  afterEach(async () => {
+    vi.mocked(getChangedFiles).mockReset();
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [], resolvedBase: 'main' } as never);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  type Diff = {
+    summary: Record<string, number>;
+    breaking: Array<{
+      name: string;
+      breakingClass: string;
+      consumerCount?: number;
+      consumers?: Array<{ id: string; via: string }>;
+      crossRepoConsumers?: Array<{ repo: string; name: string }>;
+      crossRepoConsumersTruncated?: number;
+    }>;
+    findings: Array<{ code: string; subject: string }>;
+    consumerCensus: { scope: string; reposConsulted?: string[] };
+    baseline?: { error?: string; accepted: Array<{ subject: string; justification: string }>; stale: Array<{ subject: string; supersededBy?: string; reason: string }>; unmatched: unknown[] };
+    confidenceBoundary: { knownUnknowable?: Array<{ detail: string }> };
+  };
+  const run = async (extra: Record<string, unknown> = {}): Promise<Diff> =>
+    (await computeCertifyPublicSurface({ directory: dir, baseRef: 'main', ...extra })) as Diff;
+  const legacyFinding = (r: Diff) => r.findings.filter((f) => f.subject === 'a.ts::parseLegacy') as never;
+  const decisionStore = async (decisions: Array<{ id: string; status?: string; supersedes?: string }>): Promise<void> => {
+    const d = join(dir, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
+    await mkdir(d, { recursive: true });
+    const full = decisions.map((x) => ({
+      status: 'approved', title: `decision ${x.id}`, rationale: 'r', consequences: 'c', proposedRequirement: null,
+      affectedDomains: [], affectedFiles: [], syncedToSpecs: [], sessionId: 's', recordedAt: '2026-06-01T00:00:00Z',
+      contentOrigin: 'agent-recorded', confidence: 'high', ...x,
+    }));
+    await writeFile(join(d, DECISIONS_PENDING_FILE), JSON.stringify({ version: '1', sessionId: 's', updatedAt: '2026-06-01T00:00:00Z', decisions: full }, null, 2));
+  };
+
+  it('without a baseline or federation: in-repo census, every break is a finding, no baseline block', async () => {
+    const r = await run();
+    expect(r.consumerCensus).toMatchObject({ scope: 'in-repo', importEvidence: 'unavailable' });
+    expect((r.consumerCensus as { inRepoCaveat?: string }).inRepoCaveat).toMatch(/resolved calls only/);
+    expect(r.baseline).toBeUndefined();
+    expect(r.findings.map((f) => f.subject).sort()).toEqual(['a.ts::other', 'a.ts::parseLegacy']);
+    expect(r.summary).toMatchObject({ breaking: 2, breakingConsumed: 0, breakingUnconsumedInIndex: 2, accepted: 0 });
+    expect(r.confidenceBoundary.knownUnknowable?.map((k) => k.detail).join(' ')).toMatch(/Pass federation/);
+  });
+
+  it('federation widens the census honestly', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((s) => [s, s === 'parseLegacy'
+        ? [{ repo: 'sibling', repoPath: '/sibling', caller: { id: 'app.ts::main', name: 'main', file: 'app.ts' }, symbol: s }]
+        : []])),
+      truncated: 0,
+      truncatedBySymbol: new Map(),
+      coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    const legacy = r.breaking.find((b) => b.name === 'parseLegacy')!;
+    expect(legacy.breakingClass).toBe('breaking-consumed');
+    expect(legacy.crossRepoConsumers).toEqual([{ repo: 'sibling', name: 'main', file: 'app.ts' }]);
+    expect(r.breaking.find((b) => b.name === 'other')!.breakingClass).toBe('breaking-unconsumed-in-index');
+    expect(r.consumerCensus).toMatchObject({ scope: 'federation', reposConsulted: ['sibling'] });
+    expect(r.confidenceBoundary.knownUnknowable?.map((k) => k.detail).join(' ')).toMatch(/Federated sibling repos were checked by symbol name/);
+
+    const without = await run();
+    expect(without.breaking.find((b) => b.name === 'parseLegacy')!.breakingClass).toBe('breaking-unconsumed-in-index');
+  });
+
+  it('an accepted break is listed as accepted, leaves findings, and a new break still reports', async () => {
+    await writeAcceptedBreakages(dir, legacyFinding(await run()), 'legacy parser retired in v3');
+    const r = await run();
+    expect(r.findings.map((f) => f.subject)).toEqual(['a.ts::other']);
+    expect(r.baseline?.accepted).toEqual([{ code: 'export-removed', subject: 'a.ts::parseLegacy', discriminator: 'was (s:string)=>string', justification: 'legacy parser retired in v3' }]);
+    expect(r.summary).toMatchObject({ breaking: 2, accepted: 1 });
+    // The verdict still describes the diff honestly: the accepted break is still breaking.
+    expect(r.breaking.map((b) => b.name).sort()).toEqual(['other', 'parseLegacy']);
+  });
+
+  it('a superseded decision anchor expires the acceptance, citing the live superseder', async () => {
+    await decisionStore([{ id: 'a1b2c3d4' }]);
+    await writeAcceptedBreakages(dir, legacyFinding(await run()), 'retired', 'a1b2c3d4');
+    expect((await run()).baseline?.accepted).toHaveLength(1);
+
+    await decisionStore([{ id: 'a1b2c3d4' }, { id: 'b2c3d4e5', supersedes: 'a1b2c3d4' }]);
+    const r = await run();
+    expect(r.baseline?.accepted).toEqual([]);
+    expect(r.baseline?.stale).toHaveLength(1);
+    expect(r.baseline?.stale[0]).toMatchObject({ subject: 'a.ts::parseLegacy', supersededBy: 'b2c3d4e5' });
+    expect(r.findings.map((f) => f.subject)).toContain('a.ts::parseLegacy');
+  });
+
+  it('an unrecorded decision anchor is not honored', async () => {
+    await writeAcceptedBreakages(dir, legacyFinding(await run()), 'retired', 'deadbeef');
+    const r = await run();
+    expect(r.baseline?.stale[0].reason).toMatch(/No decision "deadbeef" is recorded/);
+    expect(r.findings.map((f) => f.subject)).toContain('a.ts::parseLegacy');
+  });
+
+  it('a corrupt baseline honors nothing and says why', async () => {
+    await writeFile(join(dir, PUBLIC_SURFACE_BASELINE_REL_PATH), '# OpenLore accepted public-surface breakages v1\n["accept","export-removed","a.ts::parseLegacy","",""]\n');
+    const r = await run();
+    expect(r.baseline?.error).toMatch(/no acceptance honored/);
+    expect(r.findings.map((f) => f.subject).sort()).toEqual(['a.ts::other', 'a.ts::parseLegacy']);
+  });
+
+  it('lists entries that no longer match any finding', async () => {
+    await writeAcceptedBreakages(dir, [{ code: 'param-removed', severity: 'error', source: 'public-surface', subject: 'a.ts::fixed', message: 'm' }], 'old');
+    const r = await run();
+    expect(r.baseline?.unmatched).toEqual([{ code: 'param-removed', subject: 'a.ts::fixed' }]);
+  });
+
+  it('the census reads the edge store the analysis provides', async () => {
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      callGraph: { nodes: [] },
+      edgeStore: { getCallers: (id: string) => (id === 'a.ts::parseLegacy' ? [{ callerId: 'b.ts::use' }] : []) },
+    } as never);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')!.breakingClass).toBe('breaking-consumed');
+    expect(r.summary).toMatchObject({ breakingConsumed: 1, breakingUnconsumedInIndex: 1 });
+  });
+
+  const depGraph = async (
+    edges: Array<{ source: string; target: string; importedNames: string[]; importedSourceNames?: string[] | null }>,
+    nodes: Array<{ file: { path: string }; exports?: unknown[] }> = [],
+  ): Promise<void> => {
+    const real = await realpath(dir);
+    await mkdir(join(dir, OPENLORE_DIR, 'analysis'), { recursive: true });
+    await writeFile(join(dir, OPENLORE_DIR, 'analysis', 'dependency-graph.json'), JSON.stringify({
+      nodes, edges: edges.map((e) => ({
+        source: join(real, e.source), target: join(real, e.target), importedNames: e.importedNames,
+        ...(e.importedSourceNames === null ? {} : { importedSourceNames: e.importedSourceNames ?? e.importedNames }),
+      })),
+    }));
+  };
+
+  it('an index built after the edit still finds the callers of a removed export, but only in files that import it', async () => {
+    await depGraph([{ source: 'b.ts', target: 'a.ts', importedNames: ['parseLegacy'] }]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      callGraph: { nodes: [] },
+      edgeStore: {
+        getCallers: () => [],
+        getExternalConsumers: (name: string) => (name === 'parseLegacy' ? [{ callerId: 'b.ts::use' }, { callerId: 'z.ts::unrelated' }] : []),
+      },
+    } as never);
+    const r = await run();
+    const legacy = r.breaking.find((b) => b.name === 'parseLegacy')!;
+    expect(legacy.breakingClass).toBe('breaking-consumed');
+    expect(legacy.consumers).toEqual([{ id: 'b.ts::use', name: 'use', file: 'b.ts', via: 'unresolved-call' }]);
+    expect(r.breaking.find((b) => b.name === 'other')!.breakingClass).toBe('breaking-unconsumed-in-index');
+  });
+
+  it('a removed const that another file imports is consumed', async () => {
+    execFileGitSync('git', ['-C', dir, 'checkout', '-q', 'main']);
+    await writeFile(join(dir, 'a.ts'), `${A_BASE}export const LIMIT = 10;\n`);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-am', 'const']);
+    await writeFile(join(dir, 'a.ts'), A_HEAD);
+    await depGraph([{ source: 'c.ts', target: 'a.ts', importedNames: ['LIMIT'] }]);
+    const r = await run();
+    const limit = r.breaking.find((b) => b.name === 'LIMIT')!;
+    expect(limit.breakingClass).toBe('breaking-consumed');
+    expect(limit.consumers).toEqual([{ id: 'c.ts', name: 'c.ts', file: 'c.ts', via: 'import' }]);
+  });
+
+  it('federation with no sibling repo consulted does not claim siblings were checked', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((sym) => [sym, []])),
+      truncated: 0,
+      truncatedBySymbol: new Map(),
+      coverage: { reposConsulted: [], reposSkipped: [{ name: 'sibling', state: 'unindexed', reason: 'no index' }], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    const detail = r.confidenceBoundary.knownUnknowable?.map((k) => k.detail).join(' ') ?? '';
+    expect(detail).toMatch(/no sibling repo was consulted/);
+    expect(detail).not.toMatch(/were checked by symbol name/);
+  });
+
+  it('attributes capped cross-repo consumers to their own symbol', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((sym) => [sym, [{ repo: 'sibling', repoPath: '/s', caller: { id: `x.ts::${sym}User`, name: `${sym}User`, file: 'x.ts' }, symbol: sym }]])),
+      truncated: 40,
+      truncatedBySymbol: new Map([['parseLegacy', 40]]),
+      coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')).toMatchObject({ consumerCount: 41, crossRepoConsumersTruncated: 40 });
+    expect(r.breaking.find((b) => b.name === 'other')!.consumerCount).toBe(1);
+  });
+
+  it('accepting one narrowing does not hide a later narrowing of the same symbol', async () => {
+    execFileGitSync('git', ['-C', dir, 'checkout', '-q', 'main']);
+    await writeFile(join(dir, 'a.ts'), 'export function foo(a: string | number, b: string | number): void {}\n');
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-am', 'foo']);
+    await writeFile(join(dir, 'a.ts'), 'export function foo(a: string, b: string | number): void {}\n');
+    const first = await run();
+    expect(first.findings.map((f) => f.code)).toEqual(['param-type-narrowed']);
+    await writeAcceptedBreakages(dir, first.findings as never, 'narrow a on purpose');
+    expect((await run()).findings).toEqual([]);
+
+    await writeFile(join(dir, 'a.ts'), 'export function foo(a: string, b: string): void {}\n');
+    const second = await run();
+    expect(second.findings.map((f) => f.code)).toEqual(['param-type-narrowed']);
+    expect(second.baseline?.unmatched).toHaveLength(1);
+  });
+
+  it('reads imports by the name they bind FROM the module: aliases, namespaces, defaults, barrels, decoys', async () => {
+    await depGraph([
+      { source: 'alias.ts', target: 'a.ts', importedNames: ['p'], importedSourceNames: ['parseLegacy'] },
+      { source: 'ns.ts', target: 'a.ts', importedNames: ['A'], importedSourceNames: null },
+      { source: 'decoy.ts', target: 'a.ts', importedNames: ['other'], importedSourceNames: ['keep'] },
+      { source: 'app.ts', target: 'index.ts', importedNames: ['parseLegacy'] },
+    ], [
+      // The analyzer records a re-export on the barrel's node, not as an edge.
+      { file: { path: 'a.ts' } },
+      { file: { path: 'index.ts' }, exports: [{ name: 'parseLegacy', isReExport: true, reExportSource: './a.js' }] },
+    ]);
+    const r = await run();
+    const legacy = r.breaking.find((b) => b.name === 'parseLegacy')!;
+    expect(legacy.consumers).toEqual([
+      { id: 'alias.ts', name: 'alias.ts', file: 'alias.ts', via: 'import' },
+      { id: 'app.ts', name: 'app.ts', file: 'app.ts', via: 'import' },
+      { id: 'index.ts', name: 'index.ts', file: 'index.ts', via: 'import' },
+      { id: 'ns.ts', name: 'ns.ts', file: 'ns.ts', via: 'module-import' },
+    ]);
+    // `import { keep as other }` does not bind `other`; only the namespace import may.
+    expect(r.breaking.find((b) => b.name === 'other')!.consumers).toEqual([{ id: 'ns.ts', name: 'ns.ts', file: 'ns.ts', via: 'module-import' }]);
+  });
+
+  it('counts a Python import of the module itself as a module import', async () => {
+    await mkdir(join(dir, 'pkg'), { recursive: true });
+    await writeFile(join(dir, 'pkg', 'util.py'), 'def tokenize(s: str) -> str:\n    return s\n\ndef keep(s: str) -> str:\n    return s\n');
+    execFileGitSync('git', ['-C', dir, 'add', 'pkg/util.py']);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-m', 'py']);
+    await writeFile(join(dir, 'pkg', 'util.py'), 'def keep(s: str) -> str:\n    return s\n');
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'pkg/util.py', status: 'modified' }], resolvedBase: 'main' } as never);
+    await depGraph([
+      { source: 'main.py', target: 'pkg/util.py', importedNames: ['util'] },
+      { source: 'm2.py', target: 'pkg/util.py', importedNames: ['tk'], importedSourceNames: ['tokenize'] },
+      { source: 'other.py', target: 'pkg/util.py', importedNames: ['keep'] },
+    ]);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'tokenize')!.consumers).toEqual([
+      { id: 'm2.py', name: 'm2.py', file: 'm2.py', via: 'import' },
+      { id: 'main.py', name: 'main.py', file: 'main.py', via: 'module-import' },
+    ]);
+  });
+
+  it('reports the cross-repo consumers found but not listed, over every name', async () => {
+    vi.mocked(findCrossRepoConsumersBatch).mockImplementationOnce(async (_scope, symbols) => ({
+      bySymbol: new Map(symbols.map((sym) => [sym, Array.from({ length: sym === 'parseLegacy' ? 30 : 0 }, (_, i) => ({
+        repo: 'sibling', repoPath: '/s', caller: { id: `x${i}.ts::f`, name: 'f', file: `x${i}.ts` }, symbol: sym,
+      }))])),
+      truncated: 10,
+      truncatedBySymbol: new Map([['parseLegacy', 10]]),
+      coverage: { reposConsulted: [{ name: 'sibling' }], reposSkipped: [], caveats: [] },
+    }) as never);
+    const r = await run({ federation: true });
+    expect((r.consumerCensus as { truncated?: number }).truncated).toBe(15);
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')).toMatchObject({ consumerCount: 40, crossRepoConsumersTruncated: 15 });
+  });
+
+  it('still reads the import census when the checkout moved after the index was built', async () => {
+    const elsewhere = '/somewhere/else/repo';
+    await mkdir(join(dir, OPENLORE_DIR, 'analysis'), { recursive: true });
+    await writeFile(join(dir, OPENLORE_DIR, 'analysis', 'dependency-graph.json'), JSON.stringify({
+      nodes: [{ id: `${elsewhere}/a.ts`, file: { path: 'a.ts', absolutePath: `${elsewhere}/a.ts` } }],
+      edges: [{ source: `${elsewhere}/use.ts`, target: `${elsewhere}/a.ts`, importedNames: ['parseLegacy'], importedSourceNames: ['parseLegacy'] }],
+    }));
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')!.consumers).toEqual([{ id: 'use.ts', name: 'use.ts', file: 'use.ts', via: 'import' }]);
+  });
+
+  it('counts `from . import mod` as a whole-module import of the submodule', async () => {
+    await mkdir(join(dir, 'pkg'), { recursive: true });
+    await writeFile(join(dir, 'pkg', 'types.py'), 'class BoolParamType:\n    pass\n\ndef keep() -> None:\n    pass\n');
+    execFileGitSync('git', ['-C', dir, 'add', 'pkg/types.py']);
+    execFileGitSync('git', ['-C', dir, 'commit', '-q', '-m', 'py']);
+    await writeFile(join(dir, 'pkg', 'types.py'), 'def keep() -> None:\n    pass\n');
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'pkg/types.py', status: 'modified' }], resolvedBase: 'main' } as never);
+    await depGraph([{ source: 'pkg/core.py', target: 'pkg/__init__.py', importedNames: ['types'] }], [
+      { file: { path: 'pkg/__init__.py' } }, { file: { path: 'pkg/types.py' } }, { file: { path: 'pkg/core.py' } },
+    ]);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'BoolParamType')!.consumers).toEqual([{ id: 'pkg/core.py', name: 'pkg/core.py', file: 'pkg/core.py', via: 'module-import' }]);
+    expect(r.consumerCensus).toMatchObject({ importEvidence: 'dependency-graph' });
+  });
+
+  it('follows an `export *` barrel', async () => {
+    await depGraph([{ source: 'app.ts', target: 'lib/index.ts', importedNames: ['other'] }], [
+      { file: { path: 'a.ts' } },
+      { file: { path: 'lib/index.ts' }, exports: [{ name: '*', isReExport: true, reExportSource: '../a' }] },
+    ]);
+    const r = await run();
+    // `export *` binds nothing itself: only the file importing through it is a consumer.
+    expect(r.breaking.find((b) => b.name === 'other')!.consumers?.map((c) => [c.id, c.via])).toEqual([['app.ts', 'import']]);
+  });
+
+  it('counts consumers keyed by the old path when the defining file was renamed', async () => {
+    execFileGitSync('git', ['-C', dir, 'mv', 'a.ts', 'b.ts']);
+    await writeFile(join(dir, 'b.ts'), A_HEAD);
+    vi.mocked(getChangedFiles).mockResolvedValue({ files: [{ path: 'b.ts', oldPath: 'a.ts', status: 'renamed' }], resolvedBase: 'main' } as never);
+    await depGraph([{ source: 'use.ts', target: 'a.ts', importedNames: ['other'] }]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      callGraph: { nodes: [] },
+      edgeStore: { getCallers: (id: string) => (id === 'a.ts::parseLegacy' ? [{ callerId: 'x.ts::call' }] : []) },
+    } as never);
+    const r = await run();
+    expect(r.breaking.find((b) => b.name === 'parseLegacy')!.consumers?.map((c) => c.id)).toEqual(['x.ts::call']);
+    expect(r.breaking.find((b) => b.name === 'other')!.consumers?.map((c) => c.id)).toEqual(['use.ts']);
+  });
+});
+
+describe('break discriminators (add-public-surface-acceptance-baseline)', () => {
+  const sig = (before: string, after: string, file = 'a.js') =>
+    breakDiscriminator({ changeKind: 'signature', class: 'breaking', name: 'f', file, kind: 'function', before, after, reasons: [], ruleCodes: [] });
+
+  it('keeps parameter names, so different untyped breaks differ', () => {
+    expect(sig('function f(a, b)', 'function f(a)')).not.toBe(sig('function f(a, b)', 'function f(b)'));
+    expect(sig('def f(a, *args)', 'def f(a)', 'a.py')).not.toBe(sig('def f(a, b)', 'def f(a)', 'a.py'));
+  });
+
+  it('ignores formatting and comments', () => {
+    const plain = sig('function f(a: string | number, b?: number): number', 'function f(a: string, b?: number): number', 'a.ts');
+    expect(sig('function f(a: string | number, b?: number): number', 'function f(\n  a: string /* opt */,\n  b?: number,\n): number', 'a.ts')).toBe(plain);
+  });
+
+  it('pins a name-level removal to its base declaration, so a different declaration removed later differs', async () => {
+    const r1 = await assembleSurfaceDiff([ts('a.ts', 'export const LIMIT = 10;\n')], [ts('a.ts', '\n')], noRename);
+    const r2 = await assembleSurfaceDiff([ts('a.ts', 'export const LIMIT: number = computeLimit();\n')], [ts('a.ts', '\n')], noRename);
+    // The initializer is a value, not the contract, and stays out of the committed baseline.
+    expect(r1.findings[0].discriminator).toBe('was export const LIMIT');
+    expect(r2.findings[0].discriminator).not.toBe(r1.findings[0].discriminator);
+  });
+});

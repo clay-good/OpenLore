@@ -518,8 +518,9 @@ async function dispatchToolImpl(
       args as { directory: string; maxResults?: number; filePattern?: string; changedSymbols?: string[]; diffRef?: string; directResolvedOnly?: boolean };
     return handleReportCoverageGaps({ directory, maxResults, filePattern, changedSymbols, diffRef, directResolvedOnly });
   } else if (name === 'certify_public_surface') {
-    const { directory, baseRef, maxResults, allowBaseFallback } = args as { directory: string; baseRef?: string; maxResults?: number; allowBaseFallback?: boolean };
-    return handleCertifyPublicSurface({ directory, baseRef, maxResults, allowBaseFallback });
+    const { directory, baseRef, maxResults, allowBaseFallback, federation, federationRepos } =
+      args as { directory: string; baseRef?: string; maxResults?: number; allowBaseFallback?: boolean; federation?: boolean; federationRepos?: string[] };
+    return handleCertifyPublicSurface({ directory, baseRef, maxResults, allowBaseFallback, federation, federationRepos });
   } else if (name === 'get_style_fingerprint') {
     const { directory, communityId, filePath, language } =
       args as { directory: string; communityId?: string; filePath?: string; language?: string };

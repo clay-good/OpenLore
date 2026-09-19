@@ -303,6 +303,17 @@ repository-relative location becomes a physical location; anything else is a log
 a fabricated line. Printed output and exit codes are unchanged. Narrowed: no graph span lookup, no
 per-rule `helpUri`, no vendored schema validator.
 
+Shipped and archived since: `add-public-surface-acceptance-baseline` (2026-09-19, PR #519) —
+`certify-public-surface --accept --justification` records intended breaking findings in
+`.openlore/public-surface-baseline.jsonl`, keyed by rule code, subject, and a discriminator for the
+exact break, so a later different break still reports; a decision-anchored acceptance expires when
+the decision is superseded, and `.gitignore` is never edited (the command prints `git add -f`). Each
+breaking change is split into `breaking-consumed` / `breaking-unconsumed-in-index` from resolved
+calls, the dependency graph's imports (aliases, barrels, whole-module imports), and unresolved calls
+to a removed name, with an opt-in federation census. Four review rounds (13 reviewers, 3 real-repo
+dogfoods) closed about 30 defects. Two pre-existing classifier gaps (return-type direction; Python,
+CommonJS, and positional-parameter false-safes) are filed as their own tasks.
+
 ## Maintenance rules (what kept this table honest)
 
 - Ship a `change: <name>` marker in the code, or expect this table to call the change unbuilt.

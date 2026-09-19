@@ -21,6 +21,14 @@ All notable changes to OpenLore are documented here. This project adheres to
   decisions gate. The gate and rejection hints no longer name the non-existent
   `openlore decisions --record`, and generated agent guidance names the CLI command when the MCP
   tool is not wired.
+- **Accept an intended breaking change, with a reason.** `openlore certify-public-surface --base <ref>
+  --accept --justification "…"` records the diff's breaking findings in
+  `.openlore/public-surface-baseline.jsonl` (commit it with the `git add -f` command it prints; it
+  never edits `.gitignore`). Later runs list them as `accepted` instead of as findings, and any new
+  or different break still reports. `--decision <id>` ties an acceptance to a decision; it
+  expires when that decision is superseded. Each breaking change is now also split into
+  `breaking-consumed` (with its consumers) or `breaking-unconsumed-in-index` (never "safe"), and
+  `--federation` counts consumers in indexed sibling repos.
 
 ## [3.2.0] - 2026-09-13
 

@@ -1796,19 +1796,17 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'certify_public_surface',
     description:
-      'USE THIS WHEN: you are about to ship a change to a library/package/module and need to know ' +
-      '"did I break my consumers\' contract?" — a removed or renamed export, an added required ' +
-      'parameter, a narrowed parameter/return type, reduced visibility. With NO base ref it returns ' +
-      'the PUBLIC SURFACE (exported symbols + signatures); with a base ref it returns a deterministic ' +
-      'breaking-change VERDICT for the working-tree diff: each changed public symbol classified ' +
-      'breaking | non-breaking | potentially-breaking, each breaking one paired with its in-repo ' +
-      'consumers, plus an overall summary. Conservative by construction: a change that cannot be ' +
-      'proven compatible from the available signatures is potentially-breaking, NEVER silently safe. ' +
-      'A renamed export is reported as a rename (not remove+add) via symbol-identity continuity. ' +
-      'Distinct from change_impact_certificate (which certifies newly-opened paths into a surface; ' +
-      'this certifies the exported contract\'s shape). No type checker, no build, no LLM, deterministic. ' +
-      'Signature classification supported for TypeScript/JavaScript/Python; other languages fail-soft. ' +
-      'Run analyze_codebase first.',
+      'USE THIS WHEN: you are about to ship a change to a library/module and need to know "did I ' +
+      'break my consumers\' contract?" (removed/renamed export, new required param, narrowed types, ' +
+      'reduced visibility). No base ref: the PUBLIC SURFACE (exports + signatures). With a base ' +
+      'ref: a deterministic breaking-change VERDICT for the working-tree ' +
+      'diff: each changed export breaking | non-breaking | potentially-breaking; each breaking one is ' +
+      'breaking-consumed (with its consumers) or breaking-unconsumed-in-index (never "safe"); ' +
+      'federation also counts indexed sibling repos. Breakages accepted in ' +
+      '.openlore/public-surface-baseline.jsonl are listed as accepted, not findings. Unprovable ' +
+      '= potentially-breaking, NEVER silently safe. Renames are reported as renames. Distinct from ' +
+      'change_impact_certificate (paths into a surface). No LLM. Signatures: TS/JS/Python; others ' +
+      'fail-soft. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1816,6 +1814,7 @@ export const TOOL_DEFINITIONS = [
         directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Git ref to diff the working tree\'s public surface against (e.g. "HEAD", "main"). Omit to return the surface itself.' },
         maxResults: { type: 'number', description: 'Limit the surface listing in surface mode (default 200, capped 500).' },
+        ...FEDERATION_PROPS,
       },
     },
   },
