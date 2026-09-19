@@ -13,6 +13,7 @@
 ## 2. Cached health read
 
 - [x] 2.1 Add a per-`cwd` health cache. Key it on the `(mtimeMs, size)` of each `REQUIRED_ANALYSIS_ARTIFACTS` entry, on whether the analysis lock is present, and on the `DaemonView`. Call `openloreHealth({ rootPath: cwd })` only on a key change or after a `building` result. Verify with a test: two updates with no change call the health read once; touching an artifact calls it again.
+- [x] 2.2 On a cache hit with a usable daemon, re-probe only the watcher (`readWatcherState`); never cache it. On a refresh with no usable daemon cached, call `getDaemon` again. Verify with tests: a watcher that stops and restarts between runs shows in the status with one health read; a daemon that comes up after a failed start shows `ready` after the next run.
 - [x] 2.2 Make a health read that throws give `openlore: status unknown` and never reject. Verify with a test that stubs the read to throw and asserts that the `agent_end` handler resolves and the status text is correct.
 
 ## 3. Lifecycle wiring

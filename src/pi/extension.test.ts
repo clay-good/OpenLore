@@ -1806,6 +1806,37 @@ describe('Pi footer status', () => {
     await h.shutdown();
   });
 
+  it('re-probes the watcher on a cached read, since it changes without touching an artifact', async () => {
+    const readHealth = vi.fn(async () => health('ready', 'healthy'));
+    let watcher: HealthResult['watcher'] = 'healthy';
+    const readWatcher = vi.fn(async () => watcher);
+    const h = statusHarness({ readHealth, readWatcher, resolveDaemon: usable });
+    await h.start();
+    expect(h.last()).toBe('openlore: ready');
+    watcher = 'stopped';
+    await h.agentEnd();
+    expect(h.last()).toBe('openlore: ready (watcher stopped)');
+    watcher = 'healthy';
+    await h.agentEnd();
+    expect(h.last()).toBe('openlore: ready');
+    expect(readHealth).toHaveBeenCalledTimes(1);
+    await h.shutdown();
+  });
+
+  it('re-resolves a daemon that is not cached instead of repeating a stale failure', async () => {
+    let up = false;
+    const resolveDaemon: Resolve = async (cwd) => up
+      ? usable(cwd)
+      : { daemon: null, failure: 'not yet healthy', failureKind: 'health-timeout' };
+    const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon });
+    await h.start();
+    expect(h.last()).toBe('openlore: daemon unavailable');
+    up = true;
+    await h.agentEnd();
+    expect(h.last()).toBe('openlore: ready');
+    await h.shutdown();
+  });
+
   it('keys the cache on artifacts, the ownership lock, and the daemon view', async () => {
     const base = await piHealthCacheKey(dir, 'usable');
     expect(await piHealthCacheKey(dir, 'usable')).toBe(base);

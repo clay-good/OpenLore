@@ -221,3 +221,16 @@ async function openloreHealthImpl(options: BaseOptions): Promise<HealthResult> {
 export function openloreHealth(options: BaseOptions = {}): Promise<HealthResult> {
   return withLoggerOptions({ quiet: options.quiet ?? true }, () => openloreHealthImpl(options));
 }
+
+/**
+ * The `watcher` field of `openloreHealth` alone: one loopback probe, no artifact read. For a
+ * caller that caches the artifact verdict but must not cache a watcher state, which changes
+ * without touching any file.
+ */
+export async function readWatcherState(rootPath: string): Promise<HealthResult['watcher']> {
+  try {
+    return await watcherState(await realpath(rootPath));
+  } catch {
+    return 'unknown';
+  }
+}

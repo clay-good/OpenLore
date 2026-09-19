@@ -90,7 +90,7 @@ import {
 import { safeJoin } from '../utils/path-confinement.js';
 // Functional readiness for the footer status. `health.ts` is kept dependency-light on purpose so
 // importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
-import { openloreHealth, type HealthResult } from '../api/health.js';
+import { openloreHealth, readWatcherState, type HealthResult } from '../api/health.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { runtimeDirOf } from '../core/runtime/analysis-ownership.js';
@@ -965,6 +965,7 @@ export async function piHealthCacheKey(cwd: string, daemon: PiDaemonView): Promi
 
 type PiHealthReader = (cwd: string) => Promise<HealthResult>;
 const defaultHealthReader: PiHealthReader = (cwd) => openloreHealth({ rootPath: cwd });
+type PiWatcherReader = (cwd: string) => Promise<HealthResult['watcher']>;
 
 /** Set the status only where the host has a UI; a failing host call never escapes. */
 function setPiStatus(ctx: ExtensionContext, text: string | undefined): void {
@@ -1909,6 +1910,8 @@ export interface PiExtensionRuntime {
   orientTimeoutMs?: number;
   /** Replaces the functional-readiness read behind the footer status. */
   readHealth?: PiHealthReader;
+  /** Replaces the watcher-only probe used on a cached health read. */
+  readWatcher?: PiWatcherReader;
   /** Replaces daemon discovery/spawn. */
   resolveDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
 }
@@ -1936,6 +1939,7 @@ function registerOpenlore(
   const daemonViews = new Map<string, PiDaemonView>();
   const healthCache = new Map<string, { key: string; health: HealthResult }>();
   const readHealth = runtime.readHealth ?? defaultHealthReader;
+  const readWatcher = runtime.readWatcher ?? readWatcherState;
   const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
   // Tool-surface state for the current session (spec: PiToolGroupsAreActivatable).
   // hostExcluded: OpenLore tools the host had turned off before the surface was applied.
@@ -2022,16 +2026,18 @@ function registerOpenlore(
     try {
       if (!ctx.hasUI) return;
       const cwd = ctx.cwd;
-      // A tree this session has not resolved yet (the cwd moved) is resolved the same way a tool
-      // call would, rather than reported as a daemon failure that never happened.
-      if (!daemonViews.has(cwd) && !daemons.has(cwd)) await getDaemon(cwd);
+      // No usable daemon cached (the cwd moved, or a daemon was dropped): resolve the same way a
+      // tool call would, so the status reports this resolution, not a stale one. `getDaemon`
+      // keeps its failure cooldown, so a failing daemon is not re-probed on every run.
+      if (!daemons.has(cwd)) await getDaemon(cwd);
       const daemon = daemons.has(cwd) ? 'usable' : (daemonViews.get(cwd) ?? 'unavailable');
       let health: HealthResult | undefined;
       try {
         const key = await piHealthCacheKey(cwd, daemon);
         const cached = healthCache.get(cwd);
         if (cached && cached.key === key && cached.health.index !== 'building') {
-          health = cached.health;
+          // The watcher can stop or restart without moving any artifact, so it is never cached.
+          health = daemon === 'usable' ? { ...cached.health, watcher: await readWatcher(cwd) } : cached.health;
         } else {
           health = await readHealth(cwd);
           healthCache.set(cwd, { key, health });

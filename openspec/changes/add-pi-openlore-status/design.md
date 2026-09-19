@@ -36,7 +36,8 @@
 
 Index readiness and watcher state come from `openloreHealth`. Daemon state comes from the
 extension's last `getDaemon` result, because only the extension knows about spawn-disabled,
-incompatible and negative-cached failures. The extension stores a per-`cwd` `DaemonView`:
+incompatible and negative-cached failures. A refresh with no usable daemon cached calls `getDaemon`
+again (its failure cooldown still applies), so the status never repeats a stale failure. The extension stores a per-`cwd` `DaemonView`:
 `connecting | usable | incompatible | spawn-disabled | unavailable`. `getDaemon` already writes the
 outcome to `daemons` and `daemonFailures`. It also records `failureKind` and whether the daemon was
 incompatible.
@@ -73,18 +74,19 @@ lock is present, and the current `DaemonView`. `stat` calls are cheap. The layer
 `openloreHealth` again only when the key changes or the last result was `building`. With no key
 change, an agent run costs a few `stat`s and no parse.
 
-The watcher state comes from the same cached call. A new daemon changes the `DaemonView` and so
-gives a new read. The watcher can stop inside the same daemon without a key change, so the shown
-watcher state can be old. This satisfies the spec: the text says "watcher stopped" only when a real
-read reported it, and it never guesses.
+The watcher state is never cached. It can stop or restart inside the same daemon without moving
+any artifact, so a cached value would hide exactly the state the `ready (watcher stopped)` row
+exists to show, or keep showing a stop that is over. On a cache hit with a usable daemon, the layer
+re-probes only the watcher through `readWatcherState` (exported from `health.ts`): one loopback
+request with a 1 s deadline, once per agent run, and no artifact parse.
 
 *Alternative:* add a cheap mode to `openloreHealth` that checks existence only. Rejected for this
 change: the call would then report `ready` for a corrupt artifact, and that is less honest. The
 cache keeps the full check and pays the parse only when an artifact is rewritten. A rewrite is also
 the only time the index result can change.
 
-*Alternative:* separate the watcher probe and run it on every agent run. Rejected: it adds a
-loopback request per turn for a rare state, and it needs a non-exported piece of `health.ts`.
+*Alternative:* cache the watcher with the index verdict. Rejected: the status would show a watcher
+state that a real read reported once, but that may no longer be true.
 
 ### 3. Update only from event handlers, with that event's `ctx`
 
