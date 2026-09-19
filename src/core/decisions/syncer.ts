@@ -212,10 +212,12 @@ async function syncDecision(
   // e.g. an MCP-preset requirement bolted onto the drift, analyzer, and cli specs.
   // (Requirement: DecisionSyncWritesOneOwningDomain)
   const [owner, ...others] = resolved;
-  if (decision.constraints && !owner && !qualifiesForADR(decision)) {
-    throw new Error(
-      `Decision ${decision.id} carries constraints but has no durable owning spec or ADR target; refusing to purge its only policy copy`,
-    );
+  // A decision with no owning spec and no ADR would be written nowhere, then
+  // marked synced and purged: its rationale would survive only as a ledger title.
+  // Refuse, so it stays in the store and the sync reports it. This holds for every
+  // decision, not only constraint-bearing ones.
+  if (!owner && !qualifiesForADR(decision)) {
+    throw new Error(noDurableTargetMessage(decision));
   }
   const backups = new Map<string, string>();
   const writtenBySync = new Map<string, string>();
@@ -258,13 +260,15 @@ async function syncDecision(
       }
     }
 
-    if (decision.constraints && !owner) {
+    // The ADR is the only target left, and createADR skips it when the decisions
+    // directory resolves outside the project. Same rule: nothing written, no purge.
+    if (!owner) {
       const durableADR = options.dryRun
         ? qualifiesForADR(decision)
         : Boolean(createdADR);
       if (!durableADR) {
         throw new Error(
-          `Decision ${decision.id} carries constraints but no durable projection was written; retaining its pending policy copy`,
+          `Decision ${decision.id} has no owning spec and no durable projection was written (the ADR could not be created); nothing was synced and the decision stays in the store`,
         );
       }
     }
@@ -292,6 +296,21 @@ async function syncDecision(
   }
 
   return modified;
+}
+
+/** Name why a decision has no sync target and how to give it one. (issue #509) */
+function noDurableTargetMessage(decision: PendingDecision): string {
+  const cause = decision.affectedDomains.length === 0
+    ? 'its affected files map to no spec domain'
+    : `none of its domains (${decision.affectedDomains.join(', ')}) resolves to a spec file`;
+  return (
+    `Decision ${decision.id} has no durable owning spec or ADR target: ${cause}, ` +
+    `and scope "${decision.scope ?? 'component'}" is not ADR-eligible (only cross-domain and system decisions become ADRs). ` +
+    'Nothing was written and the decision stays in the store. ' +
+    `To keep it, reject this copy (openlore decisions --reject ${decision.id}), run openlore decisions --sync to clear it, ` +
+    'then record it again with --files that map to a spec domain, or with --scope cross-domain or --scope system ' +
+    '(written as an ADR; consolidation can change the scope, so check it in openlore decisions --list before approving).'
+  );
 }
 
 async function appendToSpec(specPath: string, decision: PendingDecision): Promise<string> {
