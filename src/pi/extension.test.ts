@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon, piToolSurface, PI_TOOL_SNIPPETS, PI_LEAN_TOOLS, PI_TOOL_GROUPS, PI_ACTIVATOR_TOOL, PI_STANDING_CONTEXT_BUDGETS, piRegisteredToolNames, estimatePiStandingTokens } from './extension.js';
+import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon, piToolSurface, PI_TOOL_SNIPPETS, PI_LEAN_TOOLS, PI_TOOL_GROUPS, PI_ACTIVATOR_TOOL, PI_STANDING_CONTEXT_BUDGETS, piRegisteredToolNames, estimatePiStandingTokens, formatPiStatus, piDaemonView, piHealthCacheKey, PI_STATUS_KEY, type PiDaemonView, type PiExtensionRuntime } from './extension.js';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { HealthResult } from '../api/health.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
@@ -1656,5 +1657,265 @@ describe('Pi lean tool surface', () => {
       }
       expect(estimates.lean).toBeLessThan(estimates.all);
     });
+  });
+});
+
+describe('Pi footer status', () => {
+  const health = (index: HealthResult['index'], watcher: HealthResult['watcher'] = 'unknown'): HealthResult => ({
+    runtime: 'available', index, watcher, repairInProgress: index === 'building',
+  });
+  type Resolve = NonNullable<PiExtensionRuntime['resolveDaemon']>;
+  const usable: Resolve = async () => ({ daemon: { baseUrl: 'http://127.0.0.1:9', token: 't' } } as Awaited<ReturnType<Resolve>>);
+
+  let dir: string;
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'openlore-pi-status-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  function statusHarness(runtime: PiExtensionRuntime, opts: { mode?: string; hasUI?: boolean } = {}) {
+    const handlers = new Map<string, PiEventHandler>();
+    const pi = {
+      registerTool: vi.fn(),
+      registerCommand: vi.fn(),
+      on: vi.fn((event: string, handler: PiEventHandler) => { handlers.set(event, handler); }),
+    } as unknown as ExtensionAPI;
+    createPiExtension(runtime)(pi);
+    const setStatus = vi.fn();
+    const ctx = {
+      cwd: dir,
+      mode: opts.mode ?? 'tui',
+      hasUI: opts.hasUI ?? true,
+      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn(), setStatus },
+    } as unknown as ExtensionContext;
+    // A valid config keeps the onboarding wizard from opening.
+    const start = async () => {
+      await mkdir(join(dir, '.openlore'), { recursive: true });
+      await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ generation: { provider: 'anthropic' } }));
+      await handlers.get('session_start')!({}, ctx);
+    };
+    return {
+      setStatus,
+      texts: () => setStatus.mock.calls.map((call) => call[1] as string | undefined),
+      last: () => setStatus.mock.calls.at(-1)?.[1] as string | undefined,
+      start,
+      agentEnd: () => handlers.get('agent_end')!({}, ctx),
+      shutdown: () => handlers.get('session_shutdown')!({}, ctx),
+    };
+  }
+
+  describe('formatPiStatus', () => {
+    const cases: Array<[string, PiDaemonView, HealthResult | undefined, string]> = [
+      ['connecting', 'connecting', health('ready'), 'openlore: connecting…'],
+      ['health read failed', 'usable', undefined, 'openlore: status unknown'],
+      ['no index', 'usable', health('absent'), 'openlore: no index (run openlore analyze)'],
+      ['analysis running', 'usable', health('building'), 'openlore: analyzing…'],
+      ['degraded index', 'usable', health('degraded'), 'openlore: index degraded'],
+      ['incompatible daemon', 'incompatible', health('ready'), 'openlore: daemon incompatible'],
+      ['spawn disabled', 'spawn-disabled', health('ready'), 'openlore: daemon not started (spawn disabled)'],
+      ['daemon unavailable', 'unavailable', health('ready'), 'openlore: daemon unavailable'],
+      ['watcher stopped', 'usable', health('ready', 'stopped'), 'openlore: ready (watcher stopped)'],
+      ['ready', 'usable', health('ready', 'healthy'), 'openlore: ready'],
+    ];
+    for (const [name, daemon, h, text] of cases) {
+      it(`renders ${name}`, () => {
+        expect(formatPiStatus({ daemon, ...(h ? { health: h } : {}) })).toBe(text);
+      });
+    }
+
+    it('names the missing index before a daemon problem', () => {
+      expect(formatPiStatus({ daemon: 'incompatible', health: health('absent') })).toBe('openlore: no index (run openlore analyze)');
+    });
+
+    it('never reports a stopped watcher it could not observe', () => {
+      expect(formatPiStatus({ daemon: 'usable', health: health('ready', 'unknown') })).toBe('openlore: ready');
+    });
+
+    it('reports ready only with a ready index and a usable daemon', () => {
+      const views: PiDaemonView[] = ['connecting', 'usable', 'incompatible', 'spawn-disabled', 'unavailable'];
+      const indexes: Array<HealthResult['index']> = ['absent', 'building', 'degraded', 'ready'];
+      for (const daemon of views) {
+        for (const index of indexes) {
+          const ready = formatPiStatus({ daemon, health: health(index) }).startsWith('openlore: ready');
+          expect(ready, `${daemon}/${index}`).toBe(daemon === 'usable' && index === 'ready');
+        }
+      }
+    });
+  });
+
+  it('maps daemon resolutions to status views', () => {
+    expect(piDaemonView({ daemon: { baseUrl: 'http://127.0.0.1:9' } } as Parameters<typeof piDaemonView>[0])).toBe('usable');
+    expect(piDaemonView({ daemon: { baseUrl: 'http://127.0.0.1:9', incompatibility: 'old' } } as Parameters<typeof piDaemonView>[0])).toBe('incompatible');
+    expect(piDaemonView({ daemon: null, failure: 'x', failureKind: 'spawn-disabled' })).toBe('spawn-disabled');
+    for (const failureKind of ['draining', 'launch', 'preparation', 'early-exit', 'health-timeout'] as const) {
+      expect(piDaemonView({ daemon: null, failure: 'x', failureKind })).toBe('unavailable');
+    }
+  });
+
+  it('shows connecting, then the resolved state, at session start', async () => {
+    const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon: usable });
+    await h.start();
+    expect(h.setStatus.mock.calls.every((call) => call[0] === PI_STATUS_KEY)).toBe(true);
+    expect(h.texts()).toEqual(['openlore: connecting…', 'openlore: ready']);
+    await h.shutdown();
+  });
+
+  it('reports the recorded daemon condition through a real resolution', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    const h = statusHarness({
+      readHealth: async () => health('ready'),
+      resolveDaemon: async () => ({ daemon: { baseUrl: 'http://127.0.0.1:9', incompatibility: 'old' } } as Awaited<ReturnType<Resolve>>),
+    });
+    await h.start();
+    expect(h.last()).toBe('openlore: daemon incompatible');
+
+    const spawnOff = statusHarness({ readHealth: async () => health('ready') });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ pi: { spawnDaemon: false } }));
+    vi.stubEnv('OPENLORE_PI_NO_SPAWN', '1');
+    try {
+      await spawnOff.start();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(spawnOff.last()).toBe('openlore: daemon not started (spawn disabled)');
+  });
+
+  it('refreshes after an agent run as readiness changes', async () => {
+    let current = health('building');
+    const h = statusHarness({ readHealth: async () => current, resolveDaemon: usable });
+    await h.start();
+    expect(h.last()).toBe('openlore: analyzing…');
+    current = health('ready');
+    await h.agentEnd();
+    expect(h.last()).toBe('openlore: ready');
+    await h.shutdown();
+  });
+
+  it('re-reads health only when an artifact, the lock, or the daemon view moves', async () => {
+    const analysisDir = join(dir, '.openlore', 'analysis');
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(join(analysisDir, 'fingerprint.json'), '{}');
+    const readHealth = vi.fn(async () => health('ready'));
+    const h = statusHarness({ readHealth, resolveDaemon: usable });
+    await h.start();
+    await h.agentEnd();
+    await h.agentEnd();
+    expect(readHealth).toHaveBeenCalledTimes(1);
+
+    await writeFile(join(analysisDir, 'fingerprint.json'), '{"hash":"next"}');
+    await h.agentEnd();
+    expect(readHealth).toHaveBeenCalledTimes(2);
+    await h.shutdown();
+  });
+
+  it('re-probes the watcher on a cached read, since it changes without touching an artifact', async () => {
+    const readHealth = vi.fn(async () => health('ready', 'healthy'));
+    let watcher: HealthResult['watcher'] = 'healthy';
+    const readWatcher = vi.fn(async () => watcher);
+    const h = statusHarness({ readHealth, readWatcher, resolveDaemon: usable });
+    await h.start();
+    expect(h.last()).toBe('openlore: ready');
+    watcher = 'stopped';
+    await h.agentEnd();
+    expect(h.last()).toBe('openlore: ready (watcher stopped)');
+    watcher = 'healthy';
+    await h.agentEnd();
+    expect(h.last()).toBe('openlore: ready');
+    expect(readHealth).toHaveBeenCalledTimes(1);
+    await h.shutdown();
+  });
+
+  it('re-resolves a daemon that is not cached instead of repeating a stale failure', async () => {
+    let up = false;
+    const resolveDaemon: Resolve = async (cwd) => up
+      ? usable(cwd)
+      : { daemon: null, failure: 'not yet healthy', failureKind: 'health-timeout' };
+    const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon });
+    await h.start();
+    expect(h.last()).toBe('openlore: daemon unavailable');
+    up = true;
+    await h.agentEnd();
+    expect(h.last()).toBe('openlore: ready');
+    await h.shutdown();
+  });
+
+  it('keys the cache on artifacts, the ownership lock, and the daemon view', async () => {
+    const base = await piHealthCacheKey(dir, 'usable');
+    expect(await piHealthCacheKey(dir, 'usable')).toBe(base);
+    expect(await piHealthCacheKey(dir, 'unavailable')).not.toBe(base);
+    await mkdir(join(dir, '.openlore', 'runtime'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'runtime', '.analysis-owner.lock'), '{}');
+    expect(await piHealthCacheKey(dir, 'usable')).not.toBe(base);
+  });
+
+  it('reports unknown readiness when the health read throws, without failing the run', async () => {
+    const h = statusHarness({ readHealth: async () => { throw new Error('boom'); }, resolveDaemon: usable });
+    await h.start();
+    await expect(h.agentEnd()).resolves.toBeUndefined();
+    expect(h.last()).toBe('openlore: status unknown');
+    await h.shutdown();
+  });
+
+  it('survives a host whose setStatus throws', async () => {
+    const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon: usable });
+    h.setStatus.mockImplementation(() => { throw new Error('host refused'); });
+    await expect(h.start()).resolves.toBeUndefined();
+    await expect(h.agentEnd()).resolves.toBeUndefined();
+    await h.shutdown();
+  });
+
+  for (const mode of ['print', 'json']) {
+    it(`sets no status in ${mode} mode`, async () => {
+      const readHealth = vi.fn(async () => health('ready'));
+      const h = statusHarness({ readHealth, resolveDaemon: usable }, { mode, hasUI: false });
+      await h.start();
+      await h.agentEnd();
+      expect(h.setStatus).not.toHaveBeenCalled();
+      expect(readHealth).not.toHaveBeenCalled();
+    });
+  }
+
+  it('clears the status on shutdown', async () => {
+    const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon: usable });
+    await h.start();
+    await h.shutdown();
+    expect(h.setStatus.mock.calls.at(-1)).toEqual([PI_STATUS_KEY, undefined]);
+  });
+
+  it.skipIf(process.platform === 'win32')('refreshes after the wizard analysis ends, success or failure', async () => {
+    const bin = join(dir, 'bin');
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, 'openlore'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}:/usr/bin:/bin`);
+    try {
+      let menuVisits = 0;
+      const select = vi.fn(async (title: string, choices: string[]) => {
+        if (title === 'Provider') return 'anthropic';
+        if (title === 'openlore config') {
+          menuVisits += 1;
+          return menuVisits === 1 ? choices.find((choice) => choice.startsWith('Provider')) : '✓ Save & close';
+        }
+        return undefined;
+      });
+      const notify = vi.fn();
+      const ctx = {
+        cwd: dir,
+        mode: 'tui',
+        hasUI: true,
+        ui: {
+          select,
+          input: vi.fn(),
+          confirm: vi.fn(async (title: string) => title === 'Run openlore analyze now?'),
+          notify,
+        },
+      } as unknown as ExtensionContext;
+      const afterAnalyze = vi.fn(async () => {});
+
+      await runConfigWizard(ctx, null, { afterAnalyze });
+
+      expect(notify).toHaveBeenCalledWith(expect.stringContaining('openlore analyze failed'), 'error');
+      expect(afterAnalyze).toHaveBeenCalledTimes(1);
+      expect(afterAnalyze).toHaveBeenCalledWith(ctx);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

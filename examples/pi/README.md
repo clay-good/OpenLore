@@ -23,6 +23,8 @@ fresh while you edit.
   active.
 - **Config wizard**: interactive setup on first run, or anytime via `/openlore`
   slash command or `openlore_configure` tool.
+- **Footer status**: an `openlore:` entry in Pi's status bar says whether the
+  tools can work right now. See [Status line](#status-line).
 
 ## Prerequisites
 
@@ -89,6 +91,28 @@ API keys are never stored in config — set them as environment variables:
 | `openai` | `OPENAI_API_KEY` |
 | `openai-compat` | `OPENAI_COMPAT_API_KEY` |
 | Embedding | `OPENLORE_EMBEDDING_API_KEY` |
+
+## Status line
+
+In the TUI and RPC modes, the extension shows one `openlore` entry in Pi's
+footer. It is set at session start and after each agent run. It is cleared on
+shutdown. Print (`-p`) and JSON modes show no status.
+
+| Status | Meaning |
+|--------|---------|
+| `openlore: connecting…` | The session is finding or starting the daemon. |
+| `openlore: ready` | The index is whole and the daemon can serve tools. |
+| `openlore: ready (watcher stopped)` | Ready, but the daemon reports that its freshness watcher stopped: edits are not re-indexed until the daemon restarts. |
+| `openlore: no index (run openlore analyze)` | The repository has no analysis yet. |
+| `openlore: analyzing…` | An analysis owns the repository and no usable index exists yet. |
+| `openlore: index degraded` | An analysis artifact is missing or corrupt. Run `openlore analyze`. |
+| `openlore: daemon incompatible` | A daemon from an older or different release runs for this tree. Run `openlore serve --stop`, then retry. |
+| `openlore: daemon not started (spawn disabled)` | `OPENLORE_PI_NO_SPAWN` or `"pi": { "spawnDaemon": false }` is set and no daemon is running. |
+| `openlore: daemon unavailable` | The daemon could not start or stopped answering. See `.openlore/serve.log`. |
+| `openlore: status unknown` | The readiness read failed. Tools still report their own errors. |
+
+The status never says `ready` unless both the index and the daemon are
+usable. Between agent runs the status can be old; the next run updates it.
 
 ## How it works
 

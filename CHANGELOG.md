@@ -5,6 +5,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- **See OpenLore's state in Pi's footer.** A Pi session shows an `openlore:` status: `ready`,
+  `no index`, `analyzing…`, `index degraded`, or the daemon condition (incompatible, spawn
+  disabled, unavailable). It never says `ready` unless the index is whole and the daemon can
+  serve tools. `openloreHealth` no longer imports the serve command, so reading health in-process
+  stays light.
 - **Pi starts with the same lean tool surface as Claude Code.** A Pi session now activates only
   the `substrate` tools (the default `openlore install` wires for MCP hosts), plus
   `openlore_configure` and the new `openlore_activate_tools`. The activator turns on the `specs`,
