@@ -102,8 +102,8 @@ describe('spec-08 additional languages', () => {
   it('Elixir — bare calls to generic names resolve; Kernel builtins and function heads do not', async () => {
     const g = await buildOne('elixir/generic_names.ex', 'Elixir');
     expect(fnNames(g, 'Elixir')).toEqual([
-      'delete', 'fallback', 'find', 'format', 'insert', 'map', 'new', 'normalize', 'parse', 'run', 'send',
-      'to_string', 'visit', 'walk', 'with_default',
+      'check', 'delete', 'fallback', 'find', 'format', 'insert', 'is_ok', 'map', 'new', 'normalize', 'parse',
+      'run', 'send', 'to_string', 'visit', 'walk', 'with_default',
     ]);
     expect(edge(g, 'new', 'parse')).toBe(true);
     expect(edge(g, 'new', 'format')).toBe(true);   // piped
@@ -130,6 +130,9 @@ describe('spec-08 additional languages', () => {
     expect(edge(g, 'run', 'to_string')).toBe(true);
     expect(edge(g, 'run', 'send')).toBe(true);
     expect(external).not.toContain('to_string');
+    // A `defguard` is a definition: a guard using it resolves to it, not to an external node.
+    expect(edge(g, 'check', 'is_ok')).toBe(true);
+    expect(external).not.toContain('is_ok');
   });
 
   it('Bash — defined-function call, NO edge to external binaries', async () => {

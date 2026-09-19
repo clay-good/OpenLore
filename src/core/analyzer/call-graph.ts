@@ -3219,16 +3219,21 @@ async function extractDartGraph(
         const uas = prev.namedChildren.find(c => c.type === 'unconditional_assignable_selector');
         name = uas?.namedChildren.find(c => c.type === 'identifier')?.text;
       }
-      if (name && !isIgnoredCallee(name)) {
+      // A bare call's previous sibling is its callee identifier. Only a
+      // selector has a receiver before it; treating `final p = Parser()`
+      // as receiver `p` fabricates an external `p.Parser` method edge.
+      const receiver = prev?.type === 'identifier' ? undefined : prev?.previousNamedSibling;
+      // A bare call, or a member call on a named receiver (which never binds by name
+      // alone), is filtered by Dart's own builtins. A chained call (`a.b().map()`)
+      // carries no receiver and would resolve like a bare call, so it keeps the
+      // cross-language union: `.map()` there must not bind to a project `map`.
+      const dartScoped = prev?.type === 'identifier' || receiver?.type === 'identifier';
+      if (name && !isIgnoredCallee(name, dartScoped ? 'Dart' : undefined)) {
         const caller = findEnclosingFunction(nodes, n.startIndex);
         if (caller) {
           const key = `${caller.id}\0${name}\0${n.startIndex}`;
           if (!seen.has(key)) {
             seen.add(key);
-            // A bare call's previous sibling is its callee identifier. Only a
-            // selector has a receiver before it; treating `final p = Parser()`
-            // as receiver `p` fabricates an external `p.Parser` method edge.
-            const receiver = prev?.type === 'identifier' ? undefined : prev?.previousNamedSibling;
             rawEdges.push({
               callerId: caller.id,
               calleeName: name,
@@ -3252,7 +3257,7 @@ async function extractDartGraph(
 }
 
 // ── Elixir (custom walk — everything is a `call` node) ───────────────────────
-const ELIXIR_DEF_KEYWORDS = new Set(['def', 'defp', 'defmacro', 'defmacrop']);
+const ELIXIR_DEF_KEYWORDS = new Set(['def', 'defp', 'defmacro', 'defmacrop', 'defguard', 'defguardp']);
 
 async function extractElixirGraph(
   filePath: string,
