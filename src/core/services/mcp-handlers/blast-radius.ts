@@ -486,6 +486,10 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   const parts: string[] = [
     `${b.changed.files} file${b.changed.files === 1 ? '' : 's'} / ${b.changed.symbols} symbol${b.changed.symbols === 1 ? '' : 's'} changed`,
   ];
+  // Zero symbols over changed code files means every code edit hashed as formatting or comments.
+  if (b.changed.symbols === 0 && (b.changeGranularity?.symbolExactFiles ?? 0) > 0) {
+    parts.push('the code edits are formatting or comments only');
+  }
   if (b.impact.highestRiskLevel !== 'none') parts.push(`highest risk: ${b.impact.highestRiskLevel}`);
   if (b.impact.hubsTouched.length > 0) parts.push(`${b.impact.hubsTouched.length} hub${b.impact.hubsTouched.length === 1 ? '' : 's'} affected`);
   // The headline is the line a reader acts on, so an uncomputed test set must appear
