@@ -226,6 +226,13 @@ export const STALE_REGION_REPAIR_THRESHOLD = 1;
  */
 export const FINGERPRINT_BUDGET_TOP_OFFENDERS = 5;
 
+/**
+ * Smallest share of the corpus a path must hold to be named as a byte-budget offender.
+ * Below it a path is filler, not a cause: `src/a.ts (17 B)` beside a 1.3 GB directory
+ * tells a user nothing they can act on.
+ */
+export const FINGERPRINT_BUDGET_OFFENDER_MIN_SHARE = 0.01;
+
 /** Grace period after consolidation during which the gate skips the no_decisions_recorded check (1 hour) */
 export const CONSOLIDATION_GRACE_PERIOD_MS = 60 * 60 * 1000;
 

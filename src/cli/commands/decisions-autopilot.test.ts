@@ -32,7 +32,11 @@ function resetCommanderState(root: Command): void {
 }
 
 vi.mock('../../utils/logger.js', () => ({
-  logger: { warning: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn(), section: vi.fn(), discovery: vi.fn(), analysis: vi.fn(), blank: vi.fn() },
+  logger: {
+    warning: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn(), section: vi.fn(), discovery: vi.fn(), analysis: vi.fn(), blank: vi.fn(),
+    // colors.ts reads it when --approve renders the decision.
+    getOptions: vi.fn(() => ({ noColor: true })),
+  },
 }));
 
 const BASE_CONFIG = {
@@ -306,6 +310,42 @@ describe('decision autopilot', () => {
     d = (await loadDecisionStore(dir)).decisions.find((x) => x.id === 'aaaabbbb');
     expect(d?.status).toBe('approved');
     expect(d?.rationale).toBe('Reduces DB load');
+  });
+
+  it('names where a sync error comes from instead of promising the retry will fix it', async () => {
+    await writeConfig({ autopilot: true });
+    // Approved but targetless: every gate's sync fails it the same way (#509).
+    await saveDecisionStore(dir, makeStore([makeDecision({
+      status: 'approved', approvedBy: 'human', scope: 'component', affectedDomains: [], affectedFiles: ['src/pi/x.ts'],
+    })]));
+
+    await runGate();
+
+    expect(process.exitCode ?? 0).toBe(0);
+    const stderr = stderrChunks.join('\n');
+    expect(stderr).toContain('1 sync error(s) — see why with openlore decisions --sync');
+    expect(stderr).not.toContain('will retry next gate');
+  });
+
+  // skipIf(win32): Windows forbids control characters in file names, so the premise (a
+  // spec directory whose name carries an escape sequence) cannot be built there.
+  it.skipIf(process.platform === 'win32')('--approve preview strips control characters from spec paths', async () => {
+    await writeConfig();
+    const evil = 'ca\u001b[2Jche';
+    await mkdir(join(dir, 'openspec', 'specs', evil), { recursive: true });
+    await writeFile(join(dir, 'openspec', 'specs', evil, 'spec.md'), CACHE_SPEC, 'utf-8');
+    await saveDecisionStore(dir, makeStore([makeDecision({ affectedDomains: [evil], affectedFiles: [] })]));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await decisionsCommand.parseAsync(['--approve', 'aaaabbbb'], { from: 'user' });
+      const out = logSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      const preview = out.split('\n').find((line) => line.startsWith('Would write to:'));
+      expect(preview, out).toBeDefined();
+      expect(preview).not.toContain('\u001b');
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it('repeated gates are idempotent: no duplicate spec entries, no duplicate transitions', async () => {
