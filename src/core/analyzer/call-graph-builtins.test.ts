@@ -40,3 +40,13 @@ describe('isIgnoredCallee fallback union', () => {
     }
   });
 });
+
+describe('isIgnoredCallee — Dart', () => {
+  it('ignores dart:core top-level builtins only', () => {
+    expect(isIgnoredCallee('print', 'Dart')).toBe(true);
+    expect(isIgnoredCallee('identical', 'Dart')).toBe(true);
+    for (const name of ['map', 'find', 'insert', 'remove', 'contains', 'join', 'parse', 'format']) {
+      expect(isIgnoredCallee(name, 'Dart')).toBe(false);
+    }
+  });
+});

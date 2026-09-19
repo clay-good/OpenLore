@@ -115,6 +115,13 @@ export function isIgnoredElixirCall(name: string, arity: number): boolean {
   return ELIXIR_IGNORED.has(name) || (ELIXIR_KERNEL_ARITIES.get(name)?.includes(arity) ?? false);
 }
 
+// Dart: top-level functions from dart:core and Flutter's foundation that a bare call
+// can only mean as the library's own. Collection and string methods (`map`, `where`,
+// `contains`, …) are methods on a receiver, not builtins. (follow-up to issue #507)
+const DART_IGNORED = new Set([
+  'print', 'identical', 'identityHashCode', 'debugPrint',
+]);
+
 const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
   Python: PYTHON_IGNORED,
   TypeScript: JS_IGNORED,
@@ -130,6 +137,7 @@ const IGNORED_BY_LANGUAGE: Record<string, Set<string>> = {
   'C++': CFAMILY_IGNORED,
   C: CFAMILY_IGNORED,
   Elixir: ELIXIR_IGNORED,
+  Dart: DART_IGNORED,
 };
 
 // Union of the legacy per-language sets — the fallback for callers that pass no

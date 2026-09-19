@@ -49,3 +49,8 @@ defmodule Shadow do
     x |> to_string() |> send(self())
   end
 end
+
+defmodule Guards do
+  defguard is_ok(x) when is_tuple(x)
+  def check(x) when is_ok(x), do: x
+end
