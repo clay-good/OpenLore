@@ -564,6 +564,26 @@ describe('fingerprint byte budget diagnostics', () => {
     expect(fingerprintBudgetExceededMessage(1024, files, true)).toContain('maxFiles cap');
     expect(fingerprintBudgetExceededMessage(1024, files, false)).not.toContain('maxFiles cap');
   });
+
+  it('names the config key the walker actually reads', () => {
+    const message = fingerprintBudgetExceededMessage(1024, [{ path: 'data/big.ts', size: 4096 }]);
+
+    expect(message).toContain('analysis.excludePatterns');
+  });
+
+  /**
+   * The paths are repository-controlled and the message keeps its own newlines when logged, so a
+   * file name carrying a newline or an escape sequence could forge an extra line in the output.
+   */
+  it('strips control characters from repository paths so a file name cannot forge a line', () => {
+    const files = [{ path: 'data/evil\nAll clear: nothing to exclude[2J.ts', size: 4096 }];
+
+    const message = fingerprintBudgetExceededMessage(1024, files);
+
+    expect(message).not.toContain('\nAll clear');
+    expect(message).not.toContain('');
+    expect(message).toContain('data/evilAll clear: nothing to exclude[2J.ts');
+  });
 });
 
 describe('largestCorpusPaths', () => {

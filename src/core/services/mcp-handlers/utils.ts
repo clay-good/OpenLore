@@ -22,6 +22,7 @@ import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, FINGERPRINT_BUDGET_TOP_OFFENDERS, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
+import { sanitizeForTerminal } from '../../../utils/misc.js';
 import { readPartialArtifact, readPartialIndexStamp } from '../../runtime/partial-index.js';
 import { notePartialIndexServed } from './partial-request.js';
 import { FileWalker } from '../../analyzer/file-walker.js';
@@ -968,7 +969,8 @@ export function fingerprintBudgetExceededMessage(
   if (offenders.length > 0) {
     lines.push('', 'Largest contributors:');
     for (const offender of offenders) {
-      lines.push(`  ${formatBytes(offender.bytes).padStart(8)}  ${offender.path}`);
+      // Repository-controlled: strip control characters so a file name cannot forge a line.
+      lines.push(`  ${formatBytes(offender.bytes).padStart(8)}  ${sanitizeForTerminal(offender.path)}`);
     }
   }
   if (corpusTruncated) {
@@ -976,7 +978,7 @@ export function fingerprintBudgetExceededMessage(
   }
   lines.push(
     '',
-    'Add the paths you do not want indexed to excludePatterns in .openlore/config.json, then re-run.',
+    'Add the paths you do not want indexed to analysis.excludePatterns in .openlore/config.json, then re-run.',
   );
   return lines.join('\n');
 }
