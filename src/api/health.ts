@@ -14,11 +14,13 @@
  */
 import { realpath, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
+import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_DIR } from '../constants.js';
 import { readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { readAnalysisOwner } from '../core/runtime/analysis-ownership.js';
-import { readDescriptor } from '../cli/commands/serve.js';
-import { serveHttpBaseUrl, validateServeHealth } from '../cli/commands/serve-descriptor.js';
+// The dependency-light descriptor reader, not `serve.js`: that module drags the MCP handlers, the
+// EdgeStore and the watcher into every importer, and the Pi extension reads health in-process
+// (change: add-pi-openlore-status).
+import { readServeDescriptor, serveHttpBaseUrl, validateServeHealth } from '../cli/commands/serve-descriptor.js';
 import { fileExists } from '../utils/command-helpers.js';
 import { withLoggerOptions } from '../utils/logger.js';
 import { safeJoin } from '../utils/path-confinement.js';
@@ -96,11 +98,13 @@ async function inspectArtifacts(analysisDir: string): Promise<{ present: number;
  * Ask a discoverable daemon for its watcher state. Returns `unknown` on every uncertainty — no
  * descriptor, an unreachable daemon, a health response that fails the SHARED validator, or a
  * daemon too old to report it. The descriptor is an untrusted artifact, so it is resolved through
- * `readDescriptor`/`validateServeHealth` like every other reader
+ * `readServeDescriptor`/`validateServeHealth` like every other reader
  * (mcp-security: ServeDescriptorValidatedAtEveryReader) — never parsed here.
  */
 async function watcherState(root: string, signal?: AbortSignal): Promise<'healthy' | 'stopped' | 'unknown'> {
-  const descriptor = await readDescriptor(root).catch(() => null);
+  // Same path and draining policy as `serve.ts`'s `readDescriptor`.
+  const descriptor = await readServeDescriptor(join(root, OPENLORE_DIR, 'serve.json'), { includeDraining: true })
+    .catch(() => null);
   if (!descriptor) return 'unknown'; // no daemon announced → no request is issued at all
   // Hoisted so the whole file-to-network flow is attributed to the one reviewed call below,
   // exactly as `serve-client` does for the identical probe.
@@ -216,4 +220,17 @@ async function openloreHealthImpl(options: BaseOptions): Promise<HealthResult> {
  */
 export function openloreHealth(options: BaseOptions = {}): Promise<HealthResult> {
   return withLoggerOptions({ quiet: options.quiet ?? true }, () => openloreHealthImpl(options));
+}
+
+/**
+ * The `watcher` field of `openloreHealth` alone: one loopback probe, no artifact read. For a
+ * caller that caches the artifact verdict but must not cache a watcher state, which changes
+ * without touching any file.
+ */
+export async function readWatcherState(rootPath: string): Promise<HealthResult['watcher']> {
+  try {
+    return await watcherState(await realpath(rootPath));
+  } catch {
+    return 'unknown';
+  }
 }
