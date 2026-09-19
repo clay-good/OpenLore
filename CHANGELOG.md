@@ -3,6 +3,20 @@
 All notable changes to OpenLore are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- **Pi starts with the same lean tool surface as Claude Code.** A Pi session now activates only
+  the `substrate` tools (the default `openlore install` wires for MCP hosts), plus
+  `openlore_configure` and the new `openlore_activate_tools`. The activator turns on the `specs`,
+  `memory`, `review`, `quality`, or `inspect` group, by group name or by any tool name in it. Tool
+  snippets are one line instead of a repeated description. Set `"pi": { "toolSurface": "all" }` in
+  `.openlore/config.json` to keep every tool active (#505).
+- **Record decisions from the CLI.** `openlore decisions record --title … --rationale …` records the
+  same draft as the `record_decision` MCP tool, so a repository on the default preset can pass the
+  decisions gate. The gate and rejection hints no longer name the non-existent
+  `openlore decisions --record`, and generated agent guidance names the CLI command when the MCP
+  tool is not wired.
+
 ## [3.2.0] - 2026-09-13
 
 **The release where OpenLore checks the locks before reading the map.**
