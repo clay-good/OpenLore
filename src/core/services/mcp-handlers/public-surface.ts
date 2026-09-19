@@ -233,7 +233,7 @@ function exportedNames(rawContent: string, language: string): Set<string> {
 function declarationLine(rawContent: string, name: string, language: string): string | undefined {
   const blanked = blankLiterals(rawContent).split('\n');
   const raw = rawContent.split('\n');
-  const id = name.replace(/[$]/g, '\\$');
+  const id = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = language === 'Python'
     ? new RegExp(`^\\s*(?:async\\s+)?(?:def|class)\\s+${id}\\b`)
     : new RegExp(`\\bexport\\b.*(?:\\b(?:const|let|var|class|interface|type|enum|function|namespace)\\s+${id}\\b|[{,]\\s*${id}\\s*[,}]|\\bas\\s+${id}\\b)`);
@@ -733,7 +733,7 @@ async function diffSurface(
       ...census.block,
       importEvidence: importersOf ? 'dependency-graph' : 'unavailable',
       inRepoCaveat: importersOf
-        ? 'In-repo consumers are resolved calls plus imports from the dependency graph. Imports the analyzer does not resolve (for example Python absolute imports in a src layout) are not seen; an aliased re-export is matched by its exported name; a default, namespace, or whole-module import counts as possible use.'
+        ? 'In-repo consumers are resolved calls plus imports from the dependency graph. Imports the analyzer does not resolve are not seen — for example Python absolute imports in a src layout, and imports through a whole-module re-export such as `module.exports = require(...)` or a package `__init__.py`; an aliased re-export is matched by its exported name; a default, namespace, or whole-module import counts as possible use.'
         : 'No usable dependency graph: in-repo consumers are resolved calls only, so a const, class, or type is never seen as consumed. Run analyze.',
     },
     ...(baseline ? { baseline: baseline.block } : {}),
