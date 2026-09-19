@@ -1477,7 +1477,7 @@ export function planPiToolActivation(
   const unknown: string[] = [];
   for (const raw of names) {
     const name = raw.trim().replace(/^openlore_/, '');
-    if (name in PI_TOOL_GROUPS) { groups.add(name); continue; }
+    if (Object.hasOwn(PI_TOOL_GROUPS, name)) { groups.add(name); continue; }
     const owner = Object.keys(PI_TOOL_GROUPS).find((group) => PI_TOOL_GROUPS[group].includes(name));
     if (owner) groups.add(owner);
     else if (!PI_LEAN_TOOLS.includes(name)) unknown.push(raw);

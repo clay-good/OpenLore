@@ -1594,6 +1594,19 @@ describe('Pi lean tool surface', () => {
       expect(surface.active()).toEqual(before);
     });
 
+    // PI_TOOL_GROUPS is a plain object: an `in` lookup also matches inherited keys, so a
+    // model passing "toString" crashed the activator instead of getting the unknown-name error.
+    it('treats inherited object keys as unknown names, not as groups', async () => {
+      const surface = registerPiSurface();
+      await surface.startSession();
+      const before = surface.active();
+      for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+        const result = await surface.activate([name]);
+        expect(result.content[0].text, name).toContain(`Unknown openlore tool group or tool: ${name}`);
+      }
+      expect(surface.active()).toEqual(before);
+    });
+
     it('reports a repeated activation as already active and changes nothing', async () => {
       const surface = registerPiSurface();
       await surface.startSession();
