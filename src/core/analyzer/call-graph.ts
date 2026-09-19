@@ -138,7 +138,7 @@ import { buildCfgFor } from './call-graph-cfg.js';
 
 // Callee-ignore predicates — extracted to ./call-graph-builtins.ts (internal, not
 // re-exported; the *_IGNORED tables stay private to that module).
-import { isIgnoredCallee, isSelfReceiver } from './call-graph-builtins.js';
+import { isIgnoredCallee, isIgnoredElixirCall, isSelfReceiver } from './call-graph-builtins.js';
 
 // Stable barrel: re-export the full public type/edge model + distance/layer helpers.
 export type {
@@ -3264,7 +3264,16 @@ async function extractElixirGraph(
   return loaded.withTree(content, (root) => {
   const nodes: FunctionNode[] = [];
   const nodeById = new Map<string, FunctionNode>();
-  const calls: Array<{ name: string; object?: string; pos: number; row: number }> = [];
+  const calls: Array<{ name: string; object?: string; pos: number; row: number; remote?: true; arity: number }> = [];
+  // Start offsets of calls on the right of `|>`: the piped value is their first argument.
+  const pipedCallStarts = new Set<number>();
+  // Start offsets of function heads (`def run(x)`): the head is a `call` node in the
+  // grammar but declares the function, it does not call it.
+  const defHeadStarts = new Set<number>();
+  // One span per clause. A multi-clause function is one node whose range is its
+  // FIRST clause, so calls in later clauses need their own span to find a caller.
+  const clauseSpans: FunctionNode[] = [];
+  const clauseOwner = new Map<FunctionNode, FunctionNode>();
 
   const targetIdent = (call: TsNodeLike): TsNodeLike | undefined => {
     const t = call.childForFieldName('target');
@@ -3272,6 +3281,10 @@ async function extractElixirGraph(
   };
 
   const walk = (node: TsNodeLike, moduleName: string | undefined) => {
+    if (node.type === 'binary_operator' && node.childForFieldName('operator')?.text === '|>') {
+      const right = node.childForFieldName('right');
+      if (right?.type === 'call') pipedCallStarts.add(right.startIndex);
+    }
     if (node.type === 'call') {
       const target = targetIdent(node);
       const kw = target?.type === 'identifier' ? target.text : undefined;
@@ -3285,7 +3298,11 @@ async function extractElixirGraph(
       }
       if (kw && ELIXIR_DEF_KEYWORDS.has(kw)) {
         // First argument is the function head: an identifier (no args) or a call (with args).
-        const head = args?.namedChildren[0];
+        // A guarded head `def f(x) when g(x)` wraps it as the left side of `when`.
+        let head = args?.namedChildren[0];
+        if (head?.type === 'binary_operator' && head.childForFieldName('operator')?.text === 'when') {
+          head = head.childForFieldName('left') ?? head.namedChildren[0];
+        }
         let fnName: string | undefined;
         let arity = 0;
         if (head?.type === 'identifier') { fnName = head.text; }
@@ -3294,21 +3311,25 @@ async function extractElixirGraph(
           fnName = ht?.text;
           const hargs = head.childForFieldName('arguments') ?? head.namedChildren.find(c => c.type === 'arguments');
           arity = hargs?.namedChildren.length ?? 0;
+          defHeadStarts.add(head.startIndex);
         }
         if (fnName) {
           const id = moduleName ? `${filePath}::${moduleName}.${fnName}` : `${filePath}::${fnName}`;
-          const existing = nodeById.get(id);
-          if (existing) {
-            existing.signature = `${existing.signature} (+clause)`;
+          let owner = nodeById.get(id);
+          if (owner) {
+            owner.signature = `${owner.signature} (+clause)`;
           } else {
-            const created: FunctionNode = {
+            owner = {
               id, name: fnName, filePath, className: moduleName, isAsync: false,
               language: 'Elixir', startIndex: node.startIndex, endIndex: node.endIndex,
               fanIn: 0, fanOut: 0, signature: `${kw} ${fnName}/${arity}`,
             };
-            nodes.push(created);
-            nodeById.set(id, created);
+            nodes.push(owner);
+            nodeById.set(id, owner);
           }
+          const span: FunctionNode = { ...owner, startIndex: node.startIndex, endIndex: node.endIndex };
+          clauseSpans.push(span);
+          clauseOwner.set(span, owner);
         }
         // Recurse into the body for nested calls.
         for (const child of node.namedChildren) walk(child, moduleName);
@@ -3316,14 +3337,17 @@ async function extractElixirGraph(
       }
 
       // Otherwise it's a call site: local `fun(...)` or remote `Mod.fun(...)`.
+      const arity = (args?.namedChildren.length ?? 0) + (pipedCallStarts.has(node.startIndex) ? 1 : 0);
       if (target?.type === 'identifier' && !ELIXIR_DEF_KEYWORDS.has(target.text)) {
-        calls.push({ name: target.text, pos: node.startIndex, row: node.startPosition.row });
+        if (!defHeadStarts.has(node.startIndex)) {
+          calls.push({ name: target.text, pos: node.startIndex, row: node.startPosition.row, arity });
+        }
       } else if (target?.type === 'dot') {
         // Remote `Mod.fun(...)`: emit the function name only (no receiver), so
         // name-based resolution can match an in-project function (matching how
         // the other spec-08 languages resolve member/static calls).
         const right = target.childForFieldName('right') ?? target.namedChildren[target.namedChildren.length - 1];
-        if (right) calls.push({ name: right.text, pos: node.startIndex, row: node.startPosition.row });
+        if (right) calls.push({ name: right.text, pos: node.startIndex, row: node.startPosition.row, remote: true, arity });
       }
     }
     for (const child of node.namedChildren) walk(child, moduleName);
@@ -3334,8 +3358,12 @@ async function extractElixirGraph(
   const rawEdges: RawEdge[] = [];
   const seen = new Set<string>();
   for (const c of calls) {
-    if (isIgnoredCallee(c.name)) continue;
-    const caller = findEnclosingFunction(nodes, c.pos);
+    // A bare call is filtered by Elixir's own builtins. A remote `Mod.fun()` keeps the
+    // cross-language union for now: it reaches resolution by bare name with no
+    // receiver, so `Enum.map()` must not bind to a project function named `map`.
+    if (c.remote ? isIgnoredCallee(c.name) : isIgnoredElixirCall(c.name, c.arity)) continue;
+    const span = findEnclosingFunction(clauseSpans, c.pos);
+    const caller = span && clauseOwner.get(span);
     if (!caller) continue;
     const key = `${caller.id}\0${c.name}\0${c.object ?? ''}\0${c.pos}`;
     if (seen.has(key)) continue;
