@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { collectIndexStatus, statusCommand } from './status.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
 
@@ -159,7 +160,7 @@ describe('openlore status — what the index is', () => {
     expect(Array.isArray(parsed.staleFiles)).toBe(true);
   });
 
-  it('reports no stale files when git is unavailable rather than failing', async () => {
+  it('reports unknown freshness when git is unavailable rather than claiming current', async () => {
     // `root` is a bare temp directory: `git status` there fails, which must degrade to
     // "nothing known" instead of taking down a read-only command.
     await withIndex(true, '2020-01-01T00:00:00.000Z');
@@ -169,5 +170,29 @@ describe('openlore status — what the index is', () => {
 
     expect(status.staleFiles).toEqual([]);
     expect(status.staleFilesTruncated).toBe(false);
+    expect(status.staleFilesUnknown).toBe(true);
+  });
+
+  it('keeps unusual git filenames intact and reports deleted indexed files', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    await writeFile(join(root, 'removed.ts'), 'export function removed() {}\n');
+    await writeFile(join(root, 'before-rename.ts'), 'export function renamed() {}\n');
+    execFileSync('git', ['add', 'removed.ts', 'before-rename.ts'], { cwd: root });
+    execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'baseline'], { cwd: root });
+    await withIndex(false, '2020-01-01T00:00:00.000Z');
+    await writeConfig(null);
+    const unusual = 'quoted "name"\n.ts';
+    await writeFile(join(root, unusual), 'export function unusual() {}\n');
+    await rm(join(root, 'removed.ts'));
+    execFileSync('git', ['mv', 'before-rename.ts', 'after-rename.ts'], { cwd: root });
+
+    const status = await collectIndexStatus(root);
+
+    expect(status.staleFiles).toContain(unusual);
+    expect(status.staleFiles).toContain('removed.ts');
+    expect(status.staleFiles).toContain('before-rename.ts');
+    expect(status.staleFiles).toContain('after-rename.ts');
   });
 });

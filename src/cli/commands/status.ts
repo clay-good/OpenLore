@@ -59,6 +59,8 @@ export interface IndexStatus {
   staleFiles: string[];
   /** True when the count was capped rather than complete. */
   staleFilesTruncated: boolean;
+  /** Git or the index build time was unavailable, so freshness cannot be asserted. */
+  staleFilesUnknown?: true;
   /** A failure recorded outside a full build (the watcher's incremental embed). */
   embedFailure?: IndexEmbedFailure;
   /** Degradations recorded by the last build. */
@@ -90,28 +92,45 @@ function readMetaSidecar(analysisDir: string): IndexMetaShape | null {
  * re-indexed is not counted. Bounded, and never fatal: a repository without git, or a
  * git call that fails, reports no stale files rather than failing the command.
  */
-async function changedSinceIndex(rootPath: string, builtAtMs: number | null): Promise<{ files: string[]; truncated: boolean }> {
-  if (builtAtMs === null) return { files: [], truncated: false };
+async function changedSinceIndex(rootPath: string, builtAtMs: number | null): Promise<{ files: string[]; truncated: boolean; unknown?: true }> {
+  if (builtAtMs === null) return { files: [], truncated: false, unknown: true };
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync('git', ['status', '--porcelain', '--untracked-files=normal'], {
+    ({ stdout } = await execFileAsync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=normal'], {
       cwd: rootPath,
       maxBuffer: 4 * 1024 * 1024,
     }));
   } catch {
-    return { files: [], truncated: false };
+    return { files: [], truncated: false, unknown: true };
   }
-  const candidates = stdout.split('\n')
-    .map(line => line.slice(3).trim())
-    .filter(path => path.length > 0 && !path.endsWith('/') && !path.startsWith(`${OPENLORE_DIR}/`));
+  // NUL output preserves filenames containing newlines, quotes, or backslashes. A
+  // rename has a second NUL field containing its old path, which can still be in
+  // the index even when the renamed file's mtime predates the build.
+  const entries = stdout.split('\0');
+  const candidates: Array<{ path: string; removed: boolean }> = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 4) continue;
+    const status = entry.slice(0, 2);
+    const path = entry.slice(3);
+    if (!path.endsWith('/') && !path.startsWith(`${OPENLORE_DIR}/`)) {
+      candidates.push({ path, removed: status.includes('D') || status.includes('R') });
+    }
+    if (status.includes('R') || status.includes('C')) {
+      const oldPath = entries[++i];
+      if (status.includes('R') && oldPath && !oldPath.startsWith(`${OPENLORE_DIR}/`)) {
+        candidates.push({ path: oldPath, removed: true });
+      }
+    }
+  }
   const truncated = candidates.length > MAX_CHANGED_FILES_INSPECTED;
   const files: string[] = [];
-  for (const relative of candidates.slice(0, MAX_CHANGED_FILES_INSPECTED)) {
+  for (const { path: relative, removed } of candidates.slice(0, MAX_CHANGED_FILES_INSPECTED)) {
     try {
       // Confinement: a path from `git status` is repository data, not a trusted input.
       const absolute = safeJoin(rootPath, relative);
-      if (statSync(absolute).mtimeMs > builtAtMs) files.push(relative);
-    } catch { /* deleted, renamed, or outside the repo — not a stale index entry */ }
+      if (removed || statSync(absolute).mtimeMs > builtAtMs) files.push(relative);
+    } catch { /* Outside the repo or unreadable. Deletions are handled above. */ }
   }
   return { files, truncated };
 }
@@ -159,7 +178,7 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
 
   const builtAt = meta?.builtAt ?? null;
   const builtAtMs = builtAt ? Date.parse(builtAt) : null;
-  const { files, truncated } = await changedSinceIndex(
+  const { files, truncated, unknown } = await changedSinceIndex(
     rootPath,
     builtAtMs !== null && !Number.isNaN(builtAtMs) ? builtAtMs : null,
   );
@@ -174,6 +193,7 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
     builtAt,
     staleFiles: files,
     staleFilesTruncated: truncated,
+    ...(unknown ? { staleFilesUnknown: true as const } : {}),
     ...base,
   };
 }
@@ -236,9 +256,11 @@ Read-only: this never builds, rebuilds, or locks the index.
     console.log(`  ${label('Index built')} ${status.builtAt ? safe(status.builtAt) : c.dim('unknown')}`);
 
     const staleCount = status.staleFiles.length;
-    const staleText = staleCount === 0
-      ? c.green('up to date with the working tree')
-      : c.yellow(`${staleCount}${status.staleFilesTruncated ? '+' : ''} file(s) changed since the index was built`);
+    const staleText = status.staleFilesUnknown
+      ? c.yellow('unknown — Git status or index build time is unavailable')
+      : staleCount === 0
+        ? c.green('up to date with the working tree')
+        : c.yellow(`${staleCount}${status.staleFilesTruncated ? '+' : ''} file(s) changed since the index was built`);
     console.log(`  ${label('Working tree')} ${staleText}`);
     if (staleCount > 0) {
       for (const file of status.staleFiles.slice(0, 5)) console.log(`  ${' '.repeat(20)} ${c.dim(safe(file))}`);

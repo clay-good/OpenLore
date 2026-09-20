@@ -63,6 +63,12 @@ fields.
 - **WHEN** the status command runs
 - **THEN** it states that no index exists and names the command that builds one
 
+#### Scenario: Working-tree freshness cannot be checked
+
+- **GIVEN** Git status or the index build timestamp is unavailable
+- **WHEN** the status command runs
+- **THEN** it reports working-tree freshness as unknown rather than claiming the index is current
+
 ### Requirement: IndexBuildFailureIsVisibleOutsideTheDaemonLog
 
 A failure to build the semantic index when a provider was resolved — an unreachable endpoint, a
