@@ -183,7 +183,8 @@ describe('openlore status — what the index is', () => {
     execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'baseline'], { cwd: root });
     await withIndex(false, '2020-01-01T00:00:00.000Z');
     await writeConfig(null);
-    const unusual = 'quoted "name"\n.ts';
+    // Windows filenames cannot contain quotes; still exercise spaces there.
+    const unusual = process.platform === 'win32' ? 'quoted name.ts' : 'quoted "name"\n.ts';
     await writeFile(join(root, unusual), 'export function unusual() {}\n');
     await mkdir(join(root, 'new-directory'));
     await writeFile(join(root, 'new-directory', 'added.ts'), 'export function added() {}\n');
