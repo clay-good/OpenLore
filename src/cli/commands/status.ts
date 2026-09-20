@@ -12,8 +12,6 @@
  */
 
 import { Command } from 'commander';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
@@ -33,8 +31,8 @@ import { readIndexReceipt, type IndexEmbedFailure } from '../../core/analyzer/an
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
+import { execFileGit } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 /** Bound on the working-tree comparison: a status command must stay instant. */
 const MAX_CHANGED_FILES_INSPECTED = 500;
@@ -96,7 +94,7 @@ async function changedSinceIndex(rootPath: string, builtAtMs: number | null): Pr
   if (builtAtMs === null) return { files: [], truncated: false, unknown: true };
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+    ({ stdout } = await execFileGit('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
       cwd: rootPath,
       maxBuffer: 4 * 1024 * 1024,
     }));
