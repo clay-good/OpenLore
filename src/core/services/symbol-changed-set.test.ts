@@ -438,6 +438,38 @@ describe('computeSymbolChangedSet', () => {
     expect(isChangedSetCaveat('Static call-graph selection is an over-approximate prioritizer.')).toBe(false);
   });
 
+  it('charges the byte budget below the repository root too', async () => {
+    // The size probe runs from the analyzed root but its pathspecs come from the git diff, which is
+    // repo-root framed. Getting that wrong charges every base blob zero bytes and the budget stops
+    // bounding anything — measured at 1.3 GB and 66s before this was fixed.
+    const big = `${TEN}\n// ${'x'.repeat(20_000)}\n`;
+    await put('pkg/src/a.ts', big);
+    await put('pkg/src/b.ts', big);
+    await commitAll();
+    await put('pkg/src/a.ts', big.replace('return x + 1;', 'return 1;'));
+    await put('pkg/src/b.ts', big.replace('return x + 1;', 'return 1;'));
+    const { set } = await changedSet(
+      [{ path: 'pkg/src/a.ts', status: 'modified' }, { path: 'pkg/src/b.ts', status: 'modified' }],
+      ['src/a.ts', 'src/b.ts'],
+      { root: join(repo, 'pkg'), maxBytes: big.length * 2 + 10 },
+    );
+    expect(set.byFile.get('src/a.ts')).toMatchObject({ granularity: 'symbol' });
+    expect(set.byFile.get('src/b.ts')).toEqual({ granularity: 'file', reason: 'size-cap' });
+  });
+
+  it('Go: a dot import is a wildcard, and TypeScript: a namespace import is not', async () => {
+    await put('d.go', 'package p\n\nimport "fmt"\n\nfunc F() { fmt.Println() }\n\nfunc G() int { return 1 }\n');
+    await put('src/ns.ts', "import { a } from './a';\nexport function one() { return a(1); }\nexport function two() { return 2; }\n");
+    await commitAll();
+    await put('d.go', 'package p\n\nimport "fmt"\n\nimport . "math"\n\nfunc F() { fmt.Println() }\n\nfunc G() int { return 1 }\n');
+    await put('src/ns.ts', "import { a } from './a';\nimport * as ns from './ns';\nexport function one() { return a(1) + ns.x; }\nexport function two() { return 2; }\n");
+    const { set } = await changedSet(
+      [{ path: 'd.go', status: 'modified' }, { path: 'src/ns.ts', status: 'modified' }], ['d.go', 'src/ns.ts'],
+    );
+    expect(set.byFile.get('d.go')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+    expect(set.byFile.get('src/ns.ts')).toMatchObject({ granularity: 'symbol', importsAdded: true, changed: ['src/ns.ts::one'] });
+  });
+
   it('parse errors on either side keep the file whole', async () => {
     await put('src/p.ts', 'export function a() { return 1; }\nexport function b() { return 2; }\n');
     await commitAll();

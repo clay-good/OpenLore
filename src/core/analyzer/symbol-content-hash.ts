@@ -285,9 +285,13 @@ export function computeFileContentHashes(
     const statementText = content.slice(n.startIndex, n.endIndex);
     // A wildcard binds names this walk cannot enumerate. `*` in an import statement is a wildcard in
     // every language that has one; C++'s `using namespace` is the same idea spelled without a star.
-    let wildcard = statementText.includes('*') || /\busing\s+namespace\b/.test(statementText);
-    // A blank binding (`import _ "net/http/pprof"`) exists ONLY to run the package's init: the
-    // statement binds no usable name, whatever its module path says.
+    // A namespace import (`import * as ns from './x'`) binds exactly one name, `ns` — it is not a
+    // wildcard, even though it spells one.
+    const namespaceImport = /\*\s*as\s+[\p{L}_$]/u.test(statementText);
+    let wildcard = (!namespaceImport && statementText.includes('*')) || /\busing\s+namespace\b/.test(statementText);
+    // A blank binding (`import _ "net/http/pprof"`) exists ONLY to run the package's init, and Go's
+    // DOT import (`import . "math"`) injects every exported name of the package into file scope —
+    // a wildcard by another spelling. Neither binds a name this walk can enumerate.
     let blank = false;
     const stack: HashTreeNode[] = [n];
     while (stack.length > 0) {
@@ -299,6 +303,7 @@ export function computeFileContentHashes(
         h.update(frame('L', cur.type, text));
         if (/wildcard|asterisk|glob/i.test(cur.type)) wildcard = true;
         if (text === '_') blank = true;
+        else if (text === '.' && PATH_BOUND_IMPORT_LANGUAGES.has(language)) wildcard = true;
         else if (/identifier|name/i.test(cur.type) && IDENTIFIER_ONLY.test(text)) names.push(text);
         // Where a language binds an import by its module PATH — Go's `import "net/http"` binds
         // `http` — the string is the binding, and without this the additive-import rule could never

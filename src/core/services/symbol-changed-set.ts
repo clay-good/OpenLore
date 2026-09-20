@@ -221,7 +221,11 @@ async function baseBlobSizes(absDir: string, commit: string, paths: readonly str
   if (paths.length === 0) return out;
   try {
     const { stdout } = await execFileGit(
-      'git', [...gitPathArgs('ls-tree', '-r', '--long', '-z', commit, '--'), ...paths],
+      // `--full-tree` makes the pathspecs repo-root-relative (they come from the git diff, which is
+      // repo-root framed) and `--full-name` prints them the same way — without both, an analyzed
+      // root BELOW the repository root matches nothing, every base blob is charged zero bytes, and
+      // the byte budget silently stops bounding anything.
+      'git', [...gitPathArgs('ls-tree', '-r', '--long', '-z', '--full-tree', '--full-name', commit, '--'), ...paths],
       { cwd: absDir, timeout: GIT_READ_TIMEOUT_MS, maxBuffer: LS_TREE_MAX_BYTES, encoding: 'utf-8' },
     );
     for (const record of String(stdout).split('\0')) {
@@ -836,7 +840,9 @@ export function seededUnchangedCaveat(count: number): string | undefined {
 export function carriedCaveat(carried: readonly CarriedSymbol[]): string | undefined {
   if (carried.length === 0) return undefined;
   return `${carried.length} symbol(s) were renamed or moved with an unchanged body ` +
-    `(e.g. ${carried[0].from} → ${carried[0].to}); their callers change even though their behavior does not.`;
+    `(e.g. ${carried[0].from} → ${carried[0].to}); their callers change even though their behavior does not. ` +
+    'The pairing is matched within the diff\'s hashed files, so an identical body elsewhere in the repository ' +
+    'could make a pair ambiguous.';
 }
 
 export function importsAddedCaveat(receipt: ChangeGranularityReceipt): string | undefined {
