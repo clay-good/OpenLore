@@ -52,6 +52,7 @@ describe('runSearchCli', () => {
   it('calls handleSearchCode directly with the supported filters and emits identical JSON', async () => {
     const result = {
       query: 'auth handler',
+      coverage: { verdict: 'covered', questionKind: 'where-is' },
       count: 1,
       results: [{ name: 'authenticate', filePath: 'src/auth.ts', matchEvidence: { field: 'symbol', terms: ['auth'], tier: 1 } }],
     };
@@ -61,7 +62,7 @@ describe('runSearchCli', () => {
       cwd: '/repo', json: true, limit: 7, language: 'typescript', tokenBudget: 500,
     })).toBe(0);
 
-    expect(searchCode).toHaveBeenCalledWith('/repo', 'auth handler', 7, 'typescript', undefined, 500);
+    expect(searchCode).toHaveBeenCalledWith('/repo', 'auth handler', 7, 'typescript', undefined, 500, undefined, undefined);
     expect(JSON.parse(writes.join(''))).toEqual(result);
     expect(searchSpecs).not.toHaveBeenCalled();
     expect(explainMiss).not.toHaveBeenCalled();
@@ -70,6 +71,7 @@ describe('runSearchCli', () => {
   it('calls handleSearchSpecs directly and renders its match evidence for a human', async () => {
     searchSpecs.mockResolvedValue({
       query: 'rate limiting',
+      coverage: { verdict: 'covered', questionKind: 'why-decided' },
       retrievalMode: 'keyword',
       count: 1,
       results: [{ title: 'RateLimitRequests', domain: 'api', section: 'Requirements', matchEvidence: { field: 'doc', terms: ['rate'], tier: 1 } }],

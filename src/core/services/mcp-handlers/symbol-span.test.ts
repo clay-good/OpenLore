@@ -133,9 +133,9 @@ describe('handleLocateSymbolSpan', () => {
   });
 
   it('keeps the stale verdict when the overlay cannot locate the symbol either', async () => {
-    setSourceMtime('bar.ts', +10);
     // The symbol is gone from the working tree, so there is nothing to re-read.
     writeFileSync(join(dir, 'bar.ts'), 'export function renamedAway() { return 1; }\n');
+    setSourceMtime('bar.ts', +10);
     const res = (await handleLocateSymbolSpan({ directory: dir, symbol: 'bar::bar.ts' })) as {
       verdict: string; hint: string; startByte?: number;
     };

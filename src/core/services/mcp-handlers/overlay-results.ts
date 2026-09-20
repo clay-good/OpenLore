@@ -18,15 +18,12 @@
 import { buildOverlayDisclosure, buildWorkingTreeOverlay, type OverlayDisclosure } from '../../analyzer/working-tree-overlay.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
 import { vectorMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { execFileGit } from '../../../utils/git-exec.js';
 
 /** Find bounded working-tree candidates when the index has no symbol to cite. */
 export async function dirtySourcePaths(rootPath: string): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+    const { stdout } = await execFileGit('git', ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], {
       cwd: rootPath,
       maxBuffer: 64 * 1024,
       timeout: 500,

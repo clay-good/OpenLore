@@ -673,7 +673,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // tool (fix-mcp-argument-contract), plus the typed v1 decision-constraint
     // block. 97 KB preserves a narrow ratchet around those intentional public
     // contracts rather than treating the added schema as free bytes.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(97_500);
+    // questionKind adds one closed-vocabulary input to search_code: 97,500 → 97,800 B
+    // (measured 97,727 B), leaving 73 B rather than silently removing the guard.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(97_800);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
@@ -691,7 +693,8 @@ describe('tools/list payload budget (spec-28)', () => {
   // ReferenceAllPairs) — find_path is in the navigation preset, so making the default-surface
   // path pair mutually legible costs ~180 B here. A conscious budget decision, not silent drift.
   it('navigation preset stays lean (the low-overhead navigate-only escape)', () => {
-    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(14_200);
+    // The same input raises the navigation surface to 14,462 B. Keep a 38 B margin.
+    expect(payloadBytes({ preset: 'navigation' })).toBeLessThan(14_500);
   });
 
   // change: unify-navigation-and-governance-substrate — the `substrate` default
