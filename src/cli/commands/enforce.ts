@@ -24,7 +24,7 @@
  */
 
 import { lstat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { Command } from 'commander';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
@@ -33,6 +33,9 @@ import { writeStdout, writeStderr } from '../output.js';
 import { writeSarifLog } from '../../core/services/sarif.js';
 import { sanitizeForTerminal } from '../../utils/misc.js';
 import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
+import { loadSpecCorpus } from '../../core/generator/spec-link-service.js';
+import { lintScenarioCorpus, SCENARIO_PATH_CAVEAT } from '../../core/generator/scenario-checkability.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import {
   effectivePolicy,
   normalizeEnforcementPolicy,
@@ -487,6 +490,27 @@ export async function collectGovernanceFindings(
   } catch (err) {
     caveats.push(`corpus-integrity check unavailable: ${err instanceof Error ? err.message : String(err)}`);
     for (const code of CORPUS_FINDING_CODES) failedCodes.add(code);
+  }
+
+  // Checkability is advisory unless the operator opts into blocking via policy.
+  try {
+    const openspecPath = relative(cwd, resolveOpenspecDir(cwd, config?.openspecPath));
+    const specs = await loadSpecCorpus(cwd, openspecPath, undefined, true, true);
+    for (const finding of lintScenarioCorpus(specs)) findings.push({
+      code: 'scenario-unverifiable-shape',
+      severity: 'warning',
+      source: 'scenario-checkability',
+      subject: `${finding.specFile}::${finding.requirement}::${finding.scenario}`,
+      message: `${finding.reason}: ${JSON.stringify(finding.clause)}. This checks shape only; ${SCENARIO_PATH_CAVEAT}`,
+      discriminator: finding.reason,
+      location: { path: finding.specFile },
+    });
+    assessedCodes.add('scenario-unverifiable-shape');
+  } catch (err) {
+    caveats.push(`scenario-checkability check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    if (policy['scenario-unverifiable-shape'] === 'blocking' || policy['scenario-unverifiable-shape'] === 'frozen') {
+      failedCodes.add('scenario-unverifiable-shape');
+    }
   }
 
   // Corpus intent delta — always (bounded, deterministic comparison of the

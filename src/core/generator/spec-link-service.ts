@@ -117,6 +117,8 @@ export async function loadSpecCorpus(
   rootPath: string,
   openspecPath = OPENSPEC_DIR,
   domains?: string[],
+  includeStructuralSpecs = false,
+  strict = false,
 ): Promise<SpecLinkIndexSpecInput[]> {
   const specsDir = join(rootPath, openspecPath, 'specs');
   const wanted = domains?.length ? new Set(domains.map(domain => domain.toLowerCase())) : null;
@@ -124,7 +126,8 @@ export async function loadSpecCorpus(
   let entries;
   try {
     entries = await readdir(specsDir, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 
@@ -132,7 +135,7 @@ export async function loadSpecCorpus(
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const domain = String(entry.name);
-    if (NON_DOMAIN_SPECS.has(domain.toLowerCase())) continue;
+    if (!includeStructuralSpecs && NON_DOMAIN_SPECS.has(domain.toLowerCase())) continue;
     if (wanted && !wanted.has(domain.toLowerCase())) continue;
 
     const specPath = join(specsDir, domain, 'spec.md');
@@ -143,7 +146,8 @@ export async function loadSpecCorpus(
         specFile: relative(rootPath, specPath).replaceAll('\\', '/'),
         content: await readFile(specPath, 'utf-8'),
       });
-    } catch {
+    } catch (error) {
+      if (strict) throw error;
       // A domain directory without a readable spec.md contributes nothing.
     }
   }

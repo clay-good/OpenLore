@@ -32,7 +32,13 @@ import {
   orphanRequirementsOf,
   resolveSpecLinkIndex,
 } from '../core/generator/spec-link-service.js';
-import { normalizeAnchorPath } from '../core/generator/spec-link-index.js';
+import { normalizeAnchorPath, type SpecRequirementLink } from '../core/generator/spec-link-index.js';
+import { loadSpecCorpus } from '../core/generator/spec-link-service.js';
+import { parseOpenSpecRequirements } from '../core/generator/openspec-compat.js';
+import { checkScenarioShape, SCENARIO_PATH_CAVEAT } from '../core/generator/scenario-checkability.js';
+import { createFullGraphReachingTestSelector } from '../core/services/edit-verdict.js';
+import { detectLanguage } from '../core/analyzer/language-detection.js';
+import { TEST_DETECTION_LANGUAGES } from '../core/analyzer/test-file.js';
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { SerializedCallGraph, FunctionNode } from '../core/analyzer/call-graph.js';
 import { readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
@@ -41,6 +47,7 @@ import { errors, isOpenLoreError } from '../utils/errors.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 
 const DEFAULT_MAX_UNCOVERED = 50;
+const MAX_SCENARIO_TEST_NAMES = 3;
 
 // ============================================================================
 // HELPERS
@@ -146,6 +153,72 @@ async function audit(options: AuditApiOptions): Promise<AuditReport> {
   const index = resolution.state === 'available' ? resolution.index : null;
 
   const callGraph = llmContext?.callGraph as SerializedCallGraph | undefined;
+  const selectReachingTests = createFullGraphReachingTestSelector(callGraph);
+  const specs = await loadSpecCorpus(rootPath, openspecRelPath, domainScope ? [...domainScope] : undefined, true);
+  const graphNodes = new Map<string, FunctionNode[]>();
+  for (const node of callGraph?.nodes ?? []) {
+    const key = `${normalizeAnchorPath(node.filePath) ?? node.filePath}::${node.name}`;
+    const matches = graphNodes.get(key) ?? [];
+    matches.push(node);
+    graphNodes.set(key, matches);
+  }
+  const links = new Map<string, SpecRequirementLink[]>();
+  for (const link of index?.links ?? []) {
+    const key = `${link.specFile}\0${link.requirement}`;
+    links.set(key, [...(links.get(key) ?? []), link]);
+  }
+  const pathCache = new Map<string, ReturnType<typeof selectReachingTests>>();
+  const scenarios: NonNullable<AuditReport['scenarioVerification']>['scenarios'] = [];
+  for (const spec of specs) for (const requirement of parseOpenSpecRequirements(spec.content)) {
+    const matches = links.get(`${spec.specFile}\0${requirement.name}`) ?? [];
+    const link = matches.length === 1 ? matches[0] : undefined;
+    if (fileScope && (!link || !link.footprintFiles.some(file => fileScope.has(file)))) continue;
+    const anchorNodes = link?.functions.map(fn =>
+      graphNodes.get(`${normalizeAnchorPath(fn.file) ?? fn.file}::${fn.name}`) ?? []) ?? [];
+    const seedIds = anchorNodes.flatMap(nodes => nodes.length === 1 ? [nodes[0].id] : []);
+    let assessmentReason: string | undefined;
+    if (!index) assessmentReason = mappingCoverage.reason ?? 'mapping-unavailable';
+    else if (!callGraph) assessmentReason = 'call-graph-unavailable';
+    else if (matches.length > 1) assessmentReason = 'duplicate-requirement-name';
+    else if (!link || link.functions.length === 0) assessmentReason = link?.state ?? 'no-resolved-anchor';
+    else if (link.functions.some(fn => !TEST_DETECTION_LANGUAGES.has(detectLanguage(fn.file)))) assessmentReason = 'test-detection-unsupported';
+    else if (anchorNodes.some(nodes => nodes.length > 1)) assessmentReason = 'ambiguous-call-graph-symbol';
+    else if (anchorNodes.some(nodes => nodes.length === 0)) assessmentReason = 'anchor-absent-from-call-graph';
+
+    let reaching = { tests: [] as Array<{ file: string; test: string }>, truncated: false, total: 0 };
+    if (!assessmentReason) {
+      const key = [...new Set(seedIds)].sort().join('\0');
+      let cached = pathCache.get(key);
+      if (!cached) {
+        cached = selectReachingTests(seedIds);
+        pathCache.set(key, cached);
+      }
+      reaching = {
+        tests: cached.tests.slice(0, MAX_SCENARIO_TEST_NAMES).map(test => ({ file: test.file, test: test.test })),
+        truncated: cached.truncated || cached.tests.length > MAX_SCENARIO_TEST_NAMES,
+        total: cached.tests.length,
+      };
+      if (cached.tests.length === 0 && llmContext?.partial) assessmentReason = 'partial-index';
+      else if (cached.truncated && cached.tests.length === 0) assessmentReason = 'reachability-truncated';
+    }
+    for (const scenario of requirement.scenarios) {
+      const shape = checkScenarioShape(scenario.text);
+      scenarios.push({
+        domain: spec.domain,
+        specFile: spec.specFile,
+        requirement: requirement.name,
+        scenario: scenario.name,
+        checkability: shape ? 'unverifiable-shape' : 'checkable',
+        ...(shape ? { shapeReason: shape.reason } : {}),
+        label: assessmentReason ? 'not-assessable' : reaching.tests.length ? 'verification-path-exists' : 'no-reaching-test',
+        ...(assessmentReason ? { reason: assessmentReason } : {}),
+        ...(!assessmentReason && link?.state !== 'linked' ? { reason: `Only resolved symbol anchors assessed; other anchors are ${link?.state}.` } : {}),
+        tests: reaching.tests,
+        ...(reaching.total ? { testCount: reaching.total } : {}),
+        ...(reaching.truncated ? { testsTruncated: true } : {}),
+      });
+    }
+  }
   const allNodes = (callGraph?.nodes ?? []).filter(node => !fileScope || fileScope.has(node.filePath));
   const hubNodes = new Set((callGraph?.hubFunctions ?? []).map(n => n.id));
 
@@ -203,6 +276,7 @@ async function audit(options: AuditApiOptions): Promise<AuditReport> {
     hubGaps,
     orphanRequirements,
     staleDomains,
+    scenarioVerification: { caveat: SCENARIO_PATH_CAVEAT, scenarios },
   };
 
   if (shouldSave) {

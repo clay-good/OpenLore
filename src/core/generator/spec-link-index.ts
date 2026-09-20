@@ -54,8 +54,9 @@ import { parseRequirementBlocks } from '../drift/spec-mapper.js';
  *       `stale`: the type exists, it is merely outside what coverage measures
  *   7 — an absent identity in a file whose exports the analysis cannot vouch for is
  *       `not-assessed` instead of `stale` (change: ground-generated-specs-in-the-graph)
+ *   8 — fenced and commented example headings no longer become requirement links
  */
-export const SPEC_LINK_INDEX_VERSION = 7;
+export const SPEC_LINK_INDEX_VERSION = 8;
 
 /** Default bound on disclosed candidates for one ambiguous or stale anchor. */
 export const SPEC_LINK_MAX_CANDIDATES = 5;

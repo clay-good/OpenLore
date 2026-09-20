@@ -12,6 +12,7 @@ import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
 import type { SpecMapping, SpecMap } from '../../types/index.js';
 import logger from '../../utils/logger.js';
+import { structuralMarkdownLines } from '../generator/openspec-compat.js';
 
 // ============================================================================
 // TYPES
@@ -201,7 +202,7 @@ function legacyImplementationAnchors(line: string): string[] | null {
  * their requirement.
  */
 export function parseRequirementBlocks(content: string): SpecRequirementBlock[] {
-  const lines = content.split('\n');
+  const lines = structuralMarkdownLines(content);
   const blocks: SpecRequirementBlock[] = [];
   let current: SpecRequirementBlock | null = null;
   let inImplBlock = false;

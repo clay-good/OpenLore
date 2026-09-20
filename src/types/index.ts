@@ -743,6 +743,24 @@ export interface AuditReport {
   hubGaps: AuditUncoveredFunction[];
   orphanRequirements: AuditOrphanRequirement[];
   staleDomains: AuditStaleDomain[];
+  /** Structural scenario observations; a reaching test is never proof of an assertion. */
+  scenarioVerification?: {
+    caveat: string;
+    scenarios: Array<{
+      domain: string;
+      specFile: string;
+      requirement: string;
+      scenario: string;
+      checkability: 'checkable' | 'unverifiable-shape';
+      shapeReason?: string;
+      label: 'verification-path-exists' | 'no-reaching-test' | 'not-assessable';
+      reason?: string;
+      tests: Array<{ file: string; test: string }>;
+      /** Number found before the per-scenario name cap; a traversal cap may lower this. */
+      testCount?: number;
+      testsTruncated?: boolean;
+    }>;
+  };
 }
 
 // ============================================================================

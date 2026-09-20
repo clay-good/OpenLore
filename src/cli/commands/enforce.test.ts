@@ -726,6 +726,28 @@ describe('corpus intent findings — reviewer output maps to the unified gate', 
 });
 
 describe('enforce gate decision', () => {
+  it('reports malformed scenario shape as advisory and honors an opt-in blocking policy', async () => {
+    const root = await mkRepo();
+    await mkdir(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    await writeFile(join(root, 'openspec', 'specs', 'billing', 'spec.md'),
+      '## Requirements\n### Requirement: Charge\nThe system SHALL charge.\n#### Scenario: Vague\n- **WHEN** a card is charged\n- **THEN** it works well\n');
+    const collected = await collectGovernanceFindings(root, null, {});
+    const finding = collected.findings.find(item => item.code === 'scenario-unverifiable-shape');
+    expect(finding).toMatchObject({
+      source: 'scenario-checkability',
+      message: expect.stringContaining('**THEN** it works well'),
+    });
+    expect(collected.assessedCodes.has('scenario-unverifiable-shape')).toBe(true);
+    expect(classifyFindings([finding!], {}).advisory).toHaveLength(1);
+    expect(classifyFindings([finding!], { 'scenario-unverifiable-shape': 'blocking' }).blocking).toHaveLength(1);
+  });
+
+  it('marks scenario assessment failed when the spec corpus cannot be read', async () => {
+    const root = await mkRepo();
+    const collected = await collectGovernanceFindings(root, null, { 'scenario-unverifiable-shape': 'blocking' });
+    expect(collected.failedCodes.has('scenario-unverifiable-shape')).toBe(true);
+    expect(collected.assessedCodes.has('scenario-unverifiable-shape')).toBe(false);
+  });
   it('applies corpus source defaults and honors an explicit advisory downgrade', async () => {
     const root = await mkRepo();
     await initializeGitHead(root);

@@ -542,29 +542,27 @@ export function selectReachingTestsFromStore(
   return { tests, truncated };
 }
 
-/** Reaching tests from the retained full-analysis graph, which includes test nodes. */
-export function selectReachingTestsFromFullGraph(
+/** Prepare reverse edges once when several exact anchors share one retained analysis graph. */
+export function createFullGraphReachingTestSelector(
   graph: Pick<SerializedCallGraph, 'nodes' | 'edges'> | undefined,
-  seedIds: readonly string[],
-  maxDepth = MAX_REACHABILITY_DEPTH,
-): { tests: EditReachingTest[]; truncated: boolean } {
-  if (!graph) return { tests: [], truncated: false };
+): (seedIds: readonly string[], maxDepth?: number) => { tests: EditReachingTest[]; truncated: boolean } {
+  if (!graph) return () => ({ tests: [], truncated: false });
   const nodes = new Map(graph.nodes.map(node => [node.id, node]));
   const callers = new Map<string, string[]>();
   const testedBy = new Map<string, string[]>();
   for (const edge of graph.edges) {
-    const map = edge.kind === 'tested_by' ? testedBy : callers;
-    const values = map.get(edge.calleeId) ?? [];
     // tested_by is production -> test, unlike ordinary caller -> callee.
     if (edge.kind === 'tested_by') {
       const tests = testedBy.get(edge.callerId) ?? [];
       tests.push(edge.calleeId);
       testedBy.set(edge.callerId, tests);
     } else {
+      const values = callers.get(edge.calleeId) ?? [];
       values.push(edge.callerId);
-      map.set(edge.calleeId, values);
+      callers.set(edge.calleeId, values);
     }
   }
+  return (seedIds, maxDepth = MAX_REACHABILITY_DEPTH) => {
   const depth = new Map<string, number>();
   const parent = new Map<string, string>();
   const queue: string[] = [];
@@ -615,6 +613,16 @@ export function selectReachingTestsFromFullGraph(
   }
   tests.sort((a, b) => a.file.localeCompare(b.file) || a.test.localeCompare(b.test));
   return { tests, truncated };
+  };
+}
+
+/** Reaching tests from the retained full-analysis graph, which includes test nodes. */
+export function selectReachingTestsFromFullGraph(
+  graph: Pick<SerializedCallGraph, 'nodes' | 'edges'> | undefined,
+  seedIds: readonly string[],
+  maxDepth = MAX_REACHABILITY_DEPTH,
+): { tests: EditReachingTest[]; truncated: boolean } {
+  return createFullGraphReachingTestSelector(graph)(seedIds, maxDepth);
 }
 
 export function mergeReachingTests(
