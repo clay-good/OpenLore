@@ -20,9 +20,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import type { FunctionNode } from './call-graph.js';
+import { readSourceCapped } from './bounded-file-scan.js';
 import { detectLanguage } from './language-support.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 
@@ -163,35 +162,34 @@ export async function buildWorkingTreeOverlay(
       continue;
     }
 
-    let size: number;
-    try {
-      size = statSync(absolute).size;
-    } catch {
-      // Deleted in the working tree: nothing to overlay, and the indexed rows for it are
-      // suppressed by the caller, which is the correct answer for a removed file.
-      uncoveredFiles.push({ filePath, status: 'unreadable' });
-      continue;
-    }
-    if (bytes + size > OVERLAY_MAX_BYTES) {
-      skipped = 'byte-budget-exceeded';
-      uncoveredFiles.push({ filePath, status: 'unreadable' });
-      continue;
-    }
-
     const language = detectLanguage(filePath);
     if (!language) {
       uncoveredFiles.push({ filePath, status: 'unsupported-language' });
       continue;
     }
 
-    let content: string;
-    try {
-      content = await readFile(absolute, 'utf-8');
-    } catch {
+    // ONE handle, stat'd and read through that same handle: the file the size was checked
+    // on is the file whose bytes come back. A `statSync(path)` followed by a separate
+    // `readFile(path)` is a check-then-use race — the working tree is, by definition, being
+    // edited while this runs (CodeQL js/file-system-race on the first cut of this module).
+    // The per-file cap is the remaining byte budget, so the budget bounds the read itself
+    // rather than being compared against a size that could since have grown.
+    const remaining = OVERLAY_MAX_BYTES - bytes;
+    // The observer fires when the file itself exceeded the cap, which is what separates
+    // "the budget stopped us" from "the file is gone or unreadable" — two different facts
+    // for the caller, and only one of them is a bound being hit.
+    let overBudget = remaining <= 0;
+    const content = remaining > 0
+      ? await readSourceCapped(absolute, remaining, () => { overBudget = true; })
+      : null;
+    if (content === null) {
+      if (overBudget) skipped = 'byte-budget-exceeded';
+      // A deleted file has nothing to overlay, and the caller suppresses its indexed rows
+      // — the right answer either way.
       uncoveredFiles.push({ filePath, status: 'unreadable' });
       continue;
     }
-    bytes += size;
+    bytes += Buffer.byteLength(content, 'utf-8');
 
     const key = memoKey(language, content);
     const memoized = _overlayMemo.get(key);

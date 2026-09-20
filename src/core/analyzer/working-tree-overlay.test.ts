@@ -121,6 +121,31 @@ describe('buildWorkingTreeOverlay — the edited files, read from disk', () => {
     expect(overlay.uncoveredFiles.map(f => f.filePath)).toContain('src/b.ts');
   });
 
+  it('stops at the byte budget and names it', async () => {
+    // One file larger than the whole budget: the bound is hit on the first read, and the
+    // reason says so rather than reporting the file as unreadable.
+    const huge = `export function big() { return '${'x'.repeat(2_100_000)}'; }\n`;
+    await write('src/huge.ts', huge);
+
+    const overlay = await buildWorkingTreeOverlay(root, ['src/huge.ts']);
+
+    expect(overlay.skipped).toBe('byte-budget-exceeded');
+    expect(overlay.coveredFiles).toEqual([]);
+  });
+
+  it('reads the file through one handle, so the size checked is the size read', async () => {
+    // Regression guard for the CodeQL check-then-use finding on the first cut of this
+    // module: a stat on the path followed by a separate read of the path lets the working
+    // tree change in between. The reader is the shared bounded one, which stats the handle
+    // it reads from.
+    await write('src/a.ts', 'export function f() {}\n');
+
+    const overlay = await buildWorkingTreeOverlay(root, ['src/a.ts']);
+
+    expect(overlay.coveredFiles).toEqual(['src/a.ts']);
+    expect(overlay.nodes.map(n => n.name)).toEqual(['f']);
+  });
+
   it('reports an unparsable file instead of failing the query', async () => {
     await write('src/broken.ts', 'export function ( { { { unterminated\n');
 
