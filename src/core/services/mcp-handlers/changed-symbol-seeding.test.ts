@@ -166,7 +166,7 @@ describe('blast_radius seeds from the changed symbols', () => {
       message: string; changeGranularity: { changedSymbolsFound: number; changedSymbolsNotIndexed: number };
     };
     expect(r.changeGranularity).toMatchObject({ changedSymbolsFound: 2, changedSymbolsNotIndexed: 2 });
-    expect(r.message).toContain('is in the index');
+    expect(r.message).toContain('absent from the index');
     expect(r.message).toContain('Re-run analyze_codebase');
     expect(r.message).not.toContain('formatting or comments only');
 

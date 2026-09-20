@@ -139,16 +139,9 @@ function renderHuman(b: BlastRadiusBriefing): string {
   const dynamicCrossing = b.confidenceBoundary?.knownUnknowable
     ?.find(c => c.kind === 'dynamic-boundary')?.detail;
   if (dynamicCrossing) lines.push(`   ⚠ ${dynamicCrossing}`);
-  // How precisely the changed symbols were identified. The headline can only strengthen the
-  // reading ("no symbol differs"); the weakening side belongs in the terminal too
-  // (change: add-symbol-content-hashes).
-  if (b.changeGranularity && b.changeGranularity.fileGranularFiles > 0) {
-    const reasons = Object.entries(b.changeGranularity.reasons).map(([reason, n]) => `${reason} ×${n}`).join(', ');
-    lines.push(`   ⚠ ${b.changeGranularity.fileGranularFiles} changed file(s) kept whole (${reasons}); every production symbol in them counts as changed.`);
-  }
-  if (b.changeGranularity && b.changeGranularity.importsAddedFiles > 0) {
-    lines.push(`   ⚠ ${b.changeGranularity.importsAddedFiles} changed file(s) only gained imports at module level; their unchanged symbols were seeded only if they name a new binding.`);
-  }
+  // How precisely the changed symbols were identified, straight from the briefing's own caveats:
+  // the headline can only strengthen the reading ("no symbol differs"), so the weakening side
+  // belongs in the terminal too (change: add-symbol-content-hashes).
   for (const caveat of b.caveats ?? []) {
     if (isChangedSetCaveat(caveat)) lines.push(`   ⚠ ${caveat}`);
   }

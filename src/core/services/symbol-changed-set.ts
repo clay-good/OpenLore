@@ -29,7 +29,9 @@
  * than file-level seeding, which never seeded other files either.
  *
  * A disappeared/appeared pair that symbol-identity continuity (`analyzer/continuity.ts`) matches is
- * also reported as a carried rename or move. Both ids stay in the seed set.
+ * also reported as a carried rename or move. Both ids stay in the seed set — which seeds nothing at
+ * all when the index holds neither path yet, and the receipt says so through `changedSymbolsNotIndexed`
+ * rather than letting the caller read the silence as "unchanged".
  */
 
 import { escapeRegExp } from '../../utils/misc.js';
@@ -68,7 +70,7 @@ export const MAX_SYMBOL_HASHED_FILES = 200;
  * cost — 200 large files parse far longer than 200 small ones — so the byte bound is what keeps the
  * worst case bounded. Deterministic (files are read in path order), and disclosed as `size-cap`.
  */
-export const MAX_SYMBOL_HASHED_BYTES = 1024 * 1024;
+export const MAX_SYMBOL_HASHED_BYTES = 4 * 1024 * 1024;
 
 /**
  * Largest single file hashed. A file this big is parsed twice, and its parse dominates the call's
@@ -109,13 +111,14 @@ export type FileGranularityReason =
   | 'index-mismatch'
   | 'file-cap'
   | 'size-cap'
+  | 'file-too-large'
   | 'time-cap'
   | 'not-assessed';
 
 export const FILE_GRANULARITY_REASONS: Record<FileGranularityReason, string> = {
   'language-not-hashed': 'the language has no native parse tree to hash (no extractor, a WASM grammar, or a script container)',
   'parse-errors': 'one side parsed with errors, was truncated, or decoded lossily, so its tree is not trustworthy evidence',
-  'module-level-change': 'code outside every symbol changed (imports, module-level statements, class fields), or moved across a symbol',
+  'module-level-change': 'code outside every symbol the index holds changed — imports, module-level statements, class fields, or a function this language\'s extraction does not index — or code moved across a symbol',
   'module-level-reference': 'module-level code names a changed symbol, so it may reach it through a binding no call edge records',
   'span-not-contiguous': 'a symbol span does not map to one contiguous run of the parse tree',
   'invalid-span': 'a symbol span lies outside its file',
@@ -123,7 +126,8 @@ export const FILE_GRANULARITY_REASONS: Record<FileGranularityReason, string> = {
   'index-mismatch': 'the index lists symbols in this file that neither revision extracts to (re-run analyze)',
   'file-cap': `the diff names more than ${MAX_SYMBOL_HASHED_FILES} code files; the rest are not hashed`,
   'time-cap': `hashing spent its ${Math.round(SYMBOL_HASHING_BUDGET_MS / 1000)}s budget before reaching this file; the rest are not hashed`,
-  'size-cap': `the file is larger than ${Math.round(MAX_SYMBOL_HASHED_FILE_BYTES / 1024)} KB, or the diff's code files exceed the ${Math.round(MAX_SYMBOL_HASHED_BYTES / 1024)} KB hashing budget`,
+  'size-cap': `the diff's earlier code files spent the ${Math.round(MAX_SYMBOL_HASHED_BYTES / 1024)} KB hashing budget before this one`,
+  'file-too-large': `the file is larger than the ${Math.round(MAX_SYMBOL_HASHED_FILE_BYTES / 1024)} KB per-file bound, so hashing it would dominate the call`,
   'not-assessed': 'the diff path did not map onto this indexed file exactly, or the changed-set could not be computed',
 };
 
@@ -435,15 +439,17 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
   // never a regex per (symbol, name) pair, which is quadratic on a file with many changed symbols.
   const wanted = new Set([...names, ...importedNames].filter(n => n.length > 0));
   const wantedProbes = nameProbes(wanted);
-  if (base.present && head.present && names.size > 0) {
+  if (base.present && head.present && wanted.size > 0) {
     // Module-level code that NAMES a changed symbol may bind it (`const h = get;`, a handler table)
-    // and hand it to a sibling that never spells the name. The names come from the walk, so a
-    // comment mentioning the symbol is not evidence of a binding.
+    // and hand it to a sibling that never spells the name — and a module-level binding that names a
+    // NEWLY IMPORTED name (`const handler = doThing;` above a new `import { doThing }`) now means
+    // something else entirely, for every symbol that uses the binding. The names come from the walk,
+    // so a comment mentioning the symbol is not evidence of a binding.
     const moduleNames = [
       ...(base.result!.contentHashes!.residualNames),
       ...(head.result!.contentHashes!.residualNames),
     ];
-    if (moduleNames.some(name => names.has(name))) {
+    if (moduleNames.some(name => wanted.has(name))) {
       return { granularity: 'file', reason: 'module-level-reference' };
     }
   }
@@ -489,6 +495,8 @@ export async function computeSymbolChangedSet(input: {
   maxFiles?: number;
   /** Overrides {@link MAX_SYMBOL_HASHED_BYTES} (tests). */
   maxBytes?: number;
+  /** Overrides {@link MAX_SYMBOL_HASHED_FILE_BYTES} (tests). */
+  maxFileBytes?: number;
   /** Overrides {@link SYMBOL_HASHING_BUDGET_MS} (tests). */
   budgetMs?: number;
 }): Promise<SymbolChangedSet> {
@@ -575,7 +583,12 @@ export async function computeSymbolChangedSet(input: {
     const headBytes = p.wantHead ? headSizes.get(p.local) : 0;
     // An unknown size is a missing blob or a non-regular working-tree entry; the read reports it.
     const bytes = (baseBytes ?? 0) + (headBytes ?? 0);
-    if ((baseBytes ?? 0) > MAX_SYMBOL_HASHED_FILE_BYTES || (headBytes ?? 0) > MAX_SYMBOL_HASHED_FILE_BYTES || bytes > budget) {
+    const perFile = input.maxFileBytes ?? MAX_SYMBOL_HASHED_FILE_BYTES;
+    if ((baseBytes ?? 0) > perFile || (headBytes ?? 0) > perFile) {
+      byFile.set(p.local, { granularity: 'file', reason: 'file-too-large' });
+      continue;
+    }
+    if (bytes > budget) {
       byFile.set(p.local, { granularity: 'file', reason: 'size-cap' });
       continue;
     }
@@ -583,6 +596,7 @@ export async function computeSymbolChangedSet(input: {
     selected.push(p);
   }
 
+  const deadline = Date.now() + (input.budgetMs ?? SYMBOL_HASHING_BUDGET_MS);
   const loaded: Loaded[] = [];
   const queue = [...selected];
   const readOne = async (p: Planned): Promise<Loaded> => {
@@ -598,6 +612,9 @@ export async function computeSymbolChangedSet(input: {
     for (;;) {
       const next = queue.shift();
       if (!next) return;
+      // The budget covers the READS too: 200 blobs at a 10s per-read timeout would otherwise run
+      // for minutes before the hashing loop's deadline was even created.
+      if (Date.now() >= deadline) { byFile.set(next.local, { granularity: 'file', reason: 'time-cap' }); continue; }
       loaded.push(await readOne(next));
     }
   });
@@ -608,7 +625,6 @@ export async function computeSymbolChangedSet(input: {
   const sides = new Map<string, { base: Side; head: Side }>();
   /** Every hashed head side: the clone census the continuity uniqueness guard needs. */
   const headSides: Side[] = [];
-  const deadline = Date.now() + (input.budgetMs ?? SYMBOL_HASHING_BUDGET_MS);
   for (const item of loaded) {
     const { local, basePath } = item;
     if (Date.now() >= deadline) { byFile.set(local, { granularity: 'file', reason: 'time-cap' }); continue; }
@@ -784,22 +800,33 @@ export function granularityReceipt(
  * no changed symbol. A symbol that changed but is absent from the index is "not indexed", never
  * "unchanged" — that is the stale-index case, and it is the most common one.
  */
-export function noChangeClaim(receipt: ChangeGranularityReceipt): { kind: 'unchanged' | 'not-indexed' | 'not-assessed'; text: string } {
-  if (receipt.changedSymbolsFound > 0) {
+export function noChangeClaim(receipt: ChangeGranularityReceipt): { kind: 'unchanged' | 'not-indexed' | 'not-seeded' | 'not-assessed'; text: string } {
+  if (receipt.changedSymbolsNotIndexed > 0) {
     return {
       kind: 'not-indexed',
-      text: `${receipt.changedSymbolsFound} symbol(s) differ from the base, but none of them is in the index — the index predates these edits, so nothing could be seeded. Re-run analyze_codebase. This is "not indexed", NOT "unchanged".`,
+      text: `${receipt.changedSymbolsNotIndexed} symbol(s) differ from the base and are absent from the index — it predates these edits, so nothing could be seeded. Re-run analyze_codebase. This is "not indexed", NOT "unchanged".`,
     };
   }
-  if (receipt.fileGranularFiles > 0 && receipt.symbolExactFiles === 0) {
+  if (receipt.changedSymbolsFound > 0) {
+    return {
+      kind: 'not-seeded',
+      text: `${receipt.changedSymbolsFound} symbol(s) differ from the base, but none of them is in scope here — generated, vendored and declaration files are excluded from this conclusion. This is "out of scope", NOT "unchanged".`,
+    };
+  }
+  if (receipt.symbolExactFiles === 0) {
     return {
       kind: 'not-assessed',
-      text: `No changed code file could be assessed at symbol level (${receipt.fileGranularFiles} file(s), see changeGranularity.fallbacks) — "not assessed", NOT "unchanged".`,
+      text: receipt.fileGranularFiles > 0
+        ? `No changed code file could be assessed at symbol level (${receipt.fileGranularFiles} file(s), see changeGranularity.fallbacks) — "not assessed", NOT "unchanged".`
+        : 'No changed code file was hashed: the diff touched no file this index holds code for — "not assessed", NOT "unchanged".',
     };
   }
   return {
     kind: 'unchanged',
-    text: 'In every changed code file that was hashed, the symbols are unchanged — the edits are formatting or comments only, or were reverted in the working tree before this call.'
+    text: `No symbol's behavior differs from the base: in every changed code file that was hashed, the symbols are unchanged`
+      + (receipt.importsAddedFiles > 0
+        ? `. The edits are formatting or comments, imports that bind new names no existing symbol uses (${receipt.importsAddedFiles} file(s)), or changes already reverted in the working tree.`
+        : ' — the edits are formatting or comments only, or were reverted in the working tree before this call.')
       + (receipt.fileGranularFiles > 0
         ? ` ${receipt.fileGranularFiles} other changed file(s) were not assessed at symbol level — "not assessed", not "unchanged".`
         : ''),
@@ -818,10 +845,13 @@ export const CHANGED_SET_CAVEAT_MARKERS = [
   'bind new names',
   'did not themselves change',
   'renamed or moved with an unchanged body',
-  'is in the index',
+  'absent from the index',
+  'none of them is in scope here',
   'not assessed at symbol level',
   'No changed code file could be assessed',
   'formatting or comments only',
+  'No symbol\'s behavior differs',
+  'No changed code file',
 ] as const;
 
 /** True when a caveat came from this module and qualifies WHAT the changed-set covered. */
@@ -856,6 +886,7 @@ export function granularityCaveat(receipt: ChangeGranularityReceipt): string | u
   if (receipt.fileGranularFiles === 0) return undefined;
   const reasons = (Object.keys(receipt.reasons) as FileGranularityReason[]).sort()
     .map(r => `${r} (${receipt.reasons[r]}): ${FILE_GRANULARITY_REASONS[r]}`);
-  return `${receipt.fileGranularFiles} changed file(s) stayed at FILE granularity: every production symbol in them counts as changed ` +
-    `(see changeGranularity.fallbacks). Reasons: ${reasons.join('; ')}.`;
+  return `${receipt.fileGranularFiles} changed file(s) stayed at FILE granularity: every production symbol the index holds ` +
+    'for them counts as changed — for a file the index holds none for (a new or moved path), that is none ' +
+    `(see changeGranularity.fallbacks and changedSymbolsNotIndexed). Reasons: ${reasons.join('; ')}.`;
 }

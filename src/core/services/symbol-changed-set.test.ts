@@ -470,6 +470,29 @@ describe('computeSymbolChangedSet', () => {
     expect(set.byFile.get('src/ns.ts')).toMatchObject({ granularity: 'symbol', importsAdded: true, changed: ['src/ns.ts::one'] });
   });
 
+  it('never claims "formatting or comments only" over an added import or an unhashed diff', () => {
+    const base: ChangeGranularityReceipt = {
+      symbolExactFiles: 0, fileGranularFiles: 0, importsAddedFiles: 0,
+      changedSymbolsFound: 0, changedSymbolsNotIndexed: 0, reasons: {}, fallbacks: [],
+    };
+    // Nothing hashed at all: "not assessed", never "unchanged".
+    expect(noChangeClaim(base)).toMatchObject({ kind: 'not-assessed' });
+    expect(noChangeClaim(base).text).not.toContain('formatting or comments only');
+    // An added import is neither formatting nor a comment.
+    const withImport = noChangeClaim({ ...base, symbolExactFiles: 1, importsAddedFiles: 1 });
+    expect(withImport.kind).toBe('unchanged');
+    expect(withImport.text).toContain('imports that bind new names');
+    expect(withImport.text).not.toContain('formatting or comments only');
+    // A symbol changed but the index predates it: "not indexed", and the count is the indexed one.
+    expect(noChangeClaim({ ...base, symbolExactFiles: 1, changedSymbolsFound: 2, changedSymbolsNotIndexed: 2 }))
+      .toMatchObject({ kind: 'not-indexed' });
+    // A symbol changed, the index knows it, but the consumer excluded it (generated, vendored).
+    expect(noChangeClaim({ ...base, symbolExactFiles: 1, changedSymbolsFound: 2 }))
+      .toMatchObject({ kind: 'not-seeded' });
+    // Only then may it say the symbols are unchanged.
+    expect(noChangeClaim({ ...base, symbolExactFiles: 1 }).kind).toBe('unchanged');
+  });
+
   it('parse errors on either side keep the file whole', async () => {
     await put('src/p.ts', 'export function a() { return 1; }\nexport function b() { return 2; }\n');
     await commitAll();

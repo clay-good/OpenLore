@@ -100,10 +100,11 @@ export interface FileContentHashes {
   /** Top-level import statements, hashed individually and excluded from the residual and layout. */
   imports: ImportStatementHash[];
   /**
-   * Identifiers named by module-level code and by the imports — the names the file's module level
-   * could be binding or handing around (`const h = get;`, a handler table, a re-import of the same
-   * name). Collected from the walk, so comments and layout never enter it, in every language the
-   * walk covers. A string literal whose whole content is an identifier counts: a handler table keyed
+   * Identifiers named by module-level code OUTSIDE the import statements — the names the file's
+   * module level could be binding or handing around (`const h = get;`, a handler table). An
+   * import's own names are in {@link ImportStatementHash.names} instead: the statement that binds a
+   * name is not evidence that other module-level code uses it. Collected from the walk, so comments
+   * and layout never enter it, in every language the walk covers. A string literal whose whole content is an identifier counts: a handler table keyed
    * by name is exactly the binding this evidence exists to catch.
    */
   residualNames: string[];
@@ -318,7 +319,6 @@ export function computeFileContentHashes(
       h.update(frame('(', cur.type));
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
     }
-    for (const name of names) residualNames.add(name);
     const hash = hash16(h);
     // The statement's PLACE is recorded in the layout: an import that MOVES (across module-level
     // code, or past another import) is a real change, and it would otherwise be hashed nowhere.

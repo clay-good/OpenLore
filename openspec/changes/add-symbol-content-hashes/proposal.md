@@ -128,6 +128,15 @@ the walk cannot enumerate. The same round replaced an unbounded read-everything-
 deterministic byte budget, refused non-regular working-tree entries instead of blocking forever on a
 FIFO open (which starved Node's whole threadpool), and bounded the pass in wall clock.
 
+A fourth round (a soundness sweep plus a 39-case end-to-end pass over four external repositories)
+found the last honesty gaps: a module-level binding that named a NEWLY IMPORTED name was not caught
+(the one construction that touched none of the five signals), the "not indexed" claim read the wrong
+field and could contradict its own receipt, "formatting or comments only" was claimed over a diff
+that added an import and over a diff where nothing was hashed at all, the granularity caveat
+promised production symbols for a file the index holds none for, the per-file bound and the byte
+budget shared one reason code, the wall-clock bound did not cover the read phase, and a region-scoped
+briefing carried a repository-wide receipt.
+
 Measured on this repository after the bounds landed: a 17-file diff resolves in ~2s and a 99-file
 diff in ~8s (the wall-clock bound); the worst case built on purpose — 200 files of 900 functions
 each — finishes in 7.4s at 64 MB heap / 408 MB RSS, where the first version took 36s and an earlier

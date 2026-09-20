@@ -144,7 +144,12 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   // changed-set only because it references a changed one, or holds a dynamic-dispatch site, did not
   // change and is not briefed. A rename or move IS briefed — its id and every caller changed, and a
   // renamed hub is exactly what a returning reader must see — and the pair is named under `carried`.
-  const narrowed = await narrowToChangedSymbols(absDir, resolvedBase, diffEntries, cg, fileSymbols);
+  // A region scope narrows the receipt too: telling a reader scoped to `src/cli/` about fallbacks in
+  // files they cannot see breaks the same denominators-match-the-briefing rule as the counts above.
+  const scopedEntries = input.filePattern
+    ? diffEntries.filter(entry => entry.path.includes(input.filePattern!))
+    : diffEntries;
+  const narrowed = await narrowToChangedSymbols(absDir, resolvedBase, scopedEntries, cg, fileSymbols);
   const carried: CarriedSymbol[] = narrowed.set?.carried ?? [];
   const changedSymbols = fileSymbols.filter(n => {
     const change = narrowed.set?.byFile.get(n.filePath);
