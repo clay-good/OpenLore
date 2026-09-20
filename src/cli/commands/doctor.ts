@@ -919,7 +919,9 @@ export async function checkRetrievalMode(rootPath: string): Promise<CheckResult>
 
   // The same resolver every query uses, so doctor cannot report a mode no search serves.
   let embedder: Embedder | null = null;
-  try { embedder = await resolveEmbedder(config); } catch { embedder = null; }
+  // A resolver failure is not this check's verdict to render — the endpoint check owns
+  // that — so it simply leaves the keyword default in place.
+  try { embedder = await resolveEmbedder(config); } catch { /* keyword default */ }
   const mode = servedRetrievalMode(embedder, analysisDir);
 
   if (!agreement.agrees && agreement.mismatch === 'configured-but-unrealized') {

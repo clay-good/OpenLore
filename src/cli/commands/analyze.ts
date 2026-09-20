@@ -1065,7 +1065,10 @@ async function runEmbedStep(
     // keyword-only index over a build already in flight and exit 0, leaving a repository
     // silently without vectors (spec `analyzer` IndexLockContentionIsNeverASilentDowngrade).
     if (error instanceof VectorIndexLockContendedError) {
-      throw new Error(`${error.message}\n    Re-run with \`openlore analyze --wait\` to wait for it, or stop the other process.`);
+      throw new Error(
+        `${error.message}\n    Re-run with \`openlore analyze --wait\` to wait for it, or stop the other process.`,
+        { cause: error },
+      );
     }
     throw error;
   }

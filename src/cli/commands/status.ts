@@ -145,7 +145,9 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
 
   const meta = readMetaSidecar(analysisDir);
   let embedder: Embedder | null = null;
-  try { embedder = await resolveEmbedder(config); } catch { embedder = null; }
+  // A resolver failure leaves the keyword default in place; `doctor` is where a broken
+  // provider is diagnosed, and `status` only reports what is being served.
+  try { embedder = await resolveEmbedder(config); } catch { /* keyword default */ }
   const retrievalMode = servedRetrievalMode(embedder, analysisDir);
   const configured = !configUnreadable && semanticProviderConfigured(config);
   const agreement = indexCapabilityAgreement(config, analysisDir);
