@@ -5,30 +5,39 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
-- **See OpenLore's state in Pi's footer.** A Pi session shows an `openlore:` status: `ready`,
-  `no index`, `analyzing…`, `index degraded`, or the daemon condition (incompatible, spawn
-  disabled, unavailable). It never says `ready` unless the index is whole and the daemon can
-  serve tools. `openloreHealth` no longer imports the serve command, so reading health in-process
-  stays light.
-- **Pi starts with the same lean tool surface as Claude Code.** A Pi session now activates only
-  the `substrate` tools (the default `openlore install` wires for MCP hosts), plus
-  `openlore_configure` and the new `openlore_activate_tools`. The activator turns on the `specs`,
-  `memory`, `review`, `quality`, or `inspect` group, by group name or by any tool name in it. Tool
-  snippets are one line instead of a repeated description. Set `"pi": { "toolSurface": "all" }` in
-  `.openlore/config.json` to keep every tool active (#505).
-- **Record decisions from the CLI.** `openlore decisions record --title … --rationale …` records the
-  same draft as the `record_decision` MCP tool, so a repository on the default preset can pass the
-  decisions gate. The gate and rejection hints no longer name the non-existent
-  `openlore decisions --record`, and generated agent guidance names the CLI command when the MCP
-  tool is not wired.
-- **Accept an intended breaking change, with a reason.** `openlore certify-public-surface --base <ref>
-  --accept --justification "…"` records the diff's breaking findings in
-  `.openlore/public-surface-baseline.jsonl` (commit it with the `git add -f` command it prints; it
-  never edits `.gitignore`). Later runs list them as `accepted` instead of as findings, and any new
-  or different break still reports. `--decision <id>` ties an acceptance to a decision; it
-  expires when that decision is superseded. Each breaking change is now also split into
-  `breaking-consumed` (with its consumers) or `breaking-unconsumed-in-index` (never "safe"), and
-  `--federation` counts consumers in indexed sibling repos.
+## [3.3.0] - 2026-09-20
+
+**The map now checks the weather before giving directions.**
+
+- **Search with its confidence showing.** Retrieval-backed answers say whether the evidence is
+  `covered`, `weak`, or `uncovered`. An uncovered search no longer presents a ranked list as an
+  answer; weak insertion-point matches no longer come with editing advice. When the index trails
+  your working tree, `search_code` and `locate_symbol_span` can use bounded, freshly read symbols,
+  including ones added since the last index build.
+- **Ask what the index is actually serving.** `openlore status` reports the retrieval mode, build
+  time, and staleness. `doctor` distinguishes a healthy embedding endpoint from an index with no
+  vectors, while index reuse checks the capability it really has. Lock contention now names the
+  holder and exits with an error instead of quietly producing a keyword index.
+- **Connect specs to evidence.** Audits can trace scenarios to reachable tests and flag scenarios
+  without an observable outcome. A reachable test is evidence of a path, not a claim that every
+  assertion has been proved.
+- **Keep change analysis close to the edit.** Change-oriented tools seed from the symbols that
+  actually changed, so edits in a busy file do not make every neighbor look relevant. `doctor`
+  also names oversized analysis corpora before a build, and fingerprint budget reports name the
+  paths that consumed the budget.
+- **Give Pi a useful first glance.** Its footer shows whether OpenLore is ready, building, or
+  degraded. Pi now starts with the lean tool set; `openlore_activate_tools` opens other groups on
+  demand. To keep every tool active from the start, set `"pi": { "toolSurface": "all" }` in
+  `.openlore/config.json`.
+- **Make governance practical.** `openlore decisions record` lets CLI-only setups record decisions.
+  Public-surface checks can accept an intentional break with a justification and distinguish
+  changes used by indexed consumers from those with no indexed consumer.
+
+Also fixed npm-aware update checks, Dart and Elixir call detection, and decision sync edge cases.
+
+**Upgrade:** `npm i -g openlore@3.3.0` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.2.0...v3.3.0
 
 ## [3.2.0] - 2026-09-13
 

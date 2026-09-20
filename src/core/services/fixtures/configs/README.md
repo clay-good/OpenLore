@@ -17,6 +17,8 @@ They intentionally do not move with the current schema.
   schema 1.2.0.
 - `3.2.0-default.json` captures the unchanged default configuration factory shape for v3.2.0 and
   schema 1.2.0.
+- `3.3.0-default.json` captures the unchanged default configuration factory shape for v3.3.0 and
+  schema 1.2.0. `3.3.0-pi-all.json` captures the explicit Pi all-tools option.
 
 For each release, add at least one `<package-version>-*.json` fixture before changing the package
 version. Include both a factory-default shape and a realistic customized shape when the release
