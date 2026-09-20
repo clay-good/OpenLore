@@ -160,9 +160,9 @@ describe('doctor command', () => {
       expect(Array.isArray(checks)).toBe(true);
     });
 
-    it('should include exactly 14 checks', async () => {
+    it('should include exactly 16 checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(14);
+      expect(checks).toHaveLength(16);
     });
 
     it('should include a governance corpus integrity check', async () => {

@@ -589,11 +589,86 @@ export function invalidateVectorIndexCaches(outputDir: string): void {
 /** Test-only: expose the canonical cache identity used for an index path. */
 export const _vectorIndexCacheIdentityForTesting = dbPathFor;
 
-async function withVectorIndexMutation<T>(outputDir: string, operation: () => Promise<T>): Promise<T> {
+/**
+ * Test-only: run an operation under the index mutation lock, so the lock's contention,
+ * reclamation and wait behavior can be asserted without building a real LanceDB table.
+ */
+export const _withVectorIndexMutationForTesting = <T>(
+  outputDir: string,
+  operation: () => Promise<T>,
+  options?: VectorIndexLockOptions,
+): Promise<T> => withVectorIndexMutation(outputDir, operation, options);
+
+/**
+ * Contention on the index's mutation lock, as a TYPED outcome.
+ *
+ * It used to be a bare `Error` carrying only the lock path, which the analyze command
+ * could not tell apart from an embedding-provider failure — so a build that collided
+ * with a concurrent one reported "keyword index used" and exited 0, over an index that
+ * still had no vectors (observed 2026-09-20). The holder's identity and the lock's age
+ * are exactly what distinguishes "wait for that build" from "your endpoint is down".
+ */
+export class VectorIndexLockContendedError extends Error {
+  constructor(
+    readonly lockPath: string,
+    /** PID named by the lock payload, or null when it names no process. */
+    readonly holderPid: number | null,
+    /** Age of the holder's last write, in milliseconds. */
+    readonly ageMs: number,
+    /** Present when the lock names no process, so nothing can ever judge it stale. */
+    readonly disclosure?: string,
+  ) {
+    const holder = holderPid === null ? 'a process that the lock file does not name' : `pid ${holderPid}`;
+    super(
+      `Vector index mutation lock is held by ${holder} (held for ${Math.round(ageMs / 1000)}s): ${lockPath}`
+      + (disclosure ? ` — ${disclosure}` : ''),
+    );
+    this.name = 'VectorIndexLockContendedError';
+  }
+}
+
+/** How a caller wants to handle a lock another live process holds. */
+export interface VectorIndexLockOptions {
+  /**
+   * `report` (the default) fails immediately with {@link VectorIndexLockContendedError};
+   * `wait` polls for the holder to finish. A caller that waits must be one whose work is
+   * worth the delay — the analyze command under `--wait` — because the critical section
+   * is a whole index build.
+   */
+  contention?: 'wait' | 'report';
+  /** Bound for `wait`. Omitted, the shared lock loop's default bound applies. */
+  maxWaitMs?: number;
+  /** Called when the acquire reclaimed a lock whose owner was dead, so the caller can say so. */
+  onReclaimed?: (lockPath: string) => void;
+}
+
+function pidFromLockPayload(payload: string): number | null {
+  const match = /^(\d+)\s/.exec(payload) ?? /"pid"\s*:\s*(\d+)/.exec(payload);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+async function withVectorIndexMutation<T>(
+  outputDir: string,
+  operation: () => Promise<T>,
+  options: VectorIndexLockOptions = {},
+): Promise<T> {
   let lockDir = resolve(outputDir);
   try { lockDir = realpathSync.native(lockDir); } catch { /* output directory may not exist yet */ }
-  const lock = await acquireLockAt(lockDir, '.vector-index.lock');
-  if ('held' in lock) throw new Error(`Vector index mutation lock is held: ${lock.lockPath}`);
+  // An explicit policy, not the defaults: the dead-PID staleness predicate is what
+  // reclaims a lock left by a crashed build (one sat unreclaimed for 16 days), and the
+  // contention mode is the caller's to choose rather than an inherited "wait".
+  const lock = await acquireLockAt(lockDir, '.vector-index.lock', {
+    onContended: options.contention ?? 'report',
+    ...(options.maxWaitMs === undefined ? {} : { maxWaitMs: options.maxWaitMs }),
+  });
+  if ('held' in lock) {
+    throw new VectorIndexLockContendedError(
+      lock.lockPath, pidFromLockPayload(lock.payload), lock.ageMs, lock.disclosure,
+    );
+  }
+  if (lock.reclaimed) options.onReclaimed?.(join(lockDir, '.vector-index.lock'));
   try {
     return await operation();
   } finally {
@@ -1332,6 +1407,8 @@ export class VectorIndex {
     incremental = false,
     vocabularyExpansion = true,
     callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
+    /** How to behave when another process is already mutating this index. */
+    lock?: VectorIndexLockOptions,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1344,7 +1421,7 @@ export class VectorIndex {
     return withVectorIndexMutation(outputDir, () => VectorIndex.buildUnlocked(
       outputDir, nodes, signatures, hubIds, entryPointIds, embedSvc, fileContents, incremental,
       vocabularyExpansion, callEdges,
-    ));
+    ), lock);
   }
 
   private static async buildUnlocked(
@@ -1642,10 +1719,15 @@ export class VectorIndex {
     entryPointIds: Set<string>,
     embedSvc: Embedder | null | undefined,
     fileContents?: Map<string, string>,
+    /**
+     * Incremental updates keep the historical WAIT behavior: the watcher's critical
+     * section is short, and a caller that loses the race should converge, not fail.
+     */
+    lock: VectorIndexLockOptions = { contention: 'wait' },
   ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' }> {
     return withVectorIndexMutation(outputDir, () => VectorIndex.updateFilesUnlocked(
       outputDir, nodes, changedFilePaths, signatures, hubIds, entryPointIds, embedSvc, fileContents,
-    ));
+    ), lock);
   }
 
   private static async updateFilesUnlocked(

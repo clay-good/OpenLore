@@ -179,6 +179,30 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     'severity',
     'tag',
   ],
+  // `openlore status` prints repository-derived values (config, index sidecar, receipt,
+  // file names) ONLY through `safe(...)`. What remains below is literal UI text, the
+  // colour helpers applied to it, and counts computed here — none can carry repository
+  // text (change: make-index-self-state-honest).
+  'cli/commands/status.ts': [
+    "c.yellow('No search index')",
+    'OPENLORE_DIR',
+    'OPENLORE_ANALYSIS_SUBDIR',
+    'c.dim(\'\u2192 Run "openlore analyze" to build one\')',
+    "label('Retrieval mode')",
+    "cause ? c.dim(` \u2014 ${cause}`) : ''",
+    "label('Configured provider')",
+    "label('Configuration')",
+    'c.yellow(\'unreadable \u2014 run "openlore doctor"\')',
+    "label('Index built')",
+    "label('Working tree')",
+    'staleText',
+    "' '.repeat(20)",
+    'c.dim(`\u2026 and ${staleCount - 5} more`)',
+    "label('Last embed failure')",
+    'where',
+    "label('Degraded')",
+    'c.dim(\'\u2192 Run "openlore analyze --force" to rebuild with the configured provider\')',
+  ],
   'cli/commands/audit.ts': [
     '(err as Error).message',
     'd.sourcesModifiedAt.slice(0, 10)',

@@ -20,6 +20,16 @@ import {
   resolveOpenLoreConfigPath,
 } from '../../core/services/config-manager.js';
 import { validateOpenLoreConfig } from '../../core/services/config-schema.js';
+import type { OpenLoreConfig } from '../../types/index.js';
+import type { Embedder } from '../../core/analyzer/embedding-service.js';
+import {
+  indexCapabilityAgreement,
+  resolveEmbedder,
+  semanticProviderConfigured,
+  servedRetrievalMode,
+} from '../../core/analyzer/embedder.js';
+import { readIndexReceipt } from '../../core/analyzer/analysis-indexes.js';
+import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { createLLMService, ProviderName } from '../../core/services/llm-service.js';
 import { isSqliteAvailable } from '../node-version-guard.js';
@@ -862,6 +872,76 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
   }
 }
 
+/**
+ * What retrieval this repository actually SERVES — read off the index, not off the
+ * configuration and not off the endpoint.
+ *
+ * `Embedding connection` answers a different question ("can I reach the endpoint"), and
+ * on 2026-09-20 it answered it correctly — `✓ … 384 dims · 1952ms` — while every query
+ * in this repository and in a second one had been served from a vectorless index for
+ * days. Two questions, two lines, two verdicts (spec `cli`
+ * DoctorReportsTheRetrievalModeActuallyServed).
+ */
+export async function checkRetrievalMode(rootPath: string): Promise<CheckResult> {
+  let config: OpenLoreConfig | null = null;
+  // An unreadable config is NOT "no provider configured": saying so would repeat the
+  // exact silence this check exists to remove. The config check owns that verdict; this
+  // one states that it could not tell, and stops.
+  let configUnreadable = false;
+  try { config = await readOpenLoreConfig(rootPath); } catch { configUnreadable = true; }
+  const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+
+  if (configUnreadable) {
+    return {
+      name: 'Retrieval mode',
+      status: 'warn',
+      detail: 'the configuration could not be read, so the configured provider is unknown — see the configuration check',
+      fix: 'Fix .openlore/config.json (the configuration check names the problem), then re-run doctor',
+    };
+  }
+
+  const configured = semanticProviderConfigured(config);
+  const agreement = indexCapabilityAgreement(config, analysisDir);
+  const receipt = await readIndexReceipt(analysisDir);
+  const failure = receipt?.embedFailure;
+  const failureDetail = failure
+    ? ` Last embedding failure: ${failure.reason}${failure.endpoint ? ` (${failure.endpoint})` : ''} at ${failure.at}.`
+    : '';
+
+  if (!VectorIndex.exists(analysisDir)) {
+    return {
+      name: 'Retrieval mode',
+      status: 'warn',
+      detail: `no search index in ${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}${failureDetail}`,
+      fix: 'Run "openlore analyze" to build one',
+    };
+  }
+
+  // The same resolver every query uses, so doctor cannot report a mode no search serves.
+  let embedder: Embedder | null = null;
+  try { embedder = await resolveEmbedder(config); } catch { embedder = null; }
+  const mode = servedRetrievalMode(embedder, analysisDir);
+
+  if (!agreement.agrees && agreement.mismatch === 'configured-but-unrealized') {
+    return {
+      name: 'Retrieval mode',
+      status: 'warn',
+      detail: `serving ${mode} — a semantic embedding provider is configured but this index carries no vectors.${failureDetail}`,
+      fix: 'Run "openlore analyze --force" to rebuild the index with the configured provider',
+    };
+  }
+
+  // A keyword index with nothing configured is the supported default, never a finding.
+  return {
+    name: 'Retrieval mode',
+    status: failure ? 'warn' : 'ok',
+    detail: configured
+      ? `serving ${mode}${failureDetail}`
+      : `serving ${mode} — no embedding provider configured (the first-class default)${failureDetail}`,
+    ...(failure ? { fix: 'Re-run "openlore analyze" once the embedding provider is reachable' } : {}),
+  };
+}
+
 async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult | null> {
   let config;
   try { config = await readOpenLoreConfig(rootPath); } catch { /* no config */ }
@@ -1056,7 +1136,7 @@ Checks performed:
       console.log('');
     }
 
-    const [staticChecks, mcpCheck, llmCheck, embeddingCheck] = await Promise.all([
+    const [staticChecks, mcpCheck, llmCheck, embeddingCheck, retrievalModeCheck] = await Promise.all([
       Promise.all([
         checkNodeVersion(),
         checkGit(rootPath),
@@ -1075,6 +1155,7 @@ Checks performed:
       checkMcpWiring(rootPath),
       checkLLMConnection(rootPath),
       checkEmbeddingConnection(rootPath),
+      checkRetrievalMode(rootPath),
     ]);
 
     const unredactedChecks = [
@@ -1082,6 +1163,7 @@ Checks performed:
       ...(mcpCheck ? [mcpCheck] : []),
       llmCheck,
       ...(embeddingCheck ? [embeddingCheck] : []),
+      retrievalModeCheck,
     ];
     // One shared output boundary covers human and JSON rendering. Provider error
     // bodies are attacker-controlled and may reflect the exact credential they

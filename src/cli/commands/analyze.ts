@@ -57,6 +57,7 @@ import {
   buildSpecIndex,
   type IndexReport,
 } from '../../core/analyzer/analysis-indexes.js';
+import { VectorIndexLockContendedError } from '../../core/analyzer/vector-index.js';
 import { readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../../core/runtime/analysis-generation.js';
 
 // ============================================================================
@@ -553,6 +554,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
               opts.include,
               opts.exclude,
               cached.generationId,
+              opts.wait ?? false,
             );
 
             // If --ai-configs is requested, generate them even from cached analysis
@@ -990,6 +992,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         opts.include,
         opts.exclude,
         result.generationId,
+        opts.wait ?? false,
       );
 
       // Duration
@@ -1030,6 +1033,7 @@ async function runEmbedStep(
   include: string[] = [],
   exclude: string[] = [],
   generationId?: string,
+  waitForLock = false,
 ): Promise<void> {
   const reporter = {
     report(event: IndexReport): void {
@@ -1041,19 +1045,30 @@ async function runEmbedStep(
       else if (event.status === 'complete') console.log(`    ✓ ${label} built${event.detail ? ` ${safe(event.detail)}` : ''}`);
     },
   };
-  await buildAnalysisIndexes({
-    rootPath,
-    outputPath,
-    config: openloreConfig,
-    force,
-    llmContext,
-    keywordOnly,
-    freshSpecDirectory,
-    include,
-    exclude,
-    generationId,
-    reporter,
-  });
+  try {
+    await buildAnalysisIndexes({
+      rootPath,
+      outputPath,
+      config: openloreConfig,
+      force,
+      llmContext,
+      keywordOnly,
+      freshSpecDirectory,
+      include,
+      exclude,
+      generationId,
+      waitForLock,
+      reporter,
+    });
+  } catch (error) {
+    // Contention is fatal by design: the alternative — the historical one — was to write a
+    // keyword-only index over a build already in flight and exit 0, leaving a repository
+    // silently without vectors (spec `analyzer` IndexLockContentionIsNeverASilentDowngrade).
+    if (error instanceof VectorIndexLockContendedError) {
+      throw new Error(`${error.message}\n    Re-run with \`openlore analyze --wait\` to wait for it, or stop the other process.`);
+    }
+    throw error;
+  }
 }
 
 export function formatSpecIndexFailure(message: string, freshSpecDirectory: boolean): string {

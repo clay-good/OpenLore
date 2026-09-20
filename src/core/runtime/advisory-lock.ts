@@ -154,6 +154,13 @@ export interface LockHandle {
    * or deleting, so a superseded holder cannot damage its successor's lock.
    */
   inode: number;
+  /**
+   * True when this acquire STOLE a lock its policy judged stale (a dead or
+   * long-abandoned holder) rather than finding the path free. Reclamation is
+   * correct but not invisible: a caller that reclaims must be able to SAY it did,
+   * so an operator seeing work proceed past a lock knows why.
+   */
+  reclaimed: boolean;
 }
 
 /** Returned instead of a handle when `onContended: 'report'` finds a live holder. */
@@ -321,6 +328,9 @@ export async function acquireLockAt(
   // millisecond of syscalls, and reporting that as a wait would make a caller
   // believe another holder just finished the work it is about to do.
   let contended = false;
+  // Did this acquire steal a lock judged stale? Carried out on the handle so the
+  // caller can state the reclamation instead of silently proceeding past a lock.
+  let reclaimed = false;
 
   for (;;) {
     throwIfAborted(signal);
@@ -356,6 +366,7 @@ export async function acquireLockAt(
           bestEffort: false,
           waitedMs: contended ? Date.now() - start : 0,
           inode,
+          reclaimed,
           refresh: async (payload: string) => {
             if (released) return;
             // Serialize truncate+write pairs. Heartbeats and explicit stage updates
@@ -469,6 +480,7 @@ export async function acquireLockAt(
             }
           } catch { /* already gone — nothing to restore */ }
           await unlink(stolen).catch(() => {});
+          reclaimed = true;
           continue; // retry acquire immediately
         }
         if (onContended === 'report') {
@@ -478,7 +490,7 @@ export async function acquireLockAt(
           if (!bestEffortAfterMaxWait) {
             return describeHolder(contents, mtimeMs, lockPath);
           }
-          return { bestEffort: true, waitedMs: Date.now() - start, inode: -1, refresh: async () => {}, release: async () => {} };
+          return { bestEffort: true, waitedMs: Date.now() - start, inode: -1, reclaimed, refresh: async () => {}, release: async () => {} };
         }
         // Never sleep while owning the namespace gate: doing so makes N waiters
         // hold it for N × POLL_MS and can starve the live holder's release.
