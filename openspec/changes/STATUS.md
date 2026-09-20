@@ -43,7 +43,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 A change belongs here the moment its implementation starts; move it back out (archive it) the
 moment its marker/spec evidence lands.
 
-## To build — 97
+## To build — 96
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -313,6 +313,24 @@ calls, the dependency graph's imports (aliases, barrels, whole-module imports), 
 to a removed name, with an opt-in federation census. Four review rounds (13 reviewers, 3 real-repo
 dogfoods) closed about 30 defects. Two pre-existing classifier gaps (return-type direction; Python,
 CommonJS, and positional-parameter false-safes) are filed as their own tasks.
+
+Shipped and archived since: `add-symbol-content-hashes` (2026-09-19, PR #520) — `blast_radius`,
+`select_tests` and `briefing_since` seed from the symbols a diff ACTUALLY changed, from normalized
+per-symbol hashes taken over each changed file's parse tree at two revisions (comments dropped
+except directives; tree shape kept, so Python indentation is structure). Module-level tokens, the
+file's run layout, the per-import hashes and the module-level identifier names are four separate
+signals, which is what keeps narrowing sound AND non-inert: an added symbol or a purely additive
+name-binding import leaves the others alone, while an import that MOVES, a wildcard/blank/dot
+import, or module-level code that NAMES a changed symbol keeps the whole file. Twelve closed
+fallback reasons, four bounds (files, per-file bytes, total bytes, wall clock) that always degrade
+toward seeding MORE, and a four-way claim (`unchanged` / `not-indexed` / `not-seeded` /
+`not-assessed`) that refuses to say "nothing changed" when it means "not assessed". Five adversarial
+review rounds (15 reviewers, ~35 defects) — the sharpest being a `git mv` that hashed identically
+and dropped every symbol, a residual design that made narrowing inert (5–14x latency for ~0% gain),
+an unbounded read phase (1.9 GB, fatal OOM), a FIFO that starved the libuv threadpool, and a
+headline that kept rendering "formatting or comments only" after the caveat beside it was fixed.
+Deferred: the persisted `norm_hash` column (to `add-incremental-early-cutoff`), the change-coupling
+semantic-churn view, and `report_coverage_gaps`' diff scope.
 
 ## Maintenance rules (what kept this table honest)
 
