@@ -19,7 +19,9 @@
       budget fail; existing parse/query bounds catch a redundant extraction pass
 - [x] Counters are inert (no counter mutations or extra payload encoding) when inactive
 - [x] Suites run under CI's existing test:unit and test:equivalence steps (no workflow change)
-- [ ] Full suite green
+- [x] Full local unit suite green (9,994 passed, 2 skipped); Linux CI unit, equivalence,
+      integration, build, lint/typecheck, Node 22.19, Windows Smoke, and Windows Unit green
+      on PR #524's implementation commit.
 
 ## Spec
 - [x] `project` delta: ADD PerformanceBudgetsAreCounterBasedAndDeterministic

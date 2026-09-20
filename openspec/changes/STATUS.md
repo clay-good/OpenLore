@@ -332,6 +332,13 @@ headline that kept rendering "formatting or comments only" after the caveat besi
 Deferred: the persisted `norm_hash` column (to `add-incremental-early-cutoff`), the change-coupling
 semantic-churn view, and `report_coverage_gaps`' diff scope.
 
+Shipped and archived since: `add-perf-regression-counter-budgets` (2026-09-20, PR #524) —
+CI-visible exact work budgets pin the shared source-parse boundary, native query compilation,
+type inference, full EdgeStore loads and statement prepares, adjacency builds, and atomic artifact
+payload bytes on fixed fixtures. The full-analysis, primed-orient, and 30-file incremental watcher
+paths are exercised; an extra parse or full-table load fails its budget. Payload growth follows
+the measured-delta ratchet policy in `docs/performance-budgets.md`.
+
 ## Maintenance rules (what kept this table honest)
 
 - Ship a `change: <name>` marker in the code, or expect this table to call the change unbuilt.

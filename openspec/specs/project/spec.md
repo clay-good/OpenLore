@@ -94,6 +94,28 @@ the deterministic sub-benchmarks SHALL remain runnable without agent credentials
 - **WHEN** a commit lands
 - **THEN** CI runs only the existing test suite; no benchmark executes per-commit
 
+### Requirement: PerformanceBudgetsAreCounterBasedAndDeterministic
+
+The project SHALL guard against performance regressions with counter-based budgets — counts of
+deterministic work units (files parsed, queries compiled, node-table loads, adjacency
+rebuilds, type inferences, SQL statements, bytes written) on a pinned fixture — asserted in
+CI-visible tests, not wall-clock timings. Budgets over deterministic counters SHALL be exact;
+a change that legitimately raises a budget SHALL update its recorded baseline in the same
+change with the measured delta stated.
+
+#### Scenario: A reintroduced redundant pass fails CI
+
+- **GIVEN** the counter-based budget suite on the pinned fixture
+- **WHEN** a change reintroduces a redundant corpus parse pass or a per-call full-graph rebuild
+- **THEN** a budget assertion fails, rather than the regression landing silently
+
+#### Scenario: Budgets are deterministic, not flaky
+
+- **GIVEN** the budget suite run repeatedly on the same fixture
+- **WHEN** the same analysis and serving work is measured again
+- **THEN** the measured counts are identical across runs (no wall-clock dependence), so the
+  budgets can be exact
+
 ## Technical Notes
 
 - **Implementation**: `src/core/services/project-detector.ts`, `bench/Dockerfile`,
@@ -101,4 +123,7 @@ the deterministic sub-benchmarks SHALL remain runnable without agent credentials
   `bench/container/package.json`, `bench/container/package-lock.json`, `bench/run.ts`,
   `scripts/bench-agent.ts`, `src/bench/container-launch.ts`, `src/bench/pinned-repository.ts`,
   `src/bench/preregistered-rule.ts`, `src/bench/protocol-verdict.ts`, `src/bench/result-path.ts`,
-  and `src/bench/fixtures/trajectory.txt`.
+  `src/bench/fixtures/trajectory.txt`, `src/core/analyzer/perf-counters.ts`,
+  `src/core/analyzer/parse-budget.ts`, `src/core/analyzer/json-stream.ts`,
+  `src/core/services/edge-store.ts`, `src/core/services/mcp-handlers/graph.ts`,
+  and `src/core/decisions/atomic-store.ts`.
