@@ -30,7 +30,7 @@ import {
   type AnalysisContentProvenance,
 } from '../served-content.js';
 import { computeIndexStaleness, withIndexStaleness } from './index-staleness.js';
-import { overlayResults } from './overlay-results.js';
+import { dirtySourcePaths, overlayResults } from './overlay-results.js';
 import {
   coverageDisclosure,
   coverageVerdict,
@@ -277,32 +277,6 @@ export async function handleSearchCode(
   ]);
   const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
   const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
-  // Zero symbol hits: the string may live in static markup/text that extracts
-  // no symbols (UI copy, error messages). Fall back to the literal-text line
-  // index rather than returning a dead end. This is an optional enrichment —
-  // its failure must never turn a valid empty symbol result into a tool error,
-  // so a throw degrades silently to the normal empty response below.
-  if (results.length === 0) {
-    try {
-      const textFallback = await searchTextLines(
-        outputDir, query, limit, 'text_fallback', analysisProvenance, vocabularyExpansion,
-      );
-      if (textFallback) {
-        return withIndexStaleness(
-          absDir,
-          {
-            ...textFallback,
-            ...(indexDegraded ? { indexDegraded } : {}),
-          },
-          llmCtx,
-          textFallback.results.map(hit => hit.filePath),
-        );
-      }
-    } catch {
-      /* text index unavailable/corrupt — fall through to the empty symbol response */
-    }
-  }
-
   type Neighbour = { name: string; filePath: string };
 
   // ── RIG-20: cross-graph spec traversal — seed → spec domains → peer functions ──
@@ -368,7 +342,37 @@ export async function handleSearchCode(
   // A ranked list of incidental matches is shaped exactly like an answer. The verdict
   // says which one this is, folded from the evidence each result already carries
   // (spec `mcp-quality` NoFalseCoverage).
-  const verdict = coverageVerdict(allResults.map(r => r.matchEvidence));
+  const citedStaleness = await computeIndexStaleness(absDir, { results: allResults }, llmCtx);
+  // A zero-hit index has no citation from which the normal freshness check can
+  // discover a newly written symbol. Inspect only bounded Git changes in that case.
+  const dirty = allResults.length === 0 ? await dirtySourcePaths(absDir) : [];
+  const dirtyStaleness = dirty.length > 0
+    ? await computeIndexStaleness(absDir, null, llmCtx, dirty)
+    : undefined;
+  const staleFiles = [...new Set([
+    ...(citedStaleness?.staleFiles ?? []),
+    ...(dirtyStaleness?.staleFiles ?? []),
+  ])];
+  const overlaid = await overlayResults(absDir, query, allResults, staleFiles);
+  const verdict = overlaid.additions.length > 0
+    ? 'covered'
+    : coverageVerdict(overlaid.results.map(r => r.matchEvidence));
+
+  // Static markup and literal strings may have no extracted symbol. Try the text
+  // index only after the working tree has had a chance to supply a new one.
+  if (results.length === 0 && overlaid.additions.length === 0) {
+    try {
+      const textFallback = await searchTextLines(
+        outputDir, query, limit, 'text_fallback', analysisProvenance, vocabularyExpansion,
+      );
+      if (textFallback) {
+        return withIndexStaleness(absDir, {
+          ...textFallback,
+          ...(indexDegraded ? { indexDegraded } : {}),
+        }, llmCtx, textFallback.results.map(hit => hit.filePath));
+      }
+    } catch { /* text index unavailable: return the symbol answer below */ }
+  }
   if (verdict === 'uncovered') {
     return withIndexStaleness(absDir, {
       query,
@@ -384,16 +388,13 @@ export async function handleSearchCode(
       // No ranked list: withholding it IS the abstention. `explain_retrieval_miss`
       // answers which field would have had to match.
       results: [],
+      ...(overlaid.disclosure ? { workingTreeOverlay: overlaid.disclosure } : {}),
+      ...(overlaid.removed.length > 0 ? { removedInWorkingTree: overlaid.removed } : {}),
       nextStep: 'explain_retrieval_miss(directory, query, target) names why an expected symbol did not come back.',
       ...(indexDegraded ? { indexDegraded } : {}),
     }, llmCtx);
   }
 
-  // Reconcile the ranked answer with the working tree before returning it: the symbols a
-  // caller just edited are the ones most likely to matter, and the freshness check has
-  // already named those files (spec `mcp-handlers` StalenessDisclosingHandlersServeTheOverlay).
-  const staleness = await computeIndexStaleness(absDir, { results: allResults }, llmCtx);
-  const overlaid = await overlayResults(absDir, query, allResults, staleness?.staleFiles ?? []);
   const budgetedRows = tokenBudget
     ? applyTokenBudget(collapseExactDuplicates(overlaid.results), tokenBudget)
     : { kept: overlaid.results, omitted: 0 };

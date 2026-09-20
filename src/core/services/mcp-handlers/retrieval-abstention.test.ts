@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { MatchEvidence } from '../../analyzer/retrieval-evidence.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
@@ -86,6 +87,52 @@ describe('retrieval handlers — coverage verdict and abstention', () => {
     expect(result.results).toEqual([]);
     expect(result.count).toBe(0);
     expect(coverage.reason).toContain('Nothing in the index matched');
+  });
+
+  it('search_code finds a new working-tree symbol when the index has no hits', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: tmpDir });
+    await mkdir(join(tmpDir, 'src'), { recursive: true });
+    await writeFile(join(tmpDir, 'src', 'spinner.ts'), 'export function spinnerGuard() {}\n');
+    mockSearch([]);
+    const { handleSearchCode } = await import('./semantic.js');
+
+    const result = await handleSearchCode(tmpDir, 'spinner') as Record<string, unknown>;
+
+    expect((result.coverage as Record<string, unknown>).verdict).toBe('covered');
+    expect(result.workingTreeAdditions).toMatchObject([{ name: 'spinnerGuard', filePath: 'src/spinner.ts' }]);
+  });
+
+  it('does not claim coverage from an indexed symbol deleted in the working tree', async () => {
+    await mkdir(join(tmpDir, 'src'), { recursive: true });
+    await writeFile(join(tmpDir, 'src', 'a.ts'), 'export function survivor() {}\n');
+    mockSearch([{
+      score: 2,
+      record: makeRecord({ name: 'deletedSpinner' }),
+      matchEvidence: { field: 'symbol', terms: ['spinner'], tier: 1 } satisfies MatchEvidence,
+    }]);
+    const { handleSearchCode } = await import('./semantic.js');
+
+    const result = await handleSearchCode(tmpDir, 'spinner') as Record<string, unknown>;
+
+    expect((result.coverage as Record<string, unknown>).verdict).toBe('uncovered');
+    expect(result.results).toEqual([]);
+    expect(result.removedInWorkingTree).toContain('deletedSpinner (src/a.ts)');
+  });
+
+  it('does not retain coverage from a signature term removed by an edit', async () => {
+    await mkdir(join(tmpDir, 'src'), { recursive: true });
+    await writeFile(join(tmpDir, 'src', 'a.ts'), 'export function f(value: number) {}\n');
+    mockSearch([{
+      score: 2,
+      record: makeRecord({ name: 'f', signature: 'function f(spinner: string)' }),
+      matchEvidence: { field: 'signature', terms: ['spinner'], tier: 1 } satisfies MatchEvidence,
+    }]);
+    const { handleSearchCode } = await import('./semantic.js');
+
+    const result = await handleSearchCode(tmpDir, 'spinner') as Record<string, unknown>;
+
+    expect((result.coverage as Record<string, unknown>).verdict).toBe('weak');
+    expect((result.results as Array<Record<string, unknown>>)[0].signature).toContain('value: number');
   });
 
   it('search_code states when every result rests on incidental evidence', async () => {

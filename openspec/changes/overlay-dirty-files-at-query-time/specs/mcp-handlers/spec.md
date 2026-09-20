@@ -4,24 +4,24 @@
 
 ### Requirement: StalenessDisclosingHandlersServeTheOverlay
 
-Every handler that discloses index staleness SHALL serve the live overlay for the stale set when the
-overlay succeeded, and SHALL keep its existing disclosure for whatever the overlay did not cover. The
-disclosure SHALL state which of the two happened, so a caller is never left unable to tell a served
-overlay from a plain stale answer.
+`search_code` SHALL reconcile cited stale files with the live overlay when the overlay succeeds,
+and `locate_symbol_span` SHALL prefer live spans for an edited file. `search_code` SHALL also inspect
+a bounded Git working-tree candidate set when the index has no symbol hits, so a newly added symbol
+can be found. The answer SHALL distinguish files read from source from files still served from the
+index; incoming call edges remain subject to the existing staleness disclosure.
 
-#### Scenario: The notice narrows to what is still stale
+#### Scenario: The overlay disclosure names what was read
 
 - **GIVEN** a query whose stale set was fully overlaid
 - **WHEN** the answer is produced
-- **THEN** the staleness notice names no remaining stale file and states that the edited files were
-  read from source
+- **THEN** the overlay disclosure names the edited files read from source and states that incoming
+  call edges can still predate the edit
 
 #### Scenario: A skipped overlay keeps today's behavior
 
 - **GIVEN** a query whose overlay was skipped for exceeding its bound
 - **WHEN** the answer is produced
-- **THEN** the existing staleness notice is returned unchanged, plus the reason the overlay was
-  skipped
+- **THEN** the indexed answer is retained with a disclosure naming why the overlay was skipped
 
 ### Requirement: ExactPositionsPreferTheOverlay
 

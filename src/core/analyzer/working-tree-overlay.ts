@@ -78,10 +78,8 @@ function deriveLines(node: FunctionNode, content: string): FunctionNode {
 }
 
 /**
- * Process-lifetime memo of overlaid extractions, keyed by the same identity the
- * persistent Pass-1 fact cache uses: `sha256(language + '\0' + content)`. Pass 1 is a pure
- * function of `(language, content)`, so an identical key can only reproduce an identical
- * answer — that purity is what makes the build-time memo sound, and it holds here.
+ * Process-lifetime memo of overlaid extractions. Extracted node IDs and file paths
+ * depend on the source path, so identical content in two files needs separate entries.
  *
  * Deliberately in-process rather than the EdgeStore-backed cache: the overlay runs on the
  * QUERY path, where opening the graph store to memoize a handful of files would cost more
@@ -93,8 +91,8 @@ const _overlayMemo = new Map<string, FunctionNode[]>();
 /** Bound: an editing session touches few files, and a memo must not grow without limit. */
 const OVERLAY_MEMO_MAX_ENTRIES = 200;
 
-function memoKey(language: string, content: string): string {
-  return createHash('sha256').update(`${language}\0${content}`).digest('hex');
+function memoKey(filePath: string, language: string, content: string): string {
+  return createHash('sha256').update(`${filePath}\0${language}\0${content}`).digest('hex');
 }
 
 /** Test-only: clear the overlay memo so a test can observe a cold extraction. */
@@ -191,7 +189,7 @@ export async function buildWorkingTreeOverlay(
     }
     bytes += Buffer.byteLength(content, 'utf-8');
 
-    const key = memoKey(language, content);
+    const key = memoKey(filePath, language, content);
     const memoized = _overlayMemo.get(key);
     if (memoized) {
       nodes.push(...memoized);

@@ -16,6 +16,37 @@
  */
 
 import { buildOverlayDisclosure, buildWorkingTreeOverlay, type OverlayDisclosure } from '../../analyzer/working-tree-overlay.js';
+import { detectLanguage } from '../../analyzer/language-detection.js';
+import { vectorMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
+/** Find bounded working-tree candidates when the index has no symbol to cite. */
+export async function dirtySourcePaths(rootPath: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      cwd: rootPath,
+      maxBuffer: 64 * 1024,
+      timeout: 500,
+    });
+    const entries = stdout.split('\0');
+    const paths: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.length < 4) continue;
+      const status = entry.slice(0, 2);
+      const path = entry.slice(3);
+      if (!path.startsWith('.openlore/') && detectLanguage(path) !== 'unknown') paths.push(path);
+      if (status.includes('R') || status.includes('C')) i++; // old path follows
+      if (paths.length > 25) break; // overlay reports its own file-cap skip
+    }
+    return paths;
+  } catch {
+    return []; // git unavailable or too many changes: preserve the indexed answer
+  }
+}
 
 /** How many unranked working-tree additions one answer may carry. */
 const MAX_OVERLAY_ADDITIONS = 5;
@@ -29,6 +60,7 @@ export interface OverlayableResult {
 export interface OverlayAddition {
   name: string;
   filePath: string;
+  className?: string;
   startLine?: number;
   language: string;
   signature?: string;
@@ -78,31 +110,53 @@ export async function overlayResults<T extends OverlayableResult>(
   }
 
   const covered = new Set(overlay.coveredFiles);
-  const live = new Set(overlay.nodes.map(node => `${node.filePath}::${node.name}`));
+  const live = new Map(overlay.nodes.map(node => [`${node.filePath}::${node.className ?? ''}::${node.name}`, node]));
 
   // A row for a covered file whose symbol is gone from disk is a ghost: the index still
   // remembers a function the caller has since deleted or renamed.
   const kept: T[] = [];
   const removed: string[] = [];
   for (const row of results) {
-    if (covered.has(row.filePath) && !live.has(`${row.filePath}::${row.name}`)) {
-      removed.push(`${row.name} (${row.filePath})`);
+    if (covered.has(row.filePath)) {
+      const key = `${row.filePath}::${String(row.className ?? '')}::${row.name}`;
+      const current = live.get(key);
+      if (!current) {
+        removed.push(`${row.name} (${row.filePath})`);
+        continue;
+      }
+      const evidence = row.matchEvidence as MatchEvidence | undefined;
+      const currentField = evidence?.field === 'symbol' ? current.name
+        : evidence?.field === 'path' ? current.filePath
+          : evidence?.field === 'signature' ? current.signature
+            : evidence?.field === 'doc' ? current.docstring
+              : undefined;
+      const evidenceStillApplies = currentField !== undefined && evidence?.terms.some(term =>
+        currentField.toLowerCase().includes(term.toLowerCase()));
+      kept.push({
+        ...row,
+        startLine: current.startLine,
+        signature: current.signature,
+        docstring: current.docstring,
+        source: 'working-tree-overlay',
+        ...(evidence && !evidenceStillApplies ? { matchEvidence: vectorMatchEvidence(3) } : {}),
+      });
       continue;
     }
     kept.push(row);
   }
 
-  const known = new Set(kept.map(row => `${row.filePath}::${row.name}`));
+  const known = new Set(kept.map(row => `${row.filePath}::${String(row.className ?? '')}::${row.name}`));
   const tokens = queryTokens(query);
   const additions: OverlayAddition[] = [];
   for (const node of overlay.nodes) {
     if (additions.length >= MAX_OVERLAY_ADDITIONS) break;
-    const identity = `${node.filePath}::${node.name}`;
+    const identity = `${node.filePath}::${node.className ?? ''}::${node.name}`;
     if (known.has(identity)) continue;
     if (!namedByQuery(node, tokens)) continue;
     additions.push({
       name: node.name,
       filePath: node.filePath,
+      ...(node.className ? { className: node.className } : {}),
       ...(node.startLine !== undefined ? { startLine: node.startLine } : {}),
       language: node.language,
       ...(node.signature ? { signature: node.signature } : {}),

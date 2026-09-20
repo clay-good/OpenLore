@@ -5,12 +5,12 @@
 ### Requirement: StaleFilesAreOverlaidFromSourceAtQueryTime
 
 When a query is served against an index that is behind the working tree for a known set of files,
-the system SHALL re-extract those files from source and overlay their facts on the cached graph
-before answering, rather than serving the stale facts with a notice alone. The overlay SHALL cover
-the symbols, signatures, spans, and file-local imports of the stale files.
+the system SHALL re-extract those files from source and reconcile the symbol answer before
+returning it. The overlay SHALL cover symbols, signatures, and spans of the stale files.
 
-The overlay SHALL reuse the content-hash-keyed Pass-1 extraction path, so an unchanged file is never
-re-parsed and a file already extracted in this session is served from cache.
+The overlay SHALL cache extraction by source path, language, and content hash, so a file already
+extracted with the same bytes in this session is served from cache without assigning its nodes to
+another file that happens to contain identical text.
 
 #### Scenario: An edited symbol is served from source, not from the index
 
@@ -24,6 +24,12 @@ re-parsed and a file already extracted in this session is served from cache.
 - **GIVEN** a file whose indexed function has been deleted in the working tree
 - **WHEN** a query is served
 - **THEN** the deleted function is absent from the answer
+
+#### Scenario: A new symbol is found when the index has no hits
+
+- **GIVEN** a Git working tree with a new source file containing a symbol absent from the index
+- **WHEN** a symbol query names that symbol
+- **THEN** the bounded working-tree overlay returns it with source provenance and no rank score
 
 #### Scenario: Unchanged files are not re-extracted
 

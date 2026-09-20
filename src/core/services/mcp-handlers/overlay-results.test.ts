@@ -48,6 +48,18 @@ describe('overlayResults — the answer, reconciled with what is on disk', () =>
     expect(out.removed).toEqual(['deletedSinceIndexing (src/a.ts)']);
   });
 
+  it('updates the span and signature of a surviving indexed symbol', async () => {
+    await write('src/a.ts', '\n\nexport function current(value: string) {}\n');
+
+    const out = await overlayResults(root, 'current', [
+      { name: 'current', filePath: 'src/a.ts', startLine: 1, signature: 'function current()' },
+    ], ['src/a.ts']);
+
+    expect(out.results[0].startLine).toBe(3);
+    expect(out.results[0].signature).toContain('value: string');
+    expect((out.results[0] as Record<string, unknown>).source).toBe('working-tree-overlay');
+  });
+
   it('surfaces a symbol the index has never seen, unranked and labelled', async () => {
     await write('src/a.ts', 'export function existing() {}\nexport function spinnerGuard() {}\n');
 

@@ -3,7 +3,7 @@
 ## 1. Overlay core
 
 - [x] 1.1 Add a query-time overlay that takes the stale set from `freshness.ts` and returns
-  re-extracted symbols, signatures, spans and file-local imports through the Pass-1 fact cache;
+  re-extracted symbols, signatures, and spans through an in-process, path-aware memo;
   verify with a test that an added function in a dirty file appears and a deleted one disappears
 - [x] 1.2 Verify the cache is honoured: assert no re-parse on a second query in the same session and
   none for files outside the stale set
@@ -14,17 +14,16 @@
 
 ## 2. Row coherence and provenance
 
-- [x] 2.1 Suppress indexed rows for any file the overlay covered so an answer never mixes two
-  versions of one file; verify with a test asserting a single row set per file
+- [x] 2.1 Refresh surviving indexed rows from the overlay and suppress deleted symbols; verify current
+  signatures and spans are served with an overlay label
 - [x] 2.2 Label overlaid results with overlay provenance and verify it is distinguishable from
   indexed provenance in the structured output
-- [x] 2.3 Reflect the uncovered part in the answer-level completeness flag and verify a partially
-  overlaid answer is not marked complete
+- [x] 2.3 Mark the working-tree boundary incomplete when overlaid symbols retain indexed incoming edges
 
 ## 3. Handler integration
 
-- [x] 3.1 Serve the overlay from the staleness-disclosing handlers and narrow the notice to what
-  remains stale; verify the notice is absent when the stale set was fully overlaid
+- [x] 3.1 Serve the overlay from `search_code` and `locate_symbol_span`; verify the separate disclosure
+  names files read from source and files still served from the index
 - [x] 3.2 Make `symbol-span` prefer overlaid spans and drop the untrustworthy-offset warning for
   covered files; verify the warning still appears when the overlay was skipped
 - [x] 3.3 Disclose the edge-staleness limit when callers of an overlaid symbol are reported, and

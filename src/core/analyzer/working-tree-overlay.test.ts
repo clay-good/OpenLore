@@ -55,6 +55,17 @@ describe('buildWorkingTreeOverlay — the edited files, read from disk', () => {
     expect(_overlayMemoSizeForTesting()).toBe(1);
   });
 
+  it('keeps identical source in different files attached to the correct path', async () => {
+    await write('src/a.ts', 'export function same() {}\n');
+    await write('src/b.ts', 'export function same() {}\n');
+
+    const overlay = await buildWorkingTreeOverlay(root, ['src/a.ts', 'src/b.ts']);
+
+    expect(overlay.nodes.map(node => node.filePath).sort()).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(new Set(overlay.nodes.map(node => node.id)).size).toBe(2);
+    expect(_overlayMemoSizeForTesting()).toBe(2);
+  });
+
   it('re-extracts once the file changes, and memoizes the new bytes', async () => {
     await write('src/a.ts', 'export function f() {}\n');
     await buildWorkingTreeOverlay(root, ['src/a.ts']);
