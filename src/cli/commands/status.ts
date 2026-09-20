@@ -94,7 +94,7 @@ async function changedSinceIndex(rootPath: string, builtAtMs: number | null): Pr
   if (builtAtMs === null) return { files: [], truncated: false, unknown: true };
   let stdout: string;
   try {
-    ({ stdout } = await execFileGit('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+    ({ stdout } = await execFileGit('git', ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], {
       cwd: rootPath,
       maxBuffer: 4 * 1024 * 1024,
     }));
