@@ -101,8 +101,13 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   let requestedRefUnresolved: boolean;
   let changedFiles: string[];
   let diffEntries: DiffEntry[];
+  /** The analyzed root's path inside the work tree, for re-framing diff paths (`''` at the root). */
+  let repoPrefix = '';
+  /** Bound once the git-diff module is loaded below; the region filter needs it afterwards. */
+  let reframeRepoPath: (repoRelPath: string, prefix: string) => string | null = p => p;
   try {
-    const { getChangedFiles, resolveBaseRefDisclosed, getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const { getChangedFiles, resolveBaseRefDisclosed, getRepoPrefix, reframeRepoPath: reframe } = await import('../../drift/git-diff.js');
+    reframeRepoPath = reframe;
     const base = await resolveBaseRefDisclosed(absDir, baseRefInput);
     resolvedBase = base.resolved;
     requestedRefUnresolved = base.fellBack;
@@ -112,6 +117,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     // graph is analyzed-root-relative; re-frame so the changed-symbol join is correct
     // (no-op at the root). Files outside the analyzed subtree are dropped.
     const prefix = (await getRepoPrefix(absDir)) ?? '';
+    repoPrefix = prefix;
     // Production code files only — tests/config/generated are not "changes that matter"
     // to rank; they still drive the tests-to-run selection below.
     changedFiles = diff.files
@@ -146,8 +152,11 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   // renamed hub is exactly what a returning reader must see — and the pair is named under `carried`.
   // A region scope narrows the receipt too: telling a reader scoped to `src/cli/` about fallbacks in
   // files they cannot see breaks the same denominators-match-the-briefing rule as the counts above.
+  // Match the pattern in the briefing's own frame: diff paths are repository-relative, while the
+  // pattern and the briefed symbols are analyzed-root relative, and below the repository root the
+  // two differ (the same trap the size probe hit).
   const scopedEntries = input.filePattern
-    ? diffEntries.filter(entry => entry.path.includes(input.filePattern!))
+    ? diffEntries.filter(entry => (reframeRepoPath(entry.path, repoPrefix) ?? entry.path).includes(input.filePattern!))
     : diffEntries;
   const narrowed = await narrowToChangedSymbols(absDir, resolvedBase, scopedEntries, cg, fileSymbols);
   const carried: CarriedSymbol[] = narrowed.set?.carried ?? [];
@@ -229,7 +238,9 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
         : `No changed production symbol matched filePattern "${input.filePattern}" — "nothing matched", NOT "nothing significant".`;
     } else {
       note = changedFiles.length === 0
-        ? `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
+        ? diffEntries.length === 0
+          ? `Nothing changed since ${resolvedBase}: the diff is empty.`
+          : `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
         : changeGranularity && (fileSymbols.length > 0 || changeGranularity.changedSymbolsFound > 0)
           ? `Nothing was briefed against ${resolvedBase}: ${noChangeClaim(changeGranularity).text}`
           : 'The changed file(s) contain no analyzed production symbol (not yet analyzed, or only tests/generated) — "nothing matched", NOT "nothing significant".';

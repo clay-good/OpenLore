@@ -137,6 +137,12 @@ promised production symbols for a file the index holds none for, the per-file bo
 budget shared one reason code, the wall-clock bound did not cover the read phase, and a region-scoped
 briefing carried a repository-wide receipt.
 
+A fifth round (a fix verification plus a 60-scenario false-statement oracle over three external
+repositories) found the last one: the caveats had been fixed, but `blast_radius`'s headline still
+rendered its own prose from the same receipt, so "formatting or comments only" survived there for an
+added-import diff, the not-indexed headline interpolated the wrong count, and a vacuous "0 changed
+file(s) not assessed" appeared for a test-only diff. The headline now comes from the claim itself.
+
 Measured on this repository after the bounds landed: a 17-file diff resolves in ~2s and a 99-file
 diff in ~8s (the wall-clock bound); the worst case built on purpose — 200 files of 900 functions
 each — finishes in 7.4s at 64 MB heap / 408 MB RSS, where the first version took 36s and an earlier

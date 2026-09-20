@@ -513,12 +513,11 @@ function renderHeadline(b: BlastRadiusBriefing): string {
     `${b.changed.files} file${b.changed.files === 1 ? '' : 's'} / ${b.changed.symbols} symbol${b.changed.symbols === 1 ? '' : 's'} changed`,
   ];
   // Zero symbols over changed code files means every code edit hashed as formatting or comments.
-  if (b.changed.symbols === 0 && b.changeGranularity) {
-    const claim = noChangeClaim(b.changeGranularity);
-    parts.push(
-      claim.kind === 'unchanged' ? 'no symbol differs from the base (formatting or comments only, or already reverted)'
-      : claim.kind === 'not-indexed' ? `${b.changeGranularity.changedSymbolsFound} symbol(s) differ but are not in the index — re-run analyze`
-      : `${b.changeGranularity.fileGranularFiles} changed file(s) not assessed at symbol level`);
+  // Straight from the claim, never a second rendering of it: a headline that writes its own prose
+  // from the same receipt is how "formatting or comments only" outlived the caveat that fixed it.
+  if (b.changed.symbols === 0 && b.changeGranularity) parts.push(noChangeClaim(b.changeGranularity).headline);
+  if ((b.changed.alsoSeeded ?? 0) > 0) {
+    parts.push(`${b.changed.alsoSeeded} more analyzed but unchanged`);
   }
   if (b.impact.highestRiskLevel !== 'none') parts.push(`highest risk: ${b.impact.highestRiskLevel}`);
   if (b.impact.hubsTouched.length > 0) parts.push(`${b.impact.hubsTouched.length} hub${b.impact.hubsTouched.length === 1 ? '' : 's'} affected`);

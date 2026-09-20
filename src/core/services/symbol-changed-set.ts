@@ -794,35 +794,52 @@ export function granularityReceipt(
   };
 }
 
+/** What a consumer may say when nothing was seeded: one sentence, and a headline-length form. */
+export interface NoChangeClaim {
+  kind: 'unchanged' | 'not-indexed' | 'not-seeded' | 'not-assessed';
+  /** The full sentence, for a caveat. */
+  text: string;
+  /** The same claim in headline length. Derived here so a headline cannot drift from the caveat. */
+  headline: string;
+}
+
 /**
  * The claim a consumer may make when nothing was seeded, or `undefined` when it may make none.
  * "Nothing differs" is only ever true when every changed code file was hashed AND the hashes found
  * no changed symbol. A symbol that changed but is absent from the index is "not indexed", never
  * "unchanged" — that is the stale-index case, and it is the most common one.
  */
-export function noChangeClaim(receipt: ChangeGranularityReceipt): { kind: 'unchanged' | 'not-indexed' | 'not-seeded' | 'not-assessed'; text: string } {
+export function noChangeClaim(receipt: ChangeGranularityReceipt): NoChangeClaim {
   if (receipt.changedSymbolsNotIndexed > 0) {
     return {
       kind: 'not-indexed',
+      headline: `${receipt.changedSymbolsNotIndexed} symbol(s) differ but are not in the index — re-run analyze`,
       text: `${receipt.changedSymbolsNotIndexed} symbol(s) differ from the base and are absent from the index — it predates these edits, so nothing could be seeded. Re-run analyze_codebase. This is "not indexed", NOT "unchanged".`,
     };
   }
   if (receipt.changedSymbolsFound > 0) {
     return {
       kind: 'not-seeded',
+      headline: `${receipt.changedSymbolsFound} symbol(s) differ but are out of scope here`,
       text: `${receipt.changedSymbolsFound} symbol(s) differ from the base, but none of them is in scope here — generated, vendored and declaration files are excluded from this conclusion. This is "out of scope", NOT "unchanged".`,
     };
   }
   if (receipt.symbolExactFiles === 0) {
     return {
       kind: 'not-assessed',
+      headline: receipt.fileGranularFiles > 0
+        ? `${receipt.fileGranularFiles} changed file(s) not assessed at symbol level`
+        : 'no changed code file was hashed',
       text: receipt.fileGranularFiles > 0
         ? `No changed code file could be assessed at symbol level (${receipt.fileGranularFiles} file(s), see changeGranularity.fallbacks) — "not assessed", NOT "unchanged".`
-        : 'No changed code file was hashed: the diff touched no file this index holds code for — "not assessed", NOT "unchanged".',
+        : 'No changed code file was hashed: the diff touched only files this changed-set does not assess (tests, generated or vendored code, or files in no indexed language) — "not assessed", NOT "unchanged".',
     };
   }
   return {
     kind: 'unchanged',
+    headline: receipt.importsAddedFiles > 0
+      ? 'no symbol\'s behavior differs (formatting, comments, or added imports nothing uses)'
+      : 'no symbol differs from the base (formatting or comments only, or already reverted)',
     text: `No symbol's behavior differs from the base: in every changed code file that was hashed, the symbols are unchanged`
       + (receipt.importsAddedFiles > 0
         ? `. The edits are formatting or comments, imports that bind new names no existing symbol uses (${receipt.importsAddedFiles} file(s)), or changes already reverted in the working tree.`
@@ -887,6 +904,7 @@ export function granularityCaveat(receipt: ChangeGranularityReceipt): string | u
   const reasons = (Object.keys(receipt.reasons) as FileGranularityReason[]).sort()
     .map(r => `${r} (${receipt.reasons[r]}): ${FILE_GRANULARITY_REASONS[r]}`);
   return `${receipt.fileGranularFiles} changed file(s) stayed at FILE granularity: every production symbol the index holds ` +
-    'for them counts as changed — for a file the index holds none for (a new or moved path), that is none ' +
+    'for them counts as changed — for a file the index holds none for (a new or moved path, or one whose ' +
+    'symbols this language\'s extraction does not index), that is none ' +
     `(see changeGranularity.fallbacks and changedSymbolsNotIndexed). Reasons: ${reasons.join('; ')}.`;
 }
