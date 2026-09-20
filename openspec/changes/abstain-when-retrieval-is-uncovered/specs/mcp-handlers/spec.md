@@ -28,11 +28,17 @@ output, subject to the same dispatch-time shape enforcement as the rest of the c
 - **WHEN** the conclusion shape is enforced at dispatch
 - **THEN** the omission is reported as a contract violation
 
-### Requirement: InsertionPointsAbstainWhenRetrievalIsUncovered
+### Requirement: InsertionPointsWithholdRecommendationWithoutStrongEvidence
 
 `suggest_insertion_points` SHALL NOT recommend a location when the retrieval that produced its
 candidates carries an `uncovered` verdict. It SHALL return the abstention with its reason and the
 question kind, because a confidently-named wrong insertion point costs more than no answer.
+
+When the verdict is `weak`, the tool SHALL return its candidates — they remain worth inspecting —
+but SHALL withhold the action recommendation built on them: the per-candidate insertion strategy and
+the next-step instructions SHALL be absent, and the coverage disclosure SHALL be present. Naming a
+location is information; telling an agent how to edit it is advice, and advice resting on incidental
+evidence is what produced a recommended edit inside an unrelated function.
 
 #### Scenario: No insertion point is invented for an uncovered task
 
@@ -40,8 +46,16 @@ question kind, because a confidently-named wrong insertion point costs more than
 - **WHEN** insertion points are requested
 - **THEN** no location is recommended, and the response states that the task is not covered
 
+#### Scenario: A weak verdict returns locations without advice
+
+- **GIVEN** a feature description whose every candidate rests on incidental evidence
+- **WHEN** insertion points are requested
+- **THEN** the candidates are returned with the coverage disclosure, and no candidate carries an
+  insertion strategy and no next-step instructions are returned
+
 #### Scenario: A covered task is unaffected
 
 - **GIVEN** a feature description whose retrieval verdict is `covered`
 - **WHEN** insertion points are requested
-- **THEN** locations are recommended exactly as before this requirement
+- **THEN** locations are recommended exactly as before this requirement, each with its insertion
+  strategy and the next steps

@@ -30,7 +30,12 @@ import {
   type AnalysisContentProvenance,
 } from '../served-content.js';
 import { withIndexStaleness } from './index-staleness.js';
-import { requireMatchEvidence } from '../../analyzer/retrieval-evidence.js';
+import {
+  coverageDisclosure,
+  coverageVerdict,
+  requireMatchEvidence,
+  type QuestionKind,
+} from '../../analyzer/retrieval-evidence.js';
 
 // ============================================================================
 // INSERTION POINT HELPERS
@@ -217,7 +222,9 @@ export async function handleSearchCode(
   language?: string,
   minFanIn?: number,
   tokenBudget?: number,
-  mode?: 'text'
+  mode?: 'text',
+  /** What the caller is asking. Declared, never inferred from the query's wording. */
+  questionKind: QuestionKind = 'where-is',
 ): Promise<unknown> {
   const tooLong = queryTooLongError(query); if (tooLong) return tooLong;
   const absDir = await validateDirectory(directory);
@@ -361,10 +368,37 @@ export async function handleSearchCode(
     ? applyTokenBudget(collapseExactDuplicates(allResults), tokenBudget)
     : { kept: allResults, omitted: 0 };
 
+  // A ranked list of incidental matches is shaped exactly like an answer. The verdict
+  // says which one this is, folded from the evidence each result already carries
+  // (spec `mcp-quality` NoFalseCoverage).
+  const verdict = coverageVerdict(allResults.map(r => r.matchEvidence));
+  if (verdict === 'uncovered') {
+    return withIndexStaleness(absDir, {
+      query,
+      searchMode,
+      retrievalMode,
+      coverage: coverageDisclosure(verdict, questionKind),
+      ...(isKeywordRetrievalMode(retrievalMode)
+        ? {
+            note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
+          }
+        : {}),
+      count: 0,
+      // No ranked list: withholding it IS the abstention. `explain_retrieval_miss`
+      // answers which field would have had to match.
+      results: [],
+      nextStep: 'explain_retrieval_miss(directory, query, target) names why an expected symbol did not come back.',
+      ...(indexDegraded ? { indexDegraded } : {}),
+    }, llmCtx);
+  }
+
   const result = {
     query,
     searchMode,
     retrievalMode,
+    coverage: verdict === 'covered'
+      ? { verdict, questionKind }
+      : coverageDisclosure(verdict, questionKind),
     ...(isKeywordRetrievalMode(retrievalMode)
       ? {
           note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
@@ -420,6 +454,33 @@ export async function handleSuggestInsertionPoints(
     readCachedContext(absDir),
   ]);
   const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
+
+  // A wrong insertion point costs more than no insertion point: it sends an agent to
+  // edit a function that has nothing to do with the task, with the product's confidence
+  // behind it. That is what happened on 2026-09-20 — a new step was recommended inside
+  // `restartServer` for a spinner bug it had no part in (spec `mcp-handlers`
+  // InsertionPointsAbstainWhenRetrievalIsUncovered).
+  // Judge only on evidence actually present. A retriever that supplied none is a case
+  // where coverage CANNOT be judged — abstaining there would suppress real answers on
+  // the strength of a missing field, which is its own dishonesty.
+  const insertionEvidence = rawResults.map(r => r.matchEvidence).filter((e): e is NonNullable<typeof e> => e !== undefined);
+  const evidenceComplete = insertionEvidence.length === rawResults.length;
+  const retrievalVerdict = evidenceComplete ? coverageVerdict(insertionEvidence) : 'covered';
+  if (retrievalVerdict === 'uncovered') {
+    return withIndexStaleness(absDir, {
+      description,
+      coverage: coverageDisclosure(retrievalVerdict, 'where-is'),
+      count: 0,
+      // Same key as the answering shape, so a consumer reading `candidates` sees an
+      // empty list with a reason rather than a missing field.
+      candidates: [],
+      nextSteps: [
+        'No candidates: nothing in the index matched this description beyond noise.',
+        'Name an existing symbol or file this feature touches, or run "openlore analyze" if the index predates it.',
+      ],
+      ...(indexDegraded ? { indexDegraded } : {}),
+    }, llmCtx);
+  }
 
   // Normalise search scores to [0, 1] for compositeScore (scores are RRF/BM25: higher = better)
   const maxScore = rawResults.length > 0 ? Math.max(...rawResults.map((r) => r.score)) : 1;
@@ -499,23 +560,40 @@ export async function handleSuggestInsertionPoints(
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  const top = candidates.slice(0, limit).map((c, i) => ({ ...c, rank: i + 1 }));
+  const ranked = candidates.slice(0, limit).map((c, i) => ({ ...c, rank: i + 1 }));
+
+  // On weak evidence the LOCATIONS are still worth inspecting, but the advice built on
+  // them is not: naming a place is information, telling an agent how to edit it is a
+  // recommendation, and a recommendation resting on incidental matches is what put a new
+  // step inside an unrelated function on 2026-09-20 (spec `mcp-handlers`
+  // InsertionPointsWithholdRecommendationWithoutStrongEvidence).
+  const advisory = retrievalVerdict === 'covered';
+  const top = advisory
+    ? ranked
+    : ranked.map(({ insertionStrategy: _withheld, ...rest }) => rest);
 
   return {
     description,
+    coverage: advisory
+      ? { verdict: retrievalVerdict, questionKind: 'where-is' as const }
+      : coverageDisclosure(retrievalVerdict, 'where-is'),
     count: top.length,
     candidates: top,
     ...(indexDegraded ? { indexDegraded } : {}),
-    nextSteps:
-      top.length > 0
-        ? [
-            `Run get_function_skeleton on "${top[0].filePath}" to see the internal structure of ${top[0].name}`,
-            `Run get_subgraph on "${top[0].name}" to understand its call neighborhood`,
-            `After implementing, run check_spec_drift to verify the code matches the spec`,
-          ]
-        : [
-            'No candidates found. Try a broader description or run "openlore analyze --embed" to build the index.',
-          ],
+    ...(advisory
+      ? {
+          nextSteps:
+            top.length > 0
+              ? [
+                  `Run get_function_skeleton on "${ranked[0].filePath}" to see the internal structure of ${ranked[0].name}`,
+                  `Run get_subgraph on "${ranked[0].name}" to understand its call neighborhood`,
+                  `After implementing, run check_spec_drift to verify the code matches the spec`,
+                ]
+              : [
+                  'No candidates found. Try a broader description or run "openlore analyze --embed" to build the index.',
+                ],
+        }
+      : {}),
   };
 }
 
@@ -701,10 +779,33 @@ export async function handleSearchSpecs(
     linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
   })));
 
+  const verdict = coverageVerdict(servedResults.map(r => r.matchEvidence));
+  if (verdict === 'uncovered') {
+    return {
+      query,
+      searchMode,
+      retrievalMode,
+      coverage: coverageDisclosure(verdict, 'why-decided'),
+      // The keyword-mode note is an independent disclosure, and an uncovered result is
+      // exactly when it matters: semantic ranking may be the reason nothing matched.
+      ...(isKeywordRetrievalMode(retrievalMode)
+        ? {
+            note: 'Keyword (BM25) spec search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
+          }
+        : {}),
+      count: 0,
+      results: [],
+      ...(indexFreshness ? { indexFreshness } : {}),
+    };
+  }
+
   return {
     query,
     searchMode,
     retrievalMode,
+    coverage: verdict === 'covered'
+      ? { verdict, questionKind: 'why-decided' as const }
+      : coverageDisclosure(verdict, 'why-decided'),
     ...(isKeywordRetrievalMode(retrievalMode)
       ? {
           note: 'Keyword (BM25) spec search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',

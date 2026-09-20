@@ -37,7 +37,7 @@ import {
 } from '../../analyzer/style-fingerprint.js';
 import { scanViolations } from '../../architecture/check.js';
 import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
-import { requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
+import { coverageDisclosure, coverageVerdict, requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
 import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
 import {
   classifyRole,
@@ -306,6 +306,15 @@ export async function handleOrient(
         ...await VectorIndex.keywordMissDiagnostics(outputDir, task),
       }
     : undefined;
+
+  // What the symbol selection is worth, folded from the evidence each result carries.
+  // An uncovered selection returns no symbols at all; the rest of the briefing (specs,
+  // decisions, staleness) has its own evidence and is unaffected (spec `mcp-handlers`
+  // RetrievalHandlersCarryTheCoverageVerdict).
+  const symbolCoverage = coverageVerdict(relevantFunctionsAll.map(f => f.matchEvidence));
+  const coverage = symbolCoverage === 'covered'
+    ? { verdict: symbolCoverage, questionKind: 'where-is' as const }
+    : coverageDisclosure(symbolCoverage, 'where-is');
 
   // ── Relevant files (deduplicated) ─────────────────────────────────────────
   const relevantFiles = [...new Set(relevantFunctions.map(f => f.filePath))];
@@ -1020,6 +1029,7 @@ export async function handleOrient(
       : {}),
     relevantFiles,
     relevantFunctions,
+    coverage,
     ...(emptyResult ? { emptyResult } : {}),
     specDomains,
     callPaths,
