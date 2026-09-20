@@ -28,6 +28,7 @@ import { constants, linkSync, unlinkSync, renameSync, existsSync } from 'node:fs
 import { dirname, basename, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
+import { recordAtomicArtifactPayload } from '../analyzer/perf-counters.js';
 
 /** Any persisted store that carries the monotonic CAS counter. */
 export interface SequencedStore {
@@ -201,6 +202,7 @@ export async function atomicWriteFile(path: string, data: string, newFileMode = 
     const fh = await open(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, mode);
     try {
       await fh.writeFile(data, 'utf-8');
+      recordAtomicArtifactPayload(data);
       await fh.sync(); // durability barrier: bytes are on disk before the rename
     } finally {
       await fh.close();

@@ -69,6 +69,26 @@ export function inferred(): void {
 ];
 
 describe('Pass-1 late-fact reuse', () => {
+  it('holds a pinned two-file corpus to the same exact work budget on repeated runs', async () => {
+    const corpus = [
+      { path: '/virtual/a.ts', language: 'TypeScript', content: 'export function a(): number { return 1; }\n' },
+      { path: '/virtual/b.ts', language: 'TypeScript', content: "import { a } from './a'; export function b(): number { return a(); }\n" },
+    ];
+    const samples = [];
+    for (let run = 0; run < 2; run++) {
+      __resetAnalyzerWorkCountersForTests(true);
+      const graph = await new CallGraphBuilder().build(corpus);
+      expect(new Set([...graph.nodes.values()].map(n => n.filePath)))
+        .toEqual(new Set(corpus.map(file => file.path)));
+      samples.push(__getAnalyzerWorkCountersForTests());
+    }
+
+    expect(samples[0]).toEqual(samples[1]);
+    expect(samples[0].parses).toBe(corpus.length);
+    expect(samples[0].nativeQueryCompiles).toBe(4);
+    expect(samples[0].nativeQueryCompileCounts.every(count => count === 1)).toBe(true);
+  });
+
   it('matches the complete serialized graph captured from pristine main', async () => {
     const graph = await new CallGraphBuilder().build(preChangeGoldenFiles);
     const bytes = JSON.stringify(serializeCallGraph(graph));

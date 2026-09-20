@@ -44,6 +44,7 @@ import {
 import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite, CallEdge } from '../../analyzer/call-graph.js';
 import { EDGE_CONFIDENCE_VALUES } from '../../analyzer/call-graph-types.js';
 import { callDistance } from '../../analyzer/call-graph.js';
+import { recordPerfWork } from '../../analyzer/perf-counters.js';
 import type { DecisionNode } from '../../decisions/project.js';
 import { decisionContentProvenance } from '../served-content.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
@@ -92,6 +93,7 @@ import { computeIndexStaleness, withIndexStaleness } from './index-staleness.js'
  * only here (so it disagreed with the DB-backed reachability path).
  */
 export function buildAdjacency(cg: SerializedCallGraph, opts?: { directResolvedOnly?: boolean }) {
+  recordPerfWork('adjacencyBuilds');
   const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
   const forward  = new Map<string, Set<string>>(); // callerId → Set<calleeId>
   const backward = new Map<string, Set<string>>(); // calleeId → Set<callerId>
