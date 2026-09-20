@@ -998,6 +998,11 @@ export const TOOL_DEFINITIONS = [
           enum: ['text'],
           description: 'Set "text" to search literal strings in markup/text directly; returns file:line matches.',
         },
+        questionKind: {
+          type: 'string',
+          enum: ['where-is', 'who-calls', 'what-gates', 'what-order', 'is-it-tested', 'why-decided'],
+          description: 'What you are asking (default "where-is"). When the index cannot cover it, the answer names this kind and the tool that does answer it — or says plainly that none does.',
+        },
       },
       required: ['query'],
     },

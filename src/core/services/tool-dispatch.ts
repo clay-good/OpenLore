@@ -75,6 +75,7 @@ import {
   handleGetFileDependencies,
   handleTraceExecutionPath,
 } from './mcp-handlers/graph.js';
+import { isQuestionKind } from '../analyzer/retrieval-evidence.js';
 import {
   handleSearchCode,
   handleSuggestInsertionPoints,
@@ -342,11 +343,12 @@ async function dispatchToolImpl(
       args as { directory: string; base?: string; files?: string[]; domains?: string[]; failOn?: 'error' | 'warning' | 'info'; maxFiles?: number };
     return handleCheckSpecDrift(directory, base, files, domains, failOn, maxFiles);
   } else if (name === 'search_code') {
-    const { directory, query, limit = 10, language, minFanIn, tokenBudget, mode } =
-      args as { directory: string; query: string; limit?: number; language?: string; minFanIn?: number; tokenBudget?: number; mode?: 'text' };
-    return mode === undefined
-      ? handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget)
-      : handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget, mode);
+    const { directory, query, limit = 10, language, minFanIn, tokenBudget, mode, questionKind } =
+      args as { directory: string; query: string; limit?: number; language?: string; minFanIn?: number; tokenBudget?: number; mode?: 'text'; questionKind?: string };
+    // The kind is declared by the caller, never inferred from the query's wording — an
+    // unrecognized value falls back to the default rather than entering the answer.
+    const kind = isQuestionKind(questionKind) ? questionKind : undefined;
+    return handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget, mode, kind);
   } else if (name === 'suggest_insertion_points') {
     const { directory, description, limit = 5, language } =
       args as { directory: string; description: string; limit?: number; language?: string };

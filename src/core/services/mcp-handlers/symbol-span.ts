@@ -44,6 +44,8 @@ import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
 import { readFileConfined } from '../../../utils/path-confinement.js';
 import { hashSpan } from '../../decisions/anchor.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
+import type { FunctionNode } from '../../analyzer/call-graph.js';
+import { buildWorkingTreeOverlay } from '../../analyzer/working-tree-overlay.js';
 import { resolveFileFreshness } from './freshness.js';
 
 export interface LocateSymbolSpanInput {
@@ -116,6 +118,39 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
   }
 
   if (candidates.length === 0) {
+    // A symbol WRITTEN since the index was built is not in the pool at all, so resolution
+    // fails before any freshness check runs. When the caller named the file, that file can
+    // simply be read: bounded (one file), and the honest answer to "where is this symbol"
+    // when the symbol plainly exists on disk.
+    if (pathPart) {
+      const overlay = await buildWorkingTreeOverlay(absDir, [pathPart]);
+      const fresh = overlay.nodes.find(n => n.name === namePart);
+      if (fresh) {
+        const source = await readFileConfined(absDir, pathPart).catch(() => null);
+        if (source !== null) {
+          const text = source.slice(fresh.startIndex, fresh.endIndex);
+          const line = source.slice(0, fresh.startIndex).split('\n').length;
+          const newlines = (text.match(/\n/g) ?? []).length;
+          return {
+            verdict: 'fresh' as const,
+            symbol: fresh.id,
+            file: pathPart,
+            language: fresh.language,
+            startLine: line,
+            endLine: Math.max(line, line + newlines - (text.endsWith('\n') ? 1 : 0)),
+            startByte: fresh.startIndex,
+            endByte: fresh.endIndex,
+            spanEncoding: 'utf16' as const,
+            contentHash: hashSpan(text),
+            source: 'working-tree-overlay' as const,
+            note: SPAN_NOTE,
+            indexBehind: {
+              note: 'This symbol is not in the index yet; the span was read from the working tree. It has no recorded callers until the index catches up.',
+            },
+          };
+        }
+      }
+    }
     const nameLower = namePart.toLowerCase();
     const near = [...new Set(pool.map(n => n.name))]
       .filter(nm => nm.toLowerCase().includes(nameLower))
@@ -190,6 +225,37 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
   const verdict = resolveFileFreshness({ baselineFileHash, currentFileHash, sourceMtimeMs, artifactMtimeMs });
 
   if (verdict === 'stale') {
+    // The index's offsets are worthless here — but the bytes on disk are right in front
+    // of us. Re-extract this one file and locate the symbol in the CURRENT source, which
+    // is the difference between an unusable answer and a usable one (spec `mcp-handlers`
+    // ExactPositionsPreferTheOverlay).
+    const overlay = await buildWorkingTreeOverlay(absDir, [confinedFile]);
+    const overlaid: FunctionNode | undefined = overlay.nodes.find(n => n.id === symbolId)
+      ?? overlay.nodes.find(n => n.name === node.name && n.filePath === confinedFile);
+    if (overlaid) {
+      const overlaidText = content.slice(overlaid.startIndex, overlaid.endIndex);
+      const overlaidStartLine = content.slice(0, overlaid.startIndex).split('\n').length;
+      const overlaidNewlines = (overlaidText.match(/\n/g) ?? []).length;
+      return {
+        verdict: 'fresh' as const,
+        symbol: overlaid.id,
+        file: confinedFile,
+        language: overlaid.language,
+        startLine: overlaidStartLine,
+        endLine: Math.max(overlaidStartLine, overlaidStartLine + overlaidNewlines - (overlaidText.endsWith('\n') ? 1 : 0)),
+        startByte: overlaid.startIndex,
+        endByte: overlaid.endIndex,
+        spanEncoding: 'utf16' as const,
+        contentHash: hashSpan(overlaidText),
+        // Provenance, not decoration: these offsets came from the working tree, and the
+        // symbol's callers are still the index's.
+        source: 'working-tree-overlay' as const,
+        note: SPAN_NOTE,
+        indexBehind: {
+          note: 'The index is behind this file; the span above was read from the working tree. Callers and impact for this symbol still come from the index and may predate the edit.',
+        },
+      };
+    }
     return {
       verdict,
       symbol: symbolId,

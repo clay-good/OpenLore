@@ -82,7 +82,7 @@ describe('orient command', () => {
   // primer (so the install SessionStart hook `orient --json` is unaffected).
   describe('positional [task] argument', () => {
     it('honors a bare positional task instead of printing the no-task primer', async () => {
-      mockHandleOrient.mockResolvedValue({
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'covered', questionKind: 'where-is' },
         task: 'add rate limiting',
         searchMode: 'keyword',
         relevantFiles: ['src/rl.ts'],
@@ -109,7 +109,7 @@ describe('orient command', () => {
 
   describe('--inject (task-scoped injection hook)', () => {
     it('emits an attributed, ignorable block for a strong match and never errors', async () => {
-      mockHandleOrient.mockResolvedValue({
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'covered', questionKind: 'where-is' },
         task: 'auth flow',
         searchMode: 'hybrid',
         relevantFiles: ['src/auth/mw.ts'],
@@ -139,7 +139,7 @@ describe('orient command', () => {
     });
 
     it('reports a suppressed gate to stderr only when injection debug is enabled', async () => {
-      mockHandleOrient.mockResolvedValue({
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'weak', questionKind: 'where-is' },
         task: 'update the documentation',
         searchMode: 'bm25_fallback',
         relevantFunctions: [
@@ -195,14 +195,14 @@ describe('orient command', () => {
 
   describe('with a task', () => {
     it('passes task, directory and limit through to handleOrient', async () => {
-      mockHandleOrient.mockResolvedValue({ task: 't', searchMode: 'bm25_fallback', relevantFunctions: [] });
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'uncovered', questionKind: 'where-is' }, task: 't', searchMode: 'bm25_fallback', relevantFunctions: [] });
       await orientCommand.parseAsync(['--task', 'add rate limiting', '--limit', '7'], { from: 'user' });
       // args: (dir, task, limit, tokenBudget=undefined, lean=false).
       expect(mockHandleOrient).toHaveBeenCalledWith('/fake/proj', 'add rate limiting', 7, undefined, false);
     });
 
     it('passes --token-budget through to handleOrient', async () => {
-      mockHandleOrient.mockResolvedValue({ task: 't', searchMode: 'bm25_fallback', relevantFunctions: [] });
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'uncovered', questionKind: 'where-is' }, task: 't', searchMode: 'bm25_fallback', relevantFunctions: [] });
       await orientCommand.parseAsync(['--task', 'auth flow', '--limit', '5', '--token-budget', '400'], { from: 'user' });
       expect(mockHandleOrient).toHaveBeenCalledWith('/fake/proj', 'auth flow', 5, 400, false);
     });
@@ -211,20 +211,20 @@ describe('orient command', () => {
       // Commander v12 retains option values across parseAsync on the same command
       // instance, so clear --token-budget that a prior test set.
       orientCommand.setOptionValue('tokenBudget', undefined);
-      mockHandleOrient.mockResolvedValue({ task: 't', searchMode: 'bm25_fallback', relevantFunctions: [], lean: true });
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'uncovered', questionKind: 'where-is' }, task: 't', searchMode: 'bm25_fallback', relevantFunctions: [], lean: true });
       await orientCommand.parseAsync(['--task', 'who calls foo', '--lean'], { from: 'user' });
       expect(mockHandleOrient).toHaveBeenCalledWith('/fake/proj', 'who calls foo', 5, undefined, true);
     });
 
     it('--json emits the full result object as JSON', async () => {
-      mockHandleOrient.mockResolvedValue({ task: 'x', searchMode: 'hybrid', relevantFunctions: [] });
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'uncovered', questionKind: 'where-is' }, task: 'x', searchMode: 'hybrid', relevantFunctions: [] });
       await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
       const parsed = JSON.parse(output());
       expect(parsed.searchMode).toBe('hybrid');
     });
 
     it('--json carries cited-file staleness in the single JSON document', async () => {
-      mockHandleOrient.mockResolvedValue({
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'uncovered', questionKind: 'where-is' },
         task: 'refundCard behavior',
         searchMode: 'bm25_fallback',
         relevantFunctions: [],
@@ -260,7 +260,7 @@ describe('orient command', () => {
       // wrapper scripts get parseable JSON. Simulate the stray write.
       mockHandleOrient.mockImplementation(async () => {
         console.log('[ok] Successfully validated directory: /fake/proj');
-        return { task: 'x', searchMode: 'bm25_fallback', relevantFunctions: [] };
+        return { task: 'x', searchMode: 'bm25_fallback', relevantFunctions: [], coverage: { verdict: 'uncovered', questionKind: 'where-is' } };
       });
       const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
@@ -278,7 +278,7 @@ describe('orient command', () => {
 
   describe('--metrics (opt-in performance readout, Issue #128)', () => {
     it('reports wall time and output size to stderr, leaving stdout JSON clean', async () => {
-      mockHandleOrient.mockResolvedValue({ task: 'x', searchMode: 'hybrid', relevantFunctions: [] });
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'uncovered', questionKind: 'where-is' }, task: 'x', searchMode: 'hybrid', relevantFunctions: [] });
       const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       await orientCommand.parseAsync(['--json', '--metrics', '--task', 'x'], { from: 'user' });
       const stderrText = stderrSpy.mock.calls.map(c => String(c[0])).join('');
@@ -292,7 +292,7 @@ describe('orient command', () => {
     });
 
     it('writes no metrics line when --metrics is omitted (off by default)', async () => {
-      mockHandleOrient.mockResolvedValue({ task: 'x', searchMode: 'hybrid', relevantFunctions: [] });
+      mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'uncovered', questionKind: 'where-is' }, task: 'x', searchMode: 'hybrid', relevantFunctions: [] });
       const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
       const stderrText = stderrSpy.mock.calls.map(c => String(c[0])).join('');

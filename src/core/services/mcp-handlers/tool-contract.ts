@@ -370,6 +370,18 @@ function isIdReferenceEdgeArray(value: unknown): value is unknown[] {
  * response itself when it is an array). Bounded provenance under the limit is
  * fine — a conclusion may cite a few edges to explain *why* it concluded.
  */
+/**
+ * Tools whose answer is produced by retrieval, and which therefore must say what that
+ * retrieval was worth. Listed explicitly rather than inferred: a tool joins this set by
+ * a deliberate edit, so adding a retrieval path cannot quietly skip the verdict.
+ */
+export const RETRIEVAL_BACKED_TOOLS: ReadonlySet<string> = new Set([
+  'search_code',
+  'search_specs',
+  'orient',
+  'suggest_insertion_points',
+]);
+
 export function assertConclusionShape(toolName: string, response: unknown): void {
   const cls = TOOL_OUTPUT_CLASS[toolName];
   if (cls === undefined) {
@@ -396,6 +408,18 @@ export function assertConclusionShape(toolName: string, response: unknown): void
       throw new ToolContractViolationError(
         toolName,
         `returns ${value.length} raw edge objects (> MAX_PROVENANCE_EDGES=${MAX_PROVENANCE_EDGES}); return the traversal result, not the graph`,
+      );
+    }
+  }
+
+  // (c) a retrieval-backed conclusion that omits its coverage verdict. A ranked list
+  // with no statement of what it is worth is shaped exactly like an answered question
+  // (spec `mcp-quality` NoFalseCoverage).
+  if (RETRIEVAL_BACKED_TOOLS.has(toolName) && !('error' in obj) && !('notReady' in obj)) {
+    if (obj.coverage === undefined) {
+      throw new ToolContractViolationError(
+        toolName,
+        'is retrieval-backed but returned no coverage verdict; fold one from the results\' match evidence',
       );
     }
   }

@@ -18,7 +18,7 @@ type Pair = {
 
 const PAIRS: readonly Pair[] = [
   { tool: 'orient', command: 'orient', commandExport: 'orientCommand', cliFile: 'orient.ts', commonInputs: ['directory', 'task', 'limit', 'tokenBudget', 'lean'], mcpOnlyInputs: ['rankBy'] },
-  { tool: 'search_code', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'limit', 'language', 'minFanIn', 'tokenBudget'], mcpOnlyInputs: ['mode'] },
+  { tool: 'search_code', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'limit', 'language', 'minFanIn', 'tokenBudget'], mcpOnlyInputs: ['mode', 'questionKind'] },
   { tool: 'search_specs', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'limit', 'domain', 'section'] },
   { tool: 'explain_retrieval_miss', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'surface', 'target', 'limit', 'language', 'minFanIn', 'domain', 'section'] },
   { tool: 'blast_radius', command: 'blast-radius', commandExport: 'blastRadiusCommand', cliFile: 'blast-radius.ts', commonInputs: ['directory', 'baseRef'], mcpOnlyInputs: ['depth', 'maxSymbols'] },

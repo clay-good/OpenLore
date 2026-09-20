@@ -112,15 +112,64 @@ describe('handleLocateSymbolSpan', () => {
     expect(content.slice(res.startByte, res.endByte)).toBe(FOO);
   });
 
-  it('discloses a stale span (no offset) when the file changed after analysis', async () => {
-    setSourceMtime('bar.ts', +10); // written after the index → offsets not trustworthy
+  // Behavior change (change: overlay-dirty-files-at-query-time): a stale file used to end
+  // the answer — "the recorded offsets are not trustworthy". The bytes on disk are right
+  // there, so the span is now re-read from them instead, and the index's remaining limit
+  // (callers) is disclosed rather than the whole answer being withheld.
+  it('re-reads the span from the working tree when the file changed after analysis', async () => {
+    setSourceMtime('bar.ts', +10); // written after the index → indexed offsets not trustworthy
     const res = (await handleLocateSymbolSpan({ directory: dir, symbol: 'bar::bar.ts' })) as {
-      verdict: string; symbol: string; hint: string; startByte?: number;
+      verdict: string; symbol: string; source?: string; startByte?: number; endByte?: number;
+      indexBehind?: { note: string };
+    };
+    expect(res.verdict).toBe('fresh');
+    expect(res.source).toBe('working-tree-overlay');
+    expect(typeof res.startByte).toBe('number');
+    // The offsets address the CURRENT bytes.
+    const content = readFileSync(join(dir, 'bar.ts'), 'utf-8');
+    expect(content.slice(res.startByte!, res.endByte!)).toContain('bar');
+    // The limit that remains is stated, not implied away.
+    expect(res.indexBehind?.note).toMatch(/callers/i);
+  });
+
+  it('keeps the stale verdict when the overlay cannot locate the symbol either', async () => {
+    // The symbol is gone from the working tree, so there is nothing to re-read.
+    writeFileSync(join(dir, 'bar.ts'), 'export function renamedAway() { return 1; }\n');
+    setSourceMtime('bar.ts', +10);
+    const res = (await handleLocateSymbolSpan({ directory: dir, symbol: 'bar::bar.ts' })) as {
+      verdict: string; hint: string; startByte?: number;
     };
     expect(res.verdict).toBe('stale');
-    expect(res.symbol).toBe('bar::bar.ts');
     expect(res.hint).toMatch(/re-run analyze/i);
     expect(res.startByte).toBeUndefined(); // no usable offset presented
+  });
+
+  it('locates a symbol written since the index was built, when its path is given', async () => {
+    writeFileSync(join(dir, 'bar.ts'), 'export function bar() { return 1; }\nexport function writtenSinceIndexing() { return 2; }\n');
+    setSourceMtime('bar.ts', +10);
+
+    const res = (await handleLocateSymbolSpan({ directory: dir, symbol: 'writtenSinceIndexing::bar.ts' })) as {
+      verdict: string; source?: string; startByte?: number; endByte?: number; indexBehind?: { note: string };
+    };
+
+    expect(res.verdict).toBe('fresh');
+    expect(res.source).toBe('working-tree-overlay');
+    const content = readFileSync(join(dir, 'bar.ts'), 'utf-8');
+    expect(content.slice(res.startByte!, res.endByte!)).toContain('writtenSinceIndexing');
+    expect(res.indexBehind?.note).toMatch(/not in the index yet/i);
+  });
+
+  it('still reports not-found for a new symbol named without its path', async () => {
+    writeFileSync(join(dir, 'bar.ts'), 'export function bar() { return 1; }\nexport function alsoNew() { return 2; }\n');
+    setSourceMtime('bar.ts', +10);
+
+    // Without a path there is no bounded file to read, so the existing answer stands.
+    const res = (await handleLocateSymbolSpan({ directory: dir, symbol: 'alsoNew' })) as {
+      verdict: string; hint: string;
+    };
+
+    expect(res.verdict).toBe('not-found');
+    expect(res.hint).toMatch(/run analyze/i);
   });
 
   it('returns ambiguous + name::path candidates for a bare name matching several symbols', async () => {
