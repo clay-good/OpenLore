@@ -10,21 +10,32 @@
  *
  * The pipeline is pure reuse:
  *   1. `getChangedFiles` (drift/git-diff) → the files changed since the base ref.
- *   2. `seedsFromFiles` (test-impact) → the changed production symbols (file-level
- *      granularity, the same primitive `select_tests`/`report_coverage_gaps` use).
+ *   2. `seedsFromFiles` + `narrowToChangedSymbols` (test-impact) → the production symbols that
+ *      changed: exact where both revisions hash cleanly, file-level (disclosed) where they do not
+ *      (change: add-symbol-content-hashes).
  *   3. `computeLandmarkSignals` → each symbol's hub/orchestrator/chokepoint labels.
  *   4. `analyzeChangeCoupling` → per-file churn + how much history exists.
  *   5. `labelChangeSignificance` (analyzer/change-significance) → one tier per symbol.
  *   6. `handleSelectTests` → the tests to run for the whole change set.
  *
- * Honest by construction: file-level granularity is disclosed; the surprising-change
+ * Honest by construction: any file-level fallback is disclosed with its reason; the surprising-change
  * label is withheld when history is too shallow; truncation always carries a receipt
  * (omitted count + lowest tier reached) and never drops a higher tier for a lower
  * one. The cursor is the base ref, never wall-clock time.
  */
 
 import { validateDirectory, readCachedContext } from './utils.js';
-import { seedsFromFiles, handleSelectTests } from './test-impact.js';
+import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
+import {
+  carriedCaveat,
+  changedSymbolIds,
+  granularityCaveat,
+  importsAddedCaveat,
+  noChangeClaim,
+  type CarriedSymbol,
+  type DiffEntry,
+  type SymbolChangedSet,
+} from '../symbol-changed-set.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
 import { computeLandmarkSignals } from '../../analyzer/landmark-signals.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
@@ -89,16 +100,24 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   let resolvedBase: string;
   let requestedRefUnresolved: boolean;
   let changedFiles: string[];
+  let diffEntries: DiffEntry[];
+  /** The analyzed root's path inside the work tree, for re-framing diff paths (`''` at the root). */
+  let repoPrefix = '';
+  /** Bound once the git-diff module is loaded below; the region filter needs it afterwards. */
+  let reframeRepoPath: (repoRelPath: string, prefix: string) => string | null = p => p;
   try {
-    const { getChangedFiles, resolveBaseRefDisclosed, getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const { getChangedFiles, resolveBaseRefDisclosed, getRepoPrefix, reframeRepoPath: reframe } = await import('../../drift/git-diff.js');
+    reframeRepoPath = reframe;
     const base = await resolveBaseRefDisclosed(absDir, baseRefInput);
     resolvedBase = base.resolved;
     requestedRefUnresolved = base.fellBack;
     const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBase, includeUnstaged: true });
+    diffEntries = diff.files;
     // Below the repository root, git returns repo-root-relative paths while the call
     // graph is analyzed-root-relative; re-frame so the changed-symbol join is correct
     // (no-op at the root). Files outside the analyzed subtree are dropped.
     const prefix = (await getRepoPrefix(absDir)) ?? '';
+    repoPrefix = prefix;
     // Production code files only — tests/config/generated are not "changes that matter"
     // to rank; they still drive the tests-to-run selection below.
     changedFiles = diff.files
@@ -109,7 +128,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     return { error: `git diff failed (base ${baseRefInput}): ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  // ── 2. Changed production symbols (file-level granularity) ──────────────────
+  // ── 2. Changed production symbols ───────────────────────────────────────────
   // A region scope (filePattern) narrows BOTH the briefed symbols and the file
   // count/sample, so the reported denominators match the scoped briefing.
   const scope: 'repo' | 'region' = input.filePattern ? 'region' : 'repo';
@@ -122,11 +141,31 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   // (IaC) resources and generated/vendored shims do not belong in this ranking; infra
   // change-impact has its own lens (`blast_radius` / `analyze_impact`). `seedsFromFiles`
   // already drops external + test nodes.
-  let changedSymbols = seedsFromFiles(cg, scopedFiles)
+  let fileSymbols = seedsFromFiles(cg, scopedFiles)
     .filter(n => isCodeNode(n) && !isExcludedPath(n.filePath));
   if (input.filePattern) {
-    changedSymbols = changedSymbols.filter(n => n.filePath.includes(input.filePattern!));
+    fileSymbols = fileSymbols.filter(n => n.filePath.includes(input.filePattern!));
   }
+  // Brief only the symbols that changed (change: add-symbol-content-hashes). A symbol kept by the
+  // changed-set only because it references a changed one, or holds a dynamic-dispatch site, did not
+  // change and is not briefed. A rename or move IS briefed — its id and every caller changed, and a
+  // renamed hub is exactly what a returning reader must see — and the pair is named under `carried`.
+  // A region scope narrows the receipt too: telling a reader scoped to `src/cli/` about fallbacks in
+  // files they cannot see breaks the same denominators-match-the-briefing rule as the counts above.
+  // Match the pattern in the briefing's own frame: diff paths are repository-relative, while the
+  // pattern and the briefed symbols are analyzed-root relative, and below the repository root the
+  // two differ (the same trap the size probe hit).
+  const scopedEntries = input.filePattern
+    ? diffEntries.filter(entry => (reframeRepoPath(entry.path, repoPrefix) ?? entry.path).includes(input.filePattern!))
+    : diffEntries;
+  const narrowed = await narrowToChangedSymbols(absDir, resolvedBase, scopedEntries, cg, fileSymbols);
+  const carried: CarriedSymbol[] = narrowed.set?.carried ?? [];
+  const changedSymbols = fileSymbols.filter(n => {
+    const change = narrowed.set?.byFile.get(n.filePath);
+    if (!change || change.granularity === 'file') return true;
+    return changedSymbolIds(change).has(n.id);
+  });
+  const changeGranularity = narrowed.receipt;
 
   // ── 3. Structural labels (reused classifier, no new score) ──────────────────
   const landmarks = computeLandmarkSignals(cg);
@@ -184,7 +223,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     .sort((a, b) => b.count - a.count || a.community.localeCompare(b.community));
 
   // ── Tests to run for the whole change set (reused select_tests) ─────────────
-  const testsToRun = await selectTestsSummary(absDir, resolvedBase);
+  const testsToRun = await selectTestsSummary(absDir, resolvedBase, narrowed.set);
 
   // ── Honesty: a base ref that matched no production symbol is "nothing changed",
   // never the reassuring "nothing significant changed". ───────────────────────
@@ -199,13 +238,21 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
         : `No changed production symbol matched filePattern "${input.filePattern}" — "nothing matched", NOT "nothing significant".`;
     } else {
       note = changedFiles.length === 0
-        ? `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
-        : 'The changed file(s) contain no analyzed production symbol (not yet analyzed, or only tests/generated) — "nothing matched", NOT "nothing significant".';
+        ? diffEntries.length === 0
+          ? `Nothing changed since ${resolvedBase}: the diff is empty.`
+          : `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
+        : changeGranularity && (fileSymbols.length > 0 || changeGranularity.changedSymbolsFound > 0)
+          ? `Nothing was briefed against ${resolvedBase}: ${noChangeClaim(changeGranularity).text}`
+          : 'The changed file(s) contain no analyzed production symbol (not yet analyzed, or only tests/generated) — "nothing matched", NOT "nothing significant".';
     }
   }
 
+  const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
+  const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
   const caveats: string[] = [
-    'Changed symbols are at FILE granularity: every production function in a file changed since the base ref is briefed, even if that specific function was not edited.',
+    ...(granularityNote ? [granularityNote] : []),
+    ...(importsNote ? [importsNote] : []),
+    ...(carriedCaveat(carried) ? [carriedCaveat(carried)!] : []),
     'Significance is a tier label from existing classifiers (hub/orchestrator/chokepoint) plus raw evidence — not a weighted score. The caller makes the final judgment.',
     'Scope is hand-authored source code: infrastructure (IaC) resources and generated/vendored files are excluded (their change-impact has its own lens — blast_radius / analyze_impact). Non-code changed files still count toward changedFiles.',
   ];
@@ -237,6 +284,8 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
       ? { changedFilesSample: [...scopedFiles].sort().slice(0, MAX_CHANGED_FILES) }
       : {}),
     changedSymbols: changedSymbols.length,
+    ...(changeGranularity ? { changeGranularity } : {}),
+    ...(carried.length > 0 ? { carried } : {}),
     tierCounts: counts,
     briefing: returned,
     truncation,
@@ -280,9 +329,11 @@ function buildTruncationReceipt(returned: LabeledChange[], omitted: LabeledChang
 async function selectTestsSummary(
   absDir: string,
   baseRef: string,
+  /** The changed-set this briefing already computed for the same base ref and diff. */
+  changedSet?: SymbolChangedSet,
 ): Promise<{ count: number; files: string[]; note?: string; truncatedAtDepth?: number; soundness?: unknown }> {
   try {
-    const result = (await handleSelectTests({ directory: absDir, diffRef: baseRef })) as {
+    const result = (await handleSelectTests({ directory: absDir, diffRef: baseRef }, { changedSet })) as {
       selectedTests?: Array<{ file: string }>;
       error?: string;
       truncatedAtDepth?: number;

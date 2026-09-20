@@ -19,7 +19,16 @@
  */
 
 import { validateDirectory, readCachedContext } from './utils.js';
-import { seedsFromFiles, handleSelectTests } from './test-impact.js';
+import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
+import {
+  carriedCaveat,
+  granularityCaveat,
+  importsAddedCaveat,
+  noChangeClaim,
+  seededUnchangedCaveat,
+  type ChangeGranularityReceipt,
+  type DiffEntry,
+} from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -96,7 +105,20 @@ export interface BlastRadiusBriefing {
    * requested ref did not resolve and resolveBaseRef fell back (main → master →
    * HEAD~1); a caveat is emitted when they differ. */
   resolvedBaseRef: string;
-  changed: { files: number; symbols: number; symbolNames: string[] };
+  changed: {
+    files: number;
+    /** Symbols that CHANGED. Symbols seeded for another reason are counted in `alsoSeeded`. */
+    symbols: number;
+    symbolNames: string[];
+    /** Seeded because they name a changed symbol, or hold a dynamic-dispatch site — not changed. */
+    alsoSeeded?: number;
+  };
+  /**
+   * How precisely the changed symbols were identified (change: add-symbol-content-hashes): files
+   * whose changed symbols are exact, and files kept whole with the reason. Absent when the diff
+   * named no file with production symbols.
+   */
+  changeGranularity?: ChangeGranularityReceipt;
   impact: {
     highestRiskLevel: RiskLevel | 'none';
     maxAffectedCallers: number;
@@ -202,6 +224,7 @@ export async function computeBlastRadius(
 
   // ── 1. Resolve the diff → changed files → seed production symbols ───────────
   let changedFiles: string[];
+  let diffEntries: DiffEntry[];
   // Resolve-or-disclose through the one shared helper (fix-cli-conclusion-honesty):
   // an explicit ref that git can't resolve falls back (main → master → HEAD~1) and is
   // disclosed, so the advisory briefing never misrepresents the base it diffed against.
@@ -214,12 +237,16 @@ export async function computeBlastRadius(
     baseFellBack = base.fellBack;
     const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBaseRef, includeUnstaged: true });
     changedFiles = diff.files.map(f => f.path);
+    diffEntries = diff.files;
   } catch (err) {
     return { error: `git diff failed (base ${baseRef}): ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  // Rank by fan-in: the highest-fan-in changed symbols dominate the blast radius.
-  const seeds = seedsFromFiles(cg, changedFiles).sort((a, b) => (b.fanIn ?? 0) - (a.fanIn ?? 0));
+  // Narrow to the symbols that changed (change: add-symbol-content-hashes), then rank by fan-in:
+  // the highest-fan-in changed symbols dominate the blast radius.
+  const narrowed = await narrowToChangedSymbols(absDir, resolvedBaseRef, diffEntries, cg, seedsFromFiles(cg, changedFiles));
+  const seeds = narrowed.seeds.sort((a, b) => (b.fanIn ?? 0) - (a.fanIn ?? 0));
+  const changeGranularity = narrowed.receipt;
   const analyzed = seeds.slice(0, maxSymbols);
 
   // ── 2. Impact per top symbol (reuse analyze_impact) ─────────────────────────
@@ -284,7 +311,8 @@ export async function computeBlastRadius(
       diffRef: resolvedBaseRef,
       ...(input.federation ? { federation: true } : {}),
       ...(input.federationRepos ? { federationRepos: input.federationRepos } : {}),
-    }) as {
+    // Reuse the changed-set computed above: same base ref, same diff, provably the same answer.
+    }, { changedSet: narrowed.set }) as {
       selectedTests?: Array<{ test: string; file: string; confidence: string }>;
       soundness?: unknown;
       truncatedAtDepth?: number;
@@ -353,11 +381,20 @@ export async function computeBlastRadius(
   if (baseFellBack) {
     caveats.push(`Requested base ref "${baseRef}" did not resolve; diffed against "${resolvedBaseRef}" instead (main → master → HEAD~1 fallback).`);
   }
+  const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
+  if (granularityNote) caveats.push(granularityNote);
+  const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
+  if (importsNote) caveats.push(importsNote);
+  if (changeGranularity && seeds.length === 0) caveats.push(noChangeClaim(changeGranularity).text);
+  const seededNote = seededUnchangedCaveat(narrowed.seededUnchanged ?? 0);
+  if (seededNote) caveats.push(seededNote);
+  const carriedNote = narrowed.set && carriedCaveat(narrowed.set.carried);
+  if (carriedNote) caveats.push(carriedNote);
   if (seeds.length > analyzed.length) {
     caveats.push(`Impact analyzed the ${analyzed.length} highest-fan-in changed symbols; ${seeds.length - analyzed.length} lower-risk symbols were not individually analyzed.`);
   }
-  if (seeds.length > 30) {
-    caveats.push(`changed.symbolNames lists the first 30 of ${seeds.length} changed symbols (count is in changed.symbols).`);
+  if (seeds.length - (narrowed.seededUnchanged ?? 0) > 30) {
+    caveats.push(`changed.symbolNames lists the first 30 of ${seeds.length - (narrowed.seededUnchanged ?? 0)} changed symbols (count is in changed.symbols).`);
   }
   if (driftUnavailable) {
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
@@ -422,9 +459,13 @@ export async function computeBlastRadius(
     ...(confidenceBoundary.complete ? {} : { confidenceBoundary }),
     changed: {
       files: changedFiles.length,
-      symbols: seeds.length,
-      symbolNames: seeds.slice(0, 30).map(s => s.name),
+      // The seed set is what was ANALYZED; what CHANGED is the seed set minus the symbols kept for
+      // another reason. Reporting the seed count as "changed" would name unchanged symbols.
+      symbols: seeds.length - (narrowed.seededUnchanged ?? 0),
+      symbolNames: seeds.filter(s => !narrowed.unchangedSeedIds?.has(s.id)).slice(0, 30).map(s => s.name),
+      ...((narrowed.seededUnchanged ?? 0) > 0 ? { alsoSeeded: narrowed.seededUnchanged } : {}),
     },
+    ...(changeGranularity ? { changeGranularity } : {}),
     impact: {
       highestRiskLevel,
       maxAffectedCallers,
@@ -471,6 +512,13 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   const parts: string[] = [
     `${b.changed.files} file${b.changed.files === 1 ? '' : 's'} / ${b.changed.symbols} symbol${b.changed.symbols === 1 ? '' : 's'} changed`,
   ];
+  // Zero symbols over changed code files means every code edit hashed as formatting or comments.
+  // Straight from the claim, never a second rendering of it: a headline that writes its own prose
+  // from the same receipt is how "formatting or comments only" outlived the caveat that fixed it.
+  if (b.changed.symbols === 0 && b.changeGranularity) parts.push(noChangeClaim(b.changeGranularity).headline);
+  if ((b.changed.alsoSeeded ?? 0) > 0) {
+    parts.push(`${b.changed.alsoSeeded} more analyzed but unchanged`);
+  }
   if (b.impact.highestRiskLevel !== 'none') parts.push(`highest risk: ${b.impact.highestRiskLevel}`);
   if (b.impact.hubsTouched.length > 0) parts.push(`${b.impact.hubsTouched.length} hub${b.impact.hubsTouched.length === 1 ? '' : 's'} affected`);
   // The headline is the line a reader acts on, so an uncomputed test set must appear

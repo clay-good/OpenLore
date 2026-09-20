@@ -177,7 +177,11 @@ export async function readFileConfinedWithStat(
     throw new Error(`Path escape blocked: symbolic-link path component in "${filePath}"`);
   }
 
-  const handle = await open(canonicalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // `O_NONBLOCK` is what makes the regular-file guard below reachable at all: opening a FIFO with no
+  // writer blocks in the kernel forever, on a libuv threadpool thread that never comes back — four
+  // of them stall every filesystem operation in the process. The flag has no effect on a regular
+  // file, so the honest "not a regular file" refusal still happens one line later.
+  const handle = await open(canonicalPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await handle.stat();
     if (!opened.isFile()) throw new Error(`Confined read requires a regular file: "${filePath}"`);

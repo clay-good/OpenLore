@@ -31,6 +31,19 @@ import {
   loadDynamicBoundaryReport,
   dynamicBoundaryCrossing,
 } from './dynamic-boundary-disclosure.js';
+import {
+  computeSymbolChangedSet,
+  coverSeedFiles,
+  granularityCaveat,
+  granularityReceipt,
+  importsAddedCaveat,
+  noChangeClaim,
+  seededUnchangedCaveat,
+  narrowSeedsToChangedSymbols,
+  type ChangeGranularityReceipt,
+  type DiffEntry,
+  type SymbolChangedSet,
+} from '../symbol-changed-set.js';
 
 export interface SelectTestsInput {
   directory: string;
@@ -200,7 +213,16 @@ function testKey(file: string, name: string): string {
  * Select the tests that transitively reach a set of changed symbols/files.
  * Read-only, deterministic, offline. Returns `unknown` (additive-by-cast).
  */
-export async function handleSelectTests(input: SelectTestsInput): Promise<unknown> {
+export async function handleSelectTests(
+  input: SelectTestsInput,
+  /**
+   * In-process reuse only (never part of the advertised MCP schema): the changed-set a composing
+   * caller already computed for the SAME base ref and diff. `blast_radius` and `briefing_since` both
+   * compose this handler, and re-deriving the set costs a second round of git reads and parses for
+   * a provably identical answer.
+   */
+  precomputed?: { changedSet?: SymbolChangedSet },
+): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
   if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
@@ -239,6 +261,12 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   let untrackedAssessed = true;
   /** Untracked test files past {@link MAX_UNTRACKED_TIER_FILES}, disclosed rather than dropped silently. */
   let untrackedOmitted = 0;
+  /** How precise the diff's changed-set was (change: add-symbol-content-hashes). Diff path only. */
+  let changeGranularity: ChangeGranularityReceipt | undefined;
+  /** Production symbols in the changed files before narrowing to the ones that changed. */
+  let fileSeedCount = 0;
+  /** Seeds kept for a reason other than their own change (naming one, or a dynamic-dispatch site). */
+  let seededUnchanged = 0;
   if (hasSymbols) {
     const resolution = resolveSymbolSeeds(cg, input.changedSymbols!);
     seeds = resolution.seeds;
@@ -248,7 +276,12 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       const { getChangedFiles } = await import('../../drift/git-diff.js');
       const diff = await getChangedFiles({ rootPath: absDir, baseRef, includeUnstaged: true });
       changedFiles = diff.files.map(f => f.path);
-      seeds = seedsFromFiles(cg, changedFiles);
+      const fileSeeds = seedsFromFiles(cg, changedFiles);
+      fileSeedCount = fileSeeds.length;
+      const narrowed = await narrowToChangedSymbols(absDir, baseRef, diff.files, cg, fileSeeds, precomputed?.changedSet);
+      seeds = narrowed.seeds;
+      changeGranularity = narrowed.receipt;
+      seededUnchanged = narrowed.seededUnchanged ?? 0;
       // A test file the diff touched, or a new untracked one, is selected on its own standing — not
       // only if reachability happens to reach it. Only a file the analyzer's own rule calls a test, inside
       // the analyzed directory, and still on disk: a fixture under `test/`, another package's test, or a
@@ -290,7 +323,8 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       selectedTests: [],
       message: hasSymbols
         ? 'No matching production functions found for the given symbols.'
-        : `No changed production functions vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`,
+        : noSymbolChangedMessage(baseRef, defaultedToHead, fileSeedCount, changeGranularity),
+      ...(changeGranularity ? { changeGranularity } : {}),
       ...(defaultedToHead ? { note: 'Called without changedSymbols/diffRef — diffed the working tree against HEAD. Pass changedSymbols or diffRef to target a specific change.' } : {}),
       ...(federationRequested ? { federationNote: 'Federation scope was requested, but no changed production symbol resolved in the home repo — cross-repo test selection keys off the home repo\'s changed published symbols, so nothing was propagated. Pass changedSymbols (or a diffRef with code changes) to select across the fleet.' } : {}),
       soundness: {
@@ -526,6 +560,12 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     caveats.push('Some seeds had no reaching test; sibling-file tests were included at low confidence (likely newly-added or untested functions).');
   }
   if (!untrackedAssessed) caveats.push(UNTRACKED_NOT_ASSESSED);
+  const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
+  if (granularityNote) caveats.push(granularityNote);
+  const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
+  if (importsNote) caveats.push(importsNote);
+  const seededNote = seededUnchangedCaveat(seededUnchanged);
+  if (seededNote) caveats.push(seededNote);
   if (untrackedOmitted > 0) {
     caveats.push(`${untrackedOmitted} more untracked test file(s) beyond the first ${MAX_UNTRACKED_TIER_FILES} were not selected; commit or ignore generated test files, or run the full suite.`);
   }
@@ -579,6 +619,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   return {
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
+    ...(changeGranularity ? { changeGranularity } : {}),
     selectedTests,
     ...(truncatedAtDepth !== undefined ? { truncatedAtDepth } : {}),
     ...(defaultedToHead ? { note: 'No changedSymbols/diffRef given — selected tests for your current working-tree changes vs HEAD.' } : {}),
@@ -597,6 +638,82 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       integrity: ctx?.integrity,
       ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
     }),
+  };
+}
+
+/**
+ * The message for a diff that seeded no symbol. It must never claim more than was assessed: the
+ * hashes cover the files that were hashed, the working tree is what was read (a staged edit already
+ * reverted in the working tree reads as no difference), and any file kept whole is named.
+ */
+function noSymbolChangedMessage(
+  baseRef: string,
+  defaultedToHead: boolean,
+  fileSeedCount: number,
+  receipt: ChangeGranularityReceipt | undefined,
+): string {
+  const base = `vs ${baseRef}${defaultedToHead ? ' (defaulted — no changedSymbols or diffRef was given)' : ''}`;
+  if (!receipt || (fileSeedCount === 0 && receipt.changedSymbolsFound === 0)) {
+    return `No changed production functions ${base}. Nothing has changed, the diff touches only non-code files, or analyze_codebase is stale.`;
+  }
+  const claim = noChangeClaim(receipt);
+  return claim.kind === 'unchanged'
+    ? `No production symbol differs from the base ${base}: ${claim.text[0].toLowerCase()}${claim.text.slice(1)}`
+    : `No test was selected ${base}: ${claim.text}`;
+}
+
+/**
+ * Narrow a diff's file-level seeds to the production symbols that changed (change:
+ * add-symbol-content-hashes). Shared by `select_tests`, `blast_radius` and `briefing_since` so they
+ * agree on the changed-set. Fail-soft: a file the changed-set could not assess keeps all its seeds and
+ * is named in the receipt as `not-assessed`.
+ */
+export async function narrowToChangedSymbols(
+  absDir: string,
+  baseRef: string,
+  diff: readonly DiffEntry[],
+  cg: SerializedCallGraph,
+  fileSeeds: FunctionNode[],
+  /** A changed-set a composing caller already computed for this base ref and diff. */
+  precomputedSet?: SymbolChangedSet,
+): Promise<{
+  seeds: FunctionNode[];
+  receipt?: ChangeGranularityReceipt;
+  set?: SymbolChangedSet;
+  seededUnchanged?: number;
+  /** Seed ids that did not themselves change (they name a changed symbol, or hold a dispatch site). */
+  unchangedSeedIds?: ReadonlySet<string>;
+}> {
+  // No file-level seed does NOT mean nothing to say: a moved file's symbols carry ids the index has
+  // never seen, and so does a file added since the last analyze. Computing the set anyway is what
+  // lets the receipt name those files and the claim say "not indexed" instead of "nothing changed".
+  let set: SymbolChangedSet;
+  try {
+    // A reused set is only the same answer when it was computed against the same base; a mismatch
+    // re-computes rather than narrowing against the wrong revision.
+    const reusable = precomputedSet && (precomputedSet.baseRef === undefined || precomputedSet.baseRef === baseRef)
+      ? precomputedSet : undefined;
+    set = reusable ?? await computeSymbolChangedSet({ absDir, baseRef, diff, callGraph: cg });
+  } catch {
+    set = { byFile: new Map(), carried: [] };
+  }
+  set = coverSeedFiles(set, fileSeeds);
+  const seeds = narrowSeedsToChangedSymbols(fileSeeds, set);
+  const indexed = new Set(cg.nodes.map(n => n.id));
+  const unchangedSeedIds = new Set<string>();
+  for (const seed of seeds) {
+    const change = set.byFile.get(seed.filePath);
+    if (change?.granularity === 'symbol'
+        && (change.referencing.includes(seed.id) || change.dynamicDispatch.includes(seed.id))) {
+      unchangedSeedIds.add(seed.id);
+    }
+  }
+  return {
+    seeds,
+    receipt: granularityReceipt(set, id => indexed.has(id)),
+    set,
+    seededUnchanged: unchangedSeedIds.size,
+    unchangedSeedIds,
   };
 }
 

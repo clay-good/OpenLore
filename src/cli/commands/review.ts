@@ -22,6 +22,7 @@
  */
 
 import { writeFile } from 'node:fs/promises';
+import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { Command } from 'commander';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
@@ -227,6 +228,14 @@ export async function composeReview(opts: { cwd: string; base?: string; head?: s
   // an absent "Tests to run" section, which reads as "no tests are impacted".
   if (blast && !('error' in blast) && blast.tests.unavailable) {
     caveats.push(`Tests to run could not be computed (${blast.tests.unavailable}) — this is not the same as "no tests are impacted".`);
+  }
+  // The briefing now narrows to the symbols the diff actually changed, so HOW it narrowed belongs in
+  // the comment too: a reviewer cannot judge a short hub list or test set without it
+  // (change: add-symbol-content-hashes).
+  if (blast && !('error' in blast)) {
+    for (const caveat of blast.caveats) {
+      if (isChangedSetCaveat(caveat)) caveats.push(caveat);
+    }
   }
 
   const resolvedBase = (!('error' in blast) && blast.resolvedBaseRef) || structural.base || opts.base || 'HEAD';

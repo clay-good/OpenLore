@@ -12,6 +12,7 @@
  */
 
 import { Command } from 'commander';
+import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { writeStdout, writeStderr } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -138,6 +139,12 @@ function renderHuman(b: BlastRadiusBriefing): string {
   const dynamicCrossing = b.confidenceBoundary?.knownUnknowable
     ?.find(c => c.kind === 'dynamic-boundary')?.detail;
   if (dynamicCrossing) lines.push(`   ⚠ ${dynamicCrossing}`);
+  // How precisely the changed symbols were identified, straight from the briefing's own caveats:
+  // the headline can only strengthen the reading ("no symbol differs"), so the weakening side
+  // belongs in the terminal too (change: add-symbol-content-hashes).
+  for (const caveat of b.caveats ?? []) {
+    if (isChangedSetCaveat(caveat)) lines.push(`   ⚠ ${caveat}`);
+  }
   if (b.impact.hubsTouched.length > 0) {
     lines.push('   Hubs: ' + b.impact.hubsTouched.map(h => `${h.symbol} (${h.fanIn} callers)`).join(', '));
   }

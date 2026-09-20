@@ -18,6 +18,42 @@ Why it matters:
 - **a deterministic graph does it instantly** — backward reachability over edges already stored.
 - **it saves real money** — agents running full suites or guessing wrong is a major time sink.
 
+## What counts as a change
+
+A diff names files; `select_tests` seeds from the **symbols inside them that actually changed**
+(change: `add-symbol-content-hashes`). Each changed file is hashed twice — once at the base
+revision, once in the working tree — over the parse tree the extractor already built, with comments
+dropped and whitespace between tokens ignored. A re-indent, a rewrapped call, or a rewritten comment
+is therefore not a change, and a one-function edit in a forty-function file seeds one function.
+
+Narrowing never removes a seed the old file-level behavior would have kept for a reason that still
+holds. A file stays whole, and says why, when the evidence is incomplete — `module-level-change`
+(imports, module-level statements, class fields, or code that moved across a symbol),
+`module-level-reference` (module-level code names a changed symbol, so it may bind it),
+`parse-errors`, `language-not-hashed`, `unreadable`, `index-mismatch`, `span-not-contiguous`,
+`invalid-span`, `file-cap`, `size-cap`, `time-cap`, `not-assessed`. Inside a narrowed file, a symbol that names a changed symbol, names a newly bound
+import, or holds a dynamic-dispatch site stays seeded too. The counts and the per-file reasons come
+back in `changeGranularity`, and the caveats name them.
+
+Claims this deliberately does **not** make: a file that was never hashed is "not assessed", never
+"unchanged"; a symbol that changed but is absent from the index is "not indexed" (re-run
+`analyze_codebase`), never "unchanged"; an added import's own load-time side effects are not
+attributed to the file's other symbols; and text in comment syntax that changes how a file is built,
+parsed, or run — a shebang, a build tag, `@ts-expect-error`, `frozen_string_literal` — is hashed as
+code from a **closed list**, so a language directive that is not on that list reads as an ordinary
+comment and flipping it is not seen as a change.
+
+How much this narrows depends on the language and the diff. It lands most reliably in
+TypeScript/JavaScript. In a language where the call graph indexes only some of a file's functions
+(Python module-level helpers, Go files whose functions the extractor does not all capture), the
+unindexed bodies sit in the module-level residual, so editing one reads as `module-level-change` and
+the file stays whole — true given what the analyzer sees, and disclosed, but no narrower than before.
+A diff that also rewrites module-level code keeps those files whole too, which is common.
+
+The bounds are disclosed too: a diff past 200 code files, a file over 256 KB, a diff past the 1 MB
+hashing budget, or a pass past its 8-second budget keeps the remaining files whole — always the
+conservative direction, so a slower machine seeds more, never less.
+
 ## Honest soundness — read this
 
 Static call-graph RTS is an **approximation**, and the tool says so in every response:
