@@ -185,12 +185,15 @@ describe('openlore status — what the index is', () => {
     await writeConfig(null);
     const unusual = 'quoted "name"\n.ts';
     await writeFile(join(root, unusual), 'export function unusual() {}\n');
+    await mkdir(join(root, 'new-directory'));
+    await writeFile(join(root, 'new-directory', 'added.ts'), 'export function added() {}\n');
     await rm(join(root, 'removed.ts'));
     execFileSync('git', ['mv', 'before-rename.ts', 'after-rename.ts'], { cwd: root });
 
     const status = await collectIndexStatus(root);
 
     expect(status.staleFiles).toContain(unusual);
+    expect(status.staleFiles).toContain('new-directory/added.ts');
     expect(status.staleFiles).toContain('removed.ts');
     expect(status.staleFiles).toContain('before-rename.ts');
     expect(status.staleFiles).toContain('after-rename.ts');
