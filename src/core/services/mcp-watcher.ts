@@ -80,6 +80,7 @@ import {
 } from './edit-verdict.js';
 import { isConfinedPath, readFileConfined } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal } from '../../utils/misc.js';
+import { clearIndexEmbedFailure, recordIndexEmbedFailure } from '../analyzer/analysis-indexes.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -2111,8 +2112,23 @@ export class McpWatcher {
             : `[mcp-watcher] refreshed BM25 index for ${changedFilePaths.size} file(s): ${total} functions\n`
         );
       }
+      // The incremental path succeeded, so any failure recorded earlier is history.
+      await clearIndexEmbedFailure(this.outputPath);
     } catch (err) {
-      process.stderr.write(`[mcp-watcher] embed error: ${sanitizeForTerminal((err as Error).message)}\n`);
+      const reason = sanitizeForTerminal((err as Error).message);
+      process.stderr.write(`[mcp-watcher] embed error: ${reason}\n`);
+      // stderr goes to the daemon's log, which no operator and no agent reads. Record it
+      // where the index-state surfaces look (spec `cli`
+      // IndexBuildFailureIsVisibleOutsideTheDaemonLog).
+      const endpoint = await (async () => {
+        try {
+          const { readOpenLoreConfig } = await import('./config-manager.js');
+          return (await readOpenLoreConfig(this.rootPath))?.embedding?.baseUrl ?? process.env.EMBED_BASE_URL;
+        } catch {
+          return process.env.EMBED_BASE_URL;
+        }
+      })();
+      await recordIndexEmbedFailure(this.outputPath, { reason, ...(endpoint ? { endpoint } : {}) });
     }
   }
 

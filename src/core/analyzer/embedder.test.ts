@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveEmbedder, embedderMode, servedRetrievalMode } from './embedder.js';
+import { resolveEmbedder, embedderMode, servedRetrievalMode, indexCapabilityAgreement, semanticProviderConfigured } from './embedder.js';
 import {
   LocalEmbeddingService,
   DEFAULT_LOCAL_MODEL,
@@ -228,5 +228,71 @@ describe('resolveTrustedLocalModel — a repo may not choose which weights are e
 
   it('falls back to the pinned default when the field is absent', () => {
     expect(resolveTrustedLocalModel(undefined)).toBe(DEFAULT_LOCAL_MODEL);
+  });
+});
+
+/**
+ * "What was asked for" vs. "what was produced". On 2026-09-20 two repositories named a
+ * reachable embedding endpoint and served keyword results for days, because nothing ever
+ * compared the two (spec `analyzer` IndexReuseRequiresCapabilityAgreement).
+ */
+describe('indexCapabilityAgreement — configured provider vs. realized index', () => {
+  let dir: string;
+  const savedBaseUrl = process.env.EMBED_BASE_URL;
+  const savedModel = process.env.EMBED_MODEL;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-capability-'));
+    delete process.env.EMBED_BASE_URL;
+    delete process.env.EMBED_MODEL;
+  });
+
+  afterEach(() => {
+    if (savedBaseUrl === undefined) delete process.env.EMBED_BASE_URL; else process.env.EMBED_BASE_URL = savedBaseUrl;
+    if (savedModel === undefined) delete process.env.EMBED_MODEL; else process.env.EMBED_MODEL = savedModel;
+  });
+
+  const withMeta = async (hasEmbeddings: boolean): Promise<void> => {
+    await writeFile(join(dir, 'vector-index-meta.json'), JSON.stringify({ hasEmbeddings }), 'utf-8');
+  };
+  const remoteConfig = { embedding: { baseUrl: 'http://127.0.0.1:8765/v1', model: 'all-MiniLM-L6-v2' } } as OpenLoreConfig;
+
+  it('reports a configured provider whose vectors are absent', async () => {
+    await withMeta(false);
+    expect(indexCapabilityAgreement(remoteConfig, dir)).toEqual({ agrees: false, mismatch: 'configured-but-unrealized' });
+  });
+
+  it('agrees when the configured provider is realized', async () => {
+    await withMeta(true);
+    expect(indexCapabilityAgreement(remoteConfig, dir)).toEqual({ agrees: true });
+  });
+
+  it('agrees on the unconfigured keyword default', async () => {
+    await withMeta(false);
+    expect(indexCapabilityAgreement(null, dir)).toEqual({ agrees: true });
+  });
+
+  it('reports vectors carried with no configured provider', async () => {
+    await withMeta(true);
+    expect(indexCapabilityAgreement(null, dir)).toEqual({ agrees: false, mismatch: 'vectors-without-provider' });
+  });
+
+  it('counts the local provider and a complete EMBED_* pair as configured', () => {
+    expect(semanticProviderConfigured({ embedding: { provider: 'local' } } as OpenLoreConfig)).toBe(true);
+    process.env.EMBED_BASE_URL = 'http://127.0.0.1:8765/v1';
+    process.env.EMBED_MODEL = 'all-MiniLM-L6-v2';
+    expect(semanticProviderConfigured(null)).toBe(true);
+  });
+
+  it('does not count a half-configured environment or a half-written config block', () => {
+    process.env.EMBED_BASE_URL = 'http://127.0.0.1:8765/v1';
+    expect(semanticProviderConfigured(null)).toBe(false);
+    expect(semanticProviderConfigured({ embedding: { baseUrl: 'http://127.0.0.1:8765/v1' } } as OpenLoreConfig)).toBe(false);
+  });
+
+  it('constructs no service and opens no socket — it reads configuration only', () => {
+    // An unreachable endpoint still answers "configured": the predicate is safe on the
+    // index-reuse hot path precisely because it never probes.
+    expect(semanticProviderConfigured({ embedding: { baseUrl: 'http://127.0.0.1:1/v1', model: 'm' } } as OpenLoreConfig)).toBe(true);
   });
 });
