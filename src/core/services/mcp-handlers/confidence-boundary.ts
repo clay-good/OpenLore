@@ -56,7 +56,18 @@ export interface EdgeBasis {
   synthesizedByRule?: Record<string, number>;
 }
 
-export type KnownUnknowableKind = 'synthesized-dispatch' | 'unindexed-repo' | 'dynamic-boundary';
+export type KnownUnknowableKind =
+  | 'synthesized-dispatch'
+  | 'unindexed-repo'
+  | 'dynamic-boundary'
+  /**
+   * The answer served symbols re-read from the working tree, but their INCOMING call
+   * edges still come from the index and may predate the edit (change:
+   * overlay-dirty-files-at-query-time). Re-reading a file is sound for what that file
+   * contains; re-resolving who calls into it is a whole-graph operation the overlay
+   * deliberately does not attempt, so it is disclosed rather than implied.
+   */
+  | 'working-tree-overlay';
 
 /**
  * One dynamic-dispatch construct the resolver could not follow, as disclosed on a conclusion
@@ -431,6 +442,19 @@ export function assembleBoundary(parts: {
   if (integrity) boundary.integrity = integrity;
   if (parts.repair) boundary.repair = parts.repair;
   return boundary;
+}
+
+/**
+ * The crossing for an answer whose symbols were re-read from the working tree. Returns
+ * undefined when no file was overlaid, so a normal answer carries nothing extra.
+ */
+export function overlayCrossing(overlaidFileCount: number): KnownUnknowableCrossing | undefined {
+  if (overlaidFileCount <= 0) return undefined;
+  return {
+    kind: 'working-tree-overlay',
+    count: overlaidFileCount,
+    detail: `${overlaidFileCount} edited file(s) were re-read from the working tree for this answer. Their symbols and spans are current; incoming call edges come from the index and may predate the edit.`,
+  };
 }
 
 /** Reset the staleness memo — test-only hook so a stubbed fingerprint is re-read. */

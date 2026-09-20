@@ -16,7 +16,8 @@ re-parsed and a file already extracted in this session is served from cache.
 
 - **GIVEN** an indexed repository and a file edited since the index was built, adding a function
 - **WHEN** a query that would return symbols from that file is served
-- **THEN** the added function is present in the answer
+- **THEN** the added function is present in the answer, carrying overlay provenance and no score,
+  so it is distinguishable from a result the ranker placed
 
 #### Scenario: A deleted symbol does not come back
 

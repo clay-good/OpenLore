@@ -57,10 +57,19 @@ It already tells the caller its offsets are untrustworthy when the file is stale
 the answer is unusable. With the overlay it becomes usable, which is a bigger win than nudging
 search ranking.
 
-**5. The overlay runs before ranking, not after.**
-A symbol added in a dirty file must be rankable, not appended to a ranked list. Since retrieval reads
-rows, the overlay contributes rows for the stale files and suppresses the indexed rows for those same
-files, keeping one coherent row set per query.
+**5. The overlay reconciles the ranked answer; it does not re-rank.**
+The overlay runs at the handler, after ranking, and does three things to the answer: it drops rows
+whose symbol no longer exists on disk (the index remembering a deleted function), it surfaces
+symbols the index has never seen, and it narrows the staleness notice to what it could not cover.
+
+Symbols it surfaces are returned AFTER the ranked rows, labelled with their provenance and carrying
+NO score. Ranking them properly would mean re-scoring the BM25 corpus on the query path — the hot
+path — and a fabricated score would be worse than none: a caller could not tell the ranker's
+judgment from a placeholder. So the answer stays honest about which half it came from.
+*Alternative considered:* contribute rows before ranking, inside `VectorIndex.search`, so working-tree
+symbols compete with indexed ones. Rejected for this change: it re-tokenizes the corpus per query and
+widens the regression surface of the search path for a gain (ordering of new symbols) smaller than
+the one this change already delivers. It remains available as its own change.
 
 ## Risks / Trade-offs
 
@@ -72,6 +81,20 @@ files, keeping one coherent row set per query.
   for any file the overlay covered; the spec's coherent-row-set rule is the test.
 - **Divergence from the watcher's own incremental update** → both read the same Pass-1 path, so a
   file overlaid at query time and later indexed by the watcher yields the same facts.
+
+## Measured
+
+Overlay cost on a synthetic repository (30 files, 40 functions each), macOS x64:
+
+| Stale set | Cold | Warm (memo hit) | Outcome |
+|-----------|------|-----------------|---------|
+| 1 file | 118.9 ms | 0.8 ms | overlaid |
+| 10 files | 26.0 ms | 3.2 ms | overlaid |
+| 30 files (over the cap) | 0.1 ms | 0.0 ms | skipped — answered from the index |
+
+The 1-file figure is dominated by first-use grammar initialization, not per-file work: ten files cost
+*less* in total because the grammar is already loaded (~2.6 ms/file thereafter). The over-cap row is
+the property that matters — exceeding a bound costs nothing and returns today's behavior.
 
 ## Migration Plan
 

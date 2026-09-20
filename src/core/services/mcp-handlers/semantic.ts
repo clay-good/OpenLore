@@ -29,7 +29,8 @@ import {
   reviewedFileContentProvenance,
   type AnalysisContentProvenance,
 } from '../served-content.js';
-import { withIndexStaleness } from './index-staleness.js';
+import { computeIndexStaleness, withIndexStaleness } from './index-staleness.js';
+import { overlayResults } from './overlay-results.js';
 import {
   coverageDisclosure,
   coverageVerdict,
@@ -364,10 +365,6 @@ export async function handleSearchCode(
   // Progressive disclosure (Spec 25 P2–P4): default returns all hits; with a
   // tokenBudget, collapse exact duplicates then greedily keep the highest-scored
   // hits that fit. Every hit carries an `expand` handle for get_function_body.
-  const budgeted = tokenBudget
-    ? applyTokenBudget(collapseExactDuplicates(allResults), tokenBudget)
-    : { kept: allResults, omitted: 0 };
-
   // A ranked list of incidental matches is shaped exactly like an answer. The verdict
   // says which one this is, folded from the evidence each result already carries
   // (spec `mcp-quality` NoFalseCoverage).
@@ -392,6 +389,15 @@ export async function handleSearchCode(
     }, llmCtx);
   }
 
+  // Reconcile the ranked answer with the working tree before returning it: the symbols a
+  // caller just edited are the ones most likely to matter, and the freshness check has
+  // already named those files (spec `mcp-handlers` StalenessDisclosingHandlersServeTheOverlay).
+  const staleness = await computeIndexStaleness(absDir, { results: allResults }, llmCtx);
+  const overlaid = await overlayResults(absDir, query, allResults, staleness?.staleFiles ?? []);
+  const budgetedRows = tokenBudget
+    ? applyTokenBudget(collapseExactDuplicates(overlaid.results), tokenBudget)
+    : { kept: overlaid.results, omitted: 0 };
+
   const result = {
     query,
     searchMode,
@@ -404,11 +410,16 @@ export async function handleSearchCode(
           note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
         }
       : {}),
-    count: budgeted.kept.length,
-    results: budgeted.kept,
-    ...(budgeted.omitted > 0
-      ? { resultsOmitted: omissionNote(budgeted.omitted, 'raise tokenBudget or narrow the query') }
+    count: budgetedRows.kept.length,
+    results: budgetedRows.kept,
+    ...(budgetedRows.omitted > 0
+      ? { resultsOmitted: omissionNote(budgetedRows.omitted, 'raise tokenBudget or narrow the query') }
       : {}),
+    // Symbols the index has never seen, read from the working tree. Unranked on purpose:
+    // a fabricated score would be worse than none.
+    ...(overlaid.additions.length > 0 ? { workingTreeAdditions: overlaid.additions } : {}),
+    ...(overlaid.removed.length > 0 ? { removedInWorkingTree: overlaid.removed } : {}),
+    ...(overlaid.disclosure ? { workingTreeOverlay: overlaid.disclosure } : {}),
     ...(specPeers.length > 0 ? { specLinkedFunctions: specPeers } : {}),
     ...(indexDegraded ? { indexDegraded } : {}),
   };
