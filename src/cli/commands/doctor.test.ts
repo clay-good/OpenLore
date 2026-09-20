@@ -160,9 +160,10 @@ describe('doctor command', () => {
       expect(Array.isArray(checks)).toBe(true);
     });
 
-    it('should include exactly 14 checks', async () => {
+    it('should include the retrieval check among the default checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(14);
+      expect(checks).toHaveLength(15);
+      expect(checks.find(c => c.name === 'Retrieval mode')).toBeDefined();
     });
 
     it('should include a governance corpus integrity check', async () => {
@@ -959,11 +960,14 @@ describe('doctor command', () => {
 
       const loggerModule = await import('../../utils/logger.js');
       vi.mocked(loggerModule.logger.success).mockClear();
+      const { VectorIndex } = await import('../../core/analyzer/vector-index.js');
+      const indexExists = vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
 
       try {
         await doctorCommand.parseAsync([], { from: 'user' });
         expect(vi.mocked(loggerModule.logger.success)).toHaveBeenCalledWith('All checks passed!');
       } finally {
+        indexExists.mockRestore();
         if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
         else process.env.ANTHROPIC_API_KEY = saved;
       }

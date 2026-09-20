@@ -15,12 +15,12 @@ import { safeJoin } from '../../utils/path-confinement.js';
 import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 import type { LLMContext } from './artifact-generator.js';
 import type { Embedder } from './embedding-service.js';
-import { embedderMode, resolveEmbedder } from './embedder.js';
+import { embedderMode, indexCapabilityAgreement, resolveEmbedder } from './embedder.js';
 import { mergeAnalysisPatterns } from './analysis-core.js';
 import { FileWalker } from './file-walker.js';
 import { SpecVectorIndex } from './spec-vector-index.js';
 import { TextLineIndex } from './text-line-index.js';
-import { VectorIndex } from './vector-index.js';
+import { VectorIndex, VectorIndexLockContendedError } from './vector-index.js';
 import { loadRepositoryVocabulary } from './repo-vocabulary.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { analysisGeneratedExcludes } from './analysis-core.js';
@@ -57,6 +57,11 @@ export interface BuildAnalysisIndexesOptions {
   reporter?: IndexReporter;
   /** Analysis generation this index set consumes; enables verified cache reuse. */
   generationId?: string;
+  /**
+   * Wait for another process's index mutation instead of failing on contention.
+   * Off by default: a silent wait on a hung holder is how a build appears to hang.
+   */
+  waitForLock?: boolean;
 }
 
 export interface BuildSpecIndexOptions {
@@ -167,6 +172,23 @@ interface IndexGenerationReceipt {
   configurationHash: string;
   result: AnalysisIndexResult;
   specSkipDetail?: string;
+  /**
+   * A semantic-index failure observed OUTSIDE a full build — the watcher's incremental
+   * embed. It used to exist only as a line in `.openlore/serve.log`, where no surface an
+   * operator or an agent consults could ever see it (spec `cli`
+   * IndexBuildFailureIsVisibleOutsideTheDaemonLog).
+   */
+  embedFailure?: IndexEmbedFailure;
+}
+
+/** A semantic-index failure recorded for the surfaces that report index state. */
+export interface IndexEmbedFailure {
+  /** ISO timestamp of the failure. */
+  at: string;
+  /** Message, already sanitized by the caller. */
+  reason: string;
+  /** The configured endpoint, when the failure was a remote one. */
+  endpoint?: string;
 }
 
 function indexConfigurationHash(options: BuildAnalysisIndexesOptions): string {
@@ -189,35 +211,72 @@ function indexExists(index: 'function' | 'text' | 'spec', status: string, output
   return SpecVectorIndex.exists(outputPath);
 }
 
-async function readReusableIndexes(options: BuildAnalysisIndexesOptions): Promise<IndexGenerationReceipt | null> {
-  if (!options.generationId || options.force) return null;
+/**
+ * Why a receipt that passed the generation and configuration checks was still not reused.
+ * Returned so the caller can SAY so: an invalidation nobody can see is how a repository
+ * serves keyword results under a semantic configuration for weeks.
+ */
+export type IndexReuseRejection = 'configured-but-unrealized' | 'vectors-without-provider';
+
+/** A reusable receipt, or the capability mismatch that rejected one. */
+interface IndexReuseVerdict {
+  receipt: IndexGenerationReceipt | null;
+  rejection?: IndexReuseRejection;
+}
+
+async function readReusableIndexes(options: BuildAnalysisIndexesOptions): Promise<IndexReuseVerdict> {
+  if (!options.generationId || options.force) return { receipt: null };
   try {
     const raw = await readArtifactBounded(join(options.outputPath, INDEX_GENERATION_FILE), ANALYSIS_ARTIFACT_MAX_BYTES);
-    if (!raw) return null;
+    if (!raw) return { receipt: null };
     const receipt = JSON.parse(raw.text) as IndexGenerationReceipt;
-    if (receipt.generationId !== options.generationId || receipt.configurationHash !== indexConfigurationHash(options)) return null;
+    if (receipt.generationId !== options.generationId || receipt.configurationHash !== indexConfigurationHash(options)) return { receipt: null };
     if (!indexExists('function', receipt.result.functionIndex, options.outputPath)
       || !indexExists('text', receipt.result.textIndex, options.outputPath)
-      || !indexExists('spec', receipt.result.specIndex, options.outputPath)) return null;
-    return receipt;
+      || !indexExists('spec', receipt.result.specIndex, options.outputPath)) return { receipt: null };
+    // A receipt is now written even for a degraded build, so that the degradation is
+    // REPORTABLE. Reuse still requires a clean one — the previous behavior, when a
+    // degraded build simply wrote nothing.
+    if (receipt.result.degraded.length > 0 || receipt.embedFailure) return { receipt: null };
+    // The configuration hash covers `config.embedding`, so a config that NAMES a provider
+    // hashes identically whether or not the build realized it. Compare the realized
+    // capability too, or a keyword index built while the endpoint was down is reused
+    // forever (spec `analyzer` IndexReuseRequiresCapabilityAgreement).
+    if (!options.keywordOnly) {
+      const agreement = indexCapabilityAgreement(options.config, options.outputPath);
+      if (!agreement.agrees) return { receipt: null, rejection: agreement.mismatch };
+    }
+    return { receipt };
   } catch {
-    return null;
+    return { receipt: null };
   }
+}
+
+/** Human-readable reason for a capability-mismatch invalidation, for the one-line notice. */
+function reuseRejectionDetail(rejection: IndexReuseRejection): string {
+  return rejection === 'configured-but-unrealized'
+    ? 'A semantic embedding provider is configured but the existing index carries no vectors — rebuilding it.'
+    : 'The existing index carries vectors but no embedding provider is configured — rebuilding it.';
 }
 
 async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions): Promise<AnalysisIndexResult> {
   const reusable = await readReusableIndexes(options);
-  if (reusable) {
-    if (reusable.result.specIndex === 'skipped') {
+  if (reusable.receipt) {
+    const receipt = reusable.receipt;
+    if (receipt.result.specIndex === 'skipped') {
       options.reporter?.report({
         index: 'spec',
         status: 'skip',
-        detail: reusable.specSkipDetail ?? (options.freshSpecDirectory ? 'OpenSpec specs directory exists but contains no spec.md files' : 'No OpenSpec specs directory.'),
+        detail: receipt.specSkipDetail ?? (options.freshSpecDirectory ? 'OpenSpec specs directory exists but contains no spec.md files' : 'No OpenSpec specs directory.'),
       });
     }
-    return reusable.result;
+    return receipt.result;
   }
   const emit = (event: IndexReport): void => options.reporter?.report(event);
+  // Say why a reusable-looking index was rebuilt. Exactly once, on the rebuild it caused.
+  if (reusable.rejection) {
+    emit({ index: 'function', status: 'skip', detail: reuseRejectionDetail(reusable.rejection) });
+  }
   const result: AnalysisIndexResult = {
     functionIndex: 'skipped',
     textIndex: 'skipped',
@@ -271,6 +330,14 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
           !(options.force ?? false),
           options.config?.retrieval?.vocabularyExpansion !== false,
           graph?.edges,
+          {
+            contention: options.waitForLock ? 'wait' : 'report',
+            onReclaimed: lockPath => emit({
+              index: 'function',
+              status: 'skip',
+              detail: `Reclaimed an index lock left by a process that is no longer running: ${lockPath}`,
+            }),
+          },
         );
         result.functionIndex = 'built';
         const vocabulary = loadRepositoryVocabulary(options.outputPath);
@@ -286,6 +353,11 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
           detail: `[${mode}] (${describePopulation(built)})${vocabularyDetail}`,
         });
       } catch (error) {
+        // Contention is NOT a provider failure. Writing a keyword index here is what let a
+        // colliding build report success over a vectorless index (spec `analyzer`
+        // IndexLockContentionIsNeverASilentDowngrade): the other process is mid-build, and
+        // overwriting its output keyword-only is both wrong and silent.
+        if (error instanceof VectorIndexLockContendedError) throw error;
         if (!embedder) throw error;
         const reason = `Semantic index failed; keyword index used: ${(error as Error).message}`;
         result.degraded.push({ index: 'function', reason });
@@ -306,6 +378,10 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
       if (result.functionIndex === 'degraded') emit({ index: 'function', status: 'complete', detail: '[keyword]' });
     }
   } catch (error) {
+    // The function-index catch-all degrades anything it is handed. Contention is the one
+    // failure that must NOT be degraded: another process owns this index right now, so
+    // "carry on with a keyword index" is both a lie and a write race.
+    if (error instanceof VectorIndexLockContendedError) throw error;
     const reason = (error as Error).message;
     result.degraded.push({ index: 'function', reason });
     emit({ index: 'function', status: 'warning', detail: reason });
@@ -339,7 +415,10 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
     if (!expectedEmpty) result.degraded.push({ index: 'spec', reason });
     emit({ index: 'spec', status: expectedEmpty ? 'skip' : 'warning', detail: reason });
   }
-  if (options.generationId && result.degraded.length === 0) {
+  if (options.generationId) {
+    // Written even when the build degraded: the receipt is the record of what this index
+    // IS, and a failure nobody records is one every later surface has to guess at. Reuse
+    // is gated separately, on `degraded` being empty.
     await atomicWriteFile(join(options.outputPath, INDEX_GENERATION_FILE), JSON.stringify({
       generationId: options.generationId,
       configurationHash: indexConfigurationHash(options),
@@ -348,6 +427,54 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
     } satisfies IndexGenerationReceipt));
   }
   return result;
+}
+
+async function readReceipt(outputPath: string): Promise<Partial<IndexGenerationReceipt> | null> {
+  try {
+    const raw = await readArtifactBounded(join(outputPath, INDEX_GENERATION_FILE), ANALYSIS_ARTIFACT_MAX_BYTES);
+    return raw ? JSON.parse(raw.text) as Partial<IndexGenerationReceipt> : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record a semantic-index failure that happened outside a full build, so `doctor`,
+ * `status` and the freshness lease can report it. Best-effort: a failure to record a
+ * failure must never take down the watcher.
+ */
+export async function recordIndexEmbedFailure(
+  outputPath: string,
+  failure: Omit<IndexEmbedFailure, 'at'> & { at?: string },
+): Promise<void> {
+  try {
+    const receipt = (await readReceipt(outputPath)) ?? {};
+    receipt.embedFailure = { at: failure.at ?? new Date().toISOString(), reason: failure.reason, ...(failure.endpoint ? { endpoint: failure.endpoint } : {}) };
+    await atomicWriteFile(join(outputPath, INDEX_GENERATION_FILE), JSON.stringify(receipt));
+  } catch { /* best-effort: never fail the caller over a disclosure */ }
+}
+
+/** Clear a recorded embed failure once the same path succeeds. */
+export async function clearIndexEmbedFailure(outputPath: string): Promise<void> {
+  try {
+    const receipt = await readReceipt(outputPath);
+    if (!receipt?.embedFailure) return;
+    delete receipt.embedFailure;
+    await atomicWriteFile(join(outputPath, INDEX_GENERATION_FILE), JSON.stringify(receipt));
+  } catch { /* best-effort */ }
+}
+
+/** The index's recorded self-state: what the last build produced, and any failure since. */
+export async function readIndexReceipt(outputPath: string): Promise<{
+  degraded: AnalysisIndexResult['degraded'];
+  embedFailure?: IndexEmbedFailure;
+} | null> {
+  const receipt = await readReceipt(outputPath);
+  if (!receipt) return null;
+  return {
+    degraded: receipt.result?.degraded ?? [],
+    ...(receipt.embedFailure ? { embedFailure: receipt.embedFailure } : {}),
+  };
 }
 
 /** Build indexes one-at-a-time per canonical output directory for every frontend. */

@@ -106,6 +106,59 @@ function indexHasVectors(metaPath: string): boolean {
 }
 
 /**
+ * Does the on-disk index for `outputDir` carry vectors? The capability the index
+ * REALIZED, as opposed to the one its configuration asks for.
+ */
+export function indexCarriesVectors(outputDir: string, kind: 'code' | 'spec' = 'code'): boolean {
+  return indexHasVectors(join(outputDir, kind === 'spec' ? SPEC_INDEX_META : CODE_INDEX_META));
+}
+
+/**
+ * Is a semantic provider configured for this repository? Mirrors `resolveEmbedder`'s
+ * priority order (explicit local provider, then `EMBED_*`, then a config endpoint) but
+ * answers from configuration ALONE — it constructs no service, downloads no weights and
+ * opens no socket, so it is safe on a hot path such as the index-reuse gate.
+ *
+ * This is "what was asked for". Pair it with {@link indexCarriesVectors} ("what was
+ * produced") to detect a configured-but-unrealized semantic index.
+ */
+export function semanticProviderConfigured(cfg?: OpenLoreConfig | null): boolean {
+  if (cfg?.embedding?.provider === 'local') return true;
+  if (process.env.EMBED_BASE_URL && process.env.EMBED_MODEL) return true;
+  return Boolean(cfg?.embedding?.baseUrl && cfg?.embedding?.model);
+}
+
+/** Whether the realized index agrees with the configured provider, and how it disagrees. */
+export type IndexCapabilityAgreement =
+  /** Configuration and index agree — both semantic, or both keyword. */
+  | { agrees: true }
+  /** A provider is configured, but the index carries no vectors: the ask never happened. */
+  | { agrees: false; mismatch: 'configured-but-unrealized' }
+  /** The index carries vectors no configured provider can query. */
+  | { agrees: false; mismatch: 'vectors-without-provider' };
+
+/**
+ * Compare what the configuration asks for against what the index realized.
+ *
+ * Deliberately NOT a timestamp comparison: a build that silently fell back to a
+ * keyword index is as recent as a successful one, so only the index's own recorded
+ * capability can tell the two apart (spec `analyzer`
+ * IndexReuseRequiresCapabilityAgreement).
+ */
+export function indexCapabilityAgreement(
+  cfg: OpenLoreConfig | null | undefined,
+  outputDir: string,
+  kind: 'code' | 'spec' = 'code',
+): IndexCapabilityAgreement {
+  const configured = semanticProviderConfigured(cfg);
+  const realized = indexCarriesVectors(outputDir, kind);
+  if (configured === realized) return { agrees: true };
+  return configured
+    ? { agrees: false, mismatch: 'configured-but-unrealized' }
+    : { agrees: false, mismatch: 'vectors-without-provider' };
+}
+
+/**
  * The retrieval mode actually SERVED for a query — honest about what the index can
  * do, not just what is configured. Returns `keyword` whenever no embedder is
  * resolved OR the on-disk index has no vectors (e.g. it was built keyword-only, or
