@@ -20,7 +20,7 @@ diff's files only, not persisted at analyze; the change-coupling semantic-churn 
 - [x] Fallback disclosure: every file that stays file-granular is named with its reason, and no
       consumer claims "unchanged" over a file it did not hash or a symbol the index does not know
 - [x] Bounds that cannot become an outage: file, per-file byte, cumulative byte and wall-clock
-      budgets, a size probe before any read (one `git cat-file --batch-check`), non-regular
+      budgets, a size probe before any read (one `git ls-tree -r --long -z`), non-regular
       working-tree entries refused rather than blocking on open
 - [ ] Deferred: persisted `norm_hash` column (until early cutoff needs it); change-coupling
       semantic-churn view (needs per-commit re-extraction); rename-aware churn join

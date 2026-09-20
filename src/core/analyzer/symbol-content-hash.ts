@@ -79,6 +79,12 @@ export interface ImportStatementHash {
 /** Node types that are a language's import/use statement. */
 const IMPORT_TYPE = /^(import|use|using|require)[_a-z]*$|_(import|use|using)_?[a-z]*$/i;
 
+/** Languages whose import statement binds a name taken from the module path itself. */
+const PATH_BOUND_IMPORT_LANGUAGES = new Set(['Go']);
+
+/** A text that is exactly one identifier, nothing else. */
+const IDENTIFIER_ONLY = /^[\p{L}_$][\p{L}\p{N}_$]*$/u;
+
 /** Why a file's residual hash could not be computed. */
 export type ResidualUnavailableReason = 'invalid-span' | 'span-not-contiguous';
 
@@ -91,10 +97,16 @@ export interface FileContentHashes {
    * It carries no marker for the spans themselves, so adding or removing a symbol leaves it alone.
    */
   residual?: string;
-  /** Ids of the outermost spans in the order they occur in the file. */
-  order: string[];
   /** Top-level import statements, hashed individually and excluded from the residual and layout. */
   imports: ImportStatementHash[];
+  /**
+   * Identifiers named by module-level code and by the imports — the names the file's module level
+   * could be binding or handing around (`const h = get;`, a handler table, a re-import of the same
+   * name). Collected from the walk, so comments and layout never enter it, in every language the
+   * walk covers. A string literal whose whole content is an identifier counts: a handler table keyed
+   * by name is exactly the binding this evidence exists to catch.
+   */
+  residualNames: string[];
   /**
    * The file's shape: `T:<n>` for a run of `n` residual tokens, `S:<id>` for a run of one span's
    * tokens, `I:<hash>` for one import statement, in file order. Comparing two revisions' layouts projected onto the symbols they share
@@ -196,6 +208,8 @@ export function computeFileContentHashes(
   root: HashTreeNode,
   spans: readonly HashSpan[],
   content: string,
+  /** Only {@link PATH_BOUND_IMPORT_LANGUAGES} is read: those bind an import by its module path. */
+  language = '',
 ): FileContentHashes {
   const hashers = spans.map(() => createHash('sha256'));
   const residual = createHash('sha256');
@@ -218,13 +232,21 @@ export function computeFileContentHashes(
   // Layout: the run structure of the file. `placed` catches a span whose tokens are interleaved with
   // residual tokens, which would make the two signals impossible to compare revision to revision.
   const placed = new Set<number>();
-  const order: string[] = [];
   const layout: string[] = [];
+  const residualNames = new Set<string>();
 
   const containing = (n: HashTreeNode): number[] => {
     while (cursor < outerFirst.length && spans[outerFirst[cursor]].startIndex <= n.startIndex) active.push(outerFirst[cursor++]);
     active = active.filter(i => spans[i].endIndex >= n.startIndex);
     return active.filter(i => spans[i].startIndex <= n.startIndex && n.endIndex <= spans[i].endIndex);
+  };
+
+  /** An identifier a module-level token names, or a string literal that is exactly an identifier. */
+  const noteResidualName = (type: string, text: string): void => {
+    if (IDENTIFIER_ONLY.test(text) && /identifier|name/i.test(type)) { residualNames.add(text); return; }
+    if (!/string|literal|char/i.test(type)) return;
+    const unquoted = text.replace(/^['"`]|['"`]$/g, '');
+    if (IDENTIFIER_ONLY.test(unquoted)) residualNames.add(unquoted);
   };
 
   const emit = (within: number[], token: string): void => {
@@ -245,7 +267,6 @@ export function computeFileContentHashes(
     if (layout[layout.length - 1] === entry) return;
     if (placed.has(outer)) residualUnavailable ??= 'span-not-contiguous';
     placed.add(outer);
-    order.push(spans[outer].id);
     layout.push(entry);
   };
 
@@ -265,6 +286,9 @@ export function computeFileContentHashes(
     // A wildcard binds names this walk cannot enumerate. `*` in an import statement is a wildcard in
     // every language that has one; C++'s `using namespace` is the same idea spelled without a star.
     let wildcard = statementText.includes('*') || /\busing\s+namespace\b/.test(statementText);
+    // A blank binding (`import _ "net/http/pprof"`) exists ONLY to run the package's init: the
+    // statement binds no usable name, whatever its module path says.
+    let blank = false;
     const stack: HashTreeNode[] = [n];
     while (stack.length > 0) {
       const cur = stack.pop()!;
@@ -274,18 +298,27 @@ export function computeFileContentHashes(
         if (isDroppedComment(cur.type, () => text)) continue;
         h.update(frame('L', cur.type, text));
         if (/wildcard|asterisk|glob/i.test(cur.type)) wildcard = true;
-        // `_` is Go's blank import: it binds nothing and exists only to run the package's `init`.
-        if (text !== '_' && /identifier|name/i.test(cur.type) && /^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(text)) names.push(text);
+        if (text === '_') blank = true;
+        else if (/identifier|name/i.test(cur.type) && IDENTIFIER_ONLY.test(text)) names.push(text);
+        // Where a language binds an import by its module PATH — Go's `import "net/http"` binds
+        // `http` — the string is the binding, and without this the additive-import rule could never
+        // fire for that language at all. Elsewhere a bare string import (`import './polyfill'`)
+        // binds nothing and only runs code, which must stay a module-level change.
+        else if (PATH_BOUND_IMPORT_LANGUAGES.has(language) && /string|literal/i.test(cur.type)) {
+          const segment = text.replace(/^['"`]|['"`]$/g, '').split('/').pop() ?? '';
+          if (IDENTIFIER_ONLY.test(segment)) names.push(segment);
+        }
         continue;
       }
       h.update(frame('(', cur.type));
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
     }
+    for (const name of names) residualNames.add(name);
     const hash = hash16(h);
     // The statement's PLACE is recorded in the layout: an import that MOVES (across module-level
     // code, or past another import) is a real change, and it would otherwise be hashed nowhere.
     layout.push(`I:${hash}`);
-    imports.push({ hash, names: [...new Set(names)].sort(), binds: !wildcard && names.length > 0 });
+    imports.push({ hash, names: [...new Set(names)].sort(), binds: !wildcard && !blank && names.length > 0 });
   };
 
   const stack: Frame[] = [];
@@ -301,7 +334,9 @@ export function computeFileContentHashes(
     }
     if (within.length > 0 && parentWithin.length === 0) markRun(within);
     if (kids.length === 0) {
-      emit(within, frame('L', n.type, content.slice(n.startIndex, n.endIndex)));
+      const text = content.slice(n.startIndex, n.endIndex);
+      if (within.length === 0) noteResidualName(n.type, text);
+      emit(within, frame('L', n.type, text));
       return;
     }
     emit(within, frame('(', n.type));
@@ -325,9 +360,9 @@ export function computeFileContentHashes(
 
   return {
     symbols: spans.map((s, i) => ({ id: s.id, hash: hash16(hashers[i]) })),
-    order,
     layout,
     imports,
+    residualNames: [...residualNames].sort(),
     ...(residualUnavailable ? { residualUnavailable } : { residual: hash16(residual) }),
   };
 }

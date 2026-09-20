@@ -208,7 +208,7 @@ describe('briefing_since briefs the changed symbols', () => {
     expect(r.carried).toEqual([{ from: 'src/m.ts::betaOld', to: 'src/m.ts::beta', reason: 'renamed', basis: 'exact-signature' }]);
     expect(r.briefing.map(c => c.name)).toEqual(['beta']);
     expect(r.changedSymbols).toBe(1);
-    expect(r.caveats.some(c => c.includes('renames or moves'))).toBe(true);
+    expect(r.caveats.some(c => c.includes('renamed or moved with an unchanged body'))).toBe(true);
   });
 
   it('keeps the file-granular disclosure when a file could not be hashed', async () => {

@@ -128,6 +128,11 @@ the walk cannot enumerate. The same round replaced an unbounded read-everything-
 deterministic byte budget, refused non-regular working-tree entries instead of blocking forever on a
 FIFO open (which starved Node's whole threadpool), and bounded the pass in wall clock.
 
+Measured on this repository after the bounds landed: a 17-file diff resolves in ~2s and a 99-file
+diff in ~8s (the wall-clock bound); the worst case built on purpose — 200 files of 900 functions
+each — finishes in 7.4s at 64 MB heap / 408 MB RSS, where the first version took 36s and an earlier
+one aborted the process under a 700 MB heap.
+
 Deferred, deliberately: the change-coupling semantic-churn view (it needs per-commit re-extraction of
 history), the persisted column, a rename-aware churn join for `briefing_since`'s surprise caveat, and
 `report_coverage_gaps`' diff scope, which stays file-level because it is a whole-graph audit lens

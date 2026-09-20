@@ -17,8 +17,11 @@
  *    `language-not-hashed`, `span-not-contiguous`, `invalid-span`);
  *  - anything outside every symbol changed: an import, a module-level constant, a class field, or
  *    the order of the symbols (`module-level-change`);
+ *  - module-level code NAMES a changed symbol, so it may bind it (`module-level-reference`);
  *  - the index does not match what the working tree extracts to (`index-mismatch`);
- *  - the diff names more files than the bound (`file-cap`).
+ *  - a bound is spent: files, per-file bytes, total bytes, or wall clock (`file-cap`, `size-cap`,
+ *    `time-cap`) — every one of which keeps all of that file's symbols seeded;
+ *  - the changed-set could not assess the file at all (`not-assessed`).
  *
  * Inside a symbol-granular file, two more groups stay seeded because a same-file caller can reach a
  * changed symbol without a resolved edge: symbols whose text names a changed symbol (`referencing`),
@@ -37,6 +40,7 @@ import type { FileExtractResult } from '../analyzer/call-graph-types.js';
 import type { ImportStatementHash } from '../analyzer/symbol-content-hash.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { languageSupport } from '../analyzer/language-support.js';
+import { isTestFile } from '../analyzer/test-file.js';
 import {
   computeContinuity,
   normalizedBodyHash,
@@ -71,7 +75,7 @@ export const MAX_SYMBOL_HASHED_BYTES = 1024 * 1024;
  * cost; a diff that touches one is better served whole (`size-cap`) than by a briefing that takes
  * a minute. Deterministic and disclosed, like every other bound here.
  */
-export const MAX_SYMBOL_HASHED_FILE_BYTES = 256 * 1024;
+export const MAX_SYMBOL_HASHED_FILE_BYTES = 512 * 1024;
 
 /**
  * Wall-clock the hashing pass may spend before the remaining files keep file granularity
@@ -110,7 +114,7 @@ export type FileGranularityReason =
 
 export const FILE_GRANULARITY_REASONS: Record<FileGranularityReason, string> = {
   'language-not-hashed': 'the language has no native parse tree to hash (no extractor, a WASM grammar, or a script container)',
-  'parse-errors': 'one side has parse errors, so its tree is not trustworthy evidence',
+  'parse-errors': 'one side parsed with errors, was truncated, or decoded lossily, so its tree is not trustworthy evidence',
   'module-level-change': 'code outside every symbol changed (imports, module-level statements, class fields), or moved across a symbol',
   'module-level-reference': 'module-level code names a changed symbol, so it may reach it through a binding no call edge records',
   'span-not-contiguous': 'a symbol span does not map to one contiguous run of the parse tree',
@@ -299,6 +303,29 @@ function diffImports(a: readonly ImportStatementHash[], b: readonly ImportStatem
   return out;
 }
 
+/**
+ * A path git printed C-quoted, because it holds a control character, a quote, or a backslash. Such a
+ * path does not resolve to an indexed file, and the changed-set says so rather than dropping it.
+ */
+function isQuotedPath(path: string): boolean {
+  if (path.startsWith('"')) return true;
+  for (let i = 0; i < path.length; i++) {
+    const code = path.charCodeAt(i);
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
+/** The same path with control characters replaced, so it can never steer a terminal that prints it. */
+function sanitizePath(path: string): string {
+  let out = '';
+  for (let i = 0; i < path.length; i++) {
+    const code = path.charCodeAt(i);
+    out += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? '?' : path[i];
+  }
+  return out;
+}
+
 /** How many copies of each import statement BOTH revisions have. */
 function sharedImportCounts(
   a: readonly ImportStatementHash[],
@@ -319,7 +346,7 @@ function sharedImportCounts(
   return out;
 }
 
-const IDENTIFIER_RE = /[\p{L}_$][\p{L}\p{N}_$]*/gu;
+const IDENTIFIER_RE = /(?<![\p{L}\p{N}_$])[\p{L}_$][\p{L}\p{N}_$]*/gu;
 
 /**
  * Does `text` name any of `wanted`, as a whole identifier? Two strategies, same answer: a few names
@@ -351,21 +378,6 @@ function sideUsable(side: Side): FileGranularityReason | undefined {
   if (r.parseHealth) return 'parse-errors';
   if (r.contentHashes.residualUnavailable) return r.contentHashes.residualUnavailable;
   return undefined;
-}
-
-/** The file's text outside every symbol span: module-level code, imports, class bodies. */
-function residualText(side: Side): string {
-  if (!side.present || !side.result) return '';
-  const spans = [...side.result.nodes]
-    .map(n => [n.startIndex, n.endIndex] as const)
-    .sort((a, b) => a[0] - b[0]);
-  let out = '';
-  let cursor = 0;
-  for (const [start, end] of spans) {
-    if (start > cursor) out += side.content.slice(cursor, start);
-    cursor = Math.max(cursor, end);
-  }
-  return out + side.content.slice(cursor);
 }
 
 /** Compare one file's two sides. `indexIds` are the index's production symbols in the file. */
@@ -420,10 +432,14 @@ function compareFile(base: Side, head: Side, indexIds: string[]): FileSymbolChan
   const wanted = new Set([...names, ...importedNames].filter(n => n.length > 0));
   const wantedProbes = nameProbes(wanted);
   if (base.present && head.present && names.size > 0) {
-    const changedProbes = nameProbes(names);
-    if (namesAppearIn(`${residualText(base)}\n${residualText(head)}`, names, changedProbes)) {
-      // Module-level code that NAMES a changed symbol may bind it (`const h = get;`, a handler
-      // table) and hand it to a sibling that never spells the name.
+    // Module-level code that NAMES a changed symbol may bind it (`const h = get;`, a handler table)
+    // and hand it to a sibling that never spells the name. The names come from the walk, so a
+    // comment mentioning the symbol is not evidence of a binding.
+    const moduleNames = [
+      ...(base.result!.contentHashes!.residualNames),
+      ...(head.result!.contentHashes!.residualNames),
+    ];
+    if (moduleNames.some(name => names.has(name))) {
       return { granularity: 'file', reason: 'module-level-reference' };
     }
   }
@@ -491,15 +507,18 @@ export async function computeSymbolChangedSet(input: {
   // indexed file, and dropping it would let a consumer report a diff as unchanged over a file
   // nobody looked at. Disclose it instead, under a rendering-safe name.
   for (const entry of input.diff) {
-    if (/^"|[\u0000-\u001f\u007f-\u009f]/.test(entry.path)) {
-      byFile.set(entry.path.replace(/[\u0000-\u001f\u007f-\u009f]/g, '?'), { granularity: 'file', reason: 'not-assessed' });
+    if (isQuotedPath(entry.path)) {
+      byFile.set(sanitizePath(entry.path), { granularity: 'file', reason: 'not-assessed' });
     }
   }
   const work = input.diff
-    .filter(entry => !/^"|[\u0000-\u001f\u007f-\u009f]/.test(entry.path))
+    .filter(entry => !isQuotedPath(entry.path))
     .map(entry => ({ entry, local: reframeRepoPath(entry.path, prefix) }))
     .filter((w): w is { entry: DiffEntry; local: string } =>
       w.local !== null
+      // A test file holds no production symbol to seed, and calling it "kept whole" would promise
+      // production symbols it does not have. `select_tests` selects changed test files by tier.
+      && !isTestFile(w.local)
       && (indexByFile.has(w.local) || languageSupport(detectLanguage(w.local)).capabilities.includes('callGraph')))
     .sort((a, b) => (a.local < b.local ? -1 : a.local > b.local ? 1 : 0));
   if (work.length === 0) return { byFile, carried: [] };
@@ -514,7 +533,7 @@ export async function computeSymbolChangedSet(input: {
 
   // Phase 1 — SIZE first, bytes second. Reading every revision of every file and only then
   // applying the budget would retain `files × 2 × SOURCE_SCAN_MAX_FILE_BYTES`, which is an OOM, not
-  // a bound. Base sizes come from ONE `git cat-file --batch-check`; head sizes from a stat. The
+  // a bound. Base sizes come from ONE `git ls-tree`; head sizes from a stat. The
   // budget is then spent in path order, so which files are hashed is a function of the two
   // revisions, never of timing.
   interface Planned { entry: DiffEntry; local: string; basePath: string; baseKey?: string; wantHead: boolean }
@@ -587,7 +606,7 @@ export async function computeSymbolChangedSet(input: {
   const headSides: Side[] = [];
   const deadline = Date.now() + (input.budgetMs ?? SYMBOL_HASHING_BUDGET_MS);
   for (const item of loaded) {
-    const { entry, local, basePath } = item;
+    const { local, basePath } = item;
     if (Date.now() >= deadline) { byFile.set(local, { granularity: 'file', reason: 'time-cap' }); continue; }
     if (item.failed) { byFile.set(local, { granularity: 'file', reason: 'unreadable' }); continue; }
     const language = detectLanguage(local);
@@ -691,21 +710,7 @@ export function coverSeedFiles(set: SymbolChangedSet, seeds: readonly FunctionNo
   for (const seed of seeds) {
     if (!byFile.has(seed.filePath)) byFile.set(seed.filePath, { granularity: 'file', reason: 'not-assessed' });
   }
-  return { byFile, carried: set.carried };
-}
-
-/**
- * Seeds that did NOT change: they are in the set because they name a changed symbol or hold a
- * dynamic-dispatch site. Callers that publish the seed list as "changed" must disclose this count.
- */
-export function seededNotChanged(set: SymbolChangedSet, seeds: readonly FunctionNode[]): number {
-  let n = 0;
-  for (const seed of seeds) {
-    const change = set.byFile.get(seed.filePath);
-    if (!change || change.granularity === 'file') continue;
-    if (change.referencing.includes(seed.id) || change.dynamicDispatch.includes(seed.id)) n++;
-  }
-  return n;
+  return { ...set, byFile };
 }
 
 /** The ids that genuinely changed in a symbol-granular file (for a "what changed" briefing). */
@@ -798,10 +803,47 @@ export function noChangeClaim(receipt: ChangeGranularityReceipt): { kind: 'uncha
 }
 
 /** One caveat line for a consumer, or undefined when every changed file was symbol-exact. */
+/**
+ * The phrase each of this module's caveats is built around. A renderer decides whether a caveat
+ * qualifies the changed-set by asking {@link isChangedSetCaveat}, never by matching prose of its
+ * own: three renderers carrying three regexes over wording defined here is a silent-drop waiting to
+ * happen the next time a sentence is reworded. `changed-set-caveats` in the tests pins the pairing.
+ */
+export const CHANGED_SET_CAVEAT_MARKERS = [
+  'stayed at FILE granularity',
+  'bind new names',
+  'did not themselves change',
+  'renamed or moved with an unchanged body',
+  'is in the index',
+  'not assessed at symbol level',
+  'No changed code file could be assessed',
+  'formatting or comments only',
+] as const;
+
+/** True when a caveat came from this module and qualifies WHAT the changed-set covered. */
+export function isChangedSetCaveat(caveat: string): boolean {
+  return CHANGED_SET_CAVEAT_MARKERS.some(marker => caveat.includes(marker));
+}
+
+/** Seeds kept for a reason other than their own change: the caller must not call them "changed". */
+export function seededUnchangedCaveat(count: number): string | undefined {
+  if (count === 0) return undefined;
+  return `${count} of the analyzed symbols did not themselves change: they are seeded because they name a ` +
+    'changed symbol, or hold a dynamic-dispatch site, in the same file.';
+}
+
+/** Renames and moves whose body is unchanged: their callers change even though their behavior does not. */
+export function carriedCaveat(carried: readonly CarriedSymbol[]): string | undefined {
+  if (carried.length === 0) return undefined;
+  return `${carried.length} symbol(s) were renamed or moved with an unchanged body ` +
+    `(e.g. ${carried[0].from} → ${carried[0].to}); their callers change even though their behavior does not.`;
+}
+
 export function importsAddedCaveat(receipt: ChangeGranularityReceipt): string | undefined {
   if (receipt.importsAddedFiles === 0) return undefined;
   return `In ${receipt.importsAddedFiles} changed file(s) the only module-level change was imports that bind new names; ` +
-    'the file\'s unchanged symbols were seeded only if they name one. The imported module\'s own load-time side effects are not attributed to them.';
+    'the file\'s unchanged symbols were seeded only if they name one. The imported module\'s own load-time ' +
+    'side effects are not attributed to them.';
 }
 
 export function granularityCaveat(receipt: ChangeGranularityReceipt): string | undefined {

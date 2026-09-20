@@ -12,7 +12,7 @@ async function hashesOf(path: string, content: string, language: string) {
   expect(r?.contentHashes).toBeDefined();
   const bySymbol = new Map<string, string>();
   for (const s of r!.contentHashes!.symbols) bySymbol.set(s.id, s.hash);
-  return { bySymbol, residual: r!.contentHashes!.residual, order: r!.contentHashes!.order, layout: r!.contentHashes!.layout, result: r! };
+  return { bySymbol, residual: r!.contentHashes!.residual, layout: r!.contentHashes!.layout, names: r!.contentHashes!.residualNames, imports: r!.contentHashes!.imports, result: r! };
 }
 
 const TEN = Array.from({ length: 10 }, (_, i) => `export function f${i}(x: number): number {\n  return x + ${i};\n}\n`).join('\n');
@@ -82,8 +82,7 @@ describe('normalized symbol content hashes', () => {
     const y = await hashesOf('src/o.ts', swapped, 'TypeScript');
     const z = await hashesOf('src/o.ts', renamed, 'TypeScript');
     expect(y.residual).toBe(x.residual);
-    expect(x.order).toEqual(['src/o.ts::a', 'src/o.ts::b']);
-    expect(y.order).toEqual(['src/o.ts::b', 'src/o.ts::a']);
+    expect(y.layout).not.toEqual(x.layout);   // the reorder shows in the file's shape
     expect(z.residual).toBe(x.residual);
     expect(z.bySymbol.get('src/o.ts::a2')).not.toBe(x.bySymbol.get('src/o.ts::a'));
   });
@@ -124,7 +123,7 @@ describe('normalized symbol content hashes', () => {
     expect(y.residual).toBe(x.residual);
     expect(y.bySymbol.get('src/add.ts::a')).toBe(x.bySymbol.get('src/add.ts::a'));
     expect(y.bySymbol.get('src/add.ts::b')).toBe(x.bySymbol.get('src/add.ts::b'));
-    expect(y.order).toEqual([...x.order, 'src/add.ts::c']);
+    expect(y.layout.filter(e => e.startsWith('S:'))).toEqual([...x.layout.filter(e => e.startsWith('S:')), 'S:src/add.ts::c']);
   });
 
   it('module-level code moving across a symbol changes the layout', async () => {
@@ -134,6 +133,16 @@ describe('normalized symbol content hashes', () => {
     const y = await hashesOf('src/lay.ts', after, 'TypeScript');
     expect(y.residual).toBe(x.residual);            // the same module-level tokens
     expect(y.layout).not.toEqual(x.layout);         // in a different place
+  });
+
+  it('module-level names come from the walk, so a doc comment naming a symbol is not one', async () => {
+    const src = '/** Uses {@link helper} for rounding. */\nexport function helper(x: number) { return x + 1; }\n' +
+      'const TABLE = { pick: "helper" };\nexport function other() { return TABLE; }\n';
+    const r = await hashesOf('src/n.ts', src, 'TypeScript');
+    // `helper` is named by the string literal in the module-level table, not by the comment…
+    expect(r.names).toContain('helper');
+    const noTable = await hashesOf('src/n2.ts', '/** Uses {@link helper} for rounding. */\nexport function helper(x: number) { return x + 1; }\n', 'TypeScript');
+    expect(noTable.names).not.toContain('helper');
   });
 
   it('a normal extraction carries no content hashes (analyze never pays for the walk)', async () => {

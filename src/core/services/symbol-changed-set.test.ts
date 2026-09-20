@@ -13,8 +13,12 @@ import {
   computeSymbolChangedSet,
   granularityCaveat,
   granularityReceipt,
+  carriedCaveat,
   importsAddedCaveat,
+  isChangedSetCaveat,
   noChangeClaim,
+  seededUnchangedCaveat,
+  type ChangeGranularityReceipt,
   narrowSeedsToChangedSymbols,
   type DiffEntry,
   type SymbolGranularChange,
@@ -324,10 +328,11 @@ describe('computeSymbolChangedSet', () => {
   it('a wildcard or blank import is never treated as purely additive', async () => {
     const py = 'from a import *\n\ndef user():\n    return run()\n';
     await put('w.py', py);
-    await put('g.go', 'package p\n\nimport "fmt"\n\nfunc F() { fmt.Println() }\n');
+    await put('g.go', 'package p\n\nimport "fmt"\n\nfunc F() { fmt.Println() }\n\nfunc G() int { return 1 }\n');
     await commitAll();
     await put('w.py', 'from a import *\nfrom b import *\n\ndef user():\n    return run()\n');
-    await put('g.go', 'package p\n\nimport (\n\t"fmt"\n\t_ "net/http/pprof"\n)\n\nfunc F() { fmt.Println() }\n');
+    // A SEPARATE blank-import declaration, so the existing `import "fmt"` statement is untouched.
+    await put('g.go', 'package p\n\nimport "fmt"\n\nimport _ "net/http/pprof"\n\nfunc F() { fmt.Println() }\n\nfunc G() int { return 1 }\n');
     const { set } = await changedSet(
       [{ path: 'w.py', status: 'modified' }, { path: 'g.go', status: 'modified' }], ['w.py', 'g.go'],
     );
@@ -379,6 +384,58 @@ describe('computeSymbolChangedSet', () => {
       ['src/ten.ts'],
     );
     expect([...set.byFile.entries()].some(([, c]) => c.granularity === 'file' && c.reason === 'not-assessed')).toBe(true);
+  });
+
+  it('Go: an added path-binding import stays symbol-exact, because the path is the binding', async () => {
+    await put('g.go', 'package p\n\nimport "fmt"\n\nfunc F() { fmt.Println() }\n\nfunc G() int { return 1 }\n');
+    await commitAll();
+    await put('g.go', 'package p\n\nimport "fmt"\n\nimport "os"\n\nfunc F() { fmt.Println(os.Args) }\n\nfunc G() int { return 1 }\n');
+    const { set } = await changedSet([{ path: 'g.go', status: 'modified' }], ['g.go']);
+    expect(set.byFile.get('g.go')).toMatchObject({ granularity: 'symbol', importsAdded: true, changed: ['g.go::F'] });
+  });
+
+  it('a removed duplicate import is a module-level change, not an unchanged multiset', async () => {
+    const base = "import { a } from './a';\nimport { a as b } from './a';\nexport function one() { return a(1); }\nexport function two() { return 2; }\n";
+    await put('src/dup.ts', base);
+    await commitAll();
+    await put('src/dup.ts', base.replace("import { a as b } from './a';\n", ''));
+    const { set } = await changedSet([{ path: 'src/dup.ts', status: 'modified' }], ['src/dup.ts']);
+    expect(set.byFile.get('src/dup.ts')).toEqual({ granularity: 'file', reason: 'module-level-change' });
+  });
+
+  it('matches names the same way whether few or many symbols changed', async () => {
+    // More than NAME_PROBE_LIMIT changed names, so the scan branch runs instead of the probes.
+    const base = TEN + 'export function reader() { return [f0, f1, f2, f3, f4, f5, f6, f7, f8, f9]; }\n';
+    await put('src/many.ts', base);
+    await commitAll();
+    await put('src/many.ts', base.replace(/return x \+ (\d);/g, 'return x - $1;'));
+    const { set } = await changedSet([{ path: 'src/many.ts', status: 'modified' }], ['src/many.ts']);
+    const change = set.byFile.get('src/many.ts') as SymbolGranularChange;
+    expect(change.changed).toHaveLength(10);
+    expect(change.referencing).toEqual(['src/many.ts::reader']);
+  });
+
+  it('every caveat this module produces is one a renderer recognizes', () => {
+    const receipt: ChangeGranularityReceipt = {
+      symbolExactFiles: 1, fileGranularFiles: 1, importsAddedFiles: 1,
+      changedSymbolsFound: 2, changedSymbolsNotIndexed: 2,
+      reasons: { 'module-level-change': 1 }, fallbacks: [{ file: 'a.ts', reason: 'module-level-change' }],
+    };
+    const produced = [
+      granularityCaveat(receipt),
+      importsAddedCaveat(receipt),
+      seededUnchangedCaveat(2),
+      carriedCaveat([{ from: 'a.ts::x', to: 'b.ts::x', reason: 'moved', basis: 'exact-body' }]),
+      noChangeClaim(receipt).text,
+      noChangeClaim({ ...receipt, changedSymbolsFound: 0 }).text,
+      noChangeClaim({ ...receipt, changedSymbolsFound: 0, symbolExactFiles: 0 }).text,
+    ];
+    for (const caveat of produced) {
+      expect(caveat).toBeDefined();
+      // A renderer that classifies by its own prose silently stops printing a reworded caveat.
+      expect(isChangedSetCaveat(caveat!), caveat!).toBe(true);
+    }
+    expect(isChangedSetCaveat('Static call-graph selection is an over-approximate prioritizer.')).toBe(false);
   });
 
   it('parse errors on either side keep the file whole', async () => {

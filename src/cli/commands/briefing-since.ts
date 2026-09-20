@@ -10,6 +10,7 @@
  */
 
 import { Command } from 'commander';
+import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
@@ -62,7 +63,7 @@ const TIER_ICON: Record<string, string> = {
 /** Compact human rendering of the briefing. */
 /** Caveats that qualify WHAT is in the ranked list, rather than how to read a single entry. */
 function isGranularityCaveat(caveat: string): boolean {
-  return /FILE granularity|module level was imports|renames or moves with an unchanged body|not in the index|not assessed/i.test(caveat);
+  return isChangedSetCaveat(caveat);
 }
 
 function renderHuman(r: BriefingResult): string {

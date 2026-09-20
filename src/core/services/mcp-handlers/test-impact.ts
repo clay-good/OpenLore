@@ -38,8 +38,8 @@ import {
   granularityReceipt,
   importsAddedCaveat,
   noChangeClaim,
+  seededUnchangedCaveat,
   narrowSeedsToChangedSymbols,
-  seededNotChanged,
   type ChangeGranularityReceipt,
   type DiffEntry,
   type SymbolChangedSet,
@@ -564,9 +564,8 @@ export async function handleSelectTests(
   if (granularityNote) caveats.push(granularityNote);
   const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
   if (importsNote) caveats.push(importsNote);
-  if (seededUnchanged > 0) {
-    caveats.push(`${seededUnchanged} of the seeded symbols did not themselves change: they are seeded because they name a changed symbol, or hold a dynamic-dispatch site, in the same file.`);
-  }
+  const seededNote = seededUnchangedCaveat(seededUnchanged);
+  if (seededNote) caveats.push(seededNote);
   if (untrackedOmitted > 0) {
     caveats.push(`${untrackedOmitted} more untracked test file(s) beyond the first ${MAX_UNTRACKED_TIER_FILES} were not selected; commit or ignore generated test files, or run the full suite.`);
   }
@@ -713,7 +712,7 @@ export async function narrowToChangedSymbols(
     seeds,
     receipt: granularityReceipt(set, id => indexed.has(id)),
     set,
-    seededUnchanged: seededNotChanged(set, seeds),
+    seededUnchanged: unchangedSeedIds.size,
     unchangedSeedIds,
   };
 }

@@ -12,6 +12,7 @@
  */
 
 import { Command } from 'commander';
+import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { writeStdout, writeStderr } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -149,9 +150,7 @@ function renderHuman(b: BlastRadiusBriefing): string {
     lines.push(`   ⚠ ${b.changeGranularity.importsAddedFiles} changed file(s) only gained imports at module level; their unchanged symbols were seeded only if they name a new binding.`);
   }
   for (const caveat of b.caveats ?? []) {
-    if (/did not themselves change|renamed or moved with an unchanged body|not in the index|reverted in the working tree|not assessed/i.test(caveat)) {
-      lines.push(`   ⚠ ${caveat}`);
-    }
+    if (isChangedSetCaveat(caveat)) lines.push(`   ⚠ ${caveat}`);
   }
   if (b.impact.hubsTouched.length > 0) {
     lines.push('   Hubs: ' + b.impact.hubsTouched.map(h => `${h.symbol} (${h.fanIn} callers)`).join(', '));

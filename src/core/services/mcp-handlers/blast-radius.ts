@@ -20,7 +20,15 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
-import { granularityCaveat, importsAddedCaveat, noChangeClaim, type ChangeGranularityReceipt } from '../symbol-changed-set.js';
+import {
+  carriedCaveat,
+  granularityCaveat,
+  importsAddedCaveat,
+  noChangeClaim,
+  seededUnchangedCaveat,
+  type ChangeGranularityReceipt,
+  type DiffEntry,
+} from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -216,7 +224,7 @@ export async function computeBlastRadius(
 
   // ── 1. Resolve the diff → changed files → seed production symbols ───────────
   let changedFiles: string[];
-  let diffEntries: Awaited<ReturnType<typeof import('../../drift/git-diff.js')['getChangedFiles']>>['files'];
+  let diffEntries: DiffEntry[];
   // Resolve-or-disclose through the one shared helper (fix-cli-conclusion-honesty):
   // an explicit ref that git can't resolve falls back (main → master → HEAD~1) and is
   // disclosed, so the advisory briefing never misrepresents the base it diffed against.
@@ -378,12 +386,10 @@ export async function computeBlastRadius(
   const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
   if (importsNote) caveats.push(importsNote);
   if (changeGranularity && seeds.length === 0) caveats.push(noChangeClaim(changeGranularity).text);
-  if ((narrowed.seededUnchanged ?? 0) > 0) {
-    caveats.push(`${narrowed.seededUnchanged} of the listed changed symbols did not themselves change: they are analyzed because they name a changed symbol, or hold a dynamic-dispatch site, in the same file.`);
-  }
-  if (narrowed.set && narrowed.set.carried.length > 0) {
-    caveats.push(`${narrowed.set.carried.length} symbol(s) were renamed or moved with an unchanged body (e.g. ${narrowed.set.carried[0].from} → ${narrowed.set.carried[0].to}); their callers change even though their behavior does not.`);
-  }
+  const seededNote = seededUnchangedCaveat(narrowed.seededUnchanged ?? 0);
+  if (seededNote) caveats.push(seededNote);
+  const carriedNote = narrowed.set && carriedCaveat(narrowed.set.carried);
+  if (carriedNote) caveats.push(carriedNote);
   if (seeds.length > analyzed.length) {
     caveats.push(`Impact analyzed the ${analyzed.length} highest-fan-in changed symbols; ${seeds.length - analyzed.length} lower-risk symbols were not individually analyzed.`);
   }

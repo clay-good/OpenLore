@@ -22,6 +22,7 @@
  */
 
 import { writeFile } from 'node:fs/promises';
+import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { Command } from 'commander';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
@@ -233,9 +234,7 @@ export async function composeReview(opts: { cwd: string; base?: string; head?: s
   // (change: add-symbol-content-hashes).
   if (blast && !('error' in blast)) {
     for (const caveat of blast.caveats) {
-      if (/FILE granularity|did not themselves change|renamed or moved with an unchanged body|module level was imports|not in the index|not assessed/i.test(caveat)) {
-        caveats.push(caveat);
-      }
+      if (isChangedSetCaveat(caveat)) caveats.push(caveat);
     }
   }
 

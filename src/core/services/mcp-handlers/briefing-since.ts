@@ -26,7 +26,16 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
-import { changedSymbolIds, granularityCaveat, importsAddedCaveat, noChangeClaim, type CarriedSymbol, type DiffEntry, type SymbolChangedSet } from '../symbol-changed-set.js';
+import {
+  carriedCaveat,
+  changedSymbolIds,
+  granularityCaveat,
+  importsAddedCaveat,
+  noChangeClaim,
+  type CarriedSymbol,
+  type DiffEntry,
+  type SymbolChangedSet,
+} from '../symbol-changed-set.js';
 import { isCodeNode, isExcludedPath } from './code-node.js';
 import { computeLandmarkSignals } from '../../analyzer/landmark-signals.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
@@ -227,9 +236,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   const caveats: string[] = [
     ...(granularityNote ? [granularityNote] : []),
     ...(importsNote ? [importsNote] : []),
-    ...(carried.length > 0
-      ? [`${carried.length} briefed symbol(s) are renames or moves whose body is unchanged (paired under carried): their id and every caller changed, so they are briefed, but the body did not.`]
-      : []),
+    ...(carriedCaveat(carried) ? [carriedCaveat(carried)!] : []),
     'Significance is a tier label from existing classifiers (hub/orchestrator/chokepoint) plus raw evidence — not a weighted score. The caller makes the final judgment.',
     'Scope is hand-authored source code: infrastructure (IaC) resources and generated/vendored files are excluded (their change-impact has its own lens — blast_radius / analyze_impact). Non-code changed files still count toward changedFiles.',
   ];
