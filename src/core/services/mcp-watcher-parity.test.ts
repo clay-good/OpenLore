@@ -36,6 +36,7 @@ import { computeIndexStaleness } from './mcp-handlers/index-staleness.js';
 import { ServeWatchRepairCoordinator } from '../../cli/commands/serve.js';
 import * as analyzeApi from '../../api/analyze.js';
 import { MAX_EDIT_VERDICT_BASIS_FILE_BYTES, readEditVerdictStore } from './edit-verdict.js';
+import { measurePerfWorkForTests } from '../analyzer/perf-counters.js';
 
 // Prevent a real chokidar watcher from opening (handleChange path never starts one,
 // but retain an event-complete deterministic watcher harness for the serve/watch
@@ -423,12 +424,14 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
     const builds = vi.spyOn(CallGraphBuilder.prototype, 'build');
     const { McpWatcher } = await import('./mcp-watcher.js');
     const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false, bulkThreshold: 10 });
-    await (watcher as unknown as { handleBatch(paths: string[]): Promise<void> }).handleBatch([
-      join(root, 'src/a.ts'),
-      join(root, 'src/b.ts'),
-    ]);
+    const { counters } = await measurePerfWorkForTests(() =>
+      (watcher as unknown as { handleBatch(paths: string[]): Promise<void> }).handleBatch([
+        join(root, 'src/a.ts'),
+        join(root, 'src/b.ts'),
+      ]));
 
     expect(nodeLoads).toHaveBeenCalledTimes(1);
+    expect(counters.fullNodeTableLoads).toBe(1);
     const parsedPaths = builds.mock.calls.flatMap(call =>
       (call[0] as Array<{ path: string }>).map(file => file.path),
     );
@@ -481,19 +484,54 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
       onGraphStale: reason => rebuilds.push(reason),
     });
 
-    await (watcher as unknown as {
+    const { counters } = await measurePerfWorkForTests(() => (watcher as unknown as {
       flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void>;
-    }).flushBatchWithBusyRetry(paths, []);
+    }).flushBatchWithBusyRetry(paths, []));
 
     const staleStore = EdgeStore.open(EdgeStore.dbPath(outputPath));
     expect(staleStore.getStaleFiles()).toEqual(paths.map(path => path.slice(root.length + 1)).sort());
     staleStore.close();
     expect(nodeLoads).toHaveBeenCalledTimes(0);
+    expect(counters.fullNodeTableLoads).toBe(0);
     expect(rebuilds).toEqual([]);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(rebuilds).toEqual(['stale-region']);
     await watcher.stop();
     vi.useRealTimers();
+  });
+
+  it('loads the node table exactly once for a real 30-file incremental batch', async () => {
+    const oldFiles: Files = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [
+      `src/file-${i}.ts`, `export function old${i}() { return ${i}; }\n`,
+    ]));
+    await writeFiles(oldFiles);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, oldFiles, await fullBuild(oldFiles));
+    store.close();
+
+    const newFiles: Files = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [
+      `src/file-${i}.ts`, `export function changed${i}() { return ${i + 1}; }\n`,
+    ]));
+    await writeFiles(newFiles);
+    const paths = Object.keys(newFiles).map(path => join(root, path));
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false, bulkThreshold: 100 });
+    const { counters } = await measurePerfWorkForTests(() =>
+      (watcher as unknown as {
+        handleBatch(paths: string[], opts: { syncFlush: boolean }): Promise<void>;
+      }).handleBatch(paths, { syncFlush: true }));
+
+    const updated = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    try {
+      for (let i = 0; i < 30; i++) {
+        expect(updated.getNodesForFile(`src/file-${i}.ts`).map(node => node.name))
+          .toContain(`changed${i}`);
+      }
+      expect(updated.getStaleFiles()).toEqual([]);
+    } finally {
+      updated.close();
+    }
+    expect(counters.fullNodeTableLoads).toBe(1);
   });
 
   it('refreshes export facts and reports only a surviving exact named import', async () => {

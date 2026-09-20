@@ -37,6 +37,7 @@ import { handleOrient } from './orient.js';
 import { handleRemember } from './memory.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
 import { _resetContextCacheForTesting } from './utils.js';
+import { measurePerfWorkForTests } from '../../analyzer/perf-counters.js';
 
 let root: string;
 const SRC = 'export function fooHandler() {\n  return 1;\n}\n';
@@ -90,6 +91,20 @@ beforeEach(async () => {
 afterEach(async () => { _resetContextCacheForTesting(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
 describe('orient — decision freshness & no-silent-stale guarantee', () => {
+  it('serves a primed, real-artifact orientation without a full graph load or rebuild', async () => {
+    await writeDecisions([{ id: 'fresh1', title: 'keep fooHandler pure', affectedFiles: ['src/foo.ts'] }]);
+    const first = await handleOrient(root, 'work on fooHandler') as {
+      pendingDecisions?: Array<{ id: string; freshness?: string }>;
+    };
+    expect(first.pendingDecisions).toContainEqual(expect.objectContaining({ id: 'fresh1', freshness: 'fresh' }));
+
+    const { result, counters } = await measurePerfWorkForTests(() => handleOrient(root, 'work on fooHandler'));
+    expect((result as typeof first).pendingDecisions)
+      .toContainEqual(expect.objectContaining({ id: 'fresh1', freshness: 'fresh' }));
+    expect(counters.fullNodeTableLoads).toBe(0);
+    expect(counters.adjacencyBuilds).toBe(0);
+  });
+
   it('annotates a fresh decision and lists it as authoritative (pendingDecisions)', async () => {
     await writeDecisions([{ id: 'fresh1', title: 'keep fooHandler pure', affectedFiles: ['src/foo.ts'] }]);
     const r = (await handleOrient(root, 'work on fooHandler')) as {

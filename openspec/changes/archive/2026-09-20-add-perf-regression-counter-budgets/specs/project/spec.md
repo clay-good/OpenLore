@@ -20,5 +20,6 @@ change with the measured delta stated.
 #### Scenario: Budgets are deterministic, not flaky
 
 - **GIVEN** the budget suite run repeatedly on the same fixture
+- **WHEN** the same analysis and serving work is measured again
 - **THEN** the measured counts are identical across runs (no wall-clock dependence), so the
   budgets can be exact

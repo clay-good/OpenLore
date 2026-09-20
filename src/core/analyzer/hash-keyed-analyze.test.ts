@@ -15,6 +15,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeStore } from '../services/edge-store.js';
 import { computeExtractorStamp } from './pass1-fact-cache.js';
+import { measurePerfWorkForTests } from './perf-counters.js';
+import { __getAnalyzerWorkCountersForTests, __resetAnalyzerWorkCountersForTests } from './call-graph.js';
 
 /**
  * The artifact bytes that must not depend on which lane produced them. `parse-health.json` is
@@ -119,6 +121,17 @@ afterEach(async () => {
 });
 
 describe('analyze cost scales with the diff', () => {
+  it('keeps full analyze to one parse per graphed file and no full node-table load', async () => {
+    __resetAnalyzerWorkCountersForTests(true);
+    const { counters } = await measurePerfWorkForTests(() => analyze({ force: true }));
+    await expect(definedIn('src/core/math.ts')).resolves.toContain('add');
+    const graphedFiles = memoRows();
+    expect(graphedFiles).toHaveLength(6);
+    expect(__getAnalyzerWorkCountersForTests().parses).toBe(graphedFiles.length);
+    expect(counters.sourceParses).toBe(6);
+    expect(counters.fullNodeTableLoads).toBe(0);
+  });
+
   it('populates the memo on the first run and keeps it across the graph rebuild', async () => {
     await analyze();
     const first = memoRows();

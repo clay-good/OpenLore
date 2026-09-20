@@ -33,6 +33,7 @@
 import { createHash } from 'node:crypto';
 import { open, mkdir, rename, unlink } from 'node:fs/promises';
 import { dirname, basename, join } from 'node:path';
+import { recordPerfWork } from './perf-counters.js';
 
 /**
  * Buffered bytes before a write is issued. Bounds transient memory without paying a syscall per
@@ -192,14 +193,16 @@ export async function writeJsonAtomicStreaming(path: string, value: unknown): Pr
         if (buffer.length >= FLUSH_BYTES) {
           const bytes = Buffer.from(buffer, 'utf-8');
           hash.update(bytes);
-          await fh.write(bytes);
+          const { bytesWritten } = await fh.write(bytes);
+          recordPerfWork('atomicArtifactPayloadBytes', bytesWritten);
           buffer = '';
         }
       }
       if (buffer.length > 0) {
         const bytes = Buffer.from(buffer, 'utf-8');
         hash.update(bytes);
-        await fh.write(bytes);
+        const { bytesWritten } = await fh.write(bytes);
+        recordPerfWork('atomicArtifactPayloadBytes', bytesWritten);
       }
       await fh.sync();
     } finally {

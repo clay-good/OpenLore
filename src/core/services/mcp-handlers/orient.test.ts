@@ -87,6 +87,7 @@ import { join } from 'node:path';
 import { buildStyleFingerprint } from '../../analyzer/style-fingerprint.js';
 import { ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
 import { registerRepairHost } from '../cold-start-bootstrap.js';
+import { measurePerfWorkForTests } from '../../analyzer/perf-counters.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -169,6 +170,25 @@ describe('handleOrient', () => {
       relevantFiles: 'source-derived',
       specDomains: 'local-unreviewed',
     });
+  });
+
+  it('keeps a primed orient free of full node-table loads and adjacency rebuilds', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([
+      makeSearchResult({ name: 'handleAuth', filePath: 'src/auth.ts' }),
+    ]);
+    vi.mocked(readCachedContext).mockResolvedValue({
+      callGraph: {
+        nodes: [{ id: 'src/auth.ts::doFoo', name: 'doFoo', filePath: 'src/auth.ts' }],
+        edges: [],
+      },
+    } as never);
+
+    await handleOrient('/tmp/proj', 'auth handler');
+    const { result, counters } = await measurePerfWorkForTests(() => handleOrient('/tmp/proj', 'auth handler'));
+    expect((result as { relevantFunctions: unknown[] }).relevantFunctions).toHaveLength(1);
+    expect(counters.fullNodeTableLoads).toBe(0);
+    expect(counters.adjacencyBuilds).toBe(0);
   });
 
   it('joins a symbol start line by canonical id and omits malformed lines', async () => {

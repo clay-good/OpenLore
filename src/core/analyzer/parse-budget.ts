@@ -32,6 +32,7 @@
  */
 
 import { PER_FILE_PARSE_BUDGET_MS, PARSE_BUDGET_ENV } from '../../constants.js';
+import { recordPerfWork } from './perf-counters.js';
 
 /**
  * Stable prefix on {@link ParseBudgetExceededError}'s message.
@@ -187,6 +188,7 @@ export function parseWithBudget<TTree>(parser: BudgetableParser<TTree>, content:
   const startedAt = Date.now();
   let tree: TTree | null | undefined;
   try {
+    recordPerfWork('sourceParses');
     tree = parser.parse(content);
   } finally {
     // Always clear the deadline, including on a throw: leaving it armed would apply this

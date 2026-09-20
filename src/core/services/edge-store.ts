@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
 import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
+import { recordPerfWork } from '../analyzer/perf-counters.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
 import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js';
 import type { FileProvenance } from '../provenance/git-provenance.js';
@@ -80,6 +81,15 @@ function schemaMismatchFault(onDiskVersion: number): StoreLifecycleFault {
   };
 }
 
+/** Counts every prepared statement on an EdgeStore handle, including helper calls. */
+class EdgeStoreDatabase extends DatabaseSync {
+  override prepare(...args: Parameters<DatabaseSync['prepare']>): StatementSync {
+    const statement = super.prepare(...args);
+    recordPerfWork('edgeStoreStatementPrepares');
+    return statement;
+  }
+}
+
 function openDatabase(dbPath: string, readOnly = false): DatabaseSync {
   // `new DatabaseSync` SUCCEEDS on a corrupt file — SQLite does not read the header until
   // the first statement — so the throw below comes from a handle that is already open. If it
@@ -89,7 +99,7 @@ function openDatabase(dbPath: string, readOnly = false): DatabaseSync {
   // "could not be moved aside (EBUSY)" and started from an empty store — the silent-empty
   // substitute the quarantine invariant exists to prevent. POSIX unlinks an open file
   // regardless, so the leak was real there too but never showed.
-  const db = new DatabaseSync(dbPath, { readOnly });
+  const db = new EdgeStoreDatabase(dbPath, { readOnly });
   try {
     // journal_mode and synchronous can rewrite a database header even when no
     // application rows change. A read handle must therefore set neither pragma.
@@ -757,9 +767,9 @@ export class EdgeStore {
    * re-parsed subset still resolve to their real node instead of `external::`.
    */
   getAllInternalNodes(): FunctionNode[] {
-    return (
-      this.db.prepare('SELECT * FROM nodes WHERE is_external = 0').all() as unknown as RawNode[]
-    ).map(rawToFunctionNode);
+    const rows = this.db.prepare('SELECT * FROM nodes WHERE is_external = 0').all() as unknown as RawNode[];
+    recordPerfWork('fullNodeTableLoads');
+    return rows.map(rawToFunctionNode);
   }
 
   /**
@@ -1635,7 +1645,7 @@ export class EdgeStore {
       // Read path: never recreate an empty on-disk store (that would be the silent
       // empty substitute the invariant forbids). Hand back a disclosed not-ready handle
       // over an ephemeral in-memory DB the caller will not query.
-      const es = new EdgeStore(new DatabaseSync(':memory:'), 'read');
+      const es = new EdgeStore(new EdgeStoreDatabase(':memory:'), 'read');
       es._fault = {
         reason: 'quarantined',
         quarantinePath,
