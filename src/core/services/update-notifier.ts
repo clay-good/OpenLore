@@ -245,14 +245,17 @@ function defaultLatestVersionLookup(
  * `npm view <pkg>@latest version --json` answers with a bare string on some npm releases and with
  * an ARRAY of the matched versions on others (npm 10/11 here: `["3.2.0"]`) — an array the first
  * version of this lookup dropped, so the check silently reported "no update" forever. The registry
- * endpoint answers with the `{ version }` document. All three are accepted; the array keeps its
- * last entry, which is the highest version npm matched.
+ * endpoint answers with the `{ version }` document. All three are accepted; an array keeps its
+ * highest version even if npm does not return the entries in order.
  */
 export function readAnswerVersion(answer: unknown): string | null {
   if (typeof answer === 'string') return answer.trim() || null;
   if (Array.isArray(answer)) {
-    const last = [...answer].reverse().find((entry) => typeof entry === 'string' && entry.trim());
-    return typeof last === 'string' ? last.trim() : null;
+    return answer.reduce<string | null>((highest, entry: unknown) => {
+      if (typeof entry !== 'string' || !entry.trim()) return highest;
+      const candidate = entry.trim();
+      return highest === null || isNewer(highest, candidate) ? candidate : highest;
+    }, null);
   }
   const body = answer as { version?: unknown } | null;
   if (!body || typeof body !== 'object') return null;

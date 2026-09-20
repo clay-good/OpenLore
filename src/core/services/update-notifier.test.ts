@@ -79,6 +79,7 @@ describe('fetchLatestVersion', () => {
     // notifier reported "no update" forever.
     expect(readAnswerVersion(['3.2.0'])).toBe('3.2.0');
     expect(readAnswerVersion(['3.1.1', '3.2.0'])).toBe('3.2.0');
+    expect(readAnswerVersion(['3.2.0', '3.1.1'])).toBe('3.2.0');
     expect(readAnswerVersion('3.2.0')).toBe('3.2.0');
     expect(readAnswerVersion({ version: '3.2.0' })).toBe('3.2.0');
     expect(readAnswerVersion([])).toBeNull();
