@@ -53,6 +53,7 @@ async function fixture(options: FixtureOptions = {}): Promise<string> {
         id: `${node.filePath}::${node.name}`, name: node.name, filePath: node.filePath,
         fanIn: node.fanIn ?? 0, fanOut: 0, isExternal: false, isTest: false,
       })),
+      edges: [],
       hubFunctions: [],
     },
   }));
@@ -82,6 +83,116 @@ const specWith = (requirement: string, anchor?: string): string =>
   `# Spec\n\n### Requirement: ${requirement}\n\nThe system SHALL work.\n${anchor ? `- **Implementation**: \`${anchor}\`\n` : ''}`;
 
 describe('openloreAudit — coverage availability', () => {
+  it('binds scenarios only to tests that reach their exact anchored symbol', async () => {
+    const spec = `## Requirements\n### Requirement: Charge\n**Implementation**: \`chargeCard::src/pay.ts\`\nThe system SHALL charge.\n#### Scenario: Paid\n- **WHEN** chargeCard runs\n- **THEN** the \`status\` field is "paid"\n\n\`\`\`markdown\n### Requirement: Charge\n**Implementation**: \`chargeCard::src/other.ts\`\n\`\`\`\n`;
+    const nodes = [
+      { id: 'src/pay.ts::chargeCard', name: 'chargeCard', filePath: 'src/pay.ts', isTest: false, startLine: 5 },
+      { id: 'src/other.ts::chargeCard', name: 'chargeCard', filePath: 'src/other.ts', isTest: false },
+      { id: 'src/pay.test.ts::sameFileTest', name: 'sameFileTest', filePath: 'src/pay.test.ts', isTest: true },
+      { id: 'src/other.test.ts::reachesWrongName', name: 'reachesWrongName', filePath: 'src/other.test.ts', isTest: true },
+    ].map(node => ({ ...node, fanIn: 0, fanOut: 0, isExternal: false }));
+    const root = await fixture({
+      specs: { billing: spec },
+      nodes: nodes.map(node => ({ name: node.name, filePath: node.filePath })),
+      llmContext: JSON.stringify({ callGraph: { nodes, edges: [{ callerId: 'src/other.test.ts::reachesWrongName', calleeId: 'src/other.ts::chargeCard', kind: 'calls' }], hubFunctions: [] } }),
+    });
+    const first = await openloreAudit({ rootPath: root, save: false });
+    expect(first.scenarioVerification?.scenarios).toEqual([expect.objectContaining({
+      label: 'no-reaching-test', tests: [], checkability: 'checkable',
+    })]);
+
+    const analysis = join(root, '.openlore', 'analysis');
+    await writeFile(join(analysis, 'llm-context.json'), JSON.stringify({ callGraph: {
+      nodes, edges: [{ callerId: 'src/pay.test.ts::sameFileTest', calleeId: 'src/pay.ts::chargeCard', kind: 'calls' }], hubFunctions: [],
+    } }));
+    const second = await openloreAudit({ rootPath: root, save: false });
+    expect(second.scenarioVerification?.scenarios).toEqual([expect.objectContaining({
+      label: 'verification-path-exists', tests: [{ file: 'src/pay.test.ts', test: 'sameFileTest' }],
+    })]);
+    expect(second.scenarioVerification?.caveat).toMatch(/never that the test asserts/);
+  });
+
+  it('withholds a negative path verdict when any resolved anchor is absent from the call graph', async () => {
+    const root = await fixture({
+      specs: { billing: `## Requirements\n### Requirement: Charge\n**Implementation**: \`chargeCard::src/pay.ts\`, \`refundCard::src/refund.ts\`\nThe system SHALL charge.\n#### Scenario: Paid\n- **WHEN** a card is charged\n- **THEN** the \`status\` field is "paid"\n` },
+      nodes: [
+        { name: 'chargeCard', filePath: 'src/pay.ts' },
+        { name: 'refundCard', filePath: 'src/refund.ts' },
+      ],
+      llmContext: JSON.stringify({ callGraph: { nodes: [{
+        id: 'src/pay.ts::chargeCard', name: 'chargeCard', filePath: 'src/pay.ts',
+        fanIn: 0, fanOut: 0, isExternal: false, isTest: false,
+      }], edges: [], hubFunctions: [] } }),
+    });
+    const report = await openloreAudit({ rootPath: root, save: false });
+    expect(report.scenarioVerification?.scenarios[0]).toMatchObject({
+      label: 'not-assessable', reason: 'anchor-absent-from-call-graph', tests: [],
+    });
+  });
+
+  it('withholds a negative path verdict when a second spec anchor is unresolved', async () => {
+    const root = await fixture({
+      specs: { billing: `## Requirements\n### Requirement: Charge\n**Implementation**: \`chargeCard::src/pay.ts\`, \`missingCard::src/pay.ts\`\nThe system SHALL charge.\n#### Scenario: Paid\n- **WHEN** a card is charged\n- **THEN** the \`status\` field is "paid"\n` },
+      nodes: [{ name: 'chargeCard', filePath: 'src/pay.ts' }],
+    });
+    const report = await openloreAudit({ rootPath: root, save: false });
+    expect(report.scenarioVerification?.scenarios[0]).toMatchObject({
+      label: 'no-reaching-test', reason: expect.stringContaining('other anchors are stale'),
+    });
+    await writeFile(join(root, '.openlore', 'analysis', 'llm-context.json'), JSON.stringify({ callGraph: {
+      nodes: [
+        { id: 'src/pay.ts::chargeCard', name: 'chargeCard', filePath: 'src/pay.ts', isTest: false },
+        { id: 'src/pay.test.ts::checks', name: 'checks', filePath: 'src/pay.test.ts', isTest: true },
+      ],
+      edges: [{ callerId: 'src/pay.test.ts::checks', calleeId: 'src/pay.ts::chargeCard', kind: 'calls' }], hubFunctions: [],
+    } }));
+    const positive = await openloreAudit({ rootPath: root, save: false });
+    expect(positive.scenarioVerification?.scenarios[0]).toMatchObject({ label: 'verification-path-exists' });
+  });
+
+  it('scopes scenario observations to anchored files and includes structural specs in a full audit', async () => {
+    const content = (name: string, file: string) => `## Requirements\n### Requirement: ${name}\n**Implementation**: \`work::${file}\`\nThe system SHALL work.\n#### Scenario: Runs\n- **WHEN** work runs\n- **THEN** the \`status\` field is "ready"\n`;
+    const root = await fixture({ specs: {
+      one: content('One', 'src/a.ts'), two: content('Two', 'src/b.ts'),
+      architecture: '## Requirements\n### Requirement: Structure\nThe system SHALL keep layers.\n#### Scenario: Layers\n- **WHEN** analysis runs\n- **THEN** the `status` field is "ready"\n',
+    }, nodes: [{ name: 'work', filePath: 'src/a.ts' }, { name: 'work', filePath: 'src/b.ts' }] });
+    const full = await openloreAudit({ rootPath: root, save: false });
+    expect(full.scenarioVerification?.scenarios.map(item => item.domain)).toContain('architecture');
+    const scoped = await openloreAudit({ rootPath: root, files: ['src/a.ts'], save: false });
+    expect(scoped.scenarioVerification?.scenarios.map(item => item.domain)).toEqual(['one']);
+  });
+
+  it('keeps an unresolved anchor visible in a file-scoped audit', async () => {
+    const root = await fixture({ specs: { billing:
+      '## Requirements\n### Requirement: Missing\n**Implementation**: `missingCard::src/pay.ts`\nThe system SHALL charge.\n#### Scenario: Missing\n- **WHEN** the card is missing\n- **THEN** the `status` field is "missing"\n',
+    } });
+    const report = await openloreAudit({ rootPath: root, files: ['src/pay.ts'], save: false });
+    expect(report.scenarioVerification?.scenarios[0]).toMatchObject({ label: 'not-assessable', reason: 'stale' });
+  });
+
+  it('keeps observed paths on a partial index and bounds named tests', async () => {
+    const testNodes = Array.from({ length: 5 }, (_, i) => ({
+      id: `src/work${i}.test.ts::checks${i}`, name: `checks${i}`,
+      filePath: `src/work${i}.test.ts`, isTest: true,
+    }));
+    const root = await fixture({
+      specs: { core: `## Requirements\n### Requirement: Works\n**Implementation**: \`work::src/a.ts\`\nThe system SHALL work.\n#### Scenario: Runs\n- **WHEN** work runs\n- **THEN** the \`status\` field is "ready"\n` },
+      llmContext: JSON.stringify({
+        partial: { state: 'partial' },
+        callGraph: {
+          nodes: [{ id: 'src/a.ts::work', name: 'work', filePath: 'src/a.ts', isTest: false }, ...testNodes],
+          edges: testNodes.map(test => ({ callerId: test.id, calleeId: 'src/a.ts::work', kind: 'calls' })),
+          hubFunctions: [],
+        },
+      }),
+    });
+    const report = await openloreAudit({ rootPath: root, save: false });
+    expect(report.scenarioVerification?.scenarios[0]).toMatchObject({
+      label: 'verification-path-exists', testCount: 5, testsTruncated: true,
+    });
+    expect(report.scenarioVerification?.scenarios[0].tests).toHaveLength(3);
+  });
+
   it('normalizes a relative project root before reading artifacts', async () => {
     const root = await fixture({ specs: { core: specWith('Works', 'work::src/a.ts') } });
     const report = await openloreAudit({ rootPath: relative(process.cwd(), root), save: false });

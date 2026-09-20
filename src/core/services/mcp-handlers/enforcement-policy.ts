@@ -119,6 +119,11 @@ export const ARCHITECTURE_FINDING_CODES = [
 ] as const;
 
 export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
+  'scenario-unverifiable-shape': {
+    defaultClass: 'advisory', source: 'scenario-checkability',
+    description: 'A scenario lacks a checkable condition or observable outcome; a verification path existing means a test reaches the anchored code, never that the test asserts the scenario\'s behavior.',
+    remediation: 'Scenario shape: {subject}; add a WHEN condition and an observable THEN outcome.',
+  },
   // ── author-declared architecture rules (widen-architecture-rule-vocabulary) ──
   'architecture-layer-violation': {
     defaultClass: 'advisory', source: 'architecture',
