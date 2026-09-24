@@ -10,7 +10,7 @@
  * vs. "no callers"). Read-only, deterministic, opt-in. No LLM.
  */
 
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import {
   CAPABILITIES,
   CAPABILITY_DESCRIPTIONS,
@@ -143,7 +143,7 @@ export async function computeGetLanguageSupport(
 
   // ── Repo mode: coverage matrix over the languages actually detected in the index. ──
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
   const cg = ctx.callGraph as SerializedCallGraph;
 

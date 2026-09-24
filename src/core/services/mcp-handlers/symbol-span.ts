@@ -40,7 +40,7 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_LLM_CONTEXT,
 } from '../../../constants.js';
-import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable, safeJoin } from './utils.js';
 import { readFileConfined } from '../../../utils/path-confinement.js';
 import { hashSpan } from '../../decisions/anchor.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
@@ -88,7 +88,7 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
   }
 
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

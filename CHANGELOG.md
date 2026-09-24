@@ -5,6 +5,14 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- **Graph tools stop calling a damaged index "absent".** When the cached context cannot be served
+  (a rebuild or publish in progress, artifacts that no longer match their published generation, a
+  refused manifest or artifact), `get_subgraph` and the other graph and conclusion tools now return
+  the same diagnosed not-ready verdict as the architecture overview (`index-publish-in-progress`,
+  `index-generation-mismatch`, …) instead of "No analysis found. Run analyze_codebase first."
+  A truly absent index still answers `index-absent`. The Pi footer re-reads index health when a
+  tool answers not-ready, so it no longer shows `ready` next to that answer.
+
 ## [3.3.0] - 2026-09-20
 
 **The map now checks the weather before giving directions.**

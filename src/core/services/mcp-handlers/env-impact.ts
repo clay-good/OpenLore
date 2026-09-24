@@ -24,7 +24,7 @@
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { readFileConfined } from '../../../utils/path-confinement.js';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
 import { computeStaleness } from './confidence-boundary.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ENV_INVENTORY } from '../../../constants.js';
@@ -92,7 +92,7 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
   if (!name) return { error: 'Provide `name` — an environment variable, e.g. DATABASE_URL.' };
 
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
   const cg = ctx.callGraph as SerializedCallGraph;
 

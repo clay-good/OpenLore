@@ -26,6 +26,8 @@ vi.mock('./artifact-cache.js', () => ({
 vi.mock('./utils.js', () => ({
   validateDirectory: vi.fn(async (dir: string) => dir),
   readCachedContext: vi.fn(async () => null),
+  // The no-index verdict the real diagnosis returns when nothing is on disk.
+  diagnoseIndexUnservable: vi.fn(async () => ({ error: 'No analysis found. Run analyze_codebase first.', notReady: true, reason: 'index-absent', remedy: 'openlore analyze' })),
   loadMappingIndex: vi.fn(async () => null),
   specsForFile: vi.fn(() => []),
   functionsForDomain: vi.fn(() => []),

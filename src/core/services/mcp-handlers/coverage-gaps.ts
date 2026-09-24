@@ -27,7 +27,7 @@
  * the test-generator; this is pure call-graph structural reachability.
  */
 
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
 import { deadCodeIds, wiringKey, loadExternalWiring, externalWiringCaveats } from './reachability.js';
 import type { WiringReceipt } from '../../analyzer/entry-point-adapters.js';
@@ -127,7 +127,7 @@ export type DeadFlagReason = 'no-callers' | 'dead-via-unreachable-callers';
 export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   // A partial first-run index cannot ground a negative conclusion (change:
   // refine-first-run-partial-serving).
   const withheld = withheldOnPartialIndex(ctx, 'test-coverage gaps');

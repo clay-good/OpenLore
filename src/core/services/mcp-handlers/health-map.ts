@@ -1,4 +1,4 @@
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 import { volatilityLevel } from '../../provenance/change-coupling.js';
 
@@ -92,7 +92,7 @@ function computeUntestedHotspots(nodes: FunctionNode[], edges: CallEdge[], topN:
 export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const limit = Math.max(1, Math.min(input.limit ?? DEFAULT_LIMIT, 50));

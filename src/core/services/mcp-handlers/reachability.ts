@@ -31,7 +31,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
 import { loadTraversalIndex } from './traversal.js';
 import { assembleBoundary, computeStaleness, edgeBasisWithinSet, withheldOnPartialIndex, type KnownUnknowableCrossing } from './confidence-boundary.js';
@@ -231,7 +231,7 @@ export async function deadCodeIds(
 export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   // A partial first-run index cannot ground a negative conclusion (change:
   // refine-first-run-partial-serving).
   const withheld = withheldOnPartialIndex(ctx, 'dead-code candidates');

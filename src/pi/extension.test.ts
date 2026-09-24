@@ -1673,8 +1673,10 @@ describe('Pi footer status', () => {
 
   function statusHarness(runtime: PiExtensionRuntime, opts: { mode?: string; hasUI?: boolean } = {}) {
     const handlers = new Map<string, PiEventHandler>();
+    type StatusTool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+    const tools = new Map<string, StatusTool>();
     const pi = {
-      registerTool: vi.fn(),
+      registerTool: vi.fn((tool: StatusTool) => { tools.set(tool.name, tool); }),
       registerCommand: vi.fn(),
       on: vi.fn((event: string, handler: PiEventHandler) => { handlers.set(event, handler); }),
     } as unknown as ExtensionAPI;
@@ -1699,6 +1701,8 @@ describe('Pi footer status', () => {
       start,
       agentEnd: () => handlers.get('agent_end')!({}, ctx),
       shutdown: () => handlers.get('session_shutdown')!({}, ctx),
+      runTool: (name: string, params: Record<string, unknown>) =>
+        tools.get(name)!.execute('call-1', params, undefined, undefined, ctx),
     };
   }
 
@@ -1787,6 +1791,37 @@ describe('Pi footer status', () => {
     await h.agentEnd();
     expect(h.last()).toBe('openlore: ready');
     await h.shutdown();
+  });
+
+  it('refreshes when a tool answers notReady, so the footer never contradicts it', async () => {
+    // The daemon answers the tool with an honest not-ready verdict (a rebuild, a lost publish).
+    const server = createServer((req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(req.url?.startsWith('/tool/')
+        ? { error: 'An analysis exists but a publish is in progress.', notReady: true, reason: 'index-publish-in-progress', remedy: 'retry shortly' }
+        : {}));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+    let current = health('ready');
+    const readHealth = vi.fn(async () => current);
+    const h = statusHarness({
+      readHealth,
+      resolveDaemon: async () => ({ daemon: { baseUrl: `http://127.0.0.1:${port}`, token: 't' } } as Awaited<ReturnType<Resolve>>),
+    });
+    try {
+      await h.start();
+      expect(h.last()).toBe('openlore: ready');
+
+      // Health moved without any artifact the cache key watches: only the not-ready answer
+      // can reveal it before the next agent_end.
+      current = health('building');
+      await h.runTool('openlore_get_subgraph', { functionName: 'main' });
+      expect(h.last()).toBe('openlore: analyzing…');
+    } finally {
+      await h.shutdown();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it('re-reads health only when an artifact, the lock, or the daemon view moves', async () => {

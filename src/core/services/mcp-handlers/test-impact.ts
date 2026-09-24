@@ -16,7 +16,7 @@
  * over-approximated; dynamic dispatch, reflection, and DI can under-select.
  */
 
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { resolveFederationScope, findCrossRepoTests } from '../../federation/resolver.js';
 import { loadTraversalIndex } from './traversal.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -225,7 +225,7 @@ export async function handleSelectTests(
 ): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

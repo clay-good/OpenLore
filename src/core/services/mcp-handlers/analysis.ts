@@ -359,7 +359,7 @@ export async function handleGetSignatures(directory: string, filePattern?: strin
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx) return 'No analysis found. Run analyze_codebase first.';
+  if (!ctx) return (await diagnoseIndexUnservable(absDir)).error;
   if (!ctx.signatures || ctx.signatures.length === 0) {
     return 'No signatures available in cached analysis. Re-run analyze_codebase.';
   }
