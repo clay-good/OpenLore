@@ -18,7 +18,7 @@
  * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
  */
 
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
 import {
   carriedCaveat,
@@ -214,7 +214,7 @@ export async function computeBlastRadius(
 ): Promise<BlastRadiusBriefing | { error: string }> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

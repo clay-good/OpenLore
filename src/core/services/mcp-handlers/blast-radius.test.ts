@@ -10,6 +10,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('./utils.js', () => ({
   validateDirectory: vi.fn(async (d: string) => d),
   readCachedContext: vi.fn(),
+  // The no-index verdict the real diagnosis returns when nothing is on disk.
+  diagnoseIndexUnservable: vi.fn(async () => ({ error: 'No analysis found. Run analyze_codebase first.', notReady: true, reason: 'index-absent', remedy: 'openlore analyze' })),
 }));
 
 vi.mock('../../drift/git-diff.js', () => ({
@@ -325,7 +327,7 @@ describe('computeBlastRadius', () => {
   it('errors clearly when no analysis exists', async () => {
     vi.mocked(readCachedContext).mockResolvedValueOnce(null as never);
     const r = await computeBlastRadius({ directory: '/p' });
-    expect(r).toEqual({ error: expect.stringMatching(/analyze_codebase/i) });
+    expect(r).toEqual({ error: expect.stringMatching(/analyze_codebase/i), notReady: true, reason: 'index-absent', remedy: 'openlore analyze' });
     expect(() => assertConclusionShape('blast_radius', r)).not.toThrow(); // {error} path is conclusion-shaped
   });
 

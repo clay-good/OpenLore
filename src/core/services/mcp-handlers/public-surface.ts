@@ -23,7 +23,7 @@ import { readDependencyGraphCached } from './artifact-cache.js';
 import { readFileConfined } from '../../../utils/path-confinement.js';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { gitPathArgs } from '../../../utils/git-args.js';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import { parseJSExports } from '../../analyzer/import-parser.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
@@ -1195,7 +1195,8 @@ export function publicSurfaceFindings(changes: readonly SurfaceChange[]): Govern
 export async function computeCertifyPublicSurface(input: CertifyPublicSurfaceInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx?.callGraph) {
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
+  if (!ctx.callGraph) {
     return { error: 'No analysis found. Run analyze_codebase first.' };
   }
   if (input.baseRef && input.baseRef.trim().length > 0) {

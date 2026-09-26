@@ -5,7 +5,7 @@
  * trace_execution_path.
  */
 
-import { validateDirectory, readCachedContext, notReadyResult, safeJoin } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable, notReadyResult, safeJoin } from './utils.js';
 import { readDependencyGraphOrPartial } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
@@ -519,7 +519,7 @@ export async function handleGetCallGraph(directory: string): Promise<unknown> {
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx) return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return notReadyResult('Call graph not available in cached analysis. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph;
@@ -552,7 +552,7 @@ export async function handleGetSubgraph(
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx) return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.edgeStore) return notReadyResult('Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).', 'graph-unavailable');
 
   const lower = functionName.toLowerCase();
@@ -714,7 +714,7 @@ export async function handleAnalyzeImpact(
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx)            return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx)            return await diagnoseIndexUnservable(absDir);
   if (!ctx.edgeStore)  return notReadyResult('Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).', 'graph-unavailable');
 
   // `symbol` is required by the MCP inputSchema, but dispatchTool enforces nothing,
@@ -1165,7 +1165,7 @@ export async function handleGetLowRiskRefactorCandidates(
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx)           return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx)           return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg       = ctx.callGraph as SerializedCallGraph;
@@ -1212,7 +1212,7 @@ export async function handleGetLeafFunctions(
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx)           return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx)           return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph as SerializedCallGraph;
@@ -1255,7 +1255,7 @@ export async function handleGetCriticalHubs(
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx)           return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx)           return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph as SerializedCallGraph;
@@ -1325,7 +1325,7 @@ export async function handleGetGodFunctions(
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx)           return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx)           return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph as SerializedCallGraph;
@@ -1460,7 +1460,7 @@ export async function handleTraceExecutionPath(
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx)           return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
+  if (!ctx)           return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph as SerializedCallGraph;

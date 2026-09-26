@@ -37,7 +37,7 @@
 
 import { join } from 'node:path';
 import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { traversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
 import { deadCodeIds, loadExternalWiring } from './reachability.js';
@@ -569,7 +569,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
   }
 
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
   const cg = ctx.callGraph as SerializedCallGraph;
 

@@ -21,7 +21,7 @@
 
 import { relative } from 'node:path';
 import type Parser from 'tree-sitter';
-import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable, safeJoin } from './utils.js';
 import {
   loadDynamicBoundaryReport,
   dynamicBoundaryCrossing,
@@ -101,7 +101,7 @@ export async function handleAnalyzeErrorPropagation(
   if (!sym) return { error: 'Provide `symbol` — a function name, or name::path, in the index.' };
 
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

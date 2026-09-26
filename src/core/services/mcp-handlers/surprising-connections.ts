@@ -1,4 +1,4 @@
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
 const DEFAULT_LIMIT = 15;
@@ -16,7 +16,7 @@ export interface GetSurprisingConnectionsInput {
 export async function handleGetSurprisingConnections(input: GetSurprisingConnectionsInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const limit = Math.max(1, Math.min(input.limit ?? DEFAULT_LIMIT, 50));

@@ -23,11 +23,18 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm, readFile, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile, readdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { diagnoseIndexUnservable, _resetContextCacheForTesting, clearMappingCache } from './utils.js';
-import { handleGetArchitectureOverview, handleGetRefactorReport } from './analysis.js';
+import { handleGetArchitectureOverview, handleGetRefactorReport, handleGetSignatures } from './analysis.js';
+import { handleGetSubgraph, handleGetCallGraph } from './graph.js';
+import { handleGetSurprisingConnections } from './surprising-connections.js';
+import { handleGetChangeCoupling } from './change-coupling.js';
+import { handleReportCoverageGaps } from './coverage-gaps.js';
+import { handleFindDeadCode } from './reachability.js';
+import { handleGetHealthMap } from './health-map.js';
 import { acquireAnalysisLock } from '../../runtime/advisory-lock.js';
 import { markGenerationUnavailable } from '../../runtime/analysis-generation.js';
 import {
@@ -278,5 +285,66 @@ describe('handlers serve the diagnosis, not the flat sentence', () => {
 
     expect(result.reason).toBe('index-absent');
     expect(result.error).toContain('No analysis found');
+  });
+});
+
+/**
+ * The same wiring for the graph and conclusion handlers. Each one used to answer every
+ * unservable-index case with the flat "No analysis found" sentence, so a Pi footer reading
+ * "ready" sat next to a tool claiming no analysis existed while the watcher rebuilt it.
+ */
+describe('graph and conclusion handlers serve the diagnosis, not the flat sentence', () => {
+  const handlers: Array<[string, () => Promise<unknown>]> = [
+    ['handleGetSubgraph', () => handleGetSubgraph(root, 'main')],
+    ['handleGetCallGraph', () => handleGetCallGraph(root)],
+    ['handleGetSurprisingConnections', () => handleGetSurprisingConnections({ directory: root })],
+    ['handleGetChangeCoupling', () => handleGetChangeCoupling({ directory: root })],
+    ['handleReportCoverageGaps', () => handleReportCoverageGaps({ directory: root })],
+    ['handleFindDeadCode', () => handleFindDeadCode({ directory: root })],
+    ['handleGetHealthMap', () => handleGetHealthMap({ directory: root })],
+  ];
+
+  for (const [name, call] of handlers) {
+    it(`${name} names a lost publish instead of reporting absence`, async () => {
+      await publish(JSON.stringify({ signatures: [], callGraph: null }));
+      await rewriteWithoutRepublishing();
+
+      const result = await call() as Record<string, unknown>;
+
+      expect(result.notReady).toBe(true);
+      expect(result.reason).toBe('index-generation-mismatch');
+      expect(result.error).not.toContain('No analysis found');
+    });
+
+    it(`${name} keeps the first-run verdict for a genuinely absent index`, async () => {
+      const result = await call() as Record<string, unknown>;
+
+      expect(result.notReady).toBe(true);
+      expect(result.reason).toBe('index-absent');
+      expect(result.error).toContain('No analysis found');
+    });
+  }
+
+  it('handleGetSignatures (a string-returning handler) names a lost publish too', async () => {
+    await publish(JSON.stringify({ signatures: [], callGraph: null }));
+    await rewriteWithoutRepublishing();
+
+    const result = await handleGetSignatures(root);
+
+    expect(result).toMatch(/does NOT match its published generation/);
+    expect(result).not.toContain('No analysis found');
+  });
+
+  it('no handler answers a null cached context with the hard-coded sentence', async () => {
+    // Source guard: a new handler copying the old one-liner would silently reintroduce the
+    // misleading answer, and no behavioural test above would cover it.
+    const dir = fileURLToPath(new URL('.', import.meta.url));
+    const offenders: string[] = [];
+    for (const file of await readdir(dir)) {
+      if (!file.endsWith('.ts') || file.endsWith('.test.ts')) continue;
+      const src = await readFile(join(dir, file), 'utf-8');
+      if (/if \(!ctx\)\s*return[^;]*No analysis found/.test(src)) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
   });
 });

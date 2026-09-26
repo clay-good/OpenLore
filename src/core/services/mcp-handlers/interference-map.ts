@@ -34,7 +34,7 @@
  */
 
 import { resolve } from 'node:path';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import {
   computeFootprint,
   classifyHazard,
@@ -887,7 +887,7 @@ export async function computeInterferenceMap(
 ): Promise<InterferenceMap | { error: string }> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
   const homeCg = ctx.callGraph as SerializedCallGraph;
 

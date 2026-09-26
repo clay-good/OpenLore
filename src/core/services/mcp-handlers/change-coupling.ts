@@ -6,7 +6,7 @@
  * analyze time. Advisory signals (correlation, not causation); never a rule.
  */
 
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { volatilityLevel } from '../../provenance/change-coupling.js';
 
 const SOUNDNESS = {
@@ -29,7 +29,7 @@ export interface GetChangeCouplingInput {
 export async function handleGetChangeCoupling(input: GetChangeCouplingInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.edgeStore) return { error: 'Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' };
 
   if (ctx.edgeStore.countChangeCoupling() === 0) {

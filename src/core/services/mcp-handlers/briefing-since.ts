@@ -24,7 +24,7 @@
  * one. The cursor is the base ref, never wall-clock time.
  */
 
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
 import {
   carriedCaveat,
@@ -84,7 +84,7 @@ function normPath(p: string): string {
 export async function handleBriefingSince(input: BriefingSinceInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

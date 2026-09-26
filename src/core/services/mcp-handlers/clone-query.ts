@@ -21,7 +21,7 @@
  */
 
 import { readFileConfined } from '../../../utils/path-confinement.js';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import {
   findClones,
   CLONE_MIN_LINES,
@@ -95,7 +95,7 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
   }
 
   const ctx = await readCachedContext(absDir);
-  if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
+  if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;

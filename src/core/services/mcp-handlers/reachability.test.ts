@@ -9,6 +9,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('./utils.js', () => ({
   validateDirectory: vi.fn(async (d: string) => d),
   readCachedContext: vi.fn(),
+  // The no-index verdict the real diagnosis returns when nothing is on disk.
+  diagnoseIndexUnservable: vi.fn(async () => ({ error: 'No analysis found. Run analyze_codebase first.', notReady: true, reason: 'index-absent', remedy: 'openlore analyze' })),
 }));
 vi.mock('node:fs/promises', () => ({ readFile: vi.fn(async () => { throw new Error('ENOENT'); }) }));
 

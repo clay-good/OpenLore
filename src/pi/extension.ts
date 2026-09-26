@@ -2052,6 +2052,18 @@ function registerOpenlore(
     }
   }
 
+  /**
+   * A tool answered `notReady` (an index being rebuilt, a lost publish, …): the footer was last
+   * computed at session start or the previous agent run and may still say "ready". Re-read
+   * health now, bypassing the cache, so the footer does not contradict the tool result.
+   * Advisory: never rejects, and costs nothing on the ordinary (ready) path.
+   */
+  async function refreshStatusIfNotReady(result: unknown, ctx: ExtensionContext): Promise<void> {
+    if (!result || typeof result !== 'object' || (result as { notReady?: unknown }).notReady !== true) return;
+    healthCache.delete(ctx.cwd);
+    await refreshStatus(ctx);
+  }
+
   // ── B: navigation tools ──
   for (const tool of NAV_TOOLS) {
     pi.registerTool({
@@ -2077,6 +2089,7 @@ function registerOpenlore(
         // result so the model loses no detail. The compact human view is produced
         // separately in renderResult (display only). `details` carries the parsed
         // object so renderResult need not re-parse the JSON text.
+        await refreshStatusIfNotReady(result, ctx);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         return toolResult(truncate(text, RESULT_MAX), result);
       },
@@ -2123,6 +2136,7 @@ function registerOpenlore(
           daemon, 'prepare_spec_generation',
           { domain, cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES }, ctx.cwd, signal ?? undefined,
         );
+        await refreshStatusIfNotReady(result, ctx);
         return compositeToolResult(result);
       } catch (err) {
         dropDaemon(ctx.cwd);
@@ -2153,6 +2167,7 @@ function registerOpenlore(
           { domain, baseRef: baseRef ?? 'HEAD', cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES },
           ctx.cwd, signal ?? undefined,
         );
+        await refreshStatusIfNotReady(result, ctx);
         return compositeToolResult(result);
       } catch (err) {
         dropDaemon(ctx.cwd);
