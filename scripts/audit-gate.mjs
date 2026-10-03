@@ -16,7 +16,17 @@
 import { execFileSync } from 'node:child_process';
 
 /** Advisories with no applicable fix. Each needs a reason and a clearing condition. */
-const ALLOWLIST = {};
+const ALLOWLIST = {
+  'GHSA-vfj7-8cjw-p6xm': {
+    package: 'braces',
+    reason:
+      'No patched release exists (every version <=3.0.3 is affected). Reached only through ' +
+      'the dev dependency @fission-ai/openspec -> fast-glob -> micromatch -> braces; nothing ' +
+      'in the runtime tree depends on it, it is absent from the published `files` list, and ' +
+      'it only ever sees developer-authored glob input.',
+    clearsWhen: 'braces publishes a fix, or @fission-ai/openspec stops depending on fast-glob 3.x.',
+  },
+};
 
 const GATED = new Set(['high', 'critical']);
 

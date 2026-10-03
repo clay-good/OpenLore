@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 const created: string[] = [];
+// The gate's ALLOWLIST is a module constant with no injection hook, so read its keys from source.
+const allowlistedIds = [
+  ...readFileSync('scripts/audit-gate.mjs', 'utf-8').matchAll(/^ {2}'(GHSA-[\w-]+)': \{/gm),
+].map(m => m[1]);
 
 async function runGate(report: unknown): Promise<{ code: number; output: string }> {
   const bin = await mkdtemp(join(tmpdir(), 'openlore-audit-gate-'));
@@ -39,12 +44,29 @@ afterEach(async () => {
 // repo's existing `skipIf(win32)` convention for POSIX-only test scaffolding.
 describe.skipIf(process.platform === 'win32')('audit-gate malformed report handling', () => {
   it('accepts a complete clean npm audit report', async () => {
+    // "Clean" means nothing beyond the allowlist. A report missing an allowlisted advisory is
+    // stale by design, so the fake report carries exactly the advisories the allowlist names.
+    const vulnerabilities = Object.fromEntries(
+      allowlistedIds.map(id => [
+        `pkg-${id}`,
+        { severity: 'high', via: [{ severity: 'high', title: id, url: `https://github.com/advisories/${id}` }] },
+      ]),
+    );
+    const result = await runGate({
+      vulnerabilities,
+      metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: allowlistedIds.length, critical: 0 } },
+    });
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('audit-gate: OK');
+  });
+
+  it.skipIf(allowlistedIds.length === 0)('fails when an allowlisted advisory has left the tree', async () => {
     const result = await runGate({
       vulnerabilities: {},
       metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0 } },
     });
-    expect(result.code).toBe(0);
-    expect(result.output).toContain('audit-gate: OK');
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('Stale audit allowlist');
   });
 
   it('fails closed when a high advisory has no stable identifier', async () => {
