@@ -253,7 +253,7 @@
     "@earendil-works/pi-coding-agent": "^1.0.1",
     "@earendil-works/pi-tui": "^1.0.1",
     "@eslint/js": "^10.0.1",
-    "@fission-ai/openspec": "1.13.1",
+    "@fission-ai/openspec": "1.13.2",
     "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "^5.0.0",
     "eslint": "^10.9.1",
