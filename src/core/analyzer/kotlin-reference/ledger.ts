@@ -354,19 +354,19 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
       && findNode(m, 'platform/Platform.jvm.kt::platformName')?.sourceSet === 'jvmMain'),
 
   // ── add-kotlin-file-dependency-and-exports ────────────────────────────────
-  entry('files-import-edge', 'file graph', 'known-gap', 'add-kotlin-file-dependency-and-exports',
+  entry('files-import-edge', 'file graph', 'asserted', 'add-kotlin-file-dependency-and-exports',
     '`UserService.kt` has an import edge to `UserRepository.kt` (`import com.acme.repo.UserRepository`)',
     m => m.importEdges.some(e => e.from === 'service/UserService.kt' && e.to === 'repo/UserRepository.kt')),
-  entry('files-import-top-level-function', 'file graph', 'known-gap', 'add-kotlin-file-dependency-and-exports',
+  entry('files-import-top-level-function', 'file graph', 'asserted', 'add-kotlin-file-dependency-and-exports',
     '`UserService.kt` has an import edge to `Strings.kt` (`import com.acme.util.slugify`)',
     m => m.importEdges.some(e => e.from === 'service/UserService.kt' && e.to === 'util/Strings.kt')),
-  entry('files-wildcard-import', 'file graph', 'known-gap', 'add-kotlin-file-dependency-and-exports',
+  entry('files-wildcard-import', 'file graph', 'asserted', 'add-kotlin-file-dependency-and-exports',
     '`Application.kt` has an import edge to `Stores.kt` through `import com.acme.repo.*` (it uses `openStore`)',
     m => m.importEdges.some(e => e.from === 'Application.kt' && e.to === 'repo/Stores.kt')),
-  entry('files-java-imports-kotlin', 'file graph', 'known-gap', 'add-kotlin-file-dependency-and-exports',
+  entry('files-java-imports-kotlin', 'file graph', 'asserted', 'add-kotlin-file-dependency-and-exports',
     '`LegacyCaller.java` has an import edge to `UserService.kt`',
     m => m.importEdges.some(e => e.from === 'legacy/LegacyCaller.java' && e.to === 'service/UserService.kt')),
-  entry('files-exports-visibility', 'file graph', 'known-gap', 'add-kotlin-file-dependency-and-exports',
+  entry('files-exports-visibility', 'file graph', 'asserted', 'add-kotlin-file-dependency-and-exports',
     '`Strings.kt` exports `slugify`, `loadName`, and `Color`, and does not export the private `load`',
     m => {
       const exported = m.exportsByFile.get('util/Strings.kt') ?? [];

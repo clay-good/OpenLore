@@ -2218,13 +2218,14 @@ export class McpWatcher {
       // and re-serialize it, so untyped node fields not modeled here (file,
       // exports, cluster, metrics.pageRank/betweenness) survive the round-trip.
       const graph = JSON.parse(raw) as {
-        nodes: Array<{ id: string; file?: { path: string; absolutePath: string }; exports?: unknown[]; metrics?: Record<string, number> }>;
+        nodes: Array<{ id: string; file?: { path: string; absolutePath: string }; exports?: unknown[]; jvm?: { package: string; declares: string[] }; metrics?: Record<string, number> }>;
         edges: Array<{ source: string; target: string; httpEdge?: unknown; isCallEdge?: boolean }>;
       };
       if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return breakages;
 
       const { ImportExportParser } = await import('../analyzer/import-parser.js');
       const { computeFileImportEdges } = await import('../analyzer/dependency-graph.js');
+      const { buildJvmPackageIndex } = await import('../analyzer/import-parser.js');
       type ExportFact = { name?: unknown; isDefault?: unknown; isReExport?: unknown };
       type ImportEdge = { source: string; target: string; importedSourceNames?: unknown; httpEdge?: unknown; isCallEdge?: boolean };
       const fileSet = new Set(graph.nodes.map((n) => n.id)); // absolute paths
@@ -2296,7 +2297,15 @@ export class McpWatcher {
         oldExports.set(f.rel, old);
         newExports.set(f.rel, fresh);
         if (node) node.exports = analysis.exports;
-        const newEdges = await computeFileImportEdges(abs, analysis, fileSet, artifactRoot);
+        // Kotlin and Java resolve through the declared-package index. It is rebuilt from the
+        // nodes of the artifact, with this file's fresh declarations, so a changed `package`
+        // line or a new top-level declaration is seen at once.
+        if (node && analysis.jvm) node.jvm = analysis.jvm;
+        else if (node) delete node.jvm;
+        const jvmIndex = analysis.jvm
+          ? buildJvmPackageIndex(graph.nodes.map(n => ({ file: n.id, jvm: n.jvm })))
+          : undefined;
+        const newEdges = await computeFileImportEdges(abs, analysis, fileSet, artifactRoot, undefined, jvmIndex);
         // Drop this file's previous IMPORT edges (keep HTTP / call-synthesized
         // edges, which the watcher does not rebuild), then splice in the fresh set.
         graph.edges = graph.edges.filter(

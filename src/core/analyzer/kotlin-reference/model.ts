@@ -5,7 +5,7 @@
  * the facts the expectations ledger checks. The fixture is parsed only: no Kotlin compiler and no
  * build tool is run.
  */
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -152,7 +152,9 @@ const str = (value: unknown): string => (typeof value === 'string' ? value : '')
  * `dispose`.
  */
 export async function analyzeKotlinReference(): Promise<{ model: KotlinReferenceModel; dispose: () => Promise<void> }> {
-  const root = await mkdtemp(join(tmpdir(), 'openlore-kotlin-reference-'));
+  // The canonical path: the analysis artifacts record real paths, and the system temporary
+  // directory is a symbolic link on some platforms.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'openlore-kotlin-reference-')));
   await cp(KOTLIN_REFERENCE_FIXTURE, root, { recursive: true });
   await mkdir(join(root, OPENLORE_DIR), { recursive: true });
   await writeFile(join(root, OPENLORE_DIR, 'config.json'), JSON.stringify({
