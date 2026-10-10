@@ -187,6 +187,12 @@ export interface FunctionNode {
   bodySpans?: Array<{ start: number; end: number }>;
   /** Declaration modifiers as written (Kotlin: `suspend`, `infix`, `operator`, `override`, …). */
   modifiers?: string[];
+  /** Kotlin: declared visibility; `public` when no modifier is written. */
+  visibility?: 'public' | 'internal' | 'protected' | 'private';
+  /** Kotlin: names of the declared type parameters. */
+  typeParameters?: string[];
+  /** Kotlin: KDoc block tags (`@param`, `@return`, `@throws`, …) of the declaration. */
+  docTags?: Array<{ tag: string; name?: string; text: string }>;
   /**
    * Kotlin: the receiver type of an extension function, as a simple name
    * (change: fix-kotlin-type-hierarchy-fidelity). `className` is set for an extension only when

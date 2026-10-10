@@ -177,3 +177,47 @@ const SELF_CALL_RECEIVERS: ReadonlySet<string> = new Set(['this', 'super', 'self
 export function isSelfReceiver(receiver: string | undefined): boolean {
   return receiver !== undefined && SELF_CALL_RECEIVERS.has(receiver);
 }
+
+/**
+ * Kotlin standard-library calls that are not recorded as external leaves
+ * (change: fix-kotlin-signature-and-kdoc-fidelity): scope functions, precondition and builder
+ * functions of the default-import packages, and the common collection and string operations.
+ * Unlike {@link isIgnoredCallee}, this is applied AFTER resolution, and only to a call that
+ * resolved to nothing: a project function with one of these names that is in scope still binds.
+ * Names that a project type commonly declares itself (`get`, `find`, `add`, `contains`, `size`,
+ * `first`, `replace`) are deliberately absent, so an unresolved call to one stays visible.
+ */
+export const KOTLIN_STDLIB_CALLS: ReadonlySet<string> = new Set([
+  // scope functions and resource handling
+  'let', 'run', 'apply', 'also', 'with', 'takeIf', 'takeUnless', 'use', 'repeat', 'lazy', 'synchronized',
+  // preconditions
+  'require', 'requireNotNull', 'check', 'checkNotNull', 'error', 'TODO', 'assert',
+  // result handling
+  'runCatching', 'getOrThrow', 'getOrNull', 'getOrElse', 'getOrDefault', 'onSuccess', 'onFailure',
+  'exceptionOrNull', 'recover', 'recoverCatching',
+  // builders
+  'listOf', 'listOfNotNull', 'mutableListOf', 'arrayListOf', 'emptyList', 'setOf', 'mutableSetOf',
+  'hashSetOf', 'linkedSetOf', 'emptySet', 'mapOf', 'mutableMapOf', 'hashMapOf', 'linkedMapOf',
+  'emptyMap', 'arrayOf', 'arrayOfNulls', 'emptyArray', 'intArrayOf', 'longArrayOf', 'byteArrayOf',
+  'sequenceOf', 'emptySequence', 'buildList', 'buildSet', 'buildMap', 'buildString', 'pairOf', 'to',
+  // higher-order collection operations
+  'forEach', 'forEachIndexed', 'onEach', 'map', 'mapIndexed', 'mapNotNull', 'mapTo', 'flatMap',
+  'flatten', 'filter', 'filterNot', 'filterNotNull', 'filterIsInstance', 'fold', 'reduce', 'any',
+  'all', 'none', 'count', 'sumOf', 'maxOf', 'minOf', 'maxByOrNull', 'minByOrNull', 'associate',
+  'associateBy', 'associateWith', 'groupBy', 'partition', 'zip', 'chunked', 'windowed', 'distinct',
+  'distinctBy', 'sorted', 'sortedBy', 'sortedByDescending', 'sortedWith', 'reversed', 'take',
+  'takeWhile', 'drop', 'dropWhile', 'firstOrNull', 'lastOrNull', 'singleOrNull', 'joinToString',
+  'toList', 'toMutableList', 'toSet', 'toMutableSet', 'toMap', 'toMutableMap', 'toTypedArray',
+  'asSequence', 'asIterable', 'withIndex', 'isEmpty', 'isNotEmpty', 'orEmpty', 'ifEmpty',
+  // strings and conversions
+  'lowercase', 'uppercase', 'trim', 'trimIndent', 'trimMargin', 'trimStart', 'trimEnd', 'isBlank',
+  'isNotBlank', 'isNullOrBlank', 'isNullOrEmpty', 'ifBlank', 'toInt', 'toIntOrNull', 'toLong',
+  'toLongOrNull', 'toDouble', 'toDoubleOrNull', 'toFloat', 'toBoolean', 'toBigDecimal',
+  'toByteArray', 'toCharArray', 'padStart', 'padEnd', 'removePrefix', 'removeSuffix', 'lines',
+  // printing
+  'println', 'print',
+]);
+
+export function isKotlinStdlibCall(name: string): boolean {
+  return KOTLIN_STDLIB_CALLS.has(name);
+}

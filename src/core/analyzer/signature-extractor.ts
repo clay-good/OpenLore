@@ -15,6 +15,7 @@
 import { detectLanguage } from './language-detection.js';
 import { extractScriptContainer } from './sfc-script-extractor.js';
 import { blankCommentsPreservingLayout } from './comment-blanking.js';
+import { scanKotlinDeclarations } from './kotlin-source.js';
 export { detectLanguage };
 
 // ============================================================================
@@ -27,6 +28,17 @@ export interface ExtractedSignature {
   signature: string;   // compact one-liner
   docstring?: string;  // first meaningful line of doc comment
   decorator?: string;  // e.g. @router.get('/path') for FastAPI
+  // Structured header, where the language extractor reads one (Kotlin; issue #546).
+  /** Qualified owner class of a member. */
+  owner?: string;
+  parameters?: Array<{ name: string; type?: string; hasDefault?: true; isVararg?: true }>;
+  /** Declared return type of a function, or declared type of a property or type alias. */
+  returnType?: string;
+  typeParameters?: string[];
+  visibility?: 'public' | 'internal' | 'protected' | 'private';
+  modifiers?: string[];
+  /** Doc-comment block tags (`@param`, `@return`, `@throws`, …). */
+  docTags?: Array<{ tag: string; name?: string; text: string }>;
 }
 
 export interface FileSignatureMap {
@@ -875,10 +887,6 @@ const EXTRA_LANG_PATTERNS: Record<string, SigPattern[]> = {
     { re: /^[ \t]*(?:(?:public|private|protected|internal|static|sealed|abstract|partial)[ \t]+)*\b(?:class|interface|struct|record|enum)[ \t]+(\w+)/gm, kind: 'class' },
     { re: /^[ \t]*(?:(?:public|private|protected|internal|static|async|virtual|override)[ \t]+)*[\w<>[\],?]+[ \t]+(\w+)[ \t]*\(/gm, kind: 'method' },
   ],
-  Kotlin: [
-    { re: /^[ \t]*(?:(?:public|private|internal|open|abstract|sealed|data)[ \t]+)*\b(?:class|object|interface)[ \t]+(\w+)/gm, kind: 'class' },
-    { re: /^[ \t]*(?:(?:public|private|internal|open|override|suspend)[ \t]+)*\bfun[ \t]+(?:[\w.<>]+\.)?(\w+)[ \t]*\(/gm, kind: 'function' },
-  ],
   PHP: [
     { re: /^[ \t]*(?:(?:abstract|final)[ \t]+)*\b(?:class|trait|interface|enum)[ \t]+(\w+)/gm, kind: 'class' },
     { re: /^[ \t]*(?:(?:public|private|protected|static|abstract|final)[ \t]+)*\bfunction[ \t]+(\w+)[ \t]*\(/gm, kind: 'function' },
@@ -1054,6 +1062,43 @@ function extractExtraLangSignatures(language: string, content: string): Extracte
 }
 
 // ============================================================================
+// KOTLIN EXTRACTOR (change: fix-kotlin-signature-and-kdoc-fidelity)
+// ============================================================================
+
+/**
+ * Kotlin signatures: functions, constructors, properties, classes of every kind, and type
+ * aliases, at package level and in class bodies. Each entry carries the exact declaration header
+ * (never a body), its structured parts, and its KDoc.
+ */
+function extractKotlin(content: string): ExtractedSignature[] {
+  const entries: ExtractedSignature[] = [];
+  for (const d of scanKotlinDeclarations(content)) {
+    if (entries.length >= MAX_SIGS_PER_FILE) break;
+    const kind: ExtractedSignature['kind'] =
+      d.kind === 'function' ? (d.owner ? 'method' : 'function')
+        : d.kind === 'constructor' ? 'method'
+          : d.kind === 'interface' ? 'interface'
+            : d.kind === 'typealias' ? 'type'
+              : d.kind === 'property' ? 'const'
+                : 'class';
+    entries.push({
+      kind,
+      name: d.kind === 'constructor' ? 'constructor' : d.name,
+      signature: d.signature,
+      ...(d.kdoc?.summary ? { docstring: d.kdoc.summary } : {}),
+      ...(d.owner ? { owner: d.owner } : {}),
+      ...(d.parameters ? { parameters: d.parameters } : {}),
+      ...(d.type ? { returnType: d.type } : {}),
+      ...(d.typeParameters.length > 0 ? { typeParameters: d.typeParameters } : {}),
+      visibility: d.visibility,
+      ...(d.modifiers.length > 0 ? { modifiers: d.modifiers } : {}),
+      ...(d.kdoc && d.kdoc.tags.length > 0 ? { docTags: d.kdoc.tags } : {}),
+    });
+  }
+  return entries;
+}
+
+// ============================================================================
 // MAIN EXTRACTOR
 // ============================================================================
 
@@ -1114,8 +1159,10 @@ export function extractSignatures(filePath: string, content: string): FileSignat
     case 'Bicep':
       entries = extractBicepSignatures(content);
       break;
-    case 'C#':
     case 'Kotlin':
+      entries = extractKotlin(content);
+      break;
+    case 'C#':
     case 'PHP':
     case 'C':
     case 'Scala':

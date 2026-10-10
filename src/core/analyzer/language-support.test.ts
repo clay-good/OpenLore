@@ -363,6 +363,11 @@ describe('every capability-set member is exercised against the real extractor (n
       expect(detectLanguage(path)).toBe(lang);
       expect(extractSignatures(path, content).entries.length, `${lang} signatures`).toBeGreaterThan(0);
     }
+    // Kotlin carries the structured header (change: fix-kotlin-signature-and-kdoc-fidelity).
+    const [kotlinPath, kotlinContent] = SIGNATURE_FIXTURES.Kotlin.split('||');
+    expect(extractSignatures(kotlinPath, kotlinContent).entries[0]).toMatchObject({
+      name: 'foo', signature: 'fun foo(a: Int): Int', parameters: [{ name: 'a', type: 'Int' }], returnType: 'Int',
+    });
   });
 
   it('imports: every member resolves a relative import; a non-member yields nothing', () => {
