@@ -2935,11 +2935,15 @@ export async function buildGraphSubset(
         ? /\b(?:requests|httpx)\b/.test(source)
         : /\.(?:[cm]?[jt]sx?)$/.test(path)
           ? /\b(?:fetch|axios|ky|got)\b/.test(source)
-          : false;
+          : ext === '.kt' || ext === '.kts'
+            ? /\b(?:io\.ktor\.client|okhttp3|retrofit2\.http|org\.springframework\.web\.(?:client|reactive\.function\.client)|java\.net\.http)\b/.test(source)
+            : false;
     const route = ext === '.py' || ext === '.pyw'
       ? /@[^\n]+\.(?:get|post|put|patch|delete|head|options|route)\s*\(|\b(?:path|re_path)\s*\(/i.test(source)
       : ext === '.java'
         ? /@(?:RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\b/.test(source)
+        : ext === '.kt' || ext === '.kts'
+          ? /\b(?:org\.springframework\.web\.(?:bind\.annotation|reactive\.function\.server|servlet\.function)|(?:javax|jakarta)\.ws\.rs|io\.ktor\.(?:server\.)?routing)\b/.test(source)
         : /\.(?:[cm]?[jt]sx?)$/.test(path)
           ? /\.(?:get|post|put|patch|delete|head|options)\s*\(|@(?:Get|Post|Put|Patch|Delete)\s*\(/.test(source) ||
             /(?:^|\/)app\/.*\/route\.[jt]sx?$|(?:^|\/)pages\/api\//.test(path.replace(/\\/g, '/'))

@@ -374,13 +374,13 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     }),
 
   // ── add-kotlin-http-topology ──────────────────────────────────────────────
-  entry('http-spring-routes', 'routes', 'known-gap', 'add-kotlin-http-topology',
+  entry('http-spring-routes', 'routes', 'asserted', 'add-kotlin-http-topology',
     'Spring routes `GET /api/users/{id}` and `POST /api/users` are listed',
     m => hasRoute(m, 'GET', '/api/users/{id}') && hasRoute(m, 'POST', '/api/users')),
-  entry('http-ktor-routes', 'routes', 'known-gap', 'add-kotlin-http-topology',
+  entry('http-ktor-routes', 'routes', 'asserted', 'add-kotlin-http-topology',
     'Ktor routes `GET /health`, `POST /users`, and `GET /users/{id}` are listed',
     m => hasRoute(m, 'GET', '/health') && hasRoute(m, 'POST', '/users') && hasRoute(m, 'GET', '/users/{id}')),
-  capability('http-capability', 'known-gap', 'add-kotlin-http-topology', 'crossServiceHttp'),
+  capability('http-capability', 'asserted', 'add-kotlin-http-topology', 'crossServiceHttp'),
 
   // ── add-kotlin-schema-inventory ───────────────────────────────────────────
   entry('schema-jpa-entity', 'schemas', 'known-gap', 'add-kotlin-schema-inventory',

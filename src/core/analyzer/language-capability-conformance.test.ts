@@ -384,6 +384,7 @@ describe('language conformance — cross-service HTTP', () => {
     { language: 'JavaScript', name: 'r.js', content: `const express = require('express');\nconst app = express();\napp.post('/items', (req, res) => res.send('ok'));\n` },
     { language: 'Python', name: 'r.py', content: `from flask import Flask\napp = Flask(__name__)\n\n@app.route('/users')\ndef users():\n    return 'ok'\n` },
     { language: 'Java', name: 'R.java', content: `@RestController\nclass R {\n  @GetMapping("/users")\n  public String users() { return "ok"; }\n}` },
+    { language: 'Kotlin', name: 'R.kt', content: `import io.ktor.server.routing.*\nfun Application.module() {\n  routing {\n    get("/users") { }\n  }\n}\n` },
   ];
 
   const CLIENT_FIX = [
@@ -391,6 +392,7 @@ describe('language conformance — cross-service HTTP', () => {
     { language: 'JavaScript', name: 'cl.js', content: `async function go(){ return await fetch('https://api.example.com/items'); }` },
     { language: 'Python', name: 'cl.py', content: `import requests\ndef go():\n    return requests.get("https://api.example.com/items")` },
     { language: 'Go', name: 'cl.go', content: `package m\nimport "net/http"\nfunc Go(){ http.Get("https://api.example.com/items") }` },
+    { language: 'Kotlin', name: 'Cl.kt', content: `import okhttp3.Request\nfun go() = Request.Builder().url("https://api.example.com/items").build()\n` },
   ];
 
   it('covers every language the registry claims supports cross-service HTTP', () => {

@@ -39,6 +39,7 @@ import {
   extractRouteDefinitions,
   extractTsRouteDefinitions,
   extractJavaRouteDefinitions,
+  extractKotlinRouteDefinitions,
 } from './http-route-parser.js';
 import { HTTP_CLIENT_LANGUAGES } from './http-capability.js';
 
@@ -188,12 +189,14 @@ const CROSS_SERVICE_FIXTURES: Record<string, { name: string; content: string; ki
   Python: { name: 'api.py', content: '@app.get("/api/items")\nasync def list_items():\n    return []', kind: 'route' },
   Java: { name: 'Api.java', content: '@RestController\nclass Api {\n  @GetMapping("/api/items")\n  public String list() { return ""; }\n}', kind: 'route' },
   Go: { name: 'client.go', content: 'package p\nimport "net/http"\nfunc Load(){ http.Get("http://svc/api/items") }', kind: 'client' },
+  Kotlin: { name: 'Api.kt', content: 'import org.springframework.web.bind.annotation.*\n@RestController\nclass Api {\n  @GetMapping("/api/items")\n  fun list(): String = ""\n}', kind: 'route' },
 };
 const HTTP_CLIENT_FIXTURES: Record<string, { name: string; content: string }> = {
   TypeScript: { name: 'client-only.ts', content: 'fetch("/api/items")' },
   JavaScript: { name: 'client-only.js', content: 'fetch("/api/items")' },
   Python: { name: 'client-only.py', content: 'import requests\nrequests.get("http://svc/api/items")' },
   Go: { name: 'client-only.go', content: 'package p\nimport "net/http"\nfunc Load(){ http.Get("http://svc/api/items") }' },
+  Kotlin: { name: 'ClientOnly.kt', content: 'import io.ktor.client.*\nsuspend fun load(c: HttpClient) = c.get("http://svc/api/items")' },
 };
 describe('crossServiceHttp is behaviorally faithful (no silent over-claim)', () => {
   let dir: string;
@@ -226,6 +229,7 @@ describe('crossServiceHttp is behaviorally faithful (no silent over-claim)', () 
         ? (await extractHttpCalls(fp)).length
         : fp.endsWith('.py') ? (await extractRouteDefinitions(fp)).length
         : fp.endsWith('.java') ? (await extractJavaRouteDefinitions(fp)).length
+        : fp.endsWith('.kt') ? (await extractKotlinRouteDefinitions(fp)).length
         : (await extractTsRouteDefinitions(fp)).length;
       expect(count, `${lang} claims crossServiceHttp but extracted nothing from its fixture`).toBeGreaterThan(0);
     });

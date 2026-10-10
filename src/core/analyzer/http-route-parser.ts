@@ -37,6 +37,7 @@ import { blankCommentsPreservingLayout } from './comment-blanking.js';
 import { scanJavaMethodDeclarations } from './java-method-scanner.js';
 import { lineFromIndex } from './line-index.js';
 import { getExceptionParser } from './exception-flow.js';
+import { extractKotlinHttp } from './kotlin-http.js';
 import type Parser from 'tree-sitter';
 import { parseBudgetOverrunMs, parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
@@ -185,6 +186,24 @@ function candidatePaths(normalizedUrl: string): string[] {
 
 
 /**
+ * A Kotlin file can hold a route or a client call only when it imports one of these packages.
+ * A cheap token test: it may over-admit (costing a scan), it can never create a route or a call.
+ */
+const KOTLIN_HTTP_PREFILTER = /\b(?:org\.springframework\.web|javax\.ws\.rs|jakarta\.ws\.rs|io\.ktor|okhttp3|retrofit2|java\.net\.http|io\.micronaut\.http|org\.http4k|io\.javalin|com\.github\.kittinunf\.fuel)\b/;
+
+/** Route definitions of one Kotlin file (change: add-kotlin-http-topology). */
+export async function extractKotlinRouteDefinitions(
+  filePath: string,
+  residentSource?: string,
+  onOversized?: OversizedFileObserver,
+): Promise<RouteDefinition[]> {
+  if (!/\.kts?$/i.test(filePath)) return [];
+  const content = residentSource ?? await readSourceCapped(filePath, undefined, onOversized);
+  if (content === null || !KOTLIN_HTTP_PREFILTER.test(content)) return [];
+  return (await extractKotlinHttp(filePath, content)).routes;
+}
+
+/**
  * Extract all HTTP calls from a JavaScript or TypeScript source file.
  */
 export async function extractHttpCalls(
@@ -193,10 +212,15 @@ export async function extractHttpCalls(
   onDegraded?: HttpDegradationObserver,
 ): Promise<HttpCall[]> {
   const ext = extname(filePath).toLowerCase();
-  if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.pyw', '.go'].includes(ext)) return [];
+  if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.pyw', '.go', '.kt', '.kts'].includes(ext)) return [];
 
   const content = residentSource ?? await readSourceCapped(filePath);
   if (content === null) return [];
+  // Kotlin (change: add-kotlin-http-topology): each client library behind its import gate.
+  if (ext === '.kt' || ext === '.kts') {
+    if (!KOTLIN_HTTP_PREFILTER.test(content)) return [];
+    return (await extractKotlinHttp(filePath, content)).calls;
+  }
   // The AST extractors are the authority for syntax/binding correctness, but a
   // repository-wide HTTP pass should not pay for a second parse of every unrelated
   // Python/Go file. These token checks may over-admit strings/comments (only costing
@@ -1206,6 +1230,7 @@ export async function extractRoutesFromFile(filePath: string): Promise<RouteDefi
   const ext = extname(filePath).toLowerCase();
   if (['.py', '.pyw'].includes(ext)) return extractRouteDefinitions(filePath);
   if (ext === '.java') return extractJavaRouteDefinitions(filePath);
+  if (ext === '.kt' || ext === '.kts') return extractKotlinRouteDefinitions(filePath);
   if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) return extractTsRouteDefinitions(filePath);
   return [];
 }
@@ -1372,6 +1397,12 @@ export async function extractAllHttpEdges(
         return { calls: cachedCalls ? [...cachedCalls] : await extractHttpCalls(fp, resident, observe), routes: [], degradations };
       } else if (ext === '.java') {
         return { calls: [], routes: await extractJavaRouteDefinitions(fp, resident), degradations };
+      } else if (ext === '.kt' || ext === '.kts') {
+        // One scan gives both: a Kotlin file can be a server, a client, or both.
+        const content = resident ?? await readSourceCapped(fp);
+        if (content === null || !KOTLIN_HTTP_PREFILTER.test(content)) return { calls: cachedCalls ? [...cachedCalls] : [], routes: [], degradations };
+        const facts = await extractKotlinHttp(fp, content);
+        return { calls: cachedCalls ? [...cachedCalls] : facts.calls, routes: facts.routes, degradations };
       }
       return { calls: [], routes: [], degradations };
       } catch {
@@ -1769,6 +1800,11 @@ export interface RouteInventory {
     responseType?: string;
     contractSource: 'annotation' | 'validator' | 'none';
   }>;
+  /**
+   * Kotlin files that import a known HTTP framework the extractor does not model, counted by
+   * framework name (change: add-kotlin-http-topology). Omitted when there is none.
+   */
+  unmodeledFrameworks?: Record<string, number>;
 }
 
 /**
@@ -1792,6 +1828,9 @@ export async function buildRouteInventory(
   // file list — pushing into a shared array inside the callbacks would append in
   // I/O-completion order (the byte-determinism hazard `extractAllHttpEdges` documents
   // and fixes above).
+  // Kotlin files that import a known HTTP framework the extractor does not model, by framework
+  // name: a quiet inventory for such a repository says why (change: add-kotlin-http-topology).
+  const unmodeledByFile: string[][] = [];
   const perFile = await mapFilesBounded(filePaths, async (fp): Promise<RouteDefinition[]> => {
     // Routes declared inside test files (e.g. a `fastify.get('/error')` set up by a
     // test harness) are fixtures, not the app's real API surface — exclude them so the
@@ -1803,9 +1842,18 @@ export async function buildRouteInventory(
       return extractTsRouteDefinitions(fp, undefined, onOversized);
     }
     if (ext === '.java') return extractJavaRouteDefinitions(fp, undefined, onOversized);
+    if (ext === '.kt' || ext === '.kts') {
+      const content = await readSourceCapped(fp, undefined, onOversized);
+      if (content === null || !KOTLIN_HTTP_PREFILTER.test(content)) return [];
+      const facts = await extractKotlinHttp(fp, content);
+      if (facts.unmodeled.length > 0) unmodeledByFile.push(facts.unmodeled);
+      return facts.routes;
+    }
     return [];
   });
   const allRoutes: RouteDefinition[] = perFile.flat();
+  const unmodeledFrameworks: Record<string, number> = {};
+  for (const name of unmodeledByFile.flat().sort()) unmodeledFrameworks[name] = (unmodeledFrameworks[name] ?? 0) + 1;
 
   const byMethod: Record<string, number> = {};
   const byFramework: Record<string, number> = {};
@@ -1829,5 +1877,6 @@ export async function buildRouteInventory(
       responseType: r.responseType,
       contractSource: r.contractSource,
     })),
+    ...(Object.keys(unmodeledFrameworks).length > 0 ? { unmodeledFrameworks } : {}),
   };
 }

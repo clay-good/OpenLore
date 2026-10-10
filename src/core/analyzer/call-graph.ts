@@ -39,6 +39,7 @@ import {
   extractTsRouteDefinitions,
   extractRouteDefinitions,
   extractJavaRouteDefinitions,
+  extractKotlinRouteDefinitions,
   extractHttpCalls,
   extractPythonHttpCallsFromRoot,
   extractGoHttpCallsFromRoot,
@@ -4989,6 +4990,7 @@ async function synthesizeRouteHandlerEdges(
         if (/\.(py|pyw)$/.test(path)) return await extractRouteDefinitions(path, resident);
         if (/\.(ts|tsx|js|jsx|mjs)$/.test(path)) return await extractTsRouteDefinitions(path, resident);
         if (/\.java$/.test(path)) return await extractJavaRouteDefinitions(path, resident);
+        if (/\.kts?$/.test(path)) return await extractKotlinRouteDefinitions(path, resident);
       } catch { /* best-effort per file */ }
       return [];
     },

@@ -11,11 +11,11 @@
  */
 
 /** Languages OpenLore extracts outbound HTTP CLIENT call sites from. */
-export const HTTP_CLIENT_LANGUAGES: ReadonlySet<string> = new Set(['TypeScript', 'JavaScript', 'Python', 'Go']);
+export const HTTP_CLIENT_LANGUAGES: ReadonlySet<string> = new Set(['TypeScript', 'JavaScript', 'Python', 'Go', 'Kotlin']);
 
 /** Languages OpenLore extracts server ROUTE registrations from (the handler half of an edge). */
 export const HTTP_ROUTE_LANGUAGES: ReadonlySet<string> = new Set([
-  'TypeScript', 'JavaScript', 'Python', 'Java',
+  'TypeScript', 'JavaScript', 'Python', 'Java', 'Kotlin',
 ]);
 
 /**

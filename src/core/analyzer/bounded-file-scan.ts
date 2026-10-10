@@ -118,6 +118,8 @@ export function isOversizedForScan(bytes: number, maxBytes = SOURCE_SCAN_MAX_FIL
 export const SCANNED_SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.pyw', '.go', '.rb', '.java',
+  // Kotlin: environment reads and HTTP routes and clients (issue #546).
+  '.kt', '.kts',
   '.vue', '.svelte', '.prisma',
 ]);
 

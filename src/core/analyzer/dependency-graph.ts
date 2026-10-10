@@ -478,10 +478,14 @@ export class DependencyGraphBuilder {
     // Callers are JS/TS. Handlers can be Python, Java, or TS/JS (server-side).
     const jsExts = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
     const pyExts = new Set(['.py', '.pyw']);
-    const hasJs = filePaths.some(fp => jsExts.has(fp.slice(fp.lastIndexOf('.')).toLowerCase()));
+    // Kotlin can be a client and a server (change: add-kotlin-http-topology).
+    const hasJs = filePaths.some(fp => {
+      const ext = fp.slice(fp.lastIndexOf('.')).toLowerCase();
+      return jsExts.has(ext) || ext === '.kt' || ext === '.kts';
+    });
     const hasHandler = filePaths.some(fp => {
       const ext = fp.slice(fp.lastIndexOf('.')).toLowerCase();
-      return pyExts.has(ext) || ext === '.java';
+      return pyExts.has(ext) || ext === '.java' || ext === '.kt' || ext === '.kts' || jsExts.has(ext);
     });
     if (!hasJs || !hasHandler) return;
 

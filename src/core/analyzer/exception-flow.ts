@@ -294,6 +294,7 @@ let _pyParser: Parser | undefined;
 let _goParser: Parser | undefined;
 let _javaParser: Parser | undefined;
 let _csharpParser: Parser | undefined;
+let _kotlinParser: Parser | null = null;
 let _NativeParser: typeof Parser | null | undefined;
 
 async function loadNativeParser(): Promise<typeof Parser | null> {
@@ -353,6 +354,11 @@ export async function getExceptionParser(
       case 'Java': {
         if (!_javaParser) { const m = await import('tree-sitter-java'); _javaParser = new NP(); _javaParser.setLanguage((m.default ?? m) as Parser.Language); }
         return _javaParser;
+      }
+      case 'Kotlin': {
+        // Callers parse `normalizeKotlinForParse(source)`, as every Kotlin parse site does.
+        if (!_kotlinParser) { const m = await import('tree-sitter-kotlin'); _kotlinParser = new NP(); _kotlinParser.setLanguage((m.default ?? m) as Parser.Language); }
+        return _kotlinParser;
       }
       case 'C#': {
         if (!_csharpParser) { const m = await import('tree-sitter-c-sharp'); _csharpParser = new NP(); _csharpParser.setLanguage((m.default ?? m) as Parser.Language); }
