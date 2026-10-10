@@ -29,6 +29,8 @@
  *     swallows query errors), which is the same deterministic answer on every lane.
  */
 
+import { collectKotlinReceiverFields, type KotlinNode } from './kotlin-extract.js';
+
 /** Languages whose extractors contribute receiver-field facts. Authoritative source for the
  *  `receiverResolution` capability flag in the declarative language-support registry; a behavioral
  *  test asserts a fixture in each member yields facts and a non-member yields none. */
@@ -36,6 +38,7 @@ export const RECEIVER_REGISTRY_LANGUAGES: ReadonlySet<string> = new Set<string>(
   'TypeScript',
   'JavaScript',
   'Python',
+  'Kotlin',
 ]);
 
 /**
@@ -137,6 +140,12 @@ export function collectReceiverFieldFacts(
 ): ReceiverFieldFact[] {
   if (!RECEIVER_REGISTRY_LANGUAGES.has(language)) return [];
   try {
+    if (language === 'Kotlin') {
+      // Kotlin facts come from one tree walk (see `kotlin-extract.ts`); the query only hands
+      // over the root, so the fail-soft contract of the runner still applies.
+      const root = runQuery('(source_file) @root')[0]?.captures[0]?.node;
+      return root ? finalizeReceiverFieldFacts(collectKotlinReceiverFields(root as unknown as KotlinNode)) : [];
+    }
     return language === 'Python'
       ? collectPythonFacts(runQuery)
       : collectTypeScriptFacts(runQuery);
