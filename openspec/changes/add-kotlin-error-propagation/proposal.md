@@ -1,6 +1,8 @@
 # Analyze exception flow in Kotlin
 
-> Status: PROPOSED (2026-10-10, issue #546). Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`. Better with
+> Status: NOT DOING (2026-10-10). Out of scope: issue #546 is resolved by
+> `add-kotlin-file-dependency-and-exports` alone. Kept as a record only; do not build.
+> Original note: Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`. Better with
 > `add-kotlin-declared-type-receivers` and `add-kotlin-callable-node-shapes`, which give it more
 > call edges to follow. Deterministic, no LLM, no new dependency.
 

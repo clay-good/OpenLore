@@ -1,7 +1,8 @@
 # Parse Kotlin imports and exports for the file dependency graph
 
-> Status: PROPOSED (2026-10-10, issue #546). Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`. This is the
-> file the issue names (`import-parser`). Deterministic, no LLM, no new dependency.
+> Status: BUILT (2026-10-10). Closes issue #546. This is the file the issue names
+> (`import-parser`). It is the only Kotlin change in scope; see `KOTLIN-TOTAL-SUPPORT-2026-10.md`.
+> Deterministic, no LLM, no new dependency.
 
 ## What you get
 
@@ -13,9 +14,8 @@ language with no modules.
 
 - `importParserFileType` has no Kotlin case (`import-parser.ts:1216-1226`). A `.kt` file returns
   empty imports and exports and the parse error `Unsupported file type: .kt`.
-- `computeFileImportEdges` is gated on `.java` (`dependency-graph.ts:183-197`). On the reference
-  fixture every Kotlin edge is call-derived (`isCallEdge: true`, `importedNames: []`), and
-  `Main.kt`, which imports four packages, has no edge to two of them.
+- `computeFileImportEdges` is gated on `.java` (`dependency-graph.ts:183-197`), so every Kotlin
+  edge is call-derived (`isCallEdge: true`, `importedNames: []`).
 - `resolveJavaImport` lists `src/main/kotlin` as a source root but probes only `<FQN>.java`
   (`import-parser.ts:1087-1103`), so a Java file that imports a Kotlin class never resolves.
 - `extractsExports` is false for Kotlin, so consumers report `language-not-extracted`
@@ -40,14 +40,12 @@ package index built from every Kotlin and Java file's `package` line and top-lev
 | `import a.b.C as D` | as `import a.b.C`; the alias is the imported name |
 | a name declared in two files of one package | no edge; counted as ambiguous |
 
-Java and Kotlin share one index, in both directions.
+Java and Kotlin share one index, in both directions, for types.
 
-**Exports.** A Kotlin file exports its top-level declarations and the members of exported classes
-whose visibility is `public` (the default) or `protected`. `internal` declarations are exported
-with the tag `internal`, because they are visible to the whole module but not to consumers of it.
-`private` declarations are not exported. Each export records its kind (function, extension
-function, property, class kind, object, type alias) and, for `@JvmName` or `@file:JvmName`, the
-JVM-facing name as an alias.
+**Exports.** A Kotlin file exports its package-level declarations. `public` (the default) is
+exported. `internal` is exported with the tag `internal`, because it is visible to the whole module
+but not to consumers of it. `private` is not exported. Each export records its kind (function,
+variable, class, interface, enum, type).
 
 **Same-package edges** keep coming from call edges (`SAME_PACKAGE_IMPLICIT_LANGS`). They are
 de-duplicated against import edges as today.
@@ -57,13 +55,16 @@ de-duplicated against import edges as today.
 
 ## Not in scope
 
-- Gradle module boundaries (`internal` across modules): see `add-kotlin-project-identity`.
+- Members of a class as exports. A file imports the class, not the member.
+- `@JvmName` aliases, and a Java import of a Kotlin file facade class (`FooKt`).
+- Gradle module boundaries (`internal` across modules).
 - Dependency edges to library artifacts.
+- Any change to the Kotlin call graph.
 
 ## Impact
 
 - `import-parser.ts` (Kotlin parser, shared JVM package index), `dependency-graph.ts`,
-  `mcp-watcher.ts` (incremental update), `java-method-scanner.ts` is untouched.
+  `mcp-watcher.ts` (incremental update), and a new scanner `kotlin-source.ts`.
 - Specs: `analyzer`, 2 ADDED requirements.
-- Risk: the dependency graph of a Kotlin repository gains many edges; cluster and domain output
-  will move. The PR shows the before/after edge counts and domain list for a real repository.
+- Risk: the dependency graph of a Kotlin repository gains import edges, so cluster and domain
+  output can move.

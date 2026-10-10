@@ -36,6 +36,7 @@ import { extractJavaRouteDefinitions } from './http-route-parser.js';
 import { tokenize } from './bm25-tokenizer.js';
 import { classifyYaml } from './iac/classify-yaml.js';
 import { extractTerraform } from './iac/terraform.js';
+import { kotlinCodeMask, scanKotlinFile } from './kotlin-source.js';
 
 /** An opening token repeated with no closer — the whole attack. */
 function payload(token: string, bytes: number): string {
@@ -938,4 +939,37 @@ describe('extractors are not quadratic on a whitespace-run or blank-line flood',
     // to the whitespace bound — verified identical against the unfixed extractor).
     expect(await paths('@RestController\nclass C {\n @RequestMapping(path  =  { "/p" }, method = RequestMethod.GET)\n public String a(){return "";}\n}\n')).toEqual(['/p']);
   });
+});
+
+// The Kotlin scanners run on every `.kt` file the import parser reads (issue #546).
+describe('Kotlin source scanners are not quadratic on a hostile file', () => {
+  const KOTLIN_PAYLOADS: Array<[string, string]> = [
+    ['repeated `fun ` with no parameter list', 'fun '],
+    ['repeated modifiers', 'private '],
+    ['repeated annotations', '@A '],
+    ['repeated `fun <`', 'fun <'],
+    ['repeated `val a.`', 'val a.'],
+    ['repeated `class `', 'class '],
+    ['repeated `import a.`', 'import a.'],
+    ['unterminated raw strings', '"""'],
+    ['unterminated template expressions', '"${'],
+    ['unterminated block comment openers', '/*'],
+    ['lone backticks', '` \n'],
+    ['lone quotes', "' "],
+    ['unbalanced braces', '{ ( [ '],
+  ];
+
+  it.each(KOTLIN_PAYLOADS)('scanKotlinFile and kotlinCodeMask survive %s', async (label, token) => {
+    expectLinearAndFast(await measure(b => {
+      const source = payload(token, b);
+      scanKotlinFile(source);
+      expect(kotlinCodeMask(source).length).toBe(source.length);
+    }), `kotlin scanners: ${label}`);
+  }, TIMEOUT_MS);
+
+  it.each(KOTLIN_PAYLOADS)('the import parser survives a Kotlin file of %s', async (label, token) => {
+    expectLinearAndFast(await measure(b => {
+      new ImportExportParser().parseContent('/repo/Hostile.kt', payload(token, b));
+    }), `ImportExportParser(Kotlin): ${label}`);
+  }, TIMEOUT_MS);
 });

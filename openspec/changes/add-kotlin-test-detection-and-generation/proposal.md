@@ -1,6 +1,8 @@
 # Detect Kotlin tests fully, and generate Kotlin tests for Kotlin projects
 
-> Status: PROPOSED (2026-10-10, issue #546). Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`.
+> Status: NOT DOING (2026-10-10). Out of scope: issue #546 is resolved by
+> `add-kotlin-file-dependency-and-exports` alone. Kept as a record only; do not build.
+> Original note: Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`.
 > Deterministic detection; generation keeps its existing LLM path. No new dependency.
 
 ## What you get

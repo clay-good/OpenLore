@@ -1,6 +1,8 @@
 # Stop Kotlin calls binding to the wrong function at `import` confidence
 
-> Status: PROPOSED (2026-10-10, issue #546). Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`. **Do this
+> Status: NOT DOING (2026-10-10). Out of scope: issue #546 is resolved by
+> `add-kotlin-file-dependency-and-exports` alone. Kept as a record only; do not build.
+> Original note: Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`. **Do this
 > first**: it removes edges that are wrong today, and every later Kotlin change builds on the index
 > it repairs. Deterministic, no LLM, no new dependency.
 
