@@ -293,7 +293,8 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
       'extractEnvVars',
     ]) {
       expect(src, `${fn} must report scan-time exclusions`).toMatch(
-        new RegExp(`${fn}\\([^\\n]+observeOversized\\)`),
+        // The observer is passed; a later argument (a receipts object) may follow it.
+        new RegExp(`${fn}\\([^\\n]+observeOversized[,)]`),
       );
     }
     expect(src).toMatch(/lower bound/i);
