@@ -119,12 +119,46 @@ export const FIXTURE_REPOS: FixtureRepo[] = [
     hints: { knownFile: 'src/main/java/org/apache/commons/cli/CommandLine.java' },
     expectNonEmpty: ['orient', 'get_architecture_overview'],
   },
-  // The languages below have tree-sitter grammars for structure/signature extraction
-  // but no call-graph CALL_QUERY yet, so they analyze like c-sds (files + signatures,
-  // no call edges). Covering them adds little over the existing C repo; deferred.
-  // TODO(spec-09-followup): add kotlin / swift / c# / php / scala / elixir / bash repos
-  //   once each gains a call-graph query (today they would only exercise the
-  //   structure-only path the c-sds repo already covers).
+  // Kotlin (change: add-kotlin-reference-corpus-conformance, issue #546). One repository per
+  // project shape. They are not a CI gate; a Kotlin pull request reports its before/after counts
+  // from them. Pinned to the default-branch commit resolved with `git ls-remote` on 2026-10-10.
+  {
+    id: 'kotlin-spring-boot',
+    url: 'https://github.com/spring-guides/tut-spring-boot-kotlin.git',
+    sha: 'a599cbd44f5ec108c402e9967309ead7008b2212',
+    tag: 'main@2026-10-10',
+    primaryLanguage: 'kotlin',
+    license: 'Apache-2.0',
+    expectNonEmpty: ['orient', 'get_architecture_overview'],
+  },
+  {
+    id: 'kotlin-ktor',
+    url: 'https://github.com/ktorio/ktor-samples.git',
+    sha: '1c9df7cf102d638eadaf545fcce4c0ec5ccad334',
+    tag: 'main@2026-10-10',
+    primaryLanguage: 'kotlin',
+    license: 'Apache-2.0',
+    expectNonEmpty: ['orient', 'get_architecture_overview'],
+  },
+  {
+    id: 'kotlin-android',
+    url: 'https://github.com/android/sunflower.git',
+    sha: '2a357a31551bb53f3fe80382a9ce6d30bcc8b960',
+    tag: 'main@2026-10-10',
+    primaryLanguage: 'kotlin',
+    license: 'Apache-2.0',
+    expectNonEmpty: ['orient', 'get_architecture_overview'],
+  },
+  {
+    id: 'kotlin-multiplatform',
+    url: 'https://github.com/Kotlin/kotlinx-datetime.git',
+    sha: 'c2175995417a2a9d291a3de5d7b65fb5c1c408b2',
+    tag: 'master@2026-10-10',
+    primaryLanguage: 'kotlin',
+    license: 'Apache-2.0',
+    expectNonEmpty: ['orient', 'get_architecture_overview'],
+  },
+  // TODO(spec-09-followup): add swift / c# / php / scala / elixir / bash repos.
 ];
 
 /** A 40-char lowercase-hex git SHA. */

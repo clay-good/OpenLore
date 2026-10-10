@@ -44,6 +44,7 @@ import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
+import { normalizeKotlinForParse } from './kotlin-source.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import {
@@ -2639,6 +2640,8 @@ async function loadGrammarSoft(
   language: string,
   importer: () => Promise<unknown>,
   pick: (m: Record<string, unknown>) => unknown,
+  /** Optional length-preserving rewrite of the source before it is parsed. */
+  prepare?: (content: string) => string,
 ): Promise<GrammarHandle | null> {
   if (_grammarHandleCache.has(language)) return _grammarHandleCache.get(language)!;
   try {
@@ -2652,7 +2655,7 @@ async function loadGrammarSoft(
     markGrammarLoaded(language);
     const handle: GrammarHandle = {
       withTree: (content, fn) => {
-        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, prepare ? prepare(content) : content);
         const root = tree.rootNode as unknown as TsNodeLike;
         const runQuery = (src: string): TsMatch[] => {
           if (!_NativeQuery) return [];
@@ -2992,7 +2995,7 @@ const CSHARP_SPEC: QueryLangSpec = {
 // ── Kotlin ──────────────────────────────────────────────────────────────────
 const KOTLIN_SPEC: QueryLangSpec = {
   language: 'Kotlin',
-  loader: () => loadGrammarSoft('Kotlin', () => import('tree-sitter-kotlin'), m => m.default),
+  loader: () => loadGrammarSoft('Kotlin', () => import('tree-sitter-kotlin'), m => m.default, normalizeKotlinForParse),
   classTypes: new Set(['class_declaration', 'object_declaration', 'interface_declaration', 'companion_object']),
   // Extension functions: `fun Foo.bar()` — the receiver user_type becomes the className.
   // The receiver is the user_type that appears BEFORE the function name. A user_type
@@ -3559,7 +3562,7 @@ export async function _extractClassRelationshipsLegacyForTesting(
         const r = await getKotlinParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, normalizeKotlinForParse(file.content));
 
         // Kotlin `class C : Base(), IFace` — every supertype is a `delegation_specifier`
         // with no syntactic class/interface distinction (a superclass may carry a
@@ -4712,7 +4715,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of ktFiles) {
-        try { collectKotlinTypeEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectKotlinTypeEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, normalizeKotlinForParse(file.content)), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));

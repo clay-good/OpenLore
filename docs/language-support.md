@@ -77,6 +77,169 @@ call targets emit no edge rather than a guessed one.
 | Elixir | `.ex` `.exs` | `defmodule` | Multi-clause definitions collapse to one node with a clause count. |
 | Bash | `.sh` `.bash` | file scope | Edges target project-defined functions, not external binaries. |
 
+### Kotlin
+
+What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The plan is
+`openspec/changes/KOTLIN-TOTAL-SUPPORT-2026-10.md`.
+
+<!-- kotlin-support:start (generated from kotlin-reference/ledger.ts; do not edit by hand) -->
+
+Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
+that a test checks on every run.
+
+#### Supported (11)
+
+| Area | Fact | Change |
+|---|---|---|
+| nodes | the member function `service/UserService.kt::UserService.create` is a graph node | `add-kotlin-reference-corpus-conformance` |
+| nodes | the top-level function `repo/Stores.kt::openStore` is a graph node | `add-kotlin-reference-corpus-conformance` |
+| nodes | the extension function `util/Strings.kt::slugify` is a graph node | `add-kotlin-reference-corpus-conformance` |
+| nodes | the object member `config/Env.kt::Env.port` is a graph node | `add-kotlin-reference-corpus-conformance` |
+| nodes | the interface member `repo/UserRepository.kt::UserRepository.save` is a graph node | `add-kotlin-reference-corpus-conformance` |
+| call graph | `service/UserService.kt::UserService.describe` calls `service/UserService.kt::UserService.require` | `add-kotlin-reference-corpus-conformance` |
+| call graph | `util/Strings.kt::loadName` calls `util/Strings.kt::load` | `add-kotlin-reference-corpus-conformance` |
+| call graph | `Application.kt::module` calls `service/UserService.kt::UserService.create` | `add-kotlin-reference-corpus-conformance` |
+| call graph | no call edge joins `client/OrderClient.kt::fetchHealth` to `web/UserController.kt::UserController.get`: `client.get(...)` is a Ktor client call | `add-kotlin-reference-corpus-conformance` |
+| call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` | `add-kotlin-reference-corpus-conformance` |
+| grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
+
+#### Known gaps (78)
+
+A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
+
+| Area | Fact | Change |
+|---|---|---|
+| call graph | no call edge joins `web/UserController.kt::UserController.create` to `web/UserController.kt::UserController.create`: `this.service.create(name)` is a call on a property, not recursion | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `service/UserService.kt::UserService.find` to `service/UserService.kt::UserService.find`: `repo.find(id)` is a call on a property, not recursion | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `service/UserService.kt::UserService.require` to `service/UserService.kt::UserService.find`: `repo.find(id)` has the receiver `repo` | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `Application.kt::module` to `web/UserController.kt::UserController.get`: `get("/health") { }` is the Ktor routing function | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `plugin/Reflect.kt::startAll` to `util/Strings.kt::load`: `ServiceLoader.load(...)` has a receiver and `load` is private to another file | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `Application.kt::main` to `plugin/Reflect.kt::Plugin.start`: `embeddedServer(...).start(...)` has a receiver of a library type | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `service/UserService.kt::UserService.create` to `repo/UserRepository.kt::AuditedUserRepository.audit`: `audit(...)` is a property of `UserService`; the other `audit` is a private member of another class | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `service/UserService.kt::UserService.create` to `util/Strings.kt::listOf`: `listOf` is a Kotlin default import and the file does not import the project function | `fix-kotlin-package-binding-soundness` |
+| call graph | no call edge joins `util/Strings.kt::listOf` to `util/Strings.kt::listOf`: `kotlin.collections.listOf(...)` is fully qualified | `fix-kotlin-package-binding-soundness` |
+| call graph | `service/UserService.kt::UserService.label` calls `util/Strings.kt::slugify` (import) | `fix-kotlin-package-binding-soundness` |
+| call graph | `service/UserService.kt::UserService.create` calls `util/Strings.kt::slugify` (import) | `fix-kotlin-package-binding-soundness` |
+| call graph | `Application.kt::module` calls `repo/Stores.kt::openStore` (import) | `fix-kotlin-package-binding-soundness` |
+| call graph | `service/UserService.kt::UserService.create` calls `repo/UserRepository.kt::UserRepository.save` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
+| call graph | `service/UserService.kt::UserService.find` calls `repo/UserRepository.kt::UserRepository.find` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
+| call graph | `web/UserController.kt::UserController.get` calls `service/UserService.kt::UserService.find` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
+| call graph | `web/UserController.kt::UserController.create` calls `service/UserService.kt::UserService.create` (receiver_inferred) | `add-kotlin-declared-type-receivers` |
+| call graph | `Application.kt::warmUp` calls `client/OrderClient.kt::OrderClient.fetch` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
+| call graph | `repo/UserRepository.kt::AuditedUserRepository.save` calls `repo/UserRepository.kt::UserRepository.save` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
+| capabilities | Kotlin backs the `receiverResolution` capability | `add-kotlin-declared-type-receivers` |
+| nodes | the constructor `service/UserService.kt::UserService.<init>` is a graph node | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserService.kt::UserService.<init>` calls `service/UserService.kt::UserService.warm` | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserService.kt::UserService.inMemory` calls `service/UserService.kt::UserService.<init>` | `add-kotlin-callable-node-shapes` |
+| call graph | `repo/Stores.kt::openStore` calls `repo/UserRepository.kt::AuditedUserRepository.<init>` | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserService.kt::UserService.create` calls `service/UserService.kt::UserService.report` | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserService.kt::UserService.create` calls `util/Strings.kt::tagged` | `add-kotlin-callable-node-shapes` |
+| nodes | the property getter `service/UserService.kt::UserService.<get-summary>` is a graph node | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserService.kt::UserService.<get-summary>` calls `service/UserService.kt::UserService.render` | `add-kotlin-callable-node-shapes` |
+| nodes | the function-typed property `service/UserService.kt::UserService.audit` is a graph node | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserService.kt::UserService.audit` calls `service/UserService.kt::UserService.record` | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserService.kt::UserService.create` calls `service/UserService.kt::UserService.audit` | `add-kotlin-callable-node-shapes` |
+| nodes | the top-level property initializer `repo/Stores.kt::<clinit>` is a graph node | `add-kotlin-callable-node-shapes` |
+| nodes | the script body `build.gradle.kts::<script>` is a graph node | `add-kotlin-callable-node-shapes` |
+| nodes | the backtick-named function, stored without backticks, `service/UserServiceTest.kt::UserServiceTest.creates a user with a slug id` is a graph node | `add-kotlin-callable-node-shapes` |
+| nodes | the `suspend` function `warmUp` is marked asynchronous | `add-kotlin-callable-node-shapes` |
+| classes | the class inventory has no class named `String` (an extension receiver is not a project class) | `fix-kotlin-type-hierarchy-fidelity` |
+| classes | the extension function `slugify` records `String` as its receiver type | `fix-kotlin-type-hierarchy-fidelity` |
+| classes | `InMemoryUserRepository` implements the interface `UserRepository` (it is not a superclass) | `fix-kotlin-type-hierarchy-fidelity` |
+| classes | `AuditedUserRepository : UserRepository by inner` implements `UserRepository` and is marked delegating | `fix-kotlin-type-hierarchy-fidelity` |
+| classes | class kinds are recorded: `Env` is an object, `User` a data class, `UserRepository` an interface, `Color` an enum | `fix-kotlin-type-hierarchy-fidelity` |
+| classes | `AuditedUserRepository.save` overrides `UserRepository.save` | `fix-kotlin-type-hierarchy-fidelity` |
+| signatures | the signature of `UserController.get` keeps `fun get(@PathVariable id: String): User?` after `@GetMapping("/{id}")` | `fix-kotlin-signature-and-kdoc-fidelity` |
+| signatures | the signature of `safeDescribe` is `fun safeDescribe(id: String): String`, with no part of its expression body | `fix-kotlin-signature-and-kdoc-fidelity` |
+| signatures | the KDoc of `UserController.get` is its docstring | `fix-kotlin-signature-and-kdoc-fidelity` |
+| call graph | standard-library calls (`forEach`, `runCatching`, `lowercase`, `error`) are not external leaves | `fix-kotlin-signature-and-kdoc-fidelity` |
+| control flow | `UserService.describe` has an overlay with a multi-way `when` branch, a `try` region, and an Elvis exit | `widen-kotlin-control-flow-overlay` |
+| control flow | `UserService.require` (an expression body with an Elvis `throw`) has an overlay with a branch | `widen-kotlin-control-flow-overlay` |
+| call graph | `legacy/LegacyCaller.java::LegacyCaller.store` calls `repo/Stores.kt::openStore` (import) | `add-kotlin-java-interop-resolution` |
+| call graph | `legacy/LegacyCaller.java::LegacyCaller.port` calls `config/Env.kt::Env.port` (import) | `add-kotlin-java-interop-resolution` |
+| call graph | `legacy/LegacyCaller.java::LegacyCaller.service` calls `service/UserService.kt::UserService.inMemory` (import) | `add-kotlin-java-interop-resolution` |
+| multiplatform | the `actual fun platformName` is joined to its `expect` declaration by an `actualizes` relation | `add-kotlin-multiplatform-source-sets` |
+| multiplatform | nodes record their source set (`commonMain`, `jvmMain`) | `add-kotlin-multiplatform-source-sets` |
+| file graph | `UserService.kt` has an import edge to `UserRepository.kt` (`import com.acme.repo.UserRepository`) | `add-kotlin-file-dependency-and-exports` |
+| file graph | `UserService.kt` has an import edge to `Strings.kt` (`import com.acme.util.slugify`) | `add-kotlin-file-dependency-and-exports` |
+| file graph | `Application.kt` has an import edge to `Stores.kt` through `import com.acme.repo.*` (it uses `openStore`) | `add-kotlin-file-dependency-and-exports` |
+| file graph | `LegacyCaller.java` has an import edge to `UserService.kt` | `add-kotlin-file-dependency-and-exports` |
+| file graph | `Strings.kt` exports `slugify`, `loadName`, and `Color`, and does not export the private `load` | `add-kotlin-file-dependency-and-exports` |
+| routes | Spring routes `GET /api/users/{id}` and `POST /api/users` are listed | `add-kotlin-http-topology` |
+| routes | Ktor routes `GET /health`, `POST /users`, and `GET /users/{id}` are listed | `add-kotlin-http-topology` |
+| capabilities | Kotlin backs the `crossServiceHttp` capability | `add-kotlin-http-topology` |
+| schemas | the JPA entity `User` is listed as table `users` with columns `id` and `display_name` | `add-kotlin-schema-inventory` |
+| schemas | the Exposed table `orders` is listed with columns `id`, `user_id`, and `total` | `add-kotlin-schema-inventory` |
+| environment | `ACME_PORT` is listed as an optional read (`System.getenv("ACME_PORT") ?: "8080"`) | `add-kotlin-env-var-reads` |
+| environment | `ACME_DATABASE_URL` (`?: error(...)`) and `ACME_TOKEN` (`getValue`) are listed as required reads | `add-kotlin-env-var-reads` |
+| environment | `ACME_REGION` is listed from `providers.environmentVariable("ACME_REGION")` in the build script | `add-kotlin-env-var-reads` |
+| inventories | the `@Composable` functions `Greeting` and `GreetingList` are listed as UI components | `add-kotlin-ui-and-middleware-inventories` |
+| inventories | the Ktor plugin installation `install(CallLogging)` is listed as middleware | `add-kotlin-ui-and-middleware-inventories` |
+| capabilities | Kotlin backs the `errorPropagation` capability | `add-kotlin-error-propagation` |
+| capabilities | Kotlin backs the `dynamicBoundary` capability | `add-kotlin-dynamic-boundary` |
+| capabilities | Kotlin backs the `styleFingerprint` capability | `add-kotlin-style-fingerprint` |
+| public surface | the public surface lists `openStore` and `UserService`, and does not list the private `load` | `add-kotlin-public-surface` |
+| tests | the Kotest spec `UserServiceSpec` has a test node for "safeDescribe falls back" that reaches `UserService.safeDescribe` | `add-kotlin-test-detection-and-generation` |
+| entry points | `main` in `Application.kt` is a root named by `application { mainClass.set("com.acme.ApplicationKt") }` | `add-kotlin-entry-point-roots` |
+| entry points | the Spring handler `UserController.get` is a framework root, not a dead-code candidate | `add-kotlin-entry-point-roots` |
+| identity | the project type is Kotlin | `add-kotlin-project-identity` |
+| identity | Spring Boot and Ktor are detected as frameworks | `add-kotlin-project-identity` |
+| identity | a source package directory named `android` is analyzed, not skipped as build output | `add-kotlin-project-identity` |
+| identity | the Gradle build script is not a domain | `add-kotlin-project-identity` |
+| search | search chunking splits a Kotlin file at declaration boundaries | `fix-kotlin-auxiliary-surface-parity` |
+
+#### Out of scope
+
+| Not supported | Reason |
+|---|---|
+| Type checking, smart casts, generic substitution, overload resolution by argument type | OpenLore reads syntax and declared types; these need a compiler front end. The affected calls are disclosed boundaries. |
+| Compiling the project, running Gradle, reading resolved dependency graphs | Local-first and deterministic: no build is run. |
+| Kotlin/JS, Kotlin/Native, and Kotlin/Wasm platform APIs | The language support is the same; platform library modeling is not in scope. |
+| Generated code (kapt, KSP, Dagger, Room) | It is not in the repository. Its effect is covered by annotation roots. |
+| SQLDelight `.sq` files and Android XML layouts | They are not Kotlin source. |
+| The `iacProjection` capability | It applies to infrastructure formats, not to general-purpose languages. |
+| The `literalReflection` capability | A Kotlin dispatch table is a map of callable references, and each reference is already an ordinary edge. |
+
+<!-- kotlin-support:end -->
+
+#### Kotlin syntax coverage
+
+<!-- kotlin-syntax:start (generated from kotlin-syntax-corpus.ts; do not edit by hand) -->
+
+Declared language level: **Kotlin 2.2**. Grammar: `tree-sitter-kotlin` 0.3.8.
+A file that uses a known gap is reported by parse-health; its other declarations are still extracted.
+
+| Feature | Stable since | Result |
+|---|---|---|
+| Functions: block and expression bodies, generics, extension, infix, tailrec, inline reified, vararg | 1.0 | clean |
+| Classes: primary and secondary constructors, init, inheritance, companion, inner, object, data, enum, annotation, abstract | 1.0 | clean |
+| Properties: accessors, delegates, lateinit, const, top-level | 1.0 | clean |
+| Control flow: when, ranges, labels, do-while, try / catch / finally as expressions | 1.0 | clean |
+| Lambdas, anonymous functions, function types with receiver, callable references, labeled return | 1.0 | clean |
+| Null safety: safe call, Elvis, non-null assertion, safe and unsafe casts, smart casts | 1.0 | clean |
+| Generics: variance, bounds, where clause, star projection, type alias | 1.1 | clean |
+| Annotations: file target, use-site target, arguments with braces, class literal | 1.0 | clean |
+| Coroutines: suspend functions and suspend function types | 1.3 | clean |
+| Strings: templates, raw strings, character escapes | 1.0 | clean |
+| Operator functions, destructuring declaration, compound assignment, in / !in | 1.0 | clean |
+| Destructuring in loops, downTo / step, underscore for unused variables | 1.1 | clean |
+| Sealed classes and interfaces, data object, value class | 1.9 | clean |
+| Functional (SAM) interfaces: `fun interface` | 1.4 | clean (normalized before parsing) |
+| Interface delegation (`by`) and delegated properties | 1.0 | clean |
+| Object expressions (anonymous objects) | 1.0 | clean |
+| Trailing commas | 1.4 | clean |
+| Definitely non-nullable types: `T & Any` | 1.7 | clean |
+| Underscore operator for type arguments | 1.7 | clean |
+| Open-ended range operator: `..<` | 1.9 | clean (normalized before parsing) |
+| Enum `entries` property | 1.9 | clean |
+| Guard conditions in `when` with a subject | 2.2 | known gap: Kotlin 2.2. The grammar has no rule for `if` after a `when` condition; the `when` entry is an error region. |
+| Multi-dollar string interpolation | 2.2 | clean (normalized before parsing) |
+| Non-local `break` and `continue` in inline lambdas | 2.2 | clean |
+| Soft keywords used as identifiers | 1.0 | clean |
+| Local functions, local classes, anonymous functions | 1.0 | clean |
+
+<!-- kotlin-syntax:end -->
+
 ### Script containers
 
 Vue (`.vue`), Svelte (`.svelte`), and Astro (`.astro`) are recognized script containers. Their support
