@@ -383,7 +383,8 @@ function bindKotlinScopes(
       const ownerFile = ownerFiles?.size === 1 ? ownerFiles.values().next().value! : uniqueTarget(jvmFqnIndex, pkgName);
       if (ownerFile) {
         offer('type', explicit, local, ownerFile);
-        typeQualifier.set(local, name);
+        // A nested class is recorded under its qualified name.
+        typeQualifier.set(local, `${owner}.${name}`);
         fileMap.set(`${KOTLIN_MEMBER_PREFIX}${local}`, `${ownerFile}\0${owner}`);
         continue;
       }

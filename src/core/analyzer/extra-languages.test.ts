@@ -37,7 +37,11 @@ describe('spec-08 additional languages', () => {
     expect(fnNames(g, 'Kotlin')).toContain('run');
     expect(fnNames(g, 'Kotlin')).toContain('helper');
     expect(fnNames(g, 'Kotlin')).toContain('shout'); // extension fun String.shout()
-    expect(g.nodes.find(n => n.name === 'shout')?.className).toBe('String');
+    // The receiver is recorded as the receiver type; `String` is not a class of the project
+    // (change: fix-kotlin-type-hierarchy-fidelity).
+    expect(g.nodes.find(n => n.name === 'shout')?.receiverType).toBe('String');
+    expect(g.nodes.find(n => n.name === 'shout')?.className).toBeUndefined();
+    expect(g.classes.some(c => c.name === 'String')).toBe(false);
     expect(edge(g, 'run', 'helper')).toBe(true);
     expect(edge(g, 'main', 'run')).toBe(true);
     expect(edge(g, 'main', 'shout')).toBe(true);  // "hi".shout() extension call resolves
@@ -59,7 +63,10 @@ describe('spec-08 additional languages', () => {
     expect(free?.className).toBeUndefined();           // free function, not a method of `Int`
     expect(g.classes.some(c => c.name === 'Int')).toBe(false); // no phantom `Int` class
     // A genuine extension still attributes to its receiver (user_type before the name).
-    expect(g.nodes.find(n => n.name === 'firstOrEmpty')?.className).toBe('List<String>');
+    expect(g.nodes.find(n => n.name === 'firstOrEmpty')?.receiverType).toBe('List');
+    expect(g.nodes.find(n => n.name === 'firstOrEmpty')?.className).toBeUndefined();
+    // The node id is what it always was.
+    expect(g.nodes.find(n => n.name === 'firstOrEmpty')?.id).toBe('k/Free.kt::List<String>.firstOrEmpty');
   });
 
   it('PHP — $this->m(), Class::m(), free function calls', async () => {

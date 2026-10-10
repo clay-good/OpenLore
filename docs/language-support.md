@@ -68,7 +68,7 @@ call targets emit no edge rather than a guessed one.
 | C++ | `.cpp` `.cc` `.cxx` `.hpp` `.h` | classes/namespaces | `.h` defaults to C++; see below. |
 | Swift | `.swift` | classes/structs | — |
 | C# | `.cs` | namespace/class/struct/record/interface | Methods, constructors, and local functions. |
-| Kotlin | `.kt` `.kts` | class/object/interface/companion | Extension functions record the receiver type in `className`. |
+| Kotlin | `.kt` `.kts` | class/interface/object/enum, nested classes by qualified name, object expressions | An extension function records its receiver in `receiverType` and creates no class. Companion members belong to the enclosing class. See [Kotlin](#kotlin). |
 | PHP | `.php` `.phtml` | class/trait/interface/enum | Instance, static, and free-function calls. |
 | C | `.c` `.h` | file scope | Functions and calls; no classes. |
 | Scala | `.scala` `.sc` | object/class/trait | Methods plus instance and object calls. |
@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (48)
+#### Supported (54)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -137,22 +137,22 @@ that a test checks on every run.
 | dead code | no constructor, initializer, or accessor node is a dead-code candidate | `add-kotlin-callable-node-shapes` |
 | dead code | the operator function `Money.plus` is not reported dead with more than low confidence | `add-kotlin-callable-node-shapes` |
 | call graph | `a + b` emits no call edge to `Money.plus`: the operator is chosen by a static type the analyzer does not compute | `add-kotlin-callable-node-shapes` |
-| call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
-| grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
-
-#### Known gaps (45)
-
-A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
-
-| Area | Fact | Change |
-|---|---|---|
-| boundaries | the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary | `add-kotlin-dynamic-boundary` |
 | classes | the class inventory has no class named `String` (an extension receiver is not a project class) | `fix-kotlin-type-hierarchy-fidelity` |
 | classes | the extension function `slugify` records `String` as its receiver type | `fix-kotlin-type-hierarchy-fidelity` |
 | classes | `InMemoryUserRepository` implements the interface `UserRepository` (it is not a superclass) | `fix-kotlin-type-hierarchy-fidelity` |
 | classes | `AuditedUserRepository : UserRepository by inner` implements `UserRepository` and is marked delegating | `fix-kotlin-type-hierarchy-fidelity` |
 | classes | class kinds are recorded: `Env` is an object, `User` a data class, `UserRepository` an interface, `Color` an enum | `fix-kotlin-type-hierarchy-fidelity` |
 | classes | `AuditedUserRepository.save` overrides `UserRepository.save` | `fix-kotlin-type-hierarchy-fidelity` |
+| call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
+| grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
+
+#### Known gaps (39)
+
+A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
+
+| Area | Fact | Change |
+|---|---|---|
+| boundaries | the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary | `add-kotlin-dynamic-boundary` |
 | signatures | the signature of `UserController.get` keeps `fun get(@PathVariable id: String): User?` after `@GetMapping("/{id}")` | `fix-kotlin-signature-and-kdoc-fidelity` |
 | signatures | the signature of `safeDescribe` is `fun safeDescribe(id: String): String`, with no part of its expression body | `fix-kotlin-signature-and-kdoc-fidelity` |
 | signatures | the KDoc of `UserController.get` is its docstring | `fix-kotlin-signature-and-kdoc-fidelity` |

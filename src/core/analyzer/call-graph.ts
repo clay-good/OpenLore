@@ -54,8 +54,9 @@ import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { kotlinCodeMask, normalizeKotlinForParse } from './kotlin-source.js';
 import {
-  collectKotlinBodyNodes, collectKotlinExtraCalls, kotlinFunctionParameters, kotlinModifiers, kotlinReturnType,
-  type KotlinNode,
+  buildKotlinOwnerIndex, collectKotlinBodyNodes, collectKotlinClassFacts, collectKotlinExtraCalls,
+  kotlinExtensionReceiver, kotlinFunctionParameters, kotlinModifiers, kotlinQualifiedOwner, kotlinReturnType,
+  type KotlinNode, type KotlinOwnerIndex,
 } from './kotlin-extract.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
@@ -131,6 +132,7 @@ import type {
   FileExtractResult,
   ClassRelationshipFact,
   DynamicDispatchFacts,
+  ClassRelationship,
 } from './call-graph-types.js';
 import { classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.js';
 
@@ -2910,6 +2912,12 @@ interface QueryLangSpec {
   callObject?: (callNode: TsNodeLike) => string | undefined;
   /** Optional per-language enrichment of a node from its declaration (parameters, return type). */
   enrichNode?: (fnNode: TsNodeLike, node: FunctionNode) => void;
+  /** Optional per-file context computed once from the tree, handed to the hooks below. */
+  prepare?: (root: TsNodeLike, content: string) => unknown;
+  /** Optional owner of a function, replacing the enclosing-group and extra-class rules. */
+  ownerName?: (fnNode: TsNodeLike, context: unknown) => string | undefined;
+  /** Optional class facts, replacing the generic relationship queries. */
+  classFacts?: (root: TsNodeLike, content: string, context: unknown) => ClassRelationshipFact[];
   /** Optional rewrite of a captured function name (Kotlin stores a backtick name without backticks). */
   normalizeName?: (name: string) => string;
   /** Optional nodes for bodies the function query cannot name (constructors, accessors, …). */
@@ -2942,14 +2950,17 @@ async function extractByQueries(
     const nodes: FunctionNode[] = [];
     const nodeIds = new Set<string>();
     const cfgByStart = new Map<number, FunctionCfg>();
+    const specContext = spec.prepare?.(_root, content);
     for (const match of runQuery(spec.fnQuery)) {
       const nameCapture = match.captures.find(c => c.name === 'fn.name');
       const nodeCapture = match.captures.find(c => c.name === 'fn.node');
       if (!nameCapture || !nodeCapture) continue;
       const name = spec.normalizeName ? spec.normalizeName(nameCapture.node.text) : nameCapture.node.text;
       const fnNode = nodeCapture.node;
-      const className = (spec.classTypes.size ? enclosingGroupName(fnNode, spec.classTypes) : undefined)
-        ?? spec.extraClassName?.(fnNode);
+      const enclosingOwner = spec.ownerName
+        ? spec.ownerName(fnNode, specContext)
+        : (spec.classTypes.size ? enclosingGroupName(fnNode, spec.classTypes) : undefined);
+      const className = enclosingOwner ?? spec.extraClassName?.(fnNode);
       const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
       if (nodeIds.has(id)) {
         // A colliding id is normally a multi-clause definition / overload and collapses
@@ -2980,6 +2991,8 @@ async function extractByQueries(
         signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, spec.language),
       };
       spec.enrichNode?.(fnNode, node);
+      // Only a language that separates the two owner sources (Kotlin) defers the decision.
+      if (className && !enclosingOwner && spec.ownerName) node.ownerIsReceiver = true;
       nodes.push(node);
       nodeIds.add(id);
     }
@@ -3031,7 +3044,9 @@ async function extractByQueries(
     const parseHealth = handle.parseHealthReliable === false
       ? undefined
       : tallyParseHealth('', _root as unknown as ParseHealthNode, filePath);
-    const classRelationships = collectClassRelationshipFacts(spec.language, runOptionalQuery);
+    const classRelationships = spec.classFacts
+      ? spec.classFacts(_root, content, specContext)
+      : collectClassRelationshipFacts(spec.language, runOptionalQuery);
     // Non-members of the receiver registry return nothing here; no query is run for them.
     const receiverFields = collectReceiverFieldFacts(spec.language, runOptionalQuery as never);
     const dynamicDispatch = collectPass1DynamicDispatch(spec.language, content, _root, nodes, filePath);
@@ -3065,6 +3080,27 @@ const CSHARP_SPEC: QueryLangSpec = {
   `,
   callObject: (call) => call.childForFieldName('function')?.childForFieldName('expression')?.text,
 };
+
+/**
+ * Kotlin class facts in the builder's relationship shape (change:
+ * fix-kotlin-type-hierarchy-fidelity). `parentClasses` holds every supertype, because call
+ * resolution walks it to find an inherited member whatever the supertype's kind; the written forms
+ * stay apart in `kotlin` and are classified in `buildClassNodes`, when all files are known.
+ */
+function kotlinRelationshipFacts(root: KotlinNode, content: string, index?: KotlinOwnerIndex): ClassRelationshipFact[] {
+  return collectKotlinClassFacts(root, content, index ?? buildKotlinOwnerIndex(root)).map(fact => ({
+    className: fact.className,
+    parentClasses: [...new Set([...fact.superclasses, ...fact.supertypes, ...fact.delegated])],
+    interfaces: [],
+    kotlin: {
+      classKind: fact.classKind,
+      superclasses: fact.superclasses,
+      supertypes: fact.supertypes,
+      delegated: fact.delegated,
+      ...(fact.companionName ? { companionName: fact.companionName } : {}),
+    },
+  }));
+}
 
 // ── Kotlin ──────────────────────────────────────────────────────────────────
 const KOTLIN_SPEC: QueryLangSpec = {
@@ -3105,9 +3141,16 @@ const KOTLIN_SPEC: QueryLangSpec = {
     if (returnType) node.returnType = returnType;
     const modifiers = kotlinModifiers(fnNode as unknown as KotlinNode);
     if (modifiers.length > 0) node.modifiers = modifiers;
+    const receiverType = kotlinExtensionReceiver(fnNode as unknown as KotlinNode);
+    if (receiverType) node.receiverType = receiverType;
     if (modifiers.includes('suspend')) node.isAsync = true;
   },
   normalizeName: name => (name.startsWith('`') && name.endsWith('`') ? name.slice(1, -1) : name),
+  prepare: root => buildKotlinOwnerIndex(root as unknown as KotlinNode),
+  // Members are owned by their qualified class (`Outer.Inner`), by the enclosing class for a
+  // companion, and by a named anonymous class for an object expression.
+  ownerName: (fnNode, context) => kotlinQualifiedOwner(fnNode as unknown as KotlinNode, context as KotlinOwnerIndex),
+  classFacts: (root, content, context) => kotlinRelationshipFacts(root as unknown as KotlinNode, content, context as KotlinOwnerIndex),
   extraNodes: (root, filePath, content) => collectKotlinBodyNodes(root as unknown as KotlinNode, /\.kts$/i.test(filePath)).map(body => ({
     id: body.className ? `${filePath}::${body.className}.${body.name}` : `${filePath}::${body.name}`,
     name: body.name,
@@ -3539,8 +3582,8 @@ export async function _extractClassRelationshipsLegacyForTesting(
    * builder can record it like any other exclusion.
    */
   budgetExceeded?: Set<string>,
-): Promise<Map<string, { parentClasses: string[]; interfaces: string[] }>> {
-  const out = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
+): Promise<Map<string, ClassRelationship>> {
+  const out = new Map<string, ClassRelationship>();
 
   // Helper to merge into map keyed by `filePath::ClassName`
   function merge(
@@ -3550,7 +3593,7 @@ export async function _extractClassRelationshipsLegacyForTesting(
     ifaces: string[],
   ) {
     const key = `${filePath}::${className}`;
-    const existing = out.get(key) ?? { parentClasses: [], interfaces: [] };
+    const existing: ClassRelationship = out.get(key) ?? { parentClasses: [], interfaces: [] };
     for (const p of parents) if (!existing.parentClasses.includes(p)) existing.parentClasses.push(p);
     for (const i of ifaces)  if (!existing.interfaces.includes(i))   existing.interfaces.push(i);
     out.set(key, existing);
@@ -3676,24 +3719,12 @@ export async function _extractClassRelationshipsLegacyForTesting(
         const { parser, lang } = r;
         const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, normalizeKotlinForParse(file.content));
 
-        // Kotlin `class C : Base(), IFace` — every supertype is a `delegation_specifier`
-        // with no syntactic class/interface distinction (a superclass may carry a
-        // constructor_invocation). Capture the whole user_type and take its leaf name,
-        // SKIPPING qualified types (`Outer.Inner`, e.g. `Job : CoroutineContext.Element`):
-        // those resolve to a nested/stdlib type, and matching the outer segment wires the
-        // class to a phantom (an extension-function receiver such as `CoroutineContext`).
-        for (const declType of ['class_declaration', 'object_declaration', 'interface_declaration']) {
-          for (const wrap of ['(user_type) @put', '(constructor_invocation (user_type) @put)']) {
-            const Q = `(${declType} (type_identifier) @cls (delegation_specifier ${wrap}))`;
-            for (const m of safeQuery(lang, Q, tree.rootNode)) {
-              const cls = m.captures.find(c => c.name === 'cls')?.node.text;
-              const put = m.captures.find(c => c.name === 'put')?.node.text;
-              if (!cls || !put) continue;
-              const parent = put.replace(/<[\s\S]*$/, '').trim(); // strip generic args
-              if (parent.includes('.')) continue;                 // skip qualified/nested types
-              merge(file.path, cls, [parent], []);
-            }
-          }
+        // One collector serves Pass 1 and this reference path (change:
+        // fix-kotlin-type-hierarchy-fidelity), so the two cannot disagree.
+        void lang;
+        for (const fact of kotlinRelationshipFacts(tree.rootNode as unknown as KotlinNode, file.content)) {
+          merge(file.path, fact.className, fact.parentClasses, fact.interfaces);
+          out.get(`${file.path}::${fact.className}`)!.kotlin = fact.kotlin;
         }
 
       } else if (file.language === 'PHP') {
@@ -3839,7 +3870,7 @@ export async function _extractClassRelationshipsLegacyForTesting(
  */
 function buildClassNodes(
   allNodes: Map<string, FunctionNode>,
-  relationships: Map<string, { parentClasses: string[]; interfaces: string[] }>,
+  relationships: Map<string, ClassRelationship>,
   importMap?: ImportMap,
   resolutionClasses: readonly ClassNode[] = [],
   resolutionNodes: readonly FunctionNode[] = [],
@@ -3854,7 +3885,10 @@ function buildClassNodes(
     let key: string;
     let name: string;
     let isModule: boolean;
-    if (fn.className) {
+    // A Kotlin extension function is a package-level function whatever its receiver: it joins
+    // the file's module group and never creates or extends a class record.
+    const isExtension = fn.receiverType !== undefined && (fn.className === undefined || fn.className === fn.receiverType);
+    if (fn.className && !isExtension) {
       key = `${fn.filePath}::${fn.className}`;
       name = fn.className;
       isModule = false;
@@ -3869,6 +3903,14 @@ function buildClassNodes(
       groups.set(key, { name, filePath: fn.filePath, language: fn.language, isModule, methods: [] });
     }
     groups.get(key)!.methods.push(fn);
+  }
+
+  // A Kotlin class that declares no function (a marker interface, an annotation class) is still
+  // a class of the project. It needs a record so a subtype can tell an interface from a superclass.
+  for (const [key, rel] of relationships) {
+    if (!rel.kotlin || groups.has(key)) continue;
+    const sep = key.indexOf('::');
+    groups.set(key, { name: key.slice(sep + 2), filePath: key.slice(0, sep), language: 'Kotlin', isModule: false, methods: [] });
   }
 
   // Build ClassNode[]
@@ -3891,6 +3933,11 @@ function buildClassNodes(
       fanIn:  g.methods.reduce((s, m) => s + m.fanIn, 0),
       fanOut: g.methods.reduce((s, m) => s + m.fanOut, 0),
       isModule: g.isModule,
+      ...(rel.kotlin ? {
+        classKind: rel.kotlin.classKind,
+        ...(rel.kotlin.delegated.length > 0 ? { delegating: true as const } : {}),
+        ...(rel.kotlin.companionName ? { aliases: [rel.kotlin.companionName] } : {}),
+      } : {}),
     };
     classMap.set(id, cls);
   }
@@ -3945,8 +3992,37 @@ function buildClassNodes(
     const sameDir = byNameAndDir.get(`${dirOf(childFile)}\0${parentName}`);
     if (sameDir && sameDir.length === 1) return sameDir[0];
     if ((nameCount.get(parentName) ?? 0) > 1) return undefined; // ambiguous across dirs → skip
-    return byName.get(parentName);
+    const unique = byName.get(parentName);
+    if (unique) return unique;
+    // A Kotlin nested class is recorded under its qualified name (`Outer.Inner`); a supertype
+    // written by its simple name binds to the one such class of the child's own file.
+    const nested = [...classMap.values()].filter(c =>
+      c.filePath === childFile && c.name.endsWith(`.${parentName}`));
+    return nested.length === 1 ? nested[0] : undefined;
   };
+
+  // Kotlin supertype kinds (change: fix-kotlin-type-hierarchy-fidelity). A supertype written
+  // with a constructor call is a superclass and one written with `by` is an interface. A bare
+  // supertype is an interface when it resolves to a project interface, a superclass when it
+  // resolves to another kind of class, and of unknown kind when it resolves to nothing; an
+  // unknown one stays among the parents, where it takes part in dispatch as before.
+  const INTERFACE_KINDS = new Set(['interface', 'functional-interface']);
+  for (const [id, cls] of classMap) {
+    const meta = relationships.get(id)?.kotlin;
+    if (!meta) continue;
+    const parents = [...meta.superclasses];
+    const interfaces = [...meta.delegated];
+    const unknown: string[] = [];
+    for (const name of meta.supertypes) {
+      const resolved = resolveParent(name, cls.filePath);
+      if (resolved && INTERFACE_KINDS.has(resolved.classKind ?? '')) { if (!interfaces.includes(name)) interfaces.push(name); continue; }
+      if (!resolved) unknown.push(name);
+      if (!parents.includes(name)) parents.push(name);
+    }
+    cls.parentClasses = parents;
+    cls.interfaces = interfaces;
+    if (unknown.length > 0) cls.unknownKindSupertypes = unknown;
+  }
 
   const inheritanceEdges: InheritanceEdge[] = [];
   const seenEdges = new Set<string>();
@@ -3980,7 +4056,8 @@ function buildClassNodes(
     const names = new Set<string>();
     for (const memberId of cls.methodIds) {
       const fn = hierarchyNodes.get(memberId);
-      if (fn && !fn.isExternal) names.add(fn.name);
+      // Every class has a constructor node; sharing that name is not an override.
+      if (fn && !fn.isExternal && !fn.synthetic) names.add(fn.name);
     }
     methodNameSet.set(id, names);
   }
@@ -5487,7 +5564,7 @@ export class CallGraphBuilder {
     // (change: disclose-dynamic-boundary-regions).
     const dynamicBoundaryCandidates = new Map<string, { language: string; candidates: AttributedCandidate[] }>();
     const grammarUnavailableByLanguage = new Map<string, GrammarUnavailableBoundary>();
-    let relationships = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
+    let relationships = new Map<string, ClassRelationship>();
     // `Class.field → Type` observations per file, folded into the refusing registry after Pass 1
     // (change: shrink-receiver-resolution-boundary).
     const receiverFieldFacts = new Map<string, ReceiverFieldFact[]>();
@@ -5645,7 +5722,8 @@ export class CallGraphBuilder {
         }
         for (const fact of result.classRelationships ?? []) {
           const key = `${file.path}::${fact.className}`;
-          const existing = relationships.get(key) ?? { parentClasses: [], interfaces: [] };
+          const existing: ClassRelationship = relationships.get(key) ?? { parentClasses: [], interfaces: [] };
+          if (fact.kotlin) existing.kotlin = fact.kotlin;
           for (const parent of fact.parentClasses) {
             if (!existing.parentClasses.includes(parent)) existing.parentClasses.push(parent);
           }
@@ -5736,6 +5814,20 @@ export class CallGraphBuilder {
           ...(cache.noReuseReason ? { noReuseReason: cache.noReuseReason } : {}),
         }
       : undefined;
+
+    // Kotlin extension receivers are not classes (change: fix-kotlin-type-hierarchy-fidelity).
+    // Pass 1 keyed an extension by its receiver so the node id stays what it always was; here,
+    // with every file known, the receiver stays the owner only when the repository declares it.
+    const leafName = (qualified: string): string => qualified.slice(qualified.lastIndexOf('.') + 1);
+    const declaredClassLeaves = new Set<string>();
+    for (const key of relationships.keys()) declaredClassLeaves.add(leafName(key.slice(key.indexOf('::') + 2)));
+    for (const node of allNodes.values()) if (node.className && !node.ownerIsReceiver) declaredClassLeaves.add(leafName(node.className));
+    for (const node of allNodes.values()) {
+      if (!node.ownerIsReceiver) continue;
+      delete node.ownerIsReceiver;
+      if (node.receiverType && declaredClassLeaves.has(node.receiverType)) node.className = node.receiverType;
+      else delete node.className;
+    }
 
     // Pass 2: Resolve raw edges — multi-strategy resolution
     const trie = new FunctionRegistryTrie();
@@ -5924,6 +6016,35 @@ export class CallGraphBuilder {
       return /^[A-Z][A-Za-z0-9_]*$/.test(name) ? name : undefined;
     };
 
+    // Kotlin class names are qualified (`Outer.Inner`), but source may write the simple name
+    // inside the outer class, and may name a companion (`Outer.Named.f()`).
+    const kotlinQualifiedByLeaf = new Map<string, Set<string>>();
+    const kotlinCompanionAlias = new Map<string, string>();
+    for (const [key, rel] of relationships) {
+      if (!rel.kotlin) continue;
+      const qualified = key.slice(key.indexOf('::') + 2);
+      if (qualified.includes('.')) {
+        const set = kotlinQualifiedByLeaf.get(leafName(qualified)) ?? new Set<string>();
+        set.add(qualified);
+        kotlinQualifiedByLeaf.set(leafName(qualified), set);
+      }
+      if (rel.kotlin.companionName) kotlinCompanionAlias.set(`${qualified}.${rel.kotlin.companionName}`, qualified);
+    }
+    /** Is the type written as `typeName` one that `filePath` can see: in scope, or its own? */
+    const kotlinTypeVisible = (filePath: string, typeName: string): boolean => {
+      const head = typeName.split('.')[0];
+      if (callImportMap.get(filePath)?.has(head)) return true;
+      if (relationships.has(`${filePath}::${typeName}`)) return true;
+      return [...(kotlinQualifiedByLeaf.get(typeName) ?? [])].some(q => relationships.has(`${filePath}::${q}`));
+    };
+    /** Members named `member` of the class written as `className`, in any file. */
+    const kotlinMembersOf = (className: string, member: string): FunctionNode[] => {
+      const canonical = kotlinCompanionAlias.get(className) ?? className;
+      const exact = trie.findByQualifiedName(canonical, member);
+      if (exact.length > 0 || canonical.includes('.')) return exact;
+      return [...(kotlinQualifiedByLeaf.get(canonical) ?? [])].flatMap(q => trie.findByQualifiedName(q, member));
+    };
+
     /**
      * The one member `member` of the Kotlin type `typeName` as `callerFile` sees it
      * (change: add-kotlin-declared-type-receivers). The type must be in the file's scope or be
@@ -5933,28 +6054,33 @@ export class CallGraphBuilder {
     const pickKotlinTypeMember = (callerFile: string, typeName: string, member: string): AffinityPick => {
       const found = new Set<FunctionNode>();
       const seen = new Set<string>();
-      const visit = (viewerFile: string, name: string, depth: number): void => {
+      const visit = (viewerFile: string, written: string, depth: number): void => {
         const scope = callImportMap.get(viewerFile);
-        const declaringFile = scope?.get(name);
-        const declared = scope?.get(`${IMPORT_QUALIFIER_PREFIX}${name}`) ?? name;
+        // `Outer.Inner`: the first segment is what the scope binds; the rest is nesting.
+        const dot = written.indexOf('.');
+        const head = dot < 0 ? written : written.slice(0, dot);
+        const rest = dot < 0 ? '' : written.slice(dot);
+        const declaringFile = scope?.get(head);
+        const declared = `${scope?.get(`${IMPORT_QUALIFIER_PREFIX}${head}`) ?? head}${rest}`;
         // The viewer's own declaration wins over a same-named type elsewhere in its package.
-        const ownFile = trie.findByQualifiedName(name, member).filter(n => n.filePath === viewerFile);
+        const ownFile = kotlinMembersOf(written, member).filter(n => n.filePath === viewerFile);
         if (!declaringFile && ownFile.length > 0) { for (const n of ownFile) found.add(n); return; }
         // In scope but declared in several files: every candidate is reported, none is chosen.
-        const ambiguousFiles = declaringFile ? undefined : scope?.get(`${KOTLIN_AMBIGUOUS_TYPE_PREFIX}${name}`)?.split('\0');
+        const ambiguousFiles = declaringFile ? undefined : scope?.get(`${KOTLIN_AMBIGUOUS_TYPE_PREFIX}${head}`)?.split('\0');
         if (ambiguousFiles) {
-          for (const n of trie.findByQualifiedName(name, member)) if (ambiguousFiles.includes(n.filePath)) found.add(n);
+          for (const n of kotlinMembersOf(written, member)) if (ambiguousFiles.includes(n.filePath)) found.add(n);
           return;
         }
         const typeFile = declaringFile ?? viewerFile; // not in scope → only a type of this very file
         const key = `${typeFile}\0${declared}`;
         if (seen.has(key) || depth > 8) return;
         seen.add(key);
-        const own = trie.findByQualifiedName(declared, member).filter(n => matchesImportedTarget(n.filePath, typeFile));
+        const own = kotlinMembersOf(declared, member).filter(n => matchesImportedTarget(n.filePath, typeFile));
         if (own.length > 0) { for (const n of own) found.add(n); return; }
         if (member === '<init>') return; // a constructor is never inherited
-        for (const candidateFile of new Set(kotlinClassFiles(typeFile, declared))) {
-          const rel = relationships.get(`${candidateFile}::${declared}`);
+        const canonical = kotlinCompanionAlias.get(declared) ?? declared;
+        for (const candidateFile of new Set(kotlinClassFiles(typeFile, canonical))) {
+          const rel = relationships.get(`${candidateFile}::${canonical}`);
           for (const parent of [...(rel?.parentClasses ?? []), ...(rel?.interfaces ?? [])]) visit(candidateFile, parent, depth + 1);
         }
       };
@@ -6371,9 +6497,20 @@ export class CallGraphBuilder {
             receiverType = kotlinLocalCallReturnType(callerNode, receiver, raw.offset)
               ?? kotlinDeclaredReceiverType(callerNode, receiver, raw.offset);
           }
+        } else if (/^[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(receiver)) {
+          // `Type.member()`, `Outer.Inner.member()`, `Outer.Named.member()` (a named companion),
+          // and `Outer.Inner()` (a nested constructor). The first segment must be a type the file
+          // can see, or a class of the file itself.
+          const inScope = callImportMap.get(callerNode.filePath)?.has(receiver.split('.')[0]) === true;
+          let picked = pickKotlinTypeMember(callerNode.filePath, receiver, raw.calleeName);
+          if (picked.kind === 'none' && /^[A-Z]/.test(raw.calleeName)) {
+            picked = pickKotlinTypeMember(callerNode.filePath, `${receiver}.${raw.calleeName}`, '<init>');
+          }
+          if (picked.kind === 'unique') { calleeNode = picked.node; confidence = inScope ? 'import' : 'type_name'; }
+          else if (picked.kind === 'ambiguous') { recordAmbiguous(raw, 'type_name', picked.candidates); continue; }
         } else {
           // `UserService(repo).find(id)`: the receiver is one constructor call.
-          const constructed = receiver.match(/^([A-Z][A-Za-z0-9_]*)\s*\(/);
+          const constructed = receiver.match(/^([A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*)\s*\(/);
           if (constructed && closesAtEnd(receiver, receiver.indexOf('('))) receiverType = constructed[1];
         }
         if (receiverType) {
@@ -6976,12 +7113,26 @@ export class CallGraphBuilder {
         // CALLER's own hierarchy — a fabricated edge, and precisely the guess the receiver
         // registry refuses (change: shrink-receiver-resolution-boundary).
         if (raw.receiverField) continue;
+        // Kotlin: hand over the type the source declares for the receiver, so dispatch covers a
+        // parameter or property typed as an interface, not only a local.
+        const kotlinCaller = allNodes.get(raw.callerId);
+        const kotlinReceiver = raw.calleeObject.replace(/!!$/, '');
+        const writtenType = kotlinCaller?.language === 'Kotlin' && /^[a-z_][A-Za-z0-9_]*$/.test(kotlinReceiver)
+          ? kotlinLocalCallReturnType(kotlinCaller, kotlinReceiver, raw.offset)
+            ?? kotlinDeclaredReceiverType(kotlinCaller, kotlinReceiver, raw.offset)
+          : undefined;
+        // Dispatch must not reach a class the file cannot see: a library `Table` is not the
+        // project's `Table`.
+        const declaredType = writtenType && kotlinCaller && kotlinTypeVisible(kotlinCaller.filePath, writtenType)
+          ? writtenType
+          : undefined;
         rawMethodCalls.push({
           callerId: raw.callerId,
-          recv: raw.calleeObject,
+          recv: kotlinCaller?.language === 'Kotlin' ? kotlinReceiver : raw.calleeObject,
           method: raw.calleeName,
           line: raw.line,
           offset: raw.offset,
+          ...(declaredType ? { declaredType } : {}),
         });
       }
       const hierarchyNodes = new Map((resolutionNodes ?? []).map(node => [node.id, node]));
