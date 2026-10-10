@@ -5,13 +5,25 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
-- **Graph tools stop calling a damaged index "absent".** When the cached context cannot be served
-  (a rebuild or publish in progress, artifacts that no longer match their published generation, a
-  refused manifest or artifact), `get_subgraph` and the other graph and conclusion tools now return
-  the same diagnosed not-ready verdict as the architecture overview (`index-publish-in-progress`,
-  `index-generation-mismatch`, …) instead of "No analysis found. Run analyze_codebase first."
-  A truly absent index still answers `index-absent`. The Pi footer re-reads index health when a
-  tool answers not-ready, so it no longer shows `ready` next to that answer.
+## [3.3.1] - 2026-10-10
+
+**Kotlin files now show up on the map.**
+
+- **Kotlin joins the file graph.** OpenLore now reads the package, imports, and package-level
+  declarations of `.kt` and `.kts` files. Before, a Kotlin file had no imports, no exports, and no
+  import edges. Imports resolve by declared package, not by directory, and Kotlin and Java files
+  resolve each other. A wildcard import reaches only the files whose names the importer uses; a
+  name declared in two files reaches nothing and is counted as ambiguous, never guessed. Exports
+  follow visibility: public is listed, `internal` is tagged, `private` is left out. (#546)
+- **An unreadable index says so.** When the index exists but cannot be served, MCP tools now
+  diagnose the cause instead of reporting that no analysis was found.
+
+Also cleared dependency advisories in `proxy-addr`, `sharp`, `source-map-js`, `fast-uri`,
+`brace-expansion`, and `braces`, and applied routine dependency updates.
+
+**Upgrade:** `npm i -g openlore@3.3.1` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.3.0...v3.3.1
 
 ## [3.3.0] - 2026-09-20
 
