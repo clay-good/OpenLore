@@ -666,13 +666,25 @@ describe('language conformance — resolver refuses to guess on ambiguity', () =
     )).toBe(false);
   });
 
-  it('a failed imported-method lookup falls through to the pre-change name_only tier', async () => {
+  // Kotlin (change: fix-kotlin-package-binding-soundness): `P.helper()` has a receiver, so it
+  // cannot mean the package-level `legacy.helper`, which the file does not import either. The
+  // pre-change name_only fall-through bound it; the call is now an external leaf.
+  it('a failed Kotlin imported-method lookup does not fall through to a same-named package function', async () => {
     const r = await build([
       { path: 'app/Main.kt', language: 'Kotlin', content: 'package app\nimport wanted.Parser as P\nfun main(){ P.helper() }' },
       { path: 'wanted/Parser.kt', language: 'Kotlin', content: 'package wanted\nobject Parser {}' },
       { path: 'legacy/Functions.kt', language: 'Kotlin', content: 'package legacy\nfun helper() {}' },
     ]);
-    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('name_only');
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')).toBeUndefined();
+  });
+
+  it('a failed C# imported-method lookup still falls through to the name_only tier', async () => {
+    const r = await build([
+      { path: 'app/Main.cs', language: 'C#', content: 'using P = Wanted.Parser;\nnamespace App;\nclass MainType { void Main(){ P.Helper(); } }' },
+      { path: 'wanted/Parser.cs', language: 'C#', content: 'namespace Wanted;\nclass Parser {}' },
+      { path: 'legacy/Functions.cs', language: 'C#', content: 'namespace Legacy;\nclass Functions { public static void Helper() {} }' },
+    ]);
+    expect(boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper')?.confidence).toBe('name_only');
   });
 
   it('an unaliased Go import uses the target package clause, not the path basename', async () => {

@@ -22,6 +22,12 @@ import {
   EXTERNAL_IMPORT_PREFIX,
   IMPORT_QUALIFIER_PREFIX,
   IMPORT_TOP_LEVEL_QUALIFIER,
+  KOTLIN_EXTENSION_PREFIX,
+  KOTLIN_EXTERNAL_PREFIX,
+  KOTLIN_FUNCTION_PREFIX,
+  KOTLIN_MEMBER_PREFIX,
+  decodeKotlinCallable,
+  decodeKotlinMember,
   PACKAGE_SCOPE_IMPORT,
   PACKAGE_SCOPE_NAME,
 } from './import-resolver-bridge.js';
@@ -5747,6 +5753,19 @@ export class CallGraphBuilder {
       return firstAmbiguous ? { ambiguous: firstAmbiguous } : {};
     };
 
+    /**
+     * The graph node of one Kotlin package-level declaration, located by the offset of its
+     * declaring keyword (change: fix-kotlin-package-binding-soundness). Matching by position, not
+     * by name, is what keeps a member function out of a package-level binding.
+     */
+    const kotlinDeclarationNode = (encoded: string | undefined): FunctionNode | undefined => {
+      const binding = decodeKotlinCallable(encoded);
+      if (!binding) return undefined;
+      const matches = trie.findBySimpleName(binding.name).filter(n =>
+        n.filePath === binding.file && binding.offsets.some(o => n.startIndex <= o && o < n.endIndex));
+      return matches.length === 1 ? matches[0] : undefined;
+    };
+
     /** `filePath::Class.field → Type`, with every conflicting observation already refused
      *  (change: shrink-receiver-resolution-boundary). */
     const receiverFields = buildReceiverFieldRegistry(receiverFieldFacts);
@@ -5948,11 +5967,15 @@ export class CallGraphBuilder {
       // (change: harden-call-resolution-ambiguity).
       if (
         !calleeNode && raw.calleeObject &&
-        (callerNode.language === 'Swift' || callerNode.language === 'C++' || callerNode.language === 'Java')
+        (callerNode.language === 'Swift' || callerNode.language === 'C++' || callerNode.language === 'Java'
+          || callerNode.language === 'Kotlin')
       ) {
         const ch = raw.calleeObject.charCodeAt(0);
         const isCapitalized = ch >= 65 && ch <= 90; // A-Z
-        const hasImportBinding = callImportMap.get(callerNode.filePath)?.has(raw.calleeObject);
+        const hasImportBinding = callImportMap.get(callerNode.filePath)?.has(raw.calleeObject)
+          // Kotlin: the file imports this name from outside the repository, so it is not a
+          // project type even when a project type shares the name.
+          || callImportMap.get(callerNode.filePath)?.has(`${KOTLIN_EXTERNAL_PREFIX}${raw.calleeObject}`);
         if (isCapitalized && !hasImportBinding) {
           const picked = pickByAffinity(
             trie.findByQualifiedName(raw.calleeObject, raw.calleeName),
@@ -6024,9 +6047,62 @@ export class CallGraphBuilder {
       // name was followed through a re-export chain is labelled `re_export` (still a
       // proven concrete target, but the barrel hop is disclosed); a direct import is
       // labelled `import`.
+      // Strategy K — Kotlin scope binding for a call with no receiver
+      // (change: fix-kotlin-package-binding-soundness). Kotlin resolves a bare name lexically,
+      // then on the implicit receiver, then through the file's scope (explicit import, own
+      // package, wildcard import). Nothing else can be meant, so a name that none of these
+      // declares is external: it never binds to a same-named function the file cannot see, and
+      // never to a member of an unrelated class.
+      if (!calleeNode && callerNode.language === 'Kotlin' && !raw.calleeObject) {
+        const scope = callImportMap.get(callerNode.filePath);
+        const sameFile = trie.findBySimpleName(raw.calleeName).filter(c => c.filePath === callerNode.filePath);
+        const nested = sameFile
+          .filter(c => c !== callerNode && c.startIndex >= callerNode.startIndex && c.endIndex <= callerNode.endIndex)
+          .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex))[0];
+        let bound: FunctionNode | undefined = nested;
+        let boundConfidence: EdgeConfidence | undefined;
+        if (!bound && callerNode.className) {
+          const res = resolveSelfMethod(callerNode, raw.calleeName, true);
+          if (res.ambiguous) { recordAmbiguous(raw, 'self_cls', res.ambiguous); continue; }
+          bound = res.node;
+          if (bound && bound.filePath !== callerNode.filePath) boundConfidence = 'self_cls';
+        }
+        if (!bound) {
+          bound = kotlinDeclarationNode(scope?.get(`${KOTLIN_FUNCTION_PREFIX}${raw.calleeName}`))
+            // An extension function called on the implicit receiver (`slugify()` inside another
+            // extension of the same type, or inside a member).
+            ?? kotlinDeclarationNode(scope?.get(`${KOTLIN_EXTENSION_PREFIX}${raw.calleeName}`));
+        }
+        if (!bound) {
+          const member = decodeKotlinMember(scope?.get(`${KOTLIN_MEMBER_PREFIX}${raw.calleeName}`));
+          const candidates = member
+            ? trie.findByQualifiedName(member.owner, raw.calleeName).filter(n => n.filePath === member.file)
+            : [];
+          if (candidates.length === 1) bound = candidates[0];
+        }
+        // The package declares the name in two files (for example `main` and `test` source sets):
+        // the file's own package-level declaration is the one it sees.
+        if (!bound && !scope?.has(`${KOTLIN_EXTERNAL_PREFIX}${raw.calleeName}`)) {
+          const own = sameFile.filter(c => !c.className);
+          if (own.length === 1) bound = own[0];
+        }
+        if (bound) {
+          calleeNode = bound;
+          confidence = boundConfidence ?? (bound.filePath === callerNode.filePath ? 'same_file' : 'import');
+        } else {
+          if (raw.callType === 'constructor') continue;
+          calleeNode = getOrCreateExternalNode(raw.calleeName, allNodes);
+          confidence = 'external';
+        }
+      }
+
       if (!calleeNode) {
         const qualifier = raw.calleeObject?.split(/[.\\:]/).filter(Boolean).pop();
-        const viaName = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+        // A Kotlin call with a receiver never binds through the bare callee name: `x.get()` is
+        // not the package-level or same-package `get`. Only the receiver may select the target.
+        const viaName = callerNode.language === 'Kotlin' && raw.calleeObject
+          ? undefined
+          : callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
         const packageScopeTarget = !raw.calleeObject
           ? callImportMap.get(callerNode.filePath)?.get(PACKAGE_SCOPE_IMPORT)
           : undefined;
@@ -6079,6 +6155,20 @@ export class CallGraphBuilder {
         }
       }
 
+      // Strategy K (receiver form) — a Kotlin extension function binds a call that has a
+      // receiver when its name is in the file's scope and names one declaration. It runs after
+      // the receiver's own type had its chance above, because a member wins over an extension.
+      if (!calleeNode && callerNode.language === 'Kotlin' && raw.calleeObject
+        && raw.calleeObject !== 'this' && raw.calleeObject !== 'super') {
+        const extension = kotlinDeclarationNode(
+          callImportMap.get(callerNode.filePath)?.get(`${KOTLIN_EXTENSION_PREFIX}${raw.calleeName}`),
+        );
+        if (extension) {
+          calleeNode = extension;
+          confidence = extension.filePath === callerNode.filePath ? 'same_file' : 'import';
+        }
+      }
+
       // Strategy 4 — same-file preference (only for calls without a typed receiver)
       // When a receiver is explicitly present but unresolvable (e.g. redis_client.get()),
       // skip name_only fallback to avoid false-positive edges.
@@ -6091,7 +6181,9 @@ export class CallGraphBuilder {
               /^[A-Z]/.test(raw.calleeObject)) &&
             !ambiguousInferredBindingsByCaller.get(callerNode.id)?.has(raw.calleeObject)))
       ) {
-        const candidates = trie.findBySimpleName(raw.calleeName);
+        // Kotlin reaches here only with a receiver the strategies above could not type. A name
+        // match across the repository would be a guess, so the call is an external leaf.
+        const candidates = callerNode.language === 'Kotlin' ? [] : trie.findBySimpleName(raw.calleeName);
         if (candidates.length === 0) {
           // A synthesized super(...) edge whose parent class is not in the
           // analyzed code (e.g. `extends RuntimeException`) is dropped rather

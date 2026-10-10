@@ -12,6 +12,7 @@
 import { dirname, resolve, posix } from 'node:path';
 import type { FileAnalysis, ExportInfo } from './import-parser.js';
 import { parseJSImports, parsePythonImports, parseJSExports } from './import-parser.js';
+import { kotlinCodeMask, scanKotlinFile, type KotlinDeclaration, type KotlinFileHeader } from './kotlin-source.js';
 
 /** filePath → Map<localName, resolvedSourceFilePath> */
 export type ImportMap = Map<string, Map<string, string>>;
@@ -70,6 +71,46 @@ export const EXTERNAL_IMPORT_PREFIX = '\0external:';
  *  import names an in-project module. Declared and shallow — see {@link EXTERNAL_IMPORT_PREFIX}. */
 const PACKAGE_ROOT_PREFIXES = ['src/', 'lib/', 'app/'] as const;
 export const IMPORT_TOP_LEVEL_QUALIFIER = '\0top-level';
+
+/**
+ * Kotlin scope bindings (change: fix-kotlin-package-binding-soundness). A Kotlin file's map holds,
+ * beside the type bindings every JVM file has, one entry per callable name that is in scope by an
+ * explicit import, the file's own package, or a wildcard import, in that order of precedence (the
+ * order the Kotlin language specifies). Each namespace is separate, because Kotlin lets a class, a
+ * function, and a property share a name:
+ *
+ * - `KOTLIN_FUNCTION_PREFIX + name`  → a package-level function (binds a receiverless call only)
+ * - `KOTLIN_EXTENSION_PREFIX + name` → a package-level extension function (binds a receiver call)
+ * - `KOTLIN_PROPERTY_PREFIX + name`  → a package-level property
+ * - `KOTLIN_MEMBER_PREFIX + name`    → a member imported by name (`import a.b.Obj.member`)
+ * - `KOTLIN_EXTERNAL_PREFIX + name`  → an explicit import that names nothing in the repository;
+ *   it shadows a same-package or wildcard symbol of that name, as it does in the language
+ *
+ * A callable value is `file\0declaredName\0offset,offset…` (see {@link decodeKotlinCallable}); the
+ * offsets are the declaring `fun` / `val` keywords, so the consumer binds the exact declaration
+ * and never a same-named member. A name that is ambiguous at its level has no entry at all.
+ */
+export const KOTLIN_FUNCTION_PREFIX = '\0kt-fn:';
+export const KOTLIN_EXTENSION_PREFIX = '\0kt-ext:';
+export const KOTLIN_PROPERTY_PREFIX = '\0kt-prop:';
+export const KOTLIN_MEMBER_PREFIX = '\0kt-member:';
+export const KOTLIN_EXTERNAL_PREFIX = '\0kt-external:';
+
+export interface KotlinCallableBinding { file: string; name: string; offsets: number[] }
+
+export function decodeKotlinCallable(value: string | undefined): KotlinCallableBinding | undefined {
+  if (!value) return undefined;
+  const [file, name, offsets] = value.split('\0');
+  if (!file || !name) return undefined;
+  return { file, name, offsets: (offsets ?? '').split(',').filter(Boolean).map(Number) };
+}
+
+/** `import a.b.Obj.member` → the declaring file and the owner type name. */
+export function decodeKotlinMember(value: string | undefined): { file: string; owner: string } | undefined {
+  if (!value) return undefined;
+  const [file, owner] = value.split('\0');
+  return file && owner ? { file, owner } : undefined;
+}
 
 type TargetIndex = Map<string, Set<string>>;
 
@@ -150,7 +191,7 @@ function sanitizeForRegex(
  * but could not reach them end to end with a newline payload through `extractSignatures`.
  */
 function declaredNamespace(content: string, language: string): string | undefined {
-  const code = sanitizeForRegex(content, false, language === 'Kotlin');
+  const code = sanitizeForRegex(content, false);
   if (language === 'PHP') {
     return code.match(/^[ \t]*namespace\s{1,80}([\\\w]+)[ \t]*[;{]/m)?.[1].replaceAll('\\', '.');
   }
@@ -159,14 +200,12 @@ function declaredNamespace(content: string, language: string): string | undefine
 }
 
 function declaredTypes(content: string, language: string): string[] {
-  const keywords = language === 'Kotlin'
-    ? 'class|interface|enum|object'
-    : language === 'PHP'
-      ? 'class|interface|enum|trait'
-      : language === 'C#'
-        ? 'class|interface|enum|record|struct'
-        : 'class|interface|enum|record';
-  return [...sanitizeForRegex(content, false, language === 'Kotlin').matchAll(
+  const keywords = language === 'PHP'
+    ? 'class|interface|enum|trait'
+    : language === 'C#'
+      ? 'class|interface|enum|record|struct'
+      : 'class|interface|enum|record';
+  return [...sanitizeForRegex(content, false).matchAll(
     new RegExp(`\\b(?:${keywords})\\s+([A-Za-z_]\\w*)`, 'g'),
   )]
     .map(m => m[1]);
@@ -224,12 +263,196 @@ function goImportSpecs(content: string): GoImportSpec[] {
   return specs;
 }
 
+const KOTLIN_TYPE_KINDS: ReadonlySet<string> = new Set(['class', 'interface', 'object', 'enum']);
+
+type KotlinScopeKind = 'type' | 'function' | 'extension' | 'property';
+interface KotlinSymbol { file: string; declaration: KotlinDeclaration }
+type KotlinPackageIndex = Map<string, Record<Exclude<KotlinScopeKind, 'type'>, Map<string, KotlinSymbol[]>>>;
+
+const kotlinScopeKind = (d: KotlinDeclaration): KotlinScopeKind | undefined =>
+  d.kind === 'function' ? (d.receiverType ? 'extension' : 'function')
+    : d.kind === 'property' ? (d.receiverType ? undefined : 'property')
+      : undefined;
+
+/**
+ * Bind the names each Kotlin file has in scope (change: fix-kotlin-package-binding-soundness).
+ *
+ * Precedence is the language's: an explicit import, then the file's own package, then a wildcard
+ * import. A name is resolved at the first level that declares it; when that level declares it in
+ * more than one file the name is ambiguous and binds nothing, and a lower level is NOT consulted
+ * (the compiler would not consult it either). Default-import names are never bound here, so a call
+ * to `listOf(...)` stays external unless the file imports a project `listOf` or shares its package.
+ */
+function bindKotlinScopes(
+  files: Array<{ path: string; content: string; language: string }>,
+  headerOf: (f: { path: string; content: string }) => KotlinFileHeader,
+  jvmFqnIndex: TargetIndex,
+  jvmTypesByPackage: Map<string, Map<string, Set<string>>>,
+  map: ImportMap,
+): void {
+  const packages: KotlinPackageIndex = new Map();
+  for (const f of files) {
+    const header = headerOf(f);
+    let pkg = packages.get(header.packageName);
+    if (!pkg) { pkg = { function: new Map(), extension: new Map(), property: new Map() }; packages.set(header.packageName, pkg); }
+    for (const declaration of header.declarations) {
+      const kind = kotlinScopeKind(declaration);
+      if (!kind || kind === 'type') continue;
+      const list = pkg[kind].get(declaration.name) ?? [];
+      list.push({ file: f.path, declaration });
+      pkg[kind].set(declaration.name, list);
+    }
+  }
+
+  /** Symbols of `name` in `pkg` that `viewer` may see: `private` is visible in its own file only. */
+  const visible = (pkgName: string, kind: Exclude<KotlinScopeKind, 'type'>, name: string, viewer: string): KotlinSymbol[] =>
+    (packages.get(pkgName)?.[kind].get(name) ?? [])
+      .filter(sym => sym.file === viewer || !sym.declaration.modifiers.includes('private'));
+
+  const encode = (symbols: KotlinSymbol[]): string | null => {
+    const fileSet = new Set(symbols.map(sym => sym.file));
+    // Overloads in one file are one graph node; the same name in two files is ambiguous.
+    if (fileSet.size !== 1) return null;
+    return `${symbols[0].file}\0${symbols[0].declaration.name}\0${symbols.map(sym => sym.declaration.offset).join(',')}`;
+  };
+
+  for (const f of files) {
+    const header = headerOf(f);
+    const fileMap = new Map<string, string>();
+    // `null` = ambiguous or shadowed at the level that decided the name: nothing lower may bind it.
+    const decided: Record<KotlinScopeKind, Map<string, string | null>> = {
+      type: new Map(), function: new Map(), extension: new Map(), property: new Map(),
+    };
+    const typeQualifier = new Map<string, string>();
+    const external = new Set<string>();
+
+    const offer = (kind: KotlinScopeKind, level: Map<string, Set<string>>, local: string, value: string): void => {
+      const values = level.get(`${kind}\0${local}`) ?? new Set<string>();
+      values.add(value);
+      level.set(`${kind}\0${local}`, values);
+    };
+    const commit = (level: Map<string, Set<string>>): void => {
+      for (const [key, values] of level) {
+        const [kind, local] = key.split('\0') as [KotlinScopeKind, string];
+        if (decided[kind].has(local)) continue;
+        decided[kind].set(local, values.size === 1 ? values.values().next().value! : null);
+      }
+    };
+    const offerPackageName = (level: Map<string, Set<string>>, pkgName: string, name: string, local: string): boolean => {
+      let found = false;
+      for (const kind of ['function', 'extension', 'property'] as const) {
+        const symbols = visible(pkgName, kind, name, f.path);
+        if (symbols.length === 0) continue;
+        found = true;
+        const encoded = encode(symbols);
+        // Two files → offer two distinct values, which `commit` records as ambiguous.
+        if (encoded) offer(kind, level, local, encoded);
+        else for (const sym of symbols) offer(kind, level, local, `${sym.file}\0${sym.declaration.name}\0${sym.declaration.offset}`);
+      }
+      const typeFiles = jvmTypesByPackage.get(pkgName)?.get(name);
+      if (typeFiles && typeFiles.size > 0) {
+        found = true;
+        for (const file of typeFiles) offer('type', level, local, file);
+        typeQualifier.set(local, name);
+      }
+      return found;
+    };
+
+    // Level 1 — explicit imports.
+    const explicit = new Map<string, Set<string>>();
+    for (const imp of header.imports) {
+      if (imp.wildcard) continue;
+      const dot = imp.fqn.lastIndexOf('.');
+      const name = dot < 0 ? imp.fqn : imp.fqn.slice(dot + 1);
+      const pkgName = dot < 0 ? '' : imp.fqn.slice(0, dot);
+      const local = imp.alias ?? name;
+      if (offerPackageName(explicit, pkgName, name, local)) continue;
+      // `import a.b.Outer.Inner` / `import a.b.Obj.member`: the owner is a type of a shorter package.
+      const ownerDot = pkgName.lastIndexOf('.');
+      const owner = ownerDot < 0 ? pkgName : pkgName.slice(ownerDot + 1);
+      const ownerFiles = pkgName ? jvmTypesByPackage.get(ownerDot < 0 ? '' : pkgName.slice(0, ownerDot))?.get(owner) : undefined;
+      const ownerFile = ownerFiles?.size === 1 ? ownerFiles.values().next().value! : uniqueTarget(jvmFqnIndex, pkgName);
+      if (ownerFile) {
+        offer('type', explicit, local, ownerFile);
+        typeQualifier.set(local, name);
+        fileMap.set(`${KOTLIN_MEMBER_PREFIX}${local}`, `${ownerFile}\0${owner}`);
+        continue;
+      }
+      // Names nothing in the repository: a library symbol. It still shadows lower levels.
+      external.add(local);
+      for (const kind of ['type', 'function', 'extension', 'property'] as const) decided[kind].set(local, null);
+    }
+    commit(explicit);
+
+    // Level 2 — the file's own package.
+    const samePackage = new Map<string, Set<string>>();
+    const offerWholePackage = (level: Map<string, Set<string>>, pkgName: string): void => {
+      const pkg = packages.get(pkgName);
+      for (const kind of ['function', 'extension', 'property'] as const) {
+        for (const name of pkg?.[kind].keys() ?? []) {
+          const symbols = visible(pkgName, kind, name, f.path);
+          if (symbols.length === 0) continue;
+          const encoded = encode(symbols);
+          if (encoded) offer(kind, level, name, encoded);
+          else for (const sym of symbols) offer(kind, level, name, `${sym.file}\0${sym.declaration.name}\0${sym.declaration.offset}`);
+        }
+      }
+      for (const [name, typeFiles] of jvmTypesByPackage.get(pkgName) ?? []) {
+        for (const file of typeFiles) offer('type', level, name, file);
+        if (!typeQualifier.has(name)) typeQualifier.set(name, name);
+      }
+    };
+    offerWholePackage(samePackage, header.packageName);
+    commit(samePackage);
+
+    // Level 3 — wildcard imports. Two wildcard packages that both declare a name make it ambiguous.
+    const wildcard = new Map<string, Set<string>>();
+    for (const imp of header.imports) if (imp.wildcard) offerWholePackage(wildcard, imp.fqn);
+    commit(wildcard);
+
+    for (const [local, target] of decided.type) {
+      if (!target) continue;
+      fileMap.set(local, target);
+      fileMap.set(`${IMPORT_QUALIFIER_PREFIX}${local}`, typeQualifier.get(local) ?? local);
+    }
+    for (const [kind, prefix] of [
+      ['function', KOTLIN_FUNCTION_PREFIX], ['extension', KOTLIN_EXTENSION_PREFIX], ['property', KOTLIN_PROPERTY_PREFIX],
+    ] as const) {
+      for (const [local, value] of decided[kind]) if (value) fileMap.set(`${prefix}${local}`, value);
+    }
+    for (const local of external) fileMap.set(`${KOTLIN_EXTERNAL_PREFIX}${local}`, local);
+    for (const key of [...fileMap.keys()]) {
+      // A member import is kept only while its type binding survived precedence.
+      if (key.startsWith(KOTLIN_MEMBER_PREFIX) && !fileMap.has(key.slice(KOTLIN_MEMBER_PREFIX.length))) fileMap.delete(key);
+    }
+
+    // Fully qualified references in code (`com.acme.repo.Store()`), as for Java.
+    const code = kotlinCodeMask(f.content);
+    for (const m of code.matchAll(/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b/g)) {
+      const exactTarget = resolveImportedFqn(jvmFqnIndex, m[0]);
+      const qualifier = exactTarget ? m[0] : m[0].slice(0, m[0].lastIndexOf('.'));
+      const target = exactTarget ?? resolveImportedFqn(jvmFqnIndex, qualifier);
+      if (target && !fileMap.has(qualifier)) {
+        fileMap.set(qualifier, target);
+        fileMap.set(`${IMPORT_QUALIFIER_PREFIX}${qualifier}`, qualifier.split('.').pop()!);
+      }
+    }
+    if (fileMap.size > 0) map.set(f.path, fileMap);
+  }
+}
+
 /** Build import/package bindings (change: widen-import-resolution). */
 function buildStaticLanguageImportMaps(
   files: Array<{ path: string; content: string; language: string }>,
 ): ImportMap {
   const map: ImportMap = new Map();
   const allFilePaths = files.map(file => file.path);
+  const kotlinHeaders = new Map<string, KotlinFileHeader>();
+  const kotlinHeader = (f: { path: string; content: string }): KotlinFileHeader => {
+    let header = kotlinHeaders.get(f.path);
+    if (!header) { header = scanKotlinFile(f.content); kotlinHeaders.set(f.path, header); }
+    return header;
+  };
 
   const goPackageSetsByDir = new Map<string, Set<string>>();
   const goFileDirs = new Set<string>();
@@ -293,15 +516,19 @@ function buildStaticLanguageImportMaps(
   const namespaceTypesByEcosystem = new Map<string, Map<string, Map<string, Set<string>>>>();
   for (const f of files) {
     if (!['Java', 'Kotlin', 'C#', 'PHP'].includes(f.language)) continue;
-    const namespace = declaredNamespace(f.content, f.language);
+    const namespace = f.language === 'Kotlin'
+      ? kotlinHeader(f).packageName
+      : declaredNamespace(f.content, f.language);
     if (!namespace) continue;
     const ecosystem = ecosystemFor(f.language);
     const fqnIndex = fqnIndexes.get(ecosystem) ?? new Map<string, Set<string>>();
     const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
-    const symbols = declaredTypes(f.content, f.language);
-    if (f.language === 'Kotlin') {
-      for (const m of sanitizeForRegex(f.content, false, true).matchAll(/^[ \t]*fun\s{1,80}([A-Za-z_]\w*)[ \t]*\(/gm)) symbols.push(m[1]);
-    } else if (f.language === 'PHP') {
+    // Kotlin: package-level types only, read by the declaration scanner. A member function is
+    // not a package symbol, and a package-level function is bound by `bindKotlinScopes` below.
+    const symbols = f.language === 'Kotlin'
+      ? kotlinHeader(f).declarations.filter(d => KOTLIN_TYPE_KINDS.has(d.kind)).map(d => d.name)
+      : declaredTypes(f.content, f.language);
+    if (f.language === 'PHP') {
       symbols.push(...declaredTopLevelFunctions(f.content));
     }
     const byName = namespaceTypes.get(namespace) ?? new Map<string, Set<string>>();
@@ -316,12 +543,20 @@ function buildStaticLanguageImportMaps(
     namespaceTypesByEcosystem.set(ecosystem, namespaceTypes);
   }
 
+  bindKotlinScopes(
+    files.filter(f => f.language === 'Kotlin'),
+    kotlinHeader,
+    fqnIndexes.get('JVM') ?? new Map(),
+    namespaceTypesByEcosystem.get('JVM') ?? new Map(),
+    map,
+  );
+
   for (const f of files) {
-    if (!['Java', 'Kotlin', 'C#', 'PHP'].includes(f.language)) continue;
+    if (!['Java', 'C#', 'PHP'].includes(f.language)) continue;
     const ecosystem = ecosystemFor(f.language);
     const fqnIndex = fqnIndexes.get(ecosystem) ?? new Map();
     const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
-    const code = sanitizeForRegex(f.content, false, f.language === 'Kotlin');
+    const code = sanitizeForRegex(f.content, false);
     const fileMap = new Map<string, string>();
     const conflicting = new Set<string>();
     const bind = (name: string, target: string, declaredQualifier?: string): void => {
@@ -343,7 +578,7 @@ function buildStaticLanguageImportMaps(
       }
     }
 
-    if (f.language === 'Java' || f.language === 'Kotlin') {
+    if (f.language === 'Java') {
       for (const m of code.matchAll(/^[ \t]*import\s{1,80}(?:(static)\s{1,80})?([\w.]+)(?:\s{1,80}as\s{1,80}(\w+))?[ \t]*;?/gm)) {
         const fqn = m[2];
         const local = m[3] ?? fqn.split('.').pop()!;

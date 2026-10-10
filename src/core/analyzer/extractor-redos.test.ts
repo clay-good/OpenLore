@@ -36,6 +36,8 @@ import { extractJavaRouteDefinitions } from './http-route-parser.js';
 import { tokenize } from './bm25-tokenizer.js';
 import { classifyYaml } from './iac/classify-yaml.js';
 import { extractTerraform } from './iac/terraform.js';
+import { kotlinCodeMask, normalizeKotlinForParse, scanKotlinFile } from './kotlin-source.js';
+import { buildBaseImportMap } from './import-resolver-bridge.js';
 
 /** An opening token repeated with no closer — the whole attack. */
 function payload(token: string, bytes: number): string {
@@ -938,4 +940,49 @@ describe('extractors are not quadratic on a whitespace-run or blank-line flood',
     // to the whitespace bound — verified identical against the unfixed extractor).
     expect(await paths('@RestController\nclass C {\n @RequestMapping(path  =  { "/p" }, method = RequestMethod.GET)\n public String a(){return "";}\n}\n')).toEqual(['/p']);
   });
+});
+
+// change: fix-kotlin-package-binding-soundness / harden-kotlin-grammar-currency (issue #546).
+// The Kotlin scanners run on every `.kt` file before it is parsed and again in the import bridge.
+describe('Kotlin source scanners are not quadratic on a hostile file', () => {
+  const KOTLIN_PAYLOADS: Array<[string, string]> = [
+    ['repeated `fun ` with no parameter list', 'fun '],
+    ['repeated modifiers', 'private '],
+    ['repeated annotations', '@A '],
+    ['repeated `fun <`', 'fun <'],
+    ['repeated `val a.`', 'val a.'],
+    ['repeated `class `', 'class '],
+    ['repeated `import a.`', 'import a.'],
+    ['unterminated raw strings', '"""'],
+    ['unterminated template expressions', '"${'],
+    ['unterminated block comment openers', '/*'],
+    ['lone backticks', '` \n'],
+    ['lone quotes', "' "],
+    ['repeated `..<`', '..<'],
+    ['repeated `fun interface`', 'fun interface '],
+    ['repeated `$$"`', '$$"'],
+    ['unbalanced braces', '{ ( [ '],
+  ];
+
+  it.each(KOTLIN_PAYLOADS)('scanKotlinFile survives %s', async (label, token) => {
+    expectLinearAndFast(await measure(b => { scanKotlinFile(payload(token, b)); }), `scanKotlinFile: ${label}`);
+  }, TIMEOUT_MS);
+
+  it.each(KOTLIN_PAYLOADS)('normalizeKotlinForParse and kotlinCodeMask survive %s', async (label, token) => {
+    expectLinearAndFast(await measure(b => {
+      const source = payload(token, b);
+      expect(kotlinCodeMask(source).length).toBe(source.length);
+      expect(normalizeKotlinForParse(source).length).toBe(source.length);
+    }), `kotlin normalize: ${label}`);
+  }, TIMEOUT_MS);
+
+  it('the Kotlin import bridge survives a package of many same-named declarations', async () => {
+    expectLinearAndFast(await measure(b => {
+      const body = payload('fun dup() = 1\n', b / 2);
+      buildBaseImportMap([
+        { path: 'a/A.kt', language: 'Kotlin', content: `package a\n${body}` },
+        { path: 'a/B.kt', language: 'Kotlin', content: `package a\nimport a.*\n${body}` },
+      ]);
+    }), 'kotlin import bridge');
+  }, TIMEOUT_MS);
 });

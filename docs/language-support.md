@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (11)
+#### Supported (22)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -100,15 +100,6 @@ that a test checks on every run.
 | call graph | `util/Strings.kt::loadName` calls `util/Strings.kt::load` | `add-kotlin-reference-corpus-conformance` |
 | call graph | `Application.kt::module` calls `service/UserService.kt::UserService.create` | `add-kotlin-reference-corpus-conformance` |
 | call graph | no call edge joins `client/OrderClient.kt::fetchHealth` to `web/UserController.kt::UserController.get`: `client.get(...)` is a Ktor client call | `add-kotlin-reference-corpus-conformance` |
-| call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` | `add-kotlin-reference-corpus-conformance` |
-| grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
-
-#### Known gaps (78)
-
-A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
-
-| Area | Fact | Change |
-|---|---|---|
 | call graph | no call edge joins `web/UserController.kt::UserController.create` to `web/UserController.kt::UserController.create`: `this.service.create(name)` is a call on a property, not recursion | `fix-kotlin-package-binding-soundness` |
 | call graph | no call edge joins `service/UserService.kt::UserService.find` to `service/UserService.kt::UserService.find`: `repo.find(id)` is a call on a property, not recursion | `fix-kotlin-package-binding-soundness` |
 | call graph | no call edge joins `service/UserService.kt::UserService.require` to `service/UserService.kt::UserService.find`: `repo.find(id)` has the receiver `repo` | `fix-kotlin-package-binding-soundness` |
@@ -121,6 +112,14 @@ A known gap is checked too: the test fails when a gap closes until the row moves
 | call graph | `service/UserService.kt::UserService.label` calls `util/Strings.kt::slugify` (import) | `fix-kotlin-package-binding-soundness` |
 | call graph | `service/UserService.kt::UserService.create` calls `util/Strings.kt::slugify` (import) | `fix-kotlin-package-binding-soundness` |
 | call graph | `Application.kt::module` calls `repo/Stores.kt::openStore` (import) | `fix-kotlin-package-binding-soundness` |
+| grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
+
+#### Known gaps (67)
+
+A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
+
+| Area | Fact | Change |
+|---|---|---|
 | call graph | `service/UserService.kt::UserService.create` calls `repo/UserRepository.kt::UserRepository.save` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | call graph | `service/UserService.kt::UserService.find` calls `repo/UserRepository.kt::UserRepository.find` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | call graph | `web/UserController.kt::UserController.get` calls `service/UserService.kt::UserService.find` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
@@ -180,6 +179,7 @@ A known gap is checked too: the test fails when a gap closes until the row moves
 | capabilities | Kotlin backs the `styleFingerprint` capability | `add-kotlin-style-fingerprint` |
 | public surface | the public surface lists `openStore` and `UserService`, and does not list the private `load` | `add-kotlin-public-surface` |
 | tests | the Kotest spec `UserServiceSpec` has a test node for "safeDescribe falls back" that reaches `UserService.safeDescribe` | `add-kotlin-test-detection-and-generation` |
+| call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | entry points | `main` in `Application.kt` is a root named by `application { mainClass.set("com.acme.ApplicationKt") }` | `add-kotlin-entry-point-roots` |
 | entry points | the Spring handler `UserController.get` is a framework root, not a dead-code candidate | `add-kotlin-entry-point-roots` |
 | identity | the project type is Kotlin | `add-kotlin-project-identity` |
