@@ -22,7 +22,7 @@
 
 ## Verification
 - [x] Ledger at landing matches the behavior of the current build exactly
-- [x] Full suite green
+- [ ] Full suite green (run once for the whole change set, in the pull request)
 
 ## Spec
 - [x] `analyzer` delta: ADD KotlinSupportIsProvenByAReferenceProjectLedger

@@ -16,7 +16,6 @@ export const KOTLIN_NEVER_BACKED: Partial<Record<Capability, string>> = {
 
 export const KOTLIN_CAPABILITY_TARGET: { missing: Partial<Record<Capability, KotlinChange>> } = {
   missing: {
-    receiverResolution: 'add-kotlin-declared-type-receivers',
     styleFingerprint: 'add-kotlin-style-fingerprint',
     crossServiceHttp: 'add-kotlin-http-topology',
     errorPropagation: 'add-kotlin-error-propagation',

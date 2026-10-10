@@ -6,13 +6,19 @@
  * or line number in the result is the same offset or line number in the input.
  */
 
+/** Longest modifier chain read before a declaration keyword. Bounds the backward walk. */
+const MAX_MODIFIER_CHAIN = 16;
+/** Longest declaration header (type parameters and receiver) scanned for its name. */
+const MAX_HEADER_CHARS = 400;
+
 /**
  * Return `content` with comments and string-literal text replaced by spaces, newlines kept.
- * Code inside a `${ … }` template expression is kept, because it is code. Nested block comments,
+ * Code inside a `${ … }` template expression is kept, because it is code (pass `'blank'` to blank
+ * it too, for a rewrite that must not touch an expression inside a string). Nested block comments,
  * raw strings, character literals, and backtick identifiers are handled. An unterminated literal
  * or comment runs to the end of input.
  */
-export function kotlinCodeMask(content: string): string {
+export function kotlinCodeMask(content: string, templateCode: 'keep' | 'blank' = 'keep'): string {
   const n = content.length;
   const out = new Array<string>(n);
   const blank = (i: number): void => { out[i] = content[i] === '\n' ? '\n' : ' '; };
@@ -89,7 +95,7 @@ export function kotlinCodeMask(content: string): string {
         if (frame.depth === 0) { blank(i); i++; continue; }
       }
     }
-    out[i] = c;
+    out[i] = templateCode === 'blank' && strings.length > 0 ? (c === '\n' ? '\n' : ' ') : c;
     i++;
   }
   return out.join('');
@@ -107,10 +113,15 @@ export function kotlinCodeMask(content: string): string {
  *   multi-dollar prefix is hidden. (Its text may then show a `$name` as a template reference.
  *   No extractor reads a name out of a template reference.)
  *
- * A file that uses neither form is returned unchanged (same string instance).
+ * - `class A { object B { … } }` on one line → `class A { object B { … };}`. The grammar needs a
+ *   statement separator after a nested class-like body that is closed on the same line as its
+ *   owner; the `;` replaces one blank and changes no declaration.
+ *
+ * A file that uses none of these forms is returned unchanged (same string instance).
  */
 export function normalizeKotlinForParse(content: string): string {
-  if (!content.includes('..<') && !content.includes('$$"') && !/\bfun\s+interface\b/.test(content)) return content;
+  const nestedClose = /\}[ \t]+\}/.test(content);
+  if (!content.includes('..<') && !content.includes('$$"') && !nestedClose && !/\bfun\s+interface\b/.test(content)) return content;
   const code = kotlinCodeMask(content);
   const chars = [...content];
   let changed = false;
@@ -127,6 +138,29 @@ export function normalizeKotlinForParse(content: string): string {
     if (content[m.index + m[0].length] !== '"') continue;
     for (let k = 0; k < m[0].length; k++) chars[m.index + k] = ' ';
     changed = true;
+  }
+  if (nestedClose) {
+    // Template expressions are blanked here: `"${ x.let { it } }"` must stay as written.
+    const plain = kotlinCodeMask(content, 'blank');
+    const classLike: boolean[] = [];
+    let statementStart = 0;
+    for (let i = 0; i < plain.length; i++) {
+      const c = plain[i];
+      if (c === '{') {
+        classLike.push(/\b(?:class|object|interface)\b/.test(plain.slice(Math.max(statementStart, i - MAX_HEADER_CHARS), i)));
+        statementStart = i + 1;
+      } else if (c === '}') {
+        if (classLike.pop()) {
+          let next = i + 1;
+          while (plain[next] === ' ' || plain[next] === '\t') next++;
+          if (next > i + 1 && plain[next] === '}') { chars[next - 1] = ';'; changed = true; }
+        }
+        statementStart = i + 1;
+      } else if (c === ';' || c === '\n') {
+        // A class header may span lines; only a `;` or a blank line ends the statement for sure.
+        if (c === ';' || plain[i + 1] === '\n') statementStart = i + 1;
+      }
+    }
   }
   return changed ? chars.join('') : content;
 }
@@ -245,10 +279,6 @@ function splitReceiver(path: string): { receiverType?: string; name: string } {
 const isWordChar = (c: string | undefined): boolean => c !== undefined && /[A-Za-z0-9_]/.test(c);
 const isBlank = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r';
 
-/** Longest modifier chain read before a declaration keyword. Bounds the backward walk. */
-const MAX_MODIFIER_CHAIN = 16;
-/** Longest declaration header (type parameters and receiver) scanned for its name. */
-const MAX_HEADER_CHARS = 400;
 
 /**
  * Modifiers and annotations written immediately before the keyword at `offset`. The chain must

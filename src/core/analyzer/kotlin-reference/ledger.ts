@@ -226,13 +226,13 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
   edge('binding-wildcard-import', 'asserted', 'fix-kotlin-package-binding-soundness', 'Application.kt::~module', 'repo/Stores.kt::openStore', ['import']),
 
   // ── add-kotlin-declared-type-receivers ────────────────────────────────────
-  edge('receiver-constructor-property', 'known-gap', 'add-kotlin-declared-type-receivers', `${SERVICE}.create`, `${REPO}::UserRepository.save`, TYPE_DERIVED),
-  edge('receiver-constructor-property-expression-body', 'known-gap', 'add-kotlin-declared-type-receivers', `${SERVICE}.find`, `${REPO}::UserRepository.find`, TYPE_DERIVED),
-  edge('receiver-controller-property', 'known-gap', 'add-kotlin-declared-type-receivers', 'web/UserController.kt::UserController.get', `${SERVICE}.find`, TYPE_DERIVED),
-  edge('receiver-this-property-chain', 'known-gap', 'add-kotlin-declared-type-receivers', 'web/UserController.kt::UserController.create', `${SERVICE}.create`, ['receiver_inferred']),
-  edge('receiver-typed-parameter', 'known-gap', 'add-kotlin-declared-type-receivers', 'Application.kt::warmUp', 'client/OrderClient.kt::OrderClient.fetch', TYPE_DERIVED),
-  edge('receiver-delegate-property', 'known-gap', 'add-kotlin-declared-type-receivers', `${REPO}::AuditedUserRepository.save`, `${REPO}::UserRepository.save`, TYPE_DERIVED),
-  capability('receiver-capability', 'known-gap', 'add-kotlin-declared-type-receivers', 'receiverResolution'),
+  edge('receiver-constructor-property', 'asserted', 'add-kotlin-declared-type-receivers', `${SERVICE}.create`, `${REPO}::UserRepository.save`, TYPE_DERIVED),
+  edge('receiver-constructor-property-expression-body', 'asserted', 'add-kotlin-declared-type-receivers', `${SERVICE}.find`, `${REPO}::UserRepository.find`, TYPE_DERIVED),
+  edge('receiver-controller-property', 'asserted', 'add-kotlin-declared-type-receivers', 'web/UserController.kt::UserController.get', `${SERVICE}.find`, TYPE_DERIVED),
+  edge('receiver-this-property-chain', 'asserted', 'add-kotlin-declared-type-receivers', 'web/UserController.kt::UserController.create', `${SERVICE}.create`, ['receiver_inferred']),
+  edge('receiver-typed-parameter', 'asserted', 'add-kotlin-declared-type-receivers', 'Application.kt::warmUp', 'client/OrderClient.kt::OrderClient.fetch', TYPE_DERIVED),
+  edge('receiver-delegate-property', 'asserted', 'add-kotlin-declared-type-receivers', `${REPO}::AuditedUserRepository.save`, `${REPO}::UserRepository.save`, TYPE_DERIVED),
+  capability('receiver-capability', 'asserted', 'add-kotlin-declared-type-receivers', 'receiverResolution'),
 
   // ── add-kotlin-callable-node-shapes ───────────────────────────────────────
   node('shape-primary-constructor', 'known-gap', 'add-kotlin-callable-node-shapes', `${SERVICE}.<init>`, 'the constructor'),
@@ -396,7 +396,7 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     m => m.edges.some(e => e.to === `${SERVICE}.safeDescribe` && m.nodes.get(e.from)?.isTest === true
       && e.from.startsWith('service/UserServiceSpec.kt::'))),
   // `service` is a class property initialized by a constructor call.
-  edge('tests-junit-reaches-service', 'known-gap', 'add-kotlin-declared-type-receivers', `${TEST}.describesMissingUser`, `${SERVICE}.describe`, TYPE_DERIVED),
+  edge('tests-junit-reaches-service', 'asserted', 'add-kotlin-declared-type-receivers', `${TEST}.describesMissingUser`, `${SERVICE}.describe`, TYPE_DERIVED),
 
   // ── add-kotlin-entry-point-roots ──────────────────────────────────────────
   entry('roots-gradle-main-class', 'entry points', 'known-gap', 'add-kotlin-entry-point-roots',

@@ -95,6 +95,12 @@ export const KOTLIN_EXTENSION_PREFIX = '\0kt-ext:';
 export const KOTLIN_PROPERTY_PREFIX = '\0kt-prop:';
 export const KOTLIN_MEMBER_PREFIX = '\0kt-member:';
 export const KOTLIN_EXTERNAL_PREFIX = '\0kt-external:';
+/**
+ * A type name that is in scope but declared in more than one file at the level that decided it.
+ * The value is the candidate files joined by `\0`, so a consumer can disclose the ambiguity with
+ * its candidates instead of reporting "no such type".
+ */
+export const KOTLIN_AMBIGUOUS_TYPE_PREFIX = '\0kt-ambiguous-type:';
 
 export interface KotlinCallableBinding { file: string; name: string; offsets: number[] }
 
@@ -336,6 +342,9 @@ function bindKotlinScopes(
         const [kind, local] = key.split('\0') as [KotlinScopeKind, string];
         if (decided[kind].has(local)) continue;
         decided[kind].set(local, values.size === 1 ? values.values().next().value! : null);
+        if (kind === 'type' && values.size > 1) {
+          fileMap.set(`${KOTLIN_AMBIGUOUS_TYPE_PREFIX}${local}`, [...values].sort().join('\0'));
+        }
       }
     };
     const offerPackageName = (level: Map<string, Set<string>>, pkgName: string, name: string, local: string): boolean => {
@@ -380,6 +389,7 @@ function bindKotlinScopes(
       }
       // Names nothing in the repository: a library symbol. It still shadows lower levels.
       external.add(local);
+      fileMap.set(`${EXTERNAL_IMPORT_PREFIX}${local}`, imp.fqn);
       for (const kind of ['type', 'function', 'extension', 'property'] as const) decided[kind].set(local, null);
     }
     commit(explicit);
@@ -516,10 +526,11 @@ function buildStaticLanguageImportMaps(
   const namespaceTypesByEcosystem = new Map<string, Map<string, Map<string, Set<string>>>>();
   for (const f of files) {
     if (!['Java', 'Kotlin', 'C#', 'PHP'].includes(f.language)) continue;
+    // A Kotlin file with no `package` line is in the root package, which is a real package.
     const namespace = f.language === 'Kotlin'
       ? kotlinHeader(f).packageName
       : declaredNamespace(f.content, f.language);
-    if (!namespace) continue;
+    if (namespace === undefined || (!namespace && f.language !== 'Kotlin')) continue;
     const ecosystem = ecosystemFor(f.language);
     const fqnIndex = fqnIndexes.get(ecosystem) ?? new Map<string, Set<string>>();
     const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
@@ -533,7 +544,7 @@ function buildStaticLanguageImportMaps(
     }
     const byName = namespaceTypes.get(namespace) ?? new Map<string, Set<string>>();
     for (const symbol of symbols) {
-      addTarget(fqnIndex, `${namespace}.${symbol}`, f.path);
+      addTarget(fqnIndex, namespace ? `${namespace}.${symbol}` : symbol, f.path);
       const targets = byName.get(symbol) ?? new Set<string>();
       targets.add(f.path);
       byName.set(symbol, targets);

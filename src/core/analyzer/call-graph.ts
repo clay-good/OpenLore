@@ -22,6 +22,7 @@ import {
   EXTERNAL_IMPORT_PREFIX,
   IMPORT_QUALIFIER_PREFIX,
   IMPORT_TOP_LEVEL_QUALIFIER,
+  KOTLIN_AMBIGUOUS_TYPE_PREFIX,
   KOTLIN_EXTENSION_PREFIX,
   KOTLIN_EXTERNAL_PREFIX,
   KOTLIN_FUNCTION_PREFIX,
@@ -50,7 +51,8 @@ import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
-import { normalizeKotlinForParse } from './kotlin-source.js';
+import { kotlinCodeMask, normalizeKotlinForParse } from './kotlin-source.js';
+import { kotlinFunctionParameters, kotlinReturnType, type KotlinNode } from './kotlin-extract.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import {
@@ -2871,6 +2873,17 @@ function enclosingGroupName(node: TsNodeLike, classTypes: Set<string>): string |
   return undefined;
 }
 
+/** True when the bracket opened at `open` in `text` is closed by the last character of `text`. */
+function closesAtEnd(text: string, open: number): boolean {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') { depth--; if (depth === 0) return i === text.length - 1; }
+  }
+  return false;
+}
+
 interface QueryLangSpec {
   language: string;
   loader: () => Promise<GrammarHandle | null>;
@@ -2884,6 +2897,14 @@ interface QueryLangSpec {
   callFilter?: (calleeName: string, definedNames: Set<string>) => boolean;
   /** Optional receiver recovery for grammars whose call query historically captured only a name. */
   callObject?: (callNode: TsNodeLike) => string | undefined;
+  /** Optional per-language enrichment of a node from its declaration (parameters, return type). */
+  enrichNode?: (fnNode: TsNodeLike, node: FunctionNode) => void;
+  /**
+   * Matches a chained intra-object receiver (`this.repo` in `this.repo.save()`); group 1 is the
+   * field. The raw edge then carries `calleeObject: 'this'` and `receiverField`, the shape the
+   * receiver registry resolves (change: add-kotlin-declared-type-receivers).
+   */
+  selfFieldReceiver?: RegExp;
 }
 
 
@@ -2932,7 +2953,7 @@ async function extractByQueries(
       // Built inside withTree while the (possibly WASM) tree is live.
       const fnCfg = buildCfgFor(fnNode as unknown as CfgNode, spec.language);
       if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
-      nodes.push({
+      const node: FunctionNode = {
         id, name, filePath, className,
         isAsync: false,
         language: spec.language,
@@ -2940,7 +2961,9 @@ async function extractByQueries(
         endIndex: fnNode.endIndex,
         fanIn: 0, fanOut: 0,
         signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, spec.language),
-      });
+      };
+      spec.enrichNode?.(fnNode, node);
+      nodes.push(node);
       nodeIds.add(id);
     }
 
@@ -2958,11 +2981,17 @@ async function extractByQueries(
       if (spec.callFilter && !spec.callFilter(calleeName, definedNames)) continue;
       const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
       if (!caller) continue;
-      const calleeObject = objectCapture?.node.text ?? spec.callObject?.(nodeCapture.node);
-      const key = `${caller.id}\0${calleeName}\0${calleeObject ?? ''}\0${nodeCapture.node.startIndex}`;
+      const writtenObject = objectCapture?.node.text ?? spec.callObject?.(nodeCapture.node);
+      const selfField = writtenObject ? spec.selfFieldReceiver?.exec(writtenObject)?.[1] : undefined;
+      const calleeObject = selfField ? 'this' : writtenObject;
+      const key = `${caller.id}\0${calleeName}\0${writtenObject ?? ''}\0${nodeCapture.node.startIndex}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject, offset: nodeCapture.node.startIndex });
+      rawEdges.push({
+        callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject,
+        ...(selfField ? { receiverField: selfField } : {}),
+        offset: nodeCapture.node.startIndex,
+      });
     }
     const cfg = materializeCfgByNodeId(nodes, cfgByStart);
     // WASM grammars (e.g. Lua) yield spurious errors after the first parse — skip parse-health there.
@@ -2970,11 +2999,17 @@ async function extractByQueries(
       ? undefined
       : tallyParseHealth('', _root as unknown as ParseHealthNode, filePath);
     const classRelationships = collectClassRelationshipFacts(spec.language, runOptionalQuery);
+    // Non-members of the receiver registry return nothing here; no query is run for them.
+    const receiverFields = collectReceiverFieldFacts(spec.language, runOptionalQuery as never);
     const dynamicDispatch = collectPass1DynamicDispatch(spec.language, content, _root, nodes, filePath);
     const dynamicBoundary = tallyDynamicBoundary(spec.language, _root, nodes, content);
     // WASM trees are not reliable across parses (see parseHealthReliable) — no content hashes there.
     const contentHashes = handle.parseHealthReliable === false ? undefined : contentHashesFor(_root, nodes, content, spec.language);
-    return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary, ...(contentHashes ? { contentHashes } : {}) };
+    return {
+      nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary,
+      ...(receiverFields.length ? { receiverFields } : {}),
+      ...(contentHashes ? { contentHashes } : {}),
+    };
   });
   return grammarStatus(spec.language) === 'unavailable'
     ? emptyForUnavailable(spec.language)
@@ -3027,6 +3062,14 @@ const KOTLIN_SPEC: QueryLangSpec = {
   callObject: (call) => {
     const navigation = call.namedChildren.find(c => c.type === 'navigation_expression');
     return navigation?.namedChildren.find(c => c.type !== 'navigation_suffix')?.text;
+  },
+  // `this.repo.save()` and `this.repo!!.save()`; a longer chain (`this.a.b.m()`) is not typed.
+  selfFieldReceiver: /^this\s*\.\s*`?([A-Za-z_][A-Za-z0-9_]*)`?(?:!!)?$/,
+  enrichNode: (fnNode, node) => {
+    const parameters = kotlinFunctionParameters(fnNode as unknown as KotlinNode);
+    if (parameters.length > 0) node.parameters = parameters;
+    const returnType = kotlinReturnType(fnNode as unknown as KotlinNode);
+    if (returnType) node.returnType = returnType;
   },
 };
 
@@ -5766,6 +5809,195 @@ export class CallGraphBuilder {
       return matches.length === 1 ? matches[0] : undefined;
     };
 
+    /** Node id → the function nodes of its file, for lexical containment (Kotlin only, lazy). */
+    const kotlinNodesByFile = new Map<string, FunctionNode[]>();
+    const kotlinFileNodes = (filePath: string): FunctionNode[] => {
+      let list = kotlinNodesByFile.get(filePath);
+      if (!list) {
+        list = [...allNodes.values()].filter(n => n.filePath === filePath && !n.isExternal);
+        kotlinNodesByFile.set(filePath, list);
+      }
+      return list;
+    };
+    /** The caller and every function that lexically contains it, innermost first. */
+    const kotlinEnclosingChain = (callerNode: FunctionNode): FunctionNode[] =>
+      kotlinFileNodes(callerNode.filePath)
+        .filter(n => n.startIndex <= callerNode.startIndex && callerNode.endIndex <= n.endIndex)
+        .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex));
+
+    const kotlinMaskByNode = new Map<string, string>();
+    const kotlinBodyMask = (node: FunctionNode): string => {
+      let mask = kotlinMaskByNode.get(node.id);
+      if (mask === undefined) {
+        mask = kotlinCodeMask((fileContents.get(node.filePath) ?? '').slice(node.startIndex, node.endIndex));
+        kotlinMaskByNode.set(node.id, mask);
+      }
+      return mask;
+    };
+
+    /**
+     * Does the function declare a local named `name` before `offset`? A local, a destructured
+     * component, a loop variable, a lambda parameter, or a catch parameter shadows a parameter
+     * and a class property, so its presence means the outer declaration must not type the receiver.
+     */
+    const kotlinDeclaresLocal = (scopeNode: FunctionNode, name: string, absoluteOffset: number): boolean => {
+      const body = kotlinBodyMask(scopeNode).slice(0, Math.max(0, absoluteOffset - scopeNode.startIndex));
+      const n = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(
+        `\\b(?:val|var)\\s+(?:\\([^()\\n]{0,200}\\b)?${n}\\b`
+        + `|\\bfor\\s*\\(\\s*(?:\\([^()\\n]{0,200}\\b)?${n}\\b`
+        + `|\\bcatch\\s*\\(\\s*${n}\\s*:`
+        + `|\\{[ \\t]*(?:[^{}\\n]{0,200}?[\\s,(])?${n}\\b[^{}\\n]{0,200}->`,
+      ).test(body);
+    };
+
+    /** Reduce a written Kotlin type to the simple name a receiver is looked up by. */
+    const kotlinTypeSimpleName = (written: string | undefined): string | undefined => {
+      if (!written) return undefined;
+      let text = written.trim();
+      while (text.startsWith('(') && text.endsWith(')?')) text = text.slice(1, -2).trim();
+      if (text.includes('->')) return undefined; // a function type
+      const name = text.replace(/<[\s\S]*$/, '').replace(/[?!\s]+$/, '').split('.').pop()!.trim();
+      return /^[A-Z][A-Za-z0-9_]*$/.test(name) ? name : undefined;
+    };
+
+    /**
+     * The one member `member` of the Kotlin type `typeName` as `callerFile` sees it
+     * (change: add-kotlin-declared-type-receivers). The type must be in the file's scope or be
+     * declared in the file itself; a repository-wide namesake is never used. A member the type
+     * does not declare is looked up on its declared supertypes.
+     */
+    const pickKotlinTypeMember = (callerFile: string, typeName: string, member: string): AffinityPick => {
+      const found = new Set<FunctionNode>();
+      const seen = new Set<string>();
+      const visit = (viewerFile: string, name: string, depth: number): void => {
+        const scope = callImportMap.get(viewerFile);
+        const declaringFile = scope?.get(name);
+        const declared = scope?.get(`${IMPORT_QUALIFIER_PREFIX}${name}`) ?? name;
+        // The viewer's own declaration wins over a same-named type elsewhere in its package.
+        const ownFile = trie.findByQualifiedName(name, member).filter(n => n.filePath === viewerFile);
+        if (!declaringFile && ownFile.length > 0) { for (const n of ownFile) found.add(n); return; }
+        // In scope but declared in several files: every candidate is reported, none is chosen.
+        const ambiguousFiles = declaringFile ? undefined : scope?.get(`${KOTLIN_AMBIGUOUS_TYPE_PREFIX}${name}`)?.split('\0');
+        if (ambiguousFiles) {
+          for (const n of trie.findByQualifiedName(name, member)) if (ambiguousFiles.includes(n.filePath)) found.add(n);
+          return;
+        }
+        const typeFile = declaringFile ?? viewerFile; // not in scope → only a type of this very file
+        const key = `${typeFile}\0${declared}`;
+        if (seen.has(key) || depth > 8) return;
+        seen.add(key);
+        const own = trie.findByQualifiedName(declared, member).filter(n => matchesImportedTarget(n.filePath, typeFile));
+        if (own.length > 0) { for (const n of own) found.add(n); return; }
+        for (const candidateFile of new Set(kotlinClassFiles(typeFile, declared))) {
+          const rel = relationships.get(`${candidateFile}::${declared}`);
+          for (const parent of [...(rel?.parentClasses ?? []), ...(rel?.interfaces ?? [])]) visit(candidateFile, parent, depth + 1);
+        }
+      };
+      visit(callerFile, typeName, 0);
+      if (found.size === 1) return { kind: 'unique', node: found.values().next().value! };
+      return found.size > 1
+        ? { kind: 'ambiguous', candidates: [...found].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) }
+        : { kind: 'none' };
+    };
+    /** Files matching an import target that declare class `name` (a target may be a directory). */
+    const kotlinClassFiles = (target: string, name: string): string[] =>
+      [...relationships.keys()]
+        .filter(key => key.endsWith(`::${name}`))
+        .map(key => key.slice(0, key.length - name.length - 2))
+        .filter(file => matchesImportedTarget(file, target));
+
+    /**
+     * What a bare Kotlin name (`f(x)`, no receiver) refers to from inside `callerNode`
+     * (change: fix-kotlin-package-binding-soundness): a function nested in the caller, then a
+     * member of the caller's class or its supertypes, then a name in the file's scope, then the
+     * file's own package-level declaration. Nothing else can be meant.
+     */
+    const resolveKotlinBareName = (
+      callerNode: FunctionNode,
+      name: string,
+    ): { node?: FunctionNode; confidence?: EdgeConfidence; ambiguous?: FunctionNode[] } => {
+      const scope = callImportMap.get(callerNode.filePath);
+      const sameFile = trie.findBySimpleName(name).filter(c => c.filePath === callerNode.filePath);
+      const nested = sameFile
+        .filter(c => c !== callerNode && c.startIndex >= callerNode.startIndex && c.endIndex <= callerNode.endIndex)
+        .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex))[0];
+      let bound: FunctionNode | undefined = nested;
+      let inherited = false;
+      if (!bound && callerNode.className) {
+        const res = resolveSelfMethod(callerNode, name, true);
+        if (res.ambiguous) return { ambiguous: res.ambiguous };
+        bound = res.node;
+        inherited = !!bound && bound.filePath !== callerNode.filePath;
+      }
+      if (!bound) {
+        bound = kotlinDeclarationNode(scope?.get(`${KOTLIN_FUNCTION_PREFIX}${name}`))
+          // An extension function called on the implicit receiver (`slugify()` inside another
+          // extension of the same type, or inside a member).
+          ?? kotlinDeclarationNode(scope?.get(`${KOTLIN_EXTENSION_PREFIX}${name}`));
+      }
+      if (!bound) {
+        const member = decodeKotlinMember(scope?.get(`${KOTLIN_MEMBER_PREFIX}${name}`));
+        const candidates = member
+          ? trie.findByQualifiedName(member.owner, name).filter(n => n.filePath === member.file)
+          : [];
+        if (candidates.length === 1) bound = candidates[0];
+      }
+      // The package declares the name in two files (for example `main` and `test` source sets):
+      // the file's own package-level declaration is the one it sees.
+      if (!bound && !scope?.has(`${KOTLIN_EXTERNAL_PREFIX}${name}`)) {
+        const own = sameFile.filter(c => !c.className);
+        if (own.length === 1) bound = own[0];
+      }
+      if (!bound) return {};
+      return {
+        node: bound,
+        confidence: inherited ? 'self_cls' : bound.filePath === callerNode.filePath ? 'same_file' : 'import',
+      };
+    };
+
+    /**
+     * The declared return type behind `val <receiver> = f(…)` in the caller, when that is the only
+     * declaration of the name before `offset`, `f` is a bare name that resolves to one project
+     * function, and that function writes its return type
+     * (change: add-kotlin-declared-type-receivers). A `var`, a second declaration, or a callee
+     * with an inferred return type gives nothing.
+     */
+    const kotlinLocalCallReturnType = (callerNode: FunctionNode, receiver: string, offset: number | undefined): string | undefined => {
+      const body = kotlinBodyMask(callerNode).slice(0, Math.max(0, (offset ?? callerNode.endIndex) - callerNode.startIndex));
+      const n = receiver.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const declarations = [...body.matchAll(new RegExp(`\\b(val|var)\\s+${n}\\b([^\\n=]{0,80})=\\s*([a-z_][A-Za-z0-9_]*)?\\s*(\\()?`, 'g'))];
+      if (declarations.length !== 1) return undefined;
+      const [, keyword, between, callee, paren] = declarations[0];
+      if (keyword !== 'val' || between.trim() !== '' || !callee || !paren) return undefined;
+      // The declaration must still be in scope at the call: every block open at the declaration
+      // is still open at the end of `body` (which ends at the call).
+      let depth = 0;
+      let minDepth = 0;
+      for (let k = declarations[0].index; k < body.length; k++) {
+        if (body[k] === '{') depth++;
+        else if (body[k] === '}') { depth--; if (depth < minDepth) minDepth = depth; }
+      }
+      if (minDepth < 0) return undefined;
+      return kotlinTypeSimpleName(resolveKotlinBareName(callerNode, callee).node?.returnType);
+    };
+
+    /**
+     * The declared receiver type of the bare name `receiver` at a Kotlin call site: a parameter of
+     * the caller or of a function that contains it, else a property of the caller's class. A local
+     * of that name hides both, so it ends the lookup with no type.
+     */
+    const kotlinDeclaredReceiverType = (callerNode: FunctionNode, receiver: string, offset: number | undefined): string | undefined => {
+      const chain = kotlinEnclosingChain(callerNode);
+      const outermost = chain.at(-1) ?? callerNode;
+      if (kotlinDeclaresLocal(outermost, receiver, offset ?? callerNode.endIndex)) return undefined;
+      for (const scopeNode of chain) {
+        const parameter = scopeNode.parameters?.find(p => p.name === receiver);
+        if (parameter) return kotlinTypeSimpleName(parameter.type);
+      }
+      return resolveReceiverFieldType(callerNode, receiver, true);
+    };
+
     /** `filePath::Class.field → Type`, with every conflicting observation already refused
      *  (change: shrink-receiver-resolution-boundary). */
     const receiverFields = buildReceiverFieldRegistry(receiverFieldFacts);
@@ -5914,11 +6146,13 @@ export class CallGraphBuilder {
           raw.calleeObject !== 'super',
         );
         if (fieldType) {
-          const picked = pickReceiverTarget(
-            trie.findByQualifiedName(fieldType, raw.calleeName),
-            callerNode.filePath,
-            fieldType,
-          );
+          const picked = callerNode.language === 'Kotlin'
+            ? pickKotlinTypeMember(callerNode.filePath, fieldType, raw.calleeName)
+            : pickReceiverTarget(
+              trie.findByQualifiedName(fieldType, raw.calleeName),
+              callerNode.filePath,
+              fieldType,
+            );
           if (picked.kind === 'unique') { calleeNode = picked.node; confidence = 'receiver_inferred'; }
           else if (picked.kind === 'ambiguous') { recordAmbiguous(raw, 'receiver_inferred', picked.candidates); continue; }
         }
@@ -6029,14 +6263,39 @@ export class CallGraphBuilder {
             )
             : inferredTypes.get(raw.calleeObject);
           if (inferredClass) {
-            const picked = pickByAffinity(
-              trie.findByQualifiedName(inferredClass, raw.calleeName),
-              callerNode.filePath,
-              inferredClass,
-            );
+            const picked = callerNode.language === 'Kotlin'
+              ? pickKotlinTypeMember(callerNode.filePath, inferredClass, raw.calleeName)
+              : pickByAffinity(
+                trie.findByQualifiedName(inferredClass, raw.calleeName),
+                callerNode.filePath,
+                inferredClass,
+              );
             if (picked.kind === 'unique') { calleeNode = picked.node; confidence = 'type_inference'; }
             else if (picked.kind === 'ambiguous') { recordAmbiguous(raw, 'type_inference', picked.candidates); continue; }
           }
+        }
+      }
+
+      // Strategy K2 — Kotlin receiver typed by a declaration
+      // (change: add-kotlin-declared-type-receivers). `repo.save()` binds through the type the
+      // source WRITES for `repo`: a parameter, a class property, or a constructor call used as
+      // the receiver. No flow analysis: a smart cast, `it`, and a shadowing local give no type.
+      if (!calleeNode && callerNode.language === 'Kotlin' && raw.calleeObject
+        && raw.calleeObject !== 'this' && raw.calleeObject !== 'super' && !raw.receiverField) {
+        const receiver = raw.calleeObject.replace(/!!$/, '').replace(/^`|`$/g, '');
+        let receiverType: string | undefined;
+        if (/^[a-z_][A-Za-z0-9_]*$/.test(receiver)) {
+          receiverType = kotlinLocalCallReturnType(callerNode, receiver, raw.offset)
+            ?? kotlinDeclaredReceiverType(callerNode, receiver, raw.offset);
+        } else {
+          // `UserService(repo).find(id)`: the receiver is one constructor call.
+          const constructed = receiver.match(/^([A-Z][A-Za-z0-9_]*)\s*\(/);
+          if (constructed && closesAtEnd(receiver, receiver.indexOf('('))) receiverType = constructed[1];
+        }
+        if (receiverType) {
+          const picked = pickKotlinTypeMember(callerNode.filePath, receiverType, raw.calleeName);
+          if (picked.kind === 'unique') { calleeNode = picked.node; confidence = 'type_inference'; }
+          else if (picked.kind === 'ambiguous') { recordAmbiguous(raw, 'type_inference', picked.candidates); continue; }
         }
       }
 
@@ -6054,41 +6313,11 @@ export class CallGraphBuilder {
       // declares is external: it never binds to a same-named function the file cannot see, and
       // never to a member of an unrelated class.
       if (!calleeNode && callerNode.language === 'Kotlin' && !raw.calleeObject) {
-        const scope = callImportMap.get(callerNode.filePath);
-        const sameFile = trie.findBySimpleName(raw.calleeName).filter(c => c.filePath === callerNode.filePath);
-        const nested = sameFile
-          .filter(c => c !== callerNode && c.startIndex >= callerNode.startIndex && c.endIndex <= callerNode.endIndex)
-          .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex))[0];
-        let bound: FunctionNode | undefined = nested;
-        let boundConfidence: EdgeConfidence | undefined;
-        if (!bound && callerNode.className) {
-          const res = resolveSelfMethod(callerNode, raw.calleeName, true);
-          if (res.ambiguous) { recordAmbiguous(raw, 'self_cls', res.ambiguous); continue; }
-          bound = res.node;
-          if (bound && bound.filePath !== callerNode.filePath) boundConfidence = 'self_cls';
-        }
-        if (!bound) {
-          bound = kotlinDeclarationNode(scope?.get(`${KOTLIN_FUNCTION_PREFIX}${raw.calleeName}`))
-            // An extension function called on the implicit receiver (`slugify()` inside another
-            // extension of the same type, or inside a member).
-            ?? kotlinDeclarationNode(scope?.get(`${KOTLIN_EXTENSION_PREFIX}${raw.calleeName}`));
-        }
-        if (!bound) {
-          const member = decodeKotlinMember(scope?.get(`${KOTLIN_MEMBER_PREFIX}${raw.calleeName}`));
-          const candidates = member
-            ? trie.findByQualifiedName(member.owner, raw.calleeName).filter(n => n.filePath === member.file)
-            : [];
-          if (candidates.length === 1) bound = candidates[0];
-        }
-        // The package declares the name in two files (for example `main` and `test` source sets):
-        // the file's own package-level declaration is the one it sees.
-        if (!bound && !scope?.has(`${KOTLIN_EXTERNAL_PREFIX}${raw.calleeName}`)) {
-          const own = sameFile.filter(c => !c.className);
-          if (own.length === 1) bound = own[0];
-        }
-        if (bound) {
-          calleeNode = bound;
-          confidence = boundConfidence ?? (bound.filePath === callerNode.filePath ? 'same_file' : 'import');
+        const bare = resolveKotlinBareName(callerNode, raw.calleeName);
+        if (bare.ambiguous) { recordAmbiguous(raw, 'self_cls', bare.ambiguous); continue; }
+        if (bare.node) {
+          calleeNode = bare.node;
+          confidence = bare.confidence!;
         } else {
           if (raw.callType === 'constructor') continue;
           calleeNode = getOrCreateExternalNode(raw.calleeName, allNodes);

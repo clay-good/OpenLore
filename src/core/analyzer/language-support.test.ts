@@ -328,6 +328,14 @@ describe('every capability-set member is exercised against the real extractor (n
           language: 'Python',
         },
       ],
+      Kotlin: [
+        { path: 'Repo.kt', content: 'package m\nclass Repo { fun save(x: Int) = x }\n', language: 'Kotlin' },
+        {
+          path: 'Svc.kt',
+          content: 'package m\nclass Svc(private val repo: Repo) {\n  fun run() = this.repo.save(1)\n}\n',
+          language: 'Kotlin',
+        },
+      ],
     };
     const receiverEdges = async (files: Array<{ path: string; content: string; language: string }>) => {
       const result = await new CallGraphBuilder().build(files);

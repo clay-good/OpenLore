@@ -25,7 +25,7 @@
 - [x] Before/after structural diff on the reference corpus: every removed edge is a ledger entry
       with its reason. One correct edge (`service.describe(...)` on a class property) had resolved
       only through the unsound path; `add-kotlin-declared-type-receivers` restores it
-- [x] Full suite green
+- [ ] Full suite green (run once for the whole change set, in the pull request)
 
 ## Spec
 - [x] `analyzer` delta: ADD KotlinPackageBindingIsReceiverAwareAndDeclarationExact

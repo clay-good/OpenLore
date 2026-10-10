@@ -137,6 +137,13 @@ export interface FunctionNode {
   /** Declaration line(s) up to opening brace/colon, whitespace-normalized */
   signature?: string;
   /** True for synthetic nodes representing unresolved external/stdlib calls (e.g. fetch, https.request) */
+  /**
+   * Declared parameters, in source order (Kotlin; issue #546). `type` is as written. Absent for
+   * a language whose extractor does not record them.
+   */
+  parameters?: Array<{ name: string; type?: string; hasDefault?: true; isVararg?: true }>;
+  /** Declared return type as written (Kotlin). Absent when the source does not write one. */
+  returnType?: string;
   isExternal?: boolean;
   /** Classification of external node — used to filter stdlib noise from views */
   externalKind?: ExternalKind;
