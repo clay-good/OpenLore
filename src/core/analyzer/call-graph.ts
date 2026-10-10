@@ -53,6 +53,7 @@ import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { kotlinCodeMask, normalizeKotlinForParse } from './kotlin-source.js';
+import { kotlinFacadeName, kotlinJvmMembers, type KotlinJvmAccess, type KotlinJvmMember } from './kotlin-jvm-names.js';
 import {
   buildKotlinOwnerIndex, collectKotlinBodyNodes, collectKotlinClassFacts, collectKotlinExtraCalls,
   kotlinExtensionReceiver, kotlinFunctionHeader, kotlinFunctionParameters, kotlinModifiers, kotlinQualifiedOwner, kotlinReturnType,
@@ -5873,6 +5874,24 @@ export class CallGraphBuilder {
       // exports are still readable and still load-bearing for OTHER files' resolution.
       : buildResolvedImportMap(structuralFiles);
 
+    // A Java accessor of a class that Kotlin source names may be read with property syntax
+    // (`user.name`), which is not a call site (change: add-kotlin-java-interop-resolution).
+    const javaClassesNamedInKotlin = new Set<string>();
+    for (const file of structuralFiles) {
+      if (file.language !== 'Kotlin') continue;
+      for (const [name, target] of callImportMap.get(file.path) ?? []) {
+        if (name.startsWith('\0') || !target.endsWith('.java')) continue;
+        const simple = name.split('.').pop()!;
+        if (new RegExp(`\\b${simple.replace(/[^\w]/g, '')}\\b`).test(file.content)) javaClassesNamedInKotlin.add(`${target}::${simple}`);
+      }
+    }
+    if (javaClassesNamedInKotlin.size > 0) {
+      for (const node of allNodes.values()) {
+        if (node.language === 'Java' && node.className && /^(?:get|set|is)[A-Z0-9_]/.test(node.name)
+          && javaClassesNamedInKotlin.has(`${node.filePath}::${node.className}`)) node.kotlinPropertyAccessor = true;
+      }
+    }
+
     // Class inheritance facts were collected inside Pass 1 while each tree was already alive.
     // They are plain data, so fresh serial extraction, worker extraction, and fact-cache reuse all
     // feed this same map without retaining or re-parsing syntax trees.
@@ -6040,6 +6059,70 @@ export class CallGraphBuilder {
       }
       if (rel.kotlin.companionName) kotlinCompanionAlias.set(`${qualified}.${rel.kotlin.companionName}`, qualified);
     }
+    // ── Java → Kotlin through JVM-facing names (change: add-kotlin-java-interop-resolution) ──
+    const kotlinJvmViews = new Map<string, { facade: string; members: KotlinJvmMember[] }>();
+    const kotlinJvmView = (filePath: string): { facade: string; members: KotlinJvmMember[] } => {
+      let view = kotlinJvmViews.get(filePath);
+      if (!view) {
+        const content = fileContents.get(filePath) ?? '';
+        view = { facade: kotlinFacadeName(filePath, content), members: kotlinJvmMembers(content) };
+        kotlinJvmViews.set(filePath, view);
+      }
+      return view;
+    };
+    /** The graph node a JVM-facing member stands for: the function, or the accessor that has a body. */
+    const kotlinJvmMemberNode = (filePath: string, member: KotlinJvmMember): FunctionNode | undefined => {
+      const { declaration } = member;
+      if (!member.accessor) {
+        const matches = trie.findBySimpleName(declaration.name).filter(n =>
+          n.filePath === filePath && n.startIndex <= declaration.offset && declaration.offset < n.endIndex && !n.synthetic);
+        return matches.length === 1 ? matches[0] : undefined;
+      }
+      const accessorName = `<${member.accessor === 'getter' ? 'get' : 'set'}-${declaration.name}>`;
+      const accessors = trie.findBySimpleName(accessorName).filter(n => n.filePath === filePath && n.className === declaration.owner);
+      return accessors.length === 1 ? accessors[0] : undefined;
+    };
+    /**
+     * What a Java call `<receiver>.<name>(…)` reaches in Kotlin. The receiver must name a Kotlin
+     * type or facade the Java file imports or shares a package with; an accessor or function
+     * name alone never binds. A JVM-facing name that two declarations share binds nothing.
+     */
+    const resolveJavaToKotlin = (callerFile: string, receiver: string, name: string): FunctionNode | undefined => {
+      const scope = callImportMap.get(callerFile);
+      if (!scope) return undefined;
+      const parts = receiver.split('.');
+      // The longest leading path the file binds: `StoresKt`, `Env`, or a fully qualified name.
+      let bound = 0;
+      for (let i = parts.length; i >= 1 && bound === 0; i--) if (scope.has(parts.slice(0, i).join('.'))) bound = i;
+      if (bound === 0) return undefined;
+      const key = parts.slice(0, bound).join('.');
+      const filePath = scope.get(key)!;
+      if (!/\.kts?$/i.test(filePath)) return undefined;
+      const typeName = scope.get(`${IMPORT_QUALIFIER_PREFIX}${key}`) ?? parts[bound - 1];
+      const rest = parts.slice(bound);
+      const view = kotlinJvmView(filePath);
+      const companionName = relationships.get(`${filePath}::${typeName}`)?.kotlin?.companionName ?? 'Companion';
+      let access: KotlinJvmAccess | undefined;
+      let owner: string | undefined = typeName;
+      if (rest.length === 0 && typeName === view.facade) { access = 'facade'; owner = undefined; }
+      else if (rest.length === 0) access = 'static';
+      else if (rest.length === 1 && rest[0] === 'INSTANCE') access = 'instance';
+      else if (rest.length === 1 && rest[0] === companionName) access = 'companion';
+      if (!access) return undefined;
+      const members = view.members.filter(m => m.jvmName === name && m.access === access && m.owner === owner);
+      // Overloads of one function are one declaration name and one node; two different
+      // declarations behind one JVM name are ambiguous.
+      if (new Set(members.map(m => `${m.declaration.name}\0${m.accessor ?? ''}`)).size !== 1) return undefined;
+      return kotlinJvmMemberNode(filePath, members[0]);
+    };
+    /** `value.getName()` in Java where `value` has a Kotlin class type: the property accessor. */
+    const resolveJavaKotlinAccessor = (callerFile: string, className: string, name: string): FunctionNode | undefined => {
+      const filePath = callImportMap.get(callerFile)?.get(className);
+      if (!filePath || !/\.kts?$/i.test(filePath)) return undefined;
+      const members = kotlinJvmView(filePath).members.filter(m => m.jvmName === name && m.access === 'member' && m.owner === className && m.accessor);
+      return members.length === 1 ? kotlinJvmMemberNode(filePath, members[0]) : undefined;
+    };
+
     /** Is the type written as `typeName` one that `filePath` can see: in scope, or its own? */
     const kotlinTypeVisible = (filePath: string, typeName: string): boolean => {
       const head = typeName.split('.')[0];
@@ -6399,6 +6482,15 @@ export class CallGraphBuilder {
         else if (res.ambiguous) { recordAmbiguous(raw, 'self_cls', res.ambiguous); continue; }
       }
 
+      // Strategy J — a Java call into Kotlin through its JVM-facing name
+      // (change: add-kotlin-java-interop-resolution): `FooKt.f()`, `Obj.INSTANCE.f()`,
+      // `Owner.Companion.f()`, `Owner.f()` for `@JvmStatic`, and property accessors.
+      if (!calleeNode && callerNode.language === 'Java' && raw.calleeObject
+        && raw.calleeObject !== 'this' && raw.calleeObject !== 'super') {
+        const target = resolveJavaToKotlin(callerNode.filePath, raw.calleeObject, raw.calleeName);
+        if (target) { calleeNode = target; confidence = 'import'; }
+      }
+
       // Strategy 1b — type-name resolution (capitalized receiver = type/class reference).
       // In Swift and C++ there are no intra-module imports, so cross-file calls appear
       // as TypeName.method() / TypeName::method(). Java has the same shape for static
@@ -6472,7 +6564,12 @@ export class CallGraphBuilder {
               raw.offset - callerNode.startIndex,
             )
             : inferredTypes.get(raw.calleeObject);
-          if (inferredClass) {
+          if (inferredClass && callerNode.language === 'Java') {
+            // A Java local typed as a Kotlin class: `user.getName()` is the property accessor.
+            const accessor = resolveJavaKotlinAccessor(callerNode.filePath, inferredClass, raw.calleeName);
+            if (accessor) { calleeNode = accessor; confidence = 'type_inference'; }
+          }
+          if (inferredClass && !calleeNode) {
             const picked = callerNode.language === 'Kotlin'
               ? pickKotlinTypeMember(callerNode.filePath, inferredClass, raw.calleeName)
               : pickByAffinity(

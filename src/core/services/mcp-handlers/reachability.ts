@@ -415,6 +415,11 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         reasons.push('an operator function is invoked by operator syntax (for example `a + b`), which is not resolved to a call edge, so it may be live');
       }
 
+      if (n.kotlinPropertyAccessor) {
+        confidence = 'low';
+        reasons.push('a Java accessor of a class that Kotlin source uses: Kotlin reads it with property syntax, which is not a call site, so it may be live');
+      }
+
       if (scriptContainerFiles.has(n.filePath)) {
         confidence = 'low';
         reasons.push('script-container templates and framework macros are unanalyzed and may invoke this symbol');

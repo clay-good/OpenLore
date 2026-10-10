@@ -330,9 +330,9 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     m => (m.cfgs.get(`${SERVICE}.require`)?.blocks ?? []).some(b => b.kind === 'branch')),
 
   // ── add-kotlin-java-interop-resolution ────────────────────────────────────
-  edge('interop-file-facade', 'known-gap', 'add-kotlin-java-interop-resolution', 'legacy/LegacyCaller.java::LegacyCaller.store', 'repo/Stores.kt::openStore', ['import']),
-  edge('interop-object-instance', 'known-gap', 'add-kotlin-java-interop-resolution', 'legacy/LegacyCaller.java::LegacyCaller.port', 'config/Env.kt::Env.port', ['import']),
-  edge('interop-companion', 'known-gap', 'add-kotlin-java-interop-resolution', 'legacy/LegacyCaller.java::LegacyCaller.service', `${SERVICE}.inMemory`, ['import']),
+  edge('interop-file-facade', 'asserted', 'add-kotlin-java-interop-resolution', 'legacy/LegacyCaller.java::LegacyCaller.store', 'repo/Stores.kt::openStore', ['import']),
+  edge('interop-object-instance', 'asserted', 'add-kotlin-java-interop-resolution', 'legacy/LegacyCaller.java::LegacyCaller.port', 'config/Env.kt::Env.port', ['import']),
+  edge('interop-companion', 'asserted', 'add-kotlin-java-interop-resolution', 'legacy/LegacyCaller.java::LegacyCaller.service', `${SERVICE}.inMemory`, ['import']),
 
   // ── add-kotlin-multiplatform-source-sets ──────────────────────────────────
   entry('kmp-actualizes', 'multiplatform', 'known-gap', 'add-kotlin-multiplatform-source-sets',

@@ -428,6 +428,8 @@ export interface KotlinSignatureDeclaration {
   name: string;
   /** Qualified owner class (`Outer.Inner`); undefined at package level. */
   owner?: string;
+  /** What the innermost enclosing body is: a class, an interface, an object, or a companion object. */
+  ownerKind?: KotlinOwnerKind;
   receiverType?: string;
   /** Modifiers other than visibility. */
   modifiers: string[];
@@ -444,6 +446,8 @@ export interface KotlinSignatureDeclaration {
   offset: number;
   line: number;
 }
+
+export type KotlinOwnerKind = 'class' | 'interface' | 'object' | 'companion';
 
 const VISIBILITIES: ReadonlySet<string> = new Set(['public', 'internal', 'protected', 'private']);
 const KDOC_NAMED_TAGS: ReadonlySet<string> = new Set(['param', 'property', 'throws', 'exception']);
@@ -611,10 +615,15 @@ function readType(mask: string, from: number): { type: string; end: number } {
  * `mask` with everything blanked that is not at declaration level: text inside parentheses, and
  * inside any brace that is not a class body. `ownerAt` gives the qualified owner for an offset.
  */
-function classLevelText(mask: string): { text: string; ownerAt: (offset: number) => string | undefined } {
+function classLevelText(mask: string): {
+  text: string;
+  ownerAt: (offset: number) => string | undefined;
+  ownerKindAt: (offset: number) => KotlinOwnerKind | undefined;
+} {
   const out = new Array<string>(mask.length);
-  const stack: Array<{ classBody: boolean; name?: string; parens: number }> = [{ classBody: true, parens: 0 }];
-  const events: Array<{ offset: number; owner: string | undefined }> = [];
+  const stack: Array<{ classBody: boolean; name?: string; kind?: KotlinOwnerKind; parens: number }> = [{ classBody: true, parens: 0 }];
+  const events: Array<{ offset: number; owner: string | undefined; kind: KotlinOwnerKind | undefined }> = [];
+  const innermostKind = (): KotlinOwnerKind | undefined => stack.at(-1)?.kind;
   let statementStart = 0;
   const visible = (): boolean => stack.every(frame => frame.classBody && frame.parens === 0);
   const owner = (): string | undefined => {
@@ -630,6 +639,7 @@ function classLevelText(mask: string): { text: string; ownerAt: (offset: number)
       const header = wasVisible ? mask.slice(Math.max(statementStart, i - MAX_HEADER_CHARS), i) : '';
       let classBody = false;
       let name: string | undefined;
+      let kind: KotlinOwnerKind | undefined;
       const keywords = [...headerKeywords(header)];
       // `class A private constructor(…) {`: the primary constructor keyword follows the class.
       const tail = keywords.at(-1);
@@ -642,15 +652,16 @@ function classLevelText(mask: string): { text: string; ownerAt: (offset: number)
         const companion = last.keyword === 'object' && /\bcompanion\s*$/.test(header.slice(0, last.index));
         if (named && !KOTLIN_HARD_KEYWORDS.has(named[1])) { classBody = true; if (!companion) name = unquote(named[1]); }
         else if (companion) classBody = true; // an unnamed companion: members belong to the class
+        if (classBody) kind = companion ? 'companion' : last.keyword as KotlinOwnerKind;
       }
       out[i] = wasVisible ? c : ' ';
-      stack.push({ classBody, ...(name ? { name } : {}), parens: 0 });
-      if (classBody) events.push({ offset: i, owner: owner() });
+      stack.push({ classBody, ...(name ? { name } : {}), ...(kind ? { kind } : {}), parens: 0 });
+      if (classBody) events.push({ offset: i, owner: owner(), kind: innermostKind() });
       statementStart = i + 1;
     } else if (c === '}') {
       if (stack.length > 1) {
         const closed = stack.pop()!;
-        if (closed.classBody) events.push({ offset: i, owner: owner() });
+        if (closed.classBody) events.push({ offset: i, owner: owner(), kind: innermostKind() });
       }
       out[i] = visible() ? c : ' ';
       statementStart = i + 1;
@@ -665,14 +676,16 @@ function classLevelText(mask: string): { text: string; ownerAt: (offset: number)
       if (c === ';' && top.parens === 0) statementStart = i + 1;
     }
   }
+  const eventAt = (offset: number): { owner: string | undefined; kind: KotlinOwnerKind | undefined } | undefined => {
+    let lo = 0;
+    let hi = events.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (events[mid].offset <= offset) lo = mid + 1; else hi = mid; }
+    return lo === 0 ? undefined : events[lo - 1];
+  };
   return {
     text: out.join(''),
-    ownerAt: (offset: number): string | undefined => {
-      let lo = 0;
-      let hi = events.length;
-      while (lo < hi) { const mid = (lo + hi) >> 1; if (events[mid].offset <= offset) lo = mid + 1; else hi = mid; }
-      return lo === 0 ? undefined : events[lo - 1].owner;
-    },
+    ownerAt: offset => eventAt(offset)?.owner,
+    ownerKindAt: offset => eventAt(offset)?.kind,
   };
 }
 
@@ -724,7 +737,7 @@ export function renderKotlinSignature(content: string, start: number, keywordOff
  */
 export function scanKotlinDeclarations(content: string): KotlinSignatureDeclaration[] {
   const mask = kotlinCodeMask(content);
-  const { text, ownerAt } = classLevelText(mask);
+  const { text, ownerAt, ownerKindAt } = classLevelText(mask);
   const out: KotlinSignatureDeclaration[] = [];
   const lineStarts: number[] = [0];
   for (let i = 0; i < content.length; i++) if (content[i] === '\n') lineStarts.push(i + 1);
@@ -737,8 +750,10 @@ export function scanKotlinDeclarations(content: string): KotlinSignatureDeclarat
   const common = (declaration: KotlinDeclaration & { start: number }, owner: string | undefined) => {
     const visibility = (declaration.modifiers.find(m => VISIBILITIES.has(m)) ?? 'public') as KotlinVisibility;
     const kdoc = kotlinKdocAt(content, declaration.start, declaration.offset);
+    const ownerKind = owner ? ownerKindAt(declaration.offset) : undefined;
     return {
       ...(owner ? { owner } : {}),
+      ...(ownerKind ? { ownerKind } : {}),
       modifiers: declaration.modifiers.filter(m => !VISIBILITIES.has(m)),
       annotations: declaration.annotations,
       visibility,
