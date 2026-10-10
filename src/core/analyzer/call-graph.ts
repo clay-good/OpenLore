@@ -27,6 +27,7 @@ import {
   KOTLIN_EXTERNAL_PREFIX,
   KOTLIN_FUNCTION_PREFIX,
   KOTLIN_MEMBER_PREFIX,
+  KOTLIN_PROPERTY_PREFIX,
   decodeKotlinCallable,
   decodeKotlinMember,
   PACKAGE_SCOPE_IMPORT,
@@ -52,7 +53,10 @@ import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { kotlinCodeMask, normalizeKotlinForParse } from './kotlin-source.js';
-import { kotlinFunctionParameters, kotlinReturnType, type KotlinNode } from './kotlin-extract.js';
+import {
+  collectKotlinBodyNodes, collectKotlinExtraCalls, kotlinFunctionParameters, kotlinModifiers, kotlinReturnType,
+  type KotlinNode,
+} from './kotlin-extract.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import {
@@ -1028,7 +1032,7 @@ function findEnclosingFunction(
   while (lo < hiExclusive) {
     if (probe) probe.steps++;
     const mid = (lo + hiExclusive) >> 1;
-    if (index.entries[mid].node.startIndex <= callPos) lo = mid + 1;
+    if (index.entries[mid].start <= callPos) lo = mid + 1;
     else hiExclusive = mid;
   }
   const hi = lo - 1;
@@ -1038,7 +1042,8 @@ function findEnclosingFunction(
 }
 
 interface EnclosingIndex {
-  entries: Array<{ node: FunctionNode; original: number }>;
+  /** One entry per node span, plus one per additional body span of a node (`bodySpans`). */
+  entries: Array<{ node: FunctionNode; original: number; start: number; end: number }>;
   maxEnd: number[];
   size: number;
 }
@@ -1049,15 +1054,21 @@ function buildEnclosingIndex(nodes: FunctionNode[]): EnclosingIndex {
   // Function intervals from one syntax tree are nested or disjoint. For equal starts, placing the
   // widest first makes the rightmost containing interval the narrowest; identical spans retain the
   // original first-match behavior by sorting the lower original index last.
-  const entries = nodes.map((node, original) => ({ node, original })).sort((a, b) =>
-    a.node.startIndex - b.node.startIndex ||
-    b.node.endIndex - a.node.endIndex ||
+  // A node may own further regions (a Kotlin constructor owns its `init` blocks and property
+  // initializers). Each is an interval of its own that maps back to the node; like node spans,
+  // they are nested in or disjoint from every other interval.
+  const entries = nodes.flatMap((node, original) => [
+    { node, original, start: node.startIndex, end: node.endIndex },
+    ...(node.bodySpans ?? []).map(s => ({ node, original, start: s.start, end: s.end })),
+  ]).sort((a, b) =>
+    a.start - b.start ||
+    b.end - a.end ||
     b.original - a.original,
   );
   let size = 1;
   while (size < entries.length) size <<= 1;
   const maxEnd = new Array(size * 2).fill(-Infinity) as number[];
-  for (let i = 0; i < entries.length; i++) maxEnd[size + i] = entries[i].node.endIndex;
+  for (let i = 0; i < entries.length; i++) maxEnd[size + i] = entries[i].end;
   for (let i = size - 1; i > 0; i--) maxEnd[i] = Math.max(maxEnd[i * 2], maxEnd[i * 2 + 1]);
   const index = { entries, maxEnd, size };
   enclosingIndexes.set(nodes, index);
@@ -2899,6 +2910,12 @@ interface QueryLangSpec {
   callObject?: (callNode: TsNodeLike) => string | undefined;
   /** Optional per-language enrichment of a node from its declaration (parameters, return type). */
   enrichNode?: (fnNode: TsNodeLike, node: FunctionNode) => void;
+  /** Optional rewrite of a captured function name (Kotlin stores a backtick name without backticks). */
+  normalizeName?: (name: string) => string;
+  /** Optional nodes for bodies the function query cannot name (constructors, accessors, …). */
+  extraNodes?: (root: TsNodeLike, filePath: string, content: string) => FunctionNode[];
+  /** Optional call shapes the call query does not capture (references, infix calls, …). */
+  extraCalls?: (root: TsNodeLike) => Array<Omit<RawEdge, 'callerId'> & { offset: number }>;
   /**
    * Matches a chained intra-object receiver (`this.repo` in `this.repo.save()`); group 1 is the
    * field. The raw edge then carries `calleeObject: 'this'` and `receiverField`, the shape the
@@ -2929,7 +2946,7 @@ async function extractByQueries(
       const nameCapture = match.captures.find(c => c.name === 'fn.name');
       const nodeCapture = match.captures.find(c => c.name === 'fn.node');
       if (!nameCapture || !nodeCapture) continue;
-      const name = nameCapture.node.text;
+      const name = spec.normalizeName ? spec.normalizeName(nameCapture.node.text) : nameCapture.node.text;
       const fnNode = nodeCapture.node;
       const className = (spec.classTypes.size ? enclosingGroupName(fnNode, spec.classTypes) : undefined)
         ?? spec.extraClassName?.(fnNode);
@@ -2967,6 +2984,13 @@ async function extractByQueries(
       nodeIds.add(id);
     }
 
+    // Bodies that are not named functions. A node whose id already exists is not added: the
+    // graph has one node per id, as for overloads.
+    for (const extra of spec.extraNodes?.(_root, filePath, content) ?? []) {
+      if (nodeIds.has(extra.id)) continue;
+      nodes.push(extra);
+      nodeIds.add(extra.id);
+    }
     const definedNames = new Set(nodes.map(n => n.name));
     ensureUniqueNodeIds(nodes);
     const rawEdges: RawEdge[] = [];
@@ -2992,6 +3016,15 @@ async function extractByQueries(
         ...(selfField ? { receiverField: selfField } : {}),
         offset: nodeCapture.node.startIndex,
       });
+    }
+    for (const extra of spec.extraCalls?.(_root) ?? []) {
+      if (isIgnoredCallee(extra.calleeName, spec.language)) continue;
+      const caller = findEnclosingFunction(nodes, extra.offset);
+      if (!caller) continue;
+      const key = `${caller.id}\0${extra.calleeName}\0${extra.calleeObject ?? ''}\0${extra.offset}\0${extra.callType ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rawEdges.push({ ...extra, callerId: caller.id });
     }
     const cfg = materializeCfgByNodeId(nodes, cfgByStart);
     // WASM grammars (e.g. Lua) yield spurious errors after the first parse — skip parse-health there.
@@ -3070,7 +3103,37 @@ const KOTLIN_SPEC: QueryLangSpec = {
     if (parameters.length > 0) node.parameters = parameters;
     const returnType = kotlinReturnType(fnNode as unknown as KotlinNode);
     if (returnType) node.returnType = returnType;
+    const modifiers = kotlinModifiers(fnNode as unknown as KotlinNode);
+    if (modifiers.length > 0) node.modifiers = modifiers;
+    if (modifiers.includes('suspend')) node.isAsync = true;
   },
+  normalizeName: name => (name.startsWith('`') && name.endsWith('`') ? name.slice(1, -1) : name),
+  extraNodes: (root, filePath, content) => collectKotlinBodyNodes(root as unknown as KotlinNode, /\.kts$/i.test(filePath)).map(body => ({
+    id: body.className ? `${filePath}::${body.className}.${body.name}` : `${filePath}::${body.name}`,
+    name: body.name,
+    filePath,
+    ...(body.className ? { className: body.className } : {}),
+    isAsync: false,
+    language: 'Kotlin',
+    startIndex: body.startIndex,
+    endIndex: body.endIndex,
+    fanIn: 0, fanOut: 0,
+    signature: body.kind === 'function-property' || body.kind === 'constructor'
+      ? content.slice(body.startIndex, Math.min(body.endIndex, body.startIndex + 200)).split('\n')[0].trim()
+      : body.name,
+    ...(body.synthetic ? { synthetic: true as const } : {}),
+    ...(body.bodySpans ? { bodySpans: body.bodySpans } : {}),
+    ...(body.parameters?.length ? { parameters: body.parameters } : {}),
+  })),
+  extraCalls: root => collectKotlinExtraCalls(root as unknown as KotlinNode).map(call => ({
+    calleeName: call.calleeName,
+    line: call.line,
+    offset: call.offset,
+    ...(call.calleeObject ? { calleeObject: call.calleeObject } : {}),
+    ...(call.shape === 'reference' ? { callType: 'reference' as const }
+      : call.shape === 'infix' ? { dropIfUnresolved: true as const, requiresModifier: 'infix' }
+        : { callType: 'constructor' as const, dropIfUnresolved: true as const }),
+  })),
 };
 
 // ── PHP ─────────────────────────────────────────────────────────────────────
@@ -5889,6 +5952,7 @@ export class CallGraphBuilder {
         seen.add(key);
         const own = trie.findByQualifiedName(declared, member).filter(n => matchesImportedTarget(n.filePath, typeFile));
         if (own.length > 0) { for (const n of own) found.add(n); return; }
+        if (member === '<init>') return; // a constructor is never inherited
         for (const candidateFile of new Set(kotlinClassFiles(typeFile, declared))) {
           const rel = relationships.get(`${candidateFile}::${declared}`);
           for (const parent of [...(rel?.parentClasses ?? []), ...(rel?.interfaces ?? [])]) visit(candidateFile, parent, depth + 1);
@@ -5937,11 +6001,21 @@ export class CallGraphBuilder {
           ?? kotlinDeclarationNode(scope?.get(`${KOTLIN_EXTENSION_PREFIX}${name}`));
       }
       if (!bound) {
+        // A package-level function-typed property (`val handler: (X) -> Y = { … }`) is callable.
+        bound = kotlinDeclarationNode(scope?.get(`${KOTLIN_PROPERTY_PREFIX}${name}`));
+      }
+      if (!bound) {
         const member = decodeKotlinMember(scope?.get(`${KOTLIN_MEMBER_PREFIX}${name}`));
         const candidates = member
           ? trie.findByQualifiedName(member.owner, name).filter(n => n.filePath === member.file)
           : [];
         if (candidates.length === 1) bound = candidates[0];
+      }
+      if (!bound) {
+        // `Foo(args)` constructs a class the file can see (change: add-kotlin-callable-node-shapes).
+        const constructor = pickKotlinTypeMember(callerNode.filePath, name, '<init>');
+        if (constructor.kind === 'ambiguous') return { ambiguous: constructor.candidates };
+        if (constructor.kind === 'unique') bound = constructor.node;
       }
       // The package declares the name in two files (for example `main` and `test` source sets):
       // the file's own package-level declaration is the one it sees.
@@ -6285,8 +6359,18 @@ export class CallGraphBuilder {
         const receiver = raw.calleeObject.replace(/!!$/, '').replace(/^`|`$/g, '');
         let receiverType: string | undefined;
         if (/^[a-z_][A-Za-z0-9_]*$/.test(receiver)) {
-          receiverType = kotlinLocalCallReturnType(callerNode, receiver, raw.offset)
-            ?? kotlinDeclaredReceiverType(callerNode, receiver, raw.offset);
+          if (raw.calleeName === 'invoke') {
+            // `audit.invoke(x)` on a function-typed property that has a node.
+            const target = resolveKotlinBareName(callerNode, receiver).node;
+            if (target && /^(?:[\w@()".,\s]*\s)?va[lr]\b/.test((fileContents.get(target.filePath) ?? '').slice(target.startIndex, target.startIndex + 200))) {
+              calleeNode = target;
+              confidence = target.filePath === callerNode.filePath ? 'same_file' : 'import';
+            }
+          }
+          if (!calleeNode) {
+            receiverType = kotlinLocalCallReturnType(callerNode, receiver, raw.offset)
+              ?? kotlinDeclaredReceiverType(callerNode, receiver, raw.offset);
+          }
         } else {
           // `UserService(repo).find(id)`: the receiver is one constructor call.
           const constructed = receiver.match(/^([A-Z][A-Za-z0-9_]*)\s*\(/);
@@ -6397,6 +6481,12 @@ export class CallGraphBuilder {
           confidence = extension.filePath === callerNode.filePath ? 'same_file' : 'import';
         }
       }
+
+      // A shape that is only an edge when it resolves (a Kotlin infix expression, a supertype
+      // constructor invocation): unresolved, or resolved to a function that is not declared
+      // with the required modifier, it leaves no edge and no external leaf.
+      if (raw.requiresModifier && calleeNode && !calleeNode.modifiers?.includes(raw.requiresModifier)) continue;
+      if (!calleeNode && raw.dropIfUnresolved) continue;
 
       // Strategy 4 — same-file preference (only for calls without a typed receiver)
       // When a receiver is explicitly present but unresolvable (e.g. redis_client.get()),

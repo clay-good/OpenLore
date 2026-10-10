@@ -11,9 +11,11 @@ initializers of a file, the top-level statements of a `.kts` script, and each fu
 property initialized by a lambda or anonymous function. Nodes that have no source identifier SHALL
 use a reserved angle-bracket name and a `synthetic` kind. A call site inside any of these bodies
 SHALL be attributed to that node and SHALL NOT be dropped. A backtick-quoted name SHALL be stored
-without backticks, a `suspend` function SHALL be marked asynchronous, and overloaded functions SHALL
-have distinct nodes. Adding these nodes SHALL NOT change the identifier of any node that existed
-before.
+without backticks and a `suspend` function SHALL be marked asynchronous. Overloads of one name in
+one owner SHALL share one node, as they do for every other language in the graph, and all
+constructors of a class SHALL share its constructor node. Adding these nodes SHALL NOT change the
+identifier of any function that existed before, except that a backtick-quoted name loses its
+backticks.
 
 #### Scenario: A call in an init block is attributed
 

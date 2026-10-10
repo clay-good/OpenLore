@@ -47,7 +47,8 @@ export type CallType =
   | 'direct'       // foo()
   | 'method'       // obj.method()
   | 'awaited'      // await foo() or await obj.method()
-  | 'constructor'; // new Foo()
+  | 'constructor'  // new Foo()
+  | 'reference';   // ::foo, Type::method (Kotlin callable reference; the target is kept alive, not invoked here)
 
 /** Internal raw edge before resolution */
 export interface RawEdge {
@@ -74,6 +75,14 @@ export interface RawEdge {
   argCount?: number;
   /** True when a spread/splat makes argCount a lower bound rather than an exact count. */
   argCountLowerBound?: true;
+  /**
+   * The site yields an edge only when it resolves to a project node; unresolved, it is dropped
+   * with no external leaf. Set for shapes whose library form is not a call worth recording
+   * (a Kotlin infix expression such as `a to b`, a supertype constructor invocation).
+   */
+  dropIfUnresolved?: true;
+  /** Kotlin: the target must be declared with this modifier (`infix`) to bind. */
+  requiresModifier?: string;
 }
 
 /** Plain-data class relationship extracted while the Pass-1 syntax tree is alive. */
@@ -141,6 +150,20 @@ export interface FunctionNode {
    * Declared parameters, in source order (Kotlin; issue #546). `type` is as written. Absent for
    * a language whose extractor does not record them.
    */
+  /**
+   * True for a node whose name is not a source identifier: a constructor (`<init>`), a class or
+   * file initializer (`<clinit>`), a script body (`<script>`), or a property accessor
+   * (`<get-x>`). A tool may hide these from name search (change: add-kotlin-callable-node-shapes).
+   */
+  synthetic?: true;
+  /**
+   * More source regions that execute as part of this node, beside `startIndex..endIndex`: the
+   * `init` blocks and property initializers of a constructor. A call site inside one belongs to
+   * this node. Regions never overlap another node's span.
+   */
+  bodySpans?: Array<{ start: number; end: number }>;
+  /** Declaration modifiers as written (Kotlin: `suspend`, `infix`, `operator`, `override`, …). */
+  modifiers?: string[];
   parameters?: Array<{ name: string; type?: string; hasDefault?: true; isVararg?: true }>;
   /** Declared return type as written (Kotlin). Absent when the source does not write one. */
   returnType?: string;

@@ -980,7 +980,7 @@ describe('the per-file fact cap', () => {
 
 describe('receiver resolution scope', () => {
   it('declares exactly the languages whose extractors collect facts', () => {
-    expect([...RECEIVER_REGISTRY_LANGUAGES].sort()).toEqual(['JavaScript', 'Python', 'TypeScript']);
+    expect([...RECEIVER_REGISTRY_LANGUAGES].sort()).toEqual(['JavaScript', 'Kotlin', 'Python', 'TypeScript']);
   });
 
   it('leaves direct intra-object resolution untouched', async () => {

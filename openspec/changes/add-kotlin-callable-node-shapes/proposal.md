@@ -39,7 +39,7 @@ Java already has constructor nodes, `new` edges, method-reference edges, and syn
 | Body | Node name | Owner |
 |---|---|---|
 | Primary constructor (declared or implied) with `init` blocks and property initializers | `<init>` | the class |
-| Secondary constructor | `<init>` (overload-distinguished) | the class |
+| Secondary constructor | the class's `<init>` (constructors of a class share one node) | the class |
 | Property getter / setter with a body | `<get-name>` / `<set-name>` | the class or file |
 | Top-level property initializers of a file | `<clinit>` | the file |
 | `.kts` script top-level statements | `<script>` | the file |
@@ -49,7 +49,8 @@ Java already has constructor nodes, `new` edges, method-reference edges, and syn
   identifier, and they carry a `synthetic` kind so a tool can hide them from name search.
 - Backtick names are stored without backticks.
 - `suspend` sets `isAsync`.
-- Overloads get distinct nodes, keyed as the existing overload-identity scheme does for Java.
+- Overloads of one name share one node, as the existing overload scheme does for Java and every
+  other language. A call to an overloaded name binds to that node; no argument-type resolution.
 
 **Edges**
 
