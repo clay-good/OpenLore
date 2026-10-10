@@ -119,8 +119,16 @@ When all 23 are built, the Kotlin row of the registry backs every capability exc
 | `iacProjection` | It applies to infrastructure formats, not to general-purpose languages. |
 | `literalReflection` | Deliberate. A Kotlin dispatch table is a map of callable references, and each reference is already an ordinary edge. |
 
-Issue #546 is closed when the reference ledger has no `known-gap` entry and the capability target
-has no missing capability.
+Issue #546 is closed by the first eight changes, delivered as eight pull requests: the reference
+corpus and grammar currency, package binding, declared-type receivers, callable node shapes, type
+hierarchy, signatures and KDoc, Java interop, and file dependencies and exports. They make the
+Kotlin call graph, class model, signatures, and file graph correct, which is what the issue asks
+for.
+
+The other changes are new Kotlin features, not corrections. They are follow-up work, one pull
+request per change. Until each one merges, its ledger entries stay `known-gap` and
+`docs/language-support.md` lists them as gaps. "Total support" in the title is the long-term
+target: no `known-gap` entry and no missing capability.
 
 ## Deliberately not in this set
 
