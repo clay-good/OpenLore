@@ -56,6 +56,18 @@ export function kotlinOwnerName(node: KotlinNode): string | undefined {
 }
 
 /**
+ * The qualified name a class-like node gives its members: its own qualified name, or — for a
+ * companion object — the qualified name of the enclosing class. Object expressions are not
+ * handled here (their name needs the file's owner index).
+ */
+function classLikeQualifiedName(node: KotlinNode): string | undefined {
+  const outer = ownerChain(node, undefined);
+  if (node.type === 'companion_object') return outer.length > 0 ? outer.join('.') : undefined;
+  const name = kotlinTypeName(node);
+  return name ? [...outer, name].join('.') : undefined;
+}
+
+/**
  * The member declarations of a class-like node: the children of its body, or — for the delegation
  * grammar quirk described in the module header — the statements of the trailing lambda.
  */
@@ -169,7 +181,7 @@ export function collectKotlinReceiverFields(root: KotlinNode): ReceiverFieldFact
     const node = stack.pop()!;
     for (let i = node.namedChildren.length - 1; i >= 0; i--) stack.push(node.namedChildren[i]);
     if (!CLASS_LIKE.has(node.type)) continue;
-    const className = node.type === 'companion_object' ? kotlinOwnerName(node) : kotlinTypeName(node);
+    const className = classLikeQualifiedName(node);
     if (!className) continue;
     const constructor = child(node, 'primary_constructor');
     for (const param of constructor?.namedChildren ?? []) {
@@ -307,7 +319,7 @@ export function collectKotlinBodyNodes(root: KotlinNode, isScript: boolean): Kot
     for (let i = node.namedChildren.length - 1; i >= 0; i--) stack.push(node.namedChildren[i]);
     if (!CLASS_LIKE.has(node.type)) continue;
     const isInterface = kotlinIsInterface(node);
-    const owner = node.type === 'companion_object' ? kotlinOwnerName(node) : kotlinTypeName(node);
+    const owner = classLikeQualifiedName(node);
     if (!owner) continue;
     const members = kotlinClassMembers(node);
     const spans: KotlinSpan[] = [];
@@ -443,4 +455,167 @@ export function collectKotlinExtraCalls(root: KotlinNode): KotlinExtraCall[] {
     }
   }
   return out;
+}
+
+// ── Class model (change: fix-kotlin-type-hierarchy-fidelity) ────────────────────────────────
+
+/** Names of the classes that have no source name: object expressions, keyed by start offset. */
+export interface KotlinOwnerIndex { anonymous: Map<number, string> }
+
+const hasClassBody = (node: KotlinNode): boolean => !!child(node, 'class_body');
+
+/** The chain of enclosing owners of `node`, outermost first, as names. */
+function ownerChain(node: KotlinNode, index: KotlinOwnerIndex | undefined): string[] {
+  const parts: string[] = [];
+  for (let cur = node.parent; cur; cur = cur.parent) {
+    if (cur.type === 'class_declaration' || cur.type === 'object_declaration') {
+      const name = kotlinTypeName(cur);
+      if (name) parts.unshift(name);
+    } else if (cur.type === 'object_literal') {
+      const name = index?.anonymous.get(cur.startIndex);
+      if (name) parts.unshift(name);
+    } else if (cur.type === 'enum_entry' && hasClassBody(cur)) {
+      const name = child(cur, 'simple_identifier');
+      if (name) parts.unshift(unquote(name.text));
+    }
+    // A companion object is not an owner: its members belong to the enclosing class.
+  }
+  return parts;
+}
+
+/**
+ * Give every object expression of the file a name. It is `<anonymous-N>`, where N counts the
+ * object expressions with the same enclosing owner in source order, so the name moves only when
+ * another object expression is added before it in the same class.
+ */
+export function buildKotlinOwnerIndex(root: KotlinNode): KotlinOwnerIndex {
+  const index: KotlinOwnerIndex = { anonymous: new Map() };
+  const counters = new Map<string, number>();
+  // Pre-order, so an outer object expression is named before one nested in it.
+  const stack: KotlinNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.type === 'object_literal') {
+      const scope = ownerChain(node, index).join('.');
+      const n = (counters.get(scope) ?? 0) + 1;
+      counters.set(scope, n);
+      index.anonymous.set(node.startIndex, `<anonymous-${n}>`);
+    }
+    for (let i = node.namedChildren.length - 1; i >= 0; i--) stack.push(node.namedChildren[i]);
+  }
+  return index;
+}
+
+/**
+ * The qualified owner of a member: `Outer.Inner` for a nested class, the enclosing class for a
+ * companion member (named or not), `Enum.ENTRY` for an enum entry body, and the anonymous name of
+ * an object expression. Undefined at package level.
+ */
+export function kotlinQualifiedOwner(node: KotlinNode, index?: KotlinOwnerIndex): string | undefined {
+  const parts = ownerChain(node, index);
+  return parts.length > 0 ? parts.join('.') : undefined;
+}
+
+/** The receiver type of an extension function, reduced to its simple name. */
+export function kotlinExtensionReceiver(fnNode: KotlinNode): string | undefined {
+  const name = fnNode.namedChildren.find(c => c.type === 'simple_identifier');
+  if (!name) return undefined;
+  const receiver = fnNode.namedChildren.find(c => TYPE_NODES.has(c.type) && c.endIndex <= name.startIndex);
+  if (!receiver) return undefined;
+  if (receiver.type === 'function_type') return undefined;
+  return kotlinReceiverTypeName(receiver) ?? normalize(receiver.text).replace(/[?\s]+$/, '');
+}
+
+export const KOTLIN_CLASS_KINDS = [
+  'class', 'interface', 'functional-interface', 'object', 'enum', 'data', 'sealed', 'value',
+  'annotation', 'inner', 'object-expression', 'enum-entry',
+] as const;
+export type KotlinClassKind = (typeof KOTLIN_CLASS_KINDS)[number];
+
+export interface KotlinClassFact {
+  /** Qualified owner name (`Outer.Inner`). */
+  className: string;
+  classKind: KotlinClassKind;
+  /** Supertypes written with a constructor invocation: superclasses. */
+  superclasses: string[];
+  /** Supertypes written as a bare type: an interface, or a class of a secondary-constructor-only type. */
+  supertypes: string[];
+  /** Interfaces implemented by delegation (`: Iface by d`). */
+  delegated: string[];
+  /** The name of a named companion object of this class. */
+  companionName?: string;
+}
+
+function primaryKind(keywords: string[], functional: boolean): KotlinClassKind {
+  if (keywords.includes('interface')) return functional ? 'functional-interface' : 'interface';
+  if (keywords.includes('object')) return 'object';
+  for (const kind of ['enum', 'annotation', 'data', 'value', 'sealed', 'inner'] as const) {
+    if (keywords.includes(kind)) return kind;
+  }
+  return 'class';
+}
+
+function supertypesOf(node: KotlinNode): Pick<KotlinClassFact, 'superclasses' | 'supertypes' | 'delegated'> {
+  const out = { superclasses: [] as string[], supertypes: [] as string[], delegated: [] as string[] };
+  const push = (list: string[], typeNode: KotlinNode | undefined): void => {
+    // A qualified type (`Outer.Inner`, `CoroutineContext.Element`) names a nested or library
+    // type; matching its last segment against a project class would wire a false parent.
+    if (!typeNode || typeNode.namedChildren.filter(c => c.type === 'type_identifier').length !== 1) return;
+    const name = kotlinReceiverTypeName(typeNode);
+    if (name && !list.includes(name)) list.push(name);
+  };
+  for (const spec of node.namedChildren) {
+    if (spec.type !== 'delegation_specifier') continue;
+    const invocation = child(spec, 'constructor_invocation');
+    const delegation = child(spec, 'explicit_delegation');
+    if (invocation) push(out.superclasses, child(invocation, 'user_type'));
+    else if (delegation) push(out.delegated, child(delegation, 'user_type'));
+    else push(out.supertypes, child(spec, 'user_type'));
+  }
+  return out;
+}
+
+/**
+ * One fact per class the file declares, including object expressions and enum entries that have
+ * a body. `content` is the ORIGINAL source: a functional interface is told apart by the `fun`
+ * keyword that the pre-parse normalization hides from the tree.
+ */
+export function collectKotlinClassFacts(root: KotlinNode, content: string, index: KotlinOwnerIndex): KotlinClassFact[] {
+  const facts: KotlinClassFact[] = [];
+  const stack: KotlinNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    for (let i = node.namedChildren.length - 1; i >= 0; i--) stack.push(node.namedChildren[i]);
+    if (node.type === 'class_declaration' || node.type === 'object_declaration') {
+      const name = kotlinTypeName(node);
+      if (!name) continue;
+      const outer = kotlinQualifiedOwner(node, index);
+      const keywords = node.type === 'object_declaration' ? [...kotlinDeclarationKeywords(node), 'object'] : kotlinDeclarationKeywords(node);
+      const keywordAt = content.slice(node.startIndex, node.endIndex).search(/\binterface\b/);
+      const functional = keywordAt >= 0
+        && /\bfun\s*$/.test(content.slice(Math.max(0, node.startIndex + keywordAt - 12), node.startIndex + keywordAt));
+      const companion = kotlinClassMembers(node).find(m => m.type === 'companion_object');
+      const companionName = companion && kotlinTypeName(companion);
+      facts.push({
+        className: outer ? `${outer}.${name}` : name,
+        classKind: primaryKind(keywords, functional),
+        ...supertypesOf(node),
+        ...(companionName ? { companionName } : {}),
+      });
+    } else if (node.type === 'object_literal') {
+      const name = index.anonymous.get(node.startIndex);
+      const outer = kotlinQualifiedOwner(node, index);
+      if (name) facts.push({ className: outer ? `${outer}.${name}` : name, classKind: 'object-expression', ...supertypesOf(node) });
+    } else if (node.type === 'enum_entry' && hasClassBody(node)) {
+      const name = child(node, 'simple_identifier');
+      const outer = kotlinQualifiedOwner(node, index);
+      if (name && outer) {
+        facts.push({
+          className: `${outer}.${unquote(name.text)}`, classKind: 'enum-entry',
+          superclasses: [outer.split('.').pop()!], supertypes: [], delegated: [],
+        });
+      }
+    }
+  }
+  return facts;
 }

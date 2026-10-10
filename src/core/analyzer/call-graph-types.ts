@@ -86,10 +86,33 @@ export interface RawEdge {
 }
 
 /** Plain-data class relationship extracted while the Pass-1 syntax tree is alive. */
+/**
+ * What the Kotlin source says about one class (change: fix-kotlin-type-hierarchy-fidelity). The
+ * supertype lists are kept apart because only the written form is known per file: a supertype
+ * written with a constructor call is a superclass, one written with `by` is an interface, and a
+ * bare one is classified once every file's class kinds are known.
+ */
+export interface KotlinClassMeta {
+  classKind: string;
+  superclasses: string[];
+  supertypes: string[];
+  delegated: string[];
+  /** Name of a named companion object; `Outer.Name.f()` then binds like `Outer.f()`. */
+  companionName?: string;
+}
+
 export interface ClassRelationshipFact {
   className: string;
   parentClasses: string[];
   interfaces: string[];
+  kotlin?: KotlinClassMeta;
+}
+
+/** One class's merged relationships, keyed by `filePath::ClassName` in the builder. */
+export interface ClassRelationship {
+  parentClasses: string[];
+  interfaces: string[];
+  kotlin?: KotlinClassMeta;
 }
 
 export interface DynamicEventFacts {
@@ -164,6 +187,17 @@ export interface FunctionNode {
   bodySpans?: Array<{ start: number; end: number }>;
   /** Declaration modifiers as written (Kotlin: `suspend`, `infix`, `operator`, `override`, …). */
   modifiers?: string[];
+  /**
+   * Kotlin: the receiver type of an extension function, as a simple name
+   * (change: fix-kotlin-type-hierarchy-fidelity). `className` is set for an extension only when
+   * the repository declares that type; an extension never creates a class record.
+   */
+  receiverType?: string;
+  /**
+   * Transient, Pass 1 → Pass 2 only: `className` was taken from the extension receiver, not from
+   * an enclosing class. Pass 2 decides whether the repository declares that type and removes this.
+   */
+  ownerIsReceiver?: true;
   parameters?: Array<{ name: string; type?: string; hasDefault?: true; isVararg?: true }>;
   /** Declared return type as written (Kotlin). Absent when the source does not write one. */
   returnType?: string;
@@ -420,6 +454,17 @@ export interface ClassNode {
   fanOut: number;
   /** True for synthetic file-level module nodes (free functions grouped by file) */
   isModule?: boolean;
+  /**
+   * Kotlin: what kind of class this is (`class`, `interface`, `functional-interface`, `object`,
+   * `enum`, `data`, `sealed`, `value`, `annotation`, `inner`, `object-expression`, `enum-entry`).
+   */
+  classKind?: string;
+  /** Kotlin: implements at least one interface by delegation (`: Iface by d`). */
+  delegating?: true;
+  /** Kotlin: supertypes that resolve to no class in the repository (kind unknown). */
+  unknownKindSupertypes?: string[];
+  /** Kotlin: other names the class answers to (a named companion object). */
+  aliases?: string[];
   /**
    * Content-addressed, location-independent stable identity (change:
    * add-content-addressed-stable-symbol-ids); the escaped class name, excluding

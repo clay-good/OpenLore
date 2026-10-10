@@ -43,6 +43,12 @@ export interface RawMethodCall {
   method: string;
   line: number;
   offset?: number;
+  /**
+   * The receiver's declared type, when the builder already recovered it from a declaration the
+   * local inference here cannot see (Kotlin: a parameter, a class property, a declared return
+   * type; change: fix-kotlin-type-hierarchy-fidelity).
+   */
+  declaredType?: string;
 }
 
 const SELF_RECEIVERS = new Set(['self', 'this', 'cls']);
@@ -162,7 +168,9 @@ class Hierarchy {
     for (const c of this.classById.values()) {
       for (const mid of c.methodIds) {
         const node = this.nodes.get(mid);
-        if (!node || node.isExternal) continue;
+        // A constructor, initializer, or accessor node is not a virtual method: two classes that
+        // each have an `<init>` do not override one another.
+        if (!node || node.isExternal || node.synthetic) continue;
         const arr = this.methodsByName.get(node.name);
         if (arr) arr.push(node); else this.methodsByName.set(node.name, [node]);
       }
@@ -343,7 +351,8 @@ function synthesizeVirtualDispatchEdges(
         ? content.slice(caller.startIndex, caller.endIndex)
         : '';
       if ((caller.language === 'Kotlin' || caller.language === 'Dart') && call.offset !== undefined) {
-        declaredType = inferReceiverTypeAt(body, caller.language, call.recv, call.offset - caller.startIndex);
+        declaredType = call.declaredType
+          ?? inferReceiverTypeAt(body, caller.language, call.recv, call.offset - caller.startIndex);
         // Name-only hierarchy fan-out would undo the call-site binding contract.
         if (!declaredType) continue;
       } else {

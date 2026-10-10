@@ -267,29 +267,29 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     async m => (await m.operatorBoundaryFiles()).includes('model/Money.kt')),
 
   // ── fix-kotlin-type-hierarchy-fidelity ────────────────────────────────────
-  entry('hierarchy-no-phantom-receiver-class', 'classes', 'known-gap', 'fix-kotlin-type-hierarchy-fidelity',
+  entry('hierarchy-no-phantom-receiver-class', 'classes', 'asserted', 'fix-kotlin-type-hierarchy-fidelity',
     'the class inventory has no class named `String` (an extension receiver is not a project class)',
     m => !classNamed(m, 'String')),
-  entry('hierarchy-receiver-type-field', 'classes', 'known-gap', 'fix-kotlin-type-hierarchy-fidelity',
+  entry('hierarchy-receiver-type-field', 'classes', 'asserted', 'fix-kotlin-type-hierarchy-fidelity',
     'the extension function `slugify` records `String` as its receiver type',
     m => findNode(m, SLUGIFY)?.receiverType === 'String'),
-  entry('hierarchy-interface-not-superclass', 'classes', 'known-gap', 'fix-kotlin-type-hierarchy-fidelity',
+  entry('hierarchy-interface-not-superclass', 'classes', 'asserted', 'fix-kotlin-type-hierarchy-fidelity',
     '`InMemoryUserRepository` implements the interface `UserRepository` (it is not a superclass)',
     m => {
       const c = classNamed(m, 'InMemoryUserRepository');
       return !!c?.interfaces?.includes('UserRepository') && !c.parentClasses?.includes('UserRepository');
     }),
-  entry('hierarchy-delegation', 'classes', 'known-gap', 'fix-kotlin-type-hierarchy-fidelity',
+  entry('hierarchy-delegation', 'classes', 'asserted', 'fix-kotlin-type-hierarchy-fidelity',
     '`AuditedUserRepository : UserRepository by inner` implements `UserRepository` and is marked delegating',
     m => {
       const c = classNamed(m, 'AuditedUserRepository');
       return !!c?.interfaces?.includes('UserRepository') && c.delegating === true;
     }),
-  entry('hierarchy-class-kind', 'classes', 'known-gap', 'fix-kotlin-type-hierarchy-fidelity',
+  entry('hierarchy-class-kind', 'classes', 'asserted', 'fix-kotlin-type-hierarchy-fidelity',
     'class kinds are recorded: `Env` is an object, `User` a data class, `UserRepository` an interface, `Color` an enum',
     m => classNamed(m, 'Env')?.classKind === 'object' && classNamed(m, 'User')?.classKind === 'data'
       && classNamed(m, 'UserRepository')?.classKind === 'interface' && classNamed(m, 'Color')?.classKind === 'enum'),
-  entry('hierarchy-override-through-delegation', 'classes', 'known-gap', 'fix-kotlin-type-hierarchy-fidelity',
+  entry('hierarchy-override-through-delegation', 'classes', 'asserted', 'fix-kotlin-type-hierarchy-fidelity',
     '`AuditedUserRepository.save` overrides `UserRepository.save`',
     m => m.edges.some(e => e.kind === 'overrides' && e.from === `${REPO}::UserRepository.save` && e.to === `${REPO}::AuditedUserRepository.save`)),
 
