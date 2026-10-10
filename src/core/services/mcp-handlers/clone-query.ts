@@ -65,6 +65,7 @@ const MAX_SNIPPET_LENGTH = 64 * 1024;
 interface SerNode extends CloneQueryNode {
   startLine?: number;
   endLine?: number;
+  platformVariantOf?: string;
 }
 
 /**
@@ -135,6 +136,7 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
   let queryBody: string;
   let queryLineCount: number;
   let exclude: { filePath: string; startIndex: number; endIndex: number } | undefined;
+  let platformVariantOf: string | undefined;
   let queryLanguage: string | undefined;
   let queryLabel: Record<string, unknown>;
 
@@ -197,6 +199,9 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
     const endLine = node.endLine ?? startLine + queryBody.split('\n').length - 1;
     queryLineCount = endLine - startLine + 1;
     exclude = { filePath: node.filePath, startIndex: node.startIndex, endIndex: node.endIndex };
+    // Kotlin Multiplatform: the `expect` declaration and the other `actual`s of the queried
+    // function are its platform variants, not clones of it.
+    platformVariantOf = node.platformVariantOf;
     queryLanguage = node.language;
     queryLabel = {
       mode: 'symbol',
@@ -215,7 +220,10 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
   // NaN-safe (a CLI `--max foo` → parseInt → NaN would otherwise pass an unlimited limit through).
   const requestedMax = Number.isFinite(input.maxResults as number) ? (input.maxResults as number) : DEFAULT_LIMIT;
   const limit = Math.max(1, Math.min(requestedMax, MAX_LIMIT));
-  const result = findClones(queryBody, queryLineCount, files, nodes, {
+  const comparable = platformVariantOf
+    ? nodes.filter(n => n.platformVariantOf !== platformVariantOf || (exclude && n.filePath === exclude.filePath && n.startIndex === exclude.startIndex))
+    : nodes;
+  const result = findClones(queryBody, queryLineCount, files, comparable, {
     minSimilarity: input.minSimilarity,
     limit,
     exclude,

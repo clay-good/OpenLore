@@ -878,3 +878,23 @@ export function scanKotlinDeclarations(content: string): KotlinSignatureDeclarat
   }
   return out.sort((a, b) => a.offset - b.offset || (a.kind === 'constructor' ? 1 : -1));
 }
+
+// ── Gradle source sets (change: add-kotlin-multiplatform-source-sets) ───────────────────────
+
+const PLATFORM_PREFIXES: ReadonlyArray<[RegExp, string]> = [
+  [/^common/, 'common'], [/^jvm/, 'jvm'], [/^android/, 'android'], [/^(?:ios|tvos|watchos|macos|apple)/, 'apple'],
+  [/^js/, 'js'], [/^wasm/, 'wasm'], [/^(?:linux|mingw|native)/, 'native'], [/^desktop/, 'jvm'],
+];
+
+/**
+ * The Gradle source set of a file, read from its `src/<set>/kotlin/` or `src/<set>/java/` path,
+ * and the platform that a standard Kotlin Multiplatform set name implies. A set name that is not
+ * a standard one is recorded as written, with platform `unknown`. No Gradle file is read.
+ */
+export function kotlinSourceSet(filePath: string): { sourceSet: string; platform: string } | undefined {
+  const set = filePath.match(/(?:^|\/)src\/([A-Za-z][A-Za-z0-9]*)\/(?:kotlin|java)\//)?.[1];
+  if (!set) return undefined;
+  const base = set.replace(/(?:Main|Test|UnitTest|InstrumentedTest)$/, '');
+  const platform = base === set ? undefined : PLATFORM_PREFIXES.find(([re]) => re.test(base))?.[1];
+  return { sourceSet: set, platform: platform ?? 'unknown' };
+}

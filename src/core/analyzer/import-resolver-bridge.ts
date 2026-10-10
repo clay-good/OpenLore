@@ -311,12 +311,31 @@ function bindKotlinScopes(
     }
   }
 
+  // `expect class X` is the binding target of `X`; `actual class X` and `actual typealias X`
+  // in other source sets do not make the name ambiguous.
+  const expectTypes = new Map<string, Set<string>>();
+  for (const f of files) {
+    const header = headerOf(f);
+    for (const declaration of header.declarations) {
+      if (!KOTLIN_TYPE_KINDS.has(declaration.kind) || !declaration.modifiers.includes('expect')) continue;
+      const key = `${header.packageName}\0${declaration.name}`;
+      const set = expectTypes.get(key) ?? new Set<string>();
+      set.add(f.path);
+      expectTypes.set(key, set);
+    }
+  }
+  const expectTypeFiles = (pkgName: string, name: string): Set<string> | undefined => expectTypes.get(`${pkgName}\0${name}`);
+
   /** Symbols of `name` in `pkg` that `viewer` may see: `private` is visible in its own file only. */
   const visible = (pkgName: string, kind: Exclude<KotlinScopeKind, 'type'>, name: string, viewer: string): KotlinSymbol[] =>
     (packages.get(pkgName)?.[kind].get(name) ?? [])
       .filter(sym => sym.file === viewer || !sym.declaration.modifiers.includes('private'));
 
-  const encode = (symbols: KotlinSymbol[]): string | null => {
+  const encode = (all: KotlinSymbol[]): string | null => {
+    // Kotlin Multiplatform: an `expect` declaration is the binding target of its name, and its
+    // `actual` declarations do not compete with it (change: add-kotlin-multiplatform-source-sets).
+    const expected = all.filter(sym => sym.declaration.modifiers.includes('expect'));
+    const symbols = expected.length > 0 ? expected : all;
     const fileSet = new Set(symbols.map(sym => sym.file));
     // Overloads in one file are one graph node; the same name in two files is ambiguous.
     if (fileSet.size !== 1) return null;
@@ -359,7 +378,7 @@ function bindKotlinScopes(
         if (encoded) offer(kind, level, local, encoded);
         else for (const sym of symbols) offer(kind, level, local, `${sym.file}\0${sym.declaration.name}\0${sym.declaration.offset}`);
       }
-      const typeFiles = jvmTypesByPackage.get(pkgName)?.get(name);
+      const typeFiles = expectTypeFiles(pkgName, name) ?? jvmTypesByPackage.get(pkgName)?.get(name);
       if (typeFiles && typeFiles.size > 0) {
         found = true;
         for (const file of typeFiles) offer('type', level, local, file);
@@ -409,7 +428,8 @@ function bindKotlinScopes(
           else for (const sym of symbols) offer(kind, level, name, `${sym.file}\0${sym.declaration.name}\0${sym.declaration.offset}`);
         }
       }
-      for (const [name, typeFiles] of jvmTypesByPackage.get(pkgName) ?? []) {
+      for (const [name, allTypeFiles] of jvmTypesByPackage.get(pkgName) ?? []) {
+        const typeFiles = expectTypeFiles(pkgName, name) ?? allTypeFiles;
         for (const file of typeFiles) offer('type', level, name, file);
         if (!typeQualifier.has(name)) typeQualifier.set(name, name);
       }

@@ -557,6 +557,8 @@ export interface KotlinClassFact {
   delegated: string[];
   /** The name of a named companion object of this class. */
   companionName?: string;
+  /** Kotlin Multiplatform: declared `expect` or `actual`. */
+  platformRole?: 'expect' | 'actual';
 }
 
 function primaryKind(keywords: string[], functional: boolean): KotlinClassKind {
@@ -614,6 +616,7 @@ export function collectKotlinClassFacts(root: KotlinNode, content: string, index
         classKind: primaryKind(keywords, functional),
         ...supertypesOf(node),
         ...(companionName ? { companionName } : {}),
+        ...(keywords.includes('expect') ? { platformRole: 'expect' as const } : keywords.includes('actual') ? { platformRole: 'actual' as const } : {}),
       });
     } else if (node.type === 'object_literal') {
       const name = index.anonymous.get(node.startIndex);

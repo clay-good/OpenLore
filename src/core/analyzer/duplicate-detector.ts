@@ -349,6 +349,10 @@ export function detectDuplicates(
   }
 
   const entries: Entry[] = [];
+  // Kotlin Multiplatform: an `expect` declaration and its `actual`s are one declaration written
+  // once per platform, not copies of each other (change: add-kotlin-multiplatform-source-sets).
+  const platformVariant = new Map<string, string>();
+  const instanceKey = (file: string, startLine: number, name: string): string => `${file}\0${startLine}\0${name}`;
   // One newline index per FILE, not per function: the nodes of a file are visited together, and
   // rebuilding it per node would restore the quadratic cost this replaced.
   const lineIndexCache = new Map<string, number[]>();
@@ -369,6 +373,7 @@ export function detectDuplicates(
     const lineCount = endLine - startLine + 1;
 
     if (lineCount < MIN_LINES) continue;
+    if (node.platformVariantOf) platformVariant.set(instanceKey(node.filePath, startLine, node.name), node.platformVariantOf);
 
     const body = content.slice(node.startIndex, node.endIndex);
     const t1 = normalizeType1(body, node.language);
@@ -493,6 +498,21 @@ export function detectDuplicates(
             ungrouped[repIdx].instance.endLine - ungrouped[repIdx].instance.startLine + 1,
         });
       }
+    }
+  }
+
+  // Platform variants of one declaration count once; a group left with one member is no clone.
+  if (platformVariant.size > 0) {
+    for (let g = cloneGroups.length - 1; g >= 0; g--) {
+      const seen = new Set<string>();
+      cloneGroups[g].instances = cloneGroups[g].instances.filter(inst => {
+        const variant = platformVariant.get(instanceKey(inst.file, inst.startLine, inst.functionName));
+        if (!variant) return true;
+        if (seen.has(variant)) return false;
+        seen.add(variant);
+        return true;
+      });
+      if (cloneGroups[g].instances.length < 2) cloneGroups.splice(g, 1);
     }
   }
 

@@ -52,7 +52,7 @@ import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
-import { kotlinCodeMask, normalizeKotlinForParse } from './kotlin-source.js';
+import { kotlinCodeMask, kotlinSourceSet, normalizeKotlinForParse, scanKotlinDeclarations, scanKotlinFile } from './kotlin-source.js';
 import { kotlinFacadeName, kotlinJvmMembers, type KotlinJvmAccess, type KotlinJvmMember } from './kotlin-jvm-names.js';
 import {
   buildKotlinOwnerIndex, collectKotlinBodyNodes, collectKotlinClassFacts, collectKotlinExtraCalls,
@@ -134,6 +134,7 @@ import type {
   ClassRelationshipFact,
   DynamicDispatchFacts,
   ClassRelationship,
+  MultiplatformReceipt,
 } from './call-graph-types.js';
 import { classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.js';
 
@@ -3099,6 +3100,7 @@ function kotlinRelationshipFacts(root: KotlinNode, content: string, index?: Kotl
       supertypes: fact.supertypes,
       delegated: fact.delegated,
       ...(fact.companionName ? { companionName: fact.companionName } : {}),
+      ...(fact.platformRole ? { platformRole: fact.platformRole } : {}),
     },
   }));
 }
@@ -5833,6 +5835,12 @@ export class CallGraphBuilder {
     const declaredClassLeaves = new Set<string>();
     for (const key of relationships.keys()) declaredClassLeaves.add(leafName(key.slice(key.indexOf('::') + 2)));
     for (const node of allNodes.values()) if (node.className && !node.ownerIsReceiver) declaredClassLeaves.add(leafName(node.className));
+    // The Gradle source set comes from the path alone, for Kotlin and for Java sources.
+    for (const node of allNodes.values()) {
+      if (node.language !== 'Kotlin' && node.language !== 'Java') continue;
+      const set = kotlinSourceSet(node.filePath);
+      if (set) { node.sourceSet = set.sourceSet; node.platform = set.platform; }
+    }
     for (const node of allNodes.values()) {
       if (!node.ownerIsReceiver) continue;
       delete node.ownerIsReceiver;
@@ -6827,6 +6835,80 @@ export class CallGraphBuilder {
       });
     }
 
+    // Kotlin Multiplatform: join each `actual` declaration to its `expect` declaration
+    // (change: add-kotlin-multiplatform-source-sets). The edge runs expect → actual, like a base
+    // method to its override, so a walk forward from a reached `expect` reaches every platform
+    // body, and a walk backward from a changed `actual` reaches the callers of its `expect`.
+    const multiplatform = ((): MultiplatformReceipt | undefined => {
+      const packageOf = new Map<string, string>();
+      const pkg = (filePath: string): string => {
+        let name = packageOf.get(filePath);
+        if (name === undefined) { name = scanKotlinFile(fileContents.get(filePath) ?? '').packageName; packageOf.set(filePath, name); }
+        return name;
+      };
+      const roleOf = (node: FunctionNode): 'expect' | 'actual' | undefined => {
+        if (node.modifiers?.includes('expect')) return 'expect';
+        if (node.modifiers?.includes('actual')) return 'actual';
+        // A member of an `expect class` carries no modifier of its own.
+        return node.className ? relationships.get(`${node.filePath}::${node.className}`)?.kotlin?.platformRole : undefined;
+      };
+      const expects = new Map<string, FunctionNode[]>();
+      const actuals = new Map<string, FunctionNode[]>();
+      for (const node of allNodes.values()) {
+        if (node.language !== 'Kotlin' || node.isExternal) continue;
+        const role = roleOf(node);
+        if (!role) continue;
+        const key = `${pkg(node.filePath)}\0${node.className ?? ''}\0${node.name}`;
+        const bucket = role === 'expect' ? expects : actuals;
+        const list = bucket.get(key);
+        if (list) list.push(node); else bucket.set(key, [node]);
+      }
+      if (expects.size === 0 && actuals.size === 0) return undefined;
+      const linkedExpects = new Set<string>();
+      const linkedActuals = new Set<string>();
+      const link = (expected: FunctionNode, actual: FunctionNode): void => {
+        if (expected.id === actual.id) return;
+        linkedExpects.add(expected.id);
+        linkedActuals.add(actual.id);
+        expected.platformVariantOf = expected.id;
+        actual.platformVariantOf = expected.id;
+        edges.push({
+          callerId: expected.id, calleeId: actual.id, calleeName: actual.name,
+          confidence: 'synthesized', kind: 'actualizes', synthesizedBy: 'kotlin-expect-actual',
+        });
+      };
+      for (const [key, expectedNodes] of expects) {
+        // Two `expect` declarations of one name are not something this pass can pair.
+        if (expectedNodes.length !== 1) continue;
+        for (const actual of actuals.get(key) ?? []) link(expectedNodes[0], actual);
+      }
+      // `actual typealias X = Y`: the members of `expect class X` are actualized by those of `Y`.
+      for (const file of structuralFiles) {
+        if (file.language !== 'Kotlin' || !/\bactual\s+typealias\b/.test(file.content)) continue;
+        for (const alias of scanKotlinDeclarations(file.content)) {
+          if (alias.kind !== 'typealias' || !alias.modifiers.includes('actual') || !alias.type) continue;
+          const target = kotlinTypeSimpleName(alias.type);
+          if (!target) continue;
+          for (const [key, expectedNodes] of expects) {
+            const [expectPackage, owner, name] = key.split('\0');
+            if (expectPackage !== pkg(file.path) || owner !== alias.name || expectedNodes.length !== 1) continue;
+            const picked = pickKotlinTypeMember(file.path, target, name);
+            if (picked.kind === 'unique') link(expectedNodes[0], picked.node);
+          }
+        }
+      }
+      const byId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+      const unmatchedExpect = [...expects.values()].flat().map(n => n.id).filter(id => !linkedExpects.has(id)).sort(byId);
+      const unmatchedActual = [...actuals.values()].flat().map(n => n.id).filter(id => !linkedActuals.has(id)).sort(byId);
+      return {
+        linked: linkedExpects.size,
+        unmatchedExpectCount: unmatchedExpect.length,
+        unmatchedActualCount: unmatchedActual.length,
+        unmatchedExpect: unmatchedExpect.slice(0, 20),
+        unmatchedActual: unmatchedActual.slice(0, 20),
+      };
+    })();
+
     // Pass 2b: HTTP cross-language edges (JS/TS caller → Python handler)
     const httpClientDegradations: HttpExtractionDegradation[] = [...pass1HttpDegradations];
     try {
@@ -7273,6 +7355,7 @@ export class CallGraphBuilder {
     return {
       nodes: allNodes,
       edges,
+      ...(multiplatform ? { multiplatform } : {}),
       // Spilled overlays are on disk, not here — the caller drains them into `cfg_overlay`.
       cfgs: cfgSpill ? undefined : allCfgs,
       classes,
@@ -7600,5 +7683,6 @@ export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph
     ...(result.ambiguousSites && result.ambiguousSites.length > 0
       ? { ambiguousSites: result.ambiguousSites }
       : {}),
+    ...(result.multiplatform ? { multiplatform: result.multiplatform } : {}),
   };
 }

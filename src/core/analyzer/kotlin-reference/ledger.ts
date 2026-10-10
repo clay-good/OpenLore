@@ -335,10 +335,20 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
   edge('interop-companion', 'asserted', 'add-kotlin-java-interop-resolution', 'legacy/LegacyCaller.java::LegacyCaller.service', `${SERVICE}.inMemory`, ['import']),
 
   // ── add-kotlin-multiplatform-source-sets ──────────────────────────────────
-  entry('kmp-actualizes', 'multiplatform', 'known-gap', 'add-kotlin-multiplatform-source-sets',
+  entry('kmp-actualizes', 'multiplatform', 'asserted', 'add-kotlin-multiplatform-source-sets',
     'the `actual fun platformName` is joined to its `expect` declaration by an `actualizes` relation',
-    m => m.edges.some(e => e.kind === 'actualizes' && e.from === 'platform/Platform.jvm.kt::platformName' && e.to === 'platform/Platform.kt::platformName')),
-  entry('kmp-source-set', 'multiplatform', 'known-gap', 'add-kotlin-multiplatform-source-sets',
+    m => m.edges.some(e => e.kind === 'actualizes' && e.from === 'platform/Platform.kt::platformName' && e.to === 'platform/Platform.jvm.kt::platformName')),
+  entry('kmp-expect-is-the-binding-target', 'multiplatform', 'asserted', 'add-kotlin-multiplatform-source-sets',
+    '`banner` calls the `expect fun platformName`, and the `actual` in `jvmMain` does not make the name ambiguous',
+    m => hasEdge(m, 'platform/Platform.kt::banner', 'platform/Platform.kt::platformName')),
+  entry('kmp-actual-not-dead', 'multiplatform', 'asserted', 'add-kotlin-multiplatform-source-sets',
+    'the `actual fun platformName` is a dead-code candidate only together with its `expect` declaration',
+    async m => {
+      const dead = (await m.deadCode()).candidates;
+      return dead.includes('platform/Platform.jvm.kt::platformName') === dead.includes('platform/Platform.kt::platformName')
+        && m.edges.some(e => e.kind === 'actualizes');
+    }),
+  entry('kmp-source-set', 'multiplatform', 'asserted', 'add-kotlin-multiplatform-source-sets',
     'nodes record their source set (`commonMain`, `jvmMain`)',
     m => findNode(m, 'platform/Platform.kt::banner')?.sourceSet === 'commonMain'
       && findNode(m, 'platform/Platform.jvm.kt::platformName')?.sourceSet === 'jvmMain'),

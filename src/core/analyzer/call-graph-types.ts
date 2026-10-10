@@ -36,6 +36,7 @@ export type EdgeKind =
   | 'calls'
   | 'overrides'      // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
   | 'tested_by'
+  | 'actualizes'     // Kotlin `expect` declaration → each `actual` declaration (change: add-kotlin-multiplatform-source-sets)
   | 'references'
   | 'depends_on'
   | 'affects'        // decision → governed file (spec-16)
@@ -99,6 +100,8 @@ export interface KotlinClassMeta {
   delegated: string[];
   /** Name of a named companion object; `Outer.Name.f()` then binds like `Outer.f()`. */
   companionName?: string;
+  /** Kotlin Multiplatform: the class is declared `expect` or `actual`. */
+  platformRole?: 'expect' | 'actual';
 }
 
 export interface ClassRelationshipFact {
@@ -193,6 +196,15 @@ export interface FunctionNode {
    * (change: add-kotlin-java-interop-resolution).
    */
   kotlinPropertyAccessor?: true;
+  /** Gradle source set of the file (`commonMain`, `jvmMain`, `main`, …), from its path. */
+  sourceSet?: string;
+  /** Platform a standard Kotlin Multiplatform source-set name implies; `unknown` otherwise. */
+  platform?: string;
+  /**
+   * Kotlin Multiplatform: the id of the `expect` declaration this node is, or actualizes. Nodes
+   * that share it are platform variants of one declaration, not clones of each other.
+   */
+  platformVariantOf?: string;
   /** Kotlin: declared visibility; `public` when no modifier is written. */
   visibility?: 'public' | 'internal' | 'protected' | 'private';
   /** Kotlin: names of the declared type parameters. */
@@ -558,6 +570,8 @@ export type FileExtractResult = {
 export interface CallGraphResult {
   nodes: Map<string, FunctionNode>;
   edges: CallEdge[];
+  /** Kotlin Multiplatform linking receipt; absent when nothing is `expect` or `actual`. */
+  multiplatform?: MultiplatformReceipt;
   /**
    * Per-function intra-procedural control-flow + reaching-definitions overlay
    * (spec: add-intraprocedural-cfg-dataflow-overlay), keyed by function id.
@@ -661,4 +675,20 @@ export interface SerializedCallGraph {
   stats: CallGraphResult['stats'];
   /** Unresolved-ambiguous call sites (change: harden-call-resolution-ambiguity). Omitted when empty. */
   ambiguousSites?: AmbiguousCallSite[];
+  /** Kotlin Multiplatform linking receipt. Omitted when the build has no `expect` or `actual`. */
+  multiplatform?: MultiplatformReceipt;
+}
+
+/**
+ * What `expect` / `actual` linking found (change: add-kotlin-multiplatform-source-sets). An
+ * unmatched declaration is not an error: a platform source set can be absent from the checkout.
+ */
+export interface MultiplatformReceipt {
+  /** `expect` declarations joined to at least one `actual`. */
+  linked: number;
+  unmatchedExpectCount: number;
+  unmatchedActualCount: number;
+  /** Up to 20 ids of each, sorted. */
+  unmatchedExpect: string[];
+  unmatchedActual: string[];
 }

@@ -44,6 +44,10 @@ export const DOMAIN_NOISE_DIRS = new Set([
   'target', 'build', 'out', 'dist', 'bin', 'obj', 'gen', 'generated',
   'pkg', 'internal', 'cmd', 'node_modules', 'vendor',
   'com', 'org', 'io', 'net', 'gov', 'edu', 'co',
+  // Kotlin Multiplatform source sets (`src/commonMain/kotlin/…`), compared in lower case.
+  'commonmain', 'commontest', 'jvmmain', 'jvmtest', 'androidmain', 'androidtest', 'androidunittest',
+  'androidinstrumentedtest', 'iosmain', 'iostest', 'jsmain', 'jstest', 'wasmjsmain', 'wasmjstest',
+  'nativemain', 'nativetest', 'applemain', 'appletest', 'linuxmain', 'macosmain', 'mingwmain', 'desktopmain',
 ]);
 
 /**
