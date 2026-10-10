@@ -6,7 +6,10 @@
  * Detects clusters, cycles, and special nodes (centers, leaves, bridges, orphans).
  */
 
-import { ImportExportParser, resolveImport, type ExportInfo, type FileAnalysis } from './import-parser.js';
+import {
+  ImportExportParser, buildJvmPackageIndex, resolveImport, resolveJvmImport,
+  type ExportInfo, type FileAnalysis, type JvmFileFacts, type JvmImportReceipt, type JvmPackageIndex,
+} from './import-parser.js';
 import { extractAllHttpEdges, type HttpEdge } from './http-route-parser.js';
 import { deriveDomainFromPath } from './domain-naming.js';
 import { escapeDotString } from '../../utils/misc.js';
@@ -48,6 +51,8 @@ export interface DependencyNode {
   id: string;
   file: ScoredFile;
   exports: ExportInfo[];
+  /** Kotlin and Java: declared package and package-level names (the JVM package index input). */
+  jvm?: JvmFileFacts;
   metrics: {
     inDegree: number;
     outDegree: number;
@@ -136,6 +141,13 @@ export interface DependencyGraphResult {
     /** Clusters with at least one internal edge */
     structuralClusterCount: number;
     cycleCount: number;
+    /**
+     * Kotlin and Java imports that reached no file for a stated reason (change:
+     * add-kotlin-file-dependency-and-exports): a wildcard import of a repository package from
+     * which the file uses no declared name, and a name declared in more than one file. Omitted
+     * when both are zero.
+     */
+    jvmImports?: { wildcardUnresolved: number; ambiguous: number };
   };
 }
 
@@ -178,18 +190,52 @@ export async function computeFileImportEdges(
   fileSet: Set<string>,
   rootDir: string,
   extensions?: string[],
+  /**
+   * The shared JVM package index (change: add-kotlin-file-dependency-and-exports). A Kotlin
+   * import resolves only through it; a Java import tries it first, so it also reaches a Kotlin
+   * declaration, and falls back to the source-root layout.
+   */
+  jvmIndex?: JvmPackageIndex,
+  /** Counts imports that reached nothing for a stated reason. */
+  receipts?: Record<JvmImportReceipt, number>,
 ): Promise<DependencyEdge[]> {
   const isPythonFile = fromAbs.endsWith('.py') || fromAbs.endsWith('.pyw');
   const isJavaFile = fromAbs.endsWith('.java');
+  const isKotlinFile = /\.kts?$/i.test(fromAbs);
   const edges: DependencyEdge[] = [];
+  const seenTargets = new Set<string>();
 
   for (const imp of analysis.imports) {
     // Skip non-relative imports for JS/TS (always npm packages). Python and Java
     // must NOT skip: `from services.retriever import X` / absolute class FQNs may
     // resolve to a local module.
-    if (!imp.isRelative && !isPythonFile && !isJavaFile) continue;
+    if (!imp.isRelative && !isPythonFile && !isJavaFile && !isKotlinFile) continue;
     // Skip builtins / third-party that can't resolve to a project file.
     if (!imp.isRelative && imp.isBuiltin) continue;
+
+    if ((isKotlinFile || isJavaFile) && jvmIndex) {
+      const resolved = resolveJvmImport(jvmIndex, imp, analysis.usedNames);
+      if (resolved.receipt && receipts) receipts[resolved.receipt]++;
+      const targets = resolved.targets.filter(t => t !== fromAbs && fileSet.has(t));
+      for (const target of targets) {
+        const key = `${target}\0${imp.importedNames.join(',')}`;
+        if (seenTargets.has(key)) continue;
+        seenTargets.add(key);
+        edges.push({
+          source: fromAbs,
+          target,
+          importedNames: imp.importedNames,
+          ...(imp.importedSourceNames ? { importedSourceNames: imp.importedSourceNames } : {}),
+          isTypeOnly: false,
+          weight: 1,
+        });
+      }
+      // Kotlin resolves by declared package only. Java keeps its layout fallback for an
+      // import the index did not place.
+      if (isKotlinFile || targets.length > 0 || resolved.receipt) continue;
+    } else if (isKotlinFile) {
+      continue;
+    }
 
     const resolvedPath = await resolveImport(imp.source, fromAbs, {
       baseDir: rootDir,
@@ -295,6 +341,8 @@ export function detectDependencyCycles(
  * Builds and analyzes a dependency graph from scored files
  */
 export class DependencyGraphBuilder {
+  /** JVM imports that reached nothing, by reason (change: add-kotlin-file-dependency-and-exports). */
+  private jvmImportReceipts: Record<JvmImportReceipt, number> = { 'wildcard-unresolved': 0, ambiguous: 0 };
   private nodes: Map<string, DependencyNode> = new Map();
   private edges: DependencyEdge[] = [];
   private adjacencyList: Map<string, Set<string>> = new Map();
@@ -336,6 +384,7 @@ export class DependencyGraphBuilder {
         id: file.absolutePath,
         file,
         exports: analysis?.exports ?? [],
+        ...(analysis?.jvm ? { jvm: analysis.jvm } : {}),
         metrics: {
           inDegree: 0,
           outDegree: 0,
@@ -473,6 +522,8 @@ export class DependencyGraphBuilder {
     analyses: Map<string, FileAnalysis>
   ): Promise<void> {
     const fileSet = new Set(files.map(f => f.absolutePath));
+    // One index for the whole analysis: Kotlin and Java declarations by declared package.
+    const jvmIndex = buildJvmPackageIndex([...analyses].map(([file, analysis]) => ({ file, jvm: analysis.jvm })));
 
     for (const file of files) {
       const analysis = analyses.get(file.absolutePath);
@@ -484,6 +535,8 @@ export class DependencyGraphBuilder {
         fileSet,
         this.options.rootDir,
         this.options.extensions.length > 0 ? this.options.extensions : undefined,
+        jvmIndex,
+        this.jvmImportReceipts,
       );
       for (const edge of edges) {
         this.edges.push(edge);
@@ -863,6 +916,9 @@ export class DependencyGraphBuilder {
       clusterCount: clusters.length,
       structuralClusterCount: clusters.filter(c => c.isStructural).length,
       cycleCount: cycles.length,
+      ...(this.jvmImportReceipts['wildcard-unresolved'] + this.jvmImportReceipts.ambiguous > 0
+        ? { jvmImports: { wildcardUnresolved: this.jvmImportReceipts['wildcard-unresolved'], ambiguous: this.jvmImportReceipts.ambiguous } }
+        : {}),
     };
   }
 }

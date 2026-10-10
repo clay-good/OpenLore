@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (62)
+#### Supported (67)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -151,10 +151,15 @@ that a test checks on every run.
 | call graph | `legacy/LegacyCaller.java::LegacyCaller.store` calls `repo/Stores.kt::openStore` (import) | `add-kotlin-java-interop-resolution` |
 | call graph | `legacy/LegacyCaller.java::LegacyCaller.port` calls `config/Env.kt::Env.port` (import) | `add-kotlin-java-interop-resolution` |
 | call graph | `legacy/LegacyCaller.java::LegacyCaller.service` calls `service/UserService.kt::UserService.inMemory` (import) | `add-kotlin-java-interop-resolution` |
+| file graph | `UserService.kt` has an import edge to `UserRepository.kt` (`import com.acme.repo.UserRepository`) | `add-kotlin-file-dependency-and-exports` |
+| file graph | `UserService.kt` has an import edge to `Strings.kt` (`import com.acme.util.slugify`) | `add-kotlin-file-dependency-and-exports` |
+| file graph | `Application.kt` has an import edge to `Stores.kt` through `import com.acme.repo.*` (it uses `openStore`) | `add-kotlin-file-dependency-and-exports` |
+| file graph | `LegacyCaller.java` has an import edge to `UserService.kt` | `add-kotlin-file-dependency-and-exports` |
+| file graph | `Strings.kt` exports `slugify`, `loadName`, and `Color`, and does not export the private `load` | `add-kotlin-file-dependency-and-exports` |
 | call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
 
-#### Known gaps (32)
+#### Known gaps (27)
 
 A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
 
@@ -165,11 +170,6 @@ A known gap is checked too: the test fails when a gap closes until the row moves
 | control flow | `UserService.require` (an expression body with an Elvis `throw`) has an overlay with a branch | `widen-kotlin-control-flow-overlay` |
 | multiplatform | the `actual fun platformName` is joined to its `expect` declaration by an `actualizes` relation | `add-kotlin-multiplatform-source-sets` |
 | multiplatform | nodes record their source set (`commonMain`, `jvmMain`) | `add-kotlin-multiplatform-source-sets` |
-| file graph | `UserService.kt` has an import edge to `UserRepository.kt` (`import com.acme.repo.UserRepository`) | `add-kotlin-file-dependency-and-exports` |
-| file graph | `UserService.kt` has an import edge to `Strings.kt` (`import com.acme.util.slugify`) | `add-kotlin-file-dependency-and-exports` |
-| file graph | `Application.kt` has an import edge to `Stores.kt` through `import com.acme.repo.*` (it uses `openStore`) | `add-kotlin-file-dependency-and-exports` |
-| file graph | `LegacyCaller.java` has an import edge to `UserService.kt` | `add-kotlin-file-dependency-and-exports` |
-| file graph | `Strings.kt` exports `slugify`, `loadName`, and `Color`, and does not export the private `load` | `add-kotlin-file-dependency-and-exports` |
 | routes | Spring routes `GET /api/users/{id}` and `POST /api/users` are listed | `add-kotlin-http-topology` |
 | routes | Ktor routes `GET /health`, `POST /users`, and `GET /users/{id}` are listed | `add-kotlin-http-topology` |
 | capabilities | Kotlin backs the `crossServiceHttp` capability | `add-kotlin-http-topology` |
