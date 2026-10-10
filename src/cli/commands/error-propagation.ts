@@ -159,7 +159,7 @@ export async function runErrorPropagationCli(opts: ErrorPropagationCliOptions): 
 }
 
 export const errorPropagationCommand = new Command('error-propagation')
-  .description('Analyze escaping exceptions (TS/JS/Python/Java/C#) or returned errors and panics (Go). Read-only, deterministic, never blocks.')
+  .description('Analyze escaping exceptions (TS/JS/Python/Java/C#/Kotlin) or returned errors and panics (Go). Read-only, deterministic, never blocks.')
   .option('--symbol <name>', 'The function to analyze: its name, or name::path to disambiguate')
   .option('--max-depth <n>', 'Callee-traversal depth bound (default 10, clamped to [1, 30])', (v) => parseInt(v, 10))
   .option('--json', 'Emit the result as JSON', false)

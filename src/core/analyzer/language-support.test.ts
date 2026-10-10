@@ -133,6 +133,7 @@ const ERRP_FIXTURES: Record<string, string> = {
   Go: 'package p\nfunc f() { panic("x") }',
   Java: 'class C { void f(){ throw new IllegalStateException(); } }',
   'C#': 'class C { void F(){ throw new InvalidOperationException(); } }',
+  Kotlin: 'fun f() {\n  throw IllegalStateException("x")\n}',
 };
 describe('errorPropagation is behaviorally faithful (no silent over-claim)', () => {
   it('every ERROR_PROPAGATION_LANGUAGES member has a fixture wired (guard cannot rot)', () => {

@@ -84,7 +84,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
-  errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
+  errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#/Kotlin, plus Go returned-error and panic/recover value flow.',
   dynamicBoundary: 'Dynamic-boundary site recording: reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition and DI-container resolution are recorded as disclosed boundaries. A language WITHOUT this reports no site because none is looked for — never because it contains no dynamic dispatch.',
   literalReflection: 'Literal reflective dispatch recovery: a stable module-private JS/TS `const` dispatch table (`HANDLERS[k]()`, `HANDLERS["create"]()`) whose entries bind by their same-file declarations (never by name) becomes `literal-reflective` synthesized edges; every refusal stays a disclosed dynamic-boundary site. Self-typed receivers (`this["m"]()`, `getattr(self, "m")()`) and bare-name reflection are never resolved. A language WITHOUT this binds none of these shapes.',
 };

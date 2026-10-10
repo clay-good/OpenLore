@@ -418,7 +418,34 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     m => m.middleware.some(x => x.name === 'CallLogging')),
 
   // ── Capabilities delivered by the conclusion changes ──────────────────────
-  capability('errors-capability', 'known-gap', 'add-kotlin-error-propagation', 'errorPropagation'),
+  capability('errors-capability', 'asserted', 'add-kotlin-error-propagation', 'errorPropagation'),
+  entry('errors-elvis-throw-escapes', 'error propagation', 'asserted', 'add-kotlin-error-propagation',
+    '`UserNotFound` escapes `UserService.require` (`repo.find(id) ?: throw UserNotFound(id)`)',
+    async m => {
+      const result = await m.errorPropagation('require::src/main/kotlin/com/acme/service/UserService.kt');
+      return (result.escapes as Array<{ type: string }> | undefined ?? []).some(e => e.type === 'UserNotFound');
+    }),
+  entry('errors-typed-catch-handles', 'error propagation', 'asserted', 'add-kotlin-error-propagation',
+    '`UserService.describe` handles `UserNotFound` in its `catch (e: UserNotFound)` and lets nothing escape',
+    async m => {
+      const result = await m.errorPropagation('describe::src/main/kotlin/com/acme/service/UserService.kt');
+      const escapes = result.escapes as Array<{ type: string }> | undefined ?? [];
+      const handled = result.handledInternally as Array<{ type: string }> | undefined ?? [];
+      return escapes.length === 0 && handled.some(h => h.type === 'UserNotFound');
+    }),
+  entry('errors-run-catching-handles', 'error propagation', 'asserted', 'add-kotlin-error-propagation',
+    '`UserService.safeDescribe` handles everything thrown inside `runCatching { }`',
+    async m => {
+      const result = await m.errorPropagation('safeDescribe::src/main/kotlin/com/acme/service/UserService.kt');
+      return (result.escapes as unknown[] | undefined ?? []).length === 0
+        && (result.handledInternally as Array<{ type: string }> | undefined ?? []).some(h => h.type === 'UserNotFound');
+    }),
+  entry('errors-contract-call', 'error propagation', 'asserted', 'add-kotlin-error-propagation',
+    '`IllegalStateException` escapes `Env.databaseUrl` (`?: error("…")` is a standard-library contract call)',
+    async m => {
+      const result = await m.errorPropagation('databaseUrl::src/main/kotlin/com/acme/config/Env.kt');
+      return (result.escapes as Array<{ type: string }> | undefined ?? []).some(e => e.type === 'IllegalStateException');
+    }),
   capability('dynamic-capability', 'known-gap', 'add-kotlin-dynamic-boundary', 'dynamicBoundary'),
   capability('style-capability', 'known-gap', 'add-kotlin-style-fingerprint', 'styleFingerprint'),
 

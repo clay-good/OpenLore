@@ -23,7 +23,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-capability.ts`) |
 | `dynamicBoundary` | Dispatch the resolver cannot follow — reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition, DI-container resolution — recorded as a disclosed **boundary site** — unless `literalReflection` binds it to an edge. Backed for TypeScript/JavaScript/Python/Ruby/Go/Java/PHP/C#. A language WITHOUT it records no site because none is looked for, never because it contains no dynamic dispatch. | `DYNAMIC_BOUNDARY_LANG_SPECS` (`dynamic-boundary.ts`) |
 | `literalReflection` | The structurally provable part of reflective dispatch becomes an edge: a **literal dispatch table** — `HANDLERS[k]()` / `HANDLERS["create"]()` over a module-private `const` object whose name is used nowhere in the file except its declaration, a type query, and as the receiver of an immediately invoked subscript, in a file that evaluates no code. Each entry binds by its same-file module-level function declaration (or `const` arrow), never by name; an imported, reassigned, or `this`-using entry keeps the construct a site. A variable key binds every entry or none (none over the synthesis fan-out cap); a literal key binds its own entry. Edges carry `confidence: 'synthesized'` and `synthesizedBy: 'literal-reflective'`; bound constructs are persisted separately so a directly-resolved-only conclusion still discloses them; a subset rebuild, or a file with more recorded constructs than the per-file retention bound, binds nothing. Self-typed receivers (`this["m"]()`, `getattr(self, "m")()`, Ruby `send(:m)`), bare-name reflection, DI-container resolution, and Python dicts are never resolved. Backed for TypeScript/JavaScript. | `supportsLiteralReflection()` over `DYNAMIC_BOUNDARY_LANG_SPECS` (`dynamic-boundary.ts`) |
-| `errorPropagation` | Static exception escape/handler extraction for TypeScript, JavaScript, Python, Java, and C#; Java/C# typed handlers are exact-name lower bounds, with finally/resource-cleanup limits disclosed. Go uses a separate value-shaped model for proven returned-error positions and a narrow unconditional deferred-recover pattern; ambiguous result types, unwind ordering, and unresolved calls are boundaries, never exception terminology. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
+| `errorPropagation` | Static exception escape/handler extraction for TypeScript, JavaScript, Python, Java, C#, and Kotlin; Java/C#/Kotlin typed handlers are exact-name lower bounds, with finally/resource-cleanup limits disclosed. Go uses a separate value-shaped model for proven returned-error positions and a narrow unconditional deferred-recover pattern; ambiguous result types, unwind ordering, and unresolved calls are boundaries, never exception terminology. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
 
 ## The registry is derived, not hand-listed
 
@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (84)
+#### Supported (89)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -173,17 +173,21 @@ that a test checks on every run.
 | environment | `analyze_env_impact` for `ACME_PORT` names the read in `Env.port` and the caller `main` | `add-kotlin-env-var-reads` |
 | inventories | the `@Composable` functions `Greeting` and `GreetingList` are listed as UI components | `add-kotlin-ui-and-middleware-inventories` |
 | inventories | the Ktor plugin installation `install(CallLogging)` is listed as middleware | `add-kotlin-ui-and-middleware-inventories` |
+| capabilities | Kotlin backs the `errorPropagation` capability | `add-kotlin-error-propagation` |
+| error propagation | `UserNotFound` escapes `UserService.require` (`repo.find(id) ?: throw UserNotFound(id)`) | `add-kotlin-error-propagation` |
+| error propagation | `UserService.describe` handles `UserNotFound` in its `catch (e: UserNotFound)` and lets nothing escape | `add-kotlin-error-propagation` |
+| error propagation | `UserService.safeDescribe` handles everything thrown inside `runCatching { }` | `add-kotlin-error-propagation` |
+| error propagation | `IllegalStateException` escapes `Env.databaseUrl` (`?: error("…")` is a standard-library contract call) | `add-kotlin-error-propagation` |
 | call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
 
-#### Known gaps (13)
+#### Known gaps (12)
 
 A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
 
 | Area | Fact | Change |
 |---|---|---|
 | boundaries | the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary | `add-kotlin-dynamic-boundary` |
-| capabilities | Kotlin backs the `errorPropagation` capability | `add-kotlin-error-propagation` |
 | capabilities | Kotlin backs the `dynamicBoundary` capability | `add-kotlin-dynamic-boundary` |
 | capabilities | Kotlin backs the `styleFingerprint` capability | `add-kotlin-style-fingerprint` |
 | public surface | the public surface lists `openStore` and `UserService`, and does not list the private `load` | `add-kotlin-public-surface` |

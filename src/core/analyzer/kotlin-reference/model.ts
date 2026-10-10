@@ -16,6 +16,7 @@ import { CallGraphBuilder } from '../call-graph.js';
 import type { FunctionCfg } from '../cfg.js';
 import { detectLanguage, languageSupport } from '../language-support.js';
 import { handleAnalyzeEnvImpact } from '../../services/mcp-handlers/env-impact.js';
+import { handleAnalyzeErrorPropagation } from '../../services/mcp-handlers/error-propagation.js';
 import { handleFindDeadCode } from '../../services/mcp-handlers/reachability.js';
 import { handleCertifyPublicSurface } from '../../services/mcp-handlers/public-surface.js';
 
@@ -97,6 +98,8 @@ export interface KotlinReferenceModel {
   operatorBoundaryFiles: () => Promise<string[]>;
   /** The `analyze_env_impact` conclusion for one variable. */
   envImpact: (name: string) => Promise<Record<string, unknown>>;
+  /** The `analyze_error_propagation` conclusion for one symbol (`name::path`). */
+  errorPropagation: (symbol: string) => Promise<Record<string, unknown>>;
   /** Names listed by the public-surface conclusion (computed once, on first use). */
   publicSurfaceNames: () => Promise<string[]>;
   /** Raw artifacts, for probes that need a field this model does not lift. */
@@ -267,6 +270,7 @@ export async function analyzeKotlinReference(): Promise<{ model: KotlinReference
         .map(f => shortId(str(f.filePath)));
     }),
     envImpact: async (name: string) => await handleAnalyzeEnvImpact({ directory: root, name }) as Record<string, unknown>,
+    errorPropagation: async (symbol: string) => await handleAnalyzeErrorPropagation({ directory: root, symbol }) as Record<string, unknown>,
     publicSurfaceNames: once(async () => {
       const result = await handleCertifyPublicSurface({ directory: root }) as Record<string, unknown>;
       return asArray(result.surface).map(e => str(e.name));

@@ -41,6 +41,8 @@ import {
 } from '../../analyzer/exception-flow.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge, AmbiguousCallSite } from '../../analyzer/call-graph.js';
 import { parseWithBudget, type BudgetableParser } from '../../analyzer/parse-budget.js';
+import { KOTLIN_COROUTINE_BOUNDARY } from '../../analyzer/kotlin-exception-flow.js';
+import { normalizeKotlinForParse } from '../../analyzer/kotlin-source.js';
 
 export interface AnalyzeErrorPropagationInput {
   directory: string;
@@ -476,7 +478,8 @@ export async function handleAnalyzeErrorPropagation(
         // Bounded (change: fix-analyze-native-abort-and-file-cost-budget): this parse runs inside
         // the long-lived daemon, so one pathological file must not be able to wedge it. On the
         // budget the file becomes a disclosed boundary below, never a silent "no exceptions".
-        tree = parser ? parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content) : null;
+        // Kotlin is parsed after the same length-preserving normalization as at analyze time.
+        tree = parser ? parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, n.language === 'Kotlin' ? normalizeKotlinForParse(content) : content) : null;
         if (tree?.rootNode.hasError) degradedFiles.add(n.filePath);
         }
       } catch (error) {
@@ -512,9 +515,10 @@ export async function handleAnalyzeErrorPropagation(
       boundaries.add(`indexed function span changed and was re-resolved — re-run analyze_codebase (${labelOf(n)})`);
     }
     parsedCount++;
-    const facts = extractExceptionFacts(tree.rootNode, span.startIndex, span.endIndex, n.language);
+    const facts = extractExceptionFacts(tree.rootNode, span.startIndex, span.endIndex, n.language, n.bodySpans ?? []);
     factsById.set(n.id, facts);
     for (const boundary of facts.boundaries) boundaries.add(`${n.filePath}: ${boundary}`);
+    if (n.language === 'Kotlin') boundaries.add(KOTLIN_COROUTINE_BOUNDARY);
     if (facts.tryGuards.some(g => g.caughtTypes.length > 0)) {
       boundaries.add(
         `${facts.language} typed handlers are matched by exact type name only — subclass catches are not ` +
@@ -626,6 +630,9 @@ export async function handleAnalyzeErrorPropagation(
     // Direct throws that escape this function.
     for (const ts of facts.throwSites) {
       if (ts.locallyHandled) continue;
+      // Kotlin: `require(...)` throws only when it is the standard-library function. When the
+      // call resolved to a project function of that name, that function's own escapes apply.
+      if (ts.contractCallee && resolvedHere.has(`${ts.contractCallee}@${ts.line}`)) continue;
       out.push({
         type: ts.type,
         kind: ts.source === 'throws_clause' ? 'declared' : 'direct',

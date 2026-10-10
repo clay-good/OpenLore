@@ -26,6 +26,8 @@
  * attributed to that nested function. Computed live (no persisted artifact).
  */
 
+import { extractKotlinExceptionFacts } from './kotlin-exception-flow.js';
+import { normalizeKotlinForParse } from './kotlin-source.js';
 import type Parser from 'tree-sitter';
 import { usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
@@ -41,6 +43,7 @@ export const ERROR_PROPAGATION_LANGUAGES: ReadonlySet<string> = new Set([
   'Go',
   'Java',
   'C#',
+  'Kotlin',
 ]);
 
 /** A thrown value whose static type cannot be known (a bare re-raise, `throw e`,
@@ -90,6 +93,11 @@ export interface ThrowSite {
   locallyHandled: boolean;
   /** Java checked-exception contract declarations are escape sources, not throws. */
   source?: 'throw' | 'throws_clause';
+  /**
+   * Kotlin: the standard-library contract call that throws here (`require`, `check`, `error`, …).
+   * The site stands only when that call did NOT resolve to a project function of the same name.
+   */
+  contractCallee?: string;
 }
 
 /** How a call's callee is addressed.
@@ -386,9 +394,14 @@ export function resolveCurrentFunctionSpan(
   language: string,
   expectedName: string,
 ): { startIndex: number; endIndex: number } | null {
+  // Kotlin: a constructor, initializer, or accessor node has no `fun` declaration to re-resolve
+  // against; its indexed span is used as recorded.
+  if (language === 'Kotlin' && expectedName.startsWith('<')) return { startIndex, endIndex };
   const functionTypes = language === 'Go'
     ? new Set(['function_declaration', 'method_declaration'])
-    : specFor(language)?.nestedFnTypes;
+    : language === 'Kotlin'
+      ? new Set(['function_declaration', 'property_declaration'])
+      : specFor(language)?.nestedFnTypes;
   if (!functionTypes) return null;
   const index = rootAstIndex(root);
   if (!index) return null;
@@ -440,6 +453,13 @@ function rootAstIndex(root: Node): RootAstIndex | null {
 function currentFunctionName(node: Node): string | undefined {
   const ownName = node.childForFieldName('name')?.text;
   if (ownName) return ownName;
+  // Kotlin has no `name` field: a function's name is its `simple_identifier` child, and a
+  // callable property's is inside its `variable_declaration`.
+  if (node.type === 'function_declaration' || node.type === 'property_declaration') {
+    const holder = node.type === 'property_declaration' ? node.namedChildren.find(c => c.type === 'variable_declaration') : node;
+    const kotlinName = holder?.namedChildren.find(c => c.type === 'simple_identifier')?.text;
+    if (kotlinName) return kotlinName.replace(/^`|`$/g, '');
+  }
   const parent = node.parent;
   if (!parent) return undefined;
   const parentName = parent.childForFieldName('name')?.text;
@@ -822,7 +842,15 @@ export function extractExceptionFacts(
   startIndex: number,
   endIndex: number,
   language: string,
+  /** More regions that execute as part of the same node (a Kotlin constructor's `init` blocks). */
+  extraSpans: ReadonlyArray<{ start: number; end: number }> = [],
 ): FunctionExceptionFacts {
+  if (language === 'Kotlin') {
+    if (!astTraversalWithinBudget(root)) {
+      return { language, supported: true, throwSites: [], tryGuards: [], callSites: [], dynamicThrowCount: 0, boundaries: ['AST traversal budget exceeded; exception facts were not extracted'] };
+    }
+    return extractKotlinExceptionFacts(root, [{ start: startIndex, end: endIndex }, ...extraSpans]);
+  }
   const spec = specFor(language);
   if (!spec) {
     return {
@@ -948,7 +976,7 @@ export async function extractExceptionFactsFromSource(
   // runs at TOOL time inside the long-lived daemon, where an unbounded parse of one hostile file
   // would wedge the whole server, not just one build. On the budget it throws, and the caller
   // records the file as an analysis boundary rather than as "no exceptions here".
-  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, source);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, language === 'Kotlin' ? normalizeKotlinForParse(source) : source);
   if (tree.rootNode.hasError) {
     return {
       language, supported: true, throwSites: [], tryGuards: [], callSites: [], dynamicThrowCount: 0,
