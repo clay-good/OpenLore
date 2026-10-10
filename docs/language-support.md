@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (30)
+#### Supported (48)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -119,15 +119,6 @@ that a test checks on every run.
 | call graph | `Application.kt::warmUp` calls `client/OrderClient.kt::OrderClient.fetch` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | call graph | `repo/UserRepository.kt::AuditedUserRepository.save` calls `repo/UserRepository.kt::UserRepository.save` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | capabilities | Kotlin backs the `receiverResolution` capability | `add-kotlin-declared-type-receivers` |
-| call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
-| grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
-
-#### Known gaps (59)
-
-A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
-
-| Area | Fact | Change |
-|---|---|---|
 | nodes | the constructor `service/UserService.kt::UserService.<init>` is a graph node | `add-kotlin-callable-node-shapes` |
 | call graph | `service/UserService.kt::UserService.<init>` calls `service/UserService.kt::UserService.warm` | `add-kotlin-callable-node-shapes` |
 | call graph | `service/UserService.kt::UserService.inMemory` calls `service/UserService.kt::UserService.<init>` | `add-kotlin-callable-node-shapes` |
@@ -143,6 +134,19 @@ A known gap is checked too: the test fails when a gap closes until the row moves
 | nodes | the script body `build.gradle.kts::<script>` is a graph node | `add-kotlin-callable-node-shapes` |
 | nodes | the backtick-named function, stored without backticks, `service/UserServiceTest.kt::UserServiceTest.creates a user with a slug id` is a graph node | `add-kotlin-callable-node-shapes` |
 | nodes | the `suspend` function `warmUp` is marked asynchronous | `add-kotlin-callable-node-shapes` |
+| dead code | no constructor, initializer, or accessor node is a dead-code candidate | `add-kotlin-callable-node-shapes` |
+| dead code | the operator function `Money.plus` is not reported dead with more than low confidence | `add-kotlin-callable-node-shapes` |
+| call graph | `a + b` emits no call edge to `Money.plus`: the operator is chosen by a static type the analyzer does not compute | `add-kotlin-callable-node-shapes` |
+| call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
+| grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
+
+#### Known gaps (45)
+
+A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
+
+| Area | Fact | Change |
+|---|---|---|
+| boundaries | the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary | `add-kotlin-dynamic-boundary` |
 | classes | the class inventory has no class named `String` (an extension receiver is not a project class) | `fix-kotlin-type-hierarchy-fidelity` |
 | classes | the extension function `slugify` records `String` as its receiver type | `fix-kotlin-type-hierarchy-fidelity` |
 | classes | `InMemoryUserRepository` implements the interface `UserRepository` (it is not a superclass) | `fix-kotlin-type-hierarchy-fidelity` |

@@ -92,6 +92,8 @@ export interface KotlinReferenceModel {
   parseErrorFiles: string[];
   /** The dead-code conclusion for the analyzed copy (computed once, on first use). */
   deadCode: () => Promise<DeadCodeConclusion>;
+  /** Repo-relative files with at least one recorded `operator-dispatch` boundary site. */
+  operatorBoundaryFiles: () => Promise<string[]>;
   /** Names listed by the public-surface conclusion (computed once, on first use). */
   publicSurfaceNames: () => Promise<string[]>;
   /** Raw artifacts, for probes that need a field this model does not lift. */
@@ -100,6 +102,8 @@ export interface KotlinReferenceModel {
 
 export interface DeadCodeConclusion {
   candidates: string[];
+  /** Candidate id → `high` / `medium` / `low`. */
+  confidence: Record<string, string>;
   rootKinds: Record<string, number>;
   /** Repo-relative files that an entry-point adapter names as externally wired. */
   wiredFiles: string[];
@@ -239,14 +243,23 @@ export async function analyzeKotlinReference(): Promise<{ model: KotlinReference
     cfgs,
     parseErrorFiles,
     deadCode: once(async () => {
-      const result = await handleFindDeadCode({ directory: root }) as Record<string, unknown>;
+      const result = await handleFindDeadCode({ directory: root, maxResults: 1000 }) as Record<string, unknown>;
       const wiring = (result.externalWiring ?? {}) as Record<string, unknown>;
+      const idOf = (c: Record<string, unknown>): string =>
+        `${shortId(str(c.file))}::${c.className ? `${str(c.className)}.` : ''}${str(c.name)}`;
       return {
-        candidates: asArray(result.candidateDead).map(c =>
-          `${shortId(str(c.file))}::${c.className ? `${str(c.className)}.` : ''}${str(c.name)}`),
+        candidates: asArray(result.candidateDead).map(idOf),
+        confidence: Object.fromEntries(asArray(result.candidateDead).map(c => [idOf(c), str(c.confidence)])),
         rootKinds: (result.rootKinds ?? {}) as Record<string, number>,
         wiredFiles: asArray(wiring.files).map(f => shortId(str(f.file ?? f.path))),
       };
+    }),
+    operatorBoundaryFiles: once(async () => {
+      const report = await readJson(join(out, 'dynamic-boundary.json')).catch(() => null) as
+        { files?: Array<{ filePath?: string; sites?: Array<{ kind?: string }>; byKind?: Record<string, number> }> } | null;
+      return (report?.files ?? [])
+        .filter(f => (f.byKind?.['operator-dispatch'] ?? 0) > 0 || (f.sites ?? []).some(site => site.kind === 'operator-dispatch'))
+        .map(f => shortId(str(f.filePath)));
     }),
     publicSurfaceNames: once(async () => {
       const result = await handleCertifyPublicSurface({ directory: root }) as Record<string, unknown>;

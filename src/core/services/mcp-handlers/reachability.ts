@@ -196,6 +196,20 @@ function fileImported(filePath: string, importedFiles: Set<string>): boolean {
 }
 
 /**
+ * A node whose name is not a source identifier (a Kotlin constructor, initializer, accessor, or
+ * script body; change: add-kotlin-callable-node-shapes). It is reached from its owner, not by a
+ * call the graph can see: a property read runs an accessor, class loading runs an initializer.
+ * So it is never a dead-code candidate. An initializer and a script body also run without any
+ * caller, which makes them liveness roots.
+ */
+const isSyntheticNode = (n: FunctionNode): boolean => n.synthetic === true;
+const isImplicitRoot = (n: FunctionNode): boolean =>
+  n.synthetic === true && (n.name === '<clinit>' || n.name === '<script>');
+
+/** Kotlin `operator fun`: invoked by operator syntax (`a + b`, `a[i]`), which is not resolved. */
+const isOperatorFunction = (n: FunctionNode): boolean => n.modifiers?.includes('operator') === true;
+
+/**
  * The candidate dead-code id set: code nodes (excluding tests) not reachable from
  * any liveness root (tests, by-name imports, HTTP handlers, main-like, config-wired files). Shares the
  * documented roots definition with {@link handleFindDeadCode} so `find_dead_code`
@@ -220,12 +234,12 @@ export async function deadCodeIds(
   const wiredFiles = opts?.externalWiring ?? (await loadExternalWiring(absDir)).byFile;
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
-    !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) || wiredFiles.has(wiringKey(n.filePath)) ||
+    !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) || isImplicitRoot(n) || wiredFiles.has(wiringKey(n.filePath)) ||
     (importedNames !== null && importedNames.has(n.name));
   const codeNodes = cg.nodes.filter(isCodeNode);
   const seedIds = codeNodes.filter(isRoot).map(r => r.id).sort();
   const live = traversal.reachAll(seedIds, 'forward', { directResolvedOnly: strict });
-  return new Set(codeNodes.filter(n => !n.isTest && !live.has(n.id)).map(n => n.id));
+  return new Set(codeNodes.filter(n => !n.isTest && !isSyntheticNode(n) && !live.has(n.id)).map(n => n.id));
 }
 
 export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unknown> {
@@ -283,6 +297,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     !!n.isTest ||
     httpHandlerIds.has(n.id) ||
     isMainLike(n) ||
+    isImplicitRoot(n) ||
     isWired(n) ||
     (importedNames !== null && importedNames.has(n.name));
 
@@ -349,7 +364,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   }
 
   // ── Candidate dead-code report ──────────────────────────────────────────────
-  let candidates = codeNodes.filter(n => !n.isTest && !live.has(n.id));
+  let candidates = codeNodes.filter(n => !n.isTest && !isSyntheticNode(n) && !live.has(n.id));
   if (input.filePattern) candidates = candidates.filter(n => n.filePath.includes(input.filePattern!));
   const parseHealthReport = await loadParseHealthReport(absDir);
   const scriptContainerFiles = new Set(
@@ -393,6 +408,11 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (ambiguousCandidateIds.has(n.id)) {
         confidence = 'low';
         reasons.push('listed as a candidate by an unresolved-ambiguous call site — a potential caller was not bound, so it may be live');
+      }
+
+      if (isOperatorFunction(n)) {
+        confidence = 'low';
+        reasons.push('an operator function is invoked by operator syntax (for example `a + b`), which is not resolved to a call edge, so it may be live');
       }
 
       if (scriptContainerFiles.has(n.filePath)) {

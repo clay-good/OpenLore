@@ -65,7 +65,8 @@ describe('Kotlin package binding: a bare call binds only what is in scope', () =
       'A.kt': 'package a\nclass Service { val audit: (String) -> Unit = {}\n fun create() { audit("x") } }\n',
       'B.kt': 'package a\nclass Repo { private fun audit(x: String) {} }\n',
     });
-    expect(from('A.kt::Service.create')).toEqual([{ from: 'A.kt::Service.create', to: 'external::audit', confidence: 'external' }]);
+    // `audit` is the function-typed property of the caller's own class, never `Repo.audit`.
+    expect(from('A.kt::Service.create')).toEqual([{ from: 'A.kt::Service.create', to: 'A.kt::Service.audit', confidence: 'same_file' }]);
   });
 
   it('keeps a default-import name external when another package declares it', async () => {
@@ -321,9 +322,11 @@ describe('scanKotlinFile', () => {
         compared++;
       }
       // Every graph function that is not inside another declaration is one the scanner found.
-      const topLevel = [...result.nodes.values()].filter(n => !n.isExternal
-        && ![...result.nodes.values()].some(o => o !== n && !o.isExternal && o.startIndex <= n.startIndex && n.endIndex <= o.endIndex)
-        && /^(?:[^{]*?\b)?fun\b/.test(content.slice(n.startIndex, n.endIndex))
+      // Named `fun` declarations only: constructors, accessors, and callable properties are
+      // other declaration kinds, and a script body contains everything.
+      const topLevel = [...result.nodes.values()].filter(n => !n.isExternal && !n.synthetic
+        && ![...result.nodes.values()].some(o => o !== n && !o.isExternal && !o.synthetic && o.startIndex <= n.startIndex && n.endIndex <= o.endIndex)
+        && /^(?:(?:@\S+(?:\([^)]*\))?|[a-z]+)\s+)*fun\b/.test(content.slice(n.startIndex, n.endIndex))
         && lineIndent(content, n.startIndex) === 0);
       for (const node of topLevel) {
         const found = scanned.some(d => node.startIndex <= d.offset && d.offset < node.endIndex);
