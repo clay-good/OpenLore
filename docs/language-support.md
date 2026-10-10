@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (61)
+#### Supported (64)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -150,19 +150,19 @@ that a test checks on every run.
 | signatures | no stored signature of a Kotlin function contains a body: none has `{` outside an annotation, and none has `=` outside a parameter list | `fix-kotlin-signature-and-kdoc-fidelity` |
 | control flow | `UserService.describe` has an overlay with a multi-way `when` branch, a `try` region, and an Elvis exit | `widen-kotlin-control-flow-overlay` |
 | control flow | `UserService.require` (an expression body with an Elvis `throw`) has an overlay with a branch | `widen-kotlin-control-flow-overlay` |
+| call graph | `legacy/LegacyCaller.java::LegacyCaller.store` calls `repo/Stores.kt::openStore` (import) | `add-kotlin-java-interop-resolution` |
+| call graph | `legacy/LegacyCaller.java::LegacyCaller.port` calls `config/Env.kt::Env.port` (import) | `add-kotlin-java-interop-resolution` |
+| call graph | `legacy/LegacyCaller.java::LegacyCaller.service` calls `service/UserService.kt::UserService.inMemory` (import) | `add-kotlin-java-interop-resolution` |
 | call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
 
-#### Known gaps (33)
+#### Known gaps (30)
 
 A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
 
 | Area | Fact | Change |
 |---|---|---|
 | boundaries | the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary | `add-kotlin-dynamic-boundary` |
-| call graph | `legacy/LegacyCaller.java::LegacyCaller.store` calls `repo/Stores.kt::openStore` (import) | `add-kotlin-java-interop-resolution` |
-| call graph | `legacy/LegacyCaller.java::LegacyCaller.port` calls `config/Env.kt::Env.port` (import) | `add-kotlin-java-interop-resolution` |
-| call graph | `legacy/LegacyCaller.java::LegacyCaller.service` calls `service/UserService.kt::UserService.inMemory` (import) | `add-kotlin-java-interop-resolution` |
 | multiplatform | the `actual fun platformName` is joined to its `expect` declaration by an `actualizes` relation | `add-kotlin-multiplatform-source-sets` |
 | multiplatform | nodes record their source set (`commonMain`, `jvmMain`) | `add-kotlin-multiplatform-source-sets` |
 | file graph | `UserService.kt` has an import edge to `UserRepository.kt` (`import com.acme.repo.UserRepository`) | `add-kotlin-file-dependency-and-exports` |

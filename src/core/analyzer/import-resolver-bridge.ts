@@ -13,6 +13,7 @@ import { dirname, resolve, posix } from 'node:path';
 import type { FileAnalysis, ExportInfo } from './import-parser.js';
 import { parseJSImports, parsePythonImports, parseJSExports } from './import-parser.js';
 import { kotlinCodeMask, scanKotlinFile, type KotlinDeclaration, type KotlinFileHeader } from './kotlin-source.js';
+import { kotlinFacadeName } from './kotlin-jvm-names.js';
 
 /** filePath → Map<localName, resolvedSourceFilePath> */
 export type ImportMap = Map<string, Map<string, string>>;
@@ -542,6 +543,14 @@ function buildStaticLanguageImportMaps(
       : declaredTypes(f.content, f.language);
     if (f.language === 'PHP') {
       symbols.push(...declaredTopLevelFunctions(f.content));
+    }
+    // A Kotlin file with package-level functions or properties compiles to a facade class
+    // (`FooKt`), which is what Java imports (change: add-kotlin-java-interop-resolution). Two
+    // files with one facade name in one package leave the name with two targets, so it binds
+    // nothing.
+    if (f.language === 'Kotlin' && kotlinHeader(f).declarations.some(d =>
+      (d.kind === 'function' || d.kind === 'property') && !d.modifiers.includes('private'))) {
+      symbols.push(kotlinFacadeName(f.path, f.content));
     }
     const byName = namespaceTypes.get(namespace) ?? new Map<string, Set<string>>();
     for (const symbol of symbols) {

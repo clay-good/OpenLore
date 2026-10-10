@@ -187,6 +187,12 @@ export interface FunctionNode {
   bodySpans?: Array<{ start: number; end: number }>;
   /** Declaration modifiers as written (Kotlin: `suspend`, `infix`, `operator`, `override`, …). */
   modifiers?: string[];
+  /**
+   * Java: an accessor (`getX` / `setX` / `isX`) of a class that Kotlin source refers to. Kotlin
+   * reads it with property syntax, which is not a call site, so it may be live with no caller
+   * (change: add-kotlin-java-interop-resolution).
+   */
+  kotlinPropertyAccessor?: true;
   /** Kotlin: declared visibility; `public` when no modifier is written. */
   visibility?: 'public' | 'internal' | 'protected' | 'private';
   /** Kotlin: names of the declared type parameters. */

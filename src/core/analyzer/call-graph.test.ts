@@ -2341,11 +2341,19 @@ describe('widened CFG parameter and foreach semantics', () => {
     });
   }
 
-  for (const fixture of [
-    {
+  // Kotlin models the expression-valued `if` (change: widen-kotlin-control-flow-overlay): the
+  // branch is in the overlay and the definition of `y` follows the join.
+  it('Kotlin models an expression-valued if as a branch before the definition', async () => {
+    const result = await new CallGraphBuilder().build([{
       language: 'Kotlin', path: 'conditional.kt',
       content: 'fun f(x:Int):Int { var y = if (x>0) 1 else 2; while(y<3){y=y+1}; return y }',
-    },
+    }]);
+    const cfg = result.cfgs?.get('conditional.kt::f');
+    expect(cfg?.blocks.filter(b => b.kind === 'branch')).toHaveLength(1);
+    expect(cfg?.blocks.filter(b => b.kind === 'loop')).toHaveLength(1);
+  });
+
+  for (const fixture of [
     {
       language: 'Scala', path: 'conditional.scala',
       content: 'object C { def f(x:Int):Int = { var y = if (x>0) 1 else 2; while(y<3){y += 1}; y } }',
