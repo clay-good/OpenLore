@@ -187,7 +187,7 @@ export interface FunctionNode {
    * `init` blocks and property initializers of a constructor. A call site inside one belongs to
    * this node. Regions never overlap another node's span.
    */
-  bodySpans?: Array<{ start: number; end: number }>;
+  bodySpans?: Array<{ start: number; end: number; startLine?: number; endLine?: number }>;
   /** Declaration modifiers as written (Kotlin: `suspend`, `infix`, `operator`, `override`, …). */
   modifiers?: string[];
   /**

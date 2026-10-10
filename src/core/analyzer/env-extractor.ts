@@ -13,6 +13,8 @@
 
 import { extname, relative, basename } from 'node:path';
 
+import { blankCommentsPreservingLayout } from './comment-blanking.js';
+import { isTestFile } from './test-file.js';
 import {
   ENV_DECLARATION_FILES,
   mapFilesBounded,
@@ -35,6 +37,8 @@ export interface EnvVar {
   required: boolean;
   /** Inline comment from .env.example, if present */
   description?: string;
+  /** `build-script` when the variable is read in a Gradle Kotlin build script. */
+  tags?: string[];
 }
 
 // ============================================================================
@@ -99,8 +103,104 @@ const GO_ENV_RE = /(?<![\w$.])os\.(?:Getenv|LookupEnv)\s*\(\s*"([A-Z_][A-Z0-9_]*
 // Ruby: ENV["X"], ENV['X'], ENV.fetch("X")
 const RUBY_ENV_RE = /(?<![\w$:])ENV\[['"]([A-Z_][A-Z0-9_]*)['"]|(?<![\w$:])ENV\.fetch(?:\(\s*|[ \t]+)['"]([A-Z_][A-Z0-9_]*)['"]/g;
 
-function extractFromSource(source: string, relPath: string, ext: string): Array<{ name: string; required: boolean }> {
-  const found: Array<{ name: string; required: boolean }> = [];
+// ── Kotlin (change: add-kotlin-env-var-reads) ───────────────────────────────
+
+const KT_NAME = '([A-Z_][A-Z0-9_]*)';
+/** `System.getenv("X")`, and the forms on the `System.getenv()` map. */
+const KT_GETENV_RE = new RegExp(
+  `(?<![\\w.])System\\.getenv\\(\\s*(?:"${KT_NAME}"\\s*\\)|\\)\\s*(?:\\[\\s*"${KT_NAME}"\\s*\\]|\\.(get|getValue|getOrDefault|getOrElse)\\(\\s*"${KT_NAME}"))`, 'g');
+/** A `System.getenv(expr)` whose name is not a string literal: counted, never listed. */
+const KT_DYNAMIC_GETENV_RE = /(?<![\w.])System\.getenv\(\s*(?!["\s)])/g;
+const KT_GRADLE_PROVIDER_RE = new RegExp(`(?<![\\w.])providers\\.environmentVariable\\(\\s*"${KT_NAME}"\\s*\\)`, 'g');
+const KT_DOTENV_IMPORT_RE = /^[ \t]*import[ \t]+io\.github\.cdimascio\.dotenv\b/m;
+const KT_DOTENV_BINDING_RE = /\b(?:val|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*(?::[ \t]*Dotenv[ \t]*)?=[ \t]*(?:dotenv\b|Dotenv\.)/g;
+
+export interface KotlinEnvRead { name: string; index: number; required: boolean; tag?: 'build-script' }
+
+/**
+ * Is the read whose expression ends at `afterIdx` required? It is optional only when the same
+ * expression supplies a value: an Elvis operator whose right side is not a jump or `error(…)`.
+ * A non-null assertion, a throwing right side, and no fallback at all are required.
+ */
+function kotlinReadRequired(source: string, afterIdx: number): boolean {
+  let i = afterIdx;
+  for (let guard = 0; guard < 12; guard++) {
+    while (i < source.length && /\s/.test(source[i])) i++;
+    if (source.startsWith('!!', i)) return true;
+    if (source.startsWith('?:', i)) return /^\s*(?:error\s*\(|throw\b|TODO\s*\(|return\b)/.test(source.slice(i + 2, i + 40));
+    // A closing parenthesis of an enclosing group, then perhaps the fallback: `(getenv("X"))`.
+    if (source[i] === ')') { i++; continue; }
+    const chained = source.slice(i, i + 80).match(/^\??\.\s*[A-Za-z_][A-Za-z0-9_]*/);
+    if (!chained) return true;
+    i += chained[0].length;
+    while (i < source.length && (source[i] === ' ' || source[i] === '\t')) i++;
+    if (source[i] === '(') {
+      let depth = 0;
+      for (; i < source.length; i++) {
+        if (source[i] === '(') depth++;
+        else if (source[i] === ')') { depth--; if (depth === 0) { i++; break; } }
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Environment reads of one Kotlin file. The name must be a string literal. Comments are blanked
+ * first, so a commented-out read is not listed.
+ */
+export function extractKotlinEnvReads(source: string, relPath: string): KotlinEnvRead[] {
+  const code = blankCommentsPreservingLayout(source);
+  const reads: KotlinEnvRead[] = [];
+  const buildScript = /\.gradle\.kts$/i.test(relPath);
+  const tag = buildScript ? { tag: 'build-script' as const } : {};
+  for (const m of code.matchAll(KT_GETENV_RE)) {
+    const afterIdx = m.index + m[0].length;
+    if (m[1]) { reads.push({ name: m[1], index: m.index, required: kotlinReadRequired(code, afterIdx), ...tag }); continue; }
+    if (m[2]) { reads.push({ name: m[2], index: m.index, required: kotlinReadRequired(code, afterIdx), ...tag }); continue; }
+    const method = m[3];
+    const name = m[4];
+    if (!name) continue;
+    if (method === 'getOrDefault' || method === 'getOrElse') { reads.push({ name, index: m.index, required: false, ...tag }); continue; }
+    if (method === 'getValue') { reads.push({ name, index: m.index, required: true, ...tag }); continue; }
+    // `.get("X")`: required unless a fallback follows the closing parenthesis.
+    const close = code.indexOf(')', afterIdx);
+    reads.push({ name, index: m.index, required: close < 0 ? true : kotlinReadRequired(code, close + 1), ...tag });
+  }
+  if (buildScript) {
+    for (const m of code.matchAll(KT_GRADLE_PROVIDER_RE)) {
+      // A provider is a value only when asked; `.orElse(d)` / `.getOrElse(d)` supply a fallback.
+      const tail = code.slice(m.index + m[0].length, m.index + m[0].length + 60);
+      reads.push({ name: m[1], index: m.index, required: !/^\s*\.\s*(?:orElse|getOrElse|orNull)\b/.test(tail), tag: 'build-script' });
+    }
+  }
+  if (KT_DOTENV_IMPORT_RE.test(code)) {
+    const receivers = new Set<string>(['dotenv']);
+    for (const m of code.matchAll(KT_DOTENV_BINDING_RE)) receivers.add(m[1]);
+    for (const receiver of receivers) {
+      const re = new RegExp(`(?<![\\w.])${receiver}\\s*(?:\\[\\s*"${KT_NAME}"\\s*\\]|\\.get\\(\\s*"${KT_NAME}"\\s*(,)?)`, 'g');
+      for (const m of code.matchAll(re)) {
+        const name = m[1] ?? m[2];
+        if (!name) continue;
+        if (m[3]) { reads.push({ name, index: m.index, required: false, ...tag }); continue; }
+        const afterIdx = m[1] ? m.index + m[0].length : code.indexOf(')', m.index + m[0].length) + 1;
+        reads.push({ name, index: m.index, required: kotlinReadRequired(code, afterIdx), ...tag });
+      }
+    }
+  }
+  return reads.sort((a, b) => a.index - b.index || a.name.localeCompare(b.name));
+}
+
+/** `System.getenv(expr)` reads whose name is not a string literal. They are never listed. */
+export function countKotlinDynamicEnvReads(source: string): number {
+  return [...blankCommentsPreservingLayout(source).matchAll(KT_DYNAMIC_GETENV_RE)].length;
+}
+
+function extractFromSource(source: string, relPath: string, ext: string): Array<{ name: string; required: boolean; tag?: 'build-script' }> {
+  const found: Array<{ name: string; required: boolean; tag?: 'build-script' }> = [];
+  if (ext === '.kt' || ext === '.kts') {
+    return extractKotlinEnvReads(source, relPath).map(r => ({ name: r.name, required: r.required, ...(r.tag ? { tag: r.tag } : {}) }));
+  }
 
   let re: RegExp;
   if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
@@ -147,7 +247,7 @@ function extractFromSource(source: string, relPath: string, ext: string): Array<
 
 // ENV_DECLARATION_FILES is imported from bounded-file-scan: the disclosure predicate must be
 // built from the SAME list this scan reads, or an oversized `.env` is dropped without a word.
-const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '.go', '.rb']);
+const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '.go', '.rb', '.kt', '.kts']);
 const SKIP_DIRS = ['/node_modules/', '/.openlore/', '/dist/', '/build/', '/coverage/'];
 
 /**
@@ -167,6 +267,7 @@ export async function extractEnvVars(
       if (patch.hasDefault) existing.hasDefault = true;
       if (patch.required) existing.required = true;
       if (patch.description && !existing.description) existing.description = patch.description;
+      for (const tag of patch.tags ?? []) if (!existing.tags?.includes(tag)) existing.tags = [...(existing.tags ?? []), tag];
     } else {
       map.set(name, {
         name,
@@ -174,6 +275,7 @@ export async function extractEnvVars(
         hasDefault: patch.hasDefault ?? false,
         required: patch.required ?? false,
         description: patch.description,
+        ...(patch.tags?.length ? { tags: [...patch.tags] } : {}),
       });
     }
   }
@@ -202,6 +304,8 @@ export async function extractEnvVars(
         if (!SOURCE_EXTENSIONS.has(ext)) return [];
         // Skip test files
         if (fp.includes('.test.') || fp.includes('.spec.') || fp.includes('_test.') || fp.includes('_spec.')) return [];
+        // Kotlin tests are told by source set and by name, not by an infix (shared predicate).
+        if ((ext === '.kt' || ext === '.kts') && isTestFile(fp.replace(/\\/g, '/'))) return [];
       }
 
       const source = await readSourceCapped(fp, undefined, onOversized);
@@ -216,10 +320,10 @@ export async function extractEnvVars(
         }));
       }
 
-      return extractFromSource(source, rel, ext).map(({ name: varName, required }) => ({
+      return extractFromSource(source, rel, ext).map(({ name: varName, required, tag }) => ({
         name: varName,
         rel,
-        patch: { required },
+        patch: { required, ...(tag ? { tags: [tag] } : {}) },
       }));
     },
   );
@@ -271,6 +375,8 @@ export interface EnvReadSite {
    * A documented heuristic, not a guarantee.
    */
   required: boolean;
+  /** `build-script` for a read in a Gradle Kotlin build script. */
+  tag?: 'build-script';
 }
 
 /** Build a sorted array of newline byte/char offsets for O(log n) line lookup. */
@@ -474,6 +580,12 @@ export function extractEnvReadSites(source: string, relPath: string, ext: string
       // ENV["X"] returns nil; ENV.fetch("X") is strict only without a default.
       const required = m[1] === undefined && rubyFetchRequired(source, afterIdx);
       sites.push({ name, file: relPath, line: lineOf(m.index), required });
+    }
+  }
+
+  if (ext === '.kt' || ext === '.kts') {
+    for (const read of extractKotlinEnvReads(source, relPath)) {
+      sites.push({ name: read.name, file: relPath, line: lineOf(read.index), required: read.required, ...(read.tag ? { tag: read.tag } : {}) });
     }
   }
 

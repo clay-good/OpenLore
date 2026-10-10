@@ -1238,7 +1238,7 @@ export const NAV_TOOLS: NavToolSpec[] = [
     name: 'analyze_env_impact',
     label: 'openlore analyze_env_impact',
     description: 'See what breaks if you remove or rename an environment variable — its read sites, the callers that reach them, and the tests to run.',
-    guideline: 'Before removing or renaming an env var, call openlore_analyze_env_impact with its `name` (e.g. DATABASE_URL) to get the read sites, the blast radius, and per-site whether the read is a hard break. TypeScript/JavaScript/Python/Go/Ruby.',
+    guideline: 'Before removing or renaming an env var, call openlore_analyze_env_impact with its `name` (e.g. DATABASE_URL) to get the read sites, the blast radius, and per-site whether the read is a hard break. TypeScript/JavaScript/Python/Go/Ruby/Kotlin.',
     parameters: Type.Object({
       name: Type.String({ description: 'REQUIRED. The environment variable to analyze, e.g. DATABASE_URL.' }),
       maxDepth: Type.Optional(Type.Number({ description: 'Backward-reachability depth bound (default 12, clamped to [1, 30]).' })),

@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (73)
+#### Supported (77)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -162,10 +162,14 @@ that a test checks on every run.
 | file graph | `Application.kt` has an import edge to `Stores.kt` through `import com.acme.repo.*` (it uses `openStore`) | `add-kotlin-file-dependency-and-exports` |
 | file graph | `LegacyCaller.java` has an import edge to `UserService.kt` | `add-kotlin-file-dependency-and-exports` |
 | file graph | `Strings.kt` exports `slugify`, `loadName`, and `Color`, and does not export the private `load` | `add-kotlin-file-dependency-and-exports` |
+| environment | `ACME_PORT` is listed as an optional read (`System.getenv("ACME_PORT") ?: "8080"`) | `add-kotlin-env-var-reads` |
+| environment | `ACME_DATABASE_URL` (`?: error(...)`) and `ACME_TOKEN` (`getValue`) are listed as required reads | `add-kotlin-env-var-reads` |
+| environment | `ACME_REGION` is listed from `providers.environmentVariable("ACME_REGION")` in the build script | `add-kotlin-env-var-reads` |
+| environment | `analyze_env_impact` for `ACME_PORT` names the read in `Env.port` and the caller `main` | `add-kotlin-env-var-reads` |
 | call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
 
-#### Known gaps (23)
+#### Known gaps (20)
 
 A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
 
@@ -177,9 +181,6 @@ A known gap is checked too: the test fails when a gap closes until the row moves
 | capabilities | Kotlin backs the `crossServiceHttp` capability | `add-kotlin-http-topology` |
 | schemas | the JPA entity `User` is listed as table `users` with columns `id` and `display_name` | `add-kotlin-schema-inventory` |
 | schemas | the Exposed table `orders` is listed with columns `id`, `user_id`, and `total` | `add-kotlin-schema-inventory` |
-| environment | `ACME_PORT` is listed as an optional read (`System.getenv("ACME_PORT") ?: "8080"`) | `add-kotlin-env-var-reads` |
-| environment | `ACME_DATABASE_URL` (`?: error(...)`) and `ACME_TOKEN` (`getValue`) are listed as required reads | `add-kotlin-env-var-reads` |
-| environment | `ACME_REGION` is listed from `providers.environmentVariable("ACME_REGION")` in the build script | `add-kotlin-env-var-reads` |
 | inventories | the `@Composable` functions `Greeting` and `GreetingList` are listed as UI components | `add-kotlin-ui-and-middleware-inventories` |
 | inventories | the Ktor plugin installation `install(CallLogging)` is listed as middleware | `add-kotlin-ui-and-middleware-inventories` |
 | capabilities | Kotlin backs the `errorPropagation` capability | `add-kotlin-error-propagation` |

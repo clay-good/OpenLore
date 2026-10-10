@@ -391,15 +391,23 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     m => m.schemas.some(s => s.name === 'orders' && ['id', 'user_id', 'total'].every(f => s.fields.includes(f)))),
 
   // ── add-kotlin-env-var-reads ──────────────────────────────────────────────
-  entry('env-optional-read', 'environment', 'known-gap', 'add-kotlin-env-var-reads',
+  entry('env-optional-read', 'environment', 'asserted', 'add-kotlin-env-var-reads',
     '`ACME_PORT` is listed as an optional read (`System.getenv("ACME_PORT") ?: "8080"`)',
     m => m.envVars.some(v => v.name === 'ACME_PORT' && v.required === false)),
-  entry('env-required-read', 'environment', 'known-gap', 'add-kotlin-env-var-reads',
+  entry('env-required-read', 'environment', 'asserted', 'add-kotlin-env-var-reads',
     '`ACME_DATABASE_URL` (`?: error(...)`) and `ACME_TOKEN` (`getValue`) are listed as required reads',
     m => ['ACME_DATABASE_URL', 'ACME_TOKEN'].every(n => m.envVars.some(v => v.name === n && v.required === true))),
-  entry('env-gradle-provider', 'environment', 'known-gap', 'add-kotlin-env-var-reads',
+  entry('env-gradle-provider', 'environment', 'asserted', 'add-kotlin-env-var-reads',
     '`ACME_REGION` is listed from `providers.environmentVariable("ACME_REGION")` in the build script',
     m => m.envVars.some(v => v.name === 'ACME_REGION')),
+
+  entry('env-impact-read-site', 'environment', 'asserted', 'add-kotlin-env-var-reads',
+    '`analyze_env_impact` for `ACME_PORT` names the read in `Env.port` and the caller `main`',
+    async m => {
+      const impact = await m.envImpact('ACME_PORT');
+      const text = JSON.stringify(impact);
+      return /"enclosingFunction":"[^"]*port/.test(text) && /"symbol":"[^"]*main/.test(text) && text.includes('OUT OF SCOPE');
+    }),
 
   // ── add-kotlin-ui-and-middleware-inventories ──────────────────────────────
   entry('ui-compose-components', 'inventories', 'known-gap', 'add-kotlin-ui-and-middleware-inventories',

@@ -5691,6 +5691,10 @@ export class CallGraphBuilder {
         };
         for (const node of result.nodes) {
           node.startLine = byteToLine(node.startIndex);
+          for (const span of node.bodySpans ?? []) {
+            span.startLine = byteToLine(span.start);
+            span.endLine = byteToLine(span.end);
+          }
           node.endLine = byteToLine(node.endIndex);
           allNodes.set(node.id, node);
         }

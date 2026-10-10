@@ -28,7 +28,7 @@ import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from '.
 import { loadTraversalIndex } from './traversal.js';
 import { computeStaleness } from './confidence-boundary.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ENV_INVENTORY } from '../../../constants.js';
-import { extractEnvReadSites, type EnvVar, type EnvReadSite } from '../../analyzer/env-extractor.js';
+import { countKotlinDynamicEnvReads, extractEnvReadSites, type EnvVar, type EnvReadSite } from '../../analyzer/env-extractor.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
 export interface AnalyzeEnvImpactInput {
@@ -124,6 +124,7 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
 
   // ── Re-scan only the files the inventory flags for this var, line-precise ────
   const rawSites: EnvReadSite[] = [];
+  let kotlinDynamicReads = 0;
   for (const rel of entry.files) {
     const ext = rel.includes('.') ? rel.slice(rel.lastIndexOf('.')).toLowerCase() : '';
     let source: string;
@@ -140,6 +141,7 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     for (const s of extractEnvReadSites(source, rel, ext)) {
       if (s.name === name) rawSites.push(s);
     }
+    if (ext === '.kt' || ext === '.kts') kotlinDynamicReads += countKotlinDynamicEnvReads(source);
   }
 
   // ── Map each read site to its enclosing function by line containment ─────────
@@ -158,10 +160,20 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
   for (const s of rawSites) {
     const candidates = nodesByFile.get(s.file) ?? [];
     let best: FunctionNode | undefined;
+    let bestSize = Infinity;
     for (const n of candidates) {
       if (n.startLine === undefined || n.endLine === undefined) continue;
-      if (n.startLine <= s.line && s.line <= n.endLine) {
-        if (!best || (n.endLine - n.startLine) < (best.endLine! - best.startLine!)) best = n;
+      // A node may own more regions than its own span: a Kotlin constructor owns its `init`
+      // blocks and property initializers. The narrowest containing region decides.
+      const regions = [
+        { start: n.startLine, end: n.endLine },
+        ...(n.bodySpans ?? []).flatMap(b => (b.startLine !== undefined && b.endLine !== undefined ? [{ start: b.startLine, end: b.endLine }] : [])),
+      ];
+      for (const region of regions) {
+        if (region.start <= s.line && s.line <= region.end && region.end - region.start < bestSize) {
+          best = n;
+          bestSize = region.end - region.start;
+        }
       }
     }
     if (best) {
@@ -236,7 +248,7 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
   if (resolvedSites.length === 0) {
     boundaries.add(
       'No source read sites found — the variable is declared (e.g. in an .env file) but not read in ' +
-        'a supported language (TS/JS/Python/Go/Ruby), or only read in test files (excluded). It may ' +
+        'a supported language (TS/JS/Python/Go/Ruby/Kotlin), or only read in test files (excluded). It may ' +
         'still be consumed by tooling/runtime outside static reach.',
     );
   }
@@ -244,6 +256,19 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     'Config-object key reads (config.x.y, a parsed settings tree) are OUT OF SCOPE — only environment ' +
       'variable reads are analyzed.',
   );
+  if (cg.nodes.some(n => n.language === 'Kotlin')) {
+    boundaries.add(
+      'Kotlin: Spring property placeholders (@Value("${…}"), @ConfigurationProperties), Ktor ' +
+        'environment.config, Android BuildConfig, and System.getProperty are configuration keys, not ' +
+        'environment-variable reads — OUT OF SCOPE.',
+    );
+  }
+  if (kotlinDynamicReads > 0) {
+    boundaries.add(
+      `${kotlinDynamicReads} Kotlin System.getenv(…) read(s) in the scanned file(s) take a name that is not a ` +
+        'string literal; a dynamic read is counted, never listed, and may read this variable.',
+    );
+  }
   boundaries.add(
     'Blast radius is a SOUND LOWER BOUND over the call graph: dynamic dispatch, reflection, and ' +
       'externally-consumed exports can add callers not enumerated here.',

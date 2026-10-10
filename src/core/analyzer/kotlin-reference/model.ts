@@ -15,6 +15,7 @@ import { ARTIFACT_PARSE_HEALTH, OPENLORE_DIR } from '../../../constants.js';
 import { CallGraphBuilder } from '../call-graph.js';
 import type { FunctionCfg } from '../cfg.js';
 import { detectLanguage, languageSupport } from '../language-support.js';
+import { handleAnalyzeEnvImpact } from '../../services/mcp-handlers/env-impact.js';
 import { handleFindDeadCode } from '../../services/mcp-handlers/reachability.js';
 import { handleCertifyPublicSurface } from '../../services/mcp-handlers/public-surface.js';
 
@@ -94,6 +95,8 @@ export interface KotlinReferenceModel {
   deadCode: () => Promise<DeadCodeConclusion>;
   /** Repo-relative files with at least one recorded `operator-dispatch` boundary site. */
   operatorBoundaryFiles: () => Promise<string[]>;
+  /** The `analyze_env_impact` conclusion for one variable. */
+  envImpact: (name: string) => Promise<Record<string, unknown>>;
   /** Names listed by the public-surface conclusion (computed once, on first use). */
   publicSurfaceNames: () => Promise<string[]>;
   /** Raw artifacts, for probes that need a field this model does not lift. */
@@ -263,6 +266,7 @@ export async function analyzeKotlinReference(): Promise<{ model: KotlinReference
         .filter(f => (f.byKind?.['operator-dispatch'] ?? 0) > 0 || (f.sites ?? []).some(site => site.kind === 'operator-dispatch'))
         .map(f => shortId(str(f.filePath)));
     }),
+    envImpact: async (name: string) => await handleAnalyzeEnvImpact({ directory: root, name }) as Record<string, unknown>,
     publicSurfaceNames: once(async () => {
       const result = await handleCertifyPublicSurface({ directory: root }) as Record<string, unknown>;
       return asArray(result.surface).map(e => str(e.name));

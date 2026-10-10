@@ -135,7 +135,7 @@ export async function runEnvImpactCli(opts: EnvImpactCliOptions): Promise<number
 }
 
 export const envImpactCommand = new Command('env-impact')
-  .description('Analyze what breaks if an environment variable is removed or renamed: read sites, blast radius, tests (TS/JS/Python/Go/Ruby). Read-only, deterministic, never blocks.')
+  .description('Analyze what breaks if an environment variable is removed or renamed: read sites, blast radius, tests (TS/JS/Python/Go/Ruby/Kotlin). Read-only, deterministic, never blocks.')
   .option('--name <var>', 'The environment variable to analyze, e.g. DATABASE_URL')
   .option('--max-depth <n>', 'Backward-reachability depth bound (default 12, clamped to [1, 30])', (v) => parseInt(v, 10))
   .option('--json', 'Emit the result as JSON', false)
