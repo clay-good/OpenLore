@@ -383,10 +383,10 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
   capability('http-capability', 'asserted', 'add-kotlin-http-topology', 'crossServiceHttp'),
 
   // ── add-kotlin-schema-inventory ───────────────────────────────────────────
-  entry('schema-jpa-entity', 'schemas', 'known-gap', 'add-kotlin-schema-inventory',
+  entry('schema-jpa-entity', 'schemas', 'asserted', 'add-kotlin-schema-inventory',
     'the JPA entity `User` is listed as table `users` with columns `id` and `display_name`',
     m => m.schemas.some(s => s.name === 'users' && s.fields.includes('id') && s.fields.includes('display_name'))),
-  entry('schema-exposed-table', 'schemas', 'known-gap', 'add-kotlin-schema-inventory',
+  entry('schema-exposed-table', 'schemas', 'asserted', 'add-kotlin-schema-inventory',
     'the Exposed table `orders` is listed with columns `id`, `user_id`, and `total`',
     m => m.schemas.some(s => s.name === 'orders' && ['id', 'user_id', 'total'].every(f => s.fields.includes(f)))),
 

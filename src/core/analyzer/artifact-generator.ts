@@ -197,6 +197,8 @@ export interface RepoStructure {
   middleware: MiddlewareEntry[];
   /** Detected environment variables */
   envVars: EnvVar[];
+  /** Known frameworks that an inventory does not model, by inventory. Omitted when there is none. */
+  unmodeledFrameworks?: UnmodeledFrameworks;
   statistics: {
     totalFiles: number;
     analyzedFiles: number;
@@ -342,7 +344,16 @@ export interface EnrichmentData {
   routeInventory?: RouteInventory;
   middleware?: MiddlewareEntry[];
   envVars?: EnvVar[];
+  /**
+   * Frameworks a file imports that an inventory knows of and does not model, by inventory and
+   * framework name (issue #546). A quiet inventory is then readable: the code uses something
+   * the extractor does not read. Omitted when there is none.
+   */
+  unmodeledFrameworks?: UnmodeledFrameworks;
 }
+
+/** File counts by framework name, per inventory. */
+export type UnmodeledFrameworks = Partial<Record<'schema' | 'ui' | 'middleware', Record<string, number>>>;
 
 /**
  * Options for artifact generation
@@ -791,6 +802,7 @@ export class AnalysisArtifactGenerator {
       routeInventory: enrichment?.routeInventory ?? { total: 0, byMethod: {}, byFramework: {}, routes: [] },
       middleware: enrichment?.middleware ?? [],
       envVars: enrichment?.envVars ?? [],
+      ...(enrichment?.unmodeledFrameworks ? { unmodeledFrameworks: enrichment.unmodeledFrameworks } : {}),
       statistics: {
         totalFiles: repoMap.summary.totalFiles,
         analyzedFiles: repoMap.summary.analyzedFiles,

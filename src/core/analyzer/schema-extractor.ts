@@ -10,6 +10,10 @@
  * Uses regex-based analysis without requiring tree-sitter.
  */
 
+import {
+  extractKotlinSchemas, resolveKotlinSchemaFragments,
+  type KotlinSchemaFragment, type KotlinSchemaTable,
+} from './kotlin-schema.js';
 import { extname, relative } from 'node:path';
 import { getSkeletonContent } from './code-shaper.js';
 import {
@@ -26,9 +30,20 @@ export interface SchemaField {
   name: string;
   type: string;
   nullable: boolean;
+  /** A relation the column declares (Kotlin: JPA relation annotations, Exposed references, Room foreign keys). */
+  relation?: { kind: string; target?: string };
 }
 
-export type OrmType = 'prisma' | 'typeorm' | 'drizzle' | 'sqlalchemy' | 'jpa' | 'unknown';
+export type OrmType =
+  | 'prisma' | 'typeorm' | 'drizzle' | 'sqlalchemy' | 'jpa'
+  | 'spring-data-relational' | 'room' | 'exposed'
+  | 'unknown';
+
+/** Receipts of a schema scan (change: add-kotlin-schema-inventory). */
+export interface SchemaScanReceipts {
+  /** Kotlin files that import a known persistence library that is not modeled, by library name. */
+  unmodeledFrameworks: Record<string, number>;
+}
 
 export interface SchemaTable {
   /** Model / table name */
@@ -343,7 +358,13 @@ export async function extractSchemas(
   filePaths: string[],
   rootDir: string,
   onOversized?: OversizedFileObserver,
+  receipts?: SchemaScanReceipts,
 ): Promise<SchemaTable[]> {
+  // Kotlin facts that need every file: mapped superclasses and embeddables are attached to the
+  // entities that use them after the scan (change: add-kotlin-schema-inventory).
+  const kotlinTables: Array<{ table: KotlinSchemaTable; out: SchemaTable }> = [];
+  const kotlinFragments: KotlinSchemaFragment[][] = [];
+  const kotlinUnmodeled: string[][] = [];
   // Per-file-then-flatten, over a BOUNDED scan. Returning each file's tables and flattening in
   // `filePaths` order keeps the inventory a pure function of the file list; pushing into a shared
   // array from inside the callbacks appended in I/O-completion order, which made the artifact's
@@ -360,6 +381,17 @@ export async function extractSchemas(
     // declarations must survive intact (the TS/Py skeletonizer would mangle them).
     if (ext === '.java') {
       return /@(?:Entity|MappedSuperclass)\b/.test(raw) ? parseJpaEntity(raw, rel) : [];
+    }
+    if (ext === '.kt' || ext === '.kts') {
+      if (!KOTLIN_SCHEMA_PREFILTER.test(raw)) return [];
+      const facts = extractKotlinSchemas(raw);
+      if (facts.fragments.length > 0) kotlinFragments.push(facts.fragments);
+      if (facts.unmodeled.length > 0) kotlinUnmodeled.push(facts.unmodeled);
+      return facts.tables.map(table => {
+        const out: SchemaTable = { name: table.name, file: rel, orm: table.framework, fields: table.fields, line: table.line };
+        kotlinTables.push({ table, out });
+        return out;
+      });
     }
 
     const source = getSkeletonContent(raw, ext === '.py' ? 'python' : 'typescript');
@@ -378,8 +410,20 @@ export async function extractSchemas(
     return [];
   });
 
+  if (kotlinTables.length > 0) {
+    // Fragments are sorted so the result does not depend on the order files were read in.
+    const fragments = kotlinFragments.flat().sort((a, b) => (a.className < b.className ? -1 : a.className > b.className ? 1 : 0));
+    resolveKotlinSchemaFragments(kotlinTables.map(t => t.table), fragments);
+    for (const { table, out } of kotlinTables) out.fields = table.fields;
+  }
+  if (receipts) {
+    for (const name of kotlinUnmodeled.flat().sort()) receipts.unmodeledFrameworks[name] = (receipts.unmodeledFrameworks[name] ?? 0) + 1;
+  }
   return perFile.flat();
 }
+
+/** A Kotlin file can declare a model only when it imports one of these packages. */
+const KOTLIN_SCHEMA_PREFILTER = /\b(?:javax\.persistence|jakarta\.persistence|org\.springframework\.data\.relational|androidx\.room|org\.jetbrains\.exposed|org\.ktorm|org\.jooq|org\.komapper|sqldelight)\b/;
 
 /**
  * Summarise schema tables by ORM for display / artifact embedding.

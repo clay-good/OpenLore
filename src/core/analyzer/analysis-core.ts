@@ -368,7 +368,8 @@ export async function runAnalysisCore(
   };
   // Serialized by design: bounded scans in parallel still multiply peak memory.
   const uiComponents = await extractUIComponents(allFilePaths, rootPath, observeOversized);
-  const schemas = await extractSchemas(allFilePaths, rootPath, observeOversized);
+  const schemaReceipts = { unmodeledFrameworks: {} as Record<string, number> };
+  const schemas = await extractSchemas(allFilePaths, rootPath, observeOversized, schemaReceipts);
   const routeInventory = await buildRouteInventory(allFilePaths, rootPath, observeOversized);
   const middleware = await extractMiddleware(allFilePaths, rootPath, observeOversized);
   const envVars = await extractEnvVars(allFilePaths, rootPath, observeOversized);
@@ -381,7 +382,13 @@ export async function runAnalysisCore(
   }
   emit({ stage: 'extractors', status: 'complete' });
 
-  const inventories = { uiComponents, schemas, routeInventory, middleware, envVars };
+  const unmodeledFrameworks = {
+    ...(Object.keys(schemaReceipts.unmodeledFrameworks).length > 0 ? { schema: schemaReceipts.unmodeledFrameworks } : {}),
+  };
+  const inventories = {
+    uiComponents, schemas, routeInventory, middleware, envVars,
+    ...(Object.keys(unmodeledFrameworks).length > 0 ? { unmodeledFrameworks } : {}),
+  };
   // The one flush. Taken here because everything before it is fast and everything after it is
   // the call-graph pass, which produces nothing servable until it finishes and then publishes.
   // Flushing earlier as well bought half a second of timeliness for a second full domain
