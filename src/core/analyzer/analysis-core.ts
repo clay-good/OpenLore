@@ -367,11 +367,13 @@ export async function runAnalysisCore(
     }
   };
   // Serialized by design: bounded scans in parallel still multiply peak memory.
-  const uiComponents = await extractUIComponents(allFilePaths, rootPath, observeOversized);
+  const uiReceipts = { unmodeledFrameworks: {} as Record<string, number> };
+  const middlewareReceipts = { unmodeledFrameworks: {} as Record<string, number> };
+  const uiComponents = await extractUIComponents(allFilePaths, rootPath, observeOversized, uiReceipts);
   const schemaReceipts = { unmodeledFrameworks: {} as Record<string, number> };
   const schemas = await extractSchemas(allFilePaths, rootPath, observeOversized, schemaReceipts);
   const routeInventory = await buildRouteInventory(allFilePaths, rootPath, observeOversized);
-  const middleware = await extractMiddleware(allFilePaths, rootPath, observeOversized);
+  const middleware = await extractMiddleware(allFilePaths, rootPath, observeOversized, middlewareReceipts);
   const envVars = await extractEnvVars(allFilePaths, rootPath, observeOversized);
   if (oversizedByPath.size > 0) {
     emit({
@@ -384,6 +386,8 @@ export async function runAnalysisCore(
 
   const unmodeledFrameworks = {
     ...(Object.keys(schemaReceipts.unmodeledFrameworks).length > 0 ? { schema: schemaReceipts.unmodeledFrameworks } : {}),
+    ...(Object.keys(uiReceipts.unmodeledFrameworks).length > 0 ? { ui: uiReceipts.unmodeledFrameworks } : {}),
+    ...(Object.keys(middlewareReceipts.unmodeledFrameworks).length > 0 ? { middleware: middlewareReceipts.unmodeledFrameworks } : {}),
   };
   const inventories = {
     uiComponents, schemas, routeInventory, middleware, envVars,

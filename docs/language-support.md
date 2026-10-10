@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (82)
+#### Supported (84)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -171,18 +171,18 @@ that a test checks on every run.
 | environment | `ACME_DATABASE_URL` (`?: error(...)`) and `ACME_TOKEN` (`getValue`) are listed as required reads | `add-kotlin-env-var-reads` |
 | environment | `ACME_REGION` is listed from `providers.environmentVariable("ACME_REGION")` in the build script | `add-kotlin-env-var-reads` |
 | environment | `analyze_env_impact` for `ACME_PORT` names the read in `Env.port` and the caller `main` | `add-kotlin-env-var-reads` |
+| inventories | the `@Composable` functions `Greeting` and `GreetingList` are listed as UI components | `add-kotlin-ui-and-middleware-inventories` |
+| inventories | the Ktor plugin installation `install(CallLogging)` is listed as middleware | `add-kotlin-ui-and-middleware-inventories` |
 | call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
 
-#### Known gaps (15)
+#### Known gaps (13)
 
 A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
 
 | Area | Fact | Change |
 |---|---|---|
 | boundaries | the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary | `add-kotlin-dynamic-boundary` |
-| inventories | the `@Composable` functions `Greeting` and `GreetingList` are listed as UI components | `add-kotlin-ui-and-middleware-inventories` |
-| inventories | the Ktor plugin installation `install(CallLogging)` is listed as middleware | `add-kotlin-ui-and-middleware-inventories` |
 | capabilities | Kotlin backs the `errorPropagation` capability | `add-kotlin-error-propagation` |
 | capabilities | Kotlin backs the `dynamicBoundary` capability | `add-kotlin-dynamic-boundary` |
 | capabilities | Kotlin backs the `styleFingerprint` capability | `add-kotlin-style-fingerprint` |

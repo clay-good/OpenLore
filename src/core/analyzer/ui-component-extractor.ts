@@ -11,6 +11,8 @@
  *   - Angular: @Component decorator
  */
 
+import { extractKotlinUi, type KotlinUiFacts } from './kotlin-inventories.js';
+import { isTestFile } from './test-file.js';
 import { basename, extname, relative } from 'node:path';
 
 import {
@@ -35,13 +37,19 @@ export interface UIComponent {
   /** Path relative to project root */
   file: string;
   /** UI framework */
-  framework: 'react' | 'vue' | 'svelte' | 'angular';
+  framework: 'react' | 'vue' | 'svelte' | 'angular' | 'compose';
   /** Whether this is the default export */
   isDefault: boolean;
   /** 1-based line number of the declaration */
   line: number;
   /** Extracted props (up to MAX_PROPS) */
   props: ComponentProp[];
+  /** Compose: parameters that take a composable lambda (`content: @Composable () -> Unit`). */
+  slots?: string[];
+  /** Compose: the components this one calls. */
+  children?: string[];
+  /** Compose: `@Preview` functions that render this component. */
+  previews?: string[];
 }
 
 // ============================================================================
@@ -287,6 +295,7 @@ export async function extractUIComponents(
   filePaths: string[],
   rootDir: string,
   onOversized?: OversizedFileObserver,
+  receipts?: { unmodeledFrameworks: Record<string, number> },
 ): Promise<UIComponent[]> {
   const UI_EXTENSIONS = new Set(['.tsx', '.jsx', '.vue', '.svelte', '.ts', '.js']);
 
@@ -294,7 +303,36 @@ export async function extractUIComponents(
 
   const results = await mapFilesBounded(candidates, f => extractFromFile(f, rootDir, onOversized));
 
-  return results.flat();
+  // Jetpack Compose (change: add-kotlin-ui-and-middleware-inventories). Children and previews
+  // are narrowed to real components once every Kotlin file has been read.
+  const kotlinFiles = filePaths.filter(f => extname(f).toLowerCase() === '.kt');
+  const kotlin = await mapFilesBounded(kotlinFiles, async (fp): Promise<{ rel: string; facts: KotlinUiFacts } | null> => {
+    if (isTestFile(fp)) return null;
+    const source = await readSourceCapped(fp, undefined, onOversized);
+    if (source === null || !/\b(?:androidx\.compose|org\.jetbrains\.compose|android\.view|android\.widget)\b/.test(source)) return null;
+    return { rel: relative(rootDir, fp), facts: extractKotlinUi(source) };
+  });
+  const composeNames = new Set(kotlin.flatMap(k => k?.facts.components.map(c => c.name) ?? []));
+  const previewsOf = new Map<string, string[]>();
+  for (const k of kotlin) {
+    for (const preview of k?.facts.previews ?? []) {
+      for (const name of preview.calls) if (composeNames.has(name)) previewsOf.set(name, [...(previewsOf.get(name) ?? []), preview.name]);
+    }
+    for (const name of k?.facts.unmodeled ?? []) if (receipts) receipts.unmodeledFrameworks[name] = (receipts.unmodeledFrameworks[name] ?? 0) + 1;
+  }
+  const compose: UIComponent[] = kotlin.flatMap(k => (k?.facts.components ?? []).map(c => {
+    const children = c.calls.filter(name => composeNames.has(name));
+    const previews = [...new Set(previewsOf.get(c.name) ?? [])].sort();
+    return {
+      name: c.name, file: k!.rel, framework: 'compose' as const, isDefault: false, line: c.line,
+      props: c.props.slice(0, MAX_PROPS),
+      ...(c.slots.length ? { slots: c.slots } : {}),
+      ...(children.length ? { children } : {}),
+      ...(previews.length ? { previews } : {}),
+    };
+  }));
+
+  return [...results.flat(), ...compose];
 }
 
 /**

@@ -410,10 +410,10 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     }),
 
   // ── add-kotlin-ui-and-middleware-inventories ──────────────────────────────
-  entry('ui-compose-components', 'inventories', 'known-gap', 'add-kotlin-ui-and-middleware-inventories',
+  entry('ui-compose-components', 'inventories', 'asserted', 'add-kotlin-ui-and-middleware-inventories',
     'the `@Composable` functions `Greeting` and `GreetingList` are listed as UI components',
     m => ['Greeting', 'GreetingList'].every(n => m.uiComponents.some(c => c.name === n))),
-  entry('middleware-ktor-install', 'inventories', 'known-gap', 'add-kotlin-ui-and-middleware-inventories',
+  entry('middleware-ktor-install', 'inventories', 'asserted', 'add-kotlin-ui-and-middleware-inventories',
     'the Ktor plugin installation `install(CallLogging)` is listed as middleware',
     m => m.middleware.some(x => x.name === 'CallLogging')),
 

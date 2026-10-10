@@ -7,6 +7,7 @@
  * Detection is purely regex-based — no AST parsing required.
  */
 
+import { extractKotlinMiddleware } from './kotlin-inventories.js';
 import { extname, relative, basename } from 'node:path';
 import { isTestFile } from './test-file.js';
 import {
@@ -26,6 +27,7 @@ export type MiddlewareType =
   | 'cors'
   | 'validation'
   | 'logging'
+  | 'body-parsing'
   | 'error-handler'
   | 'custom';
 
@@ -267,7 +269,9 @@ export async function extractMiddleware(
   filePaths: string[],
   rootDir: string,
   onOversized?: OversizedFileObserver,
+  receipts?: { unmodeledFrameworks: Record<string, number> },
 ): Promise<MiddlewareEntry[]> {
+  const unmodeled: string[][] = [];
   // Per-file-then-flatten, over a BOUNDED scan. Flattening in `filePaths` order keeps the
   // inventory a pure function of the file list; pushing into a shared array from inside the
   // callbacks appended in I/O-completion order, which made the artifact's bytes depend on disk
@@ -278,6 +282,16 @@ export async function extractMiddleware(
     // app's real middleware surface — exclude them (they produced phantom entries).
     if (isTestFile(fp)) return [];
     const ext = extname(fp).toLowerCase();
+    if (ext === '.kt' || ext === '.kts') {
+      // Kotlin (change: add-kotlin-ui-and-middleware-inventories): Ktor plugins, Spring
+      // interceptors and filters, JAX-RS provider filters, each behind its import gate.
+      const kotlinSource = await readSourceCapped(fp, undefined, onOversized);
+      if (kotlinSource === null || !/\b(?:io\.ktor\.server|org\.springframework|javax\.ws\.rs|jakarta\.ws\.rs|org\.http4k|io\.javalin)\b/.test(kotlinSource)) return [];
+      const facts = extractKotlinMiddleware(kotlinSource);
+      if (facts.unmodeled.length > 0) unmodeled.push(facts.unmodeled);
+      const rel = relative(rootDir, fp);
+      return facts.entries.map(e => ({ type: e.type, framework: e.framework, file: rel, line: e.line, name: e.name }));
+    }
     if (!['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return [];
 
     const source = await readSourceCapped(fp, undefined, onOversized);
@@ -286,5 +300,6 @@ export async function extractMiddleware(
     return extractFromSource(source, relative(rootDir, fp), fp);
   });
 
+  if (receipts) for (const name of unmodeled.flat().sort()) receipts.unmodeledFrameworks[name] = (receipts.unmodeledFrameworks[name] ?? 0) + 1;
   return perFile.flat();
 }
