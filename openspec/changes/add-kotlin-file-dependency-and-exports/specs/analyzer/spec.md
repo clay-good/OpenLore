@@ -13,8 +13,8 @@ top-level owner. A wildcard import SHALL create an edge only to a file of that p
 a name the importing file uses; otherwise it SHALL create no edge and be counted as unresolved. An
 imported name declared in more than one file SHALL create no edge and be counted as ambiguous.
 Imports from the Kotlin default-import packages and from JDK or Kotlin standard-library packages
-SHALL be marked built-in. Java files SHALL resolve imports of Kotlin declarations, and Kotlin files
-imports of Java declarations, through the same index.
+SHALL be marked built-in. Java files SHALL resolve imports of Kotlin types, and Kotlin files
+imports of Java types, through the same index.
 
 #### Scenario: A Kotlin import becomes a dependency edge
 
@@ -52,12 +52,11 @@ imports of Java declarations, through the same index.
 
 ### Requirement: KotlinExportsFollowDeclaredVisibility
 
-The analyzer SHALL report the exports of a Kotlin file as its top-level declarations, and the
-members of its exported classes, whose visibility is `public` (the default when no modifier is
-written) or `protected`. A declaration marked `internal` SHALL be reported with an `internal` tag.
-A `private` declaration SHALL NOT be reported. Each export SHALL carry its kind and, when a
-`@JvmName` or `@file:JvmName` annotation renames it, the JVM-facing name as an alias. The export
-inventory SHALL report Kotlin as an extracted language, and a Kotlin file SHALL NOT carry an
+The analyzer SHALL report the exports of a Kotlin file as its package-level declarations whose
+visibility is `public` (the default when no modifier is written). A declaration marked `internal`
+SHALL be reported with an `internal` tag. A `private` declaration SHALL NOT be reported. A member
+of a class SHALL NOT be reported as an export of the file. Each export SHALL carry its kind. The
+export inventory SHALL report Kotlin as an extracted language, and a Kotlin file SHALL NOT carry an
 unsupported-file-type parse error.
 
 #### Scenario: Default visibility is public
@@ -71,7 +70,7 @@ unsupported-file-type parse error.
 - **GIVEN** `data class User(val id: Long)`, `object Registry`, `typealias Handler = (Int) -> Unit`,
   and `val MAX = 10`
 - **WHEN** exports are extracted
-- **THEN** four exports exist with kinds data class, object, type alias, and property
+- **THEN** four exports exist with kinds class, class, type, and variable
 
 #### Scenario: A consumer can tell extracted from unsupported
 

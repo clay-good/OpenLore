@@ -1,6 +1,8 @@
 # Measure the Kotlin style fingerprint
 
-> Status: PROPOSED (2026-10-10, issue #546). Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`.
+> Status: NOT DOING (2026-10-10). Out of scope: issue #546 is resolved by
+> `add-kotlin-file-dependency-and-exports` alone. Kept as a record only; do not build.
+> Original note: Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`.
 > Deterministic, no LLM, no new dependency.
 
 ## What you get

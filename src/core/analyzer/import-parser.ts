@@ -13,6 +13,7 @@ import { buildLineIndex, lineFromIndex } from './line-index.js';
 import { blankCommentsPreservingLayout } from './comment-blanking.js';
 import { readSourceCapped } from './bounded-file-scan.js';
 import { scanJavaMethodDeclarations } from './java-method-scanner.js';
+import { KOTLIN_DEFAULT_IMPORT_PACKAGES, kotlinCodeMask, scanKotlinFile } from './kotlin-source.js';
 
 // ============================================================================
 // TYPES
@@ -59,6 +60,8 @@ export interface ExportInfo {
   reExportSource?: string;
   kind: 'function' | 'class' | 'variable' | 'type' | 'interface' | 'enum' | 'unknown';
   line: number;
+  /** Kotlin: `internal` for a declaration visible to its module but not to consumers of it. */
+  visibility?: 'internal';
 }
 
 /**
@@ -73,6 +76,21 @@ export interface FileAnalysis {
   parseErrors: string[];
   /** Java package declaration (e.g. "com.example.service"), if this is a .java file */
   javaPackage?: string;
+  /**
+   * Kotlin and Java: the declared package (the empty string for the root package) and the names
+   * the file declares at package level, the inputs of the shared JVM package index
+   * (change: add-kotlin-file-dependency-and-exports).
+   */
+  jvm?: JvmFileFacts;
+  /** Kotlin: every identifier the code uses, to decide which file a wildcard import reaches. */
+  usedNames?: ReadonlySet<string>;
+}
+
+/** What one Kotlin or Java file contributes to the JVM package index. Plain data. */
+export interface JvmFileFacts {
+  package: string;
+  /** Names declared at package level that another file can import. */
+  declares: string[];
 }
 
 /**
@@ -940,6 +958,165 @@ export function parseJavaExports(content: string): ExportInfo[] {
 }
 
 // ============================================================================
+// KOTLIN PARSER (change: add-kotlin-file-dependency-and-exports)
+// ============================================================================
+
+/** Package prefixes that are the JDK or the Kotlin standard library, never project code. */
+const KOTLIN_BUILTIN_PREFIXES = [...JAVA_BUILTIN_PREFIXES, 'kotlin.'];
+
+function isKotlinBuiltin(fqn: string): boolean {
+  return KOTLIN_DEFAULT_IMPORT_PACKAGES.includes(fqn) || KOTLIN_BUILTIN_PREFIXES.some(p => `${fqn}.`.startsWith(p));
+}
+
+/** The declared package of a Kotlin file; the empty string for the root package. */
+export function parseKotlinPackage(content: string): string {
+  return scanKotlinFile(content).packageName;
+}
+
+/**
+ * Imports of a Kotlin file: plain, aliased, and wildcard. `source` is the fully qualified name
+ * (the package for a wildcard import). An import from a default-import package, the JDK, or the
+ * Kotlin standard library is marked built-in.
+ */
+export function parseKotlinImports(content: string): ImportInfo[] {
+  const imports: ImportInfo[] = [];
+  let cursor = 0;
+  for (const imp of scanKotlinFile(content).imports) {
+    const at = content.indexOf(imp.fqn.split('.')[0], content.indexOf('import', cursor));
+    cursor = at < 0 ? cursor : at;
+    const isBuiltin = isKotlinBuiltin(imp.fqn);
+    const name = imp.fqn.slice(imp.fqn.lastIndexOf('.') + 1);
+    imports.push({
+      source: imp.fqn,
+      isRelative: false,
+      isPackage: !isBuiltin,
+      isBuiltin,
+      importedNames: [imp.wildcard ? '*' : imp.alias ?? name],
+      ...(imp.alias && !imp.wildcard ? { importedSourceNames: [name] } : {}),
+      hasDefault: false,
+      hasNamespace: imp.wildcard,
+      isTypeOnly: false,
+      isDynamic: false,
+      line: getLineNumber(content, Math.max(0, cursor)),
+    });
+  }
+  return imports;
+}
+
+/**
+ * Exports of a Kotlin file: its package-level declarations, by declared visibility. `public` (the
+ * default) is exported; `internal` is exported with the `internal` tag; `private` is not listed.
+ * Members of a class are not listed: a file imports the class, not the member.
+ */
+export function parseKotlinExports(content: string): ExportInfo[] {
+  const exports: ExportInfo[] = [];
+  for (const d of scanKotlinFile(content).declarations) {
+    if (d.modifiers.includes('private')) continue;
+    const kind: ExportInfo['kind'] =
+      d.kind === 'function' ? 'function'
+        : d.kind === 'property' ? 'variable'
+          : d.kind === 'interface' ? 'interface'
+            : d.kind === 'enum' ? 'enum'
+              : d.kind === 'typealias' ? 'type'
+                : 'class';
+    exports.push({
+      name: d.name,
+      isDefault: false,
+      isType: d.kind === 'interface' || d.kind === 'typealias',
+      isReExport: false,
+      kind,
+      line: getLineNumber(content, d.offset),
+      ...(d.modifiers.includes('internal') ? { visibility: 'internal' as const } : {}),
+    });
+  }
+  return exports;
+}
+
+/** Identifiers used in Kotlin code (comments and string text excluded). */
+function kotlinUsedNames(content: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of kotlinCodeMask(content).matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) names.add(m[0]);
+  return names;
+}
+
+/** Package-level names of a Kotlin file that another file can import. */
+function kotlinJvmFacts(filePath: string, content: string): JvmFileFacts {
+  const header = scanKotlinFile(content);
+  const visible = header.declarations.filter(d => !d.modifiers.includes('private'));
+  return { package: header.packageName, declares: [...new Set(visible.map(d => d.name))] };
+}
+
+/** Top-level type names of a Java file. */
+function javaJvmFacts(content: string, javaPackage: string | undefined): JvmFileFacts {
+  const clean = blankCommentsPreservingLayout(content);
+  const declares = new Set<string>();
+  for (const m of clean.matchAll(/\b(?:class|interface|enum|record|@interface)[ \t]+([A-Za-z_$][\w$]*)/g)) declares.add(m[1]);
+  return { package: javaPackage ?? '', declares: [...declares] };
+}
+
+// ── The shared JVM package index ────────────────────────────────────────────
+
+/**
+ * `package → declared name → files`, over every Kotlin and Java file of the analysis. An import
+ * resolves through this index, never through the directory layout: Kotlin does not require a
+ * directory to match its package, and one file can declare many types.
+ */
+export interface JvmPackageIndex {
+  byPackage: Map<string, Map<string, Set<string>>>;
+}
+
+export function buildJvmPackageIndex(files: Iterable<{ file: string; jvm: JvmFileFacts | undefined }>): JvmPackageIndex {
+  const byPackage = new Map<string, Map<string, Set<string>>>();
+  for (const { file, jvm } of files) {
+    if (!jvm) continue;
+    let names = byPackage.get(jvm.package);
+    if (!names) { names = new Map(); byPackage.set(jvm.package, names); }
+    for (const name of jvm.declares) {
+      const set = names.get(name);
+      if (set) set.add(file); else names.set(name, new Set([file]));
+    }
+  }
+  return { byPackage };
+}
+
+export type JvmImportReceipt = 'wildcard-unresolved' | 'ambiguous';
+
+/**
+ * The repository files a JVM import reaches. An import of a type, a top-level function or
+ * property, a nested type, or an object member resolves to the file that declares the top-level
+ * owner. A wildcard import reaches each file of the package that declares a name `usedNames`
+ * contains. A name declared in more than one file reaches nothing and is `ambiguous`.
+ */
+export function resolveJvmImport(
+  index: JvmPackageIndex,
+  imp: Pick<ImportInfo, 'source' | 'hasNamespace'>,
+  usedNames: ReadonlySet<string> | undefined,
+): { targets: string[]; receipt?: JvmImportReceipt } {
+  const source = imp.source.replace(/\.\*$/, '');
+  if (imp.hasNamespace) {
+    const names = index.byPackage.get(source);
+    if (!names) return { targets: [] }; // not a package of this repository: a library
+    const targets = new Set<string>();
+    let ambiguous = false;
+    for (const [name, files] of names) {
+      if (!usedNames?.has(name)) continue;
+      if (files.size === 1) targets.add(files.values().next().value!);
+      else ambiguous = true;
+    }
+    if (targets.size > 0) return { targets: [...targets].sort() };
+    return { targets: [], receipt: ambiguous ? 'ambiguous' : 'wildcard-unresolved' };
+  }
+  // `a.b.C`, then `a.b.C.Inner` / `a.b.Obj.member` through progressively shorter owners.
+  const parts = source.split('.');
+  for (let cut = parts.length - 1; cut >= 0; cut--) {
+    const files = index.byPackage.get(parts.slice(0, cut).join('.'))?.get(parts[cut]);
+    if (!files) continue;
+    return files.size === 1 ? { targets: [files.values().next().value!] } : { targets: [], receipt: 'ambiguous' };
+  }
+  return { targets: [] };
+}
+
+// ============================================================================
 // IMPORT RESOLUTION
 // ============================================================================
 
@@ -1209,17 +1386,18 @@ export function parseHtmlAssetImports(content: string): ImportInfo[] {
  */
 export function extractsExports(filePath: string): boolean {
   const type = importParserFileType(filePath);
-  return type === 'ts' || type === 'js' || type === 'python' || type === 'java';
+  return type === 'ts' || type === 'js' || type === 'python' || type === 'java' || type === 'kotlin';
 }
 
 /** The parser's extension dispatch — the one definition `parseContent` and `extractsExports` share. */
-function importParserFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'html' | 'unknown' {
+function importParserFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'kotlin' | 'html' | 'unknown' {
   const ext = extname(filePath).toLowerCase();
 
   if (['.ts', '.tsx', '.mts', '.cts'].includes(ext)) return 'ts';
   if (['.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return 'js';
   if (['.py', '.pyw'].includes(ext)) return 'python';
   if (ext === '.java') return 'java';
+  if (ext === '.kt' || ext === '.kts') return 'kotlin';
   if (['.html', '.htm'].includes(ext)) return 'html';
 
   return 'unknown';
@@ -1238,7 +1416,7 @@ export class ImportExportParser {
   /**
    * Get file extension type
    */
-  private getFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'html' | 'unknown' {
+  private getFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'kotlin' | 'html' | 'unknown' {
     return importParserFileType(filePath);
   }
 
@@ -1258,6 +1436,12 @@ export class ImportExportParser {
       analysis.imports = parseJavaImports(content);
       analysis.exports = parseJavaExports(content);
       analysis.javaPackage = parseJavaPackage(content);
+      analysis.jvm = javaJvmFacts(content, analysis.javaPackage);
+    } else if (fileType === 'kotlin') {
+      analysis.imports = parseKotlinImports(content);
+      analysis.exports = parseKotlinExports(content);
+      analysis.jvm = kotlinJvmFacts(filePath, content);
+      analysis.usedNames = kotlinUsedNames(content);
     } else if (fileType === 'html') {
       analysis.imports = parseHtmlAssetImports(content);
     } else {

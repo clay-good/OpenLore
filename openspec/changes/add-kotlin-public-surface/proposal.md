@@ -1,6 +1,8 @@
 # Certify the public API surface of Kotlin code
 
-> Status: PROPOSED (2026-10-10, issue #546). Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`. Depends on
+> Status: NOT DOING (2026-10-10). Out of scope: issue #546 is resolved by
+> `add-kotlin-file-dependency-and-exports` alone. Kept as a record only; do not build.
+> Original note: Part of `KOTLIN-TOTAL-SUPPORT-2026-10.md`. Depends on
 > `add-kotlin-file-dependency-and-exports` and `fix-kotlin-signature-and-kdoc-fidelity`.
 > Deterministic, no LLM, no new dependency.
 
