@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (59)
+#### Supported (61)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -148,18 +148,18 @@ that a test checks on every run.
 | signatures | the KDoc of `UserController.get` is its docstring | `fix-kotlin-signature-and-kdoc-fidelity` |
 | call graph | standard-library calls (`forEach`, `runCatching`, `lowercase`, `error`) are not external leaves | `fix-kotlin-signature-and-kdoc-fidelity` |
 | signatures | no stored signature of a Kotlin function contains a body: none has `{` outside an annotation, and none has `=` outside a parameter list | `fix-kotlin-signature-and-kdoc-fidelity` |
+| control flow | `UserService.describe` has an overlay with a multi-way `when` branch, a `try` region, and an Elvis exit | `widen-kotlin-control-flow-overlay` |
+| control flow | `UserService.require` (an expression body with an Elvis `throw`) has an overlay with a branch | `widen-kotlin-control-flow-overlay` |
 | call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
 
-#### Known gaps (35)
+#### Known gaps (33)
 
 A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
 
 | Area | Fact | Change |
 |---|---|---|
 | boundaries | the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary | `add-kotlin-dynamic-boundary` |
-| control flow | `UserService.describe` has an overlay with a multi-way `when` branch, a `try` region, and an Elvis exit | `widen-kotlin-control-flow-overlay` |
-| control flow | `UserService.require` (an expression body with an Elvis `throw`) has an overlay with a branch | `widen-kotlin-control-flow-overlay` |
 | call graph | `legacy/LegacyCaller.java::LegacyCaller.store` calls `repo/Stores.kt::openStore` (import) | `add-kotlin-java-interop-resolution` |
 | call graph | `legacy/LegacyCaller.java::LegacyCaller.port` calls `config/Env.kt::Env.port` (import) | `add-kotlin-java-interop-resolution` |
 | call graph | `legacy/LegacyCaller.java::LegacyCaller.service` calls `service/UserService.kt::UserService.inMemory` (import) | `add-kotlin-java-interop-resolution` |

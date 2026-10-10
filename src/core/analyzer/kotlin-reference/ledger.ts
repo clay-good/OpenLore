@@ -317,7 +317,7 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
       })),
 
   // ── widen-kotlin-control-flow-overlay ─────────────────────────────────────
-  entry('cfg-when-and-try', 'control flow', 'known-gap', 'widen-kotlin-control-flow-overlay',
+  entry('cfg-when-and-try', 'control flow', 'asserted', 'widen-kotlin-control-flow-overlay',
     '`UserService.describe` has an overlay with a multi-way `when` branch, a `try` region, and an Elvis exit',
     m => {
       const cfg = m.cfgs.get(`${SERVICE}.describe`);
@@ -325,7 +325,7 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
       // Elvis (`id ?: return`), `try`, and `when` are three separate branch points.
       return branches >= 3;
     }),
-  entry('cfg-expression-body', 'control flow', 'known-gap', 'widen-kotlin-control-flow-overlay',
+  entry('cfg-expression-body', 'control flow', 'asserted', 'widen-kotlin-control-flow-overlay',
     '`UserService.require` (an expression body with an Elvis `throw`) has an overlay with a branch',
     m => (m.cfgs.get(`${SERVICE}.require`)?.blocks ?? []).some(b => b.kind === 'branch')),
 

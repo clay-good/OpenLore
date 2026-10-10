@@ -112,6 +112,21 @@ function sameNode(a: CfgNode | null | undefined, b: CfgNode | null | undefined):
 // ============================================================================
 
 interface CfgLangSpec {
+  /**
+   * A branching construct in EXPRESSION position (change: widen-kotlin-control-flow-overlay):
+   * `control` for an `if` / `when` / `try` used as a value, `elvis` for `a ?: b`, `safe-call` for
+   * `a?.b()`. The builder lowers each one, in evaluation order, before the statement that holds
+   * it, so the statement's own definition lands after the join.
+   */
+  embeddedBranch?: (node: CfgNode) => 'control' | 'elvis' | 'safe-call' | undefined;
+  /** Node type of a statement-level label that names the loop that follows it (`outer@`). */
+  labelType?: string;
+  /** The label a `break` / `continue` names (`break@outer` → `outer`). */
+  jumpLabel?: (node: CfgNode) => string | undefined;
+  /** The operator of an assignment node that has no `operator` field. */
+  assignOperator?: (node: CfgNode, left: CfgNode | null | undefined, right: CfgNode | null | undefined) => string | undefined;
+  /** True for an increment or decrement expression whose node type also covers other operators. */
+  isUpdate?: (node: CfgNode) => boolean;
   /** `if`-style branch node types. */
   ifTypes: Set<string>;
   /** Loop node types (while/for/range). */
@@ -508,11 +523,10 @@ const firstNamedOutside = (node: CfgNode, excluded: Set<string>): CfgNode | null
 const KOTLIN_BLOCKS = new Set(['function_body', 'statements', 'control_structure_body']);
 const KOTLIN_SPEC: CfgLangSpec = {
   ifTypes: new Set(['if_expression']),
-  loopTypes: new Set(['while_statement', 'for_statement']),
-  // Kotlin catch/finally nodes are positional `catch_block`/`finally_block`, which
-  // the generic try adapter does not model. Keep the claim honest until that
-  // complete shape (including abrupt-finally routing) is supported.
-  tryTypes: new Set([]), switchTypes: new Set([]),
+  loopTypes: new Set(['while_statement', 'for_statement', 'do_while_statement']),
+  // `when` is a multi-way branch and `try` has positional `catch_block` / `finally_block`
+  // children (change: widen-kotlin-control-flow-overlay).
+  tryTypes: new Set(['try_expression']), switchTypes: new Set(['when_expression']),
   nestedFnTypes: new Set(['anonymous_function', 'lambda_literal', 'function_declaration']),
   switchFallsThrough: false, blockScoped: true, comprehensionTypes: new Set([]),
   returnTypes: new Set([]), breakTypes: new Set([]), continueTypes: new Set([]), throwTypes: new Set([]),
@@ -545,6 +559,21 @@ const KOTLIN_SPEC: CfgLangSpec = {
     const keyword = n.text.trim().match(/^(return|break|continue|throw)\b/)?.[1];
     return keyword as 'return' | 'break' | 'continue' | 'throw' | undefined;
   },
+  embeddedBranch: n => {
+    if (n.type === 'if_expression' || n.type === 'when_expression' || n.type === 'try_expression') return 'control';
+    if (n.type === 'elvis_expression') return 'elvis';
+    const navigation = n.type === 'call_expression' ? n.namedChildren[0] : n;
+    if (navigation?.type === 'navigation_expression'
+      && navigation.namedChildren.at(-1)?.type === 'navigation_suffix'
+      && navigation.namedChildren.at(-1)!.text.startsWith('?.')) return 'safe-call';
+    return undefined;
+  },
+  labelType: 'label',
+  jumpLabel: n => n.text.trim().match(/^(?:break|continue)@\s*([A-Za-z_][A-Za-z0-9_]*)/)?.[1],
+  assignOperator: (node, left, right) =>
+    left && right ? node.text.slice(left.endIndex - node.startIndex, right.startIndex - node.startIndex).trim() : undefined,
+  isUpdate: n => (n.type === 'postfix_expression' || n.type === 'prefix_expression') && /(?:\+\+|--)/.test(
+    n.type === 'postfix_expression' ? n.text.slice(-2) : n.text.slice(0, 2)),
 };
 
 const SWIFT_BLOCKS = new Set(['function_body', 'statements']);
@@ -683,6 +712,10 @@ type Op =
 interface LoopCtx {
   continueTarget: number;
   breakTarget: number;
+  /** The loop's label, when the source gives one. */
+  label?: string;
+  /** The enclosing loop, so a labeled jump can reach past the innermost one. */
+  parent?: LoopCtx | null;
 }
 
 interface FinallyRoute {
@@ -698,6 +731,8 @@ class CfgBuilder {
   readonly EXIT: number;
   private finallyRoutes: Map<string, FinallyRoute> | null = null;
   private rescuePrecisionBoundaries: Array<{ variable: string; rescueLine: number }> = [];
+  /** A label statement seen just before the loop it names. */
+  private pendingLabel: string | undefined;
 
   /** identifier startIndex → scope-resolved key (`name#scopeId`). */
   constructor(private readonly spec: CfgLangSpec, private readonly scopeKeys: Map<number, string> = new Map(), private readonly language: string = '') {
@@ -786,7 +821,90 @@ class CfgBuilder {
     let current: number | null = entry;
     for (const stmt of stmts) {
       if (current === null) break; // unreachable after a divert
+      if (this.spec.labelType && stmt.type === this.spec.labelType) {
+        this.pendingLabel = stmt.text.replace(/@\s*$/, '').trim();
+        continue;
+      }
       current = this.processStmt(stmt, current, loop);
+      this.pendingLabel = undefined;
+    }
+    return current;
+  }
+
+  /** The loop a `break` / `continue` targets: the labeled one when it names a label in scope. */
+  private jumpTarget(stmt: CfgNode, loop: LoopCtx | null): LoopCtx | null {
+    const label = this.spec.jumpLabel?.(stmt);
+    if (!label) return loop;
+    for (let cur = loop; cur; cur = cur.parent ?? null) if (cur.label === label) return cur;
+    return loop;
+  }
+
+  /** Branching expressions directly inside `node`, outermost first, in source order. */
+  private collectEmbedded(node: CfgNode): CfgNode[] {
+    const found: CfgNode[] = [];
+    const visit = (n: CfgNode): void => {
+      for (const c of n.namedChildren) {
+        if (this.spec.nestedFnTypes.has(c.type)) continue;
+        if (this.spec.embeddedBranch?.(c)) found.push(c);
+        else visit(c);
+      }
+    };
+    visit(node);
+    return found;
+  }
+
+  /** Lower every branching expression inside `node`; null when no path falls through. */
+  private lowerEmbedded(node: CfgNode, current: number, loop: LoopCtx | null): number | null {
+    let cur: number | null = current;
+    for (const inner of this.collectEmbedded(node)) {
+      if (cur === null) return null;
+      cur = this.processEmbedded(inner, cur, loop);
+    }
+    return cur;
+  }
+
+  /**
+   * One branching expression in expression position (change: widen-kotlin-control-flow-overlay).
+   * `a ?: b` is a two-way branch whose right side runs only when `a` is null, and is an exit edge
+   * when it is a jump. `a?.b()` is a two-way branch that skips the call.
+   */
+  private processEmbedded(node: CfgNode, current: number, loop: LoopCtx | null): number | null {
+    const kind = this.spec.embeddedBranch?.(node);
+    if (kind === 'control') return this.processStmt(node, current, loop);
+    if (kind === 'elvis') {
+      const [left, right] = node.namedChildren;
+      let cur: number | null = current;
+      if (left) cur = this.spec.embeddedBranch?.(left) ? this.processEmbedded(left, cur, loop) : this.lowerEmbedded(left, cur, loop);
+      if (cur === null) return null;
+      this.setKind(cur, 'branch');
+      if (left) this.recordUses(left, cur);
+      const merge = this.newBlock('merge');
+      this.addEdge(cur, merge, 'true');
+      const rightBlock = this.newBlock('normal');
+      this.addEdge(cur, rightBlock, 'false');
+      const rightExit = right ? this.processStmt(right, rightBlock, loop) : rightBlock;
+      if (rightExit !== null) this.addEdge(rightExit, merge, 'normal');
+      return merge;
+    }
+    if (kind === 'safe-call') {
+      // The receiver and the arguments are evaluated first. The callee navigation of a safe
+      // call is this same branch, so it is walked into, never lowered a second time.
+      const callee = node.type === 'navigation_expression' ? node : node.namedChildren[0];
+      const parts = [callee?.namedChildren[0], ...(callee === node ? [] : node.namedChildren.slice(1))];
+      let cur: number | null = current;
+      for (const part of parts) {
+        if (!part || cur === null) continue;
+        cur = this.spec.embeddedBranch?.(part) ? this.processEmbedded(part, cur, loop) : this.lowerEmbedded(part, cur, loop);
+      }
+      if (cur === null) return null;
+      this.setKind(cur, 'branch');
+      const callBlock = this.newBlock('normal');
+      this.addEdge(cur, callBlock, 'true');
+      this.recordUses(node, callBlock);
+      const merge = this.newBlock('merge');
+      this.addEdge(callBlock, merge, 'normal');
+      this.addEdge(cur, merge, 'false');
+      return merge;
     }
     return current;
   }
@@ -842,6 +960,16 @@ class CfgBuilder {
       return current;
     }
 
+    // Branching expressions inside a straight-line statement run first, in source order; the
+    // statement itself (its definition, or its jump) then follows their join. A block is not a
+    // statement: its own statements are lowered one by one when the block is processed.
+    if (spec.embeddedBranch && !spec.blockTypes.has(t)) {
+      if (spec.embeddedBranch(stmt)) return this.processEmbedded(stmt, current, loop);
+      const lowered = this.lowerEmbedded(stmt, current, loop);
+      if (lowered === null) return null;
+      current = lowered;
+    }
+
     const adaptedTransfer = spec.transferKind?.(stmt);
     if (adaptedTransfer === 'return' || adaptedTransfer === 'throw') {
       this.recordExpr(stmt, current);
@@ -849,12 +977,14 @@ class CfgBuilder {
       return null;
     }
     if (adaptedTransfer === 'break') {
-      if (loop) this.addAbruptEdge(current, loop.breakTarget, 'normal');
+      const target = this.jumpTarget(stmt, loop);
+      if (target) this.addAbruptEdge(current, target.breakTarget, 'normal');
       else this.addAbruptEdge(current, this.EXIT, 'exit');
       return null;
     }
     if (adaptedTransfer === 'continue') {
-      if (loop) this.addAbruptEdge(current, loop.continueTarget, 'back');
+      const target = this.jumpTarget(stmt, loop);
+      if (target) this.addAbruptEdge(current, target.continueTarget, 'back');
       else this.addAbruptEdge(current, this.EXIT, 'exit');
       return null;
     }
@@ -911,8 +1041,14 @@ class CfgBuilder {
 
   private processIf(stmt: CfgNode, current: number, loop: LoopCtx | null): number | null {
     const { spec } = this;
-    this.setKind(current, 'branch');
     const cond = stmt.childForFieldName(spec.conditionField) ?? spec.conditionNode?.(stmt) ?? null;
+    // A branching expression inside the condition (`if (a?.ok() ?: false)`) runs before the test.
+    if (cond && spec.embeddedBranch) {
+      const lowered = spec.embeddedBranch(cond) ? this.processEmbedded(cond, current, loop) : this.lowerEmbedded(cond, current, loop);
+      if (lowered === null) return null;
+      current = lowered;
+    }
+    this.setKind(current, 'branch');
     if (cond) this.recordUses(cond, current);
 
     const consequence = stmt.childForFieldName(spec.consequenceField) ?? spec.consequenceNode?.(stmt) ?? null;
@@ -1000,7 +1136,9 @@ class CfgBuilder {
     // BEFORE the condition, so a pre-loop def is killed by the body before the
     // condition or post-loop code sees it. Wiring it as a pre-test loop would
     // leak that pre-loop def through as an unsound `exact`.
-    if (stmt.type === 'do_statement') return this.processDoWhile(stmt, current);
+    if (stmt.type === 'do_statement' || stmt.type === 'do_while_statement') return this.processDoWhile(stmt, current, _loop);
+    const label = this.pendingLabel;
+    this.pendingLabel = undefined;
 
     // Loop init / range target: a `for (let i = 0; ...)` or `for x := range ...`
     // introduces a definition; record it into the pre-loop block.
@@ -1036,7 +1174,7 @@ class CfgBuilder {
     const update = loopHeaderField(stmt, 'update') ?? loopHeaderField(stmt, 'increment');
     const updateBlock = update ? this.newBlock('normal') : null;
     if (update && updateBlock !== null) this.recordUses(update, updateBlock);
-    const innerLoop: LoopCtx = { continueTarget: updateBlock ?? condBlock, breakTarget: afterBlock };
+    const innerLoop: LoopCtx = { continueTarget: updateBlock ?? condBlock, breakTarget: afterBlock, ...(label ? { label } : {}), parent: _loop };
     const bodyExit = body
       ? this.processSeq(this.stmtChildren(body), bodyBlock, innerLoop)
       : bodyBlock;
@@ -1072,15 +1210,17 @@ class CfgBuilder {
   /** `do { body } while (cond)` — post-test: body runs first, then the condition
    *  decides whether to loop. The body's defs therefore reach the condition and
    *  the exit, killing any pre-loop def. */
-  private processDoWhile(stmt: CfgNode, current: number): number | null {
+  private processDoWhile(stmt: CfgNode, current: number, outer: LoopCtx | null = null): number | null {
     const { spec } = this;
+    const label = this.pendingLabel;
+    this.pendingLabel = undefined;
     const bodyBlock = this.newBlock('normal');
     this.addEdge(current, bodyBlock, 'normal');
     const condBlock = this.newBlock('loop');
     const afterBlock = this.newBlock('merge');
 
     const body = stmt.childForFieldName(spec.bodyField) ?? spec.bodyNode?.(stmt) ?? null;
-    const innerLoop: LoopCtx = { continueTarget: condBlock, breakTarget: afterBlock };
+    const innerLoop: LoopCtx = { continueTarget: condBlock, breakTarget: afterBlock, ...(label ? { label } : {}), parent: outer };
     const bodyExit = body ? this.processSeq(this.stmtChildren(body), bodyBlock, innerLoop) : bodyBlock;
     if (bodyExit !== null) this.addEdge(bodyExit, condBlock, 'normal');
 
@@ -1105,7 +1245,7 @@ class CfgBuilder {
     const rubyTryStatements = stmt.type === 'begin' || stmt.type === 'body_statement'
       ? stmt.namedChildren.filter(c => !rubyClauses.has(c.type))
       : undefined;
-    const finallyClause = stmt.namedChildren.find(c => c.type === 'finally_clause' || c.type === 'ensure');
+    const finallyClause = stmt.namedChildren.find(c => c.type === 'finally_clause' || c.type === 'finally_block' || c.type === 'ensure');
     const priorFinallyRoutes = this.finallyRoutes;
     const localFinallyRoutes = finallyClause ? new Map<string, FinallyRoute>() : null;
     if (localFinallyRoutes) this.finallyRoutes = localFinallyRoutes;
@@ -1134,7 +1274,7 @@ class CfgBuilder {
     // Each catch/except clause is an alternative path from `current`.
     let sawCatch = false;
     for (const clause of stmt.namedChildren) {
-      if (clause.type !== 'catch_clause' && clause.type !== 'except_clause' && clause.type !== 'rescue') continue;
+      if (clause.type !== 'catch_clause' && clause.type !== 'catch_block' && clause.type !== 'except_clause' && clause.type !== 'rescue') continue;
       sawCatch = true;
       if (clause.type === 'rescue') this.recordRescuePrecisionBoundary(clause);
       const catchBlock = this.newBlock('normal');
@@ -1190,7 +1330,16 @@ class CfgBuilder {
   private processSwitch(stmt: CfgNode, current: number, loop: LoopCtx | null): number | null {
     const { spec } = this;
     this.setKind(current, 'branch');
-    const value = stmt.childForFieldName('value') ?? stmt.childForFieldName('condition');
+    const isWhen = stmt.type === 'when_expression';
+    const value = stmt.childForFieldName('value') ?? stmt.childForFieldName('condition')
+      ?? (isWhen ? stmt.namedChildren.find(c => c.type === 'when_subject') ?? null : null);
+    // A branching expression inside the subject (`when (val u = repo?.find(k))`) runs first.
+    if (value && spec.embeddedBranch) {
+      const lowered = this.lowerEmbedded(value, current, loop);
+      if (lowered === null) return null;
+      current = lowered;
+      this.setKind(current, 'branch');
+    }
     if (value) this.recordUses(value, current);
 
     // The case clauses live under a `*_body` node (TS switch_body) or, in Go,
@@ -1198,7 +1347,8 @@ class CfgBuilder {
     const body = stmt.childForFieldName(spec.bodyField) ?? stmt.namedChildren.find(c => c.type.endsWith('_body'));
     const caseContainer = body ?? stmt;
     const merge = this.newBlock('merge');
-    const caseCtx: LoopCtx = { breakTarget: merge, continueTarget: loop?.continueTarget ?? merge };
+    // A Kotlin `when` is not a `break` target: `break` inside it leaves the enclosing loop.
+    const caseCtx: LoopCtx | null = isWhen ? loop : { breakTarget: merge, continueTarget: loop?.continueTarget ?? merge };
 
     const isCaseNode = (ty: string): boolean =>
       ty === 'switch_case' || ty === 'switch_default' ||      // TS
@@ -1208,11 +1358,12 @@ class CfgBuilder {
       ty === 'switch_block_statement_group' || ty === 'switch_rule' || // Java (colon + arrow)
       ty === 'switch_section' || ty === 'default_statement' || // C# / PHP
       ty === 'match_arm' ||                                    // Rust
-      ty === 'when' || ty === 'else';                          // Ruby (when + else)
+      ty === 'when' || ty === 'else' ||                        // Ruby (when + else)
+      ty === 'when_entry';                                     // Kotlin
     const cases = caseContainer.namedChildren.filter(c => isCaseNode(c.type));
     // Arrow-style cases (Java `case N ->`, Rust arms, Ruby when) never fall through.
     const fallsThrough = spec.switchFallsThrough &&
-      !cases.some(c => c.type === 'switch_rule' || c.type === 'match_arm' || c.type === 'when' || c.type === 'else');
+      !cases.some(c => c.type === 'switch_rule' || c.type === 'match_arm' || c.type === 'when' || c.type === 'else' || c.type === 'when_entry');
     let sawDefault = false;
     let prevFallthrough: number | null = null;
     for (const cs of cases) {
@@ -1252,6 +1403,11 @@ class CfgBuilder {
       const body = cs.childForFieldName('value');
       const isDefault = !!pat && (pat.text === '_' || pat.text.includes('_'));
       return { labels: pat ? [pat] : [], stmts: body ? this.stmtChildren(body) : [], isDefault };
+    }
+    if (t === 'when_entry') { // Kotlin: condition(s) -> body; an entry with no condition is `else`
+      const labels = cs.namedChildren.filter(c => c.type === 'when_condition');
+      const body = cs.namedChildren.find(c => this.spec.blockTypes.has(c.type));
+      return { labels, stmts: body ? this.stmtChildren(body) : [], isDefault: labels.length === 0 };
     }
     if (t === 'when') { // Ruby: when <pattern> then <body>
       const pats = cs.namedChildren.filter(c => c.type === 'pattern' || (c.type !== 'then' && c.type !== 'do'));
@@ -1334,7 +1490,7 @@ class CfgBuilder {
           if (this.spec.declTypes.has(child.type)) this.recordDeclaration(child, block);
           else this.recordStmt(child, block);
         }
-      } else if (this.spec.updateTypes.has(node.type)) {
+      } else if (this.spec.updateTypes.has(node.type) || this.spec.isUpdate?.(node)) {
         this.recordUpdate(node, block);
       } else if (this.spec.assignTypes.has(node.type)) {
         this.recordAssignment(node, block, false);
@@ -1373,7 +1529,7 @@ class CfgBuilder {
 
     // Detect a compound operator (`+=`, `-=`, …) from its text, so languages that
     // use ONE node type for `=` and `+=` (Java, C/C++) are handled correctly.
-    const op = node.childForFieldName('operator')?.text;
+    const op = node.childForFieldName('operator')?.text ?? this.spec.assignOperator?.(node, left, right);
     const compound = !!op && op.length >= 2 && op.endsWith('=') &&
       op !== '==' && op !== '!=' && op !== '<=' && op !== '>=' && op !== '=>' && op !== '===' && op !== '!==';
     const reads = augmented || compound; // a compound assignment reads the target first
@@ -2127,7 +2283,8 @@ export function buildFunctionCfg(fnNode: CfgNode, language: string, bodyOverride
     // after both expression branches without fabricating straight-line flow.
     // Refuse the whole overlay for that function instead of emitting a valid-
     // looking CFG that silently omits the branch.
-    if ((language === 'Kotlin' || language === 'Scala') && hasNestedIfInitializer(body, spec)) return undefined;
+    // Kotlin lowers expression-position branches (see `embeddedBranch`), so it needs no refusal.
+    if (language === 'Scala' && hasNestedIfInitializer(body, spec)) return undefined;
     if (language === 'Scala' && hasMultiEnumeratorFor(body)) return undefined;
     const params = extractParamNames(fnNode, spec);
     const paramLine = fnNode.startPosition.row + 1;
