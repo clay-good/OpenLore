@@ -37,6 +37,7 @@ import { tokenize } from './bm25-tokenizer.js';
 import { classifyYaml } from './iac/classify-yaml.js';
 import { extractTerraform } from './iac/terraform.js';
 import { kotlinCodeMask, normalizeKotlinForParse, scanKotlinDeclarations, scanKotlinFile } from './kotlin-source.js';
+import { matchDynamicBoundaries, type DynamicBoundaryNode } from './dynamic-boundary.js';
 import { buildBaseImportMap } from './import-resolver-bridge.js';
 
 /** An opening token repeated with no closer — the whole attack. */
@@ -1003,4 +1004,51 @@ describe('Kotlin source scanners are not quadratic on a hostile file', () => {
       ]);
     }), 'kotlin import bridge');
   }, TIMEOUT_MS);
+});
+
+// The dynamic-boundary matcher reads a call's callee text. On a chain of N calls the callee of the
+// outermost call is the whole chain, so anything linear in that text is quadratic in the file
+// (change: add-kotlin-dynamic-boundary). Measured on a synthetic tree: the parser is not under test.
+describe('the Kotlin dynamic-boundary matcher is not quadratic on a hostile call chain', () => {
+  const chain = (bytes: number, link: string): { root: DynamicBoundaryNode; source: string } => {
+    const head = 'a::class';
+    const n = Math.max(1, Math.floor(bytes / link.length));
+    const source = head + link.repeat(n);
+    const at = (type: string, start: number, end: number, children: DynamicBoundaryNode[] = []): DynamicBoundaryNode =>
+      ({ type, startIndex: start, endIndex: end, startPosition: { row: 0 }, children });
+    let node = at('callable_reference', 0, head.length);
+    const name = link.slice(1, link.indexOf('('));
+    for (let i = 0; i < n; i++) {
+      const start = head.length + i * link.length;
+      const nameEnd = start + 1 + name.length;
+      const nav = at('navigation_expression', 0, nameEnd, [
+        node,
+        at('navigation_suffix', start, nameEnd, [at('simple_identifier', start + 1, nameEnd)]),
+      ]);
+      node = at('call_expression', 0, start + link.length, [
+        nav,
+        at('call_suffix', nameEnd, start + link.length, [at('value_arguments', nameEnd, start + link.length)]),
+      ]);
+    }
+    return { root: at('source_file', 0, source.length, [node]), source };
+  };
+
+  it.each([
+    ['a gated reflective method', '.call()'],
+    ['an ungated method', '.b()'],
+    ['a class-loader method', '.loadClass()'],
+    ['a container method name without its import', '.get()'],
+  ])('survives a chain of %s', async (label, link) => {
+    expectLinearAndFast(await measure(b => {
+      const { root, source } = chain(b, link);
+      matchDynamicBoundaries('Kotlin', root, source);
+    }), `matchDynamicBoundaries(Kotlin): ${label}`);
+  }, TIMEOUT_MS);
+
+  it('still records the reflective call on such a chain', () => {
+    const { root, source } = chain(700, '.call()');
+    const sites = matchDynamicBoundaries('Kotlin', root, source);
+    expect(sites.map(s => s.kind)).toEqual(['reflective-invoke']);
+    expect(sites[0].matchedTotal).toBeUndefined();
+  });
 });

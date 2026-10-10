@@ -60,6 +60,14 @@ never less cautious than it was before the edges existed. A language
 with no matcher records no site and is reported as *unsupported* by the capability registry, never as
 containing no dynamic dispatch.
 
+Kotlin operator syntax is the one dispatch form that is counted but not listed. `a + b` calls `plus`
+on the static type of `a`, which the analyzer does not compute, so no edge is emitted and an
+`operator fun` is never reported dead with more than low confidence. `dynamic-boundary.json` carries
+an `operatorDispatch` summary: the declared `operator fun` names, and per file the number of
+operator expressions that could call one of them. It is a count, not a site list, because operator
+syntax is in most files and a site per expression would qualify every conclusion in the repository.
+
+
 ## How roots and confidence work
 
 A node is a **root** (assumed live) if it is a test, is imported by name from another file, is a

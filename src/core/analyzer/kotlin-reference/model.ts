@@ -94,8 +94,10 @@ export interface KotlinReferenceModel {
   parseErrorFiles: string[];
   /** The dead-code conclusion for the analyzed copy (computed once, on first use). */
   deadCode: () => Promise<DeadCodeConclusion>;
-  /** Repo-relative files with at least one recorded `operator-dispatch` boundary site. */
+  /** Repo-relative files with at least one counted operator-dispatch site. */
   operatorBoundaryFiles: () => Promise<string[]>;
+  /** Recorded dynamic-boundary sites, as `file::kind` (repo-relative file). */
+  dynamicSites: () => Promise<string[]>;
   /** The `analyze_env_impact` conclusion for one variable. */
   envImpact: (name: string) => Promise<Record<string, unknown>>;
   /** The `analyze_error_propagation` conclusion for one symbol (`name::path`). */
@@ -264,10 +266,13 @@ export async function analyzeKotlinReference(): Promise<{ model: KotlinReference
     }),
     operatorBoundaryFiles: once(async () => {
       const report = await readJson(join(out, 'dynamic-boundary.json')).catch(() => null) as
-        { files?: Array<{ filePath?: string; sites?: Array<{ kind?: string }>; byKind?: Record<string, number> }> } | null;
-      return (report?.files ?? [])
-        .filter(f => (f.byKind?.['operator-dispatch'] ?? 0) > 0 || (f.sites ?? []).some(site => site.kind === 'operator-dispatch'))
-        .map(f => shortId(str(f.filePath)));
+        { operatorDispatch?: { files?: Array<{ filePath?: string; sites?: number }> } } | null;
+      return (report?.operatorDispatch?.files ?? []).filter(f => (f.sites ?? 0) > 0).map(f => shortId(str(f.filePath)));
+    }),
+    dynamicSites: once(async () => {
+      const report = await readJson(join(out, 'dynamic-boundary.json')).catch(() => null) as
+        { files?: Array<{ filePath?: string; sites?: Array<{ kind?: string }> }> } | null;
+      return (report?.files ?? []).flatMap(f => (f.sites ?? []).map(site => `${shortId(str(f.filePath))}::${str(site.kind)}`));
     }),
     envImpact: async (name: string) => await handleAnalyzeEnvImpact({ directory: root, name }) as Record<string, unknown>,
     errorPropagation: async (symbol: string) => await handleAnalyzeErrorPropagation({ directory: root, symbol }) as Record<string, unknown>,

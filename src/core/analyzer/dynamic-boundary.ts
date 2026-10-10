@@ -228,6 +228,41 @@ export interface DynamicBoundaryReport {
   byLanguage: Array<{ language: string; files: number; sites: number }>;
   /** Every per-file record, sorted by path — the source of truth the watcher splices. */
   files: FileDynamicBoundary[];
+  /** Operator-convention sites that could call a declared `operator fun`. Not sites; never in `files`. */
+  operatorDispatch?: OperatorDispatchSummary;
+}
+
+/**
+ * Operator-convention dispatch (change: add-kotlin-dynamic-boundary). `a + b` calls `plus` on the
+ * static type of `a`, which the analyzer does not compute, so no edge is emitted. This is the count
+ * of such expressions whose convention function the project declares as `operator fun`.
+ *
+ * A COUNT, deliberately not a site list: operator syntax is in most files, and a site per expression
+ * would caveat every conclusion in the repository. The consumer is the dead-code verdict of an
+ * `operator fun`, which is never confident.
+ */
+export interface OperatorDispatchSummary {
+  /** The declared `operator fun` names the counts were taken against, sorted. */
+  functions: string[];
+  /** Sum over `files`. */
+  totalSites: number;
+  /** Files with at least one counted expression, sorted by path. */
+  files: Array<{ filePath: string; sites: number }>;
+}
+
+/** Build the summary, or `undefined` when no expression could call a declared operator function. */
+export function buildOperatorDispatchSummary(
+  functions: Iterable<string>,
+  files: Array<{ filePath: string; sites: number }>,
+): OperatorDispatchSummary | undefined {
+  const kept = files.filter(f => f.sites > 0)
+    .sort((a, b) => (a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0));
+  if (kept.length === 0) return undefined;
+  return {
+    functions: [...new Set(functions)].sort(),
+    totalSites: kept.reduce((sum, f) => sum + f.sites, 0),
+    files: kept,
+  };
 }
 
 /**
@@ -310,7 +345,20 @@ interface LanguageSpec {
    * Member-call rules that need import evidence: the file must contain one of `requires` before the
    * `method` name counts. This is what keeps `.invoke(`/`.Call(` from firing on ordinary code.
    */
-  gatedMethods?: Array<{ methods: string[]; requires: string[]; kind: DynamicBoundaryKind }>;
+  gatedMethods?: GatedRule[];
+  /**
+   * Member READS that are a reflective lookup (`X::class.memberFunctions`), gated like a method.
+   * Matched on {@link LanguageSpec.memberAccessTypes} nodes that are not the callee of a call.
+   */
+  gatedProperties?: GatedRule[];
+  /** Node types that denote a member access (`a.b`) in this grammar; read by `gatedProperties`. */
+  memberAccessTypes?: string[];
+  /**
+   * Two rules of DIFFERENT kinds at one start offset are two constructs, and both are recorded:
+   * `Class.forName(n).getDeclaredConstructor().newInstance()` loads a class and then invokes it.
+   * Same-kind matches at one offset still fold into one candidate.
+   */
+  distinctKindsPerOffset?: boolean;
   /** `new X(...)` constructor name → kind. */
   constructorKinds?: Record<string, DynamicBoundaryKind>;
   /** Node types that, used as a call's callee, denote computed member dispatch (`obj[expr]()`). */
@@ -344,6 +392,12 @@ interface LanguageSpec {
    * anchored source scan, so a CommonJS `require` is still recognised.
    */
   importNodeTypes?: string[];
+  /**
+   * The grammar's import nodes are the ONLY import form of the language, so a file with none imports
+   * nothing and the anchored source scan is not consulted. Without this, a file that only quotes an
+   * import line in a multi-line string would bind that package.
+   */
+  importNodesOnly?: boolean;
   /**
    * Which ARGUMENT carries the dispatch selector, per rule name — `getattr(o, "run")` is index 1,
    * `send(:run)` is index 0. A rule absent from this table has no static selector to read, which is
@@ -398,6 +452,28 @@ interface LanguageSpec {
    */
   dispatchTables?: 'js';
 }
+
+/**
+ * A member rule that fires only behind evidence that the name has its reflective meaning.
+ *
+ * The gate is open for the whole file when one of `requires` is imported. `orReceiver` opens it for
+ * one call without the import, on the receiver text alone (`Handler::class.java.getMethod(...)`
+ * needs no import). `receiver` narrows the rule: when present the receiver text must match it as
+ * well. Both patterns are tested against a bounded slice of the receiver text.
+ */
+interface GatedRule {
+  methods: string[];
+  requires: string[];
+  kind: DynamicBoundaryKind;
+  receiver?: RegExp;
+  orReceiver?: RegExp;
+  /** The rule needs a receiver: a bare call of this name is an ordinary function call. */
+  memberOnly?: boolean;
+}
+
+/** A class literal, the Java bridge on one, or a class loaded by name: reflection without an import. */
+const KOTLIN_JAVA_REFLECTION_CHAIN = /::class\.java\b|\bjavaClass\b|\bClass\.forName\(/;
+const KOTLIN_REFLECTION_CHAIN = /::class\b|\bClass\.forName\(/;
 
 /**
  * The declared per-language matchers. **This table is the language-support source of truth** — a
@@ -520,6 +596,54 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     selectorIndex: { getDeclaredMethod: 0, getMethod: 0, getBean: 0, forName: 0 },
     importStyle: 'jvm',
     importNodeTypes: ['import_declaration'],
+  },
+  // change: add-kotlin-dynamic-boundary. No literal dispatch table rule: the Kotlin idiom is a map of
+  // callable references (`mapOf("a" to ::create)`), and each reference is already an ordinary edge.
+  Kotlin: {
+    triggers: ['Class.forName', '::class', 'javaClass', 'loadClass'],
+    callTypes: ['call_expression'],
+    calleeKinds: {},
+    dottedKinds: {
+      'Class.forName': 'dynamic-import',
+      'java.lang.Class.forName': 'dynamic-import',
+    },
+    gatedMethods: [
+      { methods: ['loadClass'], requires: ['java.lang.ClassLoader', 'java.net.URLClassLoader'], orReceiver: /[Ll]oader(?:\(\))?(?:!!)?\??$/, memberOnly: true, kind: 'dynamic-import' },
+      {
+        methods: ['load', 'loadInstalled'], requires: ['java.util.ServiceLoader'],
+        receiver: /(?:^|\.)ServiceLoader$/, orReceiver: /^java\.util\.ServiceLoader$/, memberOnly: true,
+        kind: 'dynamic-import',
+      },
+      {
+        methods: ['getMethod', 'getDeclaredMethod', 'invoke', 'newInstance'], requires: ['java.lang.reflect'],
+        orReceiver: KOTLIN_JAVA_REFLECTION_CHAIN, memberOnly: true, kind: 'reflective-invoke',
+      },
+      {
+        methods: ['call', 'callBy', 'createInstance'], requires: ['kotlin.reflect'],
+        orReceiver: KOTLIN_REFLECTION_CHAIN, memberOnly: true, kind: 'reflective-invoke',
+      },
+      {
+        methods: ['newProxyInstance'], requires: ['java.lang.reflect'],
+        orReceiver: /^java\.lang\.reflect\.Proxy$/, memberOnly: true, kind: 'metaprogrammed-definition',
+      },
+      { methods: ['getBean'], requires: ['org.springframework'], kind: 'container-resolution' },
+      { methods: ['get', 'inject', 'koinInject', 'getKoin'], requires: ['org.koin'], kind: 'container-resolution' },
+      { methods: ['instance'], requires: ['org.kodein.di'], kind: 'container-resolution' },
+      { methods: ['eval'], requires: ['javax.script', 'kotlin.script'], memberOnly: true, kind: 'code-eval' },
+    ],
+    gatedProperties: [
+      {
+        methods: ['members', 'memberFunctions', 'declaredFunctions', 'functions', 'constructors', 'primaryConstructor'],
+        requires: ['kotlin.reflect'], orReceiver: KOTLIN_REFLECTION_CHAIN, kind: 'reflective-invoke',
+      },
+    ],
+    memberAccessTypes: ['navigation_expression'],
+    distinctKindsPerOffset: true,
+    literalTypes: ['string_literal'],
+    selectorIndex: { getDeclaredMethod: 0, getMethod: 0, getBean: 0, forName: 0 },
+    importStyle: 'jvm',
+    importNodeTypes: ['import_header'],
+    importNodesOnly: true,
   },
   'C#': {
     triggers: ['.Invoke(', 'Activator.CreateInstance', 'GetMethod(', 'GetType().'],
@@ -750,7 +874,7 @@ function literalTargetOf(
   selectorIndex: number | undefined,
 ): string | undefined {
   if (selectorIndex === undefined) return undefined;
-  const args = field(call, 'arguments') ?? childrenOf(call).find(c => /argument/.test(c.type));
+  const args = argumentList(call);
   if (!args) return undefined;
   // Argument lists carry punctuation children in several grammars; count only real arguments.
   const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
@@ -761,7 +885,20 @@ function literalTargetOf(
   const literal = spec.literalTypes.includes(selector.type)
     ? selector
     : wrappedLiteral(source, spec, selector);
+  // A literal that carries an interpolation is computed at runtime, whatever its quotes say.
+  if (literal && childrenOf(literal).some(k => /interpolat|substitution/.test(k.type))) return undefined;
   return literal ? literalValue(textOf(source, literal)) : undefined;
+}
+
+/**
+ * The argument-list node of a call. Most grammars hang it on the call; Kotlin wraps it in a
+ * `call_suffix`, beside the type arguments and the trailing lambda.
+ */
+function argumentList(call: DynamicBoundaryNode): DynamicBoundaryNode | undefined {
+  const kids = childrenOf(call);
+  return field(call, 'arguments') ?? kids.find(c => /argument/.test(c.type))
+    ?? childrenOf(kids.find(c => c.type === 'call_suffix') ?? { type: '', startIndex: 0, endIndex: 0, startPosition: { row: 0 }, children: [] })
+      .find(c => c.type === 'value_arguments');
 }
 
 /** The dotted text of a call's callee (`Reflect.get`), or undefined when it is not a member access. */
@@ -801,11 +938,17 @@ function lastSegment(text: string): string {
  * construct tokens plus the import evidence its gated and DI rules require. Derived so a rule can
  * never be added without also being reachable through the pre-scan.
  */
-export function triggersFor(spec: { triggers: string[]; diPackages?: string[]; gatedMethods?: Array<{ requires: string[] }> }): string[] {
+export function triggersFor(spec: {
+  triggers: string[];
+  diPackages?: string[];
+  gatedMethods?: Array<{ requires: string[] }>;
+  gatedProperties?: Array<{ requires: string[] }>;
+}): string[] {
   return [
     ...spec.triggers,
     ...(spec.diPackages ?? []),
     ...(spec.gatedMethods ?? []).flatMap(g => g.requires),
+    ...(spec.gatedProperties ?? []).flatMap(g => g.requires),
   ];
 }
 
@@ -838,7 +981,8 @@ function collectImportText(
     if (depth >= 3) continue;
     for (const c of childrenOf(n)) stack.push({ n: c, depth: depth + 1 });
   }
-  return parts.length > 0 ? parts.join('\n') : source;
+  if (parts.length === 0) return spec.importNodesOnly ? '' : source;
+  return parts.join('\n');
 }
 
 /**
@@ -865,12 +1009,20 @@ export function matchDynamicBoundaries(
 
   const importText = collectImportText(spec, root, source);
   const diPresent = !!spec.diPackages?.some(p => hasImportEvidence(importText, p, spec.importStyle));
-  const gates = (spec.gatedMethods ?? [])
-    .filter(g => g.requires.some(r => hasImportEvidence(importText, r, spec.importStyle)));
+  const imported = (g: GatedRule): boolean =>
+    g.requires.some(r => hasImportEvidence(importText, r, spec.importStyle));
+  const gates = new Set((spec.gatedMethods ?? []).filter(imported));
+  const propertyGates = new Set((spec.gatedProperties ?? []).filter(imported));
+  const memberAccess = spec.gatedProperties?.length ? new Set(spec.memberAccessTypes ?? []) : undefined;
+  /** Callee spans, so a member access that IS a call's callee is read by the method rules only. */
+  const calleeSpans = new Set<string>();
+  const spanKey = (node: DynamicBoundaryNode): string => `${node.startIndex}:${node.endIndex}`;
+  const offsetKey = (node: DynamicBoundaryNode, kind: DynamicBoundaryKind): string =>
+    spec.distinctKindsPerOffset ? `${node.startIndex}:${kind}` : String(node.startIndex);
 
   const out: DynamicBoundaryCandidate[] = [];
-  const atOffset = new Map<number, DynamicBoundaryCandidate>();
-  const seen = new Set<number>();
+  const atOffset = new Map<string, DynamicBoundaryCandidate>();
+  const seen = new Set<string>();
   let matched = 0;
   // Module-level dispatch tables, read only when a subscript call's receiver could name one.
   let tables: Map<string, StableTable> | undefined;
@@ -898,8 +1050,9 @@ export function matchDynamicBoundaries(
     // A false statement, and one that also hides the literal from the sibling change built to
     // recover it. So a later match at the same offset does not merely lose: it donates the more
     // specific selector to the candidate already retained.
-    if (seen.has(node.startIndex)) {
-      const existing = atOffset.get(node.startIndex);
+    const at = offsetKey(node, kind);
+    if (seen.has(at)) {
+      const existing = atOffset.get(at);
       // SAME KIND only. `Class.forName("Foo").getMethod(name).invoke(o)` puts a `dynamic-import`
       // rule and a `reflective-invoke` rule at one offset, and donating across them hands the CLASS
       // name to a candidate whose METHOD is genuinely runtime-computed — the site then reads "the
@@ -911,7 +1064,7 @@ export function matchDynamicBoundaries(
       }
       return undefined;
     }
-    seen.add(node.startIndex);
+    seen.add(at);
     matched++;
     // Retained candidates are capped HERE, not at finalize. A generated dispatch table can carry
     // thousands, and every one of them would otherwise be structured-cloned out of an extraction
@@ -931,7 +1084,7 @@ export function matchDynamicBoundaries(
     };
     if (recoverable) candidate.recoverable = true;
     out.push(candidate);
-    atOffset.set(node.startIndex, candidate);
+    atOffset.set(at, candidate);
     return candidate;
   };
 
@@ -946,9 +1099,19 @@ export function matchDynamicBoundaries(
       if (kind) record(kind, n);
     }
 
+    if (memberAccess?.has(n.type) && !calleeSpans.has(spanKey(n))) {
+      const kids = childrenOf(n);
+      const name = lastSegment(textOf(source, kids[kids.length - 1] ?? n).trim());
+      const rule = spec.gatedProperties!.find(g => g.methods.includes(name));
+      if (rule && gateOpen(rule, propertyGates, kids.length > 1 ? receiverSlices(source, kids[0]) : undefined)) {
+        record(rule.kind, n);
+      }
+    }
+
     if (spec.callTypes.includes(n.type)) {
       const fn = calleeNode(n);
       const text = calleeText(source, n);
+      if (memberAccess && fn) calleeSpans.add(spanKey(fn));
 
       // 1. Computed member dispatch — `obj[expr]()`. A syntactic shape, not a name: the callee is a
       //    subscript whose index is not a static literal. `obj["run"]()` IS statically resolvable
@@ -983,7 +1146,8 @@ export function matchDynamicBoundaries(
       } else if (text) {
         // A dotted rule is checked first, on the FULL dotted text: `Reflect.get` must never be read
         // as a bare `get`.
-        const dotted = spec.dottedKinds?.[text];
+        // Bounded: a dotted rule key is a short reserved name, and a chained callee is not one.
+        const dotted = text.length <= DOTTED_RULE_MAX ? spec.dottedKinds?.[text] : undefined;
         // A `calleeKinds` rule fires on a bare call, on a self-like receiver, or — only where the
         // language declares the name on its universal base object — on any receiver.
         const bareApplies = !text.includes('.')
@@ -1021,7 +1185,14 @@ export function matchDynamicBoundaries(
           // 2. Gated member rules — `.invoke(`, `.Call(`, `.getBean(` — which fire only when the
           //    file imports the framework that gives the name its reflective meaning.
           const method = lastSegment(text);
-          const gate = gates.find(g => g.methods.includes(method));
+          const dotAt = text.lastIndexOf('.');
+          let slices: ReceiverSlices | undefined;
+          const gate = (spec.gatedMethods ?? []).find(g => {
+            if (!g.methods.includes(method)) return false;
+            if (dotAt === -1) return !g.memberOnly && !g.receiver && gates.has(g);
+            slices ??= receiverSlicesOfText(text.slice(0, dotAt));
+            return gateOpen(g, gates, slices);
+          });
           if (gate) {
             record(gate.kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[method]));
           } else if (
@@ -1049,6 +1220,40 @@ export function matchDynamicBoundaries(
   return out;
 }
 
+/** Longer than any declared dotted rule key; a longer callee text is never looked up. */
+const DOTTED_RULE_MAX = 64;
+
+/** A receiver's text, bounded at both ends so a gate pattern never scans a whole call chain. */
+interface ReceiverSlices { head: string; tail: string }
+const RECEIVER_SLICE = 256;
+
+function receiverSlicesOfText(text: string): ReceiverSlices {
+  // A safe-call or non-null-assertion marker belongs to the access, not to the receiver's name.
+  // Sliced BEFORE the pattern runs: an end-anchored replace over a whole chain is linear per call.
+  return {
+    head: text.slice(0, RECEIVER_SLICE).trimStart(),
+    tail: text.slice(-RECEIVER_SLICE).trimEnd().replace(/\?$/, ''),
+  };
+}
+
+function receiverSlices(source: string, node: DynamicBoundaryNode): ReceiverSlices {
+  const end = Math.min(node.endIndex, node.startIndex + RECEIVER_SLICE);
+  return {
+    head: source.slice(node.startIndex, end).trim(),
+    tail: source.slice(Math.max(node.startIndex, node.endIndex - RECEIVER_SLICE), node.endIndex).trim(),
+  };
+}
+
+/**
+ * Is this gated rule open for one member access? `receiver` is an AND condition on the receiver's
+ * tail; the gate itself is the file's import or, failing that, `orReceiver` on either slice.
+ */
+function gateOpen(rule: GatedRule, imported: ReadonlySet<GatedRule>, slices: ReceiverSlices | undefined): boolean {
+  if (!slices) return !rule.memberOnly && !rule.receiver && imported.has(rule);
+  if (imported.has(rule)) return !rule.receiver || rule.receiver.test(slices.tail);
+  return !!rule.orReceiver && (rule.orReceiver.test(slices.tail) || rule.orReceiver.test(slices.head));
+}
+
 /**
  * Is there ANY literal at the given argument position — quoted or not, identifier-shaped or not?
  * Distinct from {@link literalTargetOf}, which asks for a usable dispatch NAME. `import('./a/b')`
@@ -1061,7 +1266,7 @@ function literalTargetOfAnyShape(
   spec: LanguageSpec,
   selectorIndex: number,
 ): string | undefined {
-  const args = field(call, 'arguments') ?? childrenOf(call).find(c => /argument/.test(c.type));
+  const args = argumentList(call);
   if (!args) return undefined;
   const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
   const selector = actual[selectorIndex];
@@ -1105,7 +1310,7 @@ function isNonCallableLiteral(
   spec: LanguageSpec,
   index: number,
 ): boolean {
-  const args = field(call, 'arguments') ?? childrenOf(call).find(c => /argument/.test(c.type));
+  const args = argumentList(call);
   if (!args) return false;
   const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
   const value = actual[index];
@@ -1580,11 +1785,12 @@ export function fileSiteCount(f: FileDynamicBoundary): number {
  */
 export function buildDynamicBoundaryReport(
   records: FileDynamicBoundary[],
+  operatorDispatch?: OperatorDispatchSummary,
 ): DynamicBoundaryReport | undefined {
   // A record carrying only bound constructs is kept (a directly-resolved-only consumer discloses it)
   // but contributes nothing to the site rollups.
   const files = records.filter(r => fileSiteCount(r) > 0 || (r.bound?.length ?? 0) > 0);
-  if (files.length === 0) return undefined;
+  if (files.length === 0 && !operatorDispatch) return undefined;
 
   const kindCounts = new Map<DynamicBoundaryKind, number>();
   const langCounts = new Map<string, { files: number; sites: number }>();
@@ -1611,5 +1817,6 @@ export function buildDynamicBoundaryReport(
       .map(([language, v]) => ({ language, files: v.files, sites: v.sites }))
       .sort((a, b) => b.sites - a.sites || (a.language < b.language ? -1 : 1)),
     files: [...files].sort((a, b) => (a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0)),
+    ...(operatorDispatch ? { operatorDispatch } : {}),
   };
 }

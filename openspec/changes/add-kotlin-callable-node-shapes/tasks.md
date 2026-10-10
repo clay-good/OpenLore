@@ -16,8 +16,9 @@
 - [x] Strip backticks from names; set `isAsync` for `suspend`; overloads share one node (the
       existing scheme for Java and every other language; the spec delta is corrected to say so)
 - [x] Exempt `operator fun` and accessor nodes from confident dead-code verdicts
-- [ ] Count operator-dispatch sites (built with `add-kotlin-dynamic-boundary`, which owns the
-      boundary kinds; ledger entry `shape-operator-boundary-count`)
+- [x] Count operator-dispatch sites (built with `add-kotlin-dynamic-boundary`; ledger entry
+      `shape-operator-boundary-count`). Kept as a per-file count under `operatorDispatch`, for
+      expressions whose convention function the project declares as `operator fun`
 
 ## Conformance
 - [x] One fixture per row of both tables; each asserts node presence, owner, and edge target

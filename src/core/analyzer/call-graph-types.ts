@@ -13,7 +13,7 @@ import type { FunctionCfg } from './cfg.js';
 import type { FileStyleRaw } from './style-fingerprint.js';
 import type { FileContentHashes } from './symbol-content-hash.js';
 import type { FileParseHealth, GrammarUnavailableBoundary } from './parse-health.js';
-import type { AttributedCandidate, FileDynamicBoundary } from './dynamic-boundary.js';
+import type { AttributedCandidate, FileDynamicBoundary, OperatorDispatchSummary } from './dynamic-boundary.js';
 import type { ExtractionLaneDisclosure } from './extraction-pool.js';
 import type { Pass1CacheDisclosure } from './pass1-fact-cache.js';
 import type { ReceiverFieldFact } from './receiver-registry.js';
@@ -529,6 +529,11 @@ export type FileExtractResult = {
    * construct plus its enclosing symbol, never a verdict. Plain data, like everything else here.
    */
   dynamicBoundary?: AttributedCandidate[];
+  /**
+   * Operator-convention sites by convention function name (change: add-kotlin-dynamic-boundary).
+   * Unresolved counts; which of them could call a declared `operator fun` is decided after Pass 2.
+   */
+  operatorSites?: Record<string, number>;
   /** Survives worker structured-clone and persistent fact-cache JSON boundaries. */
   classRelationships?: ClassRelationshipFact[];
   /**
@@ -620,6 +625,8 @@ export interface CallGraphResult {
    * carried into {@link SerializedCallGraph} and never a node or an edge.
    */
   dynamicBoundaryByFile?: Map<string, FileDynamicBoundary>;
+  /** Operator-convention sites that could call a declared `operator fun`. Transient, like the sites. */
+  operatorDispatch?: OperatorDispatchSummary;
   /** Optional HTTP client projection failures. The primary graph parse may still
    * be healthy, so these are disclosed separately from whole-file parse health. */
   httpClientDegradations?: Array<{

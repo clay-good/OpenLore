@@ -42,6 +42,7 @@ import {
   extractKotlinRouteDefinitions,
 } from './http-route-parser.js';
 import { HTTP_CLIENT_LANGUAGES } from './http-capability.js';
+import { extractFileDynamicBoundary } from './call-graph.js';
 
 // ── registry is DERIVED from the live sources: exact cross-checks ──
 
@@ -712,5 +713,19 @@ describe('single-source language detection', () => {
         `src/${CANONICAL} (re-exported by language-support.ts). Offenders:\n` +
         offenders.map(o => `  - ${o}`).join('\n'),
     ).toEqual([]);
+  });
+});
+
+// Kotlin claims `dynamicBoundary` only together with a fixture that yields a site, and never
+// `literalReflection` (change: add-kotlin-dynamic-boundary).
+describe('Kotlin dynamicBoundary is behaviorally faithful', () => {
+  it('a reflective fixture yields a site', async () => {
+    expect(languageSupport('Kotlin').capabilities).toContain('dynamicBoundary');
+    expect(languageSupport('Kotlin').capabilities).not.toContain('literalReflection');
+    const record = await extractFileDynamicBoundary({
+      path: 'A.kt', language: 'Kotlin',
+      content: 'fun f(h: Handler) { Handler::class.java.getMethod("run").invoke(h) }',
+    });
+    expect(record?.sites.map(s => s.kind)).toEqual(['reflective-invoke']);
   });
 });

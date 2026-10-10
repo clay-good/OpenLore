@@ -262,7 +262,7 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
   entry('shape-operator-no-edge', 'call graph', 'asserted', 'add-kotlin-callable-node-shapes',
     '`a + b` emits no call edge to `Money.plus`: the operator is chosen by a static type the analyzer does not compute',
     m => !!findNode(m, 'model/Money.kt::Money.plus') && !callEdges(m).some(e => e.to === 'model/Money.kt::Money.plus')),
-  entry('shape-operator-boundary-count', 'boundaries', 'known-gap', 'add-kotlin-dynamic-boundary',
+  entry('shape-operator-boundary-count', 'boundaries', 'asserted', 'add-kotlin-dynamic-boundary',
     'the operator call `a + b` in `Money.kt` is counted as an `operator-dispatch` boundary',
     async m => (await m.operatorBoundaryFiles()).includes('model/Money.kt')),
 
@@ -446,7 +446,20 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
       const result = await m.errorPropagation('databaseUrl::src/main/kotlin/com/acme/config/Env.kt');
       return (result.escapes as Array<{ type: string }> | undefined ?? []).some(e => e.type === 'IllegalStateException');
     }),
-  capability('dynamic-capability', 'known-gap', 'add-kotlin-dynamic-boundary', 'dynamicBoundary'),
+  capability('dynamic-capability', 'asserted', 'add-kotlin-dynamic-boundary', 'dynamicBoundary'),
+  entry('dynamic-reflection-sites', 'boundaries', 'asserted', 'add-kotlin-dynamic-boundary',
+    '`plugin/Reflect.kt` records a `dynamic-import` site (`ServiceLoader.load`, `Class.forName`) and a `reflective-invoke` site (`memberFunctions`, `call`, `newInstance`)',
+    async m => {
+      const sites = await m.dynamicSites();
+      return sites.includes('plugin/Reflect.kt::dynamic-import') && sites.includes('plugin/Reflect.kt::reflective-invoke');
+    }),
+  entry('dynamic-no-ordinary-sites', 'boundaries', 'asserted', 'add-kotlin-dynamic-boundary',
+    'no other file of the reference project records a dynamic-boundary site',
+    async m => (await m.dynamicSites()).every(site => site.startsWith('plugin/Reflect.kt::'))),
+  entry('dynamic-dead-code-qualified', 'dead code', 'asserted', 'add-kotlin-dynamic-boundary',
+    'no dead-code candidate in `plugin/Reflect.kt` is reported with more than low confidence',
+    async m => Object.entries((await m.deadCode()).confidence)
+      .filter(([id]) => id.startsWith('plugin/Reflect.kt::')).every(([, confidence]) => confidence === 'low')),
   capability('style-capability', 'known-gap', 'add-kotlin-style-fingerprint', 'styleFingerprint'),
 
   // ── add-kotlin-public-surface ─────────────────────────────────────────────

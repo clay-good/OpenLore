@@ -20,6 +20,8 @@ export interface KotlinNode {
   startPosition: { row: number };
   parent: KotlinNode | null;
   namedChildren: KotlinNode[];
+  /** Every child, anonymous tokens included. Read only where an operator token decides the shape. */
+  children?: KotlinNode[];
 }
 
 /** A declared parameter of a function or constructor. */
@@ -678,4 +680,95 @@ export function kotlinFunctionHeader(fnNode: KotlinNode, content: string): Kotli
     ...(kdoc?.summary ? { docstring: kdoc.summary } : {}),
     ...(kdoc && kdoc.tags.length > 0 ? { docTags: kdoc.tags } : {}),
   };
+}
+
+// ── Operator-convention sites (change: add-kotlin-dynamic-boundary) ───────────────────────────────
+
+const BINARY_OPERATOR_NAMES: Record<string, string> = {
+  '+': 'plus', '-': 'minus', '*': 'times', '/': 'div', '%': 'rem', '..': 'rangeTo', '..<': 'rangeTo',
+  'in': 'contains', '!in': 'contains',
+  '<': 'compareTo', '>': 'compareTo', '<=': 'compareTo', '>=': 'compareTo',
+};
+const UNARY_OPERATOR_NAMES: Record<string, string> = {
+  '-': 'unaryMinus', '+': 'unaryPlus', '!': 'not', '++': 'inc', '--': 'dec',
+};
+const ASSIGN_OPERATOR_NAMES: Record<string, string> = {
+  '+=': 'plusAssign', '-=': 'minusAssign', '*=': 'timesAssign', '/=': 'divAssign', '%=': 'remAssign',
+};
+const BINARY_OPERATOR_NODES = new Set([
+  'additive_expression', 'multiplicative_expression', 'range_expression', 'check_expression', 'comparison_expression',
+]);
+
+/**
+ * The `operator fun` names one operator-convention site can call. A site counts as a boundary when
+ * the project declares any of them: `a += b` calls `plusAssign` or, failing that, `plus`; the
+ * pre-parse normalization writes `..<` as `..`, so a range site can be `rangeTo` or `rangeUntil`.
+ */
+export const KOTLIN_OPERATOR_SITE_TARGETS: Record<string, string[]> = {
+  plusAssign: ['plusAssign', 'plus'],
+  minusAssign: ['minusAssign', 'minus'],
+  timesAssign: ['timesAssign', 'times'],
+  divAssign: ['divAssign', 'div'],
+  remAssign: ['remAssign', 'rem'],
+  rangeTo: ['rangeTo', 'rangeUntil'],
+  iterator: ['iterator'],
+  getValue: ['getValue', 'setValue', 'provideDelegate'],
+};
+
+/** The site key of a destructuring declaration; it matches every declared `componentN`. */
+export const KOTLIN_COMPONENT_SITE = 'componentN';
+
+/**
+ * Count the operator-convention sites of one file, by the convention function each one names.
+ *
+ * Counted: binary arithmetic, ranges, `in`, comparison, unary operators, increment and decrement,
+ * augmented assignment, indexed read and write, `for` iteration, property delegation, and
+ * destructuring. NOT counted: a call on a value (`a()` is `invoke` only by the static type, and
+ * every function call has that shape) and `==` (`equals` exists on every class).
+ *
+ * Nothing here resolves a site: the operator is chosen by the static type of the operand. The count
+ * is kept only for names the project declares as `operator fun`, which is decided after Pass 2.
+ */
+export function countKotlinOperatorSites(root: KotlinNode): Record<string, number> | undefined {
+  const counts: Record<string, number> = {};
+  let any = false;
+  const add = (name: string | undefined): void => {
+    if (!name) return;
+    counts[name] = (counts[name] ?? 0) + 1;
+    any = true;
+  };
+  const token = (node: KotlinNode, table: Record<string, string>): string | undefined => {
+    for (const c of node.children ?? []) {
+      if (Object.hasOwn(table, c.type)) return table[c.type];
+    }
+    return undefined;
+  };
+  const stack: KotlinNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    for (let i = node.namedChildren.length - 1; i >= 0; i--) stack.push(node.namedChildren[i]);
+    if (BINARY_OPERATOR_NODES.has(node.type)) add(token(node, BINARY_OPERATOR_NAMES));
+    else if (node.type === 'prefix_expression' || node.type === 'postfix_expression') add(token(node, UNARY_OPERATOR_NAMES));
+    else if (node.type === 'indexing_expression') add('get');
+    else if (node.type === 'assignment') {
+      add(token(node, ASSIGN_OPERATOR_NAMES));
+      const target = node.namedChildren[0];
+      if (target?.type === 'directly_assignable_expression' && target.namedChildren.some(c => c.type === 'indexing_suffix')) add('set');
+    } else if (node.type === 'for_statement') add('iterator');
+    else if (node.type === 'property_delegate') add('getValue');
+    else if (node.type === 'multi_variable_declaration') add(KOTLIN_COMPONENT_SITE);
+  }
+  return any ? counts : undefined;
+}
+
+/** Sum the sites of one file whose convention function the project declares as `operator fun`. */
+export function kotlinOperatorBoundaryCount(counts: Record<string, number>, declared: ReadonlySet<string>): number {
+  let total = 0;
+  for (const [site, n] of Object.entries(counts)) {
+    const live = site === KOTLIN_COMPONENT_SITE
+      ? [...declared].some(name => /^component\d+$/.test(name))
+      : (KOTLIN_OPERATOR_SITE_TARGETS[site] ?? [site]).some(name => declared.has(name));
+    if (live) total += n;
+  }
+  return total;
 }

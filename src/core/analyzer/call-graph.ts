@@ -57,6 +57,7 @@ import { kotlinCodeMask, kotlinSourceSet, normalizeKotlinForParse, scanKotlinDec
 import { kotlinFacadeName, kotlinJvmMembers, type KotlinJvmAccess, type KotlinJvmMember } from './kotlin-jvm-names.js';
 import {
   buildKotlinOwnerIndex, collectKotlinBodyNodes, collectKotlinClassFacts, collectKotlinExtraCalls,
+  countKotlinOperatorSites, kotlinOperatorBoundaryCount,
   kotlinExtensionReceiver, kotlinFunctionHeader, kotlinFunctionParameters, kotlinModifiers, kotlinQualifiedOwner, kotlinReturnType,
   type KotlinNode, type KotlinOwnerIndex,
 } from './kotlin-extract.js';
@@ -87,6 +88,8 @@ import {
   boundDynamicBoundarySites,
   buildFileDynamicBoundary,
   REFLECTIVE_RESOLUTION_RULE,
+  buildOperatorDispatchSummary,
+  type OperatorDispatchSummary,
   type AttributedCandidate,
   type DynamicBoundaryNode,
   type FileDynamicBoundary,
@@ -2927,6 +2930,8 @@ interface QueryLangSpec {
   extraNodes?: (root: TsNodeLike, filePath: string, content: string) => FunctionNode[];
   /** Optional call shapes the call query does not capture (references, infix calls, …). */
   extraCalls?: (root: TsNodeLike) => Array<Omit<RawEdge, 'callerId'> & { offset: number }>;
+  /** Optional operator-convention site counts, by convention function name. */
+  operatorSites?: (root: TsNodeLike) => Record<string, number> | undefined;
   /**
    * Matches a chained intra-object receiver (`this.repo` in `this.repo.save()`); group 1 is the
    * field. The raw edge then carries `calleeObject: 'this'` and `receiverField`, the shape the
@@ -3054,10 +3059,12 @@ async function extractByQueries(
     const receiverFields = collectReceiverFieldFacts(spec.language, runOptionalQuery as never);
     const dynamicDispatch = collectPass1DynamicDispatch(spec.language, content, _root, nodes, filePath);
     const dynamicBoundary = tallyDynamicBoundary(spec.language, _root, nodes, content);
+    const operatorSites = spec.operatorSites?.(_root);
     // WASM trees are not reliable across parses (see parseHealthReliable) — no content hashes there.
     const contentHashes = handle.parseHealthReliable === false ? undefined : contentHashesFor(_root, nodes, content, spec.language);
     return {
       nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary,
+      ...(operatorSites ? { operatorSites } : {}),
       ...(receiverFields.length ? { receiverFields } : {}),
       ...(contentHashes ? { contentHashes } : {}),
     };
@@ -3182,6 +3189,7 @@ const KOTLIN_SPEC: QueryLangSpec = {
     ...(body.bodySpans ? { bodySpans: body.bodySpans } : {}),
     ...(body.parameters?.length ? { parameters: body.parameters } : {}),
   })),
+  operatorSites: root => countKotlinOperatorSites(root as unknown as KotlinNode),
   extraCalls: root => collectKotlinExtraCalls(root as unknown as KotlinNode).map(call => ({
     calleeName: call.calleeName,
     line: call.line,
@@ -5474,6 +5482,26 @@ function finalizeDynamicBoundaries(
 }
 
 /**
+ * Keep the operator-convention sites that could call a declared `operator fun` (change:
+ * add-kotlin-dynamic-boundary). Decided here because the declared names are a whole-repository fact.
+ */
+function summarizeOperatorDispatch(
+  byFile: Map<string, Record<string, number>>,
+  allNodes: Map<string, FunctionNode>,
+): OperatorDispatchSummary | undefined {
+  if (byFile.size === 0) return undefined;
+  const declared = new Set<string>();
+  for (const n of allNodes.values()) {
+    if (!n.isExternal && n.modifiers?.includes('operator')) declared.add(n.name);
+  }
+  if (declared.size === 0) return undefined;
+  return buildOperatorDispatchSummary(
+    declared,
+    [...byFile].map(([filePath, counts]) => ({ filePath, sites: kotlinOperatorBoundaryCount(counts, declared) })),
+  );
+}
+
+/**
  * Does a Pass-1 extraction result carry no facts at all? Used only to decide whether a
  * WORKER's silence has been proven trustworthy (see `extraction-pool.ts`) — never to alter
  * a result. `undefined` (a language with no extractor) is not emptiness: it is the same
@@ -5492,6 +5520,7 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
     && !result.receiverFields?.length
     && !result.dynamicDispatch
     && !result.dynamicBoundary?.length
+    && !result.operatorSites
     && !result.httpCalls?.length
     && !result.httpDegradations?.length;
 }
@@ -5578,6 +5607,7 @@ export class CallGraphBuilder {
     // Dynamic-boundary CANDIDATES, kept raw until Pass-2 resolution can decide the partition
     // (change: disclose-dynamic-boundary-regions).
     const dynamicBoundaryCandidates = new Map<string, { language: string; candidates: AttributedCandidate[] }>();
+    const operatorSitesByFile = new Map<string, Record<string, number>>();
     const grammarUnavailableByLanguage = new Map<string, GrammarUnavailableBoundary>();
     let relationships = new Map<string, ClassRelationship>();
     // `Class.field → Type` observations per file, folded into the refusing registry after Pass 1
@@ -5733,6 +5763,7 @@ export class CallGraphBuilder {
             candidates: result.dynamicBoundary,
           });
         }
+        if (result.operatorSites) operatorSitesByFile.set(file.path, result.operatorSites);
         if (result.receiverFields?.length) {
           receiverFieldFacts.set(file.path, [
             ...(receiverFieldFacts.get(file.path) ?? []),
@@ -7378,6 +7409,7 @@ export class CallGraphBuilder {
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
       dynamicBoundaryByFile: finalizeDynamicBoundaries(dynamicBoundaryCandidates, allNodes, literalReflection),
+      operatorDispatch: summarizeOperatorDispatch(operatorSitesByFile, allNodes),
       httpClientDegradations: httpClientDegradations.length > 0 ? httpClientDegradations : undefined,
       grammarUnavailable: grammarUnavailableByLanguage.size > 0
         ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
@@ -7652,7 +7684,30 @@ export async function extractFileParseHealth(
 export async function extractFileDynamicBoundary(
   file: { path: string; content: string; language: string },
 ): Promise<FileDynamicBoundary | undefined> {
+  return (await extractFileBoundaryFacts(file)).record;
+}
+
+/**
+ * The single-file lane's two boundary facts from ONE extraction: the site record, and the
+ * operator-convention sites counted against `operatorFunctions` (the declared `operator fun` names
+ * of the last full build, plus the ones this file declares).
+ */
+export async function extractFileBoundaryFacts(
+  file: { path: string; content: string; language: string },
+  operatorFunctions: readonly string[] = [],
+): Promise<{ record?: FileDynamicBoundary; operatorSites: number; declaredOperators: string[] }> {
   const result = await dispatchFileExtract(file);
+  const declaredOperators = [...new Set((result?.nodes ?? []).filter(n => n.modifiers?.includes('operator')).map(n => n.name))].sort();
+  const operatorSites = result?.operatorSites
+    ? kotlinOperatorBoundaryCount(result.operatorSites, new Set([...operatorFunctions, ...declaredOperators]))
+    : 0;
+  return { record: boundaryRecordOf(file, result), operatorSites, declaredOperators };
+}
+
+function boundaryRecordOf(
+  file: { path: string; language: string },
+  result: FileExtractResult | undefined,
+): FileDynamicBoundary | undefined {
   const candidates = result?.dynamicBoundary;
   if (!candidates?.length) return undefined;
   const singleFileProbe: ResolutionProbe = {

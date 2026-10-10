@@ -164,6 +164,8 @@ interface SerializedFacts {
    * dispatch — a false clean disclosure, which is worse than no disclosure at all.
    */
   b?: FileExtractResult['dynamicBoundary'];
+  /** Operator-convention site counts (change: add-kotlin-dynamic-boundary). */
+  o?: FileExtractResult['operatorSites'];
 }
 
 /**
@@ -186,6 +188,7 @@ export function serializeFacts(facts: FileExtractResult | undefined): string {
   if (facts.httpCalls !== undefined) payload.t = facts.httpCalls;
   if (facts.httpDegradations?.length) payload.x = facts.httpDegradations;
   if (facts.dynamicBoundary?.length) payload.b = facts.dynamicBoundary;
+  if (facts.operatorSites) payload.o = facts.operatorSites;
   return JSON.stringify(payload);
 }
 
@@ -216,6 +219,7 @@ export function deserializeFacts(raw: string): { facts: FileExtractResult | unde
   if (p.t !== undefined) facts.httpCalls = p.t;
   if (p.x) facts.httpDegradations = p.x;
   if (p.b) facts.dynamicBoundary = p.b;
+  if (p.o) facts.operatorSites = p.o;
   return { facts };
 }
 

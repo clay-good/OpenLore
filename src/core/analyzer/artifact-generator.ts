@@ -1710,6 +1710,7 @@ export class AnalysisArtifactGenerator {
     // with no site, which is what makes the artifact absent and the disclosure path free.
     this._dynamicBoundary = buildDynamicBoundaryReport(
       [...(callGraphResult.dynamicBoundaryByFile?.values() ?? [])],
+      callGraphResult.operatorDispatch,
     );
 
     // Intra-procedural CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).

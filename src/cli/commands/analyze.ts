@@ -926,7 +926,11 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       if (artifacts.dynamicBoundary) {
         console.log(
           `    ├─ ${safe(opts.output)}dynamic-boundary.json  (${artifacts.dynamicBoundary.totalSites} `
-          + `dispatch site(s) the call graph cannot follow, in ${artifacts.dynamicBoundary.totalFiles} file(s))`,
+          + `dispatch site(s) the call graph cannot follow, in ${artifacts.dynamicBoundary.totalFiles} file(s)`
+          + (artifacts.dynamicBoundary.operatorDispatch
+            ? `; ${artifacts.dynamicBoundary.operatorDispatch.totalSites} operator-dispatch site(s)`
+            : '')
+          + ')',
         );
       }
       // CODEBASE.md (digestWritten) is the last branch when present, so it owns the

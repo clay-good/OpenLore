@@ -41,8 +41,8 @@ import { spawn } from 'node:child_process';
 import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
-import { extractFileStyle, extractFileParseHealth, extractFileDynamicBoundary } from '../analyzer/call-graph.js';
-import { buildDynamicBoundaryReport, type DynamicBoundaryReport, type FileDynamicBoundary } from '../analyzer/dynamic-boundary.js';
+import { extractFileStyle, extractFileParseHealth, extractFileBoundaryFacts } from '../analyzer/call-graph.js';
+import { buildDynamicBoundaryReport, buildOperatorDispatchSummary, type DynamicBoundaryReport, type FileDynamicBoundary } from '../analyzer/dynamic-boundary.js';
 import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 /** Matches the serving-side cap in `dynamic-boundary-disclosure.ts` — one artifact, one bound. */
 const DYNAMIC_BOUNDARY_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024;
@@ -2443,16 +2443,33 @@ export class McpWatcher {
       const byPath = new Map<string, FileDynamicBoundary>(
         Array.isArray(existing?.files) ? existing!.files.map(f => [f.filePath, f]) : [],
       );
+      // Operator-convention counts are kept against the declared names of the last full build.
+      const operatorFunctions = Array.isArray(existing?.operatorDispatch?.functions)
+        ? existing!.operatorDispatch!.functions.filter((n): n is string => typeof n === 'string')
+        : [];
+      const operatorSites = new Map<string, number>(
+        (Array.isArray(existing?.operatorDispatch?.files) ? existing!.operatorDispatch!.files : [])
+          .filter(f => typeof f?.filePath === 'string' && Number.isSafeInteger(f?.sites))
+          .map(f => [f.filePath, f.sites]),
+      );
       let touched = false;
 
       for (const rel of deletedRels) {
         if (byPath.delete(rel)) touched = true;
+        if (operatorSites.delete(rel)) touched = true;
       }
       for (const f of changedFiles) {
         const language = detectLanguage(f.rel);
         let record: FileDynamicBoundary | undefined;
         try {
-          record = await extractFileDynamicBoundary({ path: f.rel, content: f.content, language });
+          const facts = await extractFileBoundaryFacts({ path: f.rel, content: f.content, language }, operatorFunctions);
+          record = facts.record;
+          for (const name of facts.declaredOperators) if (!operatorFunctions.includes(name)) operatorFunctions.push(name);
+          if ((operatorSites.get(f.rel) ?? 0) !== facts.operatorSites) {
+            if (facts.operatorSites > 0) operatorSites.set(f.rel, facts.operatorSites);
+            else operatorSites.delete(f.rel);
+            touched = true;
+          }
         } catch {
           // A file this lane cannot re-derive keeps whatever the last full build recorded. Dropping
           // it would turn a parse failure into a claim that the file has no dynamic dispatch.
@@ -2467,7 +2484,10 @@ export class McpWatcher {
       }
 
       if (!touched) return;
-      const report = buildDynamicBoundaryReport([...byPath.values()]);
+      const report = buildDynamicBoundaryReport(
+        [...byPath.values()],
+        buildOperatorDispatchSummary(operatorFunctions, [...operatorSites].map(([filePath, sites]) => ({ filePath, sites }))),
+      );
       if (!report) {
         // The repository now records no site — remove the stale artifact rather than serve it.
         if (raw !== null) await unlink(dbPath).catch(() => {});

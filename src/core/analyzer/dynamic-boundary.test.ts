@@ -50,6 +50,7 @@ describe('the vocabulary is closed and source-declared', () => {
         ...Object.values(spec.dottedKinds ?? {}),
         ...Object.values(spec.constructorKinds ?? {}),
         ...(spec.gatedMethods ?? []).map(g => g.kind),
+        ...(spec.gatedProperties ?? []).map(g => g.kind),
       ];
       for (const k of emitted) {
         expect(declared, `${language} emits an undeclared kind "${k}"`).toContain(k);
@@ -91,7 +92,7 @@ describe('the vocabulary is closed and source-declared', () => {
         expect(covers(name), `${language}: no trigger reaches constructor rule "${name}"`).toBe(true);
       }
       // Gated and DI rules key on their import evidence, which `triggersFor` folds in wholesale.
-      for (const gate of spec.gatedMethods ?? []) {
+      for (const gate of [...(spec.gatedMethods ?? []), ...(spec.gatedProperties ?? [])]) {
         for (const req of gate.requires) expect(triggers).toContain(req);
       }
       for (const pkg of spec.diPackages ?? []) expect(triggers).toContain(pkg);
@@ -107,7 +108,7 @@ describe('the vocabulary is closed and source-declared', () => {
         expect(spec.diPackages?.length, `${language} names DI methods with no DI packages`)
           .toBeGreaterThan(0);
       }
-      for (const gate of spec.gatedMethods ?? []) {
+      for (const gate of [...(spec.gatedMethods ?? []), ...(spec.gatedProperties ?? [])]) {
         expect(gate.requires.length, `${language} gate for ${gate.methods} has no import evidence`)
           .toBeGreaterThan(0);
       }

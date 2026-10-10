@@ -110,4 +110,23 @@ describe('watcher dynamic-boundary lane', () => {
     writeFileSync(join(outputPath, ARTIFACT_DYNAMIC_BOUNDARY), 'not json');
     await expect(splice(watcher, [{ rel: 'src/a.ts', content: WITH_EVAL }])).resolves.toBeUndefined();
   });
+
+  // change: add-kotlin-dynamic-boundary. The operator count rides the same artifact and is not a site.
+  it('keeps the Kotlin operator-dispatch count live without turning it into a site', async () => {
+    const { watcher, outputPath } = watcherIn();
+    const MONEY = 'class Money(val c: Long) { operator fun plus(o: Money) = Money(c + o.c) }\n';
+    await splice(watcher, [{ rel: 'src/Money.kt', content: MONEY }]);
+    let report = readReport(outputPath)!;
+    expect(report.totalSites).toBe(0);
+    expect(report.files).toEqual([]);
+    expect(report.operatorDispatch).toEqual({ functions: ['plus'], totalSites: 1, files: [{ filePath: 'src/Money.kt', sites: 1 }] });
+
+    // A second file is counted against the operator names the artifact already holds.
+    await splice(watcher, [{ rel: 'src/Total.kt', content: 'fun total(a: Money, b: Money) = a + b\n' }]);
+    report = readReport(outputPath)!;
+    expect(report.operatorDispatch!.files).toEqual([{ filePath: 'src/Money.kt', sites: 1 }, { filePath: 'src/Total.kt', sites: 1 }]);
+
+    await splice(watcher, [{ rel: 'src/Total.kt', content: 'fun total(a: Money, b: Money) = a\n' }], ['src/Money.kt']);
+    expect(readReport(outputPath)).toBeNull();
+  });
 });

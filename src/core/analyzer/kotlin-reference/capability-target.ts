@@ -17,6 +17,5 @@ export const KOTLIN_NEVER_BACKED: Partial<Record<Capability, string>> = {
 export const KOTLIN_CAPABILITY_TARGET: { missing: Partial<Record<Capability, KotlinChange>> } = {
   missing: {
     styleFingerprint: 'add-kotlin-style-fingerprint',
-    dynamicBoundary: 'add-kotlin-dynamic-boundary',
   },
 };
