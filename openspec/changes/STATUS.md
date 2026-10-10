@@ -95,6 +95,10 @@ folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESE
 5 in `SUBSTRATE-WHITESPACE-2026-07-27.md`, and 7 in `GOVERNANCE-SUBSTRATE-2026-07-31.md` — see those
 indexes for the per-change one-liners.
 
+The 2026-10-10 Kotlin sweep (issue #546) added 23 more proposals (all validate; not yet folded into
+the table): see `KOTLIN-TOTAL-SUPPORT-2026-10.md` for the per-change one-liners, the build order,
+and the evidence run.
+
 The 2026-07-31 governance-substrate sweep is the first one aimed at the governance face rather than
 the navigation face: corpus integrity, corpus-delta intent review, decision-bound constraints with
 an enforcement-eligibility ledger, retrieval hit/miss evidence, derived-artifact equivalence
