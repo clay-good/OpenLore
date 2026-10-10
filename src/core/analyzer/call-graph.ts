@@ -72,7 +72,7 @@ import {
 } from './receiver-registry.js';
 import { logger } from '../../utils/logger.js';
 import { HUB_THRESHOLD } from '../../constants.js';
-import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
+import { tallyFileStyle, STYLE_FINGERPRINT_LANGUAGES, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
 import { computeFileContentHashes, contentHashesRequested, withContentHashes, type FileContentHashes, type HashTreeNode } from './symbol-content-hash.js';
 import {
   tallyParseHealth,
@@ -249,12 +249,14 @@ function contentHashesFor(root: unknown, nodes: FunctionNode[], content: string,
  * error or unsupported language yields `undefined`, never a thrown build (change:
  * add-codebase-style-fingerprint).
  */
-function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], filePath: string): FileStyleRaw | undefined {
+function tallyStyle(language: string, tree: { rootNode: unknown }, nodes: FunctionNode[], filePath: string): FileStyleRaw | undefined {
   try {
     const raw = tallyFileStyle({
       language,
       rootNode: tree.rootNode as unknown as StyleAstNode,
       functionNames: nodes.map(n => n.name),
+      filePath,
+      isTest: isTestFile(filePath),
     });
     if (!raw) return undefined;
     raw.filePath = filePath;
@@ -3060,11 +3062,15 @@ async function extractByQueries(
     const dynamicDispatch = collectPass1DynamicDispatch(spec.language, content, _root, nodes, filePath);
     const dynamicBoundary = tallyDynamicBoundary(spec.language, _root, nodes, content);
     const operatorSites = spec.operatorSites?.(_root);
+    const style = STYLE_FINGERPRINT_LANGUAGES.has(spec.language)
+      ? tallyStyle(spec.language, { rootNode: _root }, nodes, filePath)
+      : undefined;
     // WASM trees are not reliable across parses (see parseHealthReliable) — no content hashes there.
     const contentHashes = handle.parseHealthReliable === false ? undefined : contentHashesFor(_root, nodes, content, spec.language);
     return {
       nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch, dynamicBoundary,
       ...(operatorSites ? { operatorSites } : {}),
+      ...(style ? { style } : {}),
       ...(receiverFields.length ? { receiverFields } : {}),
       ...(contentHashes ? { contentHashes } : {}),
     };
@@ -7547,6 +7553,7 @@ export async function extractFileStyle(
     if (file.language === 'Python') result = await extractPyGraph(file.path, file.content);
     else if (file.language === 'TypeScript' || file.language === 'JavaScript') result = await extractTSGraph(file.path, file.content);
     else if (file.language === 'Go') result = await extractGoGraph(file.path, file.content);
+    else if (STYLE_FINGERPRINT_LANGUAGES.has(file.language)) result = await dispatchFileExtract(file);
     else return undefined;
     if (result?.style) result.style.language = file.language;
     return result?.style;

@@ -19,6 +19,7 @@ import { handleAnalyzeEnvImpact } from '../../services/mcp-handlers/env-impact.j
 import { handleAnalyzeErrorPropagation } from '../../services/mcp-handlers/error-propagation.js';
 import { handleFindDeadCode } from '../../services/mcp-handlers/reachability.js';
 import { handleCertifyPublicSurface } from '../../services/mcp-handlers/public-surface.js';
+import { handleGetStyleFingerprint } from '../../services/mcp-handlers/style-fingerprint.js';
 
 export const KOTLIN_REFERENCE_FIXTURE = join(
   dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'kotlin-reference',
@@ -96,6 +97,8 @@ export interface KotlinReferenceModel {
   deadCode: () => Promise<DeadCodeConclusion>;
   /** Repo-relative files with at least one counted operator-dispatch site. */
   operatorBoundaryFiles: () => Promise<string[]>;
+  /** The `get_style_fingerprint` conclusion for one scope of the analyzed copy. */
+  styleFingerprint: (scope?: { filePath?: string; communityId?: string }) => Promise<Record<string, unknown>>;
   /** Recorded dynamic-boundary sites, as `file::kind` (repo-relative file). */
   dynamicSites: () => Promise<string[]>;
   /** The `analyze_env_impact` conclusion for one variable. */
@@ -105,7 +108,7 @@ export interface KotlinReferenceModel {
   /** Names listed by the public-surface conclusion (computed once, on first use). */
   publicSurfaceNames: () => Promise<string[]>;
   /** Raw artifacts, for probes that need a field this model does not lift. */
-  raw: { repoStructure: Record<string, unknown>; dependencyGraph: Record<string, unknown>; llmContext: Record<string, unknown> };
+  raw: { repoStructure: Record<string, unknown>; dependencyGraph: Record<string, unknown>; llmContext: Record<string, unknown>; styleFingerprint?: Record<string, unknown> };
 }
 
 export interface DeadCodeConclusion {
@@ -175,6 +178,7 @@ export async function analyzeKotlinReference(): Promise<{ model: KotlinReference
 
   const out = join(root, OPENLORE_DIR, 'analysis');
   const llmContext = await readJson(join(out, 'llm-context.json')) as Record<string, unknown>;
+  const styleFingerprint = await readJson(join(out, 'style-fingerprint.json')).catch(() => undefined) as Record<string, unknown> | undefined;
   const repoStructure = await readJson(join(out, 'repo-structure.json')) as Record<string, unknown>;
   const dependencyGraph = await readJson(join(out, 'dependency-graph.json')) as Record<string, unknown>;
   const inventory = async (name: string): Promise<Array<Record<string, unknown>>> =>
@@ -274,13 +278,14 @@ export async function analyzeKotlinReference(): Promise<{ model: KotlinReference
         { files?: Array<{ filePath?: string; sites?: Array<{ kind?: string }> }> } | null;
       return (report?.files ?? []).flatMap(f => (f.sites ?? []).map(site => `${shortId(str(f.filePath))}::${str(site.kind)}`));
     }),
+    styleFingerprint: async scope => await handleGetStyleFingerprint({ directory: root, ...scope }) as Record<string, unknown>,
     envImpact: async (name: string) => await handleAnalyzeEnvImpact({ directory: root, name }) as Record<string, unknown>,
     errorPropagation: async (symbol: string) => await handleAnalyzeErrorPropagation({ directory: root, symbol }) as Record<string, unknown>,
     publicSurfaceNames: once(async () => {
       const result = await handleCertifyPublicSurface({ directory: root }) as Record<string, unknown>;
       return asArray(result.surface).map(e => str(e.name));
     }),
-    raw: { repoStructure, dependencyGraph, llmContext },
+    raw: { repoStructure, dependencyGraph, llmContext, styleFingerprint },
   };
   return { model, dispose: () => rm(root, { recursive: true, force: true }) };
 }

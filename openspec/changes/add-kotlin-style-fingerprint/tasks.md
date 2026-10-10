@@ -1,20 +1,22 @@
 # Tasks: Kotlin style fingerprint
 
 ## Implementation
-- [ ] Kotlin entry in `STYLE_LANG_SPECS` with the five idioms; `enforced` empty
-- [ ] Walker branches for function body form, `val`/`var`, expression or statement conditionals,
-      templates or concatenation, naming case
-- [ ] Skip rules: bodiless functions, backtick names, test files, Gradle build scripts
-- [ ] Update the supported-language text in the unavailable result
+- [x] Kotlin entry in `STYLE_LANG_SPECS` with the five idioms; `enforced` empty
+- [x] Kotlin tally for function body form, `val`/`var`, expression or statement conditionals,
+      templates or concatenation, naming case. It is its own function: Kotlin shares node-type
+      names with the other grammars (`function_declaration`) but not their meaning. A conditional
+      directly in a block is a statement; an `else if` continues its `if` and is counted once
+- [x] Skip rules: bodiless functions, backtick names, test files, Gradle build scripts
+- [x] Update the supported-language text in the unavailable result
 
 ## Conformance
-- [ ] One fixture per idiom with known counts
-- [ ] Below-floor fixture reports a null signal with reason `below_floor`
-- [ ] `language-support.test.ts`: Kotlin `styleFingerprint` fixture yields counters
+- [x] One fixture per idiom with known counts
+- [x] Below-floor fixture reports a null signal with reason `below_floor`
+- [x] `language-support.test.ts`: Kotlin `styleFingerprint` fixture yields counters
 
 ## Verification
-- [ ] Reference corpus: fingerprint reported for repository, region, and file scope
-- [ ] Full suite green
+- [x] Reference corpus: fingerprint reported for repository, region, and file scope
+- [ ] Full suite green (run once for the whole change set, in the pull request)
 
 ## Spec
-- [ ] `analyzer` delta: ADD KotlinStyleFingerprintIsMeasured
+- [x] `analyzer` delta: ADD KotlinStyleFingerprintIsMeasured

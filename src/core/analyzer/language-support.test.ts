@@ -165,6 +165,7 @@ const STYLE_FIXTURES: Record<string, string> = {
   JavaScript: 'a.js||const f = () => { const x = c ? 1 : 2; return `v${x}`; };',
   Python: 'a.py||def my_fn():\n    return 1 if c else 2',
   Go: 'a.go||package m\nfunc Foo() { x := 1; var y int = 2 }',
+  Kotlin: 'a.kt||fun loadUser(c: Boolean) = if (c) "a$c" else "b"',
 };
 describe('styleFingerprint is behaviorally faithful (no silent over-claim)', () => {
   for (const lang of STY) {

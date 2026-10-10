@@ -68,7 +68,7 @@ describe('handleGetStyleFingerprint', () => {
     const res = (await handleGetStyleFingerprint({ directory: dir, language: 'Klingon' })) as Record<string, unknown>;
     expect(res.error).toMatch(/No style fingerprint for language "Klingon"/);
     expect(res.error).toMatch(/TypeScript/);
-    expect(res.knownLanguages).toEqual(['Go', 'JavaScript', 'Python', 'TypeScript']);
+    expect(res.knownLanguages).toEqual(['Go', 'JavaScript', 'Kotlin', 'Python', 'TypeScript']);
     expect(res.byLanguage).toBeUndefined();
   });
 

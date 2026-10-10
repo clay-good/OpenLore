@@ -18,7 +18,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `cfgOverlay` | A control-flow-graph overlay (branches/loops) via the data-driven CFG language table and grammar-shape adapters. | `cfgSupportsLanguage()` (`cfg.ts`) |
 | `typeInference` | Lightweight receiver-type inference, used to resolve method calls to their class. | `TYPE_INFERENCE_LANGUAGES` (`type-inference-engine.ts`) |
 | `receiverResolution` | Chained intra-object receiver resolution — `this.<field>.m()` / `self.<field>.m()` — through a per-file registry of declared field types (annotation, `new T()`, constructor parameter property, Python `__init__` annotation, class-body annotation, or `self.x = T()` construction — where a capitalized name the file declares as a `def` is a factory, not a class, and is refused) and locally-declared return types. A resolved call becomes a `receiver_inferred` edge; a receiver the registry cannot bind emits NO edge and is disclosed as a boundary by `analyze_error_propagation`, never guessed. Backed for TypeScript/JavaScript/Python. A language without it does not bind the shape; what it records instead is its own call query's business, and the three outcomes differ: Java/C# capture the chained receiver and fall through to ordinary member-call handling; **Go captures no chained receiver at all**, so it records nothing (a known open gap); and **Ruby is worse than either** — its call query matches only the receiverless alternative, so `self.repo.save` / `@repo.save` emit a raw edge carrying NO receiver, which then binds by `name_only` to any same-named method in the repository. All three are pre-existing and untouched here. | `RECEIVER_REGISTRY_LANGUAGES` (`receiver-registry.ts`) |
-| `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
+| `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go/Kotlin. Kotlin measures expression or block bodies, `val` or `var`, `if`/`when` as a value or a statement, templates or concatenation, and naming case; it reports no async idiom. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
 | `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-capability.ts`) |
 | `dynamicBoundary` | Dispatch the resolver cannot follow — reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition, DI-container resolution — recorded as a disclosed **boundary site** — unless `literalReflection` binds it to an edge. Backed for TypeScript/JavaScript/Python/Ruby/Go/Java/PHP/C#/Kotlin. Kotlin also counts operator-convention expressions (`a + b`, `a[i]`) that could call a declared `operator fun`; the count is in `dynamic-boundary.json` under `operatorDispatch` and is never a site. A language WITHOUT it records no site because none is looked for, never because it contains no dynamic dispatch. | `DYNAMIC_BOUNDARY_LANG_SPECS` (`dynamic-boundary.ts`) |
@@ -87,7 +87,7 @@ What OpenLore does for Kotlin is a checked list, not a claim (issue #546). The p
 Each row is a fact about the Kotlin reference project (`src/core/analyzer/fixtures/kotlin-reference/`)
 that a test checks on every run.
 
-#### Supported (94)
+#### Supported (98)
 
 | Area | Fact | Change |
 |---|---|---|
@@ -183,16 +183,19 @@ that a test checks on every run.
 | boundaries | `plugin/Reflect.kt` records a `dynamic-import` site (`ServiceLoader.load`, `Class.forName`) and a `reflective-invoke` site (`memberFunctions`, `call`, `newInstance`) | `add-kotlin-dynamic-boundary` |
 | boundaries | no other file of the reference project records a dynamic-boundary site | `add-kotlin-dynamic-boundary` |
 | dead code | no dead-code candidate in `plugin/Reflect.kt` is reported with more than low confidence | `add-kotlin-dynamic-boundary` |
+| capabilities | Kotlin backs the `styleFingerprint` capability | `add-kotlin-style-fingerprint` |
+| style | the repository style fingerprint has a Kotlin profile whose `binding` idiom is measured (`val` dominant) and which reports no `asyncForm` | `add-kotlin-style-fingerprint` |
+| style | a file-scope fingerprint is returned for `service/UserService.kt`, and none for `build.gradle.kts` | `add-kotlin-style-fingerprint` |
+| style | every region of the style fingerprint that holds a Kotlin file has a Kotlin profile | `add-kotlin-style-fingerprint` |
 | call graph | `service/UserServiceTest.kt::UserServiceTest.describesMissingUser` calls `service/UserService.kt::UserService.describe` (type_inference or receiver_inferred or type_name or self_cls) | `add-kotlin-declared-type-receivers` |
 | grammar | every source file of the reference project parses without a syntax error, at a declared language level | `harden-kotlin-grammar-currency` |
 
-#### Known gaps (10)
+#### Known gaps (9)
 
 A known gap is checked too: the test fails when a gap closes until the row moves to "Supported".
 
 | Area | Fact | Change |
 |---|---|---|
-| capabilities | Kotlin backs the `styleFingerprint` capability | `add-kotlin-style-fingerprint` |
 | public surface | the public surface lists `openStore` and `UserService`, and does not list the private `load` | `add-kotlin-public-surface` |
 | tests | the Kotest spec `UserServiceSpec` has a test node for "safeDescribe falls back" that reaches `UserService.safeDescribe` | `add-kotlin-test-detection-and-generation` |
 | entry points | `main` in `Application.kt` is a root named by `application { mainClass.set("com.acme.ApplicationKt") }` | `add-kotlin-entry-point-roots` |

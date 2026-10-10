@@ -145,6 +145,14 @@ export const STYLE_LANG_SPECS: Record<string, StyleLangSpec> = {
     idioms: ['binding', 'functionNaming'],
     enforced: ['functionNaming'],
   },
+  Kotlin: {
+    // change: add-kotlin-style-fingerprint. `asyncForm` is not listed: `suspend` against a callback
+    // or future style is an architecture decision, and no syntactic count separates them reliably.
+    // Nothing is enforced: the compiler ties none of these choices to semantics.
+    language: 'Kotlin',
+    idioms: ['functionForm', 'binding', 'conditionalForm', 'stringForm', 'functionNaming'],
+    enforced: [],
+  },
 };
 
 /** Languages for which a style fingerprint is computed — the registry derives the capability from this. */
@@ -198,6 +206,9 @@ export interface StyleAstNode {
   namedChildren: StyleAstNode[];
   namedChildCount?: number;
   namedChild?(i: number): StyleAstNode | null;
+  /** Read only by the Kotlin tally, to place a conditional in value or statement position. */
+  parent?: StyleAstNode | null;
+  startIndex?: number;
 }
 
 function bump(tally: RawIdiomTally, key: string): void {
@@ -261,10 +272,17 @@ export function tallyFileStyle(params: {
   language: string;
   rootNode: StyleAstNode;
   functionNames: string[];
+  /** Kotlin only: a Gradle build script has no fingerprint. */
+  filePath?: string;
+  /** Kotlin only: a test file adds no function-naming sample. */
+  isTest?: boolean;
 }): FileStyleRaw | null {
   const { language, rootNode, functionNames } = params;
   const spec = STYLE_LANG_SPECS[language];
   if (!spec) return null;
+  // Kotlin shares node-type names with the grammars below (`function_declaration`) but not their
+  // meaning, so it has its own tally.
+  if (language === 'Kotlin') return tallyKotlinStyle(rootNode, functionNames.length, params.filePath, params.isTest === true);
 
   const counters: Partial<Record<IdiomKey, RawIdiomTally>> = {};
   const want = new Set(spec.idioms);
@@ -361,6 +379,111 @@ export function tallyFileStyle(params: {
   }
 
   return { filePath: '', language, counters, functionsSampled: functionNames.length };
+}
+
+// ============================================================================
+// Kotlin tally (change: add-kotlin-style-fingerprint)
+// ============================================================================
+
+/** How many enclosing conditionals a single-expression branch is followed through. */
+const KOTLIN_CONDITIONAL_HOPS = 8;
+
+/**
+ * Is this `if` / `when` used as a value or as a statement?
+ *
+ * A conditional directly in a block is a statement. That is an approximation in one place: the
+ * last expression of a lambda or of a braced branch can be a value, and syntax alone cannot say.
+ * A conditional that is the single-expression branch of another conditional has the position of
+ * that one. An `else if` continues its `if` and is not a second conditional (`undefined`).
+ */
+function kotlinConditionalPosition(node: StyleAstNode): 'value' | 'statement' | undefined {
+  let cur = node;
+  for (let hop = 0; hop < KOTLIN_CONDITIONAL_HOPS; hop++) {
+    const parent = cur.parent;
+    if (!parent) return undefined;
+    if (parent.type === 'statements') return 'statement';
+    if (parent.type !== 'control_structure_body') return 'value';
+    const owner = parent.parent;
+    if (!owner) return undefined;
+    if (owner.type === 'if_expression') {
+      if (hop === 0 && cur.type === 'if_expression') {
+        const kids = owner.children;
+        const at = kids.findIndex(k => k.type === 'control_structure_body' && k.startIndex === parent.startIndex);
+        if (at > 0 && kids[at - 1].type === 'else') return undefined;
+      }
+      cur = owner;
+    } else if (owner.type === 'when_entry') {
+      if (!owner.parent) return undefined;
+      cur = owner.parent;
+    } else {
+      return 'statement'; // the body of a loop
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Tally the Kotlin idioms of one file. A Gradle build script has no fingerprint: it is
+ * configuration in a DSL, not the code style of the project.
+ */
+function tallyKotlinStyle(
+  rootNode: StyleAstNode,
+  functionsSampled: number,
+  filePath: string | undefined,
+  isTest: boolean,
+): FileStyleRaw | null {
+  if (filePath && /\.gradle\.kts$/.test(filePath)) return null;
+  const functionForm: RawIdiomTally = {};
+  const binding: RawIdiomTally = {};
+  const conditionalForm: RawIdiomTally = {};
+  const stringForm: RawIdiomTally = {};
+  const functionNaming: RawIdiomTally = {};
+
+  walk(rootNode, n => {
+    switch (n.type) {
+      case 'function_declaration': {
+        // Counted only when both forms were possible: a function with no body had no choice.
+        const body = n.namedChildren.find(c => c.type === 'function_body');
+        if (body) bump(functionForm, body.children[0]?.type === '=' ? 'expression' : 'block');
+        // Test sentences in backticks are not a naming-case choice, and neither are test names.
+        const name = n.namedChildren.find(c => c.type === 'simple_identifier')?.text;
+        const naming = !isTest && name && !name.startsWith('`') ? classifyNamingCase(name) : null;
+        if (naming) bump(functionNaming, naming);
+        break;
+      }
+      case 'property_declaration': {
+        const keyword = n.namedChildren.find(c => c.type === 'binding_pattern_kind')?.children[0]?.type;
+        if (keyword === 'val' || keyword === 'var') bump(binding, keyword);
+        break;
+      }
+      case 'if_expression':
+      case 'when_expression': {
+        const position = kotlinConditionalPosition(n);
+        if (position) bump(conditionalForm, position);
+        break;
+      }
+      case 'string_literal':
+        if (n.namedChildren.some(c => c.type === 'interpolated_identifier' || c.type === 'interpolated_expression')) {
+          bump(stringForm, 'template');
+        }
+        break;
+      case 'additive_expression':
+        if (n.children.some(c => c.type === '+') && n.namedChildren.some(c => c.type === 'string_literal')) {
+          bump(stringForm, 'concat');
+        }
+        break;
+      default:
+        break;
+    }
+  });
+
+  const counters: Partial<Record<IdiomKey, RawIdiomTally>> = {};
+  if (Object.keys(functionForm).length) counters.functionForm = functionForm;
+  if (Object.keys(binding).length) counters.binding = binding;
+  if (Object.keys(conditionalForm).length) counters.conditionalForm = conditionalForm;
+  if (Object.keys(stringForm).length) counters.stringForm = stringForm;
+  if (Object.keys(functionNaming).length) counters.functionNaming = functionNaming;
+  return { filePath: '', language: 'Kotlin', counters, functionsSampled };
 }
 
 // ============================================================================

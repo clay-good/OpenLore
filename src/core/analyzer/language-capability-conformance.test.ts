@@ -348,6 +348,7 @@ describe('language conformance — style fingerprint', () => {
     { language: 'JavaScript', path: 's.js', content: arrows },
     { language: 'Python', path: 's.py', content: Array.from({ length: 14 }, (_, i) => `def f${i}(a):\n    return a + ${i}`).join('\n') },
     { language: 'Go', path: 's.go', content: `package m\n${Array.from({ length: 14 }, (_, i) => `func F${i}(a int) int { return a + ${i} }`).join('\n')}` },
+    { language: 'Kotlin', path: 's.kt', content: Array.from({ length: 14 }, (_, i) => `fun addTo${i}(a: Int) = a + ${i}`).join('\n') },
   ];
 
   it('covers every language the registry claims supports a style fingerprint', () => {

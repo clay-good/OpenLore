@@ -133,7 +133,7 @@ export async function handleGetStyleFingerprint(input: GetStyleFingerprintInput)
     return {
       error:
         'No style fingerprint found. Run `openlore analyze` first. (A fingerprint is produced only ' +
-        'for supported languages: TypeScript, JavaScript, Python, Go.)',
+        `for supported languages: ${KNOWN_STYLE_LANGUAGES.join(', ')}.)`,
     };
   }
 

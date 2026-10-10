@@ -1840,7 +1840,7 @@ export const TOOL_DEFINITIONS = [
       'enforces (e.g. Go ties identifier case to visibility), reports a null signal rather than a ' +
       'misleading or tautological ratio — never a guess. Descriptive, not prescriptive: it measures ' +
       'what the code IS, emits no lint judgment and no composite style score. Supported languages: ' +
-      'TypeScript, JavaScript, Python, Go (others contribute nothing, fail-soft). No LLM, offline. ' +
+      'TypeScript, JavaScript, Python, Go, Kotlin (others contribute nothing, fail-soft). No LLM, offline. ' +
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',

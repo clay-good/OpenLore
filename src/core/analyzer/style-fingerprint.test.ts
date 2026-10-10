@@ -310,7 +310,7 @@ describe('assembleFromRegions (incremental re-roll, used by the watcher)', () =>
 
 describe('registry source set', () => {
   it('declares the languages with a style fingerprint', () => {
-    expect([...STYLE_FINGERPRINT_LANGUAGES].sort()).toEqual(['Go', 'JavaScript', 'Python', 'TypeScript']);
+    expect([...STYLE_FINGERPRINT_LANGUAGES].sort()).toEqual(['Go', 'JavaScript', 'Kotlin', 'Python', 'TypeScript']);
     expect(STYLE_EVIDENCE_FLOOR).toBe(12);
   });
 });

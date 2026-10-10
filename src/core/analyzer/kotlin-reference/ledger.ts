@@ -460,7 +460,33 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     'no dead-code candidate in `plugin/Reflect.kt` is reported with more than low confidence',
     async m => Object.entries((await m.deadCode()).confidence)
       .filter(([id]) => id.startsWith('plugin/Reflect.kt::')).every(([, confidence]) => confidence === 'low')),
-  capability('style-capability', 'known-gap', 'add-kotlin-style-fingerprint', 'styleFingerprint'),
+  capability('style-capability', 'asserted', 'add-kotlin-style-fingerprint', 'styleFingerprint'),
+  entry('style-repository-profile', 'style', 'asserted', 'add-kotlin-style-fingerprint',
+    'the repository style fingerprint has a Kotlin profile whose `binding` idiom is measured (`val` dominant) and which reports no `asyncForm`',
+    async m => {
+      const result = await m.styleFingerprint();
+      const kotlin = (result.byLanguage as Array<{ language: string; idioms: Record<string, { dominant?: string }> }> | undefined ?? [])
+        .find(p => p.language === 'Kotlin');
+      return kotlin?.idioms.binding?.dominant === 'val' && !('asyncForm' in kotlin.idioms);
+    }),
+  entry('style-file-profile', 'style', 'asserted', 'add-kotlin-style-fingerprint',
+    'a file-scope fingerprint is returned for `service/UserService.kt`, and none for `build.gradle.kts`',
+    async m => {
+      const file = await m.styleFingerprint({ filePath: 'service/UserService.kt' });
+      const build = await m.styleFingerprint({ filePath: 'build.gradle.kts' });
+      return file.scope === 'file' && typeof build.error === 'string';
+    }),
+  entry('style-region-profile', 'style', 'asserted', 'add-kotlin-style-fingerprint',
+    'every region of the style fingerprint that holds a Kotlin file has a Kotlin profile',
+    async m => {
+      const repo = await m.styleFingerprint();
+      if (typeof repo.regionCount !== 'number' || repo.regionCount === 0) return false;
+      const raw = m.raw.styleFingerprint as { regions?: Array<{ communityId: string; byLanguage: Array<{ language: string }> }> } | undefined;
+      const regions = raw?.regions ?? [];
+      if (regions.length === 0) return false;
+      const first = await m.styleFingerprint({ communityId: regions[0].communityId });
+      return first.scope === 'region' && regions.every(r => r.byLanguage.some(p => p.language === 'Kotlin'));
+    }),
 
   // ── add-kotlin-public-surface ─────────────────────────────────────────────
   entry('surface-membership', 'public surface', 'known-gap', 'add-kotlin-public-surface',
