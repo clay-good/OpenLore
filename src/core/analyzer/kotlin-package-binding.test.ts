@@ -74,7 +74,9 @@ describe('Kotlin package binding: a bare call binds only what is in scope', () =
       'util/Lists.kt': 'package util\nfun listOf(first: String): List<String> = emptyList()\nfun require(x: Boolean) {}\n',
       'app/Main.kt': 'package app\nfun main() { listOf("a"); require(true) }\n',
     });
-    expect(from('app/Main.kt::main').map(e => e.to).sort()).toEqual(['external::listOf', 'external::require']);
+    // Neither binds to the project functions of that name. Both are standard-library calls, so
+    // they leave no external leaf either (change: fix-kotlin-signature-and-kdoc-fidelity).
+    expect(from('app/Main.kt::main')).toEqual([]);
   });
 
   it('binds a default-import name to a project function the file imports', async () => {

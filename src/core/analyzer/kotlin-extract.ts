@@ -9,6 +9,7 @@
  * parsed as a trailing lambda of the delegate expression, not as a `class_body`. Every walk over
  * the members of a class therefore goes through {@link kotlinClassMembers}.
  */
+import { kotlinKdocAt, renderKotlinSignature, type KotlinDocTag } from './kotlin-source.js';
 import type { ReceiverFieldFact } from './receiver-registry.js';
 
 export interface KotlinNode {
@@ -108,6 +109,18 @@ export function kotlinReceiverTypeName(typeNode: KotlinNode | undefined): string
 const typeChild = (node: KotlinNode): KotlinNode | undefined => node.namedChildren.find(c => TYPE_NODES.has(c.type));
 const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
+/**
+ * The type of a parameter as written, from the colon to the end of the type node. The type node
+ * alone drops a leading type modifier (`suspend () -> T`), which is part of the type.
+ */
+function writtenType(param: KotlinNode, typeNode: KotlinNode): string {
+  const name = child(param, 'simple_identifier');
+  const from = name ? name.endIndex - param.startIndex : 0;
+  const colon = param.text.indexOf(':', from);
+  const end = typeNode.endIndex - param.startIndex;
+  return normalize(colon >= 0 && colon < end ? param.text.slice(colon + 1, end) : typeNode.text);
+}
+
 /** `Foo(...)` — a call whose callee is one capitalized identifier. */
 function constructedType(value: KotlinNode | undefined): string | undefined {
   if (value?.type !== 'call_expression') return undefined;
@@ -133,7 +146,7 @@ export function kotlinFunctionParameters(fnNode: KotlinNode): KotlinParameter[] 
     const hasDefault = !!next && next.type !== 'parameter' && next.type !== 'parameter_modifiers';
     out.push({
       name: unquote(name.text),
-      ...(type ? { type: normalize(type.text) } : {}),
+      ...(type ? { type: writtenType(param, type) } : {}),
       ...(hasDefault ? { hasDefault: true as const } : {}),
       ...(/\bvararg\b/.test(modifiers) ? { isVararg: true as const } : {}),
     });
@@ -267,7 +280,7 @@ function parametersOfConstructor(primary: KotlinNode | undefined): KotlinParamet
     const type = typeChild(param);
     const hasDefault = param.namedChildren.some(c => c !== name && !TYPE_NODES.has(c.type)
       && c.type !== 'modifiers' && c.type !== 'binding_pattern_kind');
-    out.push({ name: unquote(name.text), ...(type ? { type: normalize(type.text) } : {}), ...(hasDefault ? { hasDefault: true as const } : {}) });
+    out.push({ name: unquote(name.text), ...(type ? { type: writtenType(param, type) } : {}), ...(hasDefault ? { hasDefault: true as const } : {}) });
   }
   return out;
 }
@@ -618,4 +631,48 @@ export function collectKotlinClassFacts(root: KotlinNode, content: string, index
     }
   }
   return facts;
+}
+
+// ── Signatures and KDoc (change: fix-kotlin-signature-and-kdoc-fidelity) ────────────────────
+
+export interface KotlinFunctionHeader {
+  /** From the first annotation or modifier to the end of the return type; never a body. */
+  signature: string;
+  typeParameters: string[];
+  visibility: 'public' | 'internal' | 'protected' | 'private';
+  docstring?: string;
+  docTags?: KotlinDocTag[];
+}
+
+/**
+ * The exact header of a `function_declaration`, read from the tree: where the declaration ends is
+ * the end of its return type, its type constraints, or its parameter list, so no part of a block
+ * body or an expression body can leak in. `content` is the original source.
+ */
+export function kotlinFunctionHeader(fnNode: KotlinNode, content: string): KotlinFunctionHeader | undefined {
+  const params = child(fnNode, 'function_value_parameters');
+  const name = fnNode.namedChildren.find(c => c.type === 'simple_identifier');
+  if (!params || !name) return undefined;
+  const returnType = fnNode.namedChildren.find(c => TYPE_NODES.has(c.type) && c.startIndex >= params.endIndex);
+  const constraints = child(fnNode, 'type_constraints');
+  const end = Math.max(params.endIndex, returnType?.endIndex ?? 0, constraints?.endIndex ?? 0);
+  // The `fun` keyword is the last one before the name (a receiver or type parameters may follow it).
+  const lead = content.slice(fnNode.startIndex, name.startIndex);
+  let keyword = -1;
+  for (const m of lead.matchAll(/(?<![\w.@`$])fun(?![\w`])/g)) keyword = m.index;
+  if (keyword < 0) return undefined;
+  const keywordOffset = fnNode.startIndex + keyword;
+  const typeParameters = (child(fnNode, 'type_parameters')?.namedChildren ?? [])
+    .map(p => child(p, 'type_identifier')?.text)
+    .filter((n): n is string => !!n);
+  const modifiers = kotlinModifiers(fnNode);
+  const visibility = (['private', 'protected', 'internal', 'public'] as const).find(v => modifiers.includes(v)) ?? 'public';
+  const kdoc = kotlinKdocAt(content, fnNode.startIndex, keywordOffset);
+  return {
+    signature: renderKotlinSignature(content, fnNode.startIndex, keywordOffset, end),
+    typeParameters,
+    visibility,
+    ...(kdoc?.summary ? { docstring: kdoc.summary } : {}),
+    ...(kdoc && kdoc.tags.length > 0 ? { docTags: kdoc.tags } : {}),
+  };
 }

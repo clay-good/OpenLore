@@ -294,18 +294,27 @@ export const KOTLIN_REFERENCE_LEDGER: readonly LedgerEntry[] = [
     m => m.edges.some(e => e.kind === 'overrides' && e.from === `${REPO}::UserRepository.save` && e.to === `${REPO}::AuditedUserRepository.save`)),
 
   // ── fix-kotlin-signature-and-kdoc-fidelity ────────────────────────────────
-  entry('signature-annotation-brace', 'signatures', 'known-gap', 'fix-kotlin-signature-and-kdoc-fidelity',
+  entry('signature-annotation-brace', 'signatures', 'asserted', 'fix-kotlin-signature-and-kdoc-fidelity',
     'the signature of `UserController.get` keeps `fun get(@PathVariable id: String): User?` after `@GetMapping("/{id}")`',
     m => (findNode(m, 'web/UserController.kt::UserController.get')?.signature ?? '').includes('fun get(@PathVariable id: String): User?')),
-  entry('signature-no-expression-body', 'signatures', 'known-gap', 'fix-kotlin-signature-and-kdoc-fidelity',
+  entry('signature-no-expression-body', 'signatures', 'asserted', 'fix-kotlin-signature-and-kdoc-fidelity',
     'the signature of `safeDescribe` is `fun safeDescribe(id: String): String`, with no part of its expression body',
     m => findNode(m, `${SERVICE}.safeDescribe`)?.signature === 'fun safeDescribe(id: String): String'),
-  entry('signature-kdoc', 'signatures', 'known-gap', 'fix-kotlin-signature-and-kdoc-fidelity',
+  entry('signature-kdoc', 'signatures', 'asserted', 'fix-kotlin-signature-and-kdoc-fidelity',
     'the KDoc of `UserController.get` is its docstring',
     m => (findNode(m, 'web/UserController.kt::UserController.get')?.docstring ?? '').includes('Returns one user by [id].')),
-  entry('signature-stdlib-noise', 'call graph', 'known-gap', 'fix-kotlin-signature-and-kdoc-fidelity',
+  entry('signature-stdlib-noise', 'call graph', 'asserted', 'fix-kotlin-signature-and-kdoc-fidelity',
     'standard-library calls (`forEach`, `runCatching`, `lowercase`, `error`) are not external leaves',
     m => !['forEach', 'runCatching', 'lowercase', 'error'].some(n => external(m, n))),
+
+  entry('signature-no-body-anywhere', 'signatures', 'asserted', 'fix-kotlin-signature-and-kdoc-fidelity',
+    'no stored signature of a Kotlin function contains a body: none has `{` outside an annotation, and none has `=` outside a parameter list',
+    m => [...m.nodes.values()].filter(n => n.language === 'Kotlin' && !n.isExternal && !n.synthetic && /\bfun\b/.test(n.signature ?? ''))
+      .every(n => {
+        const header = (n.signature ?? '').split('\n').filter(line => !line.startsWith('@')).join(' ');
+        const outsideParens = header.replace(/\([^()]*(?:\([^()]*\)[^()]*)*\)/g, '()');
+        return !outsideParens.includes('{') && !outsideParens.includes('=');
+      })),
 
   // ── widen-kotlin-control-flow-overlay ─────────────────────────────────────
   entry('cfg-when-and-try', 'control flow', 'known-gap', 'widen-kotlin-control-flow-overlay',

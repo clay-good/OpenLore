@@ -55,7 +55,7 @@ import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { kotlinCodeMask, normalizeKotlinForParse } from './kotlin-source.js';
 import {
   buildKotlinOwnerIndex, collectKotlinBodyNodes, collectKotlinClassFacts, collectKotlinExtraCalls,
-  kotlinExtensionReceiver, kotlinFunctionParameters, kotlinModifiers, kotlinQualifiedOwner, kotlinReturnType,
+  kotlinExtensionReceiver, kotlinFunctionHeader, kotlinFunctionParameters, kotlinModifiers, kotlinQualifiedOwner, kotlinReturnType,
   type KotlinNode, type KotlinOwnerIndex,
 } from './kotlin-extract.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
@@ -154,7 +154,7 @@ import { buildCfgFor } from './call-graph-cfg.js';
 
 // Callee-ignore predicates — extracted to ./call-graph-builtins.ts (internal, not
 // re-exported; the *_IGNORED tables stay private to that module).
-import { isIgnoredCallee, isIgnoredElixirCall, isSelfReceiver } from './call-graph-builtins.js';
+import { isIgnoredCallee, isIgnoredElixirCall, isSelfReceiver, isKotlinStdlibCall } from './call-graph-builtins.js';
 
 // Stable barrel: re-export the full public type/edge model + distance/layer helpers.
 export type {
@@ -2911,7 +2911,7 @@ interface QueryLangSpec {
   /** Optional receiver recovery for grammars whose call query historically captured only a name. */
   callObject?: (callNode: TsNodeLike) => string | undefined;
   /** Optional per-language enrichment of a node from its declaration (parameters, return type). */
-  enrichNode?: (fnNode: TsNodeLike, node: FunctionNode) => void;
+  enrichNode?: (fnNode: TsNodeLike, node: FunctionNode, content: string) => void;
   /** Optional per-file context computed once from the tree, handed to the hooks below. */
   prepare?: (root: TsNodeLike, content: string) => unknown;
   /** Optional owner of a function, replacing the enclosing-group and extra-class rules. */
@@ -2990,7 +2990,7 @@ async function extractByQueries(
         fanIn: 0, fanOut: 0,
         signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, spec.language),
       };
-      spec.enrichNode?.(fnNode, node);
+      spec.enrichNode?.(fnNode, node, content);
       // Only a language that separates the two owner sources (Kotlin) defers the decision.
       if (className && !enclosingOwner && spec.ownerName) node.ownerIsReceiver = true;
       nodes.push(node);
@@ -3134,12 +3134,22 @@ const KOTLIN_SPEC: QueryLangSpec = {
   },
   // `this.repo.save()` and `this.repo!!.save()`; a longer chain (`this.a.b.m()`) is not typed.
   selfFieldReceiver: /^this\s*\.\s*`?([A-Za-z_][A-Za-z0-9_]*)`?(?:!!)?$/,
-  enrichNode: (fnNode, node) => {
+  enrichNode: (fnNode, node, content) => {
+    const header = kotlinFunctionHeader(fnNode as unknown as KotlinNode, content);
+    if (header) {
+      node.signature = header.signature;
+      node.visibility = header.visibility;
+      if (header.typeParameters.length > 0) node.typeParameters = header.typeParameters;
+      if (header.docstring) node.docstring = header.docstring;
+      if (header.docTags) node.docTags = header.docTags;
+    }
     const parameters = kotlinFunctionParameters(fnNode as unknown as KotlinNode);
     if (parameters.length > 0) node.parameters = parameters;
     const returnType = kotlinReturnType(fnNode as unknown as KotlinNode);
     if (returnType) node.returnType = returnType;
-    const modifiers = kotlinModifiers(fnNode as unknown as KotlinNode);
+    // Visibility is its own field; `modifiers` holds the rest.
+    const modifiers = kotlinModifiers(fnNode as unknown as KotlinNode)
+      .filter(m => m !== 'public' && m !== 'private' && m !== 'protected' && m !== 'internal');
     if (modifiers.length > 0) node.modifiers = modifiers;
     const receiverType = kotlinExtensionReceiver(fnNode as unknown as KotlinNode);
     if (receiverType) node.receiverType = receiverType;
@@ -6541,6 +6551,9 @@ export class CallGraphBuilder {
           confidence = bare.confidence!;
         } else {
           if (raw.callType === 'constructor') continue;
+          // A scope function or another standard-library call that nothing in scope shadows
+          // is not worth an external leaf (change: fix-kotlin-signature-and-kdoc-fidelity).
+          if (isKotlinStdlibCall(raw.calleeName)) continue;
           calleeNode = getOrCreateExternalNode(raw.calleeName, allNodes);
           confidence = 'external';
         }
@@ -6624,6 +6637,10 @@ export class CallGraphBuilder {
       // with the required modifier, it leaves no edge and no external leaf.
       if (raw.requiresModifier && calleeNode && !calleeNode.modifiers?.includes(raw.requiresModifier)) continue;
       if (!calleeNode && raw.dropIfUnresolved) continue;
+
+      // Kotlin: an unresolved call to a scope function or another standard-library name
+      // (`x.let { }`, `name.lowercase()`) leaves no external leaf.
+      if (!calleeNode && callerNode.language === 'Kotlin' && raw.calleeObject && isKotlinStdlibCall(raw.calleeName)) continue;
 
       // Strategy 4 — same-file preference (only for calls without a typed receiver)
       // When a receiver is explicitly present but unresolvable (e.g. redis_client.get()),

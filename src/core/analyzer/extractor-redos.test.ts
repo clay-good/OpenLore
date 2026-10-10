@@ -36,7 +36,7 @@ import { extractJavaRouteDefinitions } from './http-route-parser.js';
 import { tokenize } from './bm25-tokenizer.js';
 import { classifyYaml } from './iac/classify-yaml.js';
 import { extractTerraform } from './iac/terraform.js';
-import { kotlinCodeMask, normalizeKotlinForParse, scanKotlinFile } from './kotlin-source.js';
+import { kotlinCodeMask, normalizeKotlinForParse, scanKotlinDeclarations, scanKotlinFile } from './kotlin-source.js';
 import { buildBaseImportMap } from './import-resolver-bridge.js';
 
 /** An opening token repeated with no closer — the whole attack. */
@@ -966,6 +966,24 @@ describe('Kotlin source scanners are not quadratic on a hostile file', () => {
 
   it.each(KOTLIN_PAYLOADS)('scanKotlinFile survives %s', async (label, token) => {
     expectLinearAndFast(await measure(b => { scanKotlinFile(payload(token, b)); }), `scanKotlinFile: ${label}`);
+  }, TIMEOUT_MS);
+
+  const KOTLIN_HEADER_PAYLOADS: Array<[string, string]> = [
+    ...KOTLIN_PAYLOADS,
+    ['repeated `fun f(` with no closer', 'fun f('],
+    ['repeated `class A(` with no closer', 'class A('],
+    ['repeated `class A : B,`', 'class A : B,\n'],
+    ['repeated `fun f(): `', 'fun f(): '],
+    ['repeated KDoc openers', '/** '],
+    ['repeated KDoc closers before `fun`', '*/ fun f() '],
+    ['repeated `constructor(`', 'class A { constructor('],
+    ['repeated `val a: `', 'val a: '],
+    ['repeated annotations with arguments', '@A(1) '],
+  ];
+
+  it.each(KOTLIN_HEADER_PAYLOADS)('scanKotlinDeclarations survives %s', async (label, token) => {
+    expectLinearAndFast(await measure(b => { scanKotlinDeclarations(payload(token, b)); }), `scanKotlinDeclarations: ${label}`);
+    expectLinearAndFast(await measure(b => { extractSignatures('Hostile.kt', payload(token, b)); }), `extractSignatures(Kotlin): ${label}`);
   }, TIMEOUT_MS);
 
   it.each(KOTLIN_PAYLOADS)('normalizeKotlinForParse and kotlinCodeMask survive %s', async (label, token) => {
