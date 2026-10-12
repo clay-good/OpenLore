@@ -1941,6 +1941,10 @@ function registerOpenlore(
   const readHealth = runtime.readHealth ?? defaultHealthReader;
   const readWatcher = runtime.readWatcher ?? readWatcherState;
   const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
+  // Background work may outlive the event that started it. A generation makes those continuations
+  // harmless after shutdown or session replacement without retaining an ExtensionContext globally.
+  let sessionGeneration = 0;
+  let sessionActive = false;
   // Tool-surface state for the current session (spec: PiToolGroupsAreActivatable).
   // hostExcluded: OpenLore tools the host had turned off before the surface was applied.
   // suppressed: tools this extension turned off, so a later session_start does not
@@ -1964,10 +1968,20 @@ function registerOpenlore(
       // The host refused the change: every tool stays active, onboarding continues.
     }
   }
+  // One in-flight resolution per cwd: the session-start warmup and any tool call that arrives
+  // meanwhile share it instead of each spawning or probing the daemon.
+  const pendingDaemons = new Map<string, Promise<Daemon | null>>();
   async function getDaemon(cwd: string): Promise<Daemon | null> {
     const cached = daemons.get(cwd);
     if (cached) return cached;
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
+    const pending = pendingDaemons.get(cwd);
+    if (pending) return pending;
+    const resolving = resolveAndRecordDaemon(cwd).finally(() => pendingDaemons.delete(cwd));
+    pendingDaemons.set(cwd, resolving);
+    return resolving;
+  }
+  async function resolveAndRecordDaemon(cwd: string): Promise<Daemon | null> {
     const result = await resolveDaemon(cwd);
     daemonViews.set(cwd, piDaemonView(result));
     const d = result.daemon;
@@ -2005,7 +2019,7 @@ function registerOpenlore(
     daemonViews.set(cwd, 'unavailable');
   }
   function startKeepalive(): void {
-    if (keepalive || daemons.size === 0) return;
+    if (!sessionActive || keepalive || daemons.size === 0) return;
     keepalive = setInterval(() => {
       for (const [cwd, daemon] of daemons) {
         const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
@@ -2246,6 +2260,8 @@ function registerOpenlore(
 
   // ── session_start: tool surface + onboarding + daemon warmup ──
   pi.on('session_start', async (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    const generation = ++sessionGeneration;
+    sessionActive = true;
     // Lean tool surface first, in every mode (spec: PiDefaultToolSurfaceIsLean).
     await applyToolSurface(ctx.cwd);
 
@@ -2260,11 +2276,20 @@ function registerOpenlore(
 
     if (ctx.mode !== 'json' && ctx.mode !== 'print') {
       setPiStatus(ctx, formatPiStatus({ daemon: 'connecting' }));
-      await getDaemon(ctx.cwd);
-      startKeepalive();
-      await refreshStatus(ctx);
+      // Not awaited: a cold daemon start takes seconds, and the host waits for this handler
+      // before the session is usable. Tool calls await the same resolution (see getDaemon).
+      void warmDaemon(ctx, generation);
     }
   });
+
+  // Session-start daemon warmup, run off the session_start handler. Resolution failures surface
+  // through the status and tool results, so nothing rejects here.
+  async function warmDaemon(ctx: ExtensionContext, generation: number): Promise<void> {
+    await getDaemon(ctx.cwd).catch(() => null);
+    if (!sessionActive || generation !== sessionGeneration) return;
+    startKeepalive();
+    await refreshStatus(ctx);
+  }
 
   // Readiness can change during a run (an analysis finishes, the daemon dies), so each run ends
   // with a refresh. Cheap when nothing moved: a few stats against the cached key.
@@ -2276,6 +2301,8 @@ function registerOpenlore(
   // idle out and free its RAM. (On a hard kill the interval dies with the host
   // process anyway — either way pings stop and the daemon reaps.)
   pi.on('session_shutdown', (_event: SessionShutdownEvent, ctx?: ExtensionContext) => {
+    sessionActive = false;
+    sessionGeneration += 1;
     if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
     if (ctx) setPiStatus(ctx, undefined);
   });

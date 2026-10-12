@@ -1689,16 +1689,23 @@ describe('Pi footer status', () => {
       ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn(), setStatus },
     } as unknown as ExtensionContext;
     // A valid config keeps the onboarding wizard from opening.
-    const start = async () => {
+    // Resolves when the session_start handler returns, which may be before the daemon warmup ends.
+    const fire = async () => {
       await mkdir(join(dir, '.openlore'), { recursive: true });
       await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ generation: { provider: 'anthropic' } }));
       await handlers.get('session_start')!({}, ctx);
+    };
+    const start = async () => {
+      await fire();
+      // The daemon warmup runs off session_start; wait for its final status before asserting.
+      await vi.waitFor(() => expect(setStatus.mock.calls.at(-1)?.[1]).not.toBe('openlore: connecting…'));
     };
     return {
       setStatus,
       texts: () => setStatus.mock.calls.map((call) => call[1] as string | undefined),
       last: () => setStatus.mock.calls.at(-1)?.[1] as string | undefined,
       start,
+      fire,
       agentEnd: () => handlers.get('agent_end')!({}, ctx),
       shutdown: () => handlers.get('session_shutdown')!({}, ctx),
       runTool: (name: string, params: Record<string, unknown>) =>
@@ -1760,6 +1767,54 @@ describe('Pi footer status', () => {
     expect(h.setStatus.mock.calls.every((call) => call[0] === PI_STATUS_KEY)).toBe(true);
     expect(h.texts()).toEqual(['openlore: connecting…', 'openlore: ready']);
     await h.shutdown();
+  });
+
+  it('does not hold session_start for the daemon: the handler returns while the daemon is still resolving', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = statusHarness({
+      readHealth: async () => health('ready'),
+      resolveDaemon: async (cwd: string) => { await gate; return usable(cwd); },
+    });
+    await h.fire();
+    expect(h.last()).toBe('openlore: connecting…');
+    release();
+    await vi.waitFor(() => expect(h.last()).toBe('openlore: ready'));
+    await h.shutdown();
+  });
+
+  it('shares the session-start daemon resolution with a tool call', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const resolveDaemon = vi.fn(async (cwd: string) => { await gate; return usable(cwd); });
+    const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon });
+    await h.fire();
+    const tool = h.runTool('openlore_get_subgraph', { functionName: 'main' });
+    expect(resolveDaemon).toHaveBeenCalledTimes(1);
+    release();
+    await tool;
+    expect(resolveDaemon).toHaveBeenCalledTimes(1);
+    await h.shutdown();
+  });
+
+  it('does not repaint status or restart keepalive when warmup settles after shutdown', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const h = statusHarness({
+      readHealth: async () => health('ready'),
+      resolveDaemon: async (cwd: string) => { await gate; return usable(cwd); },
+    });
+    try {
+      await h.fire();
+      await h.shutdown();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(h.last()).toBeUndefined();
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
   });
 
   it('reports the recorded daemon condition through a real resolution', async () => {
