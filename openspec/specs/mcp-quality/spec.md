@@ -1045,18 +1045,27 @@ disabled), and it SHALL NOT use a generic failure label.
 ### Requirement: PiStatusFollowsTheSessionLifecycle
 
 The Pi extension SHALL set the `openlore` status only through the context of the event that it is
-handling. It SHALL NOT use a context captured from an earlier event. It SHALL show a connecting
-state while the session-start daemon resolution runs. It SHALL update the status when that
-resolution ends, after each agent run, and after the configuration wizard's analysis ends. It SHALL
-clear the status when the session shuts down. In a session without a UI (print or JSON mode), the
-extension SHALL NOT set a status. A status update that fails SHALL NOT fail the session event, the
-agent run, or a tool call.
+handling. The session-start daemon warmup MAY retain that event's context after the handler returns
+while the same session remains active, but it MUST NOT use the retained context after shutdown or
+session replacement. It SHALL show a connecting state while the session-start daemon resolution
+runs without making the session-start handler await that resolution. It SHALL update the status
+when that resolution ends, after each agent run, and after the configuration wizard's analysis ends.
+It SHALL clear the status when the session shuts down, and a pending warmup MUST NOT repaint it or
+restart keepalive afterward. In a session without a UI (print or JSON mode), the extension SHALL
+NOT set a status. A status update that fails SHALL NOT fail the session event, the agent run, or a
+tool call.
 
 #### Scenario: Session start shows connecting, then the outcome
 
 - **GIVEN** a Pi session with a UI in a repository with a ready index
 - **WHEN** the session starts and the daemon resolution completes
 - **THEN** the `openlore` status first reports connecting and then reports the resolved state
+
+#### Scenario: Session start does not await daemon resolution
+
+- **GIVEN** a daemon resolution that is still pending
+- **WHEN** the session-start handler runs
+- **THEN** the handler returns while the status continues to report connecting
 
 #### Scenario: Status refreshes after an agent run
 
@@ -1075,6 +1084,12 @@ agent run, or a tool call.
 - **GIVEN** a session with an `openlore` status
 - **WHEN** the session shuts down
 - **THEN** the extension clears the `openlore` status
+
+#### Scenario: Daemon resolution finishes after shutdown
+
+- **GIVEN** a session that shuts down while its daemon warmup is still pending
+- **WHEN** the daemon resolution finishes
+- **THEN** the extension leaves the status cleared and does not restart keepalive
 
 #### Scenario: A failing status read does not break the turn
 

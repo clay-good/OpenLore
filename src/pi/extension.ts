@@ -1941,6 +1941,10 @@ function registerOpenlore(
   const readHealth = runtime.readHealth ?? defaultHealthReader;
   const readWatcher = runtime.readWatcher ?? readWatcherState;
   const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
+  // Background work may outlive the event that started it. A generation makes those continuations
+  // harmless after shutdown or session replacement without retaining an ExtensionContext globally.
+  let sessionGeneration = 0;
+  let sessionActive = false;
   // Tool-surface state for the current session (spec: PiToolGroupsAreActivatable).
   // hostExcluded: OpenLore tools the host had turned off before the surface was applied.
   // suppressed: tools this extension turned off, so a later session_start does not
@@ -2015,7 +2019,7 @@ function registerOpenlore(
     daemonViews.set(cwd, 'unavailable');
   }
   function startKeepalive(): void {
-    if (keepalive || daemons.size === 0) return;
+    if (!sessionActive || keepalive || daemons.size === 0) return;
     keepalive = setInterval(() => {
       for (const [cwd, daemon] of daemons) {
         const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
@@ -2256,6 +2260,8 @@ function registerOpenlore(
 
   // ── session_start: tool surface + onboarding + daemon warmup ──
   pi.on('session_start', async (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    const generation = ++sessionGeneration;
+    sessionActive = true;
     // Lean tool surface first, in every mode (spec: PiDefaultToolSurfaceIsLean).
     await applyToolSurface(ctx.cwd);
 
@@ -2272,14 +2278,15 @@ function registerOpenlore(
       setPiStatus(ctx, formatPiStatus({ daemon: 'connecting' }));
       // Not awaited: a cold daemon start takes seconds, and the host waits for this handler
       // before the session is usable. Tool calls await the same resolution (see getDaemon).
-      void warmDaemon(ctx);
+      void warmDaemon(ctx, generation);
     }
   });
 
   // Session-start daemon warmup, run off the session_start handler. Resolution failures surface
   // through the status and tool results, so nothing rejects here.
-  async function warmDaemon(ctx: ExtensionContext): Promise<void> {
+  async function warmDaemon(ctx: ExtensionContext, generation: number): Promise<void> {
     await getDaemon(ctx.cwd).catch(() => null);
+    if (!sessionActive || generation !== sessionGeneration) return;
     startKeepalive();
     await refreshStatus(ctx);
   }
@@ -2294,6 +2301,8 @@ function registerOpenlore(
   // idle out and free its RAM. (On a hard kill the interval dies with the host
   // process anyway — either way pings stop and the daemon reaps.)
   pi.on('session_shutdown', (_event: SessionShutdownEvent, ctx?: ExtensionContext) => {
+    sessionActive = false;
+    sessionGeneration += 1;
     if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
     if (ctx) setPiStatus(ctx, undefined);
   });

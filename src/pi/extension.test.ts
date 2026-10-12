@@ -1783,6 +1783,40 @@ describe('Pi footer status', () => {
     await h.shutdown();
   });
 
+  it('shares the session-start daemon resolution with a tool call', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const resolveDaemon = vi.fn(async (cwd: string) => { await gate; return usable(cwd); });
+    const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon });
+    await h.fire();
+    const tool = h.runTool('openlore_get_subgraph', { functionName: 'main' });
+    expect(resolveDaemon).toHaveBeenCalledTimes(1);
+    release();
+    await tool;
+    expect(resolveDaemon).toHaveBeenCalledTimes(1);
+    await h.shutdown();
+  });
+
+  it('does not repaint status or restart keepalive when warmup settles after shutdown', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const h = statusHarness({
+      readHealth: async () => health('ready'),
+      resolveDaemon: async (cwd: string) => { await gate; return usable(cwd); },
+    });
+    try {
+      await h.fire();
+      await h.shutdown();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(h.last()).toBeUndefined();
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
   it('reports the recorded daemon condition through a real resolution', async () => {
     await mkdir(join(dir, '.openlore'), { recursive: true });
     const h = statusHarness({
