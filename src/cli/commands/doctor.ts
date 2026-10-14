@@ -16,6 +16,7 @@ import { palette } from '../../utils/colors.js';
 import {
   InvalidOpenLoreConfigError,
   readOpenLoreConfig,
+  readOpenLoreConfigData,
   normalizeOpenLoreConfig,
   resolveOpenLoreConfigPath,
 } from '../../core/services/config-manager.js';
@@ -268,20 +269,20 @@ async function checkConfig(rootPath: string): Promise<CheckResult> {
   const rel = relative(rootPath, configPath);
   const shown = rel && !rel.startsWith('..') ? rel : configPath;
   try {
-    await access(configPath);
     const config = await readOpenLoreConfig(rootPath);
     if (!config) {
+      const exists = await access(configPath).then(() => true, () => false);
       return {
         name: 'openlore config',
-        status: 'fail',
-        detail: `${shown} exists but could not be parsed`,
-        fix: `Delete ${shown} and run 'openlore init'`,
+        status: exists ? 'fail' : 'warn',
+        detail: exists ? `${shown} exists but could not be parsed` : `${shown} not found or user configuration could not be read`,
+        fix: exists ? `Delete ${shown} and run 'openlore init'` : "Run 'openlore install' for one-command setup, or 'openlore init' to configure manually",
       };
     }
     return {
       name: 'openlore config',
       status: 'ok',
-      detail: `${shown} (project: ${config.projectType})`,
+      detail: `Effective configuration for ${shown} (project: ${config.projectType})`,
     };
   } catch (error) {
     if (error instanceof InvalidOpenLoreConfigError) {
@@ -309,14 +310,14 @@ async function checkConfig(rootPath: string): Promise<CheckResult> {
  * make `checkConfig` fail through the same validator-backed read boundary.
  */
 async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
-  const configPath = resolveOpenLoreConfigPath(rootPath);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(configPath, 'utf-8'));
+    parsed = await readOpenLoreConfigData(rootPath);
   } catch {
     // No config, or unparseable JSON — checkConfig already reports both. Nothing to add.
     return { name: 'Config schema', status: 'ok', detail: 'no config to validate' };
   }
+  if (parsed === null) return { name: 'Config schema', status: 'ok', detail: 'no config to validate' };
   const normalized = normalizeOpenLoreConfig(parsed);
   const findings = [...normalized.findings, ...validateOpenLoreConfig(normalized.config)];
   if (findings.length === 0) {

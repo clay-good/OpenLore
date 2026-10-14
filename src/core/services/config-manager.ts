@@ -21,6 +21,7 @@ import {
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
+import { readConfigObject, readLayeredConfig, readConfigObjectSync, readLayeredConfigSync } from '../../utils/config-layers.js';
 import {
   validateOpenLoreConfig,
   backfillRequiredConfigDefaults,
@@ -213,20 +214,14 @@ function emitConfigValidationWarnings(
  */
 export async function readOpenLoreConfig(rootPath: string, explicitConfigPath?: string): Promise<OpenLoreConfig | null> {
   const configPath = resolveOpenLoreConfigPath(rootPath, explicitConfigPath);
-  let content: string;
-  try {
-    content = await readFile(configPath, 'utf-8');
-  } catch {
-    return null; // File doesn't exist — normal case before init
-  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content) as unknown;
+    parsed = await readOpenLoreConfigData(rootPath, explicitConfigPath);
   } catch (err) {
-    logger.warning(`Failed to parse ${configPath}: ${(err as Error).message}`);
-    logger.warning(`Delete ${configPath} and run 'openlore init' to recreate it.`);
+    logger.warning(`Failed to read OpenLore configuration: ${(err as Error).message}`);
     return null;
   }
+  if (parsed === null) return null;
   const normalized = normalizeOpenLoreConfig(parsed);
   const validationFindings = validateOpenLoreConfig(normalized.config);
   emitConfigValidationWarnings(configPath, [...normalized.findings, ...validationFindings]);
@@ -247,19 +242,8 @@ export async function readOpenLoreConfigStrict(
   explicitConfigPath?: string,
 ): Promise<OpenLoreConfig | null> {
   const configPath = resolveOpenLoreConfigPath(rootPath, explicitConfigPath);
-  let content: string;
-  try {
-    content = await readFile(configPath, 'utf-8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw new Error(`Unable to read ${configPath}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content) as unknown;
-  } catch (error) {
-    throw new Error(`Invalid JSON in ${configPath}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  }
+  const parsed = await readOpenLoreConfigData(rootPath, explicitConfigPath);
+  if (parsed === null) return null;
   const normalized = normalizeOpenLoreConfig(parsed);
   const validationFindings = validateOpenLoreConfig(normalized.config);
   emitConfigValidationWarnings(configPath, [...normalized.findings, ...validationFindings]);
@@ -270,6 +254,21 @@ export async function readOpenLoreConfigStrict(
   );
   if (fatalFindings.length > 0) throw new InvalidOpenLoreConfigError(configPath, fatalFindings);
   return normalized.config as OpenLoreConfig;
+}
+
+/** Explicit config files remain self-contained; default reads inherit user settings. */
+export async function readOpenLoreConfigData(rootPath: string, explicitPath?: string): Promise<Record<string, unknown> | null> {
+  const path = resolveOpenLoreConfigPath(rootPath, explicitPath);
+  const hasOverride = explicitPath || (primaryConfigOverride?.root === resolve(rootPath));
+  return hasOverride ? readConfigObject(path) : readLayeredConfig(
+    path, getDefaultConfig('unknown', './openspec') as unknown as Record<string, unknown>,
+  );
+}
+
+/** Synchronous counterpart for availability-only background auto-init checks. */
+export function readOpenLoreConfigDataSync(rootPath: string): Record<string, unknown> | null {
+  const path = resolveOpenLoreConfigPath(rootPath);
+  return primaryConfigOverride?.root === resolve(rootPath) ? readConfigObjectSync(path) : readLayeredConfigSync(path);
 }
 
 /**

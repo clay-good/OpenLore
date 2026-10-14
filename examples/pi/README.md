@@ -21,7 +21,7 @@ fresh while you edit.
   it: `specs`, `memory`, `review`, `quality`, or `inspect`. Set
   `"pi": { "toolSurface": "all" }` in `.openlore/config.json` to keep every tool
   active.
-- **Config wizard**: interactive setup on first run, or anytime via `/openlore`
+- **Config wizard**: opt-in setup via `/openlore configure`
   slash command or `openlore_configure` tool.
 - **Footer status**: an `openlore:` entry in Pi's status bar says whether the
   tools can work right now. See [Status line](#status-line).
@@ -61,7 +61,7 @@ pi install npm:openlore
 ```
 
 Pi discovers the extension automatically via the `"pi"` field in openlore's
-`package.json`. On first session it launches the config wizard.
+`package.json`. Unconfigured projects receive a non-blocking configuration hint.
 
 ### All projects — openlore setup --global
 
@@ -74,14 +74,41 @@ openlore setup --tools pi --global   # → ~/.pi/agent/extensions/openlore.js (a
 
 ## Configuration
 
-On first session (no `.openlore/config.json`) the wizard runs automatically.
-Re-open anytime:
+Configuration is opt-in. Without project configuration or user defaults, startup
+shows a hint once per cwd during the extension's lifetime and never waits for a
+dialog. Open the wizard explicitly:
 
 ```
-/openlore          # slash command in any Pi session
+/openlore configure           # this project
+/openlore configure --global  # defaults for all projects
 ```
 
-or ask Pi to call `openlore_configure`.
+or ask Pi to call `openlore_configure` (with `global: true` for user defaults).
+The bare `/openlore` command remains a project-wizard alias.
+
+User defaults live in `~/.openlore/config.json` (`%USERPROFILE%\.openlore\config.json`
+on Windows). Pi, the CLI and MCP share these defaults. Object fields merge with
+`.openlore/config.json` in the current project; project values take priority, and
+project arrays replace global arrays. An explicit CLI `--config` or API config
+path uses that file alone. Ordinary saves write project configuration;
+`configure --global` writes only the user file and does not offer project analysis.
+`OPENLORE_GLOBAL_CONFIG` selects another user-defaults file for an isolated host.
+Set `"embedding": null` in project configuration to disable inherited embeddings;
+the project wizard's Remove embedding action writes this override when needed.
+
+For example, a global file can contain:
+
+```json
+{
+  "generation": { "provider": "openai", "model": "your-model" },
+  "pi": { "toolSurface": "lean" },
+  "contextInjection": { "mode": "task-scoped" }
+}
+```
+
+Projects can override just the model while retaining the global provider. Changing
+the provider drops inherited provider-specific model, endpoint and TLS settings.
+Relative paths still resolve within each project; analysis artifacts remain local.
 
 API keys are never stored in config — set them as environment variables:
 

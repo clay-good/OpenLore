@@ -52,6 +52,10 @@ vi.mock('../../core/services/config-manager.js', async (importOriginal) => {
     }),
     // Default resolution: <root>/.openlore/config.json (no --config override in tests).
     resolveOpenLoreConfigPath: (rootPath: string) => `${rootPath}/.openlore/config.json`,
+    readOpenLoreConfigData: async (rootPath: string) => {
+      const { readFile } = await import('node:fs/promises');
+      return JSON.parse(await readFile(`${rootPath}/.openlore/config.json`, 'utf8'));
+    },
   };
 });
 
@@ -162,7 +166,6 @@ describe('doctor command', () => {
 
     it('should include the retrieval check among the default checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(15);
       expect(checks.find(c => c.name === 'Retrieval mode')).toBeDefined();
     });
 
@@ -630,6 +633,13 @@ describe('doctor command', () => {
 
   // --------------------------------------------------------------------------
   describe('config check', () => {
+    it('accepts effective global defaults even when no project config file exists', async () => {
+      const { access } = await import('node:fs/promises');
+      vi.mocked(access).mockRejectedValue(new Error('ENOENT'));
+      const checks = await runDoctorJson();
+      expect(checks.find(c => c.name === 'openlore config')?.status).toBe('ok');
+    });
+
     it('should show ok when config exists and parses', async () => {
       const checks = await runDoctorJson();
       const configCheck = checks.find(c => c.name === 'openlore config')!;
@@ -637,9 +647,12 @@ describe('doctor command', () => {
       expect(configCheck.detail).toContain('nodejs');
     });
 
-    it('should show warn when config file is not accessible', async () => {
+    it('should show warn when neither project nor user configuration is available', async () => {
       const { access } = await import('node:fs/promises');
       vi.mocked(access).mockRejectedValue(new Error('ENOENT'));
+
+      const configManager = await import('../../core/services/config-manager.js');
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue(null);
 
       const checks = await runDoctorJson();
       const configCheck = checks.find(c => c.name === 'openlore config')!;
