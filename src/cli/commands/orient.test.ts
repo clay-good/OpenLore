@@ -20,7 +20,18 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, existsSync: vi.fn().mockReturnValue(false) };
 });
 
+vi.mock('../../core/services/one-shot-index-build.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/services/one-shot-index-build.js')>();
+  return {
+    ...actual,
+    startDetachedIndexBuild: vi.fn().mockReturnValue({ state: 'unavailable' }),
+    registerOneShotRepair: vi.fn(),
+    runBackgroundIndexBuild: vi.fn(),
+  };
+});
+
 import { orientCommand, readStdin } from './orient.js';
+import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
 import { pointerLineFor } from './orient-inject-render.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
@@ -28,6 +39,7 @@ import { PassThrough } from 'node:stream';
 
 const mockHandleOrient = vi.mocked(handleOrient);
 const mockExistsSync = vi.mocked(existsSync);
+const mockStartBuild = vi.mocked(startDetachedIndexBuild);
 
 describe('orient command', () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
@@ -36,6 +48,7 @@ describe('orient command', () => {
   beforeEach(() => {
     mockHandleOrient.mockReset();
     mockExistsSync.mockReset().mockReturnValue(false);
+    mockStartBuild.mockReset().mockReturnValue({ state: 'unavailable' });
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/fake/proj');
     process.exitCode = undefined;
@@ -190,6 +203,51 @@ describe('orient command', () => {
       await orientCommand.parseAsync(['--json'], { from: 'user' });
       const parsed = JSON.parse(output());
       expect(parsed.openlore).toBe('ready');
+    });
+  });
+
+  describe('self-bootstrap (change: bootstrap-index-from-one-shot-orient)', () => {
+    const notReady = { error: 'No analysis found. Run "openlore analyze" first.', notReady: true, reason: 'index-absent', remedy: 'openlore analyze' };
+
+    it('starts a build for an absent index and tells a task caller to retry', async () => {
+      mockStartBuild.mockReturnValue({ state: 'started' });
+      mockHandleOrient.mockResolvedValue({ ...notReady });
+      await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
+      expect(mockStartBuild).toHaveBeenCalledWith('/fake/proj', 'index-absent');
+      const parsed = JSON.parse(output());
+      expect(parsed.error).toContain('background build has started');
+      expect(parsed.error).not.toContain('Run "openlore analyze"');
+      expect(parsed).toMatchObject({ notReady: true, remedy: 'retry', indexBuild: { state: 'started' } });
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it('names the reason when the build is suppressed', async () => {
+      mockStartBuild.mockReturnValue({ state: 'suppressed', detail: 'OPENLORE_NO_AUTO_ANALYZE is set in this environment' });
+      mockHandleOrient.mockResolvedValue({ ...notReady });
+      await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
+      const parsed = JSON.parse(output());
+      expect(parsed.error).toContain('OPENLORE_NO_AUTO_ANALYZE');
+      expect(parsed.remedy).toBe('openlore analyze');
+    });
+
+    it('the primer reports the running build', async () => {
+      mockStartBuild.mockReturnValue({ state: 'running' });
+      await orientCommand.parseAsync(['--json'], { from: 'user' });
+      expect(JSON.parse(output()).message).toContain('a build is already running');
+    });
+
+    it('--inject reports the build in place of the "run analyze" pointer', async () => {
+      mockStartBuild.mockReturnValue({ state: 'started' });
+      mockHandleOrient.mockResolvedValue({ ...notReady });
+      await orientCommand.parseAsync(['--inject', '--task', 'fix the auth flow bug'], { from: 'user' });
+      expect(output()).toContain('[OpenLore] No index existed for this repository yet');
+      expect(output()).not.toBe(pointerLineFor('no-graph'));
+    });
+
+    it('starts no build when an analysis exists', async () => {
+      mockExistsSync.mockReturnValue(true);
+      await orientCommand.parseAsync(['--json'], { from: 'user' });
+      expect(mockStartBuild).not.toHaveBeenCalled();
     });
   });
 

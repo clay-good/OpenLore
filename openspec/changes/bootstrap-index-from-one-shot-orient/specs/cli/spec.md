@@ -4,11 +4,11 @@
 
 ### Requirement: OneShotOrientSelfBootstraps
 
-A one-shot `openlore orient` invocation (`--task`, `--inject`, or the no-task primer) that finds the
-analysis index absent or stale SHALL start one detached background build and SHALL return without
-waiting for it. The build SHALL follow `AutoInitIsConsentGuarded`, SHALL be at-most-once per
-repository across processes, and SHALL be fail-soft. The not-ready conclusion SHALL say that a build
-is running, or name the reason that none started.
+A one-shot `openlore orient` (`--task`, `--inject`, or the primer) that finds the index absent or
+stale SHALL start one detached background build and return without waiting. The build SHALL follow
+`AutoInitIsConsentGuarded` and be fail-soft. At most one build SHALL run per repository at a time,
+and a finished attempt SHALL NOT repeat inside a short cooldown. The not-ready conclusion SHALL say
+a build is running, or name why none started.
 
 #### Scenario: First orient in a fresh worktree builds the index
 
@@ -30,6 +30,12 @@ is running, or name the reason that none started.
 - **WHEN** a one-shot orient runs
 - **THEN** it serves the existing orientation with its staleness disclosure and starts one
   background rebuild
+
+#### Scenario: A build that cannot succeed is not restarted on every prompt
+
+- **GIVEN** a background build that finished moments ago and produced no index
+- **WHEN** a one-shot orient runs again inside the cooldown
+- **THEN** no build starts and the conclusion says a recent attempt produced no index
 
 #### Scenario: An opted-out repository is left alone
 

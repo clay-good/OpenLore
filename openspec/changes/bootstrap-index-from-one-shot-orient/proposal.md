@@ -15,8 +15,9 @@ chore, and the next prompt gets the same answer.
 - The not-ready answer says a build is running and to retry, not "run `openlore analyze`".
 - The build uses the existing consent rules (`AutoInitIsConsentGuarded`): git work trees only,
   `autoInit: false` and `OPENLORE_NO_AUTO_ANALYZE` respected, no git hook installed.
-- A repo-level lock makes the build at-most-once across processes, so many hook calls start one
-  build, not many.
+- One build per repository at a time, across processes: the existing full-analysis ownership lock
+  plus an attempt stamp. A finished attempt is not repeated for 2 minutes, so a build that cannot
+  succeed is not restarted on every prompt.
 - **Reversal:** `OneShotOrientCarriesTheSameStalenessDisclosure` said the hook path SHALL "never
   spawn analysis". It now may spawn one detached build. It still never blocks.
 
@@ -33,7 +34,7 @@ chore, and the next prompt gets the same answer.
 
 ## Impact
 
-- `src/cli/commands/orient.ts` — trigger the build on the not-ready and stale paths; primer text
-- `src/core/services/cold-start-bootstrap.ts` — a detached, cross-process-locked build entry point
-- `src/core/services/mcp-handlers/orient.ts` — not-ready message when a build is in flight
+- `src/core/services/one-shot-index-build.ts` (new) — the detached build, its guards, and the
+  supervisor process
+- `src/cli/commands/orient.ts` — starts the build; not-ready, primer, and `--inject` text
 - No index or artifact format change

@@ -11,9 +11,9 @@
  * rather than failing on every session start.
  */
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 // Repo-derived values are printed here with bare console.log (not via logger), so
 // they are neutralized explicitly. Whole-line sanitizing is not an option: these
@@ -23,7 +23,14 @@ import { withQuietStdout } from '../../utils/quiet-stdout.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
-import { buildInjection, extractPrompt } from './orient-inject.js';
+import { buildInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
+import {
+  oneShotBuildNote,
+  registerOneShotRepair,
+  runBackgroundIndexBuild,
+  startDetachedIndexBuild,
+  type OneShotBuild,
+} from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
 
 interface OrientCliOptions {
@@ -35,6 +42,8 @@ interface OrientCliOptions {
   json?: boolean;
   metrics?: boolean;
   inject?: boolean;
+  backgroundBuild?: boolean;
+  backgroundRepair?: boolean;
 }
 
 // readStdin moved to ../../utils/stdin.js (dependency-light leaf) so latency-sensitive hooks can
@@ -48,7 +57,7 @@ export { readStdin };
  * pre-turn agent hook. Reads the task from --task or the hook's stdin payload.
  * Always exits 0: a hook must never break the user's turn.
  */
-async function runInject(directory: string, taskOpt: string | undefined): Promise<void> {
+async function runInject(directory: string, taskOpt: string | undefined, buildNote?: string): Promise<void> {
   let prompt = taskOpt ?? '';
   if (!prompt) {
     try {
@@ -71,7 +80,8 @@ async function runInject(directory: string, taskOpt: string | undefined): Promis
         `failed=${evaluation.failedCriteria.join(',') || 'none'}\n`,
       );
     } : undefined));
-    if (block) console.log(block);
+    // With a build in flight, "run openlore analyze" is the wrong remedy: say what is happening.
+    if (block) console.log(buildNote && block === pointerLineFor('no-graph') ? `[OpenLore] ${safe(buildNote)}` : block);
   } catch {
     // buildInjection is fail-open, but guard the print path too: never throw.
   }
@@ -97,7 +107,7 @@ function hasAnalysis(directory: string): boolean {
 }
 
 /** Session-start primer printed when orient is invoked without a task. */
-function printPrimer(directory: string, asJson: boolean): void {
+function printPrimer(directory: string, asJson: boolean, buildNote?: string): void {
   const ready = hasAnalysis(directory);
   if (asJson) {
     console.log(
@@ -106,7 +116,7 @@ function printPrimer(directory: string, asJson: boolean): void {
           openlore: ready ? 'ready' : 'no-analysis',
           message: ready
             ? 'OpenLore architectural memory is active. Call orient with a task before reading source files.'
-            : 'OpenLore is installed but no analysis was found. Run "openlore analyze" to build the graph.',
+            : buildNote ?? 'OpenLore is installed but no analysis was found. Run "openlore analyze" to build the graph.',
           usage: 'openlore orient --json --task "<task description>"',
         },
         null,
@@ -119,6 +129,8 @@ function printPrimer(directory: string, asJson: boolean): void {
     console.log('OpenLore architectural memory is active.');
     console.log('Call orient with a task before reading source files:');
     console.log('  openlore orient --task "<task description>"');
+  } else if (buildNote) {
+    console.log(buildNote);
   } else {
     console.log('OpenLore is installed but no analysis was found.');
     console.log('Run "openlore analyze" to build the graph, then:');
@@ -185,6 +197,8 @@ export const orientCommand = new Command('orient')
   .option('--json', 'Emit the full result as JSON instead of a human-readable summary', false)
   .option('--metrics', 'Report wall time and output size to stderr (opt-in; off by default)', false)
   .option('--inject', 'Emit a bounded, ignorable task-scoped orientation block for a pre-turn agent hook (reads the task from --task or stdin); always exits 0', false)
+  .addOption(new Option('--background-build').hideHelp())
+  .addOption(new Option('--background-repair').hideHelp())
   .addHelpText(
     'after',
     `
@@ -194,7 +208,8 @@ Examples:
   $ openlore orient --json --task "auth flow" --limit 10
   $ openlore orient --metrics --task "auth flow"   # opt-in wall-time/output-size readout
 
-Requires "openlore analyze" to have been run at least once. With no --task,
+When no index exists, or the index is stale, a background build starts and this
+command returns at once; run it again when the build completes. With no --task,
 prints a short session-start primer (used by the install SessionStart hook).
 `
   )
@@ -204,17 +219,31 @@ prints a short session-start primer (used by the install SessionStart hook).
     // --task wins; otherwise a bare positional task is honored.
     const task = (opts.task ?? taskArg)?.trim();
 
+    // The detached supervisor a one-shot orient hands the build to (hidden).
+    if (opts.backgroundBuild) {
+      await runBackgroundIndexBuild(resolve(directory), { repair: opts.backgroundRepair });
+      return;
+    }
+
+    // One-shot self-bootstrap (change: bootstrap-index-from-one-shot-orient): start one
+    // detached build for an absent index, and let the read path's staleness signals
+    // start the same build. Neither waits.
+    const root = resolve(directory);
+    let build: OneShotBuild | undefined = hasAnalysis(root) ? undefined : startDetachedIndexBuild(root, 'index-absent');
+    registerOneShotRepair(root);
+    const buildNote = (): string | undefined => build && oneShotBuildNote(build);
+
     // Task-scoped injection hook mode: emit a bounded orientation block (or a
     // pointer line) to stdout and always exit 0 — a pre-turn hook must never
     // break the user's turn. Reads the task from --task or stdin.
     if (opts.inject) {
-      await runInject(directory, task);
+      await runInject(directory, task, buildNote());
       return;
     }
 
     // No task → session-start primer (keeps the install hook from erroring).
     if (!task) {
-      printPrimer(directory, asJson);
+      printPrimer(directory, asJson, buildNote());
       return;
     }
 
@@ -248,6 +277,17 @@ prints a short session-start primer (used by the install SessionStart hook).
             directory, task, limit, tokenBudget, lean,
           }, directory)) as Record<string, unknown>;
       if (opts.metrics) reportMetrics(startNs, result);
+      if (result.notReady === true && result.reason === 'index-absent') {
+        // An analysis without a search index is rebuilt, not first-built.
+        build ??= startDetachedIndexBuild(root, 'stale-region');
+        const note = buildNote();
+        if (note) {
+          result.error = note;
+          delete result.hint;
+          if (build.state === 'started' || build.state === 'running') result.remedy = 'retry';
+          result.indexBuild = build;
+        }
+      }
       // Always emit structured results (including the "no analysis" error object)
       // on stdout so wrapper scripts can parse them — mirroring the MCP tool.
       if (asJson) {
