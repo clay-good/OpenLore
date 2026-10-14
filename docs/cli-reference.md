@@ -407,6 +407,7 @@ Checks performed:
 | OpenSpec directory | `openspec/specs/` exists |
 | LLM provider | API key or `claude` CLI detected |
 | Disk space | Warns < 500 MB, fails < 200 MB |
+| Install health | Warns when more than one `openlore` install is on PATH, or when the user-scope MCP entry (`~/.claude.json`) names a launcher that no longer exists; `--fix` re-wires the launcher |
 | Analysis corpus size | Fails when the files `analyze` would index exceed the 1 GB fingerprint budget, and names the largest paths to add to `analysis.excludePatterns` |
 
 Run `openlore doctor` whenever setup instructions aren't working — it tells you exactly what to fix and how.
