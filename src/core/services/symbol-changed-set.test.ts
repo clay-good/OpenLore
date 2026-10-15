@@ -364,7 +364,19 @@ describe('computeSymbolChangedSet', () => {
     expect(narrowSeedsToChangedSymbols(callGraph.nodes.filter(n => !n.isExternal), set)).toHaveLength(10);
   });
 
-  it('a working-tree entry that is not a regular file is unreadable, never a hang', async () => {
+  it('a working-tree directory is unreadable rather than hashed as a file', async () => {
+    await put('src/ten.ts', TEN);
+    await commitAll();
+    const callGraph = await index(repo, ['src/ten.ts']);
+    await rm(join(repo, 'src/ten.ts'));
+    await mkdir(join(repo, 'src/ten.ts'));
+    const set = await computeSymbolChangedSet({
+      absDir: repo, baseRef: 'HEAD', diff: [{ path: 'src/ten.ts', status: 'modified' }], callGraph,
+    });
+    expect(set.byFile.get('src/ten.ts')).toEqual({ granularity: 'file', reason: 'unreadable' });
+  });
+
+  it.runIf(process.platform !== 'win32')('a working-tree FIFO is unreadable, never a hang', async () => {
     await put('src/ten.ts', TEN);
     await commitAll();
     const callGraph = await index(repo, ['src/ten.ts']);   // index it while it is still a file

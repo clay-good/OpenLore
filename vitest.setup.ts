@@ -22,6 +22,10 @@ const sandboxHome = mkdtempSync(join(tmpdir(), 'openlore-test-home-'));
 // Never clobber a root an operator supplied deliberately (a container image, a CI
 // job that wants its own).
 process.env.OPENLORE_HOME ??= sandboxHome;
+// Default config reads now include user-wide settings. Keep another developer's
+// real ~/.openlore/config.json from changing fixtures that intentionally have no
+// project configuration; config-layer tests select their own user file explicitly.
+process.env.OPENLORE_GLOBAL_CONFIG ??= join(sandboxHome, 'openlore-config.json');
 // The user-scope write path also takes advisory locks and writes recovery journals
 // under a private coordination directory derived from `homedir()` — which
 // OPENLORE_HOME does not redirect. Without this pin, the suite creates directories
