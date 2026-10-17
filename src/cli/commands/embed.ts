@@ -11,7 +11,7 @@
 
 import { Command } from 'commander';
 import { logger } from '../../utils/logger.js';
-import { readOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/config-manager.js';
+import { readProjectOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/config-manager.js';
 import { DEFAULT_LOCAL_MODEL } from '../../core/analyzer/local-embedding-service.js';
 
 interface EmbedOptions {
@@ -54,7 +54,7 @@ Notes:
       return;
     }
 
-    const cfg = await readOpenLoreConfig(rootPath);
+    const cfg = await readProjectOpenLoreConfig(rootPath);
     if (!cfg) {
       logger.error('No openlore configuration found. Run "openlore init" first.');
       process.exitCode = 1;
@@ -62,7 +62,8 @@ Notes:
     }
 
     if (options.off) {
-      delete cfg.embedding;
+      // null (not delete) so an inherited user-wide embedding stays off for this project.
+      cfg.embedding = null;
       await writeOpenLoreConfig(rootPath, cfg);
       logger.success('Embeddings disabled — reverted to the keyword (BM25) default.');
       logger.discovery('Rebuilding the keyword index…');

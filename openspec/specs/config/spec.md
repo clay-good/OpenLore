@@ -36,6 +36,12 @@ Ordinary writes and existence checks SHALL remain scoped to the project or expli
 Strict reads SHALL reject unreadable, malformed, non-object or schema-invalid configuration.
 When a project changes the generation provider, it SHALL NOT inherit the prior provider's
 model, compatibility endpoint or TLS override unless those fields are explicitly supplied.
+A project `generation.model` without a project `generation.provider` SHALL belong to the built-in
+provider and SHALL NOT pair with an inherited user provider.
+When a project sets an endpoint (`baseUrl`, `apiBase`, `openaiCompatBaseUrl`) that differs from the
+user value, that block SHALL NOT inherit the user `apiKey` or TLS override.
+Read-modify-write commands SHALL read and write the project file alone, never the merged view.
+Repository trust checks SHALL apply to project values only; a user-configured value is trusted.
 
 #### Scenario: Global settings work without a project config
 
@@ -45,9 +51,15 @@ model, compatibility endpoint or TLS override unless those fields are explicitly
 
 #### Scenario: Project fields override global defaults
 
-- **GIVEN** a user generation provider and model and a project model override
+- **GIVEN** a user generation provider and model and a project provider and model override
 - **WHEN** configuration is read
-- **THEN** the user provider and project model are used together
+- **THEN** the project provider and model are used together
+
+#### Scenario: Init's built-in model does not override a user provider and model
+
+- **GIVEN** a user generation provider and model and a project model with no provider
+- **WHEN** configuration is read
+- **THEN** the user provider and user model are used together
 
 #### Scenario: Explicit configuration is exclusive
 

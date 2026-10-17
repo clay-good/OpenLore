@@ -35,7 +35,7 @@ import {
   AUTO_INIT_DEGRADED_FILE_CEILING,
   OPENLORE_ANALYSIS_REL_PATH,
 } from '../../constants.js';
-import { readOpenLoreConfigDataSync } from './config-manager.js';
+import { readOpenLoreConfigDataSync, resolveOpenLoreConfigPath } from './config-manager.js';
 
 /**
  * Why a background repair was started. `index-absent` is the original cold-start
@@ -526,7 +526,9 @@ export async function buildIndexInChildProcess(
     child.unref();
   });
 
-  if (!readOpenLoreConfigDataSync(directory)) await run(['init']);
+  // The PROJECT file decides whether `init` is needed; user-wide defaults do not
+  // initialize a repository (and a malformed user file must not abort the build).
+  if (!existsSync(resolveOpenLoreConfigPath(directory))) await run(['init']);
   await run([
     'analyze',
     ...(opts.repair ? ['--reanalyze'] : []),

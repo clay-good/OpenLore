@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { checkbox } from '@inquirer/prompts';
 import { logger } from '../../utils/logger.js';
 import { uninstallClaudeHook } from './decisions.js';
-import { readOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/config-manager.js';
+import { readProjectOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/config-manager.js';
 import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicResponseMode } from '../../types/index.js';
@@ -1007,7 +1007,7 @@ async function setPanicMode(rootPath: string, mode: string, acknowledgeUnvalidat
     logger.error(`Unknown panic mode "${mode}". Valid: ${valid.join(', ')}`);
     return false;
   }
-  const cfg = await readOpenLoreConfig(rootPath);
+  const cfg = await readProjectOpenLoreConfig(rootPath);
   if (!cfg) {
     logger.error('setup --panic: no .openlore/config.json found. Run `openlore init` first.');
     return false;

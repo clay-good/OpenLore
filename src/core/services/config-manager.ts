@@ -213,10 +213,28 @@ function emitConfigValidationWarnings(
  * Read openlore configuration from .openlore/config.json
  */
 export async function readOpenLoreConfig(rootPath: string, explicitConfigPath?: string): Promise<OpenLoreConfig | null> {
+  return readValidatedConfig(
+    resolveOpenLoreConfigPath(rootPath, explicitConfigPath),
+    () => readOpenLoreConfigData(rootPath, explicitConfigPath),
+  );
+}
+
+/**
+ * Read ONLY the project file, without user-wide defaults. Read-modify-write callers use
+ * this so a write never copies user settings (an API key) into a repository file.
+ */
+export async function readProjectOpenLoreConfig(rootPath: string, explicitConfigPath?: string): Promise<OpenLoreConfig | null> {
   const configPath = resolveOpenLoreConfigPath(rootPath, explicitConfigPath);
+  return readValidatedConfig(configPath, () => readConfigObject(configPath));
+}
+
+async function readValidatedConfig(
+  configPath: string,
+  load: () => Promise<Record<string, unknown> | null>,
+): Promise<OpenLoreConfig | null> {
   let parsed: unknown;
   try {
-    parsed = await readOpenLoreConfigData(rootPath, explicitConfigPath);
+    parsed = await load();
   } catch (err) {
     logger.warning(`Failed to read OpenLore configuration: ${(err as Error).message}`);
     return null;

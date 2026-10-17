@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import type { Embedder } from './embedding-service.js';
 import type { EmbeddingConfig } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
+import { isUserConfiguredValue } from '../../utils/config-layers.js';
 
 /**
  * Pinned default model: all-MiniLM-L6-v2 (~22M params, 384-dim), the standard
@@ -70,7 +71,7 @@ export function resolveTrustedLocalModel(configValue: string | undefined): strin
   const operatorValue = process.env[LOCAL_MODEL_ENV]?.trim();
   if (operatorValue) return operatorValue;
   if (!configValue) return DEFAULT_LOCAL_MODEL;
-  if (LOCAL_MODEL_ALLOWLIST.has(configValue)) return configValue;
+  if (LOCAL_MODEL_ALLOWLIST.has(configValue) || isUserConfiguredValue('embedding.model', configValue)) return configValue;
   logger.warning(
     `Ignoring embedding.model "${configValue}" from .openlore/config.json: a repository may ` +
       'not choose which model weights are downloaded and executed in this process. ' +

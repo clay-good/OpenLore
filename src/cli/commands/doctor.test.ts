@@ -166,6 +166,7 @@ describe('doctor command', () => {
 
     it('should include the retrieval check among the default checks', async () => {
       const checks = await runDoctorJson();
+      expect(checks).toHaveLength(15);
       expect(checks.find(c => c.name === 'Retrieval mode')).toBeDefined();
     });
 
@@ -637,14 +638,20 @@ describe('doctor command', () => {
       const { access } = await import('node:fs/promises');
       vi.mocked(access).mockRejectedValue(new Error('ENOENT'));
       const checks = await runDoctorJson();
-      expect(checks.find(c => c.name === 'openlore config')?.status).toBe('ok');
+      const configCheck = checks.find(c => c.name === 'openlore config')!;
+      expect(configCheck.status).toBe('ok');
+      // Honest wording: the project file is absent, user-wide defaults are in effect.
+      expect(configCheck.detail).toMatch(/^no \.openlore\/config\.json; using user-wide defaults/);
     });
 
     it('should show ok when config exists and parses', async () => {
+      const { access } = await import('node:fs/promises');
+      vi.mocked(access).mockResolvedValue(undefined);
       const checks = await runDoctorJson();
       const configCheck = checks.find(c => c.name === 'openlore config')!;
       expect(configCheck.status).toBe('ok');
       expect(configCheck.detail).toContain('nodejs');
+      expect(configCheck.detail).not.toContain('user-wide defaults');
     });
 
     it('should show warn when neither project nor user configuration is available', async () => {

@@ -9,6 +9,7 @@ import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { embeddingTlsRelaxed, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile, realpath } from 'node:fs/promises';
+import { globalOpenLoreConfigPath } from '../../utils/config-layers.js';
 import { constants as fsConstants } from 'node:fs';
 import { join, relative, isAbsolute, win32 } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -279,10 +280,14 @@ async function checkConfig(rootPath: string): Promise<CheckResult> {
         fix: exists ? `Delete ${shown} and run 'openlore init'` : "Run 'openlore install' for one-command setup, or 'openlore init' to configure manually",
       };
     }
+    // With only user-wide defaults the project file is still absent: say so, not "exists".
+    const projectFileExists = await access(configPath).then(() => true, () => false);
     return {
       name: 'openlore config',
       status: 'ok',
-      detail: `Effective configuration for ${shown} (project: ${config.projectType})`,
+      detail: projectFileExists
+        ? `${shown} (project: ${config.projectType})`
+        : `no ${shown}; using user-wide defaults from ${globalOpenLoreConfigPath()} (project: ${config.projectType})`,
     };
   } catch (error) {
     if (error instanceof InvalidOpenLoreConfigError) {

@@ -89,11 +89,28 @@ describe('Pi opt-in configuration onboarding', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
+  it('saves the project wizard without copying user-wide defaults into the project file', async () => {
+    await writeFile(join(root, 'user.json'), JSON.stringify({
+      generation: { provider: 'openai', model: 'gpt-5' },
+      embedding: { baseUrl: 'https://embed.example.com/v1', model: 'global-embed', apiKey: 'user-secret' },
+    }));
+    const notify = vi.fn();
+    await registerPiCommands().get('openlore')?.('configure', {
+      cwd: root, mode: 'rpc', hasUI: true, ui: { select: vi.fn(async () => '✓ Save & close'), confirm: vi.fn(), notify },
+    });
+    const text = await readFile(join(root, '.openlore', 'config.json'), 'utf8');
+    expect(text).not.toContain('user-secret');
+    expect(JSON.parse(text)).not.toHaveProperty('embedding');
+    expect(JSON.parse(text).generation).not.toHaveProperty('provider');
+    // The project keeps inheriting both user defaults.
+    expect(await readConfig(root)).toMatchObject({ generation: { provider: 'openai', model: 'gpt-5' }, embedding: { model: 'global-embed' } });
+  });
+
   it('keeps inherited embeddings disabled after removing them in the project wizard', async () => {
     await writeFile(join(root, 'user.json'), JSON.stringify({
       generation: { provider: 'openai' }, embedding: { baseUrl: 'http://localhost:11434', model: 'global-embed' },
     }));
-    const choices = ['✕ Remove embedding', '✓ Save & close'];
+    const choices = ['✕ Disable inherited embedding', '✓ Save & close'];
     await registerPiCommands().get('openlore')?.('configure', {
       cwd: root, mode: 'rpc', hasUI: true, ui: { select: vi.fn(async () => choices.shift()), notify: vi.fn() },
     });

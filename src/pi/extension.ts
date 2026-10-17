@@ -296,11 +296,20 @@ const SEP_ANALYSIS   = fmtSep('Analysis');
 const SEP_DIVIDER    = fmtSep();
 
 
-export async function loadExistingConfig(cwd: string, global = false): Promise<ExistingConfigLoad> {
+/**
+ * `effective` (user defaults under the project file) answers "is OpenLore configured here?".
+ * The wizard edits ONE file, so it loads `project` or `global` alone: a project save must
+ * never copy user-wide settings (an API key) into a repository file.
+ */
+export async function loadExistingConfig(
+  cwd: string,
+  target: 'effective' | 'project' | 'global' = 'effective',
+): Promise<ExistingConfigLoad> {
   try {
-    const raw = global
+    const projectPath = safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
+    const raw = target === 'global'
       ? await readConfigObject(globalOpenLoreConfigPath())
-      : await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
+      : target === 'project' ? await readConfigObject(projectPath) : await readLayeredConfig(projectPath);
     return raw === null ? { state: 'absent' } : { state: 'valid', config: raw };
   } catch (error) {
     return { state: 'invalid', detail: error instanceof Error ? error.message : String(error) };
@@ -325,6 +334,13 @@ export async function runConfigWizard(
   let maxFiles = typeof existingAnalysis.maxFiles === 'number' ? existingAnalysis.maxFiles : 500;
   const prevProvider = typeof existingGeneration.provider === 'string' ? existingGeneration.provider : undefined;
   const prevModel = typeof existingGeneration.model === 'string' ? existingGeneration.model : undefined;
+
+  // A project wizard edits the project file only; a user-wide embedding is not shown as
+  // the project's own, but it can be turned off here (written as `embedding: null`).
+  const inheritedEmbedding = hooks.global
+    ? undefined
+    : (await readConfigObject(globalOpenLoreConfigPath()).catch(() => null))?.embedding;
+  let disableInheritedEmbedding = false;
 
   if (embedding?.apiKey) {
     embedding = { ...embedding };
@@ -475,6 +491,8 @@ export async function runConfigWizard(
         ) };
       });
       menu.push({ label: '✕ Remove embedding', handler: async () => { embedding = undefined; } });
+    } else if (isPlainObject(inheritedEmbedding) && existing?.embedding !== null && !disableInheritedEmbedding) {
+      menu.push({ label: '✕ Disable inherited embedding', handler: async () => { disableInheritedEmbedding = true; } });
     }
 
     sep(SEP_ANALYSIS);
@@ -501,7 +519,6 @@ export async function runConfigWizard(
   // UI can never erase governance added by a newer OpenLore version.
   const existingWithoutEmbedding = { ...(existing ?? {}) };
   delete existingWithoutEmbedding.embedding;
-  const inheritedEmbedding = hooks.global ? undefined : (await readConfigObject(globalOpenLoreConfigPath()))?.embedding;
   const config: OpenLoreConfig = {
     ...existingWithoutEmbedding,
     version: typeof existing?.version === 'string' ? existing.version : '1.0.0',
@@ -514,7 +531,10 @@ export async function runConfigWizard(
       excludePatterns: Array.isArray(existingAnalysis.excludePatterns) ? existingAnalysis.excludePatterns as string[] : [],
     },
     generation,
-    ...(embedding ? { embedding } : isPlainObject(inheritedEmbedding) ? { embedding: null } : {}),
+    // Keep inheriting a user embedding unless this project had its own entry (now removed).
+    ...(embedding ? { embedding }
+      : isPlainObject(inheritedEmbedding) && (disableInheritedEmbedding || Object.hasOwn(existing ?? {}, 'embedding'))
+        ? { embedding: null } : {}),
     createdAt: typeof existing?.createdAt === 'string' ? existing.createdAt : new Date().toISOString(),
     lastRun: typeof existing?.lastRun === 'string' || existing?.lastRun === null ? existing.lastRun : null,
   };
@@ -2197,7 +2217,7 @@ function registerOpenlore(
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return toolResult('Config wizard requires an interactive session (tui or rpc mode).');
       const global = (params as { global?: boolean }).global === true;
-      const loaded = await loadExistingConfig(ctx.cwd, global);
+      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
       if (loaded.state === 'invalid') {
         return toolResult(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`);
       }
@@ -2251,7 +2271,7 @@ function registerOpenlore(
         ctx.ui.notify('Usage: /openlore configure [--global]', 'error');
         return;
       }
-      const loaded = await loadExistingConfig(ctx.cwd, global);
+      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
       if (loaded.state === 'invalid') {
         ctx.ui.notify(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`, 'error');
         return;

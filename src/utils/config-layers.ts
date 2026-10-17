@@ -82,7 +82,45 @@ export function mergeConfigLayers(
       if (!Object.hasOwn(project.generation, key)) delete merged.generation[key];
     }
   }
+  // A model with no provider beside it belongs to the built-in provider (`openlore init`
+  // writes the built-in model this way). It must not pair with an inherited provider.
+  if (isObject(defaults.generation) && isObject(project.generation) && isObject(merged.generation)
+    && typeof defaults.generation.provider === 'string'
+    && !Object.hasOwn(project.generation, 'provider')
+    && Object.hasOwn(project.generation, 'model')) {
+    if (Object.hasOwn(defaults.generation, 'model')) merged.generation.model = defaults.generation.model;
+    else delete merged.generation.model;
+  }
+  // A layer that chooses its own endpoint does not inherit the lower layer's credential
+  // or TLS opt-out for it: a repository must not pick where the user's key is sent.
+  for (const [key, value] of Object.entries(project)) {
+    const block = merged[key];
+    const lower = defaults[key];
+    if (!isObject(value) || !isObject(lower) || !isObject(block)) continue;
+    if (!ENDPOINT_KEYS.some((field) => Object.hasOwn(value, field) && value[field] !== lower[field])) continue;
+    for (const field of ENDPOINT_BOUND_KEYS) {
+      if (!Object.hasOwn(value, field)) delete block[field];
+    }
+  }
   return merged;
+}
+
+const ENDPOINT_KEYS = ['baseUrl', 'apiBase', 'openaiCompatBaseUrl'];
+const ENDPOINT_BOUND_KEYS = ['apiKey', 'skipSslVerify', 'sslVerify'];
+
+/**
+ * True when `value` at dotted `field` is the one the user-wide config sets. Such a value
+ * is user-authored, so repository trust checks do not apply to it. Fail-closed.
+ */
+export function isUserConfiguredValue(field: string, value: unknown): boolean {
+  if (value === undefined) return false;
+  try {
+    let node: unknown = readConfigObjectSync(globalOpenLoreConfigPath());
+    for (const part of field.split('.')) node = isObject(node) && Object.hasOwn(node, part) ? node[part] : undefined;
+    return node === value;
+  } catch {
+    return false;
+  }
 }
 
 export async function readLayeredConfig(

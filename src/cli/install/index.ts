@@ -230,8 +230,8 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
       logger.info('Decision trail', 'skipped — not a git repository, so there is no commit gate to wire');
       return 'skipped';
     }
-    const { readOpenLoreConfig, writeOpenLoreConfig } = await import('../../core/services/config-manager.js');
-    const config = await readOpenLoreConfig(cwd);
+    const { readProjectOpenLoreConfig, writeOpenLoreConfig } = await import('../../core/services/config-manager.js');
+    const config = await readProjectOpenLoreConfig(cwd);
     // A missing config is not a reason to skip the HOOK — `openlore setup` never
     // runs `init` and has always installed it. Only the autopilot config write
     // needs a config to write into (change: unify-onboarding-entrypoint).

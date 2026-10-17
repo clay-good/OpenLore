@@ -3,7 +3,9 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { globalOpenLoreConfigPath, mergeConfigLayers, readLayeredConfig } from './config-layers.js';
-import { getDefaultConfig, readOpenLoreConfig, readOpenLoreConfigStrict, writeOpenLoreConfig } from '../core/services/config-manager.js';
+import { getDefaultConfig, readOpenLoreConfig, readOpenLoreConfigStrict, readProjectOpenLoreConfig, writeOpenLoreConfig } from '../core/services/config-manager.js';
+import { refuseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut, resolveTrustedCompatBase } from '../core/services/repo-config-trust.js';
+import { logger } from './logger.js';
 import { readConfig, readContextInjection, piMaySpawnDaemon, piToolSurface } from '../pi/extension.js';
 import { autoInitSuppression, repairInBackground } from '../core/services/cold-start-bootstrap.js';
 
@@ -50,7 +52,7 @@ describe('user and project configuration layers', () => {
       contextInjection: { mode: 'off', tokenBudget: 800 },
     }));
     await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({
-      generation: { model: 'project-model' }, analysis: { excludePatterns: [] },
+      generation: { provider: 'openai', model: 'project-model' }, analysis: { excludePatterns: [] },
       contextInjection: { mode: 'task-scoped' },
     }));
     const config = await readOpenLoreConfig(project);
@@ -102,6 +104,61 @@ describe('user and project configuration layers', () => {
     await expect(readOpenLoreConfigStrict(project)).rejects.toThrow(/malformed JSON/);
     await writeFile(globalPath, '[]');
     await expect(readLayeredConfig(join(project, '.openlore', 'config.json'))).rejects.toThrow(/not a JSON object/);
+  });
+
+  it('keeps the user provider/model pair over the built-in model `openlore init` writes', async () => {
+    await writeFile(globalPath, JSON.stringify({ generation: { provider: 'openai', model: 'gpt-5' } }));
+    await writeOpenLoreConfig(project, getDefaultConfig('nodejs', 'openspec'));
+    expect((await readOpenLoreConfig(project))?.generation).toMatchObject({ provider: 'openai', model: 'gpt-5' });
+    // A user provider with no user model: the built-in model must not pair with it either.
+    await writeFile(globalPath, JSON.stringify({ generation: { provider: 'openai' } }));
+    expect((await readOpenLoreConfig(project))?.generation).not.toHaveProperty('model');
+  });
+
+  it('does not inherit a user credential or TLS opt-out into a block whose endpoint the project chose', async () => {
+    await writeFile(globalPath, JSON.stringify({ embedding: {
+      baseUrl: 'https://embed.example.com/v1', model: 'user-embed', apiKey: 'user-secret', skipSslVerify: true,
+    } }));
+    await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'http://127.0.0.1:9999/v1' } }));
+    expect((await readOpenLoreConfig(project))?.embedding).toEqual({ baseUrl: 'http://127.0.0.1:9999/v1', model: 'user-embed' });
+    // The same endpoint as the user's keeps the user's key: the user chose that destination.
+    await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1', batchSize: 8 } }));
+    expect((await readOpenLoreConfig(project))?.embedding).toMatchObject({ apiKey: 'user-secret' });
+  });
+
+  it('applies repository trust checks to project values only, not user-wide values', async () => {
+    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    try {
+      await writeFile(globalPath, JSON.stringify({
+        embedding: { baseUrl: 'https://embed.example.com/v1', model: 'm', skipSslVerify: true },
+        generation: { provider: 'openai-compat', openaiCompatBaseUrl: 'https://gw.example.com/v1' },
+      }));
+      const cfg = await readOpenLoreConfig(project);
+      expect(refuseRepoConfiguredEndpoint('embedding.baseUrl', cfg?.embedding?.baseUrl, '')).toBe('https://embed.example.com/v1');
+      expect(rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', cfg?.embedding?.skipSslVerify)).toBe(true);
+      expect(resolveTrustedCompatBase(undefined, cfg?.generation.openaiCompatBaseUrl)).toBe('https://gw.example.com/v1');
+      expect(warn).not.toHaveBeenCalled();
+      // A project-chosen remote endpoint is still refused and blamed on the repository.
+      expect(refuseRepoConfiguredEndpoint('embedding.baseUrl', 'https://evil.example/v1', '')).toBeUndefined();
+      expect(rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', true)).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reads the project file alone for read-modify-write and accepts embedding: null there', async () => {
+    await writeFile(globalPath, JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1', model: 'm', apiKey: 'user-secret' } }));
+    await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ ...getDefaultConfig('nodejs', 'openspec'), embedding: null }));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const own = await readProjectOpenLoreConfig(project);
+      expect(own?.embedding).toBeNull();
+      expect(JSON.stringify(own)).not.toContain('user-secret');
+      expect(stderr.mock.calls.join('')).not.toContain('embedding');
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('does not mutate layer objects or allow prototype pollution', () => {

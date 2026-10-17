@@ -153,6 +153,27 @@ describe('buildIndexInChildProcess', () => {
     expect(calls.every(call => (call.options as { stdio: string }).stdio === 'ignore')).toBe(true);
   });
 
+  it('still initializes a repository when only the user-wide config exists (even a malformed one)', async () => {
+    const dir = freshDir(false);
+    const prior = process.env.OPENLORE_GLOBAL_CONFIG;
+    const userFile = join(dir, 'user-config.json');
+    process.env.OPENLORE_GLOBAL_CONFIG = userFile;
+    try {
+      for (const content of ['{"generation":{"provider":"openai"}}', '{not json']) {
+        writeFileSync(userFile, content);
+        const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = [];
+        await buildIndexInChildProcess(dir, {
+          cliPath: '/openlore/dist/cli/index.js',
+          spawnProcess: spawnHarness(calls),
+        });
+        expect(calls.map(call => call.args[1])).toEqual(['init', 'analyze']);
+      }
+    } finally {
+      if (prior === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
+      else process.env.OPENLORE_GLOBAL_CONFIG = prior;
+    }
+  });
+
   it('runs a repair analyze without blocking on in-process analyzer work', async () => {
     const dir = freshDir(true);
     mkdirSync(join(dir, '.openlore'), { recursive: true });
