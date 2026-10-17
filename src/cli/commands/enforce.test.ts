@@ -14,6 +14,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { stableHomebrewPath } from '../../utils/platform-command.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
@@ -453,7 +455,7 @@ describe('enforce git hook install/uninstall', () => {
     await installEnforcementHook(root);
 
     const h = await readHook(root);
-    expect(h).toContain(process.execPath);
+    expect(h).toContain(stableHomebrewPath(realpathSync(process.execPath)));
     expect(h).not.toContain('npx');
   });
 
