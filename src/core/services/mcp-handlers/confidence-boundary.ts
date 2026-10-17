@@ -264,6 +264,19 @@ export function buildPairEdgeIndex(edges: Iterable<PairableEdge>): Map<string, B
   return idx;
 }
 
+/**
+ * The rule label for a hop a SYNTHESIZED edge realizes, or `undefined` for a directly-resolved hop
+ * (a direct edge wins over a synthesized one for the same pair, see {@link buildPairEdgeIndex}).
+ * The rule name comes from a repository-controlled artifact, so only a plain rule-shaped name is
+ * echoed; anything else reads `synthesized`. Shared by every tool that reports a path or a
+ * neighbour, so a message or event hop never reads as a call.
+ */
+export function hopVia(edge: BoundaryEdge | undefined): string | undefined {
+  if (edge?.confidence !== 'synthesized') return undefined;
+  const rule = edge.synthesizedBy;
+  return typeof rule === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(rule) ? rule : 'synthesized';
+}
+
 /** Edge basis for a set of node-id chains, deduping repeated caller→callee pairs. */
 export function edgeBasisForChains(chains: string[][], pairIndex: Map<string, BoundaryEdge>): EdgeBasis {
   const seen = new Set<string>();

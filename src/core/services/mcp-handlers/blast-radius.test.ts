@@ -123,6 +123,24 @@ describe('computeBlastRadius', () => {
     vi.mocked(computeStaleness).mockResolvedValue(undefined);
   });
 
+  it('carries the synthesized edges each symbol\'s impact relied on into the briefing (change: label-synthesized-hops)', async () => {
+    vi.mocked(handleAnalyzeImpact).mockResolvedValue({
+      symbol: 'validateDirectory', file: 'src/utils.ts',
+      metrics: { fanIn: 58, fanOut: 1, isHub: true },
+      blastRadius: { total: 60, upstream: 58, downstream: 2 },
+      riskLevel: 'critical',
+      confidenceBoundary: { complete: false, basis: { directEdges: 10, synthesizedEdges: 3, synthesizedByRule: { 'message-topology': 2, 'event-channel': 1, '\u001b[31m': 5 } } },
+    } as never);
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing & {
+      impact: { topSymbols: Array<{ synthesizedEdges?: Record<string, number> }> };
+      confidenceBoundary?: { complete: boolean; knownUnknowable?: Array<{ kind: string; rule?: string; count: number }> };
+    };
+    expect(b.impact.topSymbols[0].synthesizedEdges).toEqual({ 'message-topology': 2, 'event-channel': 1 });
+    const synth = b.confidenceBoundary?.knownUnknowable?.filter(k => k.kind === 'synthesized-dispatch').map(k => [k.rule, k.count]);
+    expect(synth).toEqual([['event-channel', 1], ['message-topology', 2]]);
+    expect(b.confidenceBoundary?.complete).toBe(false);
+  });
+
   it('briefs a hub change: callers, layers, tests, and anchored drift, as one conclusion', async () => {
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing & {
       indexStaleness?: { staleFiles: string[] };
