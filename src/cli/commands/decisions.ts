@@ -143,6 +143,11 @@ async function removeAgentInstructions(rootPath: string, filePath: string): Prom
   const content = await readFile(filePath, 'utf-8');
   if (!content.includes(AGENT_INSTRUCTIONS_MARKER)) return;
   const cleaned = content.replace(AGENT_INSTRUCTIONS_RE, '').trim();
+  // Nothing but our block was there: remove the file rather than leave a 1-byte stub.
+  if (!cleaned) {
+    await rm(filePath, { force: true });
+    return;
+  }
   await confinedAtomicWriteFile(rootPath, filePath, cleaned + '\n', { preserveMode: true });
 }
 

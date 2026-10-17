@@ -149,6 +149,16 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     expect(claude).toContain('openlore decisions record --title');
   });
 
+  it('uninstall deletes agent files it created instead of leaving empty stubs', async () => {
+    await initGit();
+    await writeConfig(dir);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    expect(await exists(join(dir, 'CLAUDE.md'))).toBe(true);
+
+    expect(await runInstall({ cwd: dir, analyze: false, home, uninstall: true })).toBe(0);
+    expect(await exists(join(dir, 'CLAUDE.md'))).toBe(false);
+  });
+
   it('an agent-scoped removal leaves the commit gate alone', async () => {
     // The gate belongs to `openlore install`, not to any one agent surface.
     // `connect remove cursor` has nothing to do with git hooks, and must not
