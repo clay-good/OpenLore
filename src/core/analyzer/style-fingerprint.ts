@@ -231,6 +231,9 @@ function isStringConcat(node: StyleAstNode): boolean {
  * source order — identical visitation order, and therefore byte-identical counters, to the
  * recursive version on every normal file.
  */
+/** Child count past which a walk reads a node's child array once instead of indexing each child. */
+const WIDE_NODE_CHILDREN = 64;
+
 function walk(root: StyleAstNode, visit: (n: StyleAstNode) => void): void {
   const stack: StyleAstNode[] = [root];
   while (stack.length > 0) {
@@ -240,7 +243,11 @@ function walk(root: StyleAstNode, visit: (n: StyleAstNode) => void): void {
     // getter builds a new array on every node, which made this whole-tree walk the tally's dominant
     // cost. Fall back to `.namedChildren` for plain test objects. Pushed in reverse so the first
     // child is visited first — preserving the recursive pre-order.
-    if (typeof node.namedChildCount === 'number' && typeof node.namedChild === 'function') {
+    // …except on a WIDE node: the binding answers `namedChild(i)` by scanning from the first child,
+    // so indexing every child of a node with k children costs O(k²) (a 1 MB binary file's single
+    // ERROR node took hours). Past a few dozen children one array read is cheaper.
+    if (typeof node.namedChildCount === 'number' && typeof node.namedChild === 'function'
+      && node.namedChildCount <= WIDE_NODE_CHILDREN) {
       for (let i = node.namedChildCount - 1; i >= 0; i--) {
         const c = node.namedChild(i);
         if (c) stack.push(c);

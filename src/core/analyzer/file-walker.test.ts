@@ -476,6 +476,27 @@ describe('FileWalker', () => {
     });
   });
 
+  describe('binary content guard', () => {
+    it('skips a binary file with a source extension, with a receipt', async () => {
+      // An MPEG-TS video segment is named `.ts`: sync byte 0x47 every 188 bytes, and NULs.
+      const segment = Buffer.alloc(188 * 50);
+      for (let i = 0; i < segment.length; i += 188) segment[i] = 0x47;
+      await writeFile(join(testDir, 'segment000.ts'), segment);
+      await writeFile(join(testDir, 'app.ts'), 'export const a = 1;\n');
+
+      const result = await walkDirectory(testDir);
+
+      expect(result.files.map(f => f.path)).toEqual(['app.ts']);
+      expect(result.summary.skippedReasons['binary']).toBe(1);
+    });
+
+    it('keeps a text file whose NUL appears only past the probe window', async () => {
+      await writeFile(join(testDir, 'late.ts'), `${'// x\n'.repeat(2000)}\u0000`);
+      const result = await walkDirectory(testDir);
+      expect(result.files.map(f => f.path)).toEqual(['late.ts']);
+    });
+  });
+
   describe('large file size guard', () => {
     it('returns lines=-1 for files larger than 10 MB', async () => {
       // Create a file just above the 10 MB threshold by writing 10 MB + 1 byte

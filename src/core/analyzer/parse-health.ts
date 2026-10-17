@@ -154,6 +154,9 @@ function isMissingNode(n: ParseHealthNode): boolean {
  * they pop in source order, which keeps `errorLines` (capped by insertion order) byte-identical
  * to the recursive version.
  */
+/** Child count past which the walk reads a node's child array once instead of indexing each child. */
+const WIDE_NODE_CHILDREN = 64;
+
 export function tallyParseHealth(
   language: string,
   rootNode: ParseHealthNode,
@@ -176,9 +179,11 @@ export function tallyParseHealth(
       if (lines.size < PARSE_HEALTH_LINE_CAP) lines.add(n.startPosition.row + 1);
       else truncated = true;
     }
-    // Prefer allocation-free index accessors (real SyntaxNode); fall back to `.children` (tests).
+    // Prefer allocation-free index accessors (real SyntaxNode); fall back to `.children` (tests, and a
+    // WIDE node: the binding answers `child(i)` by scanning from the first child, so indexing a node
+    // with k children is O(k²) — a binary file's single ERROR node took hours).
     // Pushed in reverse so the first child is visited first — preserving the recursive order.
-    if (typeof n.childCount === 'number' && typeof n.child === 'function') {
+    if (typeof n.childCount === 'number' && typeof n.child === 'function' && n.childCount <= WIDE_NODE_CHILDREN) {
       for (let i = n.childCount - 1; i >= 0; i--) {
         const c = n.child(i);
         if (c) stack.push(c);

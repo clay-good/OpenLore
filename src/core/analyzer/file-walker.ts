@@ -339,8 +339,16 @@ async function hasShebang(filePath: string): Promise<boolean> {
   }
 }
 
+/** {@link countLines}'s answer for a file whose head carries a NUL byte: binary content, not source. */
+const BINARY_FILE = -2;
+/** Bytes inspected for a NUL. Git's own binary heuristic looks at the first 8,000. */
+const BINARY_PROBE_BYTES = 8000;
+
 /**
- * Count lines in a file. Returns -1 for files larger than MAX_READ_SIZE.
+ * Count lines in a file. Returns -1 for files larger than MAX_READ_SIZE, and {@link BINARY_FILE}
+ * for a file with a NUL byte in its head — a video segment named `.ts`, a binary blob with a source
+ * extension. Such a file is not source; parsing it built a single ERROR node with hundreds of
+ * thousands of children that stalled analysis for minutes (found dogfooding mdn/dom-examples).
  */
 async function countLines(filePath: string): Promise<number> {
   // One descriptor for both the size check and the bytes. `stat` then `readFile` described two
@@ -359,6 +367,7 @@ async function countLines(filePath: string): Promise<number> {
       if (bytesRead === 0) break; // truncated under us: count what the admitted size held
       total += bytesRead;
     }
+    if (buffer.subarray(0, Math.min(total, BINARY_PROBE_BYTES)).includes(0)) return BINARY_FILE;
     return buffer.subarray(0, total).toString('utf-8').split('\n').length;
   } catch {
     return 0;
@@ -1034,6 +1043,10 @@ export class FileWalker {
       const repositoryPath = toRepositoryPath(relativePath);
       const directory = dirname(repositoryPath);
       const lines = await countLines(absolutePath);
+      if (lines === BINARY_FILE) {
+        this.recordSkip('binary');
+        return false;
+      }
 
       const metadata: FileMetadata = {
         path: repositoryPath,
