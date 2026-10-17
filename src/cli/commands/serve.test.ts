@@ -980,6 +980,45 @@ describe('openlore serve', () => {
     }
   });
 
+  it('never adopts a planted or stale descriptor token for a new daemon', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-planted-token-'));
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    const tokensSeen: string[] = [];
+    const squatter = createServer((req, res) => {
+      tokensSeen.push(String(req.headers['x-openlore-token'] ?? ''));
+      res.writeHead(500);
+      res.end();
+    });
+    await new Promise<void>((resolveListen) => squatter.listen(0, '127.0.0.1', resolveListen));
+    const address = squatter.address();
+    if (!address || typeof address === 'string') throw new Error('squatter did not bind');
+    const planted = 'a'.repeat(48);
+    const descriptor = (pid: number) => JSON.stringify({
+      port: address.port, pid, host: '127.0.0.1', token: planted,
+      protocolVersion: SERVE_PROTOCOL_VERSION, startedAt: '', version: 'test',
+    });
+    try {
+      // Live PID, unhealthy listener: the probe may run, but the token is not adopted.
+      await writeFile(join(root, '.openlore', 'serve.json'), descriptor(process.pid));
+      const h = await startServe({ directory: root, port: '0', watch: false });
+      if (!h) throw new Error('startServe returned no handle');
+      expect(h.token).toBeDefined();
+      expect(h.token).not.toBe(planted);
+      expect((await readDescriptor(root))?.token).toBe(h.token);
+      await h.close();
+      // Dead PID: the descriptor's token is never even sent.
+      tokensSeen.length = 0;
+      await writeFile(join(root, '.openlore', 'serve.json'), descriptor(2 ** 30));
+      const h2 = await startServe({ directory: root, port: '0', watch: false });
+      if (!h2) throw new Error('startServe returned no handle');
+      expect(h2.token).not.toBe(planted);
+      expect(tokensSeen).toEqual([]);
+      await h2.close();
+    } finally {
+      await new Promise<void>((resolveClose) => squatter.close(() => resolveClose()));
+    }
+  });
+
   it('does not reuse a compatible-looking daemon from another repository root', async () => {
     await boot();
     const desc = await readFile(join(root, '.openlore', 'serve.json'), 'utf-8');

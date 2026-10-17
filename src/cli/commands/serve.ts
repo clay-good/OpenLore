@@ -311,6 +311,17 @@ export async function readDescriptor(root: string): Promise<ServeDescriptor | nu
  * Verifies GET /health returns the strict authenticated, root-bound shape before
  * trusting any daemon metadata or asking the listener to shut itself down.
  */
+/** False only when the descriptor's process is certainly gone (ESRCH). */
+function descriptorPidAlive(pid: unknown): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
 async function probeDaemon(
   desc: ServeDescriptor,
   expectedRoot: string,
@@ -575,6 +586,7 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
     await unlink(serveFilePath(root)).catch(() => {});
   }
   let existing = await readDescriptor(root);
+  const generatedToken = token;
   if (!options.allowUnauthenticatedForTesting && !configuredToken && existing?.token) {
     // A generated token is instance state, not launch configuration. Reuse the
     // descriptor's owner-only token instead of generating a different one and
@@ -611,7 +623,8 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       'daemon before changing its security settings.',
     );
   }
-  let existingProbe = existing ? await probeDaemon(existing, root) : null;
+  // A dead PID means a stale descriptor: do not send its token to whatever now holds the port.
+  let existingProbe = existing && descriptorPidAlive(existing.pid) ? await probeDaemon(existing, root) : null;
   let existingHealth = existingProbe?.health ?? null;
   if (existingHealth?.draining) {
     const deadline = Date.now() + SERVE_STOP_WAIT_MS;
@@ -664,6 +677,11 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       },
     };
   }
+
+  // No live daemon proved the descriptor's token, so it is not ours to adopt: it may be
+  // a stale token that leaked, or one a cloned repository planted in serve.json. A new
+  // daemon always starts with a fresh one.
+  token = generatedToken;
 
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
