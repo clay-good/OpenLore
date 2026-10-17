@@ -50,9 +50,11 @@
   verify a path exists from the client action to the reducer clause
 - [x] 5.2 Measure edge-count and analysis-time delta on this repository and on a client/server app;
   verify the growth is within the fan-out cap's bound and record the numbers in the change —
-  this repository (1,379 analyzed files): 10 message edges (+0.03%, all real worker-protocol and
-  telemetry hops after review round 1), 54 `message-send` boundary sites; earlier cut: 7 edges, 40 sites, no
-  other edge changed (no `tested_by` edge derives from a message hop after round 2); analysis
-  time 24–26 s with and without the rule over three runs each (no measurable change)
+  this repository (1,379 analyzed files, final build): 11 message edges (+0.03%, all real
+  worker-protocol and telemetry hops), 53 `message-send` sites; no other edge changed; analysis time
+  unchanged within noise (24–26 s with and without the rule, three runs each, round 1). Real repos
+  after four review rounds: chrome-extensions-samples 15/20, socket.io 14/18, redux 1/1,
+  vscode-extension-samples 4/4, excalidraw 1/1 true edges; the residual false positives are
+  stored-record `if`s and cross-sample pairings in sample collections (design 2).
 - [x] 5.3 Run `openspec validate --strict` for this change and the reaching tests from
   `openlore select-tests`, and verify both are green
