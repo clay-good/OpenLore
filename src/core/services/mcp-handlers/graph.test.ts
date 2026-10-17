@@ -522,6 +522,34 @@ describe('handleTraceExecutionPath', () => {
     expect(result.paths[0].steps[2].callsNext).toBeUndefined();
   });
 
+  it('answers fast when the target is out of reach in a wide, deep graph', async () => {
+    // Layers of 6 fully connected nodes, 20 deep: ~6^20 simple paths, none ending at the
+    // target. Before the distance bound this blocked the event loop for minutes.
+    const width = 6;
+    const depth = 20;
+    const id = (layer: number, i: number) => `l.ts::n${layer}_${i}`;
+    const nodes = [makeNode({ id: 'e.ts::entry' }), makeNode({ id: 't.ts::target' })];
+    const edges = [];
+    for (let layer = 0; layer < depth; layer++) {
+      for (let i = 0; i < width; i++) {
+        nodes.push(makeNode({ id: id(layer, i) }));
+        if (layer === 0) edges.push(makeEdge('e.ts::entry', id(0, i)));
+        else for (let j = 0; j < width; j++) edges.push(makeEdge(id(layer - 1, j), id(layer, i)));
+      }
+    }
+    // The target hangs off the last layer: reachable, but only past maxDepth.
+    edges.push(makeEdge(id(depth - 2, 0), 't.ts::target')); // 20 hops from entry
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
+
+    const started = Date.now();
+    const result = await handleTraceExecutionPath('/tmp/proj', 'entry', 'target', 12) as { pathsFound: number };
+    expect(result.pathsFound).toBe(0);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // Within depth it is still found.
+    const reachable = await handleTraceExecutionPath('/tmp/proj', 'entry', 'target', 20) as { pathsFound: number };
+    expect(reachable.pathsFound).toBeGreaterThan(0);
+  });
+
   it('bounds parallel call-site evidence and reports truncation', async () => {
     const nodes = [makeNode({ id: 'a.ts::A' }), makeNode({ id: 'b.ts::B' })];
     const edges = Array.from({ length: 12 }, (_, index) => ({ ...makeEdge('a.ts::A', 'b.ts::B'), line: index + 1 }));
