@@ -1426,6 +1426,32 @@ describe('adversarial regressions (PR #189 review findings)', () => {
     expect(after.files.find(f => f.filePath === 'src/a.ts')?.sites.map(s => s.refusal)).toEqual(['unresolved-in-file-scope']);
   });
 
+  it('downgrades no-consumer claims past the re-derive bound instead of serving them stale (change: add-message-topology-edges)', async () => {
+    const v1: Files = {};
+    for (let i = 0; i < 70; i++) v1[`src/s${String(i).padStart(3, '0')}.ts`] = `export function s${i}(ws: any) { ws.send({ type: "t${i}" }); }\n`;
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
+    const { buildDynamicBoundaryReport } = await import('../analyzer/dynamic-boundary.js');
+    const built = await new CallGraphBuilder().build(Object.entries(v1).map(([path, content]) => ({ path, content, language: 'TypeScript' })));
+    await writeFile(join(outputPath, 'dynamic-boundary.json'),
+      JSON.stringify(buildDynamicBoundaryReport([...built.dynamicBoundaryByFile!.values()])), 'utf-8');
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    const consumer = 'export function onT(m: any) { if (m.type === "t69") { return 1; } }\n';
+    await writeFiles({ 'src/consumer.ts': consumer });
+    await (watcher as unknown as { updateDynamicBoundary(c: Array<{ rel: string; content: string }>): Promise<void> })
+      .updateDynamicBoundary([{ rel: 'src/consumer.ts', content: consumer }]);
+    const report = JSON.parse(await readFile(join(outputPath, 'dynamic-boundary.json'), 'utf-8')) as {
+      files: Array<{ sites: Array<{ refusal: string }> }>;
+    };
+    const refusals = report.files.flatMap(f => f.sites.map(s => s.refusal));
+    expect(refusals).toHaveLength(70);
+    expect(refusals.every(r => r === 'unresolved-in-file-scope')).toBe(true);
+  });
+
   it('deletion clears any stale mark for the removed file (no phantom stale rows)', async () => {
     const v1: Files = { 'src/c.ts': 'export function target() { return 1; }\n' };
     for (let i = 0; i < 5; i++) v1[`src/caller${i}.ts`] = `export function call${i}() { return target(); }\n`;

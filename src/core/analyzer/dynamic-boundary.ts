@@ -714,7 +714,7 @@ function textOf(source: string, n: DynamicBoundaryNode): string {
  * 320MB on a 1.9MB adversarial file, against 23ms for the same bytes with no trigger. The window is
  * generous enough that redaction still sees whole tokens around the kept span.
  */
-const EVIDENCE_SCAN_WINDOW = DYNAMIC_BOUNDARY_EVIDENCE_MAX * 8;
+export const EVIDENCE_SCAN_WINDOW = DYNAMIC_BOUNDARY_EVIDENCE_MAX * 8;
 
 /**
  * Neutralize, redact, collapse and truncate one matched construct's source into storable evidence.

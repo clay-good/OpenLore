@@ -524,6 +524,14 @@ describe('message-topology review regressions (round 2)', () => {
     expect(sites(b, 'src/s.ts')).toEqual(['test-only-message-consumer']);
   });
 
+  it('reads a ternary whose condition guards with &&', async () => {
+    const b = await build(
+      ts('src/c.ts', 'export function reducer(s: any, a: any) { return a && a.type === "init" ? 0 : s; }'),
+      ts('src/s.ts', 'export function init(store: any) { store.dispatch({ type: "init" }); }'),
+    );
+    expect(hasMessageEdge(b, 'init', 'reducer')).toBe(true);
+  });
+
   it('makes the clause container a handler beside its single callee', async () => {
     const b = await build(...RESTART_PROTOCOL);
     expect(hasMessageEdge(b, 'requestRestart', 'handleRestart')).toBe(true);

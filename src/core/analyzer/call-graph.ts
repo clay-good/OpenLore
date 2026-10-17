@@ -54,6 +54,7 @@ import {
   type ReceiverFieldFact,
 } from './receiver-registry.js';
 import { logger } from '../../utils/logger.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { HUB_THRESHOLD } from '../../constants.js';
 import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
 import { computeFileContentHashes, contentHashesRequested, withContentHashes, type FileContentHashes, type HashTreeNode } from './symbol-content-hash.js';
@@ -71,6 +72,7 @@ import {
   boundDynamicBoundarySites,
   buildFileDynamicBoundary,
   toEvidence,
+  EVIDENCE_SCAN_WINDOW,
   REFLECTIVE_RESOLUTION_RULE,
   type AttributedCandidate,
   type DynamicBoundaryNode,
@@ -4148,7 +4150,7 @@ function groupHandlersByKey(
   for (const [key, set] of handlersByKey) {
     if (set.size > EVENT_CHANNEL_FANOUT_CAP) {
       logger.debug(
-        `[edge-synthesis] ${ruleName} '${key}' dropped: ${set.size} handlers exceed cap ${EVENT_CHANNEL_FANOUT_CAP}`,
+        `[edge-synthesis] ${ruleName} '${sanitizeForTerminal(key)}' dropped: ${set.size} handlers exceed cap ${EVENT_CHANNEL_FANOUT_CAP}`,
       );
       handlersByKey.delete(key);
       dropped.add(key);
@@ -4171,7 +4173,7 @@ const MESSAGE_TOPOLOGY_GROUP = 'TypeScript/message';
  * evidence already neutralized.
  */
 function collectTsMessageFacts(
-  tree: Parser.Tree, fileNodes: FunctionNode[], filePath: string, language: string,
+  tree: Parser.Tree, content: string, fileNodes: FunctionNode[], filePath: string, language: string,
   resolveHandler: HandlerResolver,
 ): { sites: EventSites; sends: DynamicMessageSendFact[] } {
   const raw: MessageSites = { registrations: [], dispatches: [], sends: [] };
@@ -4181,7 +4183,9 @@ function collectTsMessageFacts(
     resolveCallee: (name) => resolveHandler(name, filePath)?.id,
   }, raw);
   const sends = raw.sends.map((send): DynamicMessageSendFact => {
-    const { evidence, truncated } = toEvidence(send.source);
+    // One bounded slice per send (one past the scan window, so a longer call still reads as
+    // truncated): never the call's full text, which nested sends would copy quadratically.
+    const { evidence, truncated } = toEvidence(content.slice(send.start, Math.min(send.end, send.start + EVIDENCE_SCAN_WINDOW + 1)));
     return {
       filePath, language, key: send.key, ...(send.callerId ? { callerId: send.callerId } : {}), line: send.line, evidence,
       ...(truncated ? { evidenceTruncated: true as const } : {}),
@@ -5316,7 +5320,7 @@ function collectPass1DynamicDispatch(
   let messageSends: DynamicMessageSendFact[] = [];
   try {
     if ((language === 'TypeScript' || language === 'JavaScript') && mayContainMessageTopology(content)) {
-      const collected = collectTsMessageFacts(tree, nodes, filePath, language, unresolved);
+      const collected = collectTsMessageFacts(tree, content, nodes, filePath, language, unresolved);
       if (collected.sites.registrations.length || collected.sites.dispatches.length) {
         events.push({ group: MESSAGE_TOPOLOGY_GROUP, rule: 'message-topology', ...collected.sites });
       }
@@ -5460,7 +5464,7 @@ async function synthesizeMessageTopologyEdges(
     if (!r) continue;
     try {
       const tree = parseWithBudget(r.parser as unknown as BudgetableParser<Parser.Tree>, file.content);
-      const collected = collectTsMessageFacts(tree, nodesByFile.get(file.path) ?? [], file.path, file.language, resolveHandler);
+      const collected = collectTsMessageFacts(tree, file.content, nodesByFile.get(file.path) ?? [], file.path, file.language, resolveHandler);
       sites.registrations.push(...collected.sites.registrations);
       sites.dispatches.push(...collected.sites.dispatches);
       sends.push(...collected.sends);

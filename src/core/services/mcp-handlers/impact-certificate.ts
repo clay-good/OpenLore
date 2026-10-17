@@ -577,6 +577,13 @@ export function detectNewlyOpenedPaths(
   if (delta.added.length === 0) return [];
   const base = forwardAdjacency(cg);
   const postFwd = applyDelta(base, delta.added, delta.removed);
+  // The same post-change graph without message hops, so an opening path that ALSO exists as plain
+  // calls is reported as one — never hidden behind a shorter path across a message hop, which would
+  // keep it out of the block signal (change: add-message-topology-edges).
+  const hasMessageEdges = cg.edges.some(e => e.synthesizedBy === MESSAGE_TOPOLOGY_RULE);
+  const postFwdCalls = hasMessageEdges
+    ? applyDelta(forwardAdjacency({ ...cg, edges: cg.edges.filter(e => e.synthesizedBy !== MESSAGE_TOPOLOGY_RULE) }), delta.added, delta.removed)
+    : postFwd;
   const preFwd = applyDelta(base, delta.removed, delta.added); // mirror: pre = base − added + removed
   const postRev = reverse(postFwd);
   const preRev = reverse(preFwd);
@@ -607,7 +614,8 @@ export function detectNewlyOpenedPaths(
       const key = `${edge.from}\u0000${edge.to}`;
       if (seenEdge.has(key)) continue;
       seenEdge.add(key);
-      const tail = shortestForwardPath(edge.to, surface.ids, postFwd);
+      const tail = (hasMessageEdges ? shortestForwardPath(edge.to, surface.ids, postFwdCalls) : undefined)
+        ?? shortestForwardPath(edge.to, surface.ids, postFwd);
       if (!tail) continue;
       const idPath = [edge.from, ...tail];
       const reaches = nameOf(idPath[idPath.length - 1]);

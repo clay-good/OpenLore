@@ -120,8 +120,12 @@ export interface MessageSend {
   callerId?: string;
   filePath: string;
   line: number;
-  /** Source of the transport call, raw. The caller neutralizes it into evidence. */
-  source: string;
+  /**
+   * Byte span of the transport call in the file. The caller slices bounded evidence from it — the
+   * call's full text is never copied, since nested sends would retain it quadratically.
+   */
+  start: number;
+  end: number;
 }
 
 export interface MessageSites {
@@ -146,7 +150,19 @@ interface CollectorState extends MessageCollectorEnv {
   packageNames: Set<string>;
   /** `import { X as Y }`: local `Y` → imported `X`, so a constant tag is keyed by what it names. */
   importAliases: Map<string, string>;
+  /** Per-scope bound names, see {@link scopeNames}. */
+  scopeMemo: Map<string, ReadonlySet<string>>;
+  /**
+   * The ancestors of the node being collected (root first), plus the nodes between it and the tags
+   * it reads. Supplied by the single top-down walk in {@link collectMessageSites}: tree-sitter's
+   * `.parent` re-walks from the root, so walking up from every tag was quadratic on a deep file.
+   */
+  ancestors: Parser.SyntaxNode[];
+  inner: Parser.SyntaxNode[];
 }
+
+/** Ancestors checked for shadowing; a tag nested deeper is refused rather than walked. */
+const MAX_SCOPE_DEPTH = 256;
 
 function unparen(node: Parser.SyntaxNode | null | undefined): Parser.SyntaxNode | null | undefined {
   let n = node;
@@ -204,37 +220,41 @@ const FUNCTION_TYPES: ReadonlySet<string> = new Set([
  */
 function isModuleBound(id: Parser.SyntaxNode, env: CollectorState): boolean {
   if (!env.moduleNames.has(id.text)) return false;
-  for (let a = id.parent; a; a = a.parent) {
-    if (FUNCTION_TYPES.has(a.type)) {
-      const names = new Set<string>();
-      const params = a.childForFieldName('parameters') ?? a.childForFieldName('parameter');
-      if (params) patternNames(params, names);
-      if (names.has(id.text)) return false;
-    }
-    // `catch (Msg)`, and `for (const Msg of …)` / `for (const Msg in …)`.
-    if (a.type === 'catch_clause') {
-      const names = new Set<string>();
-      patternNames(a.childForFieldName('parameter'), names);
-      if (names.has(id.text)) return false;
-    }
-    if (a.type === 'for_in_statement') {
-      const names = new Set<string>();
-      patternNames(a.childForFieldName('left'), names);
-      if (names.has(id.text)) return false;
-    }
-    if (a.type === 'statement_block' || a.type === 'switch_body' || a.type === 'switch_case') {
-      for (const stmt of a.namedChildren) {
-        if (stmt.type === 'lexical_declaration' || stmt.type === 'variable_declaration') {
-          const names = new Set<string>();
-          for (const d of stmt.namedChildren) if (d.type === 'variable_declarator') patternNames(d.childForFieldName('name'), names);
-          if (names.has(id.text)) return false;
-        } else if (stmt.type === 'function_declaration' || stmt.type === 'class_declaration') {
-          if (stmt.childForFieldName('name')?.text === id.text) return false;
-        }
+  if (env.ancestors.length + env.inner.length > MAX_SCOPE_DEPTH) return false;
+  for (const a of env.inner) if (scopeNames(a, env).has(id.text)) return false;
+  for (const a of env.ancestors) if (scopeNames(a, env).has(id.text)) return false;
+  return true;
+}
+
+/**
+ * The names a scope node binds for the code inside it: a function's parameters, a `catch`
+ * parameter, a `for…of`/`for…in` binding, or a block's declarations. Memoized per node, so a file
+ * with thousands of tags under one large block pays for each block once — the walk was quadratic
+ * without it (review round 4: a 256 KB file took minutes).
+ */
+function scopeNames(a: Parser.SyntaxNode, env: CollectorState): ReadonlySet<string> {
+  const memoKey = `${a.startIndex}:${a.endIndex}:${a.type}`;
+  const hit = env.scopeMemo.get(memoKey);
+  if (hit) return hit;
+  const names = new Set<string>();
+  if (FUNCTION_TYPES.has(a.type)) {
+    patternNames(a.childForFieldName('parameters') ?? a.childForFieldName('parameter'), names);
+  } else if (a.type === 'catch_clause') {
+    patternNames(a.childForFieldName('parameter'), names);
+  } else if (a.type === 'for_in_statement') {
+    patternNames(a.childForFieldName('left'), names);
+  } else if (a.type === 'statement_block' || a.type === 'switch_case' || a.type === 'switch_default') {
+    for (const stmt of a.namedChildren) {
+      if (stmt.type === 'lexical_declaration' || stmt.type === 'variable_declaration') {
+        for (const d of stmt.namedChildren) if (d.type === 'variable_declarator') patternNames(d.childForFieldName('name'), names);
+      } else if (stmt.type === 'function_declaration' || stmt.type === 'class_declaration') {
+        const name = stmt.childForFieldName('name')?.text;
+        if (name) names.add(name);
       }
     }
   }
-  return true;
+  env.scopeMemo.set(memoKey, names);
+  return names;
 }
 
 /**
@@ -416,6 +436,7 @@ function collectSwitchClauses(sw: Parser.SyntaxNode, env: CollectorState, out: M
   for (const clause of body.namedChildren) {
     if (clause.type !== 'switch_case' && clause.type !== 'switch_default') continue;
     const value = clause.type === 'switch_case' ? clause.childForFieldName('value') : null;
+    env.inner = [sw, body, clause];
     const tag = tagKey(value, env);
     const statements = clause.namedChildren.filter(c =>
       !(value && c.startIndex === value.startIndex && c.endIndex === value.endIndex) && c.type !== 'comment');
@@ -491,9 +512,10 @@ function isEarlyExit(stmt: Parser.SyntaxNode | null | undefined): boolean {
     && inner.slice(0, -1).every(c => c.type === 'expression_statement');
 }
 
-/** `x.<field> === <tag> ? a : b` — the consequent handles the tag; its function is the handler. */
+/** `x.<field> === <tag> ? a : b` (also `m && m.type === tag ? …`) — its function is the handler. */
 function collectTernary(expr: Parser.SyntaxNode, env: CollectorState, out: MessageSites): void {
-  const found = comparison(expr.childForFieldName('condition'), env);
+  env.inner = [expr];
+  const found = conditionComparison(expr.childForFieldName('condition'), env);
   if (!found || !('key' in found) || found.negated) return;
   const enclosing = env.enclosingId(expr.startIndex);
   out.registrations.push(enclosing
@@ -502,6 +524,7 @@ function collectTernary(expr: Parser.SyntaxNode, env: CollectorState, out: Messa
 }
 
 function collectIfClause(stmt: Parser.SyntaxNode, env: CollectorState, out: MessageSites): void {
+  env.inner = [stmt];
   const found = conditionComparison(stmt.childForFieldName('condition'), env);
   if (!found) return;
   if ('uncomparable' in found) {
@@ -533,29 +556,34 @@ function pairKeyName(keyNode: Parser.SyntaxNode | null): string | undefined {
   return undefined;
 }
 
-/** The transport call an object literal is handed to, directly or through `JSON.stringify`. */
-function transportCall(obj: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
-  let arg: Parser.SyntaxNode = obj;
+/**
+ * The transport call an object literal is handed to, directly or through `JSON.stringify`, read
+ * off the ancestor stack (`ancestors[ancestors.length - 1]` is the literal's parent).
+ */
+function transportCall(ancestors: Parser.SyntaxNode[]): Parser.SyntaxNode | undefined {
+  let k = ancestors.length - 1;
   for (let depth = 0; depth < 2; depth++) {
     // A type-only wrapper (`{ … } as Msg`, `satisfies`, `!`, parentheses) does not change the value.
-    while (arg.parent && TYPE_ONLY_WRAPPERS.has(arg.parent.type)) arg = arg.parent;
-    const args = arg.parent;
-    if (args?.type !== 'arguments') return undefined;
-    const call = args.parent;
-    if (call?.type !== 'call_expression') return undefined;
+    while (k >= 0 && TYPE_ONLY_WRAPPERS.has(ancestors[k].type)) k--;
+    if (k < 1 || ancestors[k].type !== 'arguments') return undefined;
+    const call = ancestors[k - 1];
+    if (call.type !== 'call_expression') return undefined;
     const callee = call.childForFieldName('function');
     const name = methodName(callee);
     if (name && TRANSPORT_METHODS.has(name)) return call;
     const isStringify = callee?.type === 'member_expression'
       && callee.childForFieldName('object')?.text === 'JSON' && name === 'stringify';
     if (!isStringify) return undefined;
-    arg = call;
+    k -= 2;
   }
   return undefined;
 }
 
 function collectConstruction(obj: Parser.SyntaxNode, env: CollectorState, out: MessageSites): void {
+  env.inner = [obj];
   const members = obj.namedChildren;
+  let lastSpread = -1;
+  for (let i = 0; i < members.length; i++) if (members[i].type === 'spread_element') lastSpread = i;
   const keys: string[] = [];
   for (let i = 0; i < members.length; i++) {
     const pair = members[i];
@@ -563,12 +591,12 @@ function collectConstruction(obj: Parser.SyntaxNode, env: CollectorState, out: M
     const field = pairKeyName(pair.childForFieldName('key'));
     if (!field || !MESSAGE_DISCRIMINANT_FIELDS.has(field)) continue;
     // A later spread can overwrite the tag at run time, so the tag is not static.
-    if (members.slice(i + 1).some(m => m.type === 'spread_element')) continue;
+    if (i < lastSpread) continue;
     const tag = tagKey(pair.childForFieldName('value'), env);
     if (tag !== undefined) keys.push(`${field}=${tag}`);
   }
   if (keys.length === 0) return;
-  const transport = transportCall(obj);
+  const transport = transportCall(env.ancestors);
   if (!transport) return;
   // A send no indexed function contains (top level, an anonymous callback) has no edge to carry,
   // but is still recorded as a send, so it is disclosed rather than dropped.
@@ -576,15 +604,29 @@ function collectConstruction(obj: Parser.SyntaxNode, env: CollectorState, out: M
   const line = obj.startPosition.row + 1;
   for (const key of keys) {
     if (callerId) out.dispatches.push({ key, callerId, line });
-    out.sends.push({ key, ...(callerId ? { callerId } : {}), filePath: env.filePath, line, source: transport.text });
+    out.sends.push({ key, ...(callerId ? { callerId } : {}), filePath: env.filePath, line, start: transport.startIndex, end: transport.endIndex });
   }
 }
 
-/** Collect one parsed TS/JS file's message-topology sites into `out`. */
+/**
+ * Collect one parsed TS/JS file's message-topology sites into `out`, in ONE top-down walk that
+ * carries the ancestor stack — no `.parent` call anywhere, since tree-sitter answers each one by
+ * re-walking from the root.
+ */
 export function collectMessageSites(root: Parser.SyntaxNode, baseEnv: MessageCollectorEnv, out: MessageSites): void {
-  const env: CollectorState = { ...baseEnv, ...fileBindings(root) };
-  for (const sw of root.descendantsOfType('switch_statement')) collectSwitchClauses(sw, env, out);
-  for (const stmt of root.descendantsOfType('if_statement')) collectIfClause(stmt, env, out);
-  for (const expr of root.descendantsOfType('ternary_expression')) collectTernary(expr, env, out);
-  for (const obj of root.descendantsOfType('object')) collectConstruction(obj, env, out);
+  const ancestors: Parser.SyntaxNode[] = [];
+  const env: CollectorState = { ...baseEnv, ...fileBindings(root), scopeMemo: new Map(), ancestors, inner: [] };
+  const cursor = root.walk();
+  for (;;) {
+    const node = cursor.currentNode;
+    if (node.type === 'switch_statement') collectSwitchClauses(node, env, out);
+    else if (node.type === 'if_statement') collectIfClause(node, env, out);
+    else if (node.type === 'ternary_expression') collectTernary(node, env, out);
+    else if (node.type === 'object') collectConstruction(node, env, out);
+    if (cursor.gotoFirstChild()) { ancestors.push(node); continue; }
+    while (!cursor.gotoNextSibling()) {
+      if (!cursor.gotoParent()) return;
+      ancestors.pop();
+    }
+  }
 }

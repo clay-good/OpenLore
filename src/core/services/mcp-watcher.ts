@@ -2493,11 +2493,22 @@ export class McpWatcher {
         const queued = new Set(toDerive.map(f => f.rel));
         const claims = [...byPath.values()].filter(r => !queued.has(r.filePath)
           && r.sites.some(s => s.kind === 'message-send' && REPOSITORY_WIDE_MESSAGE_CLAIMS.has(s.refusal)));
-        for (const r of claims.slice(0, MAX_MESSAGE_CLAIM_REDERIVES)) {
+        // Claims past the bound (or in a file unreadable now) are downgraded in place: the claim may
+        // have become false, so it says only what one file shows until the next full build.
+        const downgrade = (r: FileDynamicBoundary): void => {
+          byPath.set(r.filePath, {
+            ...r,
+            sites: r.sites.map(s => (s.kind === 'message-send' && REPOSITORY_WIDE_MESSAGE_CLAIMS.has(s.refusal)
+              ? { ...s, refusal: 'unresolved-in-file-scope' as const } : s)),
+          });
+          touched = true;
+        };
+        for (const [i, r] of claims.entries()) {
+          if (i >= MAX_MESSAGE_CLAIM_REDERIVES) { downgrade(r); continue; }
           try {
             toDerive.push({ rel: r.filePath, content: await readFileConfined(this.rootPath, r.filePath, MAX_EDIT_VERDICT_BASIS_FILE_BYTES) });
           } catch {
-            // Unreadable now: it keeps its last record, and the next full build re-derives it.
+            downgrade(r);
           }
         }
       }

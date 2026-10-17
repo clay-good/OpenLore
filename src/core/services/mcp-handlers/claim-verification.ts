@@ -228,8 +228,8 @@ function verifyCalls(cg: SerializedCallGraph, subject: FunctionNode, object: Fun
   if (messageHop) {
     return {
       verdict: 'unverifiable',
-      reason: `"${subject.name}" sends a tagged message that a clause in "${object.name}" selects — a message hop `
-        + 'recovered by the message-topology rule, not a call. Whether the handler runs, and when, depends on the transport.',
+      reason: `"${object.name}" handles a tagged message "${subject.name}" sends — a message hop recovered by the `
+        + 'message-topology rule, not a call. Whether the handler runs, and when, depends on the transport.',
       basisEdges: [messageHop],
     };
   }
