@@ -421,20 +421,6 @@ describe('message-topology review regressions (round 2)', () => {
     expect(b.edges.some(e => e.kind === 'tested_by' && e.callerId === idOf(b, 'handle'))).toBe(false);
   });
 
-  it('pairs a send only with the closest copy of a duplicated handler', async () => {
-    const b = await build(
-      ts('samples/news/feed.ts', 'export function showStory(w: any) { w.postMessage({ type: "story" }); }'),
-      ts('samples/news/frame.ts', 'export function onStory(m: any) { if (m.type === "story") { return 1; } }'),
-      ts('samples/news_i18n/frame.ts', 'export function onStory(m: any) { if (m.type === "story") { return 2; } }'),
-    );
-    const targets = messageEdges(b).map(e => b.nodes.get(e.calleeId)?.filePath);
-    expect(targets).toEqual(['samples/news/frame.ts']);
-  });
-});
-
-describe('message-topology review regressions (round 3)', () => {
-  const sites = (b: Built, file: string) => (b.dynamicBoundaryByFile?.get(file)?.sites ?? []).map(s => s.refusal);
-
   it('keeps both a near client handler and a far server handler of one tag', async () => {
     const b = await build(
       ts('src/client/actions.ts', 'export function requestRestart(ws: any) { ws.send({ type: "restart" }); }'),
@@ -549,6 +535,55 @@ describe('message-topology review regressions (round 3)', () => {
     const forward = messageEdges(await build(...files)).map(edgeKey);
     const backward = messageEdges(await build(...[...files].reverse())).map(edgeKey);
     expect(backward).toEqual(forward);
+  });
+});
+
+describe('message-topology review regressions (round 4)', () => {
+  const sites = (b: Built, file: string) => (b.dynamicBoundaryByFile?.get(file)?.sites ?? []).map(s => s.refusal);
+
+  it('pairs every same-named handler: two classes\' onMessage are both real consumers', async () => {
+    const b = await build(
+      ts('src/client/send.ts', 'export function requestPing(ws: any) { ws.send({ type: "ping" }); }'),
+      ts('src/client/conn.ts', 'export class ClientConn { onMessage(m: any) { if (m.type === "ping") { const a = 1; return a; } } }'),
+      ts('src/server/conn.ts', 'export class ServerConn { onMessage(m: any) { if (m.type === "ping") { const b = 2; return b; } } }'),
+    );
+    expect(messageEdges(b).map(e => b.nodes.get(e.calleeId)?.filePath).sort()).toEqual(['src/client/conn.ts', 'src/server/conn.ts']);
+  });
+
+  it('refuses member tags shadowed by catch, for-of, for-in, and block declarations', async () => {
+    const b = await build(
+      ts('src/types.ts', 'export const Msg = { A: "a" } as const;'),
+      ts('src/send.ts', 'import { Msg } from "./types";\nexport function go(ws: any) { ws.send({ type: Msg.A }); }'),
+      ts('src/h.ts', `
+        const Msg = { A: "a" } as const;
+        export function catchH(m: any) { try { return 0; } catch (Msg) { switch (m.type) { case Msg.A: return 1; } } }
+        export function forH(m: any, xs: any[]) { for (const Msg of xs) { switch (m.type) { case Msg.A: return 1; } } }
+        export function forIn(m: any, o: any) { for (const Msg in o) { if (m.type === Msg.A) { return 1; } } }
+        export function blockFn(m: any) { function Msg() { return 0; } if (m.type === Msg.A) { return 1; } }
+      `),
+    );
+    expect(messageEdges(b)).toHaveLength(0);
+  });
+
+  it('does not treat a default parameter value as a shadowing binding', async () => {
+    const b = await build(ts('src/a.ts', `
+      const Msg = { A: "a" } as const;
+      export function dflt(m: any, k = Msg.A) { if (m.type === Msg.A) { return k; } }
+      export function go(ws: any) { ws.send({ type: Msg.A }); }
+    `));
+    expect(hasMessageEdge(b, 'go', 'dflt')).toBe(true);
+  });
+
+  it('counts module-level clauses one each toward the cap, never by their shared callee', async () => {
+    const clauses = Array.from({ length: EVENT_CHANNEL_FANOUT_CAP }, () => 'if (g.m.type === "k") h();').join('\n');
+    const b = await build(ts('src/a.ts', `${clauses}\nexport function h() { return 1; }\nexport function s(ws: any) { ws.send({ type: "k" }); }`));
+    expect(hasMessageEdge(b, 's', 'h')).toBe(true);
+  });
+
+  it('discloses a relay whose only handler is the sending function itself', async () => {
+    const file = ts('src/a.ts', 'export function relay(ws: any, m: any) { switch (m.type) { case "a": ws.send({ type: "a" }); log(); } }\nfunction log() { return 1; }');
+    expect(sites(await build(file), 'src/a.ts')).toEqual(['unindexed-message-consumer']);
+    expect((await extractFileDynamicBoundary(file))?.sites.map(s => s.refusal)).toEqual(['unresolved-in-file-scope']);
   });
 });
 

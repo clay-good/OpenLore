@@ -27,8 +27,8 @@ and the dispatch is not a named call but the **construction of a tagged object l
 
 - Recover the producer → handler hop for tagged-message protocols with the same precision discipline
   as the existing rules: static-only, additive-only, deterministic, no LLM.
-- Reuse `pairAndEmitEventEdges`, the key-kind namespacing and the fan-out cap unchanged, so the new
-  rule cannot alter the edges any existing rule produces.
+- Reuse the event-channel key-kind namespacing and fan-out cap, and leave the existing rules'
+  pairing untouched, so the new rule cannot alter the edges any existing rule produces.
 - Make the hop *legible as a message hop* wherever it is reported, and make an unpairable send
   visible as a boundary rather than as silence.
 
@@ -54,14 +54,16 @@ handler function, while a `case` clause names only a position in a switch.
 matched exhaustively.
 
 **2. The consumer side is modelled as a registration, so pairing is untouched.**
-A `case "x":` clause is collected as a registration on key `"x"` whose handler is the nearest
-enclosing function of the clause body — or, when the clause body's only statement is a call, that
-callee, which is the common `case "x": handleX(msg)` shape and gives the more useful edge target.
+A `case "x":` clause is collected as a registration on key `"x"`. *As built:* its handlers are the
+enclosing function of the clause (the code that selects the tag, so a verdict about it sees the
+hop) and, when the clause body is one call, that callee too (`case "x": handleX(msg)`).
 A construction site is collected as a dispatch on the same key.
 *As built:* pairing runs in its own `pairMessageTopology`. It shares the event-channel fan-out cap
-(`groupHandlersByKey`) and edge shape, and adds what review found the generic pairing lacks: a
-handler selection (a test file's handler pairs only within its file; a same-named near-copy farther
-from the sender is withheld) and the boundary pass. The other rules' pairing is unchanged.
+(`groupHandlersByKey`, counting one per clause container) and edge shape, and adds a test-file rule
+(a test's handler pairs only within its file) and the boundary pass. Rounds 2–3 also tried
+narrowing by directory distance and by name; both silently dropped real consumers and were removed,
+so near-copies in a sample collection pair with each other (precision cost on such collections
+only). The other rules' pairing is unchanged.
 
 **3. The discriminant field is namespaced into the key.**
 Keys are `<field>=<tag>`, where the tag keeps the event-channel namespacing (`type=str:restart`,

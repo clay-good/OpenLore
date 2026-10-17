@@ -86,8 +86,8 @@ export interface ClassRelationshipFact {
 export interface DynamicEventFacts {
   group: string;
   rule: 'event-channel' | 'type-event' | 'actor-message' | 'message-topology';
-  /** `file`: the clause's file, recorded by message-topology for its test-file rule. */
-  registrations: Array<{ key: string; handlerIds: string[]; file?: string }>;
+  /** `container`/`file`: the clause's enclosing function and file, recorded by message-topology. */
+  registrations: Array<{ key: string; handlerIds: string[]; container?: string; file?: string }>;
   dispatches: Array<{ key: string; callerId: string; line: number }>;
 }
 

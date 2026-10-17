@@ -24,7 +24,7 @@ edge rather than a guess.
 A construction site SHALL count only when its object literal is passed to a transport call
 (`send`, `postMessage`, `dispatch`, …), directly or through `JSON.stringify`, for a closed set of
 fields (`type`, `kind`, …). A consumer SHALL be a `switch` over `x.<field>`, an `if` testing
-`x.<field> ===`/`== <tag>`, or an early-exit `if (x.<field> !== <tag>) return;`. A tag SHALL be static
+`x.<field> ===`/`== <tag>`, an early-exit `!==` guard, or a ternary on `===`. A tag SHALL be static
 only as a literal or `A.B` with `A` module-bound or imported; any other tag SHALL give no edge.
 
 #### Scenario: An equality test is an equivalent consumer form
@@ -135,8 +135,8 @@ dynamic-boundary site with the most specific reason that holds: `over-cap`, `una
 A handler clause in a test file SHALL pair only with a send in the same file, because a test's
 protocol (a fake worker, a local reducer) is its own. A send in a test file MAY pair with a handler
 in production code, but SHALL NOT make that handler tested: no `tested_by` edge and no test reach
-for coverage gaps derive from a message hop. Of the remaining handlers, a send SHALL pair only with
-those sharing the longest directory prefix with it.
+for coverage gaps derive from a message hop. Production handlers SHALL NOT be narrowed by distance
+or name: a missing edge is worse than a near-copy pairing in a sample collection.
 
 #### Scenario: A generic tag does not cross unrelated tests
 
@@ -145,17 +145,18 @@ those sharing the longest directory prefix with it.
 - **WHEN** the call graph is built
 - **THEN** no edge connects them, while a send in the reducer's own file does pair with it
 
-#### Scenario: Near-copies in sibling directories do not cross-pair
+#### Scenario: Same-named handlers in two places are both consumers
 
-- **GIVEN** a sender and a handler in `samples/news/`, and a same-tag handler in `samples/news_i18n/`
+- **GIVEN** a `ping` send and `onMessage` methods selecting `ping` in a client class and a server class
 - **WHEN** the call graph is built
-- **THEN** the sender pairs only with the handler in its own directory
+- **THEN** the send pairs with both
 
 ### Requirement: SingleFileMessageBoundariesClaimNoRepositoryWideAbsence
 
 The single-file dynamic-boundary re-derive SHALL pair a send only against that file's own handler
-clauses, and SHALL record any other send as `unresolved-in-file-scope`, never as
-`unindexed-message-consumer`: one file cannot show that no handler exists elsewhere.
+clauses, and SHALL NOT record `unindexed-message-consumer`: one file cannot show that no handler
+exists elsewhere, so such a send is `unresolved-in-file-scope` unless a more specific in-file reason
+holds.
 
 #### Scenario: A one-file re-derive stays in its scope
 

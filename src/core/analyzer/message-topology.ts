@@ -104,7 +104,13 @@ export function tagConstantName(key: string): string | undefined {
  * One handler clause: key → the node ids that handle it. `file` is the clause's file, which the
  * test-file rule needs for a marker.
  */
-export interface MessageRegistration { key: string; handlerIds: string[]; file?: string }
+export interface MessageRegistration {
+  key: string;
+  handlerIds: string[];
+  /** The function enclosing the clause, which the fan-out cap counts (one per clause container). */
+  container?: string;
+  file?: string;
+}
 /** One construction site. */
 export interface MessageDispatch { key: string; callerId: string; line: number }
 /** A construction site, with the source of the transport call it is handed to. */
@@ -205,12 +211,26 @@ function isModuleBound(id: Parser.SyntaxNode, env: CollectorState): boolean {
       if (params) patternNames(params, names);
       if (names.has(id.text)) return false;
     }
-    if (a.type === 'statement_block' || a.type === 'switch_body') {
+    // `catch (Msg)`, and `for (const Msg of …)` / `for (const Msg in …)`.
+    if (a.type === 'catch_clause') {
+      const names = new Set<string>();
+      patternNames(a.childForFieldName('parameter'), names);
+      if (names.has(id.text)) return false;
+    }
+    if (a.type === 'for_in_statement') {
+      const names = new Set<string>();
+      patternNames(a.childForFieldName('left'), names);
+      if (names.has(id.text)) return false;
+    }
+    if (a.type === 'statement_block' || a.type === 'switch_body' || a.type === 'switch_case') {
       for (const stmt of a.namedChildren) {
-        if (stmt.type !== 'lexical_declaration' && stmt.type !== 'variable_declaration') continue;
-        const names = new Set<string>();
-        for (const d of stmt.namedChildren) if (d.type === 'variable_declarator') patternNames(d.childForFieldName('name'), names);
-        if (names.has(id.text)) return false;
+        if (stmt.type === 'lexical_declaration' || stmt.type === 'variable_declaration') {
+          const names = new Set<string>();
+          for (const d of stmt.namedChildren) if (d.type === 'variable_declarator') patternNames(d.childForFieldName('name'), names);
+          if (names.has(id.text)) return false;
+        } else if (stmt.type === 'function_declaration' || stmt.type === 'class_declaration') {
+          if (stmt.childForFieldName('name')?.text === id.text) return false;
+        }
       }
     }
   }
@@ -248,12 +268,42 @@ function stringValue(node: Parser.SyntaxNode | null | undefined): string | undef
 
 /** The local names a binding pattern introduces (`x`, `{ a, b: c }`). */
 function patternNames(pattern: Parser.SyntaxNode | null | undefined, out: Set<string>): void {
-  if (!pattern) return;
-  if (pattern.type === 'identifier') { out.add(pattern.text); return; }
-  for (const id of pattern.descendantsOfType(['shorthand_property_identifier_pattern', 'identifier'])) {
-    // In `{ a: b }` the binding is the value `b`, not the key `a`.
-    if (id.parent?.type === 'pair_pattern' && id.parent.childForFieldName('key')?.startIndex === id.startIndex) continue;
-    out.add(id.text);
+  // Iterative over the binding positions only: a default value (`k = Msg.A`) and a type annotation
+  // bind nothing, and a pair's key (`{ a: b }`) is not its binding.
+  const stack = pattern ? [pattern] : [];
+  while (stack.length) {
+    const n = stack.pop()!;
+    switch (n.type) {
+      case 'identifier':
+      case 'shorthand_property_identifier_pattern':
+        out.add(n.text);
+        break;
+      case 'required_parameter':
+      case 'optional_parameter': {
+        const p = n.childForFieldName('pattern');
+        if (p) stack.push(p);
+        break;
+      }
+      case 'assignment_pattern':
+      case 'object_assignment_pattern': {
+        const left = n.childForFieldName('left');
+        if (left) stack.push(left);
+        break;
+      }
+      case 'pair_pattern': {
+        const value = n.childForFieldName('value');
+        if (value) stack.push(value);
+        break;
+      }
+      case 'formal_parameters':
+      case 'object_pattern':
+      case 'array_pattern':
+      case 'rest_pattern':
+        for (const c of n.namedChildren) stack.push(c);
+        break;
+      default:
+        break;
+    }
   }
 }
 
@@ -351,7 +401,7 @@ function registrationFor(
   // more precise target and joins it. The Pass-1 lane records the callee by name and resolves it
   // later, dropping it when it resolves to nothing — the same set the re-parsing lane builds here.
   const handlerIds = [...(resolved ? [resolved] : []), ...(enclosing && enclosing !== resolved ? [enclosing] : [])];
-  if (handlerIds.length) return { key, handlerIds, file };
+  if (handlerIds.length) return { key, handlerIds, ...(enclosing ? { container: enclosing } : {}), file };
   return { key: unattributedConsumerKey(key), handlerIds: [], file };
 }
 
@@ -447,7 +497,7 @@ function collectTernary(expr: Parser.SyntaxNode, env: CollectorState, out: Messa
   if (!found || !('key' in found) || found.negated) return;
   const enclosing = env.enclosingId(expr.startIndex);
   out.registrations.push(enclosing
-    ? { key: found.key, handlerIds: [enclosing], file: env.filePath }
+    ? { key: found.key, handlerIds: [enclosing], container: enclosing, file: env.filePath }
     : { key: unattributedConsumerKey(found.key), handlerIds: [], file: env.filePath });
 }
 
@@ -468,7 +518,7 @@ function collectIfClause(stmt: Parser.SyntaxNode, env: CollectorState, out: Mess
   if (stmt.childForFieldName('alternative') || !isEarlyExit(consequence)) return;
   const enclosing = env.enclosingId(stmt.startIndex);
   out.registrations.push(enclosing
-    ? { key: found.key, handlerIds: [enclosing], file: env.filePath }
+    ? { key: found.key, handlerIds: [enclosing], container: enclosing, file: env.filePath }
     : { key: unattributedConsumerKey(found.key), handlerIds: [], file: env.filePath });
 }
 
