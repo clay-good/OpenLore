@@ -3063,17 +3063,19 @@ The system SHALL detects clusters using a simple community detection approach.
 
 ### Requirement: Suggestdomainname
 
-The system SHALL suggests a domain name based on directory and file contents.
+The system SHALL suggest a deterministic domain name from the source-tree layout, candidate ownership root, and directory/file evidence. It MUST ignore domain-ineligible files when establishing a name and MUST NOT use one universal leaf-first rule across incompatible project layouts.
 
 #### Scenario: SuccessfulDomainNameSuggestion
-- **GIVEN** A directory and a list of files
-- **WHEN** suggestDomainName is called
-- **THEN** A domain name is suggested and returned
+
+- **GIVEN** a source tree with an identified layout and at least one domain-defining file
+- **WHEN** domain naming runs
+- **THEN** it returns a stable name for the reconciled ownership candidate
 
 #### Scenario: NoDomainNameSuggestion
-- **GIVEN** An empty directory and an empty list of files
-- **WHEN** suggestDomainName is called
-- **THEN** A default domain name is returned
+
+- **GIVEN** a candidate with no domain-defining file or meaningful ownership segment
+- **WHEN** domain naming runs
+- **THEN** it returns an explicitly non-promotable result rather than inventing a generation-ready domain from scan order
 
 ### Requirement: DetectcyclesDfs
 
@@ -4196,40 +4198,46 @@ Analyze SHALL compute an SCC condensation and topological order of the resolved 
 persist a compact integer-indexed forward/backward adjacency representation, carrying per-edge
 kind/confidence so existing edge filters remain expressible. The structure SHALL be written under
 the same atomic-write and analysis-lock discipline as the sibling artifacts, and SHALL be stamped
-with a content digest of the `llm-context.json` it accompanies so it can never be served over a
-graph it was not built from.
+with the graph digest defined by TraversalStructureIsKeyedToTheGraphItDescribes — the same value
+analyze writes into the `llm-context.json` it accompanies — so it can never be served over a graph
+it was not built from.
 
 Because forward and backward adjacency are not transposes of one another — an edge whose caller
 is not itself a node of the graph contributes to backward adjacency only — a condensation SHALL
 be computed per direction, over exactly the adjacency that direction traverses.
 
-Analyze SHALL write the structure strictly after the artifact it is stamped against, not
-concurrently with it, so the structure's modification time can never precede the context's. That
-ordering is what lets a reader rule out a superseded structure with a stat instead of digesting a
-multi-MB artifact; written concurrently the comparison would be meaningless, so the ordering is a
-requirement rather than an incidental detail.
+The order in which analyze writes the structure relative to the context it is stamped against
+SHALL NOT be constrained: currency is established by comparing the graph digest carried in the
+context to the structure's stamp, not by comparing modification times, so the structure MAY be
+written concurrently with the other artifacts.
 
 The watcher's incremental flush SHALL NOT rebuild the structure, because that lane never changes
 the call graph: rebuilding it would produce a bit-identical structure while holding the analysis
-lock, at a cost that grows with the graph. A flush therefore leaves the persisted structure
-stamped for superseded context bytes, and a later read builds in memory until the next full
-analyze — a slower answer, never a stale one.
+lock, at a cost that grows with the graph. Because the structure is keyed to the graph rather than
+to the context bytes, a flush that leaves the call graph unchanged leaves the structure valid, and
+a later read serves it rather than rebuilding it in memory.
 
 #### Scenario: A superseded structure is ruled out without reading it
 
-- **GIVEN** a persisted structure and an incremental flush that has rewritten the analysis
-  context since it was written
+- **GIVEN** a persisted structure stamped with a graph digest different from the digest already
+  carried by the parsed analysis context
 - **WHEN** a reader considers using it
-- **THEN** the modification times alone establish that it is superseded, so neither the context
-  digest nor the structure itself is read — the cost of rejecting it does not scale with the
-  size of the artifacts
+- **THEN** the stamp mismatch rules it out before the adjacency payload is read or traversed, and
+  the reader performs no content hashing of the analysis artifact
 
 #### Scenario: The structure tracks the graph, never leads or trails it
 
 - **GIVEN** a persisted structure and a graph being served
 - **WHEN** a traversal handler asks for the structure
-- **THEN** it is used only if its digest matches the exact artifact bytes that graph was parsed
-  from, so a reader can never observe a structure/graph pair from different generations
+- **THEN** it is used only if its stamp matches the graph digest carried by the exact context from
+  which the served graph was parsed
+
+#### Scenario: The structure is stamped with the graph digest the context carries
+
+- **GIVEN** a completed analyze
+- **WHEN** the structure is persisted
+- **THEN** it is stamped with the same graph digest analyze wrote into `llm-context.json`, so a
+  reader establishes currency from the parsed context without digesting the artifact
 
 #### Scenario: Edge filters survive the representation change
 
@@ -4243,7 +4251,7 @@ analyze — a slower answer, never a stale one.
 
 - **GIVEN** a persisted structure that is absent, oversized, truncated, altered in its own bytes,
   carrying an index outside the bounds of the array it addresses, written by another schema
-  version, byte-ordered for another host, or stamped for another generation
+  version, byte-ordered for another host, or stamped for another graph
 - **WHEN** a traversal handler asks for the structure
 - **THEN** it is refused and the structure is rebuilt in memory from the served graph, so the
   answer is unchanged and only its cost differs
@@ -6847,6 +6855,837 @@ changed but is absent from the index SHALL be reported as not indexed, never as 
 - **GIVEN** a repository of thousands of files where three files changed since the base ref
 - **WHEN** the changed-set is computed
 - **THEN** only those three files are read and parsed, once per side
+
+### Requirement: KotlinImportsResolveThroughTheDeclaredPackageIndex
+
+The analyzer SHALL parse the `package` declaration and the plain, aliased, and wildcard imports of a
+Kotlin file, and SHALL resolve each import to repository files through an index built from the
+declared package and top-level declarations of every Kotlin and Java file. Resolution SHALL NOT
+depend on the directory path matching the package name. An import of a type, a top-level function,
+a top-level property, a nested type, or an object member SHALL resolve to the file that declares the
+top-level owner. A wildcard import SHALL create an edge only to a file of that package that declares
+a name the importing file uses; otherwise it SHALL create no edge and be counted as unresolved. An
+imported name declared in more than one file SHALL create no edge and be counted as ambiguous.
+Imports from the Kotlin default-import packages and from JDK or Kotlin standard-library packages
+SHALL be marked built-in. Java files SHALL resolve imports of Kotlin types, and Kotlin files
+imports of Java types, through the same index.
+
+#### Scenario: A Kotlin import becomes a dependency edge
+
+- **GIVEN** `Main.kt` with `import com.acme.service.UserService` and a file that declares
+  `class UserService` in package `com.acme.service`
+- **WHEN** the dependency graph is built
+- **THEN** an import edge joins the two files with `UserService` in its imported names
+- **AND** the edge is not marked as call-derived
+
+#### Scenario: The package does not match the directory
+
+- **GIVEN** `src/main/kotlin/misc/Util.kt` that declares `package com.acme.util` and
+  `fun slugify(s: String)`, and another file with `import com.acme.util.slugify`
+- **WHEN** the dependency graph is built
+- **THEN** the import resolves to `src/main/kotlin/misc/Util.kt`
+
+#### Scenario: A top-level function import resolves
+
+- **GIVEN** `import com.acme.util.slugify` where `slugify` is a top-level extension function
+- **WHEN** imports are resolved
+- **THEN** the edge targets the file that declares `slugify`
+
+#### Scenario: Java and Kotlin resolve each other
+
+- **GIVEN** a Java file with `import com.acme.repo.UserRepository;` where `UserRepository` is
+  declared in a `.kt` file
+- **WHEN** the dependency graph is built
+- **THEN** the Java file has an import edge to the Kotlin file
+
+#### Scenario: An undecidable wildcard creates no edge
+
+- **GIVEN** `import com.acme.repo.*` in a file that uses no name declared in that package
+- **WHEN** imports are resolved
+- **THEN** no edge is created for that import and the unresolved-wildcard count is one
+
+### Requirement: KotlinExportsFollowDeclaredVisibility
+
+The analyzer SHALL report the exports of a Kotlin file as its package-level declarations whose
+visibility is `public` (the default when no modifier is written). A declaration marked `internal`
+SHALL be reported with an `internal` tag. A `private` declaration SHALL NOT be reported. A member
+of a class SHALL NOT be reported as an export of the file. Each export SHALL carry its kind. The
+export inventory SHALL report Kotlin as an extracted language, and a Kotlin file SHALL NOT carry an
+unsupported-file-type parse error.
+
+#### Scenario: Default visibility is public
+
+- **GIVEN** a Kotlin file with `fun a()`, `internal fun b()`, and `private fun c()`
+- **WHEN** exports are extracted
+- **THEN** `a` is exported, `b` is exported with the `internal` tag, and `c` is not exported
+
+#### Scenario: Export kinds are recorded
+
+- **GIVEN** `data class User(val id: Long)`, `object Registry`, `typealias Handler = (Int) -> Unit`,
+  and `val MAX = 10`
+- **WHEN** exports are extracted
+- **THEN** four exports exist with kinds class, class, type, and variable
+
+#### Scenario: A consumer can tell extracted from unsupported
+
+- **GIVEN** a Kotlin file that declares no public symbol named `foo`
+- **WHEN** a spec link asks whether the file exports `foo`
+- **THEN** the answer is that the file does not export it, not that the language is not extracted
+
+### Requirement: GeneratedGuidanceOnlyPrescribesCallableTools
+
+Generated agent configuration SHALL prescribe only tools exposed by the wired MCP preset. A workflow that requires a tool outside that preset SHALL either be omitted from the generated guidance, or be emitted together with the exact command that makes the tool available. Generated guidance SHALL name the surface it was written for.
+
+A conformance test SHALL fail when generated guidance names a tool the wired preset does not expose.
+
+#### Scenario: Decision gate under the default surface
+
+- **GIVEN** guidance generated for a repository wired to the default preset, which does not expose `record_decision`
+- **WHEN** the guidance is written
+- **THEN** the decision-gate workflow is either omitted or accompanied by the exact install command that provides `record_decision`, and never prescribed as if the tool were callable
+
+#### Scenario: Decision gate under the full surface
+
+- **GIVEN** guidance generated for a repository wired to the full preset
+- **WHEN** the guidance is written
+- **THEN** the decision-gate workflow is prescribed without a remediation command
+
+#### Scenario: Guidance names its surface
+
+- **WHEN** guidance is generated
+- **THEN** it states the preset it was written for, so a reader can tell which surface the instructions assume
+
+### Requirement: OrientGuidanceIsConditionalOnUnreadCode
+
+Generated guidance SHALL express the orientation instruction conditionally rather than absolutely. It SHALL prescribe orienting before touching a module not yet read in the current session, or when a task spans modules, and SHALL state why — one structural lookup replaces file-by-file rediscovery. It SHALL NOT instruct the agent to orient before every turn or before every file read.
+
+#### Scenario: Dense work in an already-read file
+
+- **GIVEN** guidance generated by the current template
+- **WHEN** an agent works repeatedly inside one file it has already read this session
+- **THEN** the guidance does not require an orientation call for those turns
+
+#### Scenario: First touch of an unfamiliar module
+
+- **WHEN** the agent is about to touch a module it has not read in this session
+- **THEN** the guidance prescribes orienting first, with its stated reason
+
+### Requirement: CfgOverlayBuffersInMemoryAndOverflowsToDiskPastAThreshold
+
+The CFG/def-use overlay produced during the call-graph build SHALL accumulate in memory and spill to
+a file ONLY once its accumulated size exceeds a fixed threshold. Below the threshold no file is
+created, so a repository whose overlay fits in memory pays no disk round-trip; past it, peak
+residency is bounded to the threshold plus one write batch. The rows drained into `cfg_overlay` SHALL
+be byte-identical whether the overlay stayed in memory or overflowed to disk.
+
+#### Scenario: A small overlay never touches the disk
+
+- **WHEN** a build's overlay stays under the overflow threshold
+- **THEN** no spill file is created under the output directory
+- **AND** the overlay is drained into `cfg_overlay` directly from memory
+
+#### Scenario: A large overlay overflows and stays bounded
+
+- **WHEN** a build's overlay exceeds the overflow threshold
+- **THEN** the buffered rows are written to a file and every subsequent row streams to that file
+- **AND** the overlay is drained back from the file, holding no more than one read chunk at a time
+
+#### Scenario: The two paths agree byte-for-byte
+
+- **WHEN** the same set of function CFGs is spilled entirely in memory and, separately, forced to
+  overflow to disk
+- **THEN** the rows drained from each path are identical in order and content
+
+### Requirement: CfgOverlayOverflowFailsClosedAndAtMostOnce
+
+An overflow that cannot be written SHALL fail closed rather than fail the analysis: the overlay is an
+optional precision refinement, so a spill that cannot reach the disk degrades to a disclosed
+function-granularity answer. The overflow SHALL be attempted at most once — a failed overflow latches
+an inert state and no subsequent write reopens the file — and any partially written file SHALL be
+removed so no truncated spill is left for the drain or the bundle exporter to find.
+
+#### Scenario: An unwritable directory does not fail the build
+
+- **WHEN** the overlay overflows but the file cannot be opened or written
+- **THEN** the spill latches a failed state without throwing
+- **AND** the overlay is skipped by the consumer, which reports the disclosed fallback
+
+#### Scenario: A failed overflow is never retried
+
+- **WHEN** an overflow has already failed
+- **THEN** further writes are inert and do not reopen the file or accumulate rows
+
+### Requirement: TextLineIndexBuildIsStreamed
+
+Building the text-line index SHALL NOT hold the repository's text, or the line records derived from
+it, in memory all at once. The build SHALL accept its input as a stream and SHALL flush accumulated
+records to storage at a bounded interval, so peak residency is a function of the flush interval
+rather than of the repository.
+
+Line records are an amplification of the source, not a summary of it: one object per non-blank
+line, on top of the text they were extracted from. A build that materializes the whole corpus
+before writing anything therefore exhausts the heap on a large repository even when every earlier
+phase has succeeded.
+
+#### Scenario: A large repository is indexed under a fixed heap
+
+- **GIVEN** a repository with more source lines than fit in memory as line records
+- **WHEN** the text-line index is built
+- **THEN** the build completes, and peak memory tracks the flush interval rather than the number of
+  lines in the repository
+
+#### Scenario: Records from every batch are present
+
+- **GIVEN** an input large enough to span several flushes
+- **WHEN** the index is built
+- **THEN** a line from the first batch, a line from a middle batch, and a line from the last batch
+  are all findable — later flushes append rather than replace
+
+### Requirement: StreamedBuildPreservesIndexIdentity
+
+A streamed build SHALL produce the same index as an equivalent non-streamed build: the same rows,
+in the same order, with the same counts. Input given as an async iterable and the same input given
+as an array SHALL be indistinguishable in the resulting index.
+
+Row order is a function of the input file order, never of read-completion timing.
+
+#### Scenario: Streamed and array inputs agree
+
+- **GIVEN** the same set of files supplied once as an array and once as an async iterable
+- **WHEN** each is indexed
+- **THEN** both report identical line and file counts, and a search returns the same file and line
+  for the same query
+
+### Requirement: EmptyCorpusLeavesNoIndex
+
+A build that yields no indexable lines SHALL leave no table behind, and SHALL remove a previously
+built index rather than leaving a stale one. Creating storage for an empty corpus is forbidden: a
+table that exists but holds nothing is indistinguishable, to a reader, from an index that was never
+built for a repository with nothing to index.
+
+#### Scenario: Nothing indexable
+
+- **GIVEN** a repository whose files contain only blank lines, or no files at all
+- **WHEN** the text-line index is built
+- **THEN** the build reports zero lines and zero files, and no index is left behind
+
+#### Scenario: An index is rebuilt from an empty corpus
+
+- **GIVEN** a previously built text-line index
+- **WHEN** the index is rebuilt from a corpus with nothing indexable
+- **THEN** the previous index is dropped and searches return nothing
+
+### Requirement: RepositoryWideScansAreBoundedInConcurrencyAndFileSize
+
+An enrichment scan that reads source files across a repository SHALL bound both the number of
+files it holds in memory at once and the size of any single file it will read. Neither bound alone
+is sufficient: a repository of many ordinary files exhausts the heap through fan-out, and a
+repository containing one generated blob exhausts it through a single read.
+
+The per-file size SHALL be measured BEFORE the file is read. Reading first and measuring after has
+already allocated exactly what the cap exists to prevent.
+
+Transient source-read residency during enrichment SHALL be a function of the bounds, not of the
+repository's file count or total bytes.
+
+#### Scenario: A large repository is scanned under a small heap
+
+- **GIVEN** a repository of several hundred megabytes of source across hundreds of files
+- **WHEN** the enrichment extractors scan it under a heap far smaller than the repository
+- **THEN** every extractor completes, and peak memory tracks the concurrency bound rather than the
+  repository size
+
+#### Scenario: One oversized file cannot exhaust the heap
+
+- **GIVEN** a repository containing a single generated file far larger than the per-file cap
+- **WHEN** a repository-wide scan runs
+- **THEN** that file is skipped without being read into memory, and the other files are scanned
+  normally
+
+### Requirement: BoundedScansPreserveInputOrder
+
+A bounded repository-wide scan SHALL return its results in INPUT order, identically to an unbounded
+`Promise.all`, and independently of its concurrency width.
+
+This is a correctness property, not a convenience. Artifacts built from these scans must be
+byte-identical across runs of a fixed repository state; under a concurrency bound, completion order
+depends on which worker frees a slot first, so input-order aggregation is the only thing keeping
+those bytes stable.
+
+#### Scenario: Adversarial completion order does not reorder output
+
+- **GIVEN** a file list longer than the concurrency bound, whose reads complete in reverse order
+- **WHEN** the route and env-var inventories are built from it
+- **THEN** both are ordered by the file list, and repeated runs produce identical bytes
+
+### Requirement: FilesTooLargeToScanAreDisclosed
+
+A file excluded from an enrichment scan because it exceeds the per-file size cap SHALL be disclosed
+to the operator with its path and size, and the affected inventories SHALL be described as a LOWER
+BOUND.
+
+A silently dropped file makes a component, route, or environment variable that genuinely exists
+read as genuinely absent — the failure mode the analyzer's disclosure discipline exists to prevent.
+The disclosure SHALL be emitted from the same scan-time size observation that applies the
+threshold, so an earlier repository-walk snapshot cannot make the two surfaces disagree.
+
+#### Scenario: An oversized file is reported rather than dropped
+
+- **GIVEN** a repository containing a file above the scan's per-file cap
+- **WHEN** `openlore analyze` runs
+- **THEN** the run completes and reports the excluded file, its size, and that the enrichment
+  inventories are a lower bound
+
+### Requirement: EnrichmentExtractorsDoNotMultiplyTheScanBound
+
+The enrichment extractors SHALL NOT run as one concurrent batch. Each is internally bounded;
+running them together multiplies that bound by the number of extractors, which is what exhausted
+the heap. Running them in sequence costs no additional I/O, since they read the same file set.
+
+#### Scenario: Adding an extractor does not raise peak memory
+
+- **GIVEN** the enrichment phase of `openlore analyze`
+- **WHEN** the extractors run
+- **THEN** peak residency is that of a single bounded scan, regardless of how many extractors the
+  phase contains
+
+### Requirement: Repository-Scoped Analysis Single Flight
+
+Only one full analysis SHALL own a repository at a time. Ownership SHALL be represented by an inspectable runtime lock containing the canonical repository identity, PID, start time, last heartbeat, current stage, and progress. A concurrent invocation SHALL report `ANALYSIS_IN_PROGRESS` with that metadata and SHALL either exit without starting duplicate work or attach in wait mode.
+
+A lock MAY be reclaimed only when its owner is no longer alive and its heartbeat is stale. Runtime lock/progress state SHALL remain outside deterministic analysis evidence.
+
+#### Scenario: Concurrent analyze does not duplicate work
+- **GIVEN** a live full analysis owns the repository lock
+- **WHEN** another full analysis starts for the same canonical repository
+- **THEN** the second invocation performs no analysis, reports the owner and elapsed duration, and offers an attach/wait path
+
+#### Scenario: Waiting invocation follows progress
+- **GIVEN** a live analysis and a second invocation using wait mode
+- **WHEN** the owner advances stages and completes
+- **THEN** the waiting invocation receives periodic progress and returns the owner analysis result without starting another analysis
+
+#### Scenario: Dead stale owner is recoverable
+- **GIVEN** a lock whose PID is not alive and whose heartbeat exceeds the stale threshold
+- **WHEN** a new analysis starts
+- **THEN** it discloses and reclaims the stale lock before becoming the sole owner
+
+### Requirement: Atomic Analysis Generation Publication
+
+A completed full analysis SHALL publish one generation identity and a manifest binding every required artifact to that identity and content digest. Writers SHALL hold the analysis lock across the complete required artifact write set and manifest commit point. Readers SHALL validate the manifest before and after multi-artifact reads. An interrupted in-place generation MUST fail closed as `analysis-changed`; it MUST NOT serve either a mixed snapshot or overwritten artifacts under the prior identity.
+
+#### Scenario: Reader never accepts mixed generations
+- **GIVEN** one analysis generation is current while a new generation is being written
+- **WHEN** an MCP request reads multiple artifacts
+- **THEN** it observes a complete verified generation or a typed `analysis-changed` response, never a mixture
+
+#### Scenario: Interrupted analysis fails closed
+- **GIVEN** a valid current analysis and a replacement analysis that terminates before publication
+- **WHEN** a reader requests evidence
+- **THEN** digest validation rejects the overwritten artifact set as `analysis-changed` until a complete generation is published
+
+### Requirement: Long Analysis Phases Emit Heartbeats
+
+Every long-running analysis stage, including artifact generation, SHALL update observable progress at a bounded interval even when its exact completion percentage is unchanged. Preflight/status consumers SHALL distinguish `FRESH`, `STALE`, `MISSING`, and `ANALYSIS_IN_PROGRESS`.
+
+#### Scenario: Artifact generation remains visibly alive
+- **GIVEN** artifact generation takes longer than the heartbeat interval without completing a sub-step
+- **WHEN** a user observes CLI or attached progress
+- **THEN** periodic heartbeat messages include stage and elapsed duration until completion or failure
+
+#### Scenario: Preflight reports active analysis
+- **GIVEN** an analysis lock with a live owner and current heartbeat
+- **WHEN** preflight/status is requested
+- **THEN** it reports `ANALYSIS_IN_PROGRESS` and owner metadata rather than `STALE` or `FRESH`
+
+### Requirement: Documentation Never Defines A Domain
+
+Domain file classification SHALL treat documentation, licences, and project meta as `supporting`, never as `defining`. Scope is prose by extension (`.md`, `.mdx`, `.mdc`, `.markdown`, `.rst`, `.adoc`, `.txt`, `.cff`) — `.txt` excepting the build-configuration names that share it (`requirements*.txt`, `constraints*.txt`, `CMakeLists.txt`), which SHALL be excluded as configuration on their own merit rather than depending on the file walker's config flag, since it does not name them — and conventional project names (`LICENSE`, `NOTICE`, `COPYING`, `AUTHORS`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY`, `SUPPORT`, `GOVERNANCE`, `CODEOWNERS`, and equivalents), including their qualified variants (`LICENSE-MIT`, `COPYING.LESSER`). A conventional project name SHALL match only in its conventional UPPER-CASE spelling, so neither a source file (`license.ts`, `readme-generator.ts`) nor an extensionless executable (`bin/readme`, `scripts/changelog`) is read as prose and stripped of its ability to define a domain. Under-matching is the required direction: a missed prose file is merely supporting, whereas a misread source file would silently remove its domain. Prose describes a system and does not implement one, so no requirement can ever be anchored to it.
+
+Because a candidate whose files are all non-defining is already excluded as `non-defining-only`, this classification alone SHALL prevent a documentation-only tree from being promoted to a domain. Documentation MUST remain `supporting` rather than `excluded`, so a code domain keeps its own documentation as footprint evidence.
+
+- **Implementation**: `classifyDomainFile::src/core/analyzer/domain-naming.ts`
+
+#### Scenario: A documentation-only tree is not a domain
+- **GIVEN** a candidate whose files are all documentation, licences, or project meta
+- **WHEN** repository domains are reconciled
+- **THEN** the candidate is excluded as `non-defining-only` and no domain is produced for it
+
+#### Scenario: An extensionless executable is not prose
+- **GIVEN** a domain defined by extensionless executables whose names resemble project metadata in lower case
+- **WHEN** repository domains are reconciled
+- **THEN** those files remain defining and the domain is retained
+
+#### Scenario: A code domain keeps its own documentation
+- **GIVEN** a domain whose files include source code and a README
+- **WHEN** repository domains are reconciled
+- **THEN** the source file is defining, the README is supporting, and the domain is retained
+
+### Requirement: IndexReuseRequiresCapabilityAgreement
+
+The index-reuse gate SHALL reuse a previously built search index only when the index's realized
+capability agrees with the resolved embedding provider, in addition to the existing generation and
+configuration checks. A resolvable semantic provider together with an on-disk index that carries no
+vectors SHALL invalidate the reuse receipt, so the next analysis rebuilds the index rather than
+reusing a keyword index indefinitely. The reverse mismatch — an index carrying vectors when no
+provider resolves — SHALL also invalidate the receipt.
+
+Agreement SHALL be established from the index's own recorded state, not from a timestamp comparison,
+so a build that silently fell back to keyword mode cannot be mistaken for an up-to-date index.
+
+#### Scenario: A keyword index is not reused when a provider resolves
+
+- **GIVEN** a repository whose configuration resolves to an embedding provider
+- **AND** an index receipt whose generation and configuration hash still match, over an index with
+  no vectors
+- **WHEN** analysis runs without a force flag
+- **THEN** the receipt is treated as invalid and the search index is rebuilt
+
+#### Scenario: An agreeing index is still reused
+
+- **GIVEN** a repository whose resolved provider matches an index carrying vectors from that provider
+- **AND** an unchanged generation and configuration hash
+- **WHEN** analysis runs
+- **THEN** the index is reused without a rebuild
+
+#### Scenario: The unconfigured default remains reusable
+
+- **GIVEN** a repository with no embedding provider configured and a keyword index
+- **WHEN** analysis runs
+- **THEN** the keyword index is reused, with no mismatch and no rebuild
+
+### Requirement: IndexLockContentionIsNeverASilentDowngrade
+
+When the vector index's mutation lock is held by another live process, the system SHALL NOT complete
+the build by silently producing a keyword-only index and reporting success. It SHALL either wait for
+the lock when the caller asked to wait, or fail with a non-zero exit status whose message names the
+process holding the lock and how long it has been held.
+
+A lock whose recorded owner is no longer alive SHALL be treated as stale: the system SHALL reclaim it
+and state that it did so, rather than refusing index mutations indefinitely.
+
+#### Scenario: A concurrent build fails loudly instead of degrading
+
+- **GIVEN** an index build holding the mutation lock
+- **WHEN** a second build is started without a wait flag
+- **THEN** the second build exits non-zero, names the holding process and the lock's age, and does
+  not replace the index with a keyword-only one
+
+#### Scenario: Waiting yields the realized index
+
+- **GIVEN** the same contention and a caller that asked to wait
+- **WHEN** the holding build completes
+- **THEN** the waiting build proceeds and produces an index whose capability matches the resolved
+  provider
+
+#### Scenario: A dead owner's lock is reclaimed
+
+- **GIVEN** a lock file recording a process id that is no longer running
+- **WHEN** an index mutation is attempted
+- **THEN** the lock is reclaimed, the reclamation is stated, and the mutation proceeds
+
+### Requirement: StaleFilesAreOverlaidFromSourceAtQueryTime
+
+When a query is served against an index that is behind the working tree for a known set of files,
+the system SHALL re-extract those files from source and reconcile the symbol answer before
+returning it. The overlay SHALL cover symbols, signatures, and spans of the stale files.
+
+The overlay SHALL cache extraction by source path, language, and content hash, so a file already
+extracted with the same bytes in this session is served from cache without assigning its nodes to
+another file that happens to contain identical text.
+
+#### Scenario: An edited symbol is served from source, not from the index
+
+- **GIVEN** an indexed repository and a file edited since the index was built, adding a function
+- **WHEN** a query that would return symbols from that file is served
+- **THEN** the added function is present in the answer, carrying overlay provenance and no score,
+  so it is distinguishable from a result the ranker placed
+
+#### Scenario: A deleted symbol does not come back
+
+- **GIVEN** a file whose indexed function has been deleted in the working tree
+- **WHEN** a query is served
+- **THEN** the deleted function is absent from the answer
+
+#### Scenario: A new symbol is found when the index has no hits
+
+- **GIVEN** a Git working tree with a new source file containing a symbol absent from the index
+- **WHEN** a symbol query names that symbol
+- **THEN** the bounded working-tree overlay returns it with source provenance and no rank score
+
+#### Scenario: Unchanged files are not re-extracted
+
+- **GIVEN** a repository with one stale file among many
+- **WHEN** the overlay runs
+- **THEN** only that file is re-extracted, and a second query in the same session re-parses nothing
+
+### Requirement: TheOverlayIsBoundedAndFailsSoft
+
+The overlay SHALL be bounded by an explicit cap on the number of stale files, the bytes re-extracted,
+and the time spent. When a bound is exceeded, the system SHALL answer from the index and disclose the
+staleness exactly as it does today — it SHALL NOT block the query, and it SHALL NOT partially apply
+an overlay without saying so.
+
+#### Scenario: A large stale set falls back to the disclosure
+
+- **GIVEN** a working tree whose stale set exceeds the file cap
+- **WHEN** a query is served
+- **THEN** the answer comes from the index with the staleness disclosure, and states that the overlay
+  was skipped for exceeding its bound
+
+#### Scenario: A partial overlay names what it covered
+
+- **GIVEN** a stale set where some files were overlaid before the time budget elapsed
+- **WHEN** the answer is produced
+- **THEN** it names the files the overlay covered and the files still served from the index
+
+#### Scenario: An unparsable dirty file does not fail the query
+
+- **GIVEN** a stale file whose current contents do not parse
+- **WHEN** the overlay runs
+- **THEN** the query is answered, that file is reported as not overlaid, and no error is raised
+
+### Requirement: OverlaidFactsCarryTheirOwnProvenance
+
+A fact served from the live overlay SHALL be distinguishable from a fact served from the index, and
+the answer's completeness flag SHALL reflect what the overlay could not cover. In particular, call
+edges into an overlaid symbol from files outside the stale set remain as the index recorded them;
+this limit SHALL be disclosed rather than implied.
+
+#### Scenario: An overlaid result is labelled
+
+- **GIVEN** a query whose answer includes a symbol re-extracted by the overlay
+- **WHEN** the answer is produced
+- **THEN** that result carries overlay provenance, distinct from indexed provenance
+
+#### Scenario: Edge staleness is disclosed, not hidden
+
+- **GIVEN** an overlaid symbol whose callers live in files outside the stale set
+- **WHEN** callers are reported
+- **THEN** the answer states that incoming edges come from the index and may predate the edit
+
+### Requirement: Analysis corpus and domain eligibility are distinct
+
+The analyzer SHALL classify analyzed files independently from their eligibility to define a specification domain. A supporting or domain-excluded file MUST NOT create or independently sustain a domain, while the same file MAY remain available to analysis features that consume its structural or behavioral evidence. A supporting file MUST NOT participate in candidate construction, naming, promotion, cohesion measurement, or independent-boundary decisions; it MAY be attached only after final domains exist.
+
+#### Scenario: Tests remain evidence without minting a domain
+
+- **GIVEN** production files for a `generator` module and tests under its implementation tree
+- **WHEN** the repository is analyzed
+- **THEN** the tests remain available as supporting evidence for `generator` but no test-only domain is emitted
+
+#### Scenario: Unattached test is disclosed without a fallback domain
+
+- **GIVEN** an analyzed test whose path and imports identify no final domain owner
+- **WHEN** supporting evidence is attached after domain reconciliation
+- **THEN** the test is disclosed as unattached supporting evidence and does not create a fallback domain
+
+#### Scenario: Fixture projects do not become product domains
+
+- **GIVEN** analyzer fixtures containing complete sample applications in several languages
+- **WHEN** the repository is analyzed
+- **THEN** fixture-only and snapshot-only candidates are excluded from final specification domains even if those files remain available to language analysis
+
+### Requirement: Domain ownership is layout-aware
+
+The analyzer SHALL derive candidate ownership using deterministic rules appropriate to each source-tree layout. Module-oriented trees MUST prefer stable ownership roots over technical leaf directories, while package-oriented trees MUST preserve meaningful business-package detection after removing build-layout and reverse-DNS noise.
+
+#### Scenario: TypeScript technical child belongs to its module
+
+- **GIVEN** TypeScript files under `src/core/generator/stages`
+- **WHEN** domain ownership is derived
+- **THEN** `generator` is the ownership candidate and `stages` is not emitted as an independent domain solely because it is the deepest directory
+
+#### Scenario: Java business packages remain distinct
+
+- **GIVEN** Java files under `src/main/java/org/example/petclinic/owner` and `src/main/java/org/example/petclinic/vet`
+- **WHEN** domain ownership is derived
+- **THEN** `owner` and `vet` remain eligible candidates rather than collapsing into `src`, `main`, `java`, `org`, or `petclinic`
+
+### Requirement: Domain candidates are reconciled before emission
+
+The analyzer SHALL combine directory, filename, dependency-cluster, public-boundary, route, and schema signals into one candidate set and SHALL reconcile overlaps before populating `RepoStructure.domains`. Exact duplicates and technical ancestor/descendant candidates MUST NOT be emitted independently unless each candidate has deterministic evidence of independent ownership. Technical-role candidates MUST be resolved by this common reconciliation process and MUST NOT disappear through an additional silent directory denylist after candidate projection.
+
+#### Scenario: Directory and graph signals do not duplicate a domain
+
+- **GIVEN** directory inference and a dependency cluster both identify the same `generator` ownership area
+- **WHEN** final domains are produced
+- **THEN** one reconciled `generator` domain is emitted with the combined evidence
+
+#### Scenario: Independent nested module is preserved
+
+- **GIVEN** a nested module with its own defining files and an independent public, route, schema, or cohesive structural boundary
+- **WHEN** its candidate is reconciled with its ancestor
+- **THEN** it remains a distinct domain and the independent-boundary reason is recorded
+
+#### Scenario: Supporting-only graph cluster cannot create a domain
+
+- **GIVEN** a dependency cluster containing only tests, fixtures, snapshots, generated files, or other non-defining evidence
+- **WHEN** graph candidates are projected into the repository structure
+- **THEN** no final domain is created from that cluster
+
+#### Scenario: Technical child receives an explainable disposition
+
+- **GIVEN** a technical child candidate such as `generator/utils` with no independent ownership boundary
+- **WHEN** candidates are reconciled
+- **THEN** it is merged into or excluded relative to `generator` with a stable reason code rather than silently removed by a local directory denylist
+
+### Requirement: Domain reconciliation is deterministic and explainable
+
+The analyzer SHALL emit a bounded decision record for every domain candidate with its disposition, stable reason code, and final owner when applicable. Final domain names, memberships, and candidate dispositions MUST be independent of file traversal and graph iteration order.
+
+#### Scenario: Merged technical child names its owner
+
+- **GIVEN** `stages` is merged into the `generator` ownership domain
+- **WHEN** `repo-structure.json` is written
+- **THEN** its candidate record identifies the merged disposition, the `generator` owner, and a stable technical-child or contained-footprint reason
+
+#### Scenario: Input order does not change domain output
+
+- **GIVEN** identical analyzed files and graph facts presented in different orders
+- **WHEN** domain reconciliation runs
+- **THEN** the final domains and candidate decision records are byte-stable apart from unrelated timestamps
+
+### Requirement: Domain configuration remains authoritative
+
+The analyzer SHALL apply configured corpus include/exclude rules before domain inference and MUST NOT reintroduce excluded files through dependency-cluster projection. Downstream selection of domains for generation MUST NOT broaden or rewrite the analyzer's inferred domain membership.
+
+#### Scenario: Excluded subtree cannot return through the graph
+
+- **GIVEN** `examples/**` is excluded from analysis and the dependency graph otherwise contains an examples cluster
+- **WHEN** repository domains are generated
+- **THEN** no file or candidate from that subtree appears in a final domain
+
+### Requirement: Domain consumers share the reconciled result
+
+Standalone generation, MCP workflows, and Pi workflows SHALL consume the same reconciled `RepoStructure.domains` membership. A client MUST NOT independently recreate or broaden domain inference from raw directories or graph clusters.
+
+#### Scenario: Agent and standalone scopes agree
+
+- **GIVEN** an analyzed repository containing merged technical children and supporting tests
+- **WHEN** standalone generation and an MCP- or Pi-hosted generation request select the same domain
+- **THEN** they receive the same defining and supporting file membership for that domain
+
+### Requirement: IntraObjectReceiverResolutionViaTypeRegistries
+
+The analyzer SHALL resolve a CHAINED intra-object receiver call — `this.<field>.<method>()` /
+`self.<field>.<method>()` — when a deterministic per-file type registry types the receiver
+unambiguously, emitting a resolved edge with a distinct `receiver_inferred` provenance tier (below
+a directly-resolved binding, above name-only).
+
+The registry SHALL be built from DECLARED types recorded during the Pass-1 walk, with no second
+parse: a field's type annotation, a `new T()` initializer, a constructor parameter property, a
+Python `__init__` parameter annotation forwarded to the field, and the declared return type of a
+function declared in the same file. Local variable types remain the existing receiver type
+inference; this requirement adds the field and return-type dimension it lacked.
+
+Resolution SHALL search only within the receiver's own type, never across the global name space,
+and SHALL bind only a unique candidate. The enclosing class chain SHALL be walked in the language's
+own attribute-lookup order (depth-first, left to right, so Python multiple inheritance is not
+answered by the wrong base), so a field inherited from an ancestor declared IN THE CALLER'S OWN
+FILE still types; an ancestor in another file is a MISS, not a guess, because the registry is keyed
+by the caller's path. Where the caller's file carries an import binding for the type name, that binding SHALL
+be decisive: only a candidate from the imported target may bind, and no such candidate SHALL be a
+refusal rather than a fall-through to a same-named definition elsewhere.
+
+A field SHALL be attributed only to the class that provably owns it. A write inside a construct
+that rebinds the receiver — a TS/JS `function` expression or object-literal method, a Python `def`
+nested inside another `def` — SHALL NOT be attributed to the enclosing class, a field of an
+unnameable class expression SHALL NOT be attributed outward, a `static` declaration SHALL NOT type
+an instance receiver, a plain constructor parameter SHALL NOT be treated as a field, and a
+capitalized name the file declares as a FUNCTION SHALL NOT be treated as a type.
+
+Supported languages SHALL be reported in the capability matrix as `receiverResolution`;
+unsupported languages SHALL be disclosed there, not silently left unresolved.
+
+#### Scenario: A field-typed receiver call resolves
+
+- **GIVEN** a `this.repo.save()` call whose receiver type the per-file registry determines from a
+  field annotation, a `new T()`, a parameter property, or a local factory's declared return type
+- **WHEN** the call graph is built
+- **THEN** a `receiver_inferred` edge to that type's `save` is emitted, raising recall without a
+  guessed binding
+
+#### Scenario: An inherited field types the receiver
+
+- **GIVEN** a `this.repo.save()` call in a subclass whose `repo` field is declared on an ancestor
+  in the same file
+- **WHEN** the call graph is built
+- **THEN** the class chain is walked and the edge is emitted, exactly as for an own-class field
+
+### Requirement: ResidualReceiverBoundaryStaysDisclosed
+
+A receiver the type registry cannot type unambiguously SHALL remain a disclosed boundary. The
+resolution step SHALL NOT emit a guessed edge, SHALL NOT emit an `external::` leaf (which would
+assert the callee leaves the project), and SHALL NOT let a chained receiver reach any resolution
+strategy that keys off the bare receiver token or the last dotted qualifier — including
+class-hierarchy analysis, which would otherwise name-bind `this.repo.save()` inside the CALLER's
+own hierarchy.
+
+A field observed with two conflicting declared types SHALL be refused rather than resolved to
+either. An ambiguous candidate set after typing SHALL be recorded as an ambiguous call site, never
+bound.
+
+`analyze_error_propagation` SHALL disclose the residual chained intra-object call sites under
+their own boundary — distinct from the unresolved-intra-object boundary, because the callee's
+provenance is unknown rather than merely unreached — and SHALL NOT treat them as exception-free.
+
+#### Scenario: An untypeable receiver is disclosed, not guessed
+
+- **GIVEN** an intra-object call whose receiver type the registry cannot determine unambiguously
+- **WHEN** the call graph is built
+- **THEN** no edge of any kind is emitted for it, and `analyze_error_propagation` reports it as a
+  chained-receiver boundary whose callee's exceptions are out of scope
+
+#### Scenario: An import binding overrules a same-named definition elsewhere
+
+- **GIVEN** a field typed `Client`, where the caller's file imports `Client` from one module and
+  an unrelated `Client` carrying the called method exists elsewhere in the repository
+- **WHEN** the call graph is built
+- **THEN** no edge is emitted — the import binding decides, and the namesake is never bound
+
+#### Scenario: A conflicting field declaration refuses
+
+- **GIVEN** a field declared with one type and assigned a different type elsewhere in the file
+- **WHEN** the call graph is built
+- **THEN** the registry refuses that field, and the call site stays unresolved and disclosed
+
+### Requirement: ChainedReceiverResidueIsScopedAndDeclared
+
+Recovery SHALL be confined to a single field hop on a receiver rooted at the enclosing object. A
+deeper chain, a computed or indexed receiver, a receiver obtained from a call, and a callee dropped
+by the language's builtin-noise filter SHALL NOT be bound — and SHALL still be classified as
+chained intra-object call sites so the disclosure covers them. A type name that does not follow the
+capitalized-class convention SHALL NOT type a field.
+
+Every remaining refusal SHALL be declared rather than left as a silent recall gap. The registry
+reads a PLAIN declared type name only, so a generic (`Map<K, V>`, `Repo<T>`), a union or optional
+annotation, and a namespace-qualified type (`pg.Client`) do not type a field. A field typed by an
+INTERFACE binds to that interface's member, which has no body — the call reaches the declaration,
+not the implementation, and the existing `overrides` edges carry it onward. Per-file facts SHALL be
+capped, and the overflow is a recall loss, never an incorrect binding.
+
+A name the caller's file imports from a specifier that resolves to no in-project file SHALL be
+REFUSED rather than bound to a repository-wide namesake — the source has stated the type is not
+from here. A specifier that is merely unfollowable (a path alias, an absolute intra-project module
+that matches a project file) SHALL NOT be treated as external, because the source stated no such
+thing. A concrete import binding for the same name SHALL win over an unresolvable one.
+
+The disclosure covers receivers rooted at the enclosing object. A receiver rooted at a CLASS NAME
+instead — `Holder.shared.work()`, a static field on another class — is out of scope and remains
+both unbound and undisclosed, exactly as before this change; it SHALL NOT be claimed as covered.
+The disclosure is served by `analyze_error_propagation` alone: other conclusion tools see the
+residue as an absent edge, as they did before.
+
+#### Scenario: A class-name static-field receiver stays out of scope
+
+- **GIVEN** a `Holder.shared.work()` call, whose receiver is a static field on another class
+- **WHEN** the call graph is built
+- **THEN** no edge is emitted and no chained-receiver boundary is reported — the shape is declared
+  out of scope rather than described as covered
+
+#### Scenario: An unread shape is disclosed rather than omitted
+
+- **GIVEN** a `this.a.b.m()`, a `this.map['k'].m()`, a `this.dep!.m()` or a `self.get_dep().m()`
+- **WHEN** the call graph is built and `analyze_error_propagation` runs over the caller
+- **THEN** no edge is emitted for it, and the site is reported under the chained-receiver boundary
+  rather than being absent from the result
+
+#### Scenario: A package-imported type is refused, an alias is not
+
+- **GIVEN** a field typed `Client` where the caller's file writes `import { Client } from 'pg'`,
+  and an unrelated in-project `Client` declares the called method
+- **WHEN** the call graph is built
+- **THEN** no edge is emitted — but the same shape written `from '@/repo'` or, in Python,
+  `from myapp.models import Repo` against a matching project file still resolves
+
+### Requirement: TraversalStructureIsKeyedToTheGraphItDescribes
+
+Analyze SHALL compute a digest over exactly the call-graph facts the precomputed traversal
+structure depends on — the node id set, and each usable edge's caller, callee, and
+synthesized-ness in `cg.edges` order — persist it as a field of the analysis context, and stamp
+the traversal structure with the same value. A reader SHALL establish the structure's currency by
+comparing that field to the structure's stamp, and SHALL NOT digest the analysis artifact to do
+so.
+
+A writer that changes the call graph SHALL recompute the digest in the same write. This invariant
+is what makes the narrower key sound, so it SHALL be enforced by a test that fails when a write
+path assigns the call graph without recomputing it, not left to reviewer attention.
+
+A context that carries no such digest SHALL yield no key, so no persisted structure is consulted
+and the traversal is built in memory.
+
+#### Scenario: An edit that cannot change the structure does not invalidate it
+
+- **GIVEN** a persisted traversal structure and an incremental flush that rewrites the analysis
+  context without changing the call graph
+- **WHEN** a traversal handler next runs from a cold read
+- **THEN** the structure is still accepted and served, because the key it is compared against
+  describes the graph rather than the bytes of the artifact the graph travels in
+
+#### Scenario: An edit that does change the graph invalidates it
+
+- **GIVEN** a persisted traversal structure and a re-analysis that changes any node id, any
+  edge endpoint, any edge's synthesized-ness, or the order of the edges
+- **WHEN** a traversal handler next runs
+- **THEN** the digests disagree, the structure is refused, and the traversal is built from the
+  graph being served
+
+#### Scenario: Establishing currency costs nothing on the read path
+
+- **GIVEN** a cold read of the analysis context
+- **WHEN** the reader establishes which graph the persisted structure belongs to
+- **THEN** it reads the digest from the already-parsed context and performs no hashing of its
+  own, so a tool that never traverses pays nothing for the structure's existence
+
+### Requirement: CycleDetectionIsStackSafe
+
+Detecting cycles in the dependency graph SHALL NOT recurse to a depth that scales with the
+dependency-chain length. The walk SHALL use an explicit, heap-allocated stack, so a repository with
+a long import or dependency chain cannot overflow the call stack and abort the analysis.
+
+A recursive DFS makes its depth equal to the chain length; a chain of a few thousand files then
+throws `RangeError: Maximum call stack size exceeded`. This walk runs in every analysis and is not
+inside a per-file exception boundary, so its overflow is terminal for the whole repository — unlike
+a per-file walk, whose overflow degrades only that file.
+
+#### Scenario: A deep dependency chain is analyzed
+
+- **GIVEN** a repository whose files form a dependency chain thousands of files deep
+- **WHEN** the dependency graph's cycles are detected
+- **THEN** the computation completes without a stack-overflow error, whether or not the chain
+  closes into a cycle
+
+### Requirement: IterativeCycleDetectionPreservesResults
+
+The stack-safe cycle detection SHALL produce the same result as the recursive detection it replaced:
+the same cycles, each with the same node order, in the same overall order, with the same
+deduplication of rotations.
+
+#### Scenario: Iterative and recursive detection agree
+
+- **GIVEN** any directed graph
+- **WHEN** cycles are detected iteratively and by the reference recursion
+- **THEN** the two results are identical — same cycles, same order, same rotation-deduplication
+
+### Requirement: StyleFingerprintWalkIsStackSafeAndDeterministic
+
+Tallying a file's style fingerprint SHALL walk the parsed tree without recursion depth that scales
+with the tree's nesting, so a deeply-nested but valid file cannot overflow the stack and lose its
+style contribution. The walk SHALL be pre-order with children visited in source order, producing
+counters identical to the recursive walk on every file.
+
+A recursive walk overflowed on a deeply-nested file; the throw was swallowed by the caller, dropping
+the file's whole style contribution silently. Because the stack limit is environment-dependent, the
+same repository could then yield different style fingerprints on different machines — a violation of
+the artifact's determinism.
+
+#### Scenario: A deeply-nested file keeps its style deterministically
+
+- **GIVEN** a valid file whose AST nests far deeper than the JS call stack allows
+- **WHEN** its style fingerprint is tallied
+- **THEN** the tally completes, the file's style is present rather than silently dropped, and its
+  shallow idioms are counted — identically on any environment
 
 ## Sub-components
 

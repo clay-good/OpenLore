@@ -8,6 +8,15 @@ status line. Two signals, both cheap to re-check:
   code before trusting a marker-less "shipped" claim)
 - **archivable** — `openspec archive <name>` completes
 
+## State as of 2026-10-17 (archive sweep)
+
+27 changes that had shipped but were still open were checked against `src/` and their PRs, then
+archived as `2026-10-17-*`. `bound-served-content-trust` was archived `--skip-specs` because its
+requirements were already in the main specs. `openspec validate --specs` passes. Still open but
+built: `honour-npmrc-in-update-check` (task 2.3 is a manual private-registry check for the
+author). `add-memory-trigger-predicates` is unbuilt. 71 changes stay open; 22 of them are the
+Kotlin changes marked NOT DOING. The counts in the sections below predate this sweep.
+
 ## State as of 2026-07-27 (spec-backlog repair pass)
 
 The corpus is fully green: **all 15 main specs and all 94 open changes pass `openspec

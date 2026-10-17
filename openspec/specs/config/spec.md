@@ -173,6 +173,13 @@ blast radius, and drift) and lexical retrieval SHALL never depend on embeddings 
 configuration SHALL make embeddings an optional ranking upgrade, not a prerequisite for a working
 index.
 
+An *unconfigured* keyword index and a *configured but unrealized* semantic index SHALL be
+distinguished wherever the system reports its retrieval state. The first is the default and SHALL NOT
+be reported as a problem. The second — a resolvable embedding provider whose vectors are absent from
+the index — SHALL be reported as a finding naming the unrealized expectation and its remedy, because
+the operator asked for something that did not happen. This distinction SHALL NOT reframe the keyword
+index itself as degraded in either case.
+
 > Implemented by `make-embeddings-zero-config` (2026-06-23). Provider selection is centralised in
 > `src/core/analyzer/embedder.ts` (`resolveEmbedder`); a null result is the keyword default, never an
 > error. `VectorIndex`/`SpecVectorIndex` are typed to the `Embedder` interface and the BM25-only path
@@ -184,6 +191,21 @@ index.
 - **WHEN** the index is built
 - **THEN** a first-class keyword index is produced and structural and lexical queries work, with no
   error and no degraded-fallback framing
+
+#### Scenario: A configured provider whose vectors are absent is a finding
+
+- **GIVEN** a repository whose `embedding` configuration or `EMBED_*` environment resolves a provider
+- **AND** an index that carries no vectors
+- **WHEN** the system reports its retrieval state
+- **THEN** a finding states that the configured provider is unrealized in the current index and names
+  the remedy, while the keyword results themselves are still described as a first-class mode
+
+#### Scenario: The two causes are never conflated
+
+- **GIVEN** two repositories serving keyword results — one with no provider configured, one with a
+  configured provider whose vectors are absent
+- **WHEN** each reports its retrieval state
+- **THEN** the reported cause differs, and only the second carries a finding
 
 ### Requirement: LocalEmbedderIsAZeroConfigOptInUpgrade
 
@@ -432,6 +454,43 @@ optional — zero required config keys is preserved.
 - **WHEN** the user runs `openlore features`
 - **THEN** auto-init is listed as disabled for this repo with the snippet to re-enable it,
   and no background build has run
+
+### Requirement: TlsOptOutVariablesAreSurfaceScopedAndDocumented
+
+The configuration surface SHALL expose one TLS certificate-verification opt-out variable per
+network surface — one for LLM provider requests and one for embedding requests — and SHALL NOT
+expose a variable that relaxes both. Each SHALL be documented alongside the certificate-
+authority mechanism that is preferred over it, which makes certificates verify rather than
+skipping the check.
+
+#### Scenario: Each surface has its own documented variable
+
+- **GIVEN** the documented environment-variable contract
+- **WHEN** an operator looks for how to reach an endpoint with a self-signed certificate
+- **THEN** they find a variable scoped to that surface alone, and the preferred
+  certificate-authority alternative described alongside it
+
+### Requirement: HalfConfiguredRemoteEmbeddingIsDisclosed
+
+A remote embedding endpoint requires both its base URL and its model name. When exactly one of
+them is supplied, the system SHALL disclose the incomplete configuration rather than proceed
+silently, and SHALL continue serving the keyword index.
+
+The disclosure SHALL name the missing variable. It SHALL NOT describe the keyword index as a
+degraded fallback, which would contradict
+`KeywordIndexIsAFirstClassDefaultNotADegradedFallback`.
+
+#### Scenario: A base URL with no model name is reported
+
+- **GIVEN** an environment supplying the remote embedding base URL but not the model name
+- **WHEN** the embedding provider is resolved
+- **THEN** a message names the missing model variable, and the keyword index serves queries
+
+#### Scenario: A fully unconfigured environment stays silent
+
+- **GIVEN** an environment supplying neither variable
+- **WHEN** the embedding provider is resolved
+- **THEN** no message is emitted, because that is the ordinary default rather than a mistake
 
 ## Technical Notes
 

@@ -63,7 +63,7 @@
       `origin/main`'s output
 
 ## Out of scope (measured, recorded, not fixed)
-- [ ] The call-graph build has its own ceiling, and it is NOT this defect. **It is now the binding
+- [x] The call-graph build has its own ceiling, and it is NOT this defect. **It is now the binding
       constraint**: on a 3,500-file / 205 MB repository at a 2 GB heap, `openlore install` dies in
       phase 4 on `origin/main` AND on this branch alike (194 MB content + 1,574 MB overlay, peak
       2,354 MB). Any repository large enough for the phase-3 fan-out to have OOM'd at that heap is
