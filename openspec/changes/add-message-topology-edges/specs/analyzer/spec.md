@@ -4,21 +4,11 @@
 
 ### Requirement: MessageTopologyEdgesFromStaticDiscriminants
 
-The dynamic-dispatch synthesis pass SHALL recover **message-topology edges**: an additive edge from
-the function that constructs a tagged message value to each handler clause that selects on the same
-discriminant. An edge SHALL be emitted only when all of the following are static in the AST: the
-discriminant field name, the tag literal at the construction site, and the tag literal the consumer
-compares. The rule SHALL NOT use an LLM, SHALL run after direct resolution, and SHALL only add
-edges — never modify or remove a directly-resolved or event-channel edge.
-
-The discriminant field SHALL be resolved from a declared discriminated-union type when that type is
-in the index, and otherwise from the member expression the consumer tests. A message whose tag is
-computed, spread from another value, or renamed between construction and consumption SHALL produce
-no edge.
-
-Recovery is per-language under the same discipline as event channels: a language whose construction
-or consumer idiom is not statically pairable SHALL emit no message edges rather than guess. The set
-in effect for this requirement is TypeScript/JavaScript.
+The synthesis pass SHALL add a **message-topology edge** from a function that sends a tagged
+message to each handler clause that selects the same field and tag, only when the field and both
+tags are static in the AST. The rule SHALL use no LLM, SHALL run after direct resolution, and SHALL
+only add edges. It SHALL apply to TypeScript/JavaScript only; another language emits no message
+edge rather than a guess.
 
 #### Scenario: A send and its switch case are connected
 
@@ -28,6 +18,14 @@ in effect for this requirement is TypeScript/JavaScript.
 - **WHEN** the call graph is built
 - **THEN** a synthesized message-topology edge exists from the constructing function to the clause's
   handling function
+
+### Requirement: MessageSitesAreTransportSendsAndClosedFieldConsumers
+
+A construction site SHALL count only when its object literal is passed to a transport call
+(`send`, `postMessage`, `dispatch`, …), directly or through `JSON.stringify`, and only for a closed
+set of fields (`type`, `kind`, `action`, …). A consumer SHALL be a `switch` over `x.<field>`, or an
+`if` whose condition is, or has as one `&&` operand, `x.<field> === <tag>`. A computed tag, or one a
+later spread can overwrite, SHALL give no edge.
 
 #### Scenario: An equality test is an equivalent consumer form
 
@@ -40,6 +38,13 @@ in effect for this requirement is TypeScript/JavaScript.
 - **GIVEN** a construction site tagged `"open"` and a consumer clause selecting `"close"`
 - **WHEN** the call graph is built
 - **THEN** no message-topology edge is created between them
+
+#### Scenario: A plain data value is not a message
+
+- **GIVEN** a function returning `{ kind: "calls" }` and a consumer containing `if (e.kind === "calls")`
+- **AND** the literal is not passed to a transport call
+- **WHEN** the call graph is built
+- **THEN** no message-topology edge is created
 
 #### Scenario: A computed tag produces no edge
 
@@ -54,7 +59,8 @@ in effect for this requirement is TypeScript/JavaScript.
   disabled
 - **WHEN** the two are compared
 - **THEN** every directly-resolved and event-channel edge is identical, and the enabled graph differs
-  only by added message-topology edges
+  only by added message-topology edges and the `tested_by` edges derived from those whose caller is
+  a test, as for every other synthesized rule
 
 #### Scenario: Two discriminant fields never cross
 
@@ -73,8 +79,9 @@ selected by that handler, not that the hop occurs on any particular execution.
 #### Scenario: A path discloses the hop kind
 
 - **GIVEN** a path traversing a message-topology edge
-- **WHEN** the path is reported
-- **THEN** the hop is labelled as a message edge, distinct from the call hops around it
+- **WHEN** `find_path` reports the path
+- **THEN** the step that edge reaches carries `via: "message-topology"`, and the call hops around it
+  carry no `via`
 
 #### Scenario: A consumer can exclude message edges
 
@@ -84,9 +91,9 @@ selected by that handler, not that the hop occurs on any particular execution.
 
 ### Requirement: UnpairedMessageSendsAreDisclosedAsTransportBoundaries
 
-A construction site with a static discriminant whose consumers are not present in the index SHALL be
-recorded as a transport boundary carrying the reason it was not paired, in the same way the analyzer
-already discloses dispatch sites it cannot follow. It SHALL NOT be reported as having no consumers,
+A send that no indexed clause can be paired with SHALL be recorded as a `message-send`
+dynamic-boundary site with its reason: `unindexed-message-consumer` when no clause selects its key,
+`over-cap` when the fan-out cap dropped the key. It SHALL NOT be reported as having no consumers,
 and no edge SHALL be invented to an unindexed consumer.
 
 #### Scenario: A message leaving the indexed repository is disclosed
@@ -100,6 +107,18 @@ and no edge SHALL be invented to an unindexed consumer.
 - **GIVEN** a recorded transport boundary in a function
 - **WHEN** a consumer reports that function's outgoing structure
 - **THEN** the boundary is disclosed, so an empty message fan-out is never read as proof of absence
+
+### Requirement: SingleFileMessageBoundariesClaimNoRepositoryWideAbsence
+
+The single-file dynamic-boundary re-derive SHALL pair a send only against that file's own handler
+clauses, and SHALL record any other send as `unresolved-in-file-scope`, never as
+`unindexed-message-consumer`: one file cannot show that no handler exists elsewhere.
+
+#### Scenario: A one-file re-derive stays in its scope
+
+- **GIVEN** a file with two sends, one of whose tags a clause in the same file selects
+- **WHEN** that file's dynamic-boundary record is re-derived on its own
+- **THEN** only the other send is a site, and its refusal is `unresolved-in-file-scope`
 
 ### Requirement: MessageTopologySupportIsDeclaredPerLanguage
 

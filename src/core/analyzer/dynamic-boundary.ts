@@ -61,6 +61,11 @@ export const DYNAMIC_BOUNDARY_KINDS = [
   'dynamic-import',
   'metaprogrammed-definition',
   'container-resolution',
+  /**
+   * A statically tagged message handed to a transport call whose consumer the message-topology
+   * rule could not pair (change: add-message-topology-edges). It hides a CALLEE, never a caller.
+   */
+  'message-send',
 ] as const;
 
 export type DynamicBoundaryKind = (typeof DYNAMIC_BOUNDARY_KINDS)[number];
@@ -73,6 +78,7 @@ export const DYNAMIC_BOUNDARY_KIND_LABEL: Record<DynamicBoundaryKind, string> = 
   'dynamic-import': 'dynamic module import',
   'metaprogrammed-definition': 'metaprogrammed definition',
   'container-resolution': 'DI container resolution',
+  'message-send': 'tagged message send',
 };
 
 /**
@@ -115,6 +121,12 @@ export const DYNAMIC_BOUNDARY_REFUSALS = [
   'synthesized-binding',
   /** The targets resolve, but no indexed symbol contains the construct to be the edge's caller. */
   'unattributed-caller',
+  /**
+   * A statically tagged message no indexed handler selects on: its consumer lives outside this
+   * index (another service, an unindexed repository), or does not exist (change:
+   * add-message-topology-edges).
+   */
+  'unindexed-message-consumer',
 ] as const;
 
 export type DynamicBoundaryRefusal = (typeof DYNAMIC_BOUNDARY_REFUSALS)[number];
@@ -130,6 +142,7 @@ export const DYNAMIC_BOUNDARY_REFUSAL_LABEL: Record<DynamicBoundaryRefusal, stri
   'over-cap': 'the dispatch table binds more targets than the synthesis fan-out cap',
   'synthesized-binding': 'a literal-reflective edge binds this dispatch, but directly-resolved-only traversal does not follow it',
   'unattributed-caller': 'the target resolves, but no indexed symbol contains the call to attach it to',
+  'unindexed-message-consumer': 'no indexed handler selects on this message tag',
 };
 
 /**
@@ -1566,6 +1579,42 @@ export function buildFileDynamicBoundary(
     // already bound, and a strict consumer must count every one of them.
     ...(bound.length > 0 ? { bound: [...bound].sort(byLine) } : {}),
   };
+}
+
+/**
+ * Add sites decided after the per-file records were built — the message-topology rule's transport
+ * boundaries, which need the whole repository's pairing (change: add-message-topology-edges). A
+ * file's existing record keeps its bound list and its count; the added sites join its list under
+ * the same per-file cap, and the exact total grows by the number added.
+ */
+export function mergeFileDynamicBoundarySites(
+  records: Map<string, FileDynamicBoundary> | undefined,
+  additions: Array<{ filePath: string; language: string; site: DynamicBoundarySite }>,
+): Map<string, FileDynamicBoundary> | undefined {
+  if (additions.length === 0) return records;
+  const out = new Map(records ?? []);
+  const byFile = new Map<string, { language: string; sites: DynamicBoundarySite[] }>();
+  for (const a of additions) {
+    const entry = byFile.get(a.filePath) ?? { language: a.language, sites: [] };
+    entry.sites.push(a.site);
+    byFile.set(a.filePath, entry);
+  }
+  const byLine = (a: DynamicBoundarySite, b: DynamicBoundarySite): number =>
+    a.line - b.line || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0);
+  for (const [filePath, { language, sites }] of byFile) {
+    const existing = out.get(filePath);
+    const all = [...(existing?.sites ?? []), ...sites].sort(byLine);
+    const kept = all.slice(0, DYNAMIC_BOUNDARY_SITE_CAP);
+    const total = (existing ? fileSiteCount(existing) : 0) + sites.length;
+    out.set(filePath, {
+      filePath,
+      language: existing?.language ?? language,
+      sites: kept,
+      ...(total > kept.length ? { totalSites: total, truncated: true as const } : {}),
+      ...(existing?.bound ? { bound: existing.bound } : {}),
+    });
+  }
+  return out;
 }
 
 /** Exact recorded-site count for one file — the total, not the retained list length. */

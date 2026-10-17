@@ -175,6 +175,17 @@ describe('handleFindPath', () => {
     expect(r.confidenceBoundary.knownUnknowable.some(c => c.rule === 'callback-registration')).toBe(true);
   });
 
+  it('labels the hop a synthesized edge realizes, and only that hop (change: add-message-topology-edges)', async () => {
+    const mid = node({ id: 'srv/handler.ts::handleRestart' });
+    const synthCg = graph([entry, mid, writer], [
+      { ...edgeC(entry.id, mid.id, 'synthesized'), synthesizedBy: 'message-topology' },
+      edgeC(mid.id, writer.id, 'import'),
+    ], { entryPoints: [entry] });
+    mockCtx.mockResolvedValue({ callGraph: synthCg } as never);
+    const r = await handleFindPath('/p', 'role:entrypoint', 'file:db/writer.ts') as { path: { chain: Array<{ name: string; via?: string }> } };
+    expect(r.path.chain.map(h => h.via)).toEqual([undefined, 'message-topology', undefined]);
+  });
+
   it('attaches a confidenceBoundary on the no-path answer', async () => {
     mockCtx.mockResolvedValue({ callGraph: graph([entry, writer], [], { entryPoints: [entry] }) } as never);
     const r = await handleFindPath('/p', 'role:entrypoint', 'file:db/writer.ts') as { path: null; confidenceBoundary: { complete: boolean } };

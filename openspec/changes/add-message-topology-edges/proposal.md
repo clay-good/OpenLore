@@ -17,12 +17,13 @@ explicit.
 ## What Changes
 
 - The dynamic-dispatch synthesis pass gains a **message-topology rule**: an additive edge from the
-  function that constructs a tagged message value (`{ type: "x", … }`, `{ kind: "x", … }`) to each
-  handler clause that tests the same discriminant field against the same literal (`switch`
-  case, `if (m.type === "x")`), when field name and literal are both static.
-- The discriminant field is taken from a declared discriminated-union type when one is in the index
-  (the shared protocol module), and otherwise from the member expression the consumer compares.
-  Neither path guesses: a message whose tag is computed, spread, or renamed produces no edge.
+  function that hands a tagged message (`ws.send({ type: "x", … })`, `dispatch({ kind: "x" })`) to a
+  transport call, to each handler clause that tests the same discriminant field against the same
+  tag (`switch` case, `if (m.type === "x")`), when field name and tag are both static.
+- The discriminant field is the member expression the consumer compares, from a closed set
+  (`type`, `kind`, `action`, `event`, `op`, `cmd`, `command`, `tag`). A message whose tag is
+  computed, or can be overwritten by a later spread, produces no edge. Reading the field from a
+  declared discriminated-union type is deferred (see `tasks.md` 2.3).
 - Synthesized message edges carry their own provenance label, distinct from directly-resolved calls
   and from event-channel edges, so every consumer can tell a message hop from a call and can
   exclude them.

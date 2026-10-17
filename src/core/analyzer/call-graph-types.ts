@@ -85,7 +85,7 @@ export interface ClassRelationshipFact {
 
 export interface DynamicEventFacts {
   group: string;
-  rule: 'event-channel' | 'type-event' | 'actor-message';
+  rule: 'event-channel' | 'type-event' | 'actor-message' | 'message-topology';
   registrations: Array<{ key: string; handlerIds: string[] }>;
   dispatches: Array<{ key: string; callerId: string; line: number }>;
 }
@@ -97,9 +97,26 @@ export interface DynamicCallbackFact {
   line: number;
 }
 
+/**
+ * A tagged message handed straight to a transport call (change: add-message-topology-edges).
+ * Becomes a disclosed boundary site when no indexed consumer selects its key.
+ */
+export interface DynamicMessageSendFact {
+  filePath: string;
+  language: string;
+  key: string;
+  callerId: string;
+  line: number;
+  /** Already neutralized, redacted and truncated, like every dynamic-boundary evidence string. */
+  evidence: string;
+  evidenceTruncated?: true;
+}
+
 export interface DynamicDispatchFacts {
   events: DynamicEventFacts[];
   callbacks: DynamicCallbackFact[];
+  /** Present only for a file with at least one transport send. */
+  messageSends?: DynamicMessageSendFact[];
 }
 
 /** Invocation-arity facts recovered from a live declaration AST. */

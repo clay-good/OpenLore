@@ -19,6 +19,7 @@
  *   - `iacProjection`  ← {@link isIacLanguage}              (iac/types.ts)
  *   - `styleFingerprint`← {@link STYLE_FINGERPRINT_LANGUAGES} (style-fingerprint.ts)
  *   - `dynamicBoundary`← {@link supportsDynamicBoundary}    (dynamic-boundary.ts)
+ *   - `messageTopology`← {@link MESSAGE_TOPOLOGY_LANGUAGES} (message-topology.ts)
  * A behavioral test (`language-support.test.ts`) cross-checks each flag against the live
  * extractor on a fixture, so the registry cannot silently drift from reality.
  *
@@ -43,6 +44,7 @@ import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
 import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
 import { COMPLEXITY_LANGUAGES } from './call-graph-complexity.js';
+import { MESSAGE_TOPOLOGY_LANGUAGES } from './message-topology.js';
 import {
   SCRIPT_CONTAINER_LIMITATIONS,
 } from './sfc-script-extractor.js';
@@ -67,6 +69,7 @@ export const CAPABILITIES = [
   'errorPropagation',
   'dynamicBoundary',
   'literalReflection',
+  'messageTopology',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -87,6 +90,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
   dynamicBoundary: 'Dynamic-boundary site recording: reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition and DI-container resolution are recorded as disclosed boundaries. A language WITHOUT this reports no site because none is looked for — never because it contains no dynamic dispatch.',
   literalReflection: 'Literal reflective dispatch recovery: a stable module-private JS/TS `const` dispatch table (`HANDLERS[k]()`, `HANDLERS["create"]()`) whose entries bind by their same-file declarations (never by name) becomes `literal-reflective` synthesized edges; every refusal stays a disclosed dynamic-boundary site. Self-typed receivers (`this["m"]()`, `getattr(self, "m")()`) and bare-name reflection are never resolved. A language WITHOUT this binds none of these shapes.',
+  messageTopology: 'Message-topology recovery: an object literal carrying a static discriminant (`{ type: "restart" }`; fields `type`/`kind`/`action`/`event`/`op`/`cmd`/`command`/`tag`) is paired with each handler clause that selects the same field and tag (`switch (m.type) case "restart"`, `if (m.type === "restart")`) as a `message-topology` synthesized edge. A computed, templated, or spread-overridden tag pairs nothing; a tagged message handed to a transport call (`send`, `postMessage`, …) with no indexed consumer is a disclosed `message-send` dynamic-boundary site. A language WITHOUT this recovers no message hop.',
 };
 
 /**
@@ -159,6 +163,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (ERROR_PROPAGATION_LANGUAGES.has(language)) out.push('errorPropagation');
   if (supportsDynamicBoundary(language)) out.push('dynamicBoundary');
   if (supportsLiteralReflection(language)) out.push('literalReflection');
+  if (MESSAGE_TOPOLOGY_LANGUAGES.has(language)) out.push('messageTopology');
   // Return in canonical CAPABILITIES order for determinism.
   return CAPABILITIES.filter(c => out.includes(c));
 }

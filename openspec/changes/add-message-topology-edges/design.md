@@ -67,6 +67,17 @@ Keys become `<field>:<literal>` (`type:restart`), reusing the existing kind-name
 so a protocol keyed on `type` can never pair with one keyed on `kind` that happens to share a tag
 literal. This is what makes the rule safe in a repository holding several protocols.
 
+**4a. As built: a construction counts only when it is handed to a transport call.**
+Measured on this repository before merge: with every tagged literal counted, the rule produced 154
+edges, about 150 of them data-flow pairings such as a `CallEdge` literal `{ kind: "calls" }` and a
+far-away `if (e.kind === "calls")`. Requiring the literal to be an argument of `send`, `postMessage`,
+`sendMessage`, `dispatch`, `broadcast`, `publish` or `emit` (directly or through `JSON.stringify`)
+left 7 edges, all real worker-message hops, and 40 disclosed `message-send` boundary sites
+(telemetry `emit` calls and a watchdog protocol whose consumer is inside a worker-source string).
+A Redux action creator that returns its action is not paired; its `dispatch({ type })` call site is.
+The field set is closed for the same reason. Decision 4 (declared unions) is deferred: with the
+transport gate, the false pairings it was meant to suppress no longer occur.
+
 **4. Declared unions are an optional precision input, never a requirement.**
 When a discriminated-union type is in the index, its discriminant field name is used to decide which
 object literals count as messages, which suppresses tagging on unrelated literals that happen to
