@@ -240,6 +240,8 @@ describe('user-scope hardening', () => {
 
       expect(result.conflict).toBe(true);
       expect(result.warnings.join(' ')).toMatch(/symbolic link|non-regular file/);
+      // The refused file is reported once, as not written — never also as created/updated.
+      expect(result.changes.filter((c) => c.path.endsWith('.claude.json')).map((c) => c.kind)).toEqual(['noop']);
       expect(JSON.parse(await readFile(victim, 'utf8'))).toEqual({ notOurs: true });
       expect(await exists(join(home, '.claude', 'CLAUDE.md'))).toBe(false);
     });

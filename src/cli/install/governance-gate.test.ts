@@ -3,7 +3,7 @@
  * gate in non-blocking autopilot mode (change: unify-onboarding-entrypoint).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
@@ -15,6 +15,7 @@ import { runInstall, wireGovernanceGate } from './index.js';
 import { resolveTrustedHookLauncher } from '../git-hooks.js';
 import { OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
 import { getDefaultConfig } from '../../core/services/config-manager.js';
+import { logger } from '../../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -157,6 +158,19 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
 
     expect(await runInstall({ cwd: dir, analyze: false, home, uninstall: true })).toBe(0);
     expect(await exists(join(dir, 'CLAUDE.md'))).toBe(false);
+  });
+
+  it('a re-install does not attribute the autopilot it wrote to the repository', async () => {
+    await initGit();
+    await writeConfig(dir);
+    expect(await wireGovernanceGate(dir)).toBe('wired');
+    const info = vi.spyOn(logger, 'info');
+    try {
+      expect(await wireGovernanceGate(dir)).toBe('wired');
+      expect(info.mock.calls.flat().join(' ')).not.toContain('came from the repository');
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it('an agent-scoped removal leaves the commit gate alone', async () => {
