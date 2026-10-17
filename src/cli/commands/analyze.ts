@@ -45,6 +45,7 @@ import {
   readAnalysisProgress,
   type AnalysisOwnership,
 } from '../../core/runtime/analysis-ownership.js';
+import { OWNERSHIP_HEARTBEAT_STALE_MS } from '../../core/runtime/advisory-lock.js';
 import {
   analysisConfigFingerprintInput,
   analysisGeneratedExcludes,
@@ -223,7 +224,12 @@ async function reportActiveAnalysis(
     + (alive === null ? '' : alive ? ' — owner process is alive' : ' — owner process is GONE'),
   );
   if (alive === false) {
-    logger.info('Reclaim', 'The owner is dead; the next analyze reclaims this lock automatically.');
+    // Reclaiming needs BOTH a dead owner and a heartbeat older than the window; saying "the next
+    // analyze reclaims it" inside the window sent users to delete the lock by hand.
+    const waitMs = OWNERSHIP_HEARTBEAT_STALE_MS - ownership.heartbeatAgeMs;
+    logger.info('Reclaim', waitMs > 0
+      ? `The owner is dead; the lock becomes reclaimable in ${formatDuration(waitMs)}, and the next analyze after that reclaims it automatically.`
+      : 'The owner is dead; the next analyze reclaims this lock automatically.');
   }
 
   const progress = await readAnalysisProgress(outputPath);

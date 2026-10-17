@@ -12,4 +12,6 @@
  */
 import { maybeReexecForHeap } from './heap-sizing.js';
 
-maybeReexecForHeap();
+// Top-level await: when the heap is re-executed this never settles (the process exits with the
+// child), so the modules importing this — commander and the commands — never evaluate in the parent.
+await maybeReexecForHeap();
