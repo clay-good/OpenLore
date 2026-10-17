@@ -30,13 +30,13 @@ vi.mock('../../core/services/one-shot-index-build.js', async (importOriginal) =>
   };
 });
 
-import { orientCommand, readStdin } from './orient.js';
+import { implicitOrientRoot, orientCommand, readStdin } from './orient.js';
 import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
 import { pointerLineFor } from './orient-inject-render.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const mockHandleOrient = vi.mocked(handleOrient);
 const mockExistsSync = vi.mocked(existsSync);
@@ -393,5 +393,27 @@ describe('orient command', () => {
       s.isTTY = true;
       expect(await readStdin(s as unknown as NodeJS.ReadStream, 1000)).toBe('');
     });
+  });
+});
+
+describe('implicitOrientRoot', () => {
+  beforeEach(() => mockExistsSync.mockReset().mockReturnValue(false));
+
+  it('serves the nearest ancestor index from a subdirectory instead of building a second one', () => {
+    const repo = resolve('/work/repo');
+    mockExistsSync.mockImplementation((p) => String(p) === join(repo, '.openlore', 'analysis', 'llm-context.json'));
+    expect(implicitOrientRoot(join(repo, 'src', 'deep'))).toBe(repo);
+  });
+
+  it('stops at the git work-tree root and never takes a parent repository index', () => {
+    const outer = resolve('/work/outer');
+    const inner = join(outer, 'vendor', 'inner');
+    mockExistsSync.mockImplementation((p) => String(p) === join(inner, '.git')
+      || String(p) === join(outer, '.openlore', 'analysis', 'llm-context.json'));
+    expect(implicitOrientRoot(join(inner, 'src'))).toBe(inner);
+  });
+
+  it('keeps the start directory when nothing encloses it', () => {
+    expect(implicitOrientRoot('/fake/proj')).toBe('/fake/proj');
   });
 });

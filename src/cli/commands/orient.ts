@@ -13,7 +13,7 @@
 
 import { Command, Option } from 'commander';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 // Repo-derived values are printed here with bare console.log (not via logger), so
 // they are neutralized explicitly. Whole-line sanitizing is not an option: these
@@ -104,6 +104,21 @@ function reportMetrics(startNs: bigint, result: Record<string, unknown>): void {
 /** True once `openlore analyze` has produced an llm-context artifact. */
 function hasAnalysis(directory: string): boolean {
   return existsSync(join(directory, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'));
+}
+
+/**
+ * The project an implicit (cwd) orient serves: the nearest ancestor that already has an
+ * index, else the enclosing git work tree's root, else the start directory. Agent hooks run
+ * from wherever the agent's shell is; from `<repo>/src` a plain cwd would report "no index"
+ * and start a second build that writes `src/.openlore`. The walk never crosses a `.git`
+ * boundary, so a nested repository is never served its parent's index.
+ */
+export function implicitOrientRoot(start: string): string {
+  const origin = resolve(start);
+  for (let dir = origin; ; dir = dirname(dir)) {
+    if (hasAnalysis(dir) || existsSync(join(dir, '.git'))) return dir === origin ? start : dir;
+    if (dirname(dir) === dir) return start;
+  }
 }
 
 /** Session-start primer printed when orient is invoked without a task. */
@@ -214,7 +229,7 @@ prints a short session-start primer (used by the install SessionStart hook).
 `
   )
   .action(async (taskArg: string | undefined, opts: OrientCliOptions) => {
-    const directory = opts.directory ?? process.cwd();
+    const directory = opts.directory ?? implicitOrientRoot(process.cwd());
     const asJson = opts.json ?? false;
     // --task wins; otherwise a bare positional task is honored.
     const task = (opts.task ?? taskArg)?.trim();
