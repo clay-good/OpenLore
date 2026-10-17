@@ -60,9 +60,11 @@ describe('doctor Git hook reachability', () => {
     await execFileAsync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
     await mkdir(join(root, '.githooks'), { recursive: true });
     const gone = join(root, 'Cellar', 'node', '1.0.0', 'bin', 'node');
+    const cli = join(root, 'cli.js');
+    await writeFile(cli, '');
     await writeFile(
       join(root, '.githooks', 'pre-commit'),
-      `#!/bin/sh\n# openlore-decisions-hook\n'${gone}' '${process.argv[1]}' enforce --hook\n`,
+      `#!/bin/sh\n# openlore-decisions-hook\n'${gone}' '${cli}' enforce --hook\n# end-openlore-decisions-hook\n`,
       { mode: 0o755 },
     );
 
@@ -70,7 +72,28 @@ describe('doctor Git hook reachability', () => {
 
     expect(result.status).toBe('fail');
     expect(result.detail).toContain(gone);
-    expect(result.detail).not.toContain(process.argv[1]);
+    expect(result.detail).not.toContain(cli);
+  });
+
+  it('ignores quoted paths in the user\'s own hook lines, and reads an apostrophe in the install path', async () => {
+    const root = await repository();
+    await execFileAsync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
+    await mkdir(join(root, '.githooks'), { recursive: true });
+    const cli = join(root, 'cli.js');
+    await writeFile(cli, '');
+    const odd = join(root, "o'brien", 'node');
+    await mkdir(join(root, "o'brien"), { recursive: true });
+    await writeFile(odd, '');
+    const quotedOdd = `'${odd.replace(/'/g, `'"'"'`)}'`;
+    await writeFile(
+      join(root, '.githooks', 'pre-commit'),
+      `#!/bin/sh\nsed -i '/^#/d' notes.txt\n# openlore-decisions-hook\n${quotedOdd} '${cli}' enforce --hook\n# end-openlore-decisions-hook\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await checkHookReachability(root);
+
+    expect(result.status).toBe('ok');
   });
 
   it('does not bless a Husky public script when Git has no executable shim', async () => {

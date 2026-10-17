@@ -22,7 +22,8 @@ describe.skipIf(process.platform === 'win32')('vector index confinement', () => 
 
   it('refuses a vector-index symlink that leaves the analysis directory', () => {
     symlinkSync(outside, join(outputDir, 'vector-index'));
-    expect(() => VectorIndex.exists(outputDir)).toThrow(/Path escape blocked/);
+    // Read path: reported as no index, so orient degrades instead of failing.
+    expect(VectorIndex.exists(outputDir)).toBe(false);
     expect(readdirSync(outside)).toEqual([]);
   });
 

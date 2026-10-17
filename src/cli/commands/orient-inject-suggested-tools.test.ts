@@ -40,4 +40,19 @@ describe('buildInjection suggested tools', () => {
     const block = await buildInjection(dir, 'add rate limiting to the API');
     expect(block).toContain('Suggested tools: record_decision, get_subgraph, check_spec_drift');
   });
+
+  it('honors a user-scope full preset when the repository wires nothing', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'openlore-inject-home-'));
+    vi.stubEnv('OPENLORE_HOME', home);
+    try {
+      await writeFile(join(home, '.claude.json'), JSON.stringify({
+        mcpServers: { openlore: { command: '/usr/bin/node', args: ['/x/cli.js', 'mcp', '--preset', 'full'] } },
+      }));
+      const block = await buildInjection(dir, 'add rate limiting to the API');
+      expect(block).toContain('Suggested tools: record_decision, get_subgraph, check_spec_drift');
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });

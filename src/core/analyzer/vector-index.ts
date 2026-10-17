@@ -2393,7 +2393,10 @@ export class VectorIndex {
    * Returns true if a vector index has been built for this output directory.
    */
   static exists(outputDir: string): boolean {
-    if (!existsSync(dbPathFor(outputDir))) return false;
+    let dbPath: string;
+    // An index path that escapes the analysis directory is not a usable index.
+    try { dbPath = dbPathFor(outputDir); } catch { return false; }
+    if (!existsSync(dbPath)) return false;
     return readMeta(outputDir) !== INVALID_META;
   }
 }

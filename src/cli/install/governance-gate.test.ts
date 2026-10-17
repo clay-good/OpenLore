@@ -150,6 +150,18 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     expect(claude).toContain('openlore decisions record --title');
   });
 
+  it('a re-install keeps user text after a decisions block whose end marker was removed', async () => {
+    await initGit();
+    await writeConfig(dir);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    const path = join(dir, 'CLAUDE.md');
+    const cut = (await readFile(path, 'utf8')).replace('<!-- end-openlore-decisions-instructions -->', '') + '\nMY OWN NOTES\n';
+    await writeFile(path, cut);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    expect(await readFile(path, 'utf8')).toContain('MY OWN NOTES');
+  });
+
   it('uninstall deletes agent files it created instead of leaving empty stubs', async () => {
     await initGit();
     await writeConfig(dir);

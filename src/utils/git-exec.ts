@@ -168,7 +168,17 @@ function hardenedArgs(file: string, args?: readonly string[]): string[] | undefi
  */
 function hardenedEnv(file: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
   if (!isGitBinary(file)) return env;
+  // Only an explicit caller env may opt out ({@link trustedLazyFetchEnv}); an inherited value may not.
+  if (env && env.GIT_NO_LAZY_FETCH === '0') return env;
   return { ...(env ?? process.env), GIT_NO_LAZY_FETCH: '1' };
+}
+
+/**
+ * Env for a git call on a repository OpenLore cloned itself from a trusted URL (the
+ * live-data fixture cache): its partial clone needs lazy fetch to check out.
+ */
+export function trustedLazyFetchEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_NO_LAZY_FETCH: '0' };
 }
 
 /** Promisified `execFile`, `windowsHide: true` always applied. */

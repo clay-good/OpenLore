@@ -126,8 +126,9 @@ describe('user and project configuration layers', () => {
     expect((await readOpenLoreConfig(project))?.embedding).toMatchObject({ apiKey: 'user-secret' });
   });
 
-  it('says once why an inherited user apiKey is not sent to a project-chosen endpoint', async () => {
-    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+  it('says once, on stderr, why an inherited user apiKey is not sent to a project-chosen endpoint', async () => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdout = vi.spyOn(console, 'log');
     try {
       await writeFile(globalPath, JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1', model: 'm', apiKey: 'user-secret' } }));
       await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'http://127.0.0.1:9999/v1' } }));
@@ -135,6 +136,7 @@ describe('user and project configuration layers', () => {
       await readOpenLoreConfig(project);
       const withheld = warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('embedding.apiKey'));
       expect(withheld).toHaveLength(1);
+      expect(stdout.mock.calls.some(([m]) => String(m).includes('embedding.apiKey'))).toBe(false);
       expect(withheld[0]).not.toContain('user-secret');
       // The same endpoint as the user's keeps the key, so there is nothing to say.
       warn.mockClear();
@@ -143,6 +145,7 @@ describe('user and project configuration layers', () => {
       expect(warn.mock.calls.some(([m]) => String(m).includes('embedding.apiKey'))).toBe(false);
     } finally {
       warn.mockRestore();
+      stdout.mockRestore();
     }
   });
 

@@ -15,6 +15,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 
 /**
@@ -93,6 +94,20 @@ export async function resolveWiredPreset(rootDir: string): Promise<WiredPreset> 
     if (preset) return { preset, source: rel };
   }
   return { preset: LEAN_DEFAULT_PRESET, source: 'default' };
+}
+
+/**
+ * The preset of the USER-scope Claude Code entry (`~/.claude.json`, or under
+ * `OPENLORE_HOME`), or null when it names none. For runtime callers only (the inject
+ * hook): generated repository files must not depend on one machine's home config.
+ */
+export async function resolveUserScopePreset(home = process.env.OPENLORE_HOME || homedir()): Promise<string | null> {
+  try {
+    const entry = openloreEntry(JSON.parse(await readFile(join(home, '.claude.json'), 'utf-8')));
+    return entry ? presetFromArgs(entry.args) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -19,7 +19,7 @@
  */
 
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
-import { presetToolNames, resolveWiredPreset } from '../../core/services/wired-preset.js';
+import { presetToolNames, resolveUserScopePreset, resolveWiredPreset } from '../../core/services/wired-preset.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { emit } from '../../core/services/telemetry.js';
 import {
@@ -133,7 +133,9 @@ export async function buildInjection(
   try {
     const result = (await handleOrient(directory, task, 8, undefined, true)) as LeanOrientResult;
     // Suggest only tools the wired MCP surface exposes (default surface when unwired).
-    const available = await presetToolNames((await resolveWiredPreset(directory)).preset);
+    const wired = await resolveWiredPreset(directory);
+    const preset = wired.source === 'default' ? (await resolveUserScopePreset()) ?? wired.preset : wired.preset;
+    const available = await presetToolNames(preset);
     if (available && result.suggestedTools) {
       result.suggestedTools = result.suggestedTools.filter((t) => available.has(t));
     }

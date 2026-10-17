@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { execFileGit, execFileGitSync } from './git-exec.js';
+import { execFileGit, execFileGitSync, trustedLazyFetchEnv } from './git-exec.js';
 
 function gitVersionAtLeast(major: number, minor: number): boolean {
   const out = execFileSync('git', ['--version'], { encoding: 'utf8', windowsHide: true });
@@ -55,6 +55,20 @@ describe.skipIf(process.platform === 'win32' || !gitVersionAtLeast(2, 45))('part
     await expect(execFileGit('git', ['show', 'HEAD~1:file.txt'], { cwd: victim })).rejects.toThrow();
     expect(() => execFileGitSync('git', ['cat-file', 'blob', 'HEAD~1:file.txt'], { cwd: victim, stdio: 'pipe' })).toThrow();
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it('ignores an inherited opt-out; only an explicit trusted env may lazy-fetch', async () => {
+    const previous = process.env.GIT_NO_LAZY_FETCH;
+    process.env.GIT_NO_LAZY_FETCH = '0';
+    try {
+      await expect(execFileGit('git', ['show', 'HEAD~1:file.txt'], { cwd: victim })).rejects.toThrow();
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.GIT_NO_LAZY_FETCH;
+      else process.env.GIT_NO_LAZY_FETCH = previous;
+    }
+    await execFileGit('git', ['show', 'HEAD~1:file.txt'], { cwd: victim, env: trustedLazyFetchEnv() });
+    expect(existsSync(marker)).toBe(true);
   });
 
   it('keeps a caller-supplied environment', async () => {

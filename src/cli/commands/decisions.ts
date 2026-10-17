@@ -83,6 +83,7 @@ import {
 // ============================================================================
 
 const AGENT_INSTRUCTIONS_MARKER = '<!-- openlore-decisions-instructions -->';
+const AGENT_INSTRUCTIONS_END_MARKER = '<!-- end-openlore-decisions-instructions -->';
 
 /**
  * The agent-file block for the wired surface. The decisions body is the same
@@ -130,6 +131,11 @@ const AGENT_INSTRUCTIONS_RE = /\n*<!-- openlore-decisions-instructions -->[\s\S]
 async function injectAgentInstructions(rootPath: string, filePath: string, block: string): Promise<'injected' | 'already' | 'missing'> {
   if (!(await fileExists(filePath))) return 'missing';
   const content = await readFile(filePath, 'utf-8');
+  if (content.includes(AGENT_INSTRUCTIONS_MARKER)) {
+    // Refresh only a complete block. With the end marker gone (a hand edit), the regex
+    // would run from the old start marker to the NEW block's end and eat the user's text.
+    if (!content.includes(AGENT_INSTRUCTIONS_END_MARKER)) return 'already';
+  }
   const base = content.includes(AGENT_INSTRUCTIONS_MARKER) ? content.replace(AGENT_INSTRUCTIONS_RE, '\n') : content;
   const next = base.trimEnd() + '\n\n' + block;
   if (next === content) return 'already';

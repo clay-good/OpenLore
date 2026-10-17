@@ -291,10 +291,14 @@ function warnWithheldCredential(projectPath: string, block: string, userPath: st
   const key = `${projectPath}\u0000${block}`;
   if (withheldCredentialWarnings.has(key)) return;
   withheldCredentialWarnings.add(key);
-  logger.warning(
-    `${block}.apiKey from ${userPath} is not used here: ${projectPath} sets its own ${block} endpoint, ` +
-      'and a repository may not choose where your key is sent. Use the same endpoint as your user ' +
-      `config, or remove the endpoint from the project's ${block} block.`,
+  // STDERR, like emitConfigValidationWarnings: this hub is read by --json and hook paths.
+  if (logger.getOptions().quiet) return;
+  process.stderr.write(
+    `${colorForStderr().yellow('[warn]')} ` + sanitizeForTerminal(
+      `${block}.apiKey from ${userPath} is not used here: ${projectPath} sets its own ${block} endpoint, ` +
+        'and a repository may not choose where your key is sent. Use the same endpoint as your user ' +
+        `config, or remove the endpoint from the project's ${block} block.`,
+    ) + '\n',
   );
 }
 
