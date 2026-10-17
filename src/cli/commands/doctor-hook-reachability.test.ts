@@ -55,6 +55,24 @@ describe('doctor Git hook reachability', () => {
     expect(result.detail).toMatch(/installed and executable/);
   });
 
+  it('fails an executable gate whose pinned launcher no longer exists', async () => {
+    const root = await repository();
+    await execFileAsync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
+    await mkdir(join(root, '.githooks'), { recursive: true });
+    const gone = join(root, 'Cellar', 'node', '1.0.0', 'bin', 'node');
+    await writeFile(
+      join(root, '.githooks', 'pre-commit'),
+      `#!/bin/sh\n# openlore-decisions-hook\n'${gone}' '${process.argv[1]}' enforce --hook\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await checkHookReachability(root);
+
+    expect(result.status).toBe('fail');
+    expect(result.detail).toContain(gone);
+    expect(result.detail).not.toContain(process.argv[1]);
+  });
+
   it('does not bless a Husky public script when Git has no executable shim', async () => {
     const root = await repository();
     await execFileAsync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: root });

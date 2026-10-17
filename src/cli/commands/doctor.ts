@@ -216,6 +216,20 @@ export async function checkHookReachability(rootPath: string): Promise<CheckResu
   if (OPENLORE_PRE_COMMIT_MARKER.test(activeContent)) {
     try {
       await access(target.executionPath, fsConstants.X_OK);
+      // The gate pins an absolute Node + CLI. A removed Node version (e.g. after
+      // `brew upgrade node`) leaves an executable hook that fails every commit.
+      const missing: string[] = [];
+      for (const [, path] of activeContent.matchAll(/'((?:\/|[A-Za-z]:[\\/])[^']+)'/g)) {
+        try { await access(path); } catch { missing.push(path); }
+      }
+      if (missing.length > 0) {
+        return {
+          name: 'Git hook reachability',
+          status: 'fail',
+          detail: `OpenLore gate at ${target.hookPath} runs a launcher that no longer exists (${missing.join(', ')}), so every commit fails`,
+          fix: "Run 'openlore install' to re-wire the hook to this install",
+        };
+      }
       return {
         name: 'Git hook reachability',
         status: 'ok',

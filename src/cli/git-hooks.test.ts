@@ -4,6 +4,8 @@ import { promisify } from 'node:util';
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { stableHomebrewPath } from '../utils/platform-command.js';
 import { installEnforcementHook, uninstallEnforcementHook } from './commands/enforce.js';
 import {
   installPreCommitHook as installDecisionsHook,
@@ -133,7 +135,7 @@ describe('effective Git hook delivery', () => {
 
     const preCommit = await readFile(join(root, '.githooks', 'pre-commit'), 'utf-8');
     expect(preCommit).toContain('# openlore-decisions-hook');
-    expect(preCommit).toContain(process.execPath);
+    expect(preCommit).toContain(stableHomebrewPath(realpathSync(process.execPath)));
     expect(preCommit).not.toContain('./node_modules/.bin/openlore');
     expect(preCommit).not.toContain('./dist/cli/index.js');
     expect(await readFile(join(root, '.githooks', 'post-commit'), 'utf-8'))
@@ -184,7 +186,7 @@ describe('effective Git hook delivery', () => {
     await installDriftHook(root);
 
     const hook = await readFile(join(root, '.git', 'hooks', 'pre-commit'), 'utf-8');
-    expect(hook).toContain(process.execPath);
+    expect(hook).toContain(stableHomebrewPath(realpathSync(process.execPath)));
     expect(hook).not.toContain('node_modules/.bin/openlore');
     expect(hook).not.toContain('npx');
     expect(hook).not.toMatch(/openlore drift[^\n]*2>\/dev\/null/);
