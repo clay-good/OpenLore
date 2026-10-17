@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, stat, symlink, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import {
   atomicWriteFile,
   casUpdate,
@@ -39,8 +40,25 @@ vi.mock('../../utils/logger.js', () => ({
 }));
 
 let root: string;
-beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'openlore-atomic-')); });
-afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+let writers: Promise<unknown>[];
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'openlore-atomic-'));
+  writers = [];
+});
+afterEach(async () => {
+  // A failed assertion or timeout does not cancel the writers. Drain them before
+  // removing their files or letting a callback observe the next fixture's root.
+  await Promise.allSettled(writers);
+  await rm(root, { recursive: true, force: true });
+});
+
+async function concurrentWrites<T>(operations: Promise<T>[]): Promise<T[]> {
+  writers.push(...operations);
+  const results = await Promise.allSettled(operations);
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Concurrent writes failed');
+  return results.map(result => (result as PromiseFulfilledResult<T>).value);
+}
 
 function note(id: string): AnchoredMemory {
   return { id, kind: 'note', content: `note ${id}`, anchors: [], recordedAt: '2026-01-01T00:00:00Z' };
@@ -132,8 +150,8 @@ describe('casUpdate', () => {
   });
 
   it('N concurrent casUpdate calls lose zero writes', async () => {
-    const N = 25;
-    await Promise.all(
+    const N = 100;
+    await concurrentWrites(
       Array.from({ length: N }, (_, i) =>
         casUpdate<Store>({ storePath: path(), load, serialize, mutate: (s) => ({ ...s, items: [...s.items, `w${i}`] }) }),
       ),
@@ -141,6 +159,86 @@ describe('casUpdate', () => {
     const final = await load();
     expect(final.items.sort()).toEqual(Array.from({ length: N }, (_, i) => `w${i}`).sort());
     expect(final.sequence).toBe(N);
+  });
+
+  it('continues queued writes after one mutation throws and admits a later batch', async () => {
+    const operations = Array.from({ length: 20 }, (_, i) => casUpdate<Store>({
+      storePath: path(), load, serialize,
+      mutate: s => {
+        if (i === 5) throw new Error('rejected mutation');
+        return { ...s, items: [...s.items, `w${i}`] };
+      },
+    }));
+    writers.push(...operations);
+    const results = await Promise.allSettled(operations);
+    expect(results.filter(result => result.status === 'rejected')).toEqual([
+      { status: 'rejected', reason: expect.objectContaining({ message: 'rejected mutation' }) },
+    ]);
+    expect((await load()).items).toEqual(Array.from({ length: 20 }, (_, i) => `w${i}`).filter(item => item !== 'w5'));
+    const later = await casUpdate<Store>({ storePath: path(), load, serialize, mutate: s => ({ ...s, items: [...s.items, 'later'] }) });
+    expect(later.sequence).toBe(20);
+    expect(later.items.at(-1)).toBe('later');
+    expect((await readdir(root)).filter(name => name.includes('.lock'))).toEqual([]);
+  });
+
+  it('keeps different stores independent while one store has queued writers', async () => {
+    let entered!: () => void;
+    let resume!: () => void;
+    const loading = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { resume = resolve; });
+    let secondLoaded = false;
+    const first = casUpdate<Store>({
+      storePath: path(), serialize, mutate: s => ({ ...s, items: ['first'] }),
+      load: async () => { entered(); await blocked; return load(); },
+    });
+    const second = casUpdate<Store>({
+      storePath: path(), serialize, mutate: s => ({ ...s, items: [...s.items, 'second'] }),
+      load: async () => { secondLoaded = true; return load(); },
+    });
+    writers.push(first, second);
+    try {
+      await loading;
+      const other = await casUpdate<Store>({
+        storePath: join(root, 'other.json'), serialize,
+        load: async () => ({ items: [], sequence: 0 }), mutate: s => ({ ...s, items: ['other'] }),
+      });
+      expect(other.items).toEqual(['other']);
+      expect(secondLoaded).toBe(false);
+    } finally {
+      resume();
+      await Promise.allSettled([first, second]);
+    }
+    expect((await load()).items).toEqual(['first', 'second']);
+  });
+
+  it('retains the filesystem lock across independent processes with local queues', async () => {
+    const moduleUrl = new URL('./atomic-store.ts', import.meta.url).href;
+    const storePath = path();
+    const run = (worker: number) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+        import { readFile } from 'node:fs/promises';
+        const { casUpdate } = await import(${JSON.stringify(moduleUrl)});
+        const storePath = ${JSON.stringify(storePath)};
+        const load = async () => {
+          try { return JSON.parse(await readFile(storePath, 'utf8')); }
+          catch (err) { if (err.code === 'ENOENT') return { items: [], sequence: 0 }; throw err; }
+        };
+        const results = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => casUpdate({
+          storePath, load, serialize: JSON.stringify,
+          mutate: s => ({ ...s, items: [...s.items, ${worker} + ':' + i] }),
+        })));
+        if (results.some(result => result.status === 'rejected')) throw new Error(JSON.stringify(results));
+      `], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', chunk => { stderr += String(chunk); });
+      child.on('error', reject);
+      child.on('close', code => code === 0 ? resolve() : reject(new Error(`Writer ${worker} exited ${code}: ${stderr}`)));
+    });
+    await concurrentWrites(Array.from({ length: 3 }, (_, worker) => run(worker)));
+    const final = await load();
+    expect(final.sequence).toBe(30);
+    expect(new Set(final.items).size).toBe(30);
+    expect((await readdir(root)).filter(name => name.includes('.lock'))).toEqual([]);
   });
 
   it('steals a stale lock left by a crashed holder and still commits', async () => {
@@ -252,7 +350,7 @@ describe('memory store — durability + concurrency end-to-end', () => {
 
   it('N concurrent remember-style updates persist all N memories', async () => {
     const N = 20;
-    await Promise.all(
+    await concurrentWrites(
       Array.from({ length: N }, (_, i) =>
         updateMemoryStore(root, (s: MemoryStore) => ({
           ...s,
@@ -361,8 +459,8 @@ describe('decision store — concurrent CAS writers across mutation kinds', () =
   }
 
   it('N concurrent upserts (record-style) persist every decision', async () => {
-    const N = 25;
-    await Promise.all(
+    const N = 100;
+    await concurrentWrites(
       Array.from({ length: N }, (_, i) =>
         updateDecisionStore(root, (s) => upsertDecisions(s, [decision(`d${i}`)])),
       ),
@@ -380,7 +478,7 @@ describe('decision store — concurrent CAS writers across mutation kinds', () =
     // Race: a consolidation that rejects draftA/draftB and writes a consolidated
     // decision, concurrently with two fresh record_decision-style upserts. With CAS
     // on a single lock, the consolidation snapshot cannot clobber the new records.
-    await Promise.all([
+    await concurrentWrites([
       updateDecisionStore(root, (s) => {
         let next = patchDecision(s, 'draftA', { status: 'rejected' });
         next = patchDecision(next, 'draftB', { status: 'rejected' });
