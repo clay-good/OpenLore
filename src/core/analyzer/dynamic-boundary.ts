@@ -151,7 +151,7 @@ export const DYNAMIC_BOUNDARY_REFUSAL_LABEL: Record<DynamicBoundaryRefusal, stri
   'over-cap': 'the dispatch table binds more targets than the synthesis fan-out cap',
   'synthesized-binding': 'a literal-reflective edge binds this dispatch, but directly-resolved-only traversal does not follow it',
   'unattributed-caller': 'the target resolves, but no indexed symbol contains the call to attach it to',
-  'unindexed-message-consumer': 'no indexed handler selects on this message tag',
+  'unindexed-message-consumer': 'no handler the rule recognizes selects on this message tag',
   'uncomparable-message-consumer': 'a handler compares this message field against a constant spelled like this tag, which cannot be evaluated statically',
   'unattributed-message-consumer': 'a handler selects this message tag, but no indexed function contains it',
   'test-only-message-consumer': 'only test code selects this message tag',

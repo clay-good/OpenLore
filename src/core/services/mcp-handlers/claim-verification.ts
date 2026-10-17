@@ -38,7 +38,7 @@
 import { join } from 'node:path';
 import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
-import { traversalIndexFor } from './traversal.js';
+import { traversalIndexFor, messageFreeTraversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
 import { deadCodeIds, loadExternalWiring } from './reachability.js';
 import {
@@ -258,10 +258,10 @@ function verifyReach(
   const crossesMessageHop = (p: string[]): boolean =>
     p.some((id, i) => i > 0 && pairIndex.get((dir === 'forward' ? p[i - 1] : id) + '\x00' + (dir === 'forward' ? id : p[i - 1]))?.synthesizedBy === MESSAGE_TOPOLOGY_RULE);
   if (path && crossesMessageHop(path)) {
-    const withoutMessages = { ...cg, edges: cg.edges.filter(e => e.synthesizedBy !== MESSAGE_TOPOLOGY_RULE) };
-    const callPath = reachWithPath(subject.id, object.id, traversalIndexFor(withoutMessages), dir);
+    const callPath = reachWithPath(subject.id, object.id, messageFreeTraversalIndexFor(cg), dir);
     if (!callPath) {
-      const names = (kind === 'reaches' ? path : [...path].reverse()).map(id => cg.nodes.find(n => n.id === id)?.name ?? id);
+      const nameOf = new Map(cg.nodes.map(n => [n.id, n.name] as const));
+      const names = (kind === 'reaches' ? path : [...path].reverse()).map(id => nameOf.get(id) ?? id);
       return {
         verdict: 'unverifiable',
         reason: `The only path ${kind === 'reaches' ? `from "${subject.name}" to "${object.name}"` : `from "${object.name}" to "${subject.name}"`} `

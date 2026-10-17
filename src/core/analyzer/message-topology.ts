@@ -60,7 +60,7 @@ const TRANSPORT_METHODS: ReadonlySet<string> = new Set([
  * Cheap pre-filter: the file must name a discriminant field as a property (`x.type`) or as an
  * object key (`type:`). A file with neither does no AST work for this rule.
  */
-const MESSAGE_PREFILTER = /(?:\.\s*|[{,]\s*)(?:type|kind|action|event|op|cmd|command|tag)\b/;
+const MESSAGE_PREFILTER = /(?:\.\s*|[{,]\s*["']?)(?:type|kind|action|event|op|cmd|command|tag)\b/;
 
 export function mayContainMessageTopology(content: string): boolean {
   return MESSAGE_PREFILTER.test(content);
@@ -85,8 +85,8 @@ export function isMarkerKey(key: string): boolean {
 
 /** The discriminant field of a pairing key (`type=str:x` → `type`). */
 export function keyField(key: string): string {
-  const i = key.search(/[=\u0000]/);
-  return i < 0 ? key : key.slice(0, i);
+  const ends = [key.indexOf('='), key.indexOf(MARKER)].filter(i => i >= 0);
+  return ends.length ? key.slice(0, Math.min(...ends)) : key;
 }
 
 /**
@@ -101,12 +101,10 @@ export function tagConstantName(key: string): string | undefined {
 }
 
 /**
- * One handler clause: key → the node ids that handle it. `fallbackId` is the enclosing function,
- * used when the clause's single callee was recorded by name and later resolves to nothing — so the
- * Pass-1 lane, which resolves names only after collection, attributes the clause exactly as the
- * re-parsing lane does. `file` is the clause's file, which the test-file rule needs for a marker.
+ * One handler clause: key → the node ids that handle it. `file` is the clause's file, which the
+ * test-file rule needs for a marker.
  */
-export interface MessageRegistration { key: string; handlerIds: string[]; fallbackId?: string; file?: string }
+export interface MessageRegistration { key: string; handlerIds: string[]; file?: string }
 /** One construction site. */
 export interface MessageDispatch { key: string; callerId: string; line: number }
 /** A construction site, with the source of the transport call it is handed to. */
@@ -140,6 +138,8 @@ interface CollectorState extends MessageCollectorEnv {
   moduleNames: Set<string>;
   /** Names bound by a package import or require: never resolved to a repository function. */
   packageNames: Set<string>;
+  /** `import { X as Y }`: local `Y` → imported `X`, so a constant tag is keyed by what it names. */
+  importAliases: Map<string, string>;
 }
 
 function unparen(node: Parser.SyntaxNode | null | undefined): Parser.SyntaxNode | null | undefined {
@@ -168,20 +168,53 @@ function methodName(callee: Parser.SyntaxNode | null): string | undefined {
 function tagKey(node: Parser.SyntaxNode | null | undefined, env: CollectorState): string | undefined {
   const n = unparen(node);
   if (!n) return undefined;
-  if (n.type === 'string') return `str:${n.text.length >= 2 ? n.text.slice(1, -1) : ''}`;
+  // A NUL byte could forge a marker key, so a tag carrying one is not static.
+  const literal = (text: string): string | undefined => (text.includes(MARKER) ? undefined : `str:${text}`);
+  if (n.type === 'string') return literal(n.text.length >= 2 ? n.text.slice(1, -1) : '');
   if (n.type === 'template_string') {
     return n.descendantsOfType('template_substitution').length === 0
-      ? `str:${n.text.length >= 2 ? n.text.slice(1, -1) : ''}`
+      ? literal(n.text.length >= 2 ? n.text.slice(1, -1) : '')
       : undefined;
   }
   if (n.type === 'member_expression' && !testedField(n)) {
     const obj = n.childForFieldName('object');
     const prop = n.childForFieldName('property');
-    if (obj?.type === 'identifier' && prop?.type === 'property_identifier' && env.moduleNames.has(obj.text)) {
-      return `const:${obj.text}.${prop.text}`;
+    if (obj?.type === 'identifier' && prop?.type === 'property_identifier' && isModuleBound(obj, env)) {
+      return `const:${env.importAliases.get(obj.text) ?? obj.text}.${prop.text}`;
     }
   }
   return undefined;
+}
+
+const FUNCTION_TYPES: ReadonlySet<string> = new Set([
+  'function_declaration', 'function_expression', 'function', 'arrow_function', 'method_definition',
+  'generator_function_declaration', 'generator_function',
+]);
+
+/**
+ * Is this identifier the module-scope binding of its name — not shadowed by a parameter or a
+ * local declaration of an enclosing function or block? `route(m, Msg) { case Msg.A: }` names the
+ * parameter, a run-time value, even when the file also declares a module-level `Msg`.
+ */
+function isModuleBound(id: Parser.SyntaxNode, env: CollectorState): boolean {
+  if (!env.moduleNames.has(id.text)) return false;
+  for (let a = id.parent; a; a = a.parent) {
+    if (FUNCTION_TYPES.has(a.type)) {
+      const names = new Set<string>();
+      const params = a.childForFieldName('parameters') ?? a.childForFieldName('parameter');
+      if (params) patternNames(params, names);
+      if (names.has(id.text)) return false;
+    }
+    if (a.type === 'statement_block' || a.type === 'switch_body') {
+      for (const stmt of a.namedChildren) {
+        if (stmt.type !== 'lexical_declaration' && stmt.type !== 'variable_declaration') continue;
+        const names = new Set<string>();
+        for (const d of stmt.namedChildren) if (d.type === 'variable_declarator') patternNames(d.childForFieldName('name'), names);
+        if (names.has(id.text)) return false;
+      }
+    }
+  }
+  return true;
 }
 
 /**
@@ -192,13 +225,14 @@ function tagKey(node: Parser.SyntaxNode | null | undefined, env: CollectorState)
 function constantName(node: Parser.SyntaxNode | null | undefined, env: CollectorState): string | undefined {
   const n = unparen(node);
   if (n?.type === 'identifier') {
-    return env.moduleNames.has(n.text) || /^[A-Z][A-Z0-9_]*$/.test(n.text) ? n.text : undefined;
+    if (isModuleBound(n, env)) return env.importAliases.get(n.text) ?? n.text;
+    return /^[A-Z][A-Z0-9_]*$/.test(n.text) && !env.moduleNames.has(n.text) ? n.text : undefined;
   }
   if (n?.type === 'member_expression' && !testedField(n)) {
     let root: Parser.SyntaxNode | null = n;
     while (root?.type === 'member_expression') root = root.childForFieldName('object');
     const prop = n.childForFieldName('property');
-    if (root?.type === 'identifier' && env.moduleNames.has(root.text) && prop?.type === 'property_identifier') return prop.text;
+    if (root?.type === 'identifier' && isModuleBound(root, env) && prop?.type === 'property_identifier') return prop.text;
   }
   return undefined;
 }
@@ -232,17 +266,21 @@ function requireSpecifier(value: Parser.SyntaxNode | null | undefined): string |
 }
 
 /** Module-scope names and package-bound names of one file. */
-function fileBindings(root: Parser.SyntaxNode): { moduleNames: Set<string>; packageNames: Set<string> } {
+function fileBindings(root: Parser.SyntaxNode): { moduleNames: Set<string>; packageNames: Set<string>; importAliases: Map<string, string> } {
   const moduleNames = new Set<string>();
   const packageNames = new Set<string>();
+  const importAliases = new Map<string, string>();
   for (const imp of root.descendantsOfType('import_statement')) {
     const local = new Set<string>();
     const clause = imp.namedChildren.find(c => c.type === 'import_clause');
     for (const id of clause?.descendantsOfType('identifier') ?? []) {
       // In `{ a as b }` the local binding is the alias.
-      if (id.parent?.type === 'import_specifier' && id.parent.childForFieldName('alias')
-        && id.parent.childForFieldName('name')?.startIndex === id.startIndex) continue;
+      const spec = id.parent?.type === 'import_specifier' ? id.parent : undefined;
+      const alias = spec?.childForFieldName('alias');
+      if (alias && spec?.childForFieldName('name')?.startIndex === id.startIndex) continue;
       local.add(id.text);
+      const imported = alias && spec?.childForFieldName('name');
+      if (imported) importAliases.set(id.text, imported.text);
     }
     // `import x = require("pkg")`.
     const req = imp.namedChildren.find(c => c.type === 'import_require_clause');
@@ -255,24 +293,28 @@ function fileBindings(root: Parser.SyntaxNode): { moduleNames: Set<string>; pack
       if (source !== undefined && isPackageSpecifier(source)) packageNames.add(name);
     }
   }
-  for (const decl of root.descendantsOfType('variable_declarator')) {
-    const spec = requireSpecifier(decl.childForFieldName('value'));
-    if (spec === undefined) continue;
-    const names = new Set<string>();
-    patternNames(decl.childForFieldName('name'), names);
-    for (const name of names) if (isPackageSpecifier(spec)) packageNames.add(name);
-  }
   for (const top of root.namedChildren) {
-    const stmt = top.type === 'export_statement' ? top.childForFieldName('declaration') ?? top.namedChildren[0] : top;
+    let stmt: Parser.SyntaxNode | null | undefined =
+      top.type === 'export_statement' ? top.childForFieldName('declaration') ?? top.namedChildren[0] : top;
+    // `declare enum D {}`, and an unexported `namespace N {}` (parsed as an expression statement).
+    if (stmt?.type === 'ambient_declaration' || stmt?.type === 'expression_statement') stmt = stmt.namedChildren[0];
     if (!stmt) continue;
     if (stmt.type === 'lexical_declaration' || stmt.type === 'variable_declaration') {
-      for (const d of stmt.namedChildren) if (d.type === 'variable_declarator') patternNames(d.childForFieldName('name'), moduleNames);
+      for (const d of stmt.namedChildren) {
+        if (d.type !== 'variable_declarator') continue;
+        const names = new Set<string>();
+        patternNames(d.childForFieldName('name'), names);
+        for (const name of names) moduleNames.add(name);
+        // Only a top-level `require` binds a name for the whole file.
+        const spec = requireSpecifier(d.childForFieldName('value'));
+        if (spec !== undefined && isPackageSpecifier(spec)) for (const name of names) packageNames.add(name);
+      }
     } else {
       const name = stmt.childForFieldName('name');
       if (name && (name.type === 'identifier' || name.type === 'type_identifier')) moduleNames.add(name.text);
     }
   }
-  return { moduleNames, packageNames };
+  return { moduleNames, packageNames, importAliases };
 }
 
 /**
@@ -304,8 +346,12 @@ function registrationFor(
   const enclosing = env.enclosingId(clause.startIndex);
   const resolved = callee && !env.packageNames.has(callee) ? env.resolveCallee(callee) : undefined;
   const file = env.filePath;
-  if (resolved) return { key, handlerIds: [resolved], ...(enclosing ? { fallbackId: enclosing } : {}), file };
-  if (enclosing) return { key, handlerIds: [enclosing], file };
+  // The enclosing function is always a handler: it is the code that selects the tag, so deleting the
+  // clause breaks the sender, and a verdict about it must see the hop. The single callee is the
+  // more precise target and joins it. The Pass-1 lane records the callee by name and resolves it
+  // later, dropping it when it resolves to nothing — the same set the re-parsing lane builds here.
+  const handlerIds = [...(resolved ? [resolved] : []), ...(enclosing && enclosing !== resolved ? [enclosing] : [])];
+  if (handlerIds.length) return { key, handlerIds, file };
   return { key: unattributedConsumerKey(key), handlerIds: [], file };
 }
 
@@ -381,15 +427,28 @@ function conditionComparison(node: Parser.SyntaxNode | null | undefined, env: Co
   return only;
 }
 
-/** A statement that leaves the function or loop: `return`, `throw`, `continue`, `break`, or a block of one. */
+const EXIT_STATEMENTS: ReadonlySet<string> = new Set(['return_statement', 'throw_statement', 'continue_statement', 'break_statement']);
+
+/**
+ * A statement that leaves the function or loop: `return`, `throw`, `continue`, `break`, or a block
+ * of plain expression statements ending in one (`{ console.warn(m); return; }`).
+ */
 function isEarlyExit(stmt: Parser.SyntaxNode | null | undefined): boolean {
-  let s = stmt;
-  if (s?.type === 'statement_block') {
-    const inner = s.namedChildren.filter(c => c.type !== 'comment');
-    if (inner.length !== 1) return false;
-    s = inner[0];
-  }
-  return !!s && ['return_statement', 'throw_statement', 'continue_statement', 'break_statement'].includes(s.type);
+  if (!stmt) return false;
+  if (stmt.type !== 'statement_block') return EXIT_STATEMENTS.has(stmt.type);
+  const inner = stmt.namedChildren.filter(c => c.type !== 'comment');
+  return inner.length > 0 && EXIT_STATEMENTS.has(inner[inner.length - 1].type)
+    && inner.slice(0, -1).every(c => c.type === 'expression_statement');
+}
+
+/** `x.<field> === <tag> ? a : b` — the consequent handles the tag; its function is the handler. */
+function collectTernary(expr: Parser.SyntaxNode, env: CollectorState, out: MessageSites): void {
+  const found = comparison(expr.childForFieldName('condition'), env);
+  if (!found || !('key' in found) || found.negated) return;
+  const enclosing = env.enclosingId(expr.startIndex);
+  out.registrations.push(enclosing
+    ? { key: found.key, handlerIds: [enclosing], file: env.filePath }
+    : { key: unattributedConsumerKey(found.key), handlerIds: [], file: env.filePath });
 }
 
 function collectIfClause(stmt: Parser.SyntaxNode, env: CollectorState, out: MessageSites): void {
@@ -476,5 +535,6 @@ export function collectMessageSites(root: Parser.SyntaxNode, baseEnv: MessageCol
   const env: CollectorState = { ...baseEnv, ...fileBindings(root) };
   for (const sw of root.descendantsOfType('switch_statement')) collectSwitchClauses(sw, env, out);
   for (const stmt of root.descendantsOfType('if_statement')) collectIfClause(stmt, env, out);
+  for (const expr of root.descendantsOfType('ternary_expression')) collectTernary(expr, env, out);
   for (const obj of root.descendantsOfType('object')) collectConstruction(obj, env, out);
 }

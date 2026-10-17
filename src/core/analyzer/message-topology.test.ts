@@ -76,7 +76,8 @@ describe('message-topology edges', () => {
       `),
     );
     expect(hasMessageEdge(b, 'send', 'onRestart')).toBe(true);
-    expect(messageEdges(b)).toHaveLength(1);
+    // The clauses' containers are handlers too: deleting either clause breaks the sender.
+    expect(messageEdges(b).map(e => b.nodes.get(e.calleeId)?.name).sort()).toEqual(['listen', 'listen2', 'onRestart']);
   });
 
   it('reads one equality out of an && guard, and refuses two', async () => {
@@ -176,7 +177,7 @@ describe('message-topology edges', () => {
       function store(list: any[]) { list.push({ kind: "calls" }); }
       function viaDispatch(store: any) { store.dispatch({ kind: "calls" }); }
     `));
-    expect(messageEdges(b).map(e => e.callerId)).toEqual([idOf(b, 'viaDispatch')]);
+    expect([...new Set(messageEdges(b).map(e => e.callerId))]).toEqual([idOf(b, 'viaDispatch')]);
   });
 
   it('drops a key whose handlers exceed the fan-out cap', async () => {
@@ -420,14 +421,134 @@ describe('message-topology review regressions (round 2)', () => {
     expect(b.edges.some(e => e.kind === 'tested_by' && e.callerId === idOf(b, 'handle'))).toBe(false);
   });
 
-  it('pairs a send only with the closest copies of its handler', async () => {
+  it('pairs a send only with the closest copy of a duplicated handler', async () => {
     const b = await build(
       ts('samples/news/feed.ts', 'export function showStory(w: any) { w.postMessage({ type: "story" }); }'),
-      ts('samples/news/frame.ts', 'export function frameNews(m: any) { if (m.type === "story") { return 1; } }'),
-      ts('samples/news_i18n/frame.ts', 'export function frameI18n(m: any) { if (m.type === "story") { return 1; } }'),
+      ts('samples/news/frame.ts', 'export function onStory(m: any) { if (m.type === "story") { return 1; } }'),
+      ts('samples/news_i18n/frame.ts', 'export function onStory(m: any) { if (m.type === "story") { return 2; } }'),
     );
-    expect(hasMessageEdge(b, 'showStory', 'frameNews')).toBe(true);
-    expect(hasMessageEdge(b, 'showStory', 'frameI18n')).toBe(false);
+    const targets = messageEdges(b).map(e => b.nodes.get(e.calleeId)?.filePath);
+    expect(targets).toEqual(['samples/news/frame.ts']);
+  });
+});
+
+describe('message-topology review regressions (round 3)', () => {
+  const sites = (b: Built, file: string) => (b.dynamicBoundaryByFile?.get(file)?.sites ?? []).map(s => s.refusal);
+
+  it('keeps both a near client handler and a far server handler of one tag', async () => {
+    const b = await build(
+      ts('src/client/actions.ts', 'export function requestRestart(ws: any) { ws.send({ type: "restart" }); }'),
+      ts('src/client/reducer.ts', 'export function reducer(s: any, a: any) { switch (a.type) { case "restart": return { ...s, spinning: true }; default: return s; } }'),
+      ts('src/server/handler.ts', 'export function handleRestart() { return 1; }\nexport function onMessage(m: any) { switch (m.type) { case "restart": handleRestart(); } }'),
+    );
+    expect(hasMessageEdge(b, 'requestRestart', 'reducer')).toBe(true);
+    expect(hasMessageEdge(b, 'requestRestart', 'handleRestart')).toBe(true);
+  });
+
+  it('refuses a member tag whose object a parameter or local shadows', async () => {
+    const b = await build(
+      ts('src/a.ts', `
+        const Msg = { A: "a" } as const;
+        export function h() { return 1; }
+        export function route(m: any, Msg: any) { switch (m.type) { case Msg.A: h(); } }
+        export function route2(m: any, t: any) { const Msg = t; if (m.type === Msg.A) { h(); } }
+        export function send(ws: any) { ws.send({ type: Msg.A }); }
+      `),
+    );
+    expect(messageEdges(b)).toHaveLength(0);
+  });
+
+  it('keys an aliased import by the name it imports', async () => {
+    const b = await build(
+      ts('src/types.ts', 'export const Types = { A: "a" } as const;'),
+      ts('src/s.ts', 'import { Types as T } from "./types";\nexport function send(ws: any) { ws.send({ type: T.A }); }'),
+      ts('src/c.ts', 'import { Types } from "./types";\nexport function route(m: any) { if (m.type === Types.A) { return 1; } }'),
+    );
+    expect(hasMessageEdge(b, 'send', 'route')).toBe(true);
+  });
+
+  it('binds declare enum and unexported namespaces at module scope', async () => {
+    const b = await build(ts('src/a.ts', `
+      declare enum D { A = "a" }
+      namespace N { export const B = "b"; }
+      export function onD() { return 1; }
+      export function onN() { return 2; }
+      export function route(m: any) { switch (m.type) { case D.A: onD(); break; case N.B: onN(); break; } }
+      export function sendD(ws: any) { ws.send({ type: D.A }); }
+      export function sendN(ws: any) { ws.send({ type: N.B }); }
+    `));
+    expect(hasMessageEdge(b, 'sendD', 'onD')).toBe(true);
+    expect(hasMessageEdge(b, 'sendN', 'onN')).toBe(true);
+  });
+
+  it('does not let a nested require shadow a top-level function file-wide', async () => {
+    const b = await build(ts('src/a.ts', `
+      export function handle() { return 1; }
+      function lazy() { const handle = require("pkg"); return handle; }
+      export function route(m: any) { switch (m.type) { case "x": handle(); } }
+      export function send(ws: any) { ws.send({ type: "x" }); }
+    `));
+    expect(hasMessageEdge(b, 'send', 'handle')).toBe(true);
+  });
+
+  it('reads a JSON-style quoted key in a file with no other discriminant spelling', async () => {
+    const b = await build(
+      ts('src/s.ts', 'export function send(ws: any) { ws.send(JSON.stringify({ "type": "x" })); }'),
+      ts('src/c.ts', 'export function route(m: any) { if (m.type === "x") { return 1; } }'),
+    );
+    expect(hasMessageEdge(b, 'send', 'route')).toBe(true);
+  });
+
+  it('reads a block early exit and a ternary as consumers', async () => {
+    const b = await build(
+      ts('src/c.ts', `
+        export function guarded(m: any) { if (m.type !== "g") { console.warn(m); return; } return 1; }
+        export function reducer(s: any, a: any) { return a.type === "t" ? s + 1 : s; }
+      `),
+      ts('src/s.ts', 'export function send(ws: any) { ws.send({ type: "g" }); ws.send({ type: "t" }); }'),
+    );
+    expect(hasMessageEdge(b, 'send', 'guarded')).toBe(true);
+    expect(hasMessageEdge(b, 'send', 'reducer')).toBe(true);
+  });
+
+  it('agrees on the single-file lane when many clauses call one name', async () => {
+    // The cap counts clause containers on both lanes, so the two always agree.
+    for (const n of [EVENT_CHANNEL_FANOUT_CAP, EVENT_CHANNEL_FANOUT_CAP + 1]) {
+      const fns = Array.from({ length: n }, (_, i) => `export function r${i}(m: any) { if (m.type === "x") handleX(m); }`).join('\n');
+      const file = ts('src/a.ts', `${fns}\nexport function handleX(m: any) { return m; }\nexport function s(ws: any) { ws.send({ type: "x" }); }`);
+      const expected = n > EVENT_CHANNEL_FANOUT_CAP ? ['over-cap'] : [];
+      expect(sites(await build(file), 'src/a.ts'), String(n)).toEqual(expected);
+      expect(((await extractFileDynamicBoundary(file))?.sites ?? []).map(s => s.refusal), String(n)).toEqual(expected);
+    }
+  });
+
+  it('never lets a NUL byte in a tag forge a marker', async () => {
+    const b = await build(
+      ts('src/c.ts', `export function route(m: any) { switch (m.type) { case "x\u0000unattributed": return 1; } }`.replace('\\u0000', '\u0000')),
+      ts('src/s.ts', 'export function send(ws: any) { ws.send({ type: "x" }); }'),
+    );
+    expect(sites(b, 'src/s.ts')).toEqual(['unindexed-message-consumer']);
+  });
+
+  it('calls a marker left only by a test file test-only', async () => {
+    const b = await build(
+      ts('src/s.ts', 'import * as types from "./types";\nexport function send(store: any) { store.dispatch({ type: types.CHECKOUT }); }'),
+      ts('src/c.test.ts', 'import { CHECKOUT } from "./types";\nexport function r(s: any, a: any) { switch (a.type) { case CHECKOUT: return 1; } }'),
+    );
+    expect(sites(b, 'src/s.ts')).toEqual(['test-only-message-consumer']);
+  });
+
+  it('makes the clause container a handler beside its single callee', async () => {
+    const b = await build(...RESTART_PROTOCOL);
+    expect(hasMessageEdge(b, 'requestRestart', 'handleRestart')).toBe(true);
+    expect(hasMessageEdge(b, 'requestRestart', 'onMessage')).toBe(true);
+  });
+
+  it('orders message edges independently of input file order', async () => {
+    const files = [...RESTART_PROTOCOL, ts('src/z.ts', 'export function z(m: any) { if (m.type === "restart") { return 1; } }')];
+    const forward = messageEdges(await build(...files)).map(edgeKey);
+    const backward = messageEdges(await build(...[...files].reverse())).map(edgeKey);
+    expect(backward).toEqual(forward);
   });
 });
 

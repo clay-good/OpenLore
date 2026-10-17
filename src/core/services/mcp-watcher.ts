@@ -42,7 +42,14 @@ import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth, extractFileDynamicBoundary } from '../analyzer/call-graph.js';
-import { MESSAGE_TOPOLOGY_RULE } from '../analyzer/message-topology.js';
+import { MESSAGE_TOPOLOGY_RULE, mayContainMessageTopology } from '../analyzer/message-topology.js';
+
+/** Message-send refusals that claim something about the whole repository, not one file. */
+const REPOSITORY_WIDE_MESSAGE_CLAIMS: ReadonlySet<string> = new Set([
+  'unindexed-message-consumer', 'test-only-message-consumer', 'uncomparable-message-consumer', 'unattributed-message-consumer',
+]);
+/** Bound on the sender files one save can queue for re-derivation; the rest wait for `analyze`. */
+const MAX_MESSAGE_CLAIM_REDERIVES = 64;
 import { buildDynamicBoundaryReport, type DynamicBoundaryReport, type FileDynamicBoundary } from '../analyzer/dynamic-boundary.js';
 import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 /** Matches the serving-side cap in `dynamic-boundary-disclosure.ts` — one artifact, one bound. */
@@ -2431,6 +2438,34 @@ export class McpWatcher {
    * is disclosed on the next conclusion without a full re-analyze; removing it clears the
    * disclosure. Best-effort + atomic; a failure is disclosed on stderr, never thrown into the batch.
    */
+  /**
+   * `(callerId, line)` of every message-topology edge the graph holds out of these files, as a
+   * probe the single-file lane uses to keep a still-paired send paired. Best-effort: no store, or
+   * an unreadable one, gives a probe that pairs nothing (the disclosing direction).
+   */
+  private messageEdgeProbe(rels: string[]): (callerId: string, line: number) => boolean {
+    const paired = new Set<string>();
+    try {
+      if (EdgeStore.exists(this.outputPath)) {
+        const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+        try {
+          if (!store.notReady) {
+            for (const rel of rels) {
+              for (const e of store.getEdgesForFile(rel).outgoing) {
+                if (e.synthesizedBy === MESSAGE_TOPOLOGY_RULE) paired.add(`${e.callerId}\u0000${e.line ?? -1}`);
+              }
+            }
+          }
+        } finally {
+          store.close();
+        }
+      }
+    } catch {
+      paired.clear();
+    }
+    return (callerId, line) => paired.has(`${callerId}\u0000${line}`);
+  }
+
   private async updateDynamicBoundary(changedFiles: ChangedFile[], deletedRels: string[] = []): Promise<void> {
     const dbPath = join(this.outputPath, ARTIFACT_DYNAMIC_BOUNDARY);
     try {
@@ -2449,11 +2484,29 @@ export class McpWatcher {
       for (const rel of deletedRels) {
         if (byPath.delete(rel)) touched = true;
       }
-      for (const f of changedFiles) {
+      // Message topology (change: add-message-topology-edges). A changed file that may hold handler
+      // clauses can pair a send whose record claims no consumer exists anywhere; that claim is now
+      // unverified, so those senders are re-derived too (their sends then read as checked in one
+      // file only). And a re-derived send whose message edge the graph still holds stays paired.
+      const toDerive = [...changedFiles];
+      if (changedFiles.some(f => mayContainMessageTopology(f.content))) {
+        const queued = new Set(toDerive.map(f => f.rel));
+        const claims = [...byPath.values()].filter(r => !queued.has(r.filePath)
+          && r.sites.some(s => s.kind === 'message-send' && REPOSITORY_WIDE_MESSAGE_CLAIMS.has(s.refusal)));
+        for (const r of claims.slice(0, MAX_MESSAGE_CLAIM_REDERIVES)) {
+          try {
+            toDerive.push({ rel: r.filePath, content: await readFileConfined(this.rootPath, r.filePath, MAX_EDIT_VERDICT_BASIS_FILE_BYTES) });
+          } catch {
+            // Unreadable now: it keeps its last record, and the next full build re-derives it.
+          }
+        }
+      }
+      const pairedSend = this.messageEdgeProbe(toDerive.map(f => f.rel));
+      for (const f of toDerive) {
         const language = detectLanguage(f.rel);
         let record: FileDynamicBoundary | undefined;
         try {
-          record = await extractFileDynamicBoundary({ path: f.rel, content: f.content, language });
+          record = await extractFileDynamicBoundary({ path: f.rel, content: f.content, language }, { pairedSend });
         } catch {
           // A file this lane cannot re-derive keeps whatever the last full build recorded. Dropping
           // it would turn a parse failure into a claim that the file has no dynamic dispatch.

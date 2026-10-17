@@ -57,15 +57,18 @@ matched exhaustively.
 A `case "x":` clause is collected as a registration on key `"x"` whose handler is the nearest
 enclosing function of the clause body — or, when the clause body's only statement is a call, that
 callee, which is the common `case "x": handleX(msg)` shape and gives the more useful edge target.
-A construction site is collected as a dispatch on the same key. Both then flow through
-`pairAndEmitEventEdges` unchanged, inheriting the cap and the kind namespacing.
-*Alternative considered:* a bespoke pairing pass for clauses. Rejected — it would duplicate the cap
-and namespacing logic, which is exactly the drift the existing per-rule structure avoids.
+A construction site is collected as a dispatch on the same key.
+*As built:* pairing runs in its own `pairMessageTopology`. It shares the event-channel fan-out cap
+(`groupHandlersByKey`) and edge shape, and adds what review found the generic pairing lacks: a
+handler selection (a test file's handler pairs only within its file; a same-named near-copy farther
+from the sender is withheld) and the boundary pass. The other rules' pairing is unchanged.
 
 **3. The discriminant field is namespaced into the key.**
-Keys become `<field>:<literal>` (`type:restart`), reusing the existing kind-namespacing mechanism,
-so a protocol keyed on `type` can never pair with one keyed on `kind` that happens to share a tag
-literal. This is what makes the rule safe in a repository holding several protocols.
+Keys are `<field>=<tag>`, where the tag keeps the event-channel namespacing (`type=str:restart`,
+`type=const:Msg.Restart`), so a protocol keyed on `type` can never pair with one keyed on `kind`
+that shares a tag, and a string never pairs with a constant. Marker registrations (a clause no
+indexed function contains, or one testing an uncomparable constant) use NUL-separated keys that
+never pair; a tag containing NUL is refused so it cannot forge one.
 
 **4a. As built: a construction counts only when it is handed to a transport call.**
 Measured on this repository before merge: with every tagged literal counted, the rule produced 154
@@ -87,14 +90,11 @@ consumer field produces nothing.
 *Alternative considered:* require a declared union. Rejected — plain JavaScript and untyped IPC
 envelopes are exactly where the graph is emptiest, and the consumer-side evidence is sufficient.
 
-**5. TypeScript gets two collectors, so the language dispatch chain stops being exclusive.**
-Today `addEvents` runs in an `else if` chain, one collector per language. TS needs both
-`event-channel` and `message-topology`, so the chain becomes per-language additive calls. Each
-collector keeps its own prefilter (a cheap `content` regex) so a file with no tagged literals and no
-switch on a member expression costs one failed regex.
-*Risk of this edit:* it touches the dispatch of every language's collector. Mitigated by the
-existing per-rule tests plus a graph-equality test asserting non-TS languages produce byte-identical
-edge sets before and after.
+**5. TypeScript gets a second collector beside the per-language chain.**
+*As built:* the `addEvents` `else if` chain is untouched; message topology is collected in its own
+block after it, under its own Pass-1 group, with its own prefilter (a cheap `content` regex), and
+its edges are appended after every other rule's. So no other language's collection or edge order
+can change, which an additive-only test asserts.
 
 **6. An unpaired static send becomes a dynamic-boundary site with a new refusal reason.**
 The vocabulary is closed, so the reason is added to it (`unindexed-message-consumer`). This is the

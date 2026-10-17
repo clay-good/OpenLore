@@ -60,8 +60,7 @@ only as a literal or `A.B` with `A` module-bound or imported; any other tag SHAL
   disabled
 - **WHEN** the two are compared
 - **THEN** every directly-resolved and event-channel edge is identical, and the enabled graph differs
-  only by added message-topology edges and the `tested_by` edges derived from those whose caller is
-  a test, as for every other synthesized rule
+  only by added message-topology edges
 
 #### Scenario: Two discriminant fields never cross
 
@@ -81,8 +80,8 @@ selected by that handler, not that the hop occurs on any particular execution.
 
 - **GIVEN** a path traversing a message-topology edge
 - **WHEN** `find_path` reports the path
-- **THEN** the step that edge reaches carries `via: "message-topology"`, and the call hops around it
-  carry no `via`
+- **THEN** the step that edge reaches carries `via: "message-topology"` (any synthesized hop names
+  its rule the same way), and the directly-resolved call hops around it carry no `via`
 
 #### Scenario: A message hop is never asserted as a call
 

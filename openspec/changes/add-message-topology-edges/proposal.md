@@ -53,7 +53,7 @@ explicit.
 
 - `src/core/analyzer/call-graph.ts` — synthesis pass registration for the new rule
 - `src/core/analyzer/` — new per-pattern rule module: tag collection at construction sites,
-  discriminant resolution from declared unions, consumer-clause collection, pairing
+  consumer-clause collection, pairing (declared-union discriminants deferred, `tasks.md` 2.3)
 - `src/core/analyzer/dynamic-boundary` sidecar — transport-boundary sites
 - `src/core/services/mcp-handlers/` — no new tool; existing traversals gain the edges and must
   render the new provenance label
