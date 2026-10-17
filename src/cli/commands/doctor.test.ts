@@ -162,7 +162,7 @@ describe('doctor command', () => {
 
     it('should include the retrieval check among the default checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(15);
+      expect(checks).toHaveLength(16);
       expect(checks.find(c => c.name === 'Retrieval mode')).toBeDefined();
     });
 
