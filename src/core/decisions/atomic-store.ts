@@ -25,7 +25,7 @@
 
 import { open, rename, unlink, mkdir, access, link, stat } from 'node:fs/promises';
 import { constants, linkSync, unlinkSync, renameSync, existsSync } from 'node:fs';
-import { dirname, basename, join } from 'node:path';
+import { dirname, basename, join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
 import { recordAtomicArtifactPayload } from '../analyzer/perf-counters.js';
@@ -238,6 +238,11 @@ const LOCK_MAX_WAIT_MS = 30_000;
 // processes, the counter across concurrent in-process acquires.
 let lockSeq = 0;
 
+// Same-process contenders otherwise repeatedly fsync namespace-gate candidates,
+// competing with the holder's release. Queue a store's writes before touching
+// the filesystem; every turn still acquires the cross-process advisory lock.
+const storeWriteTails = new Map<string, Promise<void>>();
+
 /**
  * Run `fn` while holding a per-file advisory lock (exclusive-create lockfile,
  * polled, with stale-steal for a confirmed-dead holder). The lock guards only the brief
@@ -298,12 +303,24 @@ export async function casUpdate<T extends SequencedStore>(opts: {
   serialize: (next: T) => string;
 }): Promise<T> {
   const lockPath = `${opts.storePath}.lock`;
-  return withCommitLock(lockPath, async () => {
+  const absolutePath = resolve(opts.storePath);
+  const key = process.platform === 'win32' ? absolutePath.toLowerCase() : absolutePath;
+  const previous = storeWriteTails.get(key) ?? Promise.resolve();
+  const operation = previous.then(() => withCommitLock(lockPath, async () => {
     const current = await opts.load(); // fresh read inside the lock
     const next = { ...opts.mutate(current), sequence: (current.sequence ?? 0) + 1 } as T;
     await atomicWriteFile(opts.storePath, opts.serialize(next));
     return next;
-  });
+  }));
+  // A rejected write must not poison subsequent turns or create an unhandled
+  // rejection. The caller still receives the original operation's error.
+  const tail = operation.then(() => {}, () => {});
+  storeWriteTails.set(key, tail);
+  try {
+    return await operation;
+  } finally {
+    if (storeWriteTails.get(key) === tail) storeWriteTails.delete(key);
+  }
 }
 
 // ── corrupt-store quarantine ──────────────────────────────────────────────────

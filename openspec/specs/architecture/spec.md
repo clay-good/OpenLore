@@ -59,6 +59,23 @@ single compare-and-swap path; a raw lock-free overwrite is prohibited because it
 the serialization. Implemented in `src/core/decisions/atomic-store.ts`; guarded by
 `atomic-store.test.ts`.
 
+Writes to the same absolute store path within one process SHALL wait in arrival order
+before acquiring the advisory filesystem lock. Each turn MUST still acquire that lock,
+so writers in other processes remain serialized. A failed write SHALL reject its caller
+without preventing subsequent turns; idle queues SHALL be removed. Queuing one store
+SHALL NOT block writes to another store. On Windows, queue keys SHALL ignore path casing;
+filesystem aliases outside this lexical normalization remain guarded by the advisory lock.
+
+#### Scenario: A failed queued write does not block its successors
+- **GIVEN** multiple writes queued for one store and one mutation that throws
+- **WHEN** the preceding writes complete
+- **THEN** the failing caller receives its error and subsequent writes commit against the freshest store
+
+#### Scenario: Local queues preserve interprocess safety
+- **GIVEN** several processes each enqueueing writes to the same store
+- **WHEN** all successful writes complete
+- **THEN** each mutation is preserved and the sequence advances once per committed write
+
 #### Scenario: A crash mid-write preserves the prior store
 - **GIVEN** a store write interrupted between writing the temporary file and the rename
 - **WHEN** the store is next loaded

@@ -62,9 +62,10 @@ export function detectInstallMethod(
   evidence: InstallEvidence = {}
 ): InstallMethod {
   const p = normalizePath(modulePath);
-  if (p.includes('/cellar/') || p.includes('/homebrew/') || p.includes('/linuxbrew/')) {
-    return 'homebrew';
-  }
+  // Only the Cellar (or its stable `opt/<formula>/libexec` alias) is a Homebrew formula
+  // install. The prefix alone is not: a Homebrew node puts `npm i -g` packages under
+  // `<prefix>/lib/node_modules`.
+  if (p.includes('/cellar/') || p.includes('/opt/openlore/libexec/')) return 'homebrew';
   // npx caches under .../_npx/<hash>/node_modules/... (npm) — transient, auto-floats.
   if (p.includes('/_npx/') || p.includes('/npm-cache/_npx/')) return 'npx';
 
@@ -177,6 +178,24 @@ export function upgradeCommandFor(
       command = null;
   }
   return command ? { cmd: command.command, args: command.args } : null;
+}
+
+/**
+ * The version `openlore` on PATH reports, or null when it cannot be read. On Windows
+ * the PATH entry is a `.cmd` shim that cannot be executed without a shell, so the
+ * answer there is always null (unverified), never a guess.
+ */
+async function versionOnPath(platform: NodeJS.Platform): Promise<string | null> {
+  if (platform === 'win32') return null;
+  try {
+    const { stdout } = await execFileAsync('openlore', ['--version'], {
+      timeout: 10_000,
+      windowsHide: true,
+    });
+    return /\d+\.\d+\.\d+[^\s]*/.exec(stdout)?.[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function runCommand(cmd: string, args: string[]): Promise<number> {
@@ -309,12 +328,28 @@ export async function runUpdate(
 
   logger.discovery(`Upgrading: ${printable}`);
   const code = await runCommand(upgrade.cmd, upgrade.args);
-  if (code === 0) {
-    logger.success(`Upgraded openlore to ${latest}.`);
-  } else {
-    logger.error(`Upgrade command exited with code ${code}. Try running it yourself: ${printable}`);
+  if (code !== 0) {
+    logger.error(
+      `Upgrade command exited with code ${code}. Try running it yourself: ${printable}\n` +
+        `If openlore was installed another way, use one of:\n` +
+        `  npm install -g openlore@latest\n` +
+        `  brew upgrade openlore`
+    );
+    return code;
   }
-  return code;
+
+  // Exit code 0 only proves the package manager was content. A second install that is
+  // first on PATH leaves the user on the old version, so read back what PATH resolves to.
+  const onPath = await versionOnPath(platform);
+  if (onPath && isNewer(onPath, latest)) {
+    logger.error(
+      `The upgrade command succeeded, but \`openlore\` on your PATH still reports ${onPath}. ` +
+        `Another install is first on PATH. List them with:\n  which -a openlore`
+    );
+    return 1;
+  }
+  logger.success(`Upgraded openlore to ${latest}.`);
+  return 0;
 }
 
 export const updateCommand = new Command('update')
