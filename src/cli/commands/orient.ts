@@ -13,7 +13,7 @@
 
 import { Command, Option } from 'commander';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 // Repo-derived values are printed here with bare console.log (not via logger), so
 // they are neutralized explicitly. Whole-line sanitizing is not an option: these
@@ -32,6 +32,7 @@ import {
   type OneShotBuild,
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
+import { isInsideGitWorkTree } from '../../core/services/cold-start-bootstrap.js';
 
 interface OrientCliOptions {
   task?: string;
@@ -57,7 +58,12 @@ export { readStdin };
  * pre-turn agent hook. Reads the task from --task or the hook's stdin payload.
  * Always exits 0: a hook must never break the user's turn.
  */
-async function runInject(directory: string, taskOpt: string | undefined, buildNote?: string): Promise<void> {
+async function runInject(
+  directory: string,
+  taskOpt: string | undefined,
+  buildNote?: string,
+  silentWithoutIndex = false,
+): Promise<void> {
   let prompt = taskOpt ?? '';
   if (!prompt) {
     try {
@@ -80,6 +86,9 @@ async function runInject(directory: string, taskOpt: string | undefined, buildNo
         `failed=${evaluation.failedCriteria.join(',') || 'none'}\n`,
       );
     } : undefined));
+    // Outside any git work tree (e.g. $HOME) with no index, say nothing: "run openlore
+    // analyze" on every prompt there invites an agent to index the whole directory.
+    if (block === pointerLineFor('no-graph') && silentWithoutIndex) return;
     // With a build in flight, "run openlore analyze" is the wrong remedy: say what is happening.
     if (block) console.log(buildNote && block === pointerLineFor('no-graph') ? `[OpenLore] ${safe(buildNote)}` : block);
   } catch {
@@ -104,6 +113,21 @@ function reportMetrics(startNs: bigint, result: Record<string, unknown>): void {
 /** True once `openlore analyze` has produced an llm-context artifact. */
 function hasAnalysis(directory: string): boolean {
   return existsSync(join(directory, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'));
+}
+
+/**
+ * The project an implicit (cwd) orient serves: the nearest ancestor that already has an
+ * index, else the enclosing git work tree's root, else the start directory. Agent hooks run
+ * from wherever the agent's shell is; from `<repo>/src` a plain cwd would report "no index"
+ * and start a second build that writes `src/.openlore`. The walk never crosses a `.git`
+ * boundary, so a nested repository is never served its parent's index.
+ */
+export function implicitOrientRoot(start: string): string {
+  const origin = resolve(start);
+  for (let dir = origin; ; dir = dirname(dir)) {
+    if (hasAnalysis(dir) || existsSync(join(dir, '.git'))) return dir === origin ? start : dir;
+    if (dirname(dir) === dir) return start;
+  }
 }
 
 /** Session-start primer printed when orient is invoked without a task. */
@@ -214,7 +238,7 @@ prints a short session-start primer (used by the install SessionStart hook).
 `
   )
   .action(async (taskArg: string | undefined, opts: OrientCliOptions) => {
-    const directory = opts.directory ?? process.cwd();
+    const directory = opts.directory ?? implicitOrientRoot(process.cwd());
     const asJson = opts.json ?? false;
     // --task wins; otherwise a bare positional task is honored.
     const task = (opts.task ?? taskArg)?.trim();
@@ -237,7 +261,8 @@ prints a short session-start primer (used by the install SessionStart hook).
     // pointer line) to stdout and always exit 0 — a pre-turn hook must never
     // break the user's turn. Reads the task from --task or stdin.
     if (opts.inject) {
-      await runInject(directory, task, buildNote());
+      const building = build?.state === 'started' || build?.state === 'running';
+      await runInject(directory, task, buildNote(), !building && !hasAnalysis(root) && !isInsideGitWorkTree(root));
       return;
     }
 

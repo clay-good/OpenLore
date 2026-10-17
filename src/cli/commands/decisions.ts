@@ -61,6 +61,8 @@ import {
 } from '../../constants.js';
 import type { DecisionConstraintBlock, DecisionScope, DecisionStore, PendingDecision } from '../../types/index.js';
 import { handleRecordDecision } from '../../core/services/mcp-handlers/decisions.js';
+import { buildDecisionsGuidance } from '../../core/analyzer/ai-config-generator.js';
+import { enablingCommandFor, presetToolNames, resolveWiredPreset } from '../../core/services/wired-preset.js';
 import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
@@ -81,28 +83,17 @@ import {
 // ============================================================================
 
 const AGENT_INSTRUCTIONS_MARKER = '<!-- openlore-decisions-instructions -->';
+const AGENT_INSTRUCTIONS_END_MARKER = '<!-- end-openlore-decisions-instructions -->';
 
-const AGENT_INSTRUCTIONS_BLOCK = `${AGENT_INSTRUCTIONS_MARKER}
+/**
+ * The agent-file block for the wired surface. The decisions body is the same
+ * preset-aware text `ai-config-generator` writes, so the block never tells an
+ * agent to call `record_decision` on a surface that does not expose it.
+ */
+const agentInstructionsBlock = (decisionsGuidance: string): string => `${AGENT_INSTRUCTIONS_MARKER}
 ## Architectural decisions
 
-When making a significant design choice, call \`record_decision\` **before** writing the code.
-
-Significant choices: data structure, library/dependency, API contract, auth strategy,
-module boundary, database schema, caching approach, error handling pattern.
-
-\`\`\`
-record_decision({
-  title: "Use JWTs for stateless auth",
-  rationale: "Avoids session store in infra",
-  consequences: "Tokens can't be revoked early",
-  affectedFiles: ["src/auth/middleware.ts"],
-  supersedes: "a1b2c3d4"  // 8-char ID of prior decision being reversed
-})
-\`\`\`
-
-Decisions are consolidated in the background immediately after \`record_decision\` is called — the pre-commit gate reads the already-consolidated store and adds no LLM latency.
-
-**Performance note**: if you skip \`record_decision\`, the gate detects unrecorded source changes at commit time and triggers a slow LLM extraction on the *next* commit (~10-30s). Calling \`record_decision\` proactively keeps every commit instant.
+${decisionsGuidance}
 
 ## When git commit is blocked by the decisions gate
 
@@ -114,7 +105,7 @@ Present each decision to the user:
 > "The commit is blocked — I found N architectural decision(s) to validate:
 > 1. **[id]** Title — rationale
 Do you approve? (yes/no)"
-For each approval call \`approve_decision\`, for rejections call \`reject_decision\`.
+For each approval run \`openlore decisions --approve <id>\`, for each rejection \`openlore decisions --reject <id>\` (both work on every MCP preset).
 Then run \`openlore decisions --sync\` and retry \`git commit\`.
 
 **\`reason: "approved_not_synced"\` — decisions approved but not written to specs:**
@@ -134,12 +125,21 @@ If no: retry with \`git commit --no-verify\` to skip the gate.
 <!-- end-openlore-decisions-instructions -->
 `;
 
-/** Inject decisions instructions into an existing agent file, idempotently. */
-async function injectAgentInstructions(rootPath: string, filePath: string): Promise<'injected' | 'already' | 'missing'> {
+const AGENT_INSTRUCTIONS_RE = /\n*<!-- openlore-decisions-instructions -->[\s\S]*?<!-- end-openlore-decisions-instructions -->\n*/g;
+
+/** Inject (or refresh a stale) decisions block into an existing agent file, idempotently. */
+async function injectAgentInstructions(rootPath: string, filePath: string, block: string): Promise<'injected' | 'already' | 'missing'> {
   if (!(await fileExists(filePath))) return 'missing';
   const content = await readFile(filePath, 'utf-8');
-  if (content.includes(AGENT_INSTRUCTIONS_MARKER)) return 'already';
-  await confinedAtomicWriteFile(rootPath, filePath, content.trimEnd() + '\n\n' + AGENT_INSTRUCTIONS_BLOCK, { preserveMode: true });
+  if (content.includes(AGENT_INSTRUCTIONS_MARKER)) {
+    // Refresh only a complete block. With the end marker gone (a hand edit), the regex
+    // would run from the old start marker to the NEW block's end and eat the user's text.
+    if (!content.includes(AGENT_INSTRUCTIONS_END_MARKER)) return 'already';
+  }
+  const base = content.includes(AGENT_INSTRUCTIONS_MARKER) ? content.replace(AGENT_INSTRUCTIONS_RE, '\n') : content;
+  const next = base.trimEnd() + '\n\n' + block;
+  if (next === content) return 'already';
+  await confinedAtomicWriteFile(rootPath, filePath, next, { preserveMode: true });
   return 'injected';
 }
 
@@ -148,9 +148,12 @@ async function removeAgentInstructions(rootPath: string, filePath: string): Prom
   if (!(await fileExists(filePath))) return;
   const content = await readFile(filePath, 'utf-8');
   if (!content.includes(AGENT_INSTRUCTIONS_MARKER)) return;
-  const cleaned = content
-    .replace(/\n*<!-- openlore-decisions-instructions -->[\s\S]*?<!-- end-openlore-decisions-instructions -->\n*/g, '')
-    .trim();
+  const cleaned = content.replace(AGENT_INSTRUCTIONS_RE, '').trim();
+  // Nothing but our block was there: remove the file rather than leave a 1-byte stub.
+  if (!cleaned) {
+    await rm(filePath, { force: true });
+    return;
+  }
   await confinedAtomicWriteFile(rootPath, filePath, cleaned + '\n', { preserveMode: true });
 }
 
@@ -277,8 +280,11 @@ async function ensureDecisionSupportFiles(rootPath: string): Promise<void> {
     { path: safeJoin(rootPath, '.windsurf/rules.md'), label: '.windsurf/rules.md' },
     { path: safeJoin(rootPath, '.vibe/skills/openlore.md'), label: '.vibe/skills/openlore.md' },
   ];
+  const { preset } = await resolveWiredPreset(rootPath);
+  const block = agentInstructionsBlock(buildDecisionsGuidance(
+    preset, await presetToolNames(preset), await enablingCommandFor('record_decision', preset)));
   for (const { path: filePath, label } of agentFiles) {
-    const result = await injectAgentInstructions(rootPath, filePath);
+    const result = await injectAgentInstructions(rootPath, filePath, block);
     if (result === 'injected') logger.discovery(`  → record_decision instructions added to ${label}`);
   }
 }
@@ -948,6 +954,12 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         logRoot: rootPath,
       });
 
+      // In --gate mode an agent parses the gated JSON on stdout: progress goes to stderr.
+      const progress = (message: string): void => {
+        if (options.gate) process.stderr.write(`[scan] ${safe(message)}\n`);
+        else logger.discovery(message);
+      };
+
       // Step 1 — Consolidate drafts OR extract from diff as fallback
       const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specMapResult = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
@@ -955,13 +967,13 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       let supersededIds: string[] = [];
       let dispositions: DraftDisposition[] = [];
       if (hasDrafts) {
-        if (!options.json) logger.discovery(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
+        if (!options.json) progress(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
         const result = await consolidateDrafts(store, llm, specMapResult);
         consolidated = result.decisions;
         supersededIds = result.supersededIds;
         dispositions = result.dispositions;
       } else {
-        if (!options.json) logger.discovery(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
+        if (!options.json) progress(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
         const specMap = specMapResult ?? await buildSpecMap({ rootPath, openspecPath });
         // Use staged-only scope so the fallback only sees what's actually being committed.
         consolidated = await extractFromDiff({ rootPath, stagedOnly: true, specMap, sessionId: store.sessionId, llm });
@@ -970,17 +982,24 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         // Nothing survived — but every draft still gets its verdict, so the author
         // can read WHY rather than watch the draft disappear
         // (change: explain-decision-rejection).
-        const updatedStore = dispositions.length > 0
-          ? await updateDecisionStore(rootPath, (s) => applyConsolidationOutcome(s, {
-            originalDraftIds: new Set(drafts.map((draft) => draft.id)),
-            originalDrafts: drafts,
-            capturedDecisions: store.decisions,
-            verified: [],
-            phantom: [],
-            supersededIds,
-            dispositions,
-          }), 'agent')
-          : store;
+        // A consolidation that honestly finds nothing still happened: write its receipt,
+        // or the gate reports `no_decisions_recorded` again and the documented flow loops.
+        const emptySnapshot = await sourceSnapshotFingerprint(rootPath, true);
+        const updatedStore = await updateDecisionStore(rootPath, (s) => ({
+          ...(dispositions.length > 0
+            ? applyConsolidationOutcome(s, {
+              originalDraftIds: new Set(drafts.map((draft) => draft.id)),
+              originalDrafts: drafts,
+              capturedDecisions: store.decisions,
+              verified: [],
+              phantom: [],
+              supersededIds,
+              dispositions,
+            })
+            : s),
+          lastConsolidatedAt: new Date().toISOString(),
+          lastConsolidatedSourceFingerprint: emptySnapshot?.fingerprint,
+        }), 'agent');
         const classifications = reconcileDecisionClassifications(updatedStore, {
           verified: [],
           phantom: [],
@@ -1057,7 +1076,9 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         dispositions.filter((disposition) => !unassessedIds.has(disposition.id)),
         new Set(phantom.map((d) => d.id)),
       );
-      const consolidationSnapshot = await sourceSnapshotFingerprint(rootPath, false);
+      // Staged scope, like the gate that checks this receipt: a working-tree fingerprint
+      // never matches when any untracked or unstaged source file exists.
+      const consolidationSnapshot = await sourceSnapshotFingerprint(rootPath, true);
       const updatedStore = await updateDecisionStore(rootPath, (s) => {
         // Every input draft's verdict, written alongside the status transition.
         const next = applyConsolidationOutcome(s, {

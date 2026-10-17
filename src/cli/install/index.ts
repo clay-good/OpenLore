@@ -249,8 +249,9 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     // the repository — not the operator — is choosing whether its own commit gate can
     // ever block. That is an advisory choice OpenLore honors, but it must be VISIBLE:
     // an operator who wires a gate is entitled to know the non-blocking mode came with
-    // the checkout rather than from them.
-    if (config?.governance?.autopilot === true) {
+    // the checkout rather than from them. Once a gate is installed the note has been
+    // shown (and a re-install may be reading back the value install itself wrote).
+    if (config?.governance?.autopilot === true && !alreadyGated) {
       logger.info(
         'Decision trail',
         'this repository\'s .openlore/config.json requests autopilot — the gate records and syncs '
@@ -758,7 +759,7 @@ export const installCommand = new Command('install')
     'Wire only this repository — skip the user-scope entries that make every future repository reach OpenLore',
     false,
   )
-  .option('--analyze', 'Build the index after configuring surfaces (default: true)', true)
+  .option('--analyze', 'Build the index after configuring surfaces', true)
   .option('--no-analyze', 'Configure surfaces only; do not run init/analyze (run "openlore analyze" yourself later)')
   .addHelpText(
     'after',

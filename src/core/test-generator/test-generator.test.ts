@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { generateTests } from './test-generator.js';
 import type { ParsedScenario } from '../../types/test-generator.js';
 
@@ -206,5 +209,38 @@ describe('generateTests', () => {
     expect(request.userPrompt).toContain(hostile);
     expect(request.userPrompt.endsWith(`</openlore-untrusted-data-${token}>`)).toBe(true);
     expect(request.systemPrompt).not.toContain(hostile);
+  });
+
+  it('never pastes a mapped file from outside the repository into the LLM prompt', async () => {
+    const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'openlore-testgen-')));
+    try {
+      const root = join(scratch, 'repo');
+      mkdirSync(join(root, 'src'), { recursive: true });
+      writeFileSync(join(root, 'src', 'ok.ts'), 'export const INSIDE_MARKER = 1;\n');
+      const secret = join(scratch, 'id_rsa');
+      writeFileSync(secret, 'OUTSIDE_SECRET_MARKER\n');
+      const complete = vi.fn().mockResolvedValue({ content: 'expect(value).toBe(true)' });
+      await generateTests({
+        scenarios: [{
+          ...MOCK_SCENARIO,
+          then: ['an unmatched outcome that needs the LLM'],
+          mappedFunctions: [
+            { name: 'a', file: secret, line: 1, confidence: 'llm' },
+            { name: 'b', file: '../id_rsa', line: 1, confidence: 'llm' },
+            { name: 'c', file: 'src/ok.ts', line: 1, confidence: 'llm' },
+          ],
+        } as ParsedScenario],
+        framework: 'vitest',
+        outputDir: 'spec-tests',
+        rootPath: root,
+        useLlm: true,
+        llm: { complete } as never,
+      });
+      const prompt = (complete.mock.calls[0][0] as { userPrompt: string }).userPrompt;
+      expect(prompt).toContain('INSIDE_MARKER');
+      expect(prompt).not.toContain('OUTSIDE_SECRET_MARKER');
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });

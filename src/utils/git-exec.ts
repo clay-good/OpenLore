@@ -157,6 +157,30 @@ function hardenedArgs(file: string, args?: readonly string[]): string[] | undefi
   return [...GIT_UNTRUSTED_CONFIG_OFF, ...hooksOff, ...rest];
 }
 
+/**
+ * Turn off partial-clone lazy fetching for every git spawn.
+ *
+ * In a partial clone, reading a missing blob (`git show ref:path`, `git cat-file`) starts a
+ * promisor fetch, and that fetch runs the command in the repository's own
+ * `remote.<name>.uploadpack`. The remote NAME is the repository's choice, so no `-c` in
+ * {@link GIT_UNTRUSTED_CONFIG_OFF} can target it. `GIT_NO_LAZY_FETCH` (git 2.45+) makes a
+ * missing object a read failure instead. RESIDUAL: older git ignores the variable.
+ */
+function hardenedEnv(file: string, env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  if (!isGitBinary(file)) return env;
+  // Only an explicit caller env may opt out ({@link trustedLazyFetchEnv}); an inherited value may not.
+  if (env && env.GIT_NO_LAZY_FETCH === '0') return env;
+  return { ...(env ?? process.env), GIT_NO_LAZY_FETCH: '1' };
+}
+
+/**
+ * Env for a git call on a repository OpenLore cloned itself from a trusted URL (the
+ * live-data fixture cache): its partial clone needs lazy fetch to check out.
+ */
+export function trustedLazyFetchEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_NO_LAZY_FETCH: '0' };
+}
+
 /** Promisified `execFile`, `windowsHide: true` always applied. */
 export function execFileGit(
   file: string,
@@ -174,7 +198,9 @@ export function execFileGit(
   options?: ExecFileOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature for the overloads above
 ): Promise<any> {
-  return rawExecFileAsync(file, hardenedArgs(file, args) as string[], { ...options, windowsHide: true });
+  return rawExecFileAsync(file, hardenedArgs(file, args) as string[], {
+    ...options, env: hardenedEnv(file, options?.env), windowsHide: true,
+  });
 }
 
 /**
@@ -200,7 +226,9 @@ export function execFileGitSync(
   options?: ExecFileSyncOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature for the overloads above
 ): any {
-  return execFileSync(file, hardenedArgs(file, args), { encoding: 'utf-8', ...options, windowsHide: true });
+  return execFileSync(file, hardenedArgs(file, args), {
+    encoding: 'utf-8', ...options, env: hardenedEnv(file, options?.env), windowsHide: true,
+  });
 }
 
 /**
@@ -216,7 +244,9 @@ export const spawnGit: typeof spawn = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
   file: any, args?: any, options?: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
-): any => spawn(file, hardenedArgs(file, args), { ...(options ?? {}), windowsHide: true });
+): any => spawn(file, hardenedArgs(file, args), {
+  ...(options ?? {}), env: hardenedEnv(file, options?.env), windowsHide: true,
+});
 
 /**
  * `spawnSync`, `windowsHide: true` always applied — for the synchronous shapes `execFileSync`
@@ -229,4 +259,6 @@ export const spawnGitSync: typeof spawnSync = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
   file: any, args?: any, options?: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
-): any => spawnSync(file, hardenedArgs(file, args), { ...(options ?? {}), windowsHide: true });
+): any => spawnSync(file, hardenedArgs(file, args), {
+  ...(options ?? {}), env: hardenedEnv(file, options?.env), windowsHide: true,
+});

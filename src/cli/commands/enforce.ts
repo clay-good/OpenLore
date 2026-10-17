@@ -604,9 +604,16 @@ async function inspectWorktreeStatus(
   }
 }
 
-async function trustedBaselineAtHead(cwd: string): Promise<{ text?: string | null; error?: string }> {
+async function trustedBaselineAtHead(cwd: string): Promise<{ text?: string | null; error?: string; unborn?: boolean }> {
   try {
-    await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd });
+    try {
+      await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd });
+    } catch (error) {
+      // An unborn HEAD (first commit, orphan branch) has no committed baseline, so
+      // nothing is frozen. Only a readable repository qualifies; anything else is an error.
+      await execFileAsync('git', ['rev-parse', '--git-dir'], { cwd }).catch(() => { throw error; });
+      return { text: null, unborn: true };
+    }
     const { stdout } = await execFileAsync('git', gitPathArgs(
       'ls-tree', '-z', '--name-only', 'HEAD', '--', ENFORCEMENT_BASELINE_REPO_PATH,
     ), { cwd });
@@ -752,8 +759,11 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
     : { text: undefined };
   const explicitGateOrConfig = activeGatePolicy || config !== null || configReadError !== null;
   const irrelevantNoPolicyAbsence = Boolean(
-    trustedBaseline.error && !explicitGateOrConfig &&
-    /not a git repository|needed a single revision|unknown revision|ambiguous argument ['"]?HEAD/i.test(trustedBaseline.error),
+    (trustedBaseline.error && !explicitGateOrConfig &&
+      /not a git repository|needed a single revision|unknown revision|ambiguous argument ['"]?HEAD/i.test(trustedBaseline.error))
+    // A first commit (or an orphan branch) with no active gate policy: nothing is frozen and
+    // nothing gates, so a config written by `openlore init` must not block it.
+    || ('unborn' in trustedBaseline && trustedBaseline.unborn && !activeGatePolicy && !activeFrozenAssessment),
   );
   const trustedBaselineError = trustedBaseline.error && !irrelevantNoPolicyAbsence
     ? trustedBaseline.error

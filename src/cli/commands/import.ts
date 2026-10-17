@@ -21,6 +21,7 @@
 import { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { readFile, mkdtemp, open, readdir, rm } from 'node:fs/promises';
+import { readFileConfined } from '../../utils/path-confinement.js';
 import { basename, resolve, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { logger } from '../../utils/logger.js';
@@ -584,7 +585,8 @@ async function buildKeywordSearchIndex(rootPath: string, analysisDir: string): P
   const paths = [...new Set(nodes.map(n => n.filePath))];
   const contents = await mapFilesBounded(paths, async fp => {
     try {
-      return await readFile(join(rootPath, fp), 'utf-8');
+      // A bundle's filePath is untrusted: confine it to the checkout.
+      return await readFileConfined(rootPath, fp);
     } catch {
       return null;
     }

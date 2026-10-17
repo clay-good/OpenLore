@@ -177,4 +177,20 @@ describe('source-carrying tool output redaction', () => {
     expect(result.body).toContain(secret);
     expect(result).not.toHaveProperty('redactions');
   });
+
+  it('honors secretRedaction.toolOutput=false from the user-wide config, not from the repository', async () => {
+    const root = await fixtureRoot();
+    const secret = `sk-${'u'.repeat(24)}`;
+    const userConfig = join(root, 'user-config.json');
+    const previous = process.env.OPENLORE_GLOBAL_CONFIG;
+    process.env.OPENLORE_GLOBAL_CONFIG = userConfig;
+    try {
+      await writeFile(userConfig, JSON.stringify({ secretRedaction: { toolOutput: false } }));
+      const result = await redactSourceToolResult('get_function_body', { body: secret }, root) as Record<string, unknown>;
+      expect(result.body).toContain(secret);
+    } finally {
+      if (previous === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
+      else process.env.OPENLORE_GLOBAL_CONFIG = previous;
+    }
+  });
 });

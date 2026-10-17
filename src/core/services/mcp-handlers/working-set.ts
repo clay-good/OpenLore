@@ -25,8 +25,8 @@
  */
 
 import { existsSync, realpathSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { resolve, join, basename } from 'node:path';
+import { resolve, join, basename, relative } from 'node:path';
+import { readFileConfined } from '../../../utils/path-confinement.js';
 import { validateDirectory, safeJoin } from './utils.js';
 import { handleSpecStoreStatus, type SpecStoreStatusReport } from './spec-store.js';
 import { handleOrient } from './orient.js';
@@ -296,7 +296,9 @@ async function readChange(
   if (!existsSync(proposalPath)) return null;
   let proposal: string;
   try {
-    proposal = await readFile(proposalPath, 'utf-8');
+    // Confined read: the change directory is confined above, but proposal.md itself may be a
+    // symlink to any file the user can read, which this tool would then return to the agent.
+    proposal = await readFileConfined(storeDir, relative(storeDir, proposalPath));
   } catch {
     return null;
   }

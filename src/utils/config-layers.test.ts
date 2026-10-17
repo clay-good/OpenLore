@@ -126,6 +126,45 @@ describe('user and project configuration layers', () => {
     expect((await readOpenLoreConfig(project))?.embedding).toMatchObject({ apiKey: 'user-secret' });
   });
 
+  it('says once, on stderr, why an inherited user apiKey is not sent to a project-chosen endpoint', async () => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdout = vi.spyOn(console, 'log');
+    try {
+      await writeFile(globalPath, JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1', model: 'm', apiKey: 'user-secret' } }));
+      await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'http://127.0.0.1:9999/v1' } }));
+      await readOpenLoreConfig(project);
+      await readOpenLoreConfig(project);
+      const withheld = warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('embedding.apiKey'));
+      expect(withheld).toHaveLength(1);
+      expect(stdout.mock.calls.some(([m]) => String(m).includes('embedding.apiKey'))).toBe(false);
+      expect(withheld[0]).not.toContain('user-secret');
+      // The same endpoint as the user's keeps the key, so there is nothing to say.
+      warn.mockClear();
+      await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1' } }));
+      await readOpenLoreConfig(project);
+      expect(warn.mock.calls.some(([m]) => String(m).includes('embedding.apiKey'))).toBe(false);
+    } finally {
+      warn.mockRestore();
+      stdout.mockRestore();
+    }
+  });
+
+  it('does not keep the user llm endpoint or TLS opt-out when a project switches provider', () => {
+    const merged = mergeConfigLayers(
+      { generation: { provider: 'openai-compat', openaiCompatBaseUrl: 'https://gw.corp/v1' }, llm: { apiBase: 'https://gw.corp/v1', sslVerify: false, timeout: 5 } },
+      { generation: { provider: 'anthropic' } },
+    );
+    expect(merged.llm).toEqual({ timeout: 5 });
+  });
+
+  it('does not reuse a user remote embedding model, endpoint or key when a project switches provider', () => {
+    const merged = mergeConfigLayers(
+      { embedding: { baseUrl: 'https://api.openai.com/v1', model: 'acme/embed-small', apiKey: 'sk-user', batchSize: 8 } },
+      { embedding: { provider: 'local' } },
+    );
+    expect(merged.embedding).toEqual({ provider: 'local', batchSize: 8 });
+  });
+
   it('drops a restated TLS opt-out beside a project-chosen endpoint', async () => {
     await writeFile(globalPath, JSON.stringify({ llm: { apiBase: 'https://corp-proxy.example', sslVerify: false } }));
     // Restating the user's value must not move the user's opt-out to the provider default.

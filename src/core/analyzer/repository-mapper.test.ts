@@ -240,6 +240,16 @@ describe('RepositoryMapper', () => {
       expect(css!.fileCount).toBe(1);
       expect(json).toBeDefined();
     });
+
+    it('lists no empty language for extensionless files', async () => {
+      await writeFile(join(testDir, 'app.ts'), 'export const x = 1;');
+      await writeFile(join(testDir, 'Dockerfile'), 'FROM node:20');
+      await writeFile(join(testDir, 'Makefile'), 'all:\n\ttrue\n');
+
+      const map = await new RepositoryMapper(testDir).map();
+
+      expect(map.summary.languages.map(l => l.language)).not.toContain('');
+    });
   });
 
   describe('file categorization', () => {

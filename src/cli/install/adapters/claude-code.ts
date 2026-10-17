@@ -501,6 +501,8 @@ function refusedWrite(
   displayName: string,
   reason: string,
 ): ApplyResult {
+  // Replace the planned create/update for this path: it did not happen.
+  result.changes = result.changes.filter((c) => c.path !== path);
   result.changes.push({
     path,
     kind: 'noop',

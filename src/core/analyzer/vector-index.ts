@@ -35,6 +35,7 @@ import {
   scoredExpansionTerms,
 } from './repo-vocabulary.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { isConfinedPath } from '../../utils/path-confinement.js';
 import { acquireLockAt } from '../runtime/advisory-lock.js';
 import {
   LEXICAL_MATCH_FIELDS,
@@ -148,11 +149,24 @@ function metaFilePath(outputDir: string): string {
 
 function dbPathFor(outputDir: string): string {
   const absolute = resolve(outputDir, DB_FOLDER);
+  let real: string;
   try {
-    return realpathSync.native(absolute);
+    real = realpathSync.native(absolute);
   } catch {
     return absolute;
   }
+  // A committed `vector-index` symlink would otherwise make `analyze` create, replace and
+  // delete index files in a directory the repository picked, outside the repository.
+  let realOutput: string;
+  try {
+    realOutput = realpathSync.native(outputDir);
+  } catch {
+    realOutput = resolve(outputDir);
+  }
+  if (!isConfinedPath(realOutput, real)) {
+    throw new Error(`Path escape blocked: ${absolute} resolves outside ${outputDir}`);
+  }
+  return real;
 }
 
 function metaStamp(outputDir: string): string | null {
@@ -2379,7 +2393,10 @@ export class VectorIndex {
    * Returns true if a vector index has been built for this output directory.
    */
   static exists(outputDir: string): boolean {
-    if (!existsSync(dbPathFor(outputDir))) return false;
+    let dbPath: string;
+    // An index path that escapes the analysis directory is not a usable index.
+    try { dbPath = dbPathFor(outputDir); } catch { return false; }
+    if (!existsSync(dbPath)) return false;
     return readMeta(outputDir) !== INVALID_META;
   }
 }

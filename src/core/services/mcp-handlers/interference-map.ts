@@ -506,9 +506,20 @@ export interface InFlightProviders {
 async function git(repoPath: string, args: string[]): Promise<string> {
   // No lazy fetch: a partial clone's promisor remote would otherwise run a repository-chosen
   // `uploadpack` command for any object this read-only tool asks for that is not present locally.
-  const { stdout } = await execFileAsync('git', args, { cwd: repoPath, env: noLazyFetchEnv(), maxBuffer: 64 * 1024 * 1024 });
+  const { stdout } = await execFileAsync('git', args, {
+    cwd: repoPath, env: noLazyFetchEnv(), maxBuffer: 64 * 1024 * 1024, timeout: GIT_TIMEOUT_MS,
+  });
   return stdout;
 }
+
+/**
+ * Bounds on each subprocess this MCP tool runs. Without them one stalled network call to
+ * GitHub (up to 51 `gh` calls in series) holds the tool call, and the agent's turn, forever.
+ * A timed-out call fails like any other: the PR is reported not enumerated / not assessed.
+ */
+const GIT_TIMEOUT_MS = 120_000;
+const GH_TIMEOUT_MS = 30_000;
+const GH_PROBE_TIMEOUT_MS = 5_000;
 
 type CommandRunner = (repoPath: string, args: string[]) => Promise<string>;
 type AutoBaseResolver = (repoPath: string) => Promise<string>;
@@ -729,7 +740,9 @@ export async function defaultEnumeratePullRequests(
   repoName: string,
   baseRefIn: string,
   runGh: CommandRunner = async (path, args) => {
-    const { stdout } = await execFileAsync('gh', args, { cwd: path, maxBuffer: args[1] === 'diff' ? 64 * 1024 * 1024 : 16 * 1024 * 1024 });
+    const { stdout } = await execFileAsync('gh', args, {
+      cwd: path, maxBuffer: args[1] === 'diff' ? 64 * 1024 * 1024 : 16 * 1024 * 1024, timeout: GH_TIMEOUT_MS,
+    });
     return stdout;
   },
   runGit: CommandRunner = git,
@@ -795,7 +808,7 @@ async function localCommit(repoPath: string, oid: string | undefined, runGit: Co
 }
 
 async function defaultGhAvailable(repoPath: string): Promise<boolean> {
-  try { await execFileAsync('gh', ['--version'], { cwd: repoPath }); return true; } catch { return false; }
+  try { await execFileAsync('gh', ['--version'], { cwd: repoPath, timeout: GH_PROBE_TIMEOUT_MS }); return true; } catch { return false; }
 }
 
 const DEFAULT_PROVIDERS: InFlightProviders = {

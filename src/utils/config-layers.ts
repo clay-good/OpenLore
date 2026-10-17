@@ -81,6 +81,24 @@ export function mergeConfigLayers(
     for (const key of ['model', 'openaiCompatBaseUrl', 'skipSslVerify']) {
       if (!Object.hasOwn(project.generation, key)) delete merged.generation[key];
     }
+    // The `llm` endpoint and TLS opt-out were set up for the user's provider: a project
+    // that picks another provider must not send that provider's key through them.
+    if (isObject(merged.llm)) {
+      const projectLlm = isObject(project.llm) ? project.llm : {};
+      for (const key of ['apiBase', 'sslVerify']) {
+        if (!Object.hasOwn(projectLlm, key)) delete merged.llm[key];
+      }
+    }
+  }
+  // Embedding model, endpoint, key and TLS opt-out belong to the user's embedding provider.
+  // A project that switches provider (e.g. to `local`) must not reuse a remote model name
+  // as a model id to download, or the remote key and TLS setting.
+  if (isObject(defaults.embedding) && isObject(project.embedding) && isObject(merged.embedding)
+    && Object.hasOwn(project.embedding, 'provider')
+    && project.embedding.provider !== defaults.embedding.provider) {
+    for (const key of ['model', 'baseUrl', 'apiKey', 'skipSslVerify']) {
+      if (!Object.hasOwn(project.embedding, key)) delete merged.embedding[key];
+    }
   }
   // A model with no provider beside it belongs to the built-in provider (`openlore init`
   // writes the built-in model this way). It must not pair with an inherited provider.
@@ -128,9 +146,28 @@ export function isUserConfiguredValue(field: string, value: unknown): boolean {
   }
 }
 
+/**
+ * Blocks whose user `apiKey` the merge withholds because the project chose its own endpoint
+ * for them. Pure; callers report it, so a key that silently stops being sent has a reason.
+ */
+export function withheldUserCredentials(
+  user: Record<string, unknown>,
+  project: Record<string, unknown>,
+): string[] {
+  const withheld: string[] = [];
+  for (const [key, value] of Object.entries(project)) {
+    const lower = user[key];
+    if (!isObject(value) || !isObject(lower)) continue;
+    if (!Object.hasOwn(lower, 'apiKey') || Object.hasOwn(value, 'apiKey')) continue;
+    if (ENDPOINT_KEYS.some((field) => Object.hasOwn(value, field) && value[field] !== lower[field])) withheld.push(key);
+  }
+  return withheld;
+}
+
 export async function readLayeredConfig(
   projectPath: string,
   builtInDefaults?: Record<string, unknown>,
+  onWithheldCredential?: (block: string, userPath: string) => void,
 ): Promise<Record<string, unknown> | null> {
   const userPath = globalOpenLoreConfigPath();
   if (resolve(projectPath) === resolve(userPath)) {
@@ -142,6 +179,7 @@ export async function readLayeredConfig(
   if (!user) return project ? mergeConfigLayers({}, project) : null;
   const defaults = mergeConfigLayers(builtInDefaults ?? {}, user);
   if (!project) return defaults;
+  for (const block of withheldUserCredentials(user, project)) onWithheldCredential?.(block, userPath);
   return mergeConfigLayers(defaults, project);
 }
 

@@ -280,7 +280,24 @@ export async function readOpenLoreConfigData(rootPath: string, explicitPath?: st
   const hasOverride = explicitPath || (primaryConfigOverride?.root === resolve(rootPath));
   return hasOverride ? readConfigObject(path) : readLayeredConfig(
     path, getDefaultConfig('unknown', './openspec') as unknown as Record<string, unknown>,
+    (block, userPath) => warnWithheldCredential(path, block, userPath),
   );
+}
+
+/** Once per (project config, block) per process: config is read on every MCP request. */
+const withheldCredentialWarnings = new Set<string>();
+
+function warnWithheldCredential(projectPath: string, block: string, userPath: string): void {
+  const key = `${projectPath}\u0000${block}`;
+  if (withheldCredentialWarnings.has(key)) return;
+  withheldCredentialWarnings.add(key);
+  // STDERR, like emitConfigValidationWarnings: this hub is read by --json and hook paths.
+  if (logger.getOptions().quiet) return;
+  const prefix = `${colorForStderr().yellow('[warn]')}`;
+  const message = `${block}.apiKey from ${userPath} is not used here: ${projectPath} sets its own ${block} endpoint, ` +
+    'and a repository may not choose where your key is sent. Use the same endpoint as your user ' +
+    `config, or remove the endpoint from the project's ${block} block.`;
+  process.stderr.write(`${prefix} ${sanitizeForTerminal(message)}\n`);
 }
 
 /** Synchronous counterpart for availability-only background auto-init checks. */

@@ -204,6 +204,28 @@ async function checkGit(rootPath: string): Promise<CheckResult> {
 
 const OPENLORE_PRE_COMMIT_MARKER = /# openlore-(?:enforcement|decisions|drift|blast-radius|impact-certificate)-hook/;
 
+/**
+ * The absolute Node + CLI paths OpenLore's own hook blocks pin (`renderTrustedHookCommand`
+ * writes `'<node>' '<cli.js>' …`). Only OpenLore's marked blocks are read, so a quoted
+ * path in the user's own hook lines (`sed '/^#/d'`) is never mistaken for a launcher.
+ */
+function pinnedHookLaunchers(hook: string): string[] {
+  const quoted = `'(?:[^']|'"'"')*'`;
+  const unquote = (token: string): string => token.slice(1, -1).replace(/'"'"'/g, "'");
+  const isAbsolute = (p: string): boolean => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+  const paths: string[] = [];
+  for (const block of hook.match(/# openlore-[a-z-]+-hook[\s\S]*?# end-openlore-[a-z-]+-hook/g) ?? []) {
+    for (const [, nodeToken, cliToken] of block.matchAll(new RegExp(`(${quoted})[ \\t]+(${quoted})`, 'g'))) {
+      const node = unquote(nodeToken);
+      const cli = unquote(cliToken);
+      if (isAbsolute(node) && /(^|[\\/])node(\.exe)?$/i.test(node) && isAbsolute(cli) && cli.endsWith('.js')) {
+        paths.push(node, cli);
+      }
+    }
+  }
+  return paths;
+}
+
 /** Verify that an installed OpenLore gate is on Git's active, executable hook path. */
 export async function checkHookReachability(rootPath: string): Promise<CheckResult> {
   const target = await resolveGitHookTarget(rootPath, 'pre-commit');
@@ -216,6 +238,20 @@ export async function checkHookReachability(rootPath: string): Promise<CheckResu
   if (OPENLORE_PRE_COMMIT_MARKER.test(activeContent)) {
     try {
       await access(target.executionPath, fsConstants.X_OK);
+      // The gate pins an absolute Node + CLI. A removed Node version (e.g. after
+      // `brew upgrade node`) leaves an executable hook that fails every commit.
+      const missing: string[] = [];
+      for (const path of pinnedHookLaunchers(activeContent)) {
+        try { await access(path); } catch { missing.push(path); }
+      }
+      if (missing.length > 0) {
+        return {
+          name: 'Git hook reachability',
+          status: 'fail',
+          detail: `OpenLore gate at ${target.hookPath} runs a launcher that no longer exists (${missing.join(', ')}), so every commit fails`,
+          fix: "Run 'openlore install' to re-wire the hook to this install",
+        };
+      }
       return {
         name: 'Git hook reachability',
         status: 'ok',
@@ -1309,7 +1345,7 @@ async function runRemediation(rootPath: string, r: Remediation): Promise<string>
       // Re-wire only — do NOT also re-analyze here (that is the 'analyze'
       // remediation's job, run separately if its own check surfaced it).
       await runInstall({ agent: 'claude-code', force: true, analyze: false, cwd: rootPath });
-      return 'MCP wiring corrected (.mcp.json)';
+      return 'MCP wiring re-written (user scope and this repository)';
     }
   }
 }

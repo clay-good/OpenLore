@@ -186,27 +186,36 @@ function buildMcpSection(
     lines.push(`**On-demand** (when orient's results aren't enough): ${onDemand.map(t => `\`${t}\``).join(' · ')}`, '');
   }
 
-  lines.push('## Architectural decisions', '');
-  if (has('record_decision')) {
-    lines.push(DECISIONS_BODY);
-  } else {
-    // Honest form: never prescribe a tool the agent cannot call. The CLI records
-    // the same draft on any preset (change: add-decisions-record-cli).
-    lines.push(
-      `\`record_decision\` is **not** part of the wired \`${preset}\` surface, so do not plan around calling it.`,
-      '',
-      'When making a significant design choice, record it with the CLI **before** writing the code:',
-      '',
-      '```bash',
-      'openlore decisions record --title "Use JWTs for stateless auth" --rationale "Avoids session store in infra" \\',
-      '  --consequences "Tokens can\'t be revoked early" --files src/auth/middleware.ts',
-      '```',
-      '',
-      `To expose the MCP tool as well: \`${enablingCommand}\`  — then this section regenerates with the MCP workflow.`,
-    );
-  }
+  lines.push('## Architectural decisions', '', buildDecisionsGuidance(preset, available, enablingCommand));
 
   return lines.join('\n').trimEnd();
+}
+
+/**
+ * The "Architectural decisions" body for the wired surface: the MCP workflow when
+ * `record_decision` is callable, otherwise the CLI form plus the enabling command.
+ * Shared with the decisions gate's agent-file block, so both say the same thing.
+ */
+export function buildDecisionsGuidance(
+  preset: string,
+  available: ReadonlySet<string> | null,
+  enablingCommand: string,
+): string {
+  if (available === null || available.has('record_decision')) return DECISIONS_BODY;
+  // Honest form: never prescribe a tool the agent cannot call. The CLI records
+  // the same draft on any preset (change: add-decisions-record-cli).
+  return [
+    `\`record_decision\` is **not** part of the wired \`${preset}\` surface, so do not plan around calling it.`,
+    '',
+    'When making a significant design choice, record it with the CLI **before** writing the code:',
+    '',
+    '```bash',
+    'openlore decisions record --title "Use JWTs for stateless auth" --rationale "Avoids session store in infra" \\',
+    '  --consequences "Tokens can\'t be revoked early" --files src/auth/middleware.ts',
+    '```',
+    '',
+    `To expose the MCP tool as well: \`${enablingCommand}\`  — then this section regenerates with the MCP workflow.`,
+  ].join('\n');
 }
 
 function buildContent(

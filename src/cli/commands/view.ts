@@ -761,6 +761,8 @@ export const viewCommand = new Command('view')
           port,
           host,
           strictPort: true,
+          // The HMR websocket bypasses the token guard; a local viewer needs no live reload.
+          hmr: false,
         },
       });
 

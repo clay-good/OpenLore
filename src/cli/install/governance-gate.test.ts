@@ -3,7 +3,7 @@
  * gate in non-blocking autopilot mode (change: unify-onboarding-entrypoint).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
@@ -15,6 +15,7 @@ import { runInstall, wireGovernanceGate } from './index.js';
 import { resolveTrustedHookLauncher } from '../git-hooks.js';
 import { OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
 import { getDefaultConfig } from '../../core/services/config-manager.js';
+import { logger } from '../../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -135,6 +136,52 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     if (stillThere) {
       expect(await readFile(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'))
         .not.toContain('openlore-decisions-hook');
+    }
+  });
+
+  it('writes decisions guidance for the wired surface, not an unwired record_decision call', async () => {
+    await initGit();
+    await writeConfig(dir);
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home })).toBe(0);
+
+    const claude = await readFile(join(dir, 'CLAUDE.md'), 'utf8');
+    expect(claude).toContain('openlore-decisions-instructions');
+    expect(claude).not.toContain('call `record_decision` **before**');
+    expect(claude).toContain('openlore decisions record --title');
+  });
+
+  it('a re-install keeps user text after a decisions block whose end marker was removed', async () => {
+    await initGit();
+    await writeConfig(dir);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    const path = join(dir, 'CLAUDE.md');
+    const cut = (await readFile(path, 'utf8')).replace('<!-- end-openlore-decisions-instructions -->', '') + '\nMY OWN NOTES\n';
+    await writeFile(path, cut);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    expect(await readFile(path, 'utf8')).toContain('MY OWN NOTES');
+  });
+
+  it('uninstall deletes agent files it created instead of leaving empty stubs', async () => {
+    await initGit();
+    await writeConfig(dir);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home });
+    expect(await exists(join(dir, 'CLAUDE.md'))).toBe(true);
+
+    expect(await runInstall({ cwd: dir, analyze: false, home, uninstall: true })).toBe(0);
+    expect(await exists(join(dir, 'CLAUDE.md'))).toBe(false);
+  });
+
+  it('a re-install does not attribute the autopilot it wrote to the repository', async () => {
+    await initGit();
+    await writeConfig(dir);
+    expect(await wireGovernanceGate(dir)).toBe('wired');
+    const info = vi.spyOn(logger, 'info');
+    try {
+      expect(await wireGovernanceGate(dir)).toBe('wired');
+      expect(info.mock.calls.flat().join(' ')).not.toContain('came from the repository');
+    } finally {
+      info.mockRestore();
     }
   });
 

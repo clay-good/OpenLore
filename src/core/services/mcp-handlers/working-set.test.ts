@@ -10,7 +10,7 @@
  * with synthetic orient-shaped inputs.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -282,6 +282,19 @@ describe('handleWorkingSetContext', () => {
     expect(report.change?.intent ?? '').not.toContain('SECRET');
     expect(report.ready).toBe(false);
     expect(() => assertConclusionShape('working_set_context', report)).not.toThrow();
+  });
+
+  it('does not follow a proposal.md symlink out of the store', async () => {
+    const api = makeRepo('api', 'h');
+    addRepo(home, api, { name: 'api' });
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'] });
+    mkdirSync(join(store, 'openspec', 'changes', 'c1'), { recursive: true });
+    writeFileSync(join(scratch, 'key.pem'), '# KEY\n\n## Why\n\nPRIVATE KEY MATERIAL');
+    symlinkSync(join(scratch, 'key.pem'), join(store, 'openspec', 'changes', 'c1', 'proposal.md'));
+
+    const report = await handleWorkingSetContext(home, 'c1');
+    expect(JSON.stringify(report)).not.toContain('PRIVATE KEY MATERIAL');
   });
 
   it('a resolved-but-unindexed target is reported as target-not-briefable, not briefed', async () => {

@@ -526,6 +526,11 @@ export const TRACE_PATH_DEFAULT_MAX_DEPTH = 6;
 
 /** Maximum number of paths returned by trace_execution_path */
 export const TRACE_PATH_MAX_PATHS = 10;
+/**
+ * Upper bound on DFS node expansions in one trace_execution_path call. The search is
+ * synchronous, so it must stay bounded or it blocks the whole MCP server.
+ */
+export const TRACE_PATH_EXPANSION_BUDGET = 200_000;
 
 /** Criticality score weight for fan-in */
 export const CRITICALITY_FAN_IN_WEIGHT = 3;

@@ -14,7 +14,7 @@ import { existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FixtureRepo, PLACEHOLDER_SHA } from './fixture-repos.js';
-import { execFileGit as execFileAsync } from '../../../../utils/git-exec.js';
+import { execFileGit as execFileAsync, trustedLazyFetchEnv } from '../../../../utils/git-exec.js';
 
 
 /** Repo root = six levels up from this file (src/core/services/mcp-handlers/live-data/). */
@@ -42,7 +42,8 @@ export interface FetchResult {
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+  // A fixture clone from a hard-coded URL: its blob:none checkout needs lazy fetch.
+  const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 64 * 1024 * 1024, env: trustedLazyFetchEnv() });
   return stdout.trim();
 }
 
@@ -91,7 +92,7 @@ export async function ensureRepo(entry: FixtureRepo): Promise<FetchResult> {
     if (!existsSync(join(dir, '.git'))) {
       // blob:none keeps the clone cheap while still resolving an arbitrary SHA.
       await execFileAsync('git', ['clone', '--filter=blob:none', '--no-tags', entry.url, dir], {
-        maxBuffer: 64 * 1024 * 1024,
+        maxBuffer: 64 * 1024 * 1024, env: trustedLazyFetchEnv(),
       });
     }
     await git(dir, ['checkout', '--quiet', entry.sha]);

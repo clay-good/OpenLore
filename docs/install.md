@@ -167,6 +167,10 @@ once per cwd within the extension instance. Use `/openlore configure` for projec
 settings or `/openlore configure --global` for defaults shared by Pi, the CLI and
 MCP in `~/.openlore/config.json` (`%USERPROFILE%\.openlore\config.json` on Windows).
 Project object fields override global fields; arrays replace inherited arrays.
+A project block that sets its own endpoint (`baseUrl`, `apiBase`, `openaiCompatBaseUrl`)
+does not inherit the user `apiKey` or a TLS opt-out for it: a repository may not choose
+where your key is sent. OpenLore prints a warning when this happens. The user file
+ignores `OPENLORE_HOME`; set `OPENLORE_GLOBAL_CONFIG` to move it.
 An explicit CLI `--config` uses that file alone. See
 [Pi configuration](../examples/pi/README.md#configuration) for details.
 

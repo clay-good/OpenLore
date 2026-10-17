@@ -662,7 +662,8 @@ export class RepositoryMapper {
     const languages: LanguageBreakdown[] = [];
 
     for (const [ext, count] of Object.entries(extCounts)) {
-      if (count > 0) {
+      // An extensionless file (Dockerfile, LICENSE) names no language.
+      if (count > 0 && ext) {
         languages.push({
           language: extToLang[ext] ?? ext.slice(1).toUpperCase(),
           extension: ext,

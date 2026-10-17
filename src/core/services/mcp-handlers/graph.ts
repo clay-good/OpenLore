@@ -40,6 +40,7 @@ import {
   ARTIFACT_ROUTE_INVENTORY,
   TRACE_PATH_DEFAULT_MAX_DEPTH,
   TRACE_PATH_MAX_PATHS,
+  TRACE_PATH_EXPANSION_BUDGET,
 } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite, CallEdge } from '../../analyzer/call-graph.js';
 import { EDGE_CONFIDENCE_VALUES } from '../../analyzer/call-graph-types.js';
@@ -1543,8 +1544,32 @@ export async function handleTraceExecutionPath(
   // on the first is an honesty feature over-claiming, which is its own defect.
   const enumerationCap = maxPaths + 1;
 
+  // Hops from each node to the nearest target (one backward BFS). The DFS skips a
+  // neighbor that cannot reach a target within the remaining depth. Without this, an
+  // out-of-reach target made the DFS enumerate every simple path up to maxDepth —
+  // synchronously, so it blocked the whole MCP server (tool timeout, stdin EOF and
+  // SIGTERM included) for tens of minutes on a 2,000-function graph.
+  const distToTarget = new Map<string, number>();
+  const queue = [...targetIds];
+  for (const id of queue) distToTarget.set(id, 0);
+  for (let head = 0; head < queue.length; head++) {
+    const id = queue[head];
+    const next = distToTarget.get(id)! + 1;
+    if (next > maxDepth) continue;
+    for (const callerId of traversal.neighborIds(id, 'backward', edgeFilter)) {
+      if (distToTarget.has(callerId)) continue;
+      distToTarget.set(callerId, next);
+      queue.push(callerId);
+    }
+  }
+  // The distance bound ignores the simple-path rule, so a pathological graph can still
+  // branch widely; a fixed expansion budget keeps the call bounded and is disclosed.
+  let expansionsLeft = TRACE_PATH_EXPANSION_BUDGET;
+  let budgetExhausted = false;
+
   function dfs(currentId: string, path: string[], visited: Set<string>): void {
-    if (allPaths.length >= enumerationCap) return;
+    if (allPaths.length >= enumerationCap || budgetExhausted) return;
+    if (--expansionsLeft < 0) { budgetExhausted = true; return; }
     if (targetIds.has(currentId) && path.length > 1) {
       allPaths.push([...path]);
       return; // don't traverse past the target
@@ -1554,6 +1579,8 @@ export async function handleTraceExecutionPath(
     const firstHopFilter = path.length === 1 && allowedFirstHop?.has(path[0]) ? allowedFirstHop.get(path[0]) : undefined;
     for (const neighborId of traversal.neighborIds(currentId, 'forward', edgeFilter)) {
       if (firstHopFilter && !firstHopFilter.has(neighborId)) continue;
+      const remaining = distToTarget.get(neighborId);
+      if (remaining === undefined || remaining > maxDepth - path.length) continue;
       if (!visited.has(neighborId)) {
         visited.add(neighborId);
         path.push(neighborId);
@@ -1589,7 +1616,10 @@ export async function handleTraceExecutionPath(
       entryFunction,
       targetFunction,
       pathsFound: 0,
-      message: `No execution path found from "${entryFunction}" to "${targetFunction}" within depth ${maxDepth}.`,
+      message: budgetExhausted
+        ? `No execution path found from "${entryFunction}" to "${targetFunction}" before the search budget ran out; one may still exist within depth ${maxDepth}.`
+        : `No execution path found from "${entryFunction}" to "${targetFunction}" within depth ${maxDepth}.`,
+      ...(budgetExhausted ? { searchBudgetExhausted: true } : {}),
       hint: 'Try increasing maxDepth, or check whether both functions are in the same connected component of the call graph.',
       ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
       confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains([], pairIndex), staleness: traceStaleness, integrity: ctx?.integrity, repair: repairDisclosure(absDir) }),
@@ -1651,6 +1681,7 @@ export async function handleTraceExecutionPath(
         }
       : { shortestPath: paths[0].chain }),
     paths,
+    ...(budgetExhausted ? { searchBudgetExhausted: true } : {}),
     ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
     confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains(allPaths, pairIndex), staleness: traceStaleness, integrity: ctx?.integrity, repair: repairDisclosure(absDir) }),
   };

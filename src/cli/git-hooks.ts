@@ -18,6 +18,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileExists } from '../utils/command-helpers.js';
 import { sanitizeForTerminal } from '../utils/misc.js';
 import { isConfinedPath } from '../utils/path-confinement.js';
+import { stableHomebrewPath } from '../utils/platform-command.js';
 import { execFileGit as execFileAsync } from '../utils/git-exec.js';
 
 
@@ -30,7 +31,10 @@ export async function resolveTrustedHookLauncher(rootPath: string): Promise<Trus
     let cli: string;
     try { cli = await realpath(join(moduleDir, 'index.js')); }
     catch { cli = await realpath(resolve(moduleDir, '../../dist/cli/index.js')); }
-    const node = await realpath(process.execPath);
+    // Through Homebrew's stable `opt` alias: `brew upgrade node` deletes the versioned Cellar
+    // path, and a hook pinned to it would then block every commit.
+    cli = stableHomebrewPath(cli);
+    const node = stableHomebrewPath(await realpath(process.execPath));
     if (isConfinedPath(rootPath, node) || isConfinedPath(rootPath, cli)) return null;
     return { node, cli };
   } catch {

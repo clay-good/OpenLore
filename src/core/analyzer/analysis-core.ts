@@ -159,7 +159,7 @@ export async function runAnalysisCore(
     emit({
       stage: 'mapping',
       status: 'warning',
-      detail: 'Repository-configured analysis.includePatterns cannot override .gitignore or .openlore-ignore; use the explicit --include option for an operator-approved override.',
+      detail: 'Configured analysis.includePatterns cannot override .gitignore or .openlore-ignore; use the explicit --include option for an operator-approved override.',
     });
   }
   const patterns = mergeAnalysisPatterns(
