@@ -1362,6 +1362,29 @@ describe('adversarial regressions (PR #189 review findings)', () => {
     if (!stale) expect(got).toEqual(oracleOutgoingSig(oracle.edges, 'src/w.ts'));
   });
 
+  it('deleting a message consumer discloses the send it leaves unpaired (change: add-message-topology-edges)', async () => {
+    const v1: Files = {
+      'src/client.ts': 'export function requestRestart(ws: any) { ws.send({ type: "restart" }); }\n',
+      'src/server.ts': 'export function onMessage(m: any) { if (m.type === "restart") { return 1; } }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const graph = await fullBuild(v1);
+    expect(graph.edges.some(e => e.synthesizedBy === 'message-topology')).toBe(true);
+    seedStore(store, v1, graph);
+    store.close();
+
+    await rm(join(root, 'src/server.ts'), { force: true });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    await watcher['handleDeletions']([join(root, 'src/server.ts')]);
+
+    const report = JSON.parse(await readFile(join(outputPath, 'dynamic-boundary.json'), 'utf-8')) as {
+      files: Array<{ filePath: string; sites: Array<{ kind: string }> }>;
+    };
+    expect(report.files.find(f => f.filePath === 'src/client.ts')?.sites.map(x => x.kind)).toEqual(['message-send']);
+  });
+
   it('deletion clears any stale mark for the removed file (no phantom stale rows)', async () => {
     const v1: Files = { 'src/c.ts': 'export function target() { return 1; }\n' };
     for (let i = 0; i < 5; i++) v1[`src/caller${i}.ts`] = `export function call${i}() { return target(); }\n`;

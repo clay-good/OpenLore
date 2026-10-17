@@ -134,7 +134,9 @@ describe('handleAnalyzeErrorPropagation', () => {
     writeFileSync(ctxPath, JSON.stringify(ctx), 'utf-8');
     const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'sender' })) as Result;
     expect(res.summary.escapes).toBe(0);
-    expect(res.boundaries.some(b => /sender::sender\.ts:2 message hop to helper not followed/.test(b))).toBe(true);
+    expect(res.boundaries.some(b => /1 message hop\(s\).*NOT followed/.test(b))).toBe(true);
+    expect((res as unknown as { messageHopsNotFollowed: { count: number; sample: string[] } }).messageHopsNotFollowed)
+      .toEqual({ count: 1, sample: ['sender::sender.ts:2 → helper'] });
   });
 
   it('discloses an external callee as a boundary, never assumed exception-free', async () => {

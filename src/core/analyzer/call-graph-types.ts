@@ -87,7 +87,7 @@ export interface DynamicEventFacts {
   group: string;
   rule: 'event-channel' | 'type-event' | 'actor-message' | 'message-topology';
   /** `fallbackId`: the enclosing function, used by message-topology when no handler id resolves. */
-  registrations: Array<{ key: string; handlerIds: string[]; fallbackId?: string }>;
+  registrations: Array<{ key: string; handlerIds: string[]; fallbackId?: string; file?: string }>;
   dispatches: Array<{ key: string; callerId: string; line: number }>;
 }
 

@@ -42,6 +42,7 @@ import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth, extractFileDynamicBoundary } from '../analyzer/call-graph.js';
+import { MESSAGE_TOPOLOGY_RULE } from '../analyzer/message-topology.js';
 import { buildDynamicBoundaryReport, type DynamicBoundaryReport, type FileDynamicBoundary } from '../analyzer/dynamic-boundary.js';
 import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 /** Matches the serving-side cap in `dynamic-boundary-disclosure.ts` — one artifact, one bound. */
@@ -2612,6 +2613,10 @@ export class McpWatcher {
     const rels = absPaths.map((abs) => toRepositoryPath(relative(this.rootPath, abs)));
     if (rels.length === 0) return;
     const releaseAnalysis = await acquireAnalysisLock(this.outputPath);
+    // Files whose message-topology edges point INTO a deleted file. Deleting the file drops those
+    // edges, so each such sender must have its dynamic-boundary record re-derived — otherwise the
+    // send keeps neither an edge nor a disclosed site (change: add-message-topology-edges).
+    const messageSenderFiles = new Set<string>();
     try {
 
     // 1. Call-graph store — deleteEdgesForFile removes edges where the file is
@@ -2625,6 +2630,14 @@ export class McpWatcher {
         if (store.notReady) {
           this.scheduleBackgroundRebuild();
           return;
+        }
+        const deleted = new Set(rels);
+        for (const rel of rels) {
+          for (const e of store.getEdgesForFile(rel).incoming) {
+            if (e.synthesizedBy !== MESSAGE_TOPOLOGY_RULE) continue;
+            const callerFile = store.getNode(e.callerId)?.filePath;
+            if (callerFile && !deleted.has(callerFile)) messageSenderFiles.add(callerFile);
+          }
         }
         store.transaction(() => {
           for (const rel of rels) {
@@ -2708,7 +2721,15 @@ export class McpWatcher {
 
       // 7. Parse health — drop the deleted files' degradation records and re-roll-up.
       await this.updateParseHealth([], rels);
-      await this.updateDynamicBoundary([], rels);
+      const senderFiles: ChangedFile[] = [];
+      for (const rel of [...messageSenderFiles].sort()) {
+        try {
+          senderFiles.push({ rel, content: await readFileConfined(this.rootPath, rel, MAX_EDIT_VERDICT_BASIS_FILE_BYTES) });
+        } catch {
+          // Unreadable now: the file keeps its last record, and the next full build re-derives it.
+        }
+      }
+      await this.updateDynamicBoundary(senderFiles, rels);
       await this.republishGeneration();
     } finally {
       await releaseAnalysis();

@@ -444,6 +444,8 @@ export async function handleAnalyzeErrorPropagation(
   // harden-call-resolution-ambiguity). Keyed by caller+line+name so a site is
   // disclosed once regardless of how often the node is revisited.
   const ambiguousCallSites = new Map<string, string>();
+  // Message hops the traversal met and did not follow (change: add-message-topology-edges).
+  const messageHopsNotFollowed = new Map<string, string>();
   let parsedCount = 0;
   let sourceBytes = 0;
   let capHit = false;
@@ -618,10 +620,7 @@ export async function handleAnalyzeErrorPropagation(
     }
 
     for (const hop of messageHopsByCaller.get(n.id) ?? []) {
-      boundaries.add(
-        `${selfLabel}:${hop.line ?? '?'} message hop to ${hop.calleeName} not followed — `
-        + 'exceptions its handler throws do not reach the sender',
-      );
+      messageHopsNotFollowed.set(`${n.id}@${hop.line ?? -1}@${hop.calleeId}`, `${selfLabel}:${hop.line ?? '?'} → ${hop.calleeName}`);
     }
 
     // Disclose unresolved-ambiguous call sites at this node: a call the resolver
@@ -756,6 +755,13 @@ export async function handleAnalyzeErrorPropagation(
         'does not clear these paths.',
     );
   }
+  const messageHopSample = [...messageHopsNotFollowed.values()].sort();
+  if (messageHopsNotFollowed.size > 0) {
+    boundaries.add(
+      `${messageHopsNotFollowed.size} message hop(s) (a tagged message handed to a transport) were NOT followed — ` +
+        'an exception a message handler throws does not reach the sender, so those handlers are not in this result.',
+    );
+  }
   const ambiguousSample = [...ambiguousCallSites.values()].sort();
   if (ambiguousCallSites.size > 0) {
     boundaries.add(
@@ -813,6 +819,9 @@ export async function handleAnalyzeErrorPropagation(
       : {}),
     ...(ambiguousCallSites.size > 0
       ? { ambiguousCallSites: { count: ambiguousCallSites.size, sample: ambiguousSample.slice(0, 15) } }
+      : {}),
+    ...(messageHopsNotFollowed.size > 0
+      ? { messageHopsNotFollowed: { count: messageHopsNotFollowed.size, sample: messageHopSample.slice(0, 15) } }
       : {}),
     note:
       'escapes = exception types that can propagate OUT of this function to its callers (each with ' +

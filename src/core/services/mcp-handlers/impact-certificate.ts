@@ -45,6 +45,7 @@ import { OPENLORE_DIR } from '../../../constants.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
+import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 import type {
   StructuralAnchor,
   CoveringSurfaceConfig,
@@ -98,6 +99,12 @@ export interface NewlyOpenedPath {
   pathIds: string[];
   /** The surface member the path lands on. */
   reaches: string;
+  /**
+   * The path crosses a message hop (a `message-topology` edge): a message reaches the surface, not a
+   * call. Such a path is reported but never raises the block signal — the hop is heuristic and its
+   * execution depends on the transport (change: add-message-topology-edges).
+   */
+  crossesMessageHop?: true;
 }
 
 export interface ResolvedSurfaceView {
@@ -579,6 +586,10 @@ export function detectNewlyOpenedPaths(
   const nameById = new Map(cg.nodes.map(n => [n.id, n.name] as const));
   for (const n of postNodes) if (!nameById.has(n.id)) nameById.set(n.id, n.name);
   const nameOf = (id: string): string => nameById.get(id) ?? id.split('::').pop() ?? id;
+  const messageHops = new Set<string>();
+  for (const e of cg.edges) {
+    if (e.synthesizedBy === MESSAGE_TOPOLOGY_RULE && e.callerId && e.calleeId) messageHops.add(`${e.callerId}\u0000${e.calleeId}`);
+  }
 
   const out: NewlyOpenedPath[] = [];
   for (const surface of surfaces) {
@@ -608,6 +619,7 @@ export function detectNewlyOpenedPaths(
         path: named.length > MAX_PATH_LEN ? [...named.slice(0, MAX_PATH_LEN - 1), '…', reaches] : named,
         pathIds: idPath,
         reaches,
+        ...(idPath.some((id, i) => i > 0 && messageHops.has(`${idPath[i - 1]}\u0000${id}`)) ? { crossesMessageHop: true as const } : {}),
       });
     }
     // Shortest paths first, then a TOTAL order so the result is byte-for-byte
@@ -898,7 +910,9 @@ export async function computeImpactCertificate(
   // Severity from the uncapped set (`?? 0` so a stray non-enum severity can never make
   // the block signal NaN/undefined — defense beyond surfacesFromConfig's coercion).
   let highestRank = 0;
-  for (const p of allOpenedPaths) highestRank = Math.max(highestRank, SEVERITY_RANK[p.surfaceSeverity] ?? 0);
+  for (const p of allOpenedPaths) {
+    if (!p.crossesMessageHop) highestRank = Math.max(highestRank, SEVERITY_RANK[p.surfaceSeverity] ?? 0);
+  }
 
   const newlyOpenedPaths: NewlyOpenedPath[] = [];
   const truncatedSurfaces: Array<{ surface: string; shown: number; total: number }> = [];
@@ -907,13 +921,17 @@ export async function computeImpactCertificate(
     const shown = paths.slice(0, MAX_PATHS_PER_SURFACE);
     newlyOpenedPaths.push(...shown);
     if (paths.length > shown.length) truncatedSurfaces.push({ surface: name, shown: shown.length, total: paths.length });
+    // A surface reached only across message hops is reported, but never as critical.
+    const viaMessagesOnly = paths.every(p => p.crossesMessageHop);
+    const critical = sev === 'critical' && !viaMessagesOnly;
     findings.push({
-      code: sev === 'critical' ? 'surface-critical' : 'surface-newly-reached',
-      severity: sev === 'critical' ? 'error' : 'warn',
+      code: critical ? 'surface-critical' : 'surface-newly-reached',
+      severity: critical ? 'error' : 'warn',
       subject: name, surfaceSeverity: sev,
       message: `Change opens ${paths.length} new path(s) into surface "${name}"` +
         (paths.length > shown.length ? ` (showing ${shown.length})` : '') +
-        ` (e.g. ${paths[0].path.join(' → ')}).`,
+        ` (e.g. ${paths[0].path.join(' → ')}).` +
+        (viaMessagesOnly ? ' Every one crosses a message hop (a message, not a call), so it does not raise the block signal.' : ''),
       remediation: `Confirm the new reach into "${name}" is intended; if not, sever the opening edge ${paths[0].openingEdge.from} → ${paths[0].openingEdge.to}.`,
     });
   }

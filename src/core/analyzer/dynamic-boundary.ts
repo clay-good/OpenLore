@@ -132,6 +132,10 @@ export const DYNAMIC_BOUNDARY_REFUSALS = [
    * constant, another message's field), so whether it handles this send is unknown.
    */
   'uncomparable-message-consumer',
+  /** A clause selects this message tag, but no indexed function contains it (an anonymous listener). */
+  'unattributed-message-consumer',
+  /** Only clauses in test files select this tag, and a test's handler pairs only within its file. */
+  'test-only-message-consumer',
 ] as const;
 
 export type DynamicBoundaryRefusal = (typeof DYNAMIC_BOUNDARY_REFUSALS)[number];
@@ -148,7 +152,9 @@ export const DYNAMIC_BOUNDARY_REFUSAL_LABEL: Record<DynamicBoundaryRefusal, stri
   'synthesized-binding': 'a literal-reflective edge binds this dispatch, but directly-resolved-only traversal does not follow it',
   'unattributed-caller': 'the target resolves, but no indexed symbol contains the call to attach it to',
   'unindexed-message-consumer': 'no indexed handler selects on this message tag',
-  'uncomparable-message-consumer': 'a handler selects this message field on a tag that cannot be compared statically',
+  'uncomparable-message-consumer': 'a handler compares this message field against a constant spelled like this tag, which cannot be evaluated statically',
+  'unattributed-message-consumer': 'a handler selects this message tag, but no indexed function contains it',
+  'test-only-message-consumer': 'only test code selects this message tag',
 };
 
 /**

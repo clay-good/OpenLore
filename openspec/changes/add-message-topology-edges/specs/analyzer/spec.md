@@ -22,10 +22,10 @@ edge rather than a guess.
 ### Requirement: MessageSitesAreTransportSendsAndClosedFieldConsumers
 
 A construction site SHALL count only when its object literal is passed to a transport call
-(`send`, `postMessage`, `dispatch`, …), directly or through `JSON.stringify`, and only for a closed
-set of fields (`type`, `kind`, `action`, …). A consumer SHALL be a `switch` over `x.<field>`, or an
-`if` whose condition is, or has as one `&&` operand, `x.<field> === <tag>`. A computed tag, or one a
-later spread can overwrite, SHALL give no edge.
+(`send`, `postMessage`, `dispatch`, …), directly or through `JSON.stringify`, for a closed set of
+fields (`type`, `kind`, …). A consumer SHALL be a `switch` over `x.<field>`, an `if` testing
+`x.<field> ===`/`== <tag>`, or an early-exit `if (x.<field> !== <tag>) return;`. A tag SHALL be static
+only as a literal or `A.B` with `A` module-bound or imported; any other tag SHALL give no edge.
 
 #### Scenario: An equality test is an equivalent consumer form
 
@@ -52,6 +52,7 @@ later spread can overwrite, SHALL give no edge.
   substitution
 - **WHEN** the call graph is built
 - **THEN** no message-topology edge is created, and the site is not reported as having no consumers
+- **AND** a member tag on a parameter or local (`case ev.name:`) is likewise not static
 
 #### Scenario: Direct and event-channel edges are unchanged
 
@@ -83,6 +84,14 @@ selected by that handler, not that the hop occurs on any particular execution.
 - **THEN** the step that edge reaches carries `via: "message-topology"`, and the call hops around it
   carry no `via`
 
+#### Scenario: A message hop is never asserted as a call
+
+- **GIVEN** a message-topology edge from `send` to `handle`
+- **WHEN** `verify_claim` checks `send calls handle`, or `reaches` with no call-only path
+- **THEN** the verdict is `unverifiable`, and `analyze_error_propagation` does not carry the
+  handler's exceptions back to `send` but counts the hop in `messageHopsNotFollowed`; a
+  change-impact path across the hop is marked `crossesMessageHop` and never raises the block signal
+
 #### Scenario: A consumer can exclude message edges
 
 - **GIVEN** a traversal that asks for directly-resolved edges only
@@ -92,10 +101,10 @@ selected by that handler, not that the hop occurs on any particular execution.
 ### Requirement: UnpairedMessageSendsAreDisclosedAsTransportBoundaries
 
 A send that no indexed clause can be paired with SHALL be recorded as a `message-send`
-dynamic-boundary site with the most specific reason: `over-cap`, `unattributed-caller` (a handler
-exists but no indexed function contains the send), `uncomparable-message-consumer` (a clause tests
-the field against a constant that cannot be compared), or `unindexed-message-consumer`. No edge
-SHALL be invented to an unindexed consumer.
+dynamic-boundary site with the most specific reason that holds: `over-cap`, `unattributed-caller`,
+`unattributed-message-consumer` (a clause no indexed function contains), `uncomparable-message-consumer`
+(a clause tests a constant spelled like the tag), `test-only-message-consumer`, or
+`unindexed-message-consumer`. No edge SHALL be invented to an unindexed consumer.
 
 #### Scenario: A message leaving the indexed repository is disclosed
 
@@ -126,7 +135,9 @@ SHALL be invented to an unindexed consumer.
 
 A handler clause in a test file SHALL pair only with a send in the same file, because a test's
 protocol (a fake worker, a local reducer) is its own. A send in a test file MAY pair with a handler
-in production code.
+in production code, but SHALL NOT make that handler tested: no `tested_by` edge and no test reach
+for coverage gaps derive from a message hop. Of the remaining handlers, a send SHALL pair only with
+those sharing the longest directory prefix with it.
 
 #### Scenario: A generic tag does not cross unrelated tests
 
@@ -134,6 +145,12 @@ in production code.
   in another test file
 - **WHEN** the call graph is built
 - **THEN** no edge connects them, while a send in the reducer's own file does pair with it
+
+#### Scenario: Near-copies in sibling directories do not cross-pair
+
+- **GIVEN** a sender and a handler in `samples/news/`, and a same-tag handler in `samples/news_i18n/`
+- **WHEN** the call graph is built
+- **THEN** the sender pairs only with the handler in its own directory
 
 ### Requirement: SingleFileMessageBoundariesClaimNoRepositoryWideAbsence
 

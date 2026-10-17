@@ -178,6 +178,14 @@ describe('detectNewlyOpenedPaths', () => {
     expect(p.reaches).toBe('surfaceFn');
   });
 
+  it('labels a path that crosses a message hop (change: add-message-topology-edges)', () => {
+    const msgCg = graph([node(A), node(B), node(S)], [{ ...edge(B, S), confidence: 'synthesized', synthesizedBy: 'message-topology' }]);
+    const out = detectNewlyOpenedPaths(msgCg, surfaces, { added: [{ from: A, to: B }], removed: [], unresolved: [] });
+    expect(out.map(p => p.crossesMessageHop)).toEqual([true]);
+    const direct = detectNewlyOpenedPaths(cg, surfaces, { added: [{ from: A, to: B }], removed: [], unresolved: [] });
+    expect(direct[0].crossesMessageHop).toBeUndefined();
+  });
+
   it('reports a direct opening edge into a surface member', () => {
     const out = detectNewlyOpenedPaths(cg, surfaces, { added: [{ from: A, to: S }], removed: [], unresolved: [] });
     expect(out).toHaveLength(1);

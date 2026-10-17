@@ -123,6 +123,27 @@ describe('verify_claim — a message hop is not a call (change: add-message-topo
   });
 });
 
+describe('verify_claim — reaches across a message hop (change: add-message-topology-edges)', () => {
+  it('is unverifiable when the only path crosses a message hop', async () => {
+    useGraph([MAIN, HANDLER, HELPER], [
+      edge('src/main.ts::main', 'src/app.ts::handler', { confidence: 'synthesized', synthesizedBy: 'message-topology' }),
+      edge('src/app.ts::handler', 'src/app.ts::helper'),
+    ]);
+    const r = await handleVerifyClaim({ directory: '/p', kind: 'reaches', subject: 'main', object: 'helper' }) as { verdict: string; reason: string };
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.reason).toMatch(/message hop/);
+  });
+  it('confirms on a call path when one exists beside the message hop', async () => {
+    useGraph([MAIN, HANDLER, HELPER], [
+      edge('src/main.ts::main', 'src/app.ts::handler', { confidence: 'synthesized', synthesizedBy: 'message-topology' }),
+      edge('src/main.ts::main', 'src/app.ts::helper'),
+      edge('src/app.ts::handler', 'src/app.ts::helper'),
+    ]);
+    const r = await handleVerifyClaim({ directory: '/p', kind: 'reaches', subject: 'main', object: 'helper' }) as { verdict: string };
+    expect(r.verdict).toBe('confirmed');
+  });
+});
+
 describe('verify_claim — reaches', () => {
   it('confirms a transitive reach and reports the hop count', async () => {
     const r = await handleVerifyClaim({ directory: '/p', kind: 'reaches', subject: 'main', object: 'helper' }) as { verdict: string; reason: string };

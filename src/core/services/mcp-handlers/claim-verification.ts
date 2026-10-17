@@ -247,12 +247,31 @@ function verifyReach(
   object: FunctionNode,
   kind: 'reaches' | 'impacts',
 ): ClaimResult {
-  const traversal = traversalIndexFor(cg);
   const pairIndex = buildPairEdgeIndex(cg.edges);
   // `reaches`: does subject call through to object (forward from subject)?
   // `impacts`: does changing subject affect object — i.e. object transitively
   // calls subject, so we walk backward from subject and look for object.
-  const path = reachWithPath(subject.id, object.id, traversal, kind === 'reaches' ? 'forward' : 'backward');
+  const dir = kind === 'reaches' ? 'forward' : 'backward';
+  let path = reachWithPath(subject.id, object.id, traversalIndexFor(cg), dir);
+  // A path that crosses a message hop is not a call chain (change: add-message-topology-edges): it
+  // decides the claim only when a path WITHOUT one exists too. Otherwise the claim is unverifiable.
+  const crossesMessageHop = (p: string[]): boolean =>
+    p.some((id, i) => i > 0 && pairIndex.get((dir === 'forward' ? p[i - 1] : id) + '\x00' + (dir === 'forward' ? id : p[i - 1]))?.synthesizedBy === MESSAGE_TOPOLOGY_RULE);
+  if (path && crossesMessageHop(path)) {
+    const withoutMessages = { ...cg, edges: cg.edges.filter(e => e.synthesizedBy !== MESSAGE_TOPOLOGY_RULE) };
+    const callPath = reachWithPath(subject.id, object.id, traversalIndexFor(withoutMessages), dir);
+    if (!callPath) {
+      const names = (kind === 'reaches' ? path : [...path].reverse()).map(id => cg.nodes.find(n => n.id === id)?.name ?? id);
+      return {
+        verdict: 'unverifiable',
+        reason: `The only path ${kind === 'reaches' ? `from "${subject.name}" to "${object.name}"` : `from "${object.name}" to "${subject.name}"`} `
+          + 'crosses a message hop recovered by the message-topology rule — a message, not a call. Whether the handler runs depends on the transport.',
+        basisEdges: chainEdges(kind === 'reaches' ? path : [...path].reverse(), pairIndex),
+        receiptVia: names,
+      };
+    }
+    path = callPath;
+  }
   if (!path) {
     return {
       verdict: 'refuted',

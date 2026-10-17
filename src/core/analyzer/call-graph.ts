@@ -82,7 +82,11 @@ import {
   collectMessageSites,
   mayContainMessageTopology,
   MESSAGE_TOPOLOGY_RULE,
-  MESSAGE_UNCOMPARABLE_TAG,
+  isMarkerKey,
+  keyField,
+  tagConstantName,
+  uncomparableKey,
+  unattributedConsumerKey,
   type MessageSites,
 } from './message-topology.js';
 import {
@@ -4084,7 +4088,7 @@ function resolveHandlerTargets(
 }
 
 // Shared registration/dispatch site shapes produced by each language's collector.
-interface EventRegistration { key: string; handlerIds: string[]; fallbackId?: string }
+interface EventRegistration { key: string; handlerIds: string[]; fallbackId?: string; file?: string }
 interface EventDispatch { key: string; callerId: string; line: number }
 interface EventSites { registrations: EventRegistration[]; dispatches: EventDispatch[] }
 
@@ -4095,10 +4099,7 @@ interface EventSites { registrations: EventRegistration[]; dispatches: EventDisp
  * pairing/fan-out/provenance stay identical across languages and adding a language
  * cannot change another's edges.
  */
-function pairAndEmitEventEdges(
-  sites: EventSites, allNodes: Map<string, FunctionNode>, ruleName: string,
-  eligible?: (callerId: string, handlerId: string) => boolean,
-): CallEdge[] {
+function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, FunctionNode>, ruleName: string): CallEdge[] {
   if (sites.dispatches.length === 0) return [];
 
   const { handlersByKey } = groupHandlersByKey(sites);
@@ -4110,7 +4111,6 @@ function pairAndEmitEventEdges(
     if (!handlers) continue;
     for (const handlerId of handlers) {
       if (handlerId === disp.callerId) continue; // no trivial self-edge
-      if (eligible && !eligible(disp.callerId, handlerId)) continue;
       const pair = `${disp.callerId}\0${handlerId}`;
       if (seen.has(pair)) continue;
       seen.add(pair);
@@ -4175,7 +4175,6 @@ function collectTsMessageFacts(
   const raw: MessageSites = { registrations: [], dispatches: [], sends: [] };
   collectMessageSites(tree.rootNode, {
     filePath,
-    staticKey: staticChannelKey,
     enclosingId: (offset) => findEnclosingFunction(fileNodes, offset)?.id,
     resolveCallee: (name) => resolveHandler(name, filePath)?.id,
   }, raw);
@@ -4190,23 +4189,68 @@ function collectTsMessageFacts(
 }
 
 /**
- * Can a send in `senderFile` be paired with this handler? A handler in a TEST file is a test's own
- * protocol (a fake worker, a local reducer): it pairs only with a send in that same file. Without
- * this, a generic tag (`INCREMENT`) in one type test paired with a reducer in another test and an
- * unrelated example app (found dogfooding reduxjs/redux).
+ * The handlers a send in `senderFile` pairs with, out of every handler of its key:
+ *  1. a handler in a TEST file pairs only with a send in that same file — a test's protocol (a fake
+ *     worker, a local reducer) is its own. Without this, a generic tag (`INCREMENT`) in one type test
+ *     paired with a reducer in another test (found dogfooding reduxjs/redux);
+ *  2. of the rest, only those CLOSEST to the sender — sharing the longest directory prefix with it —
+ *     pair. A collection of near-copies (one sample per directory) otherwise paired every copy's
+ *     sender with every copy's handler (found dogfooding GoogleChrome/chrome-extensions-samples).
+ * Deterministic: a pure function of file paths.
  */
-function messageHandlerEligible(senderFile: string | undefined, handlerId: string, allNodes: Map<string, FunctionNode>): boolean {
-  const handlerFile = allNodes.get(handlerId)?.filePath;
-  return handlerFile === undefined || !isTestFile(handlerFile) || handlerFile === senderFile;
+function selectMessageHandlers(senderFile: string | undefined, handlerIds: Iterable<string>, fileOf: (id: string) => string | undefined): string[] {
+  const eligible = [...handlerIds].filter(h => {
+    const f = fileOf(h);
+    return f === undefined || !isTestFile(f) || f === senderFile;
+  });
+  if (senderFile === undefined || eligible.length < 2) return eligible;
+  const senderDirs = senderFile.split('/').slice(0, -1);
+  const shared = (h: string): number => {
+    const dirs = (fileOf(h) ?? '').split('/').slice(0, -1);
+    let i = 0;
+    while (i < dirs.length && i < senderDirs.length && dirs[i] === senderDirs[i]) i++;
+    return i;
+  };
+  const best = Math.max(...eligible.map(shared));
+  return eligible.filter(h => shared(h) === best);
+}
+
+/** Marker registrations of a site set, by key, with the files they were recorded in. */
+function messageMarkers(registrations: EventRegistration[]): Map<string, Set<string | undefined>> {
+  const markers = new Map<string, Set<string | undefined>>();
+  for (const r of registrations) {
+    if (!isMarkerKey(r.key)) continue;
+    (markers.get(r.key) ?? markers.set(r.key, new Set()).get(r.key)!).add(r.file);
+  }
+  return markers;
 }
 
 /**
- * Pair resolved message sites into edges, and turn each transport send no indexed consumer can be
- * paired with into a boundary site. The reason is the most specific one that holds:
+ * The most specific reason a send that pairs with nothing was not paired, from the markers a
+ * clause left, or `undefined` when no marker applies. A marker recorded in a test file only speaks
+ * for a send in that same file, as for real handlers.
+ */
+function markerRefusal(
+  send: DynamicMessageSendFact, markers: Map<string, Set<string | undefined>>,
+): DynamicBoundarySite['refusal'] | undefined {
+  const applies = (key: string): boolean =>
+    [...(markers.get(key) ?? [])].some(f => f === undefined || !isTestFile(f) || f === send.filePath);
+  if (applies(unattributedConsumerKey(send.key))) return 'unattributed-message-consumer';
+  const name = tagConstantName(send.key);
+  if (name && applies(uncomparableKey(keyField(send.key), name))) return 'uncomparable-message-consumer';
+  return undefined;
+}
+
+/**
+ * Pair resolved message sites into edges (the event-channel edge shape and fan-out cap, with the
+ * handler selection of {@link selectMessageHandlers}), and turn each transport send that pairs with
+ * no handler into a boundary site carrying the most specific reason that holds:
  *   - `over-cap` — the fan-out cap dropped the key;
  *   - `unattributed-caller` — a handler exists, but no indexed function contains the send;
- *   - `uncomparable-message-consumer` — some clause selects this field on a tag that cannot be
- *     compared statically (an imported constant), so "no consumer" cannot be claimed;
+ *   - `unattributed-message-consumer` — a clause selects the tag, but no indexed function contains it;
+ *   - `uncomparable-message-consumer` — a clause compares the field against a constant spelled like
+ *     this tag, which the rule cannot evaluate;
+ *   - `test-only-message-consumer` — only test files handle the tag;
  *   - `unindexed-message-consumer` — otherwise.
  * A paired send records nothing.
  */
@@ -4215,23 +4259,47 @@ function pairMessageTopology(
   sends: DynamicMessageSendFact[],
   allNodes: Map<string, FunctionNode>,
 ): { edges: CallEdge[]; boundaries: MessageBoundarySite[] } {
-  const edges = pairAndEmitEventEdges(sites, allNodes, MESSAGE_TOPOLOGY_RULE,
-    (callerId, handlerId) => messageHandlerEligible(allNodes.get(callerId)?.filePath, handlerId, allNodes));
-  const { handlersByKey, dropped } = groupHandlersByKey(sites);
-  const uncomparableFields = new Set(
-    sites.registrations.filter(r => r.key.endsWith(MESSAGE_UNCOMPARABLE_TAG)).map(r => r.key.slice(0, r.key.indexOf('='))),
-  );
+  const fileOf = (id: string): string | undefined => allNodes.get(id)?.filePath;
+  const real = sites.registrations.filter(r => !isMarkerKey(r.key) && r.handlerIds.length > 0);
+  const { handlersByKey, dropped } = groupHandlersByKey({ registrations: real, dispatches: [] });
+  const markers = messageMarkers(sites.registrations);
+
+  const edges: CallEdge[] = [];
+  const seen = new Set<string>();
+  for (const disp of sites.dispatches) {
+    const handlers = handlersByKey.get(disp.key);
+    if (!handlers) continue;
+    for (const handlerId of selectMessageHandlers(fileOf(disp.callerId), handlers, fileOf)) {
+      if (handlerId === disp.callerId) continue; // no trivial self-edge
+      const pair = `${disp.callerId}\0${handlerId}`;
+      if (seen.has(pair)) continue;
+      seen.add(pair);
+      edges.push({
+        callerId: disp.callerId,
+        calleeId: handlerId,
+        calleeName: allNodes.get(handlerId)?.name ?? '',
+        line: disp.line,
+        confidence: 'synthesized',
+        kind: 'calls',
+        callType: 'direct',
+        synthesizedBy: MESSAGE_TOPOLOGY_RULE,
+      });
+    }
+  }
+
   const boundaries: MessageBoundarySite[] = [];
   for (const send of sends) {
-    const handlers = [...(handlersByKey.get(send.key) ?? [])]
-      .filter(h => messageHandlerEligible(send.filePath, h, allNodes));
+    const all = handlersByKey.get(send.key);
+    const selected = all ? selectMessageHandlers(send.filePath, all, fileOf) : [];
     let refusal: DynamicBoundarySite['refusal'];
     if (dropped.has(send.key)) refusal = 'over-cap';
-    else if (handlers.length > 0) {
+    else if (selected.length > 0) {
       if (send.callerId) continue;
       refusal = 'unattributed-caller';
-    } else if (uncomparableFields.has(send.key.slice(0, send.key.indexOf('=')))) refusal = 'uncomparable-message-consumer';
-    else refusal = 'unindexed-message-consumer';
+    } else {
+      refusal = markerRefusal(send, markers)
+        ?? ((all?.size ?? 0) > 0 ? 'test-only-message-consumer' : 'unindexed-message-consumer');
+    }
     boundaries.push({ filePath: send.filePath, language: send.language, site: messageSendSite(send, refusal) });
   }
   return { edges, boundaries };
@@ -5301,7 +5369,11 @@ export async function synthesizeDynamicDispatchEdges(
         });
         // A message clause whose single callee resolves to nothing is handled by its enclosing
         // function, exactly as the re-parsing lane decides at collection time.
-        return { key: reg.key, handlerIds: handlerIds.length === 0 && reg.fallbackId ? [reg.fallbackId] : handlerIds };
+        return {
+          key: reg.key,
+          handlerIds: handlerIds.length === 0 && reg.fallbackId ? [reg.fallbackId] : handlerIds,
+          ...(reg.file ? { file: reg.file } : {}),
+        };
       }),
       dispatches: sites.dispatches,
     });
@@ -5331,9 +5403,12 @@ export async function synthesizeDynamicDispatchEdges(
     try {
       const bucket = grouped.get(MESSAGE_TOPOLOGY_GROUP);
       const sends = pass1Facts.flatMap(f => f.messageSends ?? []);
-      const paired = pairMessageTopology(
-        bucket ? resolveSites(bucket.sites) : { registrations: [], dispatches: [] }, sends, allNodes,
-      );
+      const resolved = bucket ? resolveSites(bucket.sites) : { registrations: [], dispatches: [] };
+      // A clause whose callee resolves to nothing and that no indexed function contains is the same
+      // unattributed consumer the re-parsing lane records at collection time.
+      resolved.registrations = resolved.registrations.map(r =>
+        r.handlerIds.length === 0 && !isMarkerKey(r.key) ? { ...r, key: unattributedConsumerKey(r.key) } : r);
+      const paired = pairMessageTopology(resolved, sends, allNodes);
       messageEdges = paired.edges;
       if (out) out.messageBoundaries = paired.boundaries;
     } catch {
@@ -6513,6 +6588,9 @@ export class CallGraphBuilder {
     const callsEdges = edges.filter(e => !e.kind || e.kind === 'calls');
     const testedByPairs = new Set<string>(); // deduplicate across sources
     for (const edge of callsEdges) {
+      // A message a test sends does not execute the handler, so it is no evidence the handler is
+      // tested (change: add-message-topology-edges).
+      if (edge.synthesizedBy === MESSAGE_TOPOLOGY_RULE) continue;
       const caller = allNodes.get(edge.callerId);
       if (!caller || !isTestFile(caller.filePath)) continue;
       const callee = allNodes.get(edge.calleeId);
@@ -7135,24 +7213,29 @@ export async function extractFileDynamicBoundary(
 function singleFileMessageBoundaries(facts: DynamicDispatchFacts | undefined): DynamicBoundarySite[] {
   const sends = facts?.messageSends ?? [];
   if (sends.length === 0) return [];
-  // Distinct handlers per key in THIS file: a lower bound on the repository's, so a key over the cap
-  // here is over it in the full build too, and is disclosed the same way.
-  const handlers = new Map<string, Set<string>>();
+  // Handlers this file proves per key: concrete node ids (an enclosing function, or a callee's
+  // fallback). A callee recorded only by name may resolve to nothing in the full build, so it proves
+  // nothing here. Concrete handlers are a lower bound on the repository's, so over the cap here is
+  // over the cap there too.
+  const registrations: EventRegistration[] = [];
+  const concrete = new Map<string, Set<string>>();
   for (const e of facts?.events ?? []) {
     if (e.group !== MESSAGE_TOPOLOGY_GROUP) continue;
     for (const reg of e.registrations) {
-      const set = handlers.get(reg.key) ?? new Set<string>();
-      for (const id of reg.handlerIds.length ? reg.handlerIds : reg.fallbackId ? [reg.fallbackId] : []) set.add(id);
-      handlers.set(reg.key, set);
+      registrations.push(reg);
+      if (isMarkerKey(reg.key)) continue;
+      const set = concrete.get(reg.key) ?? new Set<string>();
+      for (const id of reg.handlerIds) if (!decodeHandlerRef(id)) set.add(id);
+      if (reg.fallbackId) set.add(reg.fallbackId);
+      concrete.set(reg.key, set);
     }
   }
-  const uncomparable = new Set([...handlers.keys()].filter(k => k.endsWith(MESSAGE_UNCOMPARABLE_TAG)).map(k => k.slice(0, k.indexOf('='))));
+  const markers = messageMarkers(registrations);
   const unpaired = sends.flatMap((send): Array<{ send: DynamicMessageSendFact; refusal: DynamicBoundarySite['refusal'] }> => {
-    const count = handlers.get(send.key)?.size ?? 0;
+    const count = concrete.get(send.key)?.size ?? 0;
     if (count > EVENT_CHANNEL_FANOUT_CAP) return [{ send, refusal: 'over-cap' }];
     if (count > 0) return send.callerId ? [] : [{ send, refusal: 'unattributed-caller' }];
-    if (uncomparable.has(send.key.slice(0, send.key.indexOf('=')))) return [{ send, refusal: 'uncomparable-message-consumer' }];
-    return [{ send, refusal: 'unresolved-in-file-scope' }];
+    return [{ send, refusal: markerRefusal(send, markers) ?? 'unresolved-in-file-scope' }];
   });
   return unpaired.map(({ send, refusal }) => messageSendSite(send, refusal));
 }
