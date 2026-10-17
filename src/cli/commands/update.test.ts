@@ -8,6 +8,25 @@ describe('detectInstallMethod', () => {
     expect(detectInstallMethod('/home/linuxbrew/.linuxbrew/Cellar/openlore/2.1.3/x.js')).toBe('homebrew');
   });
 
+  it('classifies an npm-global install under a Homebrew prefix as npm-global, not Homebrew', () => {
+    expect(
+      detectInstallMethod('/opt/homebrew/lib/node_modules/openlore/dist/cli/commands/update.js', {
+        npmGlobalRoots: ['/opt/homebrew/lib/node_modules'],
+      })
+    ).toBe('npm-global');
+    expect(
+      detectInstallMethod('/home/linuxbrew/.linuxbrew/lib/node_modules/openlore/dist/cli/index.js')
+    ).toBe('npm-global');
+  });
+
+  it('classifies the stable opt alias of the Homebrew formula as Homebrew', () => {
+    expect(
+      detectInstallMethod('/opt/homebrew/opt/openlore/libexec/lib/node_modules/openlore/dist/cli/index.js', {
+        npmGlobalRoots: ['/opt/homebrew/lib/node_modules'],
+      })
+    ).toBe('homebrew');
+  });
+
   it('detects npx (transient) installs', () => {
     expect(detectInstallMethod('/Users/x/.npm/_npx/abc123/node_modules/openlore/dist/cli/update.js')).toBe('npx');
   });

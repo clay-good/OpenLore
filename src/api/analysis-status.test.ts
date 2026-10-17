@@ -8,11 +8,10 @@
  * analysis in progress, and this read must not be the one place that disagrees.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile, readFile, utimes, readdir } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { mkdtemp, rm, mkdir, writeFile, readFile, utimes, readdir, realpath } from 'node:fs/promises';
+import { spawn, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { realpathSync } from 'node:fs';
 import { openloreAnalysisStatus } from './analysis-status.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
 import {
@@ -32,12 +31,12 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function workspace(): Promise<{ root: string; analysisDir: string; runtimeDir: string }> {
-  const dir = await mkdtemp(join(tmpdir(), 'openlore-analysis-status-'));
+async function workspace(baseDir = tmpdir()): Promise<{ root: string; analysisDir: string; runtimeDir: string }> {
+  const dir = await mkdtemp(join(baseDir, 'openlore-analysis-status-'));
   dirs.push(dir);
-  // Symlink-resolved, because the API resolves its root the same way (macOS /tmp → /private/tmp)
-  // and the staleness predicate compares the payload's repository against it.
-  const root = realpathSync(dir);
+  // Match the API's canonical spelling, including Windows DOS 8.3 aliases.
+  // JS realpathSync preserves those aliases while async realpath expands them.
+  const root = await realpath(dir);
   const analysisDir = join(root, OPENLORE_ANALYSIS_REL_PATH);
   const runtimeDir = runtimeDirOf(analysisDir);
   await mkdir(runtimeDir, { recursive: true });
@@ -148,5 +147,30 @@ describe('openloreAnalysisStatus', () => {
     const { root } = await workspace();
     await expect(openloreAnalysisStatus({ rootPath: join(root, 'does-not-exist') }))
       .resolves.toEqual({ inProgress: false });
+  });
+
+  it.runIf(process.platform === 'win32')('agrees about a stale owner when TEMP has a DOS 8.3 alias', async context => {
+    const base = await mkdtemp(join(tmpdir(), 'openlore-short-path-regression-'));
+    dirs.push(base);
+    const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '$fso = New-Object -ComObject Scripting.FileSystemObject; $fso.GetFolder($env:OPENLORE_TEST_SHORT_ROOT).ShortPath',
+    ], { encoding: 'utf8', env: { ...process.env, OPENLORE_TEST_SHORT_ROOT: base } }).trim();
+    if (short.toLowerCase() === base.toLowerCase()) {
+      context.skip('DOS 8.3 name creation is disabled on this filesystem');
+      return;
+    }
+    const { root, analysisDir, runtimeDir } = await workspace(short);
+    const payload: AnalysisOwnerPayload = {
+      repository: root, pid: await deadPid(), stage: 'parsing',
+      startedAt: new Date(Date.now() - STALE_AGE_MS).toISOString(),
+      heartbeatAt: new Date(Date.now() - STALE_AGE_MS).toISOString(),
+      progressPath: progressPathOf(analysisDir),
+    };
+    const lock = await plantLock(runtimeDir, payload, STALE_AGE_MS);
+    expect(isOwnershipStale(Date.now() - STALE_AGE_MS, await readFile(lock, 'utf8'), root)).toBe(true);
+    await expect(openloreAnalysisStatus({ rootPath: root })).resolves.toEqual({ inProgress: false });
+    const ownership = await acquireAnalysisOwnership(root, analysisDir, { stage: 'test' });
+    expect(ownership.state).toBe('owned');
+    if (ownership.state === 'owned') await ownership.release();
   });
 });
