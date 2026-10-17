@@ -1,10 +1,13 @@
-import { win32 } from 'node:path';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   formatPlatformCommand,
   isOpenloreCliEntryPath,
   resolvePlatformCommand,
   resolveOpenloreCommand,
+  stableHomebrewPath,
   windowsCommandHazard,
   windowsQuotingHazard,
 } from './platform-command.js';
@@ -319,5 +322,51 @@ describe('isOpenloreCliEntryPath', () => {
     '/home/a/openlore-notes/README.md',
   ])('does not claim an unrelated path: %s', (path) => {
     expect(isOpenloreCliEntryPath(path)).toBe(false);
+  });
+});
+
+// Symlink creation needs elevation on Windows, and Homebrew does not exist there.
+describe.skipIf(process.platform === 'win32')('stableHomebrewPath', () => {
+  function prefixWithKeg(): { prefix: string; cellarNode: string } {
+    const prefix = realpathSync(mkdtempSync(join(tmpdir(), 'openlore-brew-')));
+    const keg = join(prefix, 'Cellar', 'node', '26.11.1');
+    mkdirSync(join(keg, 'bin'), { recursive: true });
+    writeFileSync(join(keg, 'bin', 'node'), '');
+    mkdirSync(join(prefix, 'opt'));
+    return { prefix, cellarNode: join(keg, 'bin', 'node') };
+  }
+
+  it('rewrites a versioned Cellar path to the opt alias that survives an upgrade', () => {
+    const { prefix, cellarNode } = prefixWithKeg();
+    try {
+      symlinkSync(join(prefix, 'Cellar', 'node', '26.11.1'), join(prefix, 'opt', 'node'));
+      const stable = join(prefix, 'opt', 'node', 'bin', 'node');
+      expect(stableHomebrewPath(cellarNode)).toBe(stable);
+      const cmd = resolveOpenloreCommand(['mcp'], 'darwin', {
+        nodeExecutable: cellarNode,
+        openloreCliEntry: '/usr/local/lib/node_modules/openlore/dist/cli/index.js',
+      });
+      expect(cmd.command).toBe(stable);
+    } finally {
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the path when the alias is absent or points at another version', () => {
+    const { prefix, cellarNode } = prefixWithKeg();
+    try {
+      expect(stableHomebrewPath(cellarNode)).toBe(cellarNode);
+      const other = join(prefix, 'Cellar', 'node', '27.0.0');
+      mkdirSync(join(other, 'bin'), { recursive: true });
+      writeFileSync(join(other, 'bin', 'node'), '');
+      symlinkSync(other, join(prefix, 'opt', 'node'));
+      expect(stableHomebrewPath(cellarNode)).toBe(cellarNode);
+    } finally {
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a path outside a Cellar unchanged', () => {
+    expect(stableHomebrewPath('/usr/local/bin/node')).toBe('/usr/local/bin/node');
   });
 });

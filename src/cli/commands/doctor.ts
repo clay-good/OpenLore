@@ -12,6 +12,7 @@ import { access, stat, readFile, realpath } from 'node:fs/promises';
 import { globalOpenLoreConfigPath } from '../../utils/config-layers.js';
 import { constants as fsConstants } from 'node:fs';
 import { join, relative, isAbsolute, win32 } from 'node:path';
+import { homedir } from 'node:os';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
 import {
@@ -767,6 +768,67 @@ async function missingLauncherPaths(servers: Record<string, unknown> | undefined
   return missing;
 }
 
+/** Every distinct `openlore` the PATH resolves to, first match first. */
+async function openloreInstallsOnPath(pathValue: string, platform: NodeJS.Platform): Promise<string[]> {
+  const names = platform === 'win32' ? ['openlore.cmd', 'openlore.exe'] : ['openlore'];
+  const installs: string[] = [];
+  for (const dir of pathValue.split(platform === 'win32' ? ';' : ':')) {
+    if (!dir) continue;
+    for (const name of names) {
+      try {
+        const resolved = await realpath(join(dir, name));
+        if (!installs.includes(resolved)) installs.push(resolved);
+        break;
+      } catch { /* not in this directory */ }
+    }
+  }
+  return installs;
+}
+
+/**
+ * Install health: the two faults that leave a user on a broken or old OpenLore with no
+ * message from the tool. (1) The user-scope MCP entry names a launcher that no longer
+ * exists (a removed Node version, an uninstalled global) — repaired by re-wiring.
+ * (2) More than one install is on PATH, so an upgrade of one leaves the other running —
+ * reported only, because removing a package is the user's decision.
+ */
+export async function checkInstallHealth(
+  home: string,
+  pathValue: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<CheckResult> {
+  let servers: Record<string, unknown> | undefined;
+  try {
+    const doc = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')) as Record<string, unknown>;
+    servers = doc?.mcpServers as Record<string, unknown> | undefined;
+  } catch { /* no user-scope wiring to check */ }
+  const missing = await missingLauncherPaths(servers);
+  const installs = await openloreInstallsOnPath(pathValue, platform);
+
+  const problems: string[] = [];
+  const fixes: string[] = [];
+  if (missing.length > 0) {
+    problems.push(`~/.claude.json points at a launcher that no longer exists: ${missing.join(', ')}`);
+    fixes.push("Run 'openlore install --agent claude-code --force' to re-wire it to this install");
+  }
+  if (installs.length > 1) {
+    problems.push(`${installs.length} openlore installs are on PATH (the first one runs): ${installs.join(', ')}`);
+    fixes.push('Remove the install you do not use, so an upgrade cannot leave an old version first on PATH');
+  }
+  if (problems.length === 0) {
+    return { name: 'Install health', status: 'ok', detail: 'no duplicate install on PATH; no stale user-scope launcher' };
+  }
+  return {
+    name: 'Install health',
+    status: 'warn',
+    detail: problems.join('; '),
+    fix: fixes.join('. '),
+    ...(missing.length > 0
+      ? { remediation: { kind: 'rewire-mcp', label: 'openlore install --agent claude-code --force' } as const }
+      : {}),
+  };
+}
+
 const CLI_PROVIDERS: Record<string, () => string> = {
   'claude-code': () => 'claude',
   'codex-cli': () => process.env.CODEX_CLI ?? 'codex',
@@ -1144,7 +1206,7 @@ Checks performed:
       console.log('');
     }
 
-    const [staticChecks, mcpCheck, llmCheck, embeddingCheck, retrievalModeCheck] = await Promise.all([
+    const [staticChecks, mcpCheck, installCheck, llmCheck, embeddingCheck, retrievalModeCheck] = await Promise.all([
       Promise.all([
         checkNodeVersion(),
         checkGit(rootPath),
@@ -1161,6 +1223,7 @@ Checks performed:
         checkAnalysisCorpus(rootPath),
       ]),
       checkMcpWiring(rootPath),
+      checkInstallHealth(process.env.OPENLORE_HOME || homedir(), process.env.PATH ?? ''),
       checkLLMConnection(rootPath),
       checkEmbeddingConnection(rootPath),
       checkRetrievalMode(rootPath),
@@ -1169,6 +1232,7 @@ Checks performed:
     const unredactedChecks = [
       ...staticChecks,
       ...(mcpCheck ? [mcpCheck] : []),
+      installCheck,
       llmCheck,
       ...(embeddingCheck ? [embeddingCheck] : []),
       retrievalModeCheck,
