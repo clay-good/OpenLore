@@ -956,7 +956,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
 
       // In --gate mode an agent parses the gated JSON on stdout: progress goes to stderr.
       const progress = (message: string): void => {
-        if (options.gate) process.stderr.write(`[scan] ${message}\n`);
+        if (options.gate) process.stderr.write(`[scan] ${safe(message)}\n`);
         else logger.discovery(message);
       };
 

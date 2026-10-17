@@ -293,13 +293,11 @@ function warnWithheldCredential(projectPath: string, block: string, userPath: st
   withheldCredentialWarnings.add(key);
   // STDERR, like emitConfigValidationWarnings: this hub is read by --json and hook paths.
   if (logger.getOptions().quiet) return;
-  process.stderr.write(
-    `${colorForStderr().yellow('[warn]')} ` + sanitizeForTerminal(
-      `${block}.apiKey from ${userPath} is not used here: ${projectPath} sets its own ${block} endpoint, ` +
-        'and a repository may not choose where your key is sent. Use the same endpoint as your user ' +
-        `config, or remove the endpoint from the project's ${block} block.`,
-    ) + '\n',
-  );
+  const prefix = `${colorForStderr().yellow('[warn]')}`;
+  const message = `${block}.apiKey from ${userPath} is not used here: ${projectPath} sets its own ${block} endpoint, ` +
+    'and a repository may not choose where your key is sent. Use the same endpoint as your user ' +
+    `config, or remove the endpoint from the project's ${block} block.`;
+  process.stderr.write(`${prefix} ${sanitizeForTerminal(message)}\n`);
 }
 
 /** Synchronous counterpart for availability-only background auto-init checks. */
