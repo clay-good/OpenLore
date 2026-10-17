@@ -36,6 +36,7 @@ import { pointerLineFor } from './orient-inject-render.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
+import { resolve } from 'node:path';
 
 const mockHandleOrient = vi.mocked(handleOrient);
 const mockExistsSync = vi.mocked(existsSync);
@@ -213,7 +214,7 @@ describe('orient command', () => {
       mockStartBuild.mockReturnValue({ state: 'started' });
       mockHandleOrient.mockResolvedValue({ ...notReady });
       await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
-      expect(mockStartBuild).toHaveBeenCalledWith('/fake/proj', 'index-absent');
+      expect(mockStartBuild).toHaveBeenCalledWith(resolve('/fake/proj'), 'index-absent');
       const parsed = JSON.parse(output());
       expect(parsed.error).toContain('background build has started');
       expect(parsed.error).not.toContain('Run "openlore analyze"');
