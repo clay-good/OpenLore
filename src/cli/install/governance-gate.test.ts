@@ -138,6 +138,17 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     }
   });
 
+  it('writes decisions guidance for the wired surface, not an unwired record_decision call', async () => {
+    await initGit();
+    await writeConfig(dir);
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home })).toBe(0);
+
+    const claude = await readFile(join(dir, 'CLAUDE.md'), 'utf8');
+    expect(claude).toContain('openlore-decisions-instructions');
+    expect(claude).not.toContain('call `record_decision` **before**');
+    expect(claude).toContain('openlore decisions record --title');
+  });
+
   it('an agent-scoped removal leaves the commit gate alone', async () => {
     // The gate belongs to `openlore install`, not to any one agent surface.
     // `connect remove cursor` has nothing to do with git hooks, and must not
