@@ -1305,8 +1305,11 @@ async function extractTSGraph(
     let className: string | undefined;
     let cursor = fnNode.parent;
     while (cursor) {
-      if (cursor.type === 'class_declaration' || cursor.type === 'interface_declaration' ||
-          (fnNode.type === 'method_signature' && cursor.type === 'type_alias_declaration')) {
+      // `abstract class` is its own node type; without it an abstract class's methods lost their
+      // class, so two such classes' same-named methods collapsed into one node.
+      if (cursor.type === 'class_declaration' || cursor.type === 'abstract_class_declaration'
+          || cursor.type === 'interface_declaration'
+          || (fnNode.type === 'method_signature' && cursor.type === 'type_alias_declaration')) {
         const classNameNode = cursor.children.find(c => c.type === 'type_identifier' || c.type === 'identifier');
         if (classNameNode) className = classNameNode.text;
         break;
@@ -2560,8 +2563,8 @@ function collectClassRelationshipFacts(
   };
 
   if (language === 'TypeScript' || language === 'JavaScript') {
-    for (const [cls, parent] of captures(`(class_declaration name: (type_identifier) @cls (class_heritage (extends_clause value: (identifier) @parent)))`)) merge(cls, [parent]);
-    for (const [cls, iface] of captures(`(class_declaration name: (type_identifier) @cls (class_heritage (implements_clause (type_identifier) @iface)))`, 'cls', 'iface')) merge(cls, [], [iface]);
+    for (const [cls, parent] of captures(tsClassQuery('(class_heritage (extends_clause value: (identifier) @parent))'))) merge(cls, [parent]);
+    for (const [cls, iface] of captures(tsClassQuery('(class_heritage (implements_clause (type_identifier) @iface))'), 'cls', 'iface')) merge(cls, [], [iface]);
   } else if (language === 'Python') {
     for (const [cls, parent] of captures(`(class_definition name: (identifier) @cls superclasses: (argument_list (identifier) @parent))`)) {
       if (parent !== 'object') merge(cls, [parent]);
@@ -3465,15 +3468,9 @@ export async function _extractClassRelationshipsLegacyForTesting(
         const { parser, lang } = r;
         const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
-        // class Foo extends Bar implements Baz, Qux
-        const EXTENDS_Q = `
-          (class_declaration
-            name: (type_identifier) @cls
-            (class_heritage (extends_clause value: (identifier) @parent)))`;
-        const IMPLEMENTS_Q = `
-          (class_declaration
-            name: (type_identifier) @cls
-            (class_heritage (implements_clause (type_identifier) @iface)))`;
+        // class Foo extends Bar implements Baz, Qux (and `abstract class`)
+        const EXTENDS_Q = tsClassQuery('(class_heritage (extends_clause value: (identifier) @parent))');
+        const IMPLEMENTS_Q = tsClassQuery('(class_heritage (implements_clause (type_identifier) @iface))');
 
         for (const m of safeQuery(lang, EXTENDS_Q, tree.rootNode)) {
           const cls    = m.captures.find(c => c.name === 'cls')?.node.text;
@@ -3934,6 +3931,14 @@ function buildClassNodes(
 // independent: each reads the inputs and returns edges; adding one cannot change
 // another's output.
 // ============================================================================
+
+/**
+ * A TS/JS class-heritage query over both class node types — tree-sitter-typescript parses
+ * `abstract class` as its own type — as ONE alternation, so it compiles as one query.
+ */
+function tsClassQuery(heritage: string): string {
+  return `[(class_declaration name: (type_identifier) @cls ${heritage}) (abstract_class_declaration name: (type_identifier) @cls ${heritage})]`;
+}
 
 /** Per-channel handler fan-out cap. Over-cap channels are DROPPED, never guessed. */
 export const EVENT_CHANNEL_FANOUT_CAP = 8;
