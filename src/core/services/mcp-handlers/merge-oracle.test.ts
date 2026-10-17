@@ -338,8 +338,8 @@ describe('simulateMerge', () => {
   const lines = (edit: Record<number, string> = {}) => ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((l, i) => edit[i] ?? l).join('\n') + '\n';
 
   it('is not-assessed for any merge driver section named like a default state, and for unknown repository merge keys', async () => {
-    const i1 = git(repo, 'rev-parse', 'info-a');
-    const i2 = git(repo, 'rev-parse', 'info-b');
+    const i1 = commitOn('config-check-a', 'main', fn(['A', 'b', 'c', 'd', 'e']));
+    const i2 = commitOn('config-check-b', 'main', fn(['a', 'b', 'c', 'd', 'E']));
     for (const [key, value, pattern] of [
       ['merge.text.name', 'foo', /merge driver named "text"/],
       ['merge.unspecified.recursive', 'binary', /merge driver named "unspecified"/],
@@ -347,7 +347,8 @@ describe('simulateMerge', () => {
     ] as const) {
       git(repo, 'config', key, value);
       try {
-        expect(await simulateMerge(repo, i1, i2)).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(pattern) });
+        const result = await simulateMerge(repo, i1, i2);
+        expect(result, `${key}=${value}: ${JSON.stringify(result)}`).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(pattern) });
       } finally {
         git(repo, 'config', '--unset', key);
       }
@@ -367,7 +368,9 @@ describe('simulateMerge', () => {
       ['merge.log', '-1', /merge\.log has a value git merge cannot parse/],
       ['merge.log', '2g', /merge\.log has a value git merge cannot parse/],
       ['merge.stat', '3g', /merge\.stat has a value git merge cannot parse/],
-      ['core.bigFileThreshold', '17179869184g', /core\.bigfilethreshold has a value git merge cannot parse/],
+      // Git for Windows may reject this overflow while locating the repository,
+      // before our config preflight gets a chance to explain it.
+      ['core.bigFileThreshold', '17179869184g', /core\.bigfilethreshold has a value git merge cannot parse|bad numeric config value.*core\.bigfilethreshold.*out of range/],
       ['merge.verbosity', '6', /merge\.verbosity has a value git merge cannot parse/],
       ['merge.renames', ' true', /merge\.renames has a value the simulation cannot forward/],
       ['commit.cleanup', 'bogus', /commit\.cleanup has a value git merge cannot parse/],
@@ -396,44 +399,53 @@ describe('simulateMerge', () => {
     execFileGitSync('git', ['init', '-q', '-b', 'main', alg]);
     git(alg, 'config', 'user.email', 't@example.com');
     git(alg, 'config', 'user.name', 't');
+    // These blobs are built directly with hash-object, so a system autocrlf
+    // setting must not rewrite the real worktree used as our ground truth.
+    git(alg, 'config', 'core.autocrlf', 'false');
     const emptyTree = execFileGitSync('git', ['mktree'], { cwd: alg, input: '' }).trim();
     const empty = execFileGitSync('git', ['commit-tree', emptyTree, '-m', 'root'], { cwd: alg }).trim();
     const base = commitFiles(alg, empty, { f: 'x\nb\n{\nb\n{\na\n' }, 'alg-base');
     const a = commitFiles(alg, base, { f: 'x\n{\nc\nb\n{\n{\n' }, 'alg-a');
     const b = commitFiles(alg, base, { f: 'x\nb\n{\nb\n{\n' }, 'alg-b');
-    // Ground truth is a real `git merge` in a worktree: merge-tree itself ignores diff.algorithm config.
-    const realMerge = (x: string, y: string, name: string): 'clean-automerge' | 'textual-conflict' => {
+    // ort defaults to histogram regardless of diff.algorithm config. Explicitly
+    // select -Xdiff-algorithm with recursive, which also honors the choice on older
+    // Git for Windows, so the non-vacuity fixture really exercises each algorithm.
+    const realMerge = (x: string, y: string, name: string, algorithm: string): { verdict: 'clean-automerge' | 'textual-conflict'; index: string } => {
       const wt = join(root, `wt-${name}`);
       git(alg, 'worktree', 'add', '-q', '--detach', wt, x);
       try {
-        git(wt, 'merge', '--no-commit', '--no-ff', y);
-        return 'clean-automerge';
-      } catch {
-        return 'textual-conflict';
+        let verdict: 'clean-automerge' | 'textual-conflict' = 'clean-automerge';
+        try { git(wt, 'merge', '--no-commit', '--no-ff', '-s', 'recursive', `-Xdiff-algorithm=${algorithm}`, y); }
+        catch { verdict = 'textual-conflict'; }
+        return { verdict, index: git(wt, 'ls-files', '--stage') };
       } finally {
         git(alg, 'worktree', 'remove', '--force', wt);
       }
     };
-    const myersBase = commitFiles(alg, empty, { m: '{\na\na\n{\n{\nb\nc\nb\n' }, 'myers-base');
-    const ma = commitFiles(alg, myersBase, { m: '{\na\na\n{\n{\na\nb\nc\nb\n' }, 'myers-a');
-    const mb = commitFiles(alg, myersBase, { m: '{\na\na\nz\n{\nb\nb\nb\n' }, 'myers-b');
+    const myersBase = commitFiles(alg, empty, { m: '{\nc\nb\nb\nc\na\nb\nb\nb\nc\nc\n' }, 'myers-base');
+    const ma = commitFiles(alg, myersBase, { m: '{\nc\nb\nb\nc\na\nb\n{\nb\nb\nc\nc\n' }, 'myers-a');
+    const mb = commitFiles(alg, myersBase, { m: '{\nc\nb\nb\na\na\nb\nb\nc\nc\n' }, 'myers-b');
     // Only git's default algorithm is assessed; a local non-default one can hide a conflict a fresh clone reports.
     let differs = false;
-    let myersTruth: string | undefined;
+    const observedMerges: { algorithm: string; label: string; verdict: string; index: string }[] = [];
+    let myersTruth: { verdict: string; index: string } | undefined;
     for (const algorithm of ['patience', 'myers', 'histogram']) {
       git(alg, 'config', 'diff.algorithm', algorithm);
       for (const [x, y, label] of [[a, b, 'alg'], [ma, mb, 'myers']] as const) {
-        const truth = realMerge(x, y, `${algorithm}-${label}`);
+        const truth = realMerge(x, y, `${algorithm}-${label}`, algorithm);
+        observedMerges.push({ algorithm, label, ...truth });
         if (algorithm === 'histogram') {
-          expect((await simulateMerge(alg, x, y)).verdict, `${algorithm} ${label}`).toBe(truth);
-          if (label === 'myers') differs = myersTruth !== undefined && truth !== myersTruth;
+          expect((await simulateMerge(alg, x, y)).verdict, `${algorithm} ${label}`).toBe(truth.verdict);
+          if (label === 'myers') differs = myersTruth !== undefined && truth.index !== myersTruth.index;
         } else {
           expect(await simulateMerge(alg, x, y), `${algorithm} ${label}`).toMatchObject({ verdict: 'not-assessed', detail: expect.stringMatching(/can hide a conflict/) });
           if (algorithm === 'myers' && label === 'myers') myersTruth = truth;
         }
       }
     }
-    expect(differs).toBe(true); // non-vacuity: the algorithm really changes this merge
+    // Non-vacuity includes the merged bytes: two algorithms may both report clean
+    // while producing different results for this repeated-line fixture.
+    expect(differs, JSON.stringify(observedMerges)).toBe(true);
     git(alg, 'config', '--unset', 'diff.algorithm');
     // diff3 skips conflict refinement, so it can turn a clean merge into a conflict.
     const styleBase = commitFiles(alg, empty, { s: 'a\nc\nc\nb\nc\na\n' }, 'style-base');

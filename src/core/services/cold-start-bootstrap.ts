@@ -26,7 +26,7 @@
  * Deterministic, no LLM, no new dependency.
  */
 
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { childEnvWithoutScopedTlsRelaxation } from './tls-scope.js';
 import { homedir } from 'node:os';
@@ -35,7 +35,7 @@ import {
   AUTO_INIT_DEGRADED_FILE_CEILING,
   OPENLORE_ANALYSIS_REL_PATH,
 } from '../../constants.js';
-import { resolveOpenLoreConfigPath } from './config-manager.js';
+import { readOpenLoreConfigDataSync, resolveOpenLoreConfigPath } from './config-manager.js';
 
 /**
  * Why a background repair was started. `index-absent` is the original cold-start
@@ -188,11 +188,10 @@ export function hasAnalysis(directory: string): boolean {
   return existsSync(join(directory, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'));
 }
 
-/** True when `.openlore/config.json` explicitly sets `autoInit: false`. Fail-open. */
+/** True when user/project config explicitly sets `autoInit: false`. Fail-open. */
 function autoInitDisabled(directory: string): boolean {
   try {
-    const raw = readFileSync(resolveOpenLoreConfigPath(directory), 'utf-8');
-    return (JSON.parse(raw) as { autoInit?: unknown }).autoInit === false;
+    return readOpenLoreConfigDataSync(directory)?.autoInit === false;
   } catch {
     return false; // no config / unreadable → auto-init not disabled
   }
@@ -337,11 +336,8 @@ export function autoInitSuppression(
     return { reason: 'env', detail: 'OPENLORE_NO_AUTO_ANALYZE is set in this environment' };
   }
   if (autoInitDisabled(directory)) {
-    // Name the FILE's owner, not just the key: `autoInit: false` is read from the
-    // analyzed repository's own config, so a clone can decide that background
-    // indexing never runs here. Availability only, but the operator should see
-    // whose choice it was.
-    return { reason: 'config', detail: '"autoInit": false in this repository\'s .openlore/config.json' };
+    // Availability only: either user defaults or this project's config can opt out.
+    return { reason: 'config', detail: '"autoInit": false in the effective OpenLore configuration (user defaults or this repository\'s .openlore/config.json)' };
   }
   if (!isInsideGitWorkTree(directory)) {
     return { reason: 'not-a-git-work-tree', detail: 'this directory is not inside a git work tree' };
@@ -530,6 +526,8 @@ export async function buildIndexInChildProcess(
     child.unref();
   });
 
+  // The PROJECT file decides whether `init` is needed; user-wide defaults do not
+  // initialize a repository (and a malformed user file must not abort the build).
   if (!existsSync(resolveOpenLoreConfigPath(directory))) await run(['init']);
   await run([
     'analyze',

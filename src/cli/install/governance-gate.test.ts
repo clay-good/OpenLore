@@ -78,6 +78,24 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     expect(config.governance.autopilot).toBe(true);
   });
 
+  it('writes autopilot into the project file without copying user-wide defaults into it', async () => {
+    await initGit();
+    await writeConfig(dir);
+    const userPath = join(home, 'user-config.json');
+    await writeFile(userPath, JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1', model: 'm', apiKey: 'user-secret' } }));
+    const prior = process.env.OPENLORE_GLOBAL_CONFIG;
+    process.env.OPENLORE_GLOBAL_CONFIG = userPath;
+    try {
+      expect(await wireGovernanceGate(dir)).toBe('wired');
+    } finally {
+      if (prior === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
+      else process.env.OPENLORE_GLOBAL_CONFIG = prior;
+    }
+    const config = JSON.parse(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8'));
+    expect(config.governance.autopilot).toBe(true);
+    expect(config).not.toHaveProperty('embedding');
+  });
+
   it('respects an explicit autopilot:false — blocking review stays the configured mode', async () => {
     await initGit();
     await writeConfig(dir, { governance: { autopilot: false } });

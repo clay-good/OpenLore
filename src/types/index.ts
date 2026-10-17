@@ -23,7 +23,8 @@ export interface OpenLoreConfig {
   analysis: AnalysisConfig;
   generation: GenerationConfig;
   llm?: LLMConfig;
-  embedding?: EmbeddingConfig;
+  /** `null` turns off an embedding inherited from user-wide defaults. */
+  embedding?: EmbeddingConfig | null;
   /** Deterministic retrieval enhancements. Vocabulary expansion defaults on. */
   retrieval?: RetrievalConfig;
   panicResponse?: {

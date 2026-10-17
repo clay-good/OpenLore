@@ -38,6 +38,7 @@
 import { logger } from '../../utils/logger.js';
 import { isLoopbackHost } from '../../utils/loopback.js';
 import { LLM_TLS_ENV, envTlsOptOut } from './tls-scope.js';
+import { isUserConfiguredValue } from '../../utils/config-layers.js';
 
 /** True when `url` names the loopback interface (and so cannot reach the network). */
 function isLoopbackUrl(url: string): boolean {
@@ -61,7 +62,7 @@ export function resolveTrustedApiBase(
 ): string | undefined {
   if (flagValue) return flagValue;
   if (!configValue) return undefined;
-  if (isLoopbackUrl(configValue)) return configValue;
+  if (isLoopbackUrl(configValue) || isUserConfiguredValue('llm.apiBase', configValue)) return configValue;
   logger.warning(
     `Ignoring llm.apiBase "${configValue}" from .openlore/config.json: a repository's ` +
       'config may not redirect provider requests that carry your API key. ' +
@@ -77,7 +78,7 @@ export function resolveTrustedCompatBase(
 ): string | undefined {
   if (operatorValue) return operatorValue;
   if (!configValue) return undefined;
-  if (isLoopbackUrl(configValue)) return configValue;
+  if (isLoopbackUrl(configValue) || isUserConfiguredValue('generation.openaiCompatBaseUrl', configValue)) return configValue;
   logger.warning(
     `Ignoring generation.openaiCompatBaseUrl "${configValue}" from .openlore/config.json: ` +
       'a repository may not choose where your API key and source are sent. ' +
@@ -101,7 +102,7 @@ export function refuseRepoConfiguredEndpoint(
   url: string | undefined,
   fallbackDescription: string,
 ): string | undefined {
-  if (!url || isLoopbackUrl(url)) return url;
+  if (!url || isLoopbackUrl(url) || isUserConfiguredValue(field, url)) return url;
   logger.warning(
     `Ignoring ${field} "${url}" from .openlore/config.json: a repository's config may not ` +
       `choose where its own contents are sent. ${fallbackDescription}`,
@@ -115,6 +116,8 @@ export function refuseRepoConfiguredEndpoint(
  * `false` — "do not skip verification" — and says so once when the field was set.
  */
 export function rejectRepoConfiguredTlsOptOut(field: string, value: boolean | undefined): boolean {
+  // The user-wide config is authored by the operator, not the repository.
+  if (value && isUserConfiguredValue(field, value)) return true;
   if (value) {
     logger.warning(
       `Ignoring ${field}=true from .openlore/config.json: a repository may not disable ` +
@@ -142,7 +145,7 @@ export function discloseRepoConfiguredEndpoint(field: string, url: string | unde
   // touches (a compat base URL while the provider is anthropic) tells the operator
   // their key is being exfiltrated when it is not — beside a correctly-worded refusal
   // for a different field, which makes the pair read as contradictory.
-  if (!url || isLoopbackUrl(url)) return;
+  if (!url || isLoopbackUrl(url) || isUserConfiguredValue(field, url)) return;
   // Once per (field, endpoint) per process. `resolveEmbedder` runs on EVERY orient /
   // search_code / semantic call, so an unlatched warning buried a team using a
   // legitimate self-hosted endpoint under one line per MCP request.
@@ -169,6 +172,7 @@ export function resolveTrustedSslVerify(
   // supplied by the person running the command. It is the only lever reaching the
   // paths that never see a command line (the mcp daemon, the pre-commit gate).
   if (envTlsOptOut(LLM_TLS_ENV)) return false;
+  if (configSslVerify === false && isUserConfiguredValue('llm.sslVerify', false)) return false;
   if (configSslVerify === false) {
     logger.warning(
       'Ignoring llm.sslVerify=false from .openlore/config.json: a repository may not ' +

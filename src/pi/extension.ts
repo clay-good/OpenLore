@@ -20,8 +20,8 @@
  * json/print (one-shot). rpc = headless interactive over stdin/stdout (IDE,
  * custom UI) — same injection needs as tui.
  *
- * Config onboarding: runs on first session when .openlore/config.json is absent;
- * also available anytime via the openlore_configure tool.
+ * Config onboarding: a non-blocking hint once per cwd in this extension instance;
+ * the wizard is opt-in via /openlore configure or the openlore_configure tool.
  *
  * change: harden-pi-config-and-daemon-fidelity
  */
@@ -44,7 +44,7 @@ import { Type, type TObject, type TSchema } from 'typebox';
 import { spawn } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -88,6 +88,7 @@ import {
   reviewedFileContentProvenance,
 } from '../core/services/served-content.js';
 import { safeJoin } from '../utils/path-confinement.js';
+import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig } from '../utils/config-layers.js';
 // Functional readiness for the footer status. `health.ts` is kept dependency-light on purpose so
 // importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
 import { openloreHealth, readWatcherState, type HealthResult } from '../api/health.js';
@@ -118,7 +119,7 @@ interface OpenLoreConfig {
     model: string;
     apiKey?: string;
     skipSslVerify?: boolean;
-  };
+  } | null;
   /** Task-scoped context injection settings (gate + token budget + opt-out). */
   contextInjection?: ContextInjectionConfig;
   createdAt: string;
@@ -140,21 +141,21 @@ export function isUsableConfig(raw: unknown): raw is OpenLoreConfig {
 
 export async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
   try {
-    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8'));
+    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
     return isUsableConfig(raw) ? raw : null;
   } catch { return null; }
 }
 
 /**
  * Read just the `contextInjection` block, independent of `isUsableConfig`.
- * The injection opt-out must work even before an LLM provider is configured —
+ * The injection opt-out (including user defaults) must work even before an LLM provider is configured —
  * `readConfig` returns null until `generation.provider` is set (a headless/rpc
  * session may never run the wizard), which would silently drop `mode: "off"`.
  * Mirrors the CLI path, which reads config unconditionally.
  */
 export async function readContextInjection(cwd: string): Promise<ContextInjectionConfig | undefined> {
   try {
-    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8')) as unknown;
+    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
     return raw && typeof raw === 'object'
       ? (raw as { contextInjection?: ContextInjectionConfig }).contextInjection
       : undefined;
@@ -181,7 +182,7 @@ export async function piMaySpawnDaemon(cwd: string): Promise<boolean> {
   const env = process.env[PI_NO_SPAWN_ENV]?.trim().toLowerCase();
   if (env !== undefined && env !== '' && env !== '0' && env !== 'false') return false;
   try {
-    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8')) as unknown;
+    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
     const pi = raw && typeof raw === 'object' ? (raw as { pi?: { spawnDaemon?: unknown } }).pi : undefined;
     return pi?.spawnDaemon !== false;
   } catch {
@@ -198,7 +199,7 @@ export type PiToolSurface = 'lean' | 'all';
  */
 export async function piToolSurface(cwd: string): Promise<PiToolSurface> {
   try {
-    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8')) as unknown;
+    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
     const pi = raw && typeof raw === 'object' ? (raw as { pi?: { toolSurface?: unknown } | null }).pi : undefined;
     return pi?.toolSurface === 'all' ? 'all' : 'lean';
   } catch {
@@ -206,9 +207,9 @@ export async function piToolSurface(cwd: string): Promise<PiToolSurface> {
   }
 }
 
-async function writeConfig(cwd: string, config: OpenLoreConfig): Promise<void> {
-  const configPath = safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
-  await mkdir(safeJoin(cwd, OPENLORE_DIR), { recursive: true });
+async function writeConfig(cwd: string, config: OpenLoreConfig, global = false): Promise<void> {
+  const configPath = global ? globalOpenLoreConfigPath() : safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
+  await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
 }
 
@@ -295,30 +296,30 @@ const SEP_ANALYSIS   = fmtSep('Analysis');
 const SEP_DIVIDER    = fmtSep();
 
 
-export async function loadExistingConfig(cwd: string): Promise<ExistingConfigLoad> {
-  const path = safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
-  let text: string;
+/**
+ * `effective` (user defaults under the project file) answers "is OpenLore configured here?".
+ * The wizard edits ONE file, so it loads `project` or `global` alone: a project save must
+ * never copy user-wide settings (an API key) into a repository file.
+ */
+export async function loadExistingConfig(
+  cwd: string,
+  target: 'effective' | 'project' | 'global' = 'effective',
+): Promise<ExistingConfigLoad> {
   try {
-    text = await readFile(path, 'utf-8');
+    const projectPath = safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
+    const raw = target === 'global'
+      ? await readConfigObject(globalOpenLoreConfigPath())
+      : target === 'project' ? await readConfigObject(projectPath) : await readLayeredConfig(projectPath);
+    return raw === null ? { state: 'absent' } : { state: 'valid', config: raw };
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? { state: 'absent' }
-      : { state: 'invalid', detail: 'the existing config could not be read' };
-  }
-  try {
-    const raw = JSON.parse(text) as unknown;
-    return isPlainObject(raw)
-      ? { state: 'valid', config: raw }
-      : { state: 'invalid', detail: 'the existing config root is not a JSON object' };
-  } catch {
-    return { state: 'invalid', detail: 'the existing config is malformed JSON' };
+    return { state: 'invalid', detail: error instanceof Error ? error.message : String(error) };
   }
 }
 
 export async function runConfigWizard(
   ctx: ExtensionContext,
   existing?: ExistingOpenLoreConfig | null,
-  hooks: { afterAnalyze?: (ctx: ExtensionContext) => Promise<void> } = {},
+  hooks: { afterAnalyze?: (ctx: ExtensionContext) => Promise<void>; global?: boolean } = {},
 ): Promise<void> {
   const { ui } = ctx;
 
@@ -333,6 +334,13 @@ export async function runConfigWizard(
   let maxFiles = typeof existingAnalysis.maxFiles === 'number' ? existingAnalysis.maxFiles : 500;
   const prevProvider = typeof existingGeneration.provider === 'string' ? existingGeneration.provider : undefined;
   const prevModel = typeof existingGeneration.model === 'string' ? existingGeneration.model : undefined;
+
+  // A project wizard edits the project file only; a user-wide embedding is not shown as
+  // the project's own, but it can be turned off here (written as `embedding: null`).
+  const inheritedEmbedding = hooks.global
+    ? undefined
+    : (await readConfigObject(globalOpenLoreConfigPath()).catch(() => null))?.embedding;
+  let disableInheritedEmbedding = false;
 
   if (embedding?.apiKey) {
     embedding = { ...embedding };
@@ -483,6 +491,8 @@ export async function runConfigWizard(
         ) };
       });
       menu.push({ label: '✕ Remove embedding', handler: async () => { embedding = undefined; } });
+    } else if (isPlainObject(inheritedEmbedding) && existing?.embedding !== null && !disableInheritedEmbedding) {
+      menu.push({ label: '✕ Disable inherited embedding', handler: async () => { disableInheritedEmbedding = true; } });
     }
 
     sep(SEP_ANALYSIS);
@@ -521,16 +531,19 @@ export async function runConfigWizard(
       excludePatterns: Array.isArray(existingAnalysis.excludePatterns) ? existingAnalysis.excludePatterns as string[] : [],
     },
     generation,
-    ...(embedding ? { embedding } : {}),
+    // Keep inheriting a user embedding unless this project had its own entry (now removed).
+    ...(embedding ? { embedding }
+      : isPlainObject(inheritedEmbedding) && (disableInheritedEmbedding || Object.hasOwn(existing ?? {}, 'embedding'))
+        ? { embedding: null } : {}),
     createdAt: typeof existing?.createdAt === 'string' ? existing.createdAt : new Date().toISOString(),
     lastRun: typeof existing?.lastRun === 'string' || existing?.lastRun === null ? existing.lastRun : null,
   };
 
-  await writeConfig(ctx.cwd, config);
-  ui.notify('Configuration saved.', 'info');
+  await writeConfig(ctx.cwd, config, hooks.global);
+  ui.notify(hooks.global ? `Global configuration saved to ${globalOpenLoreConfigPath()}.` : 'Configuration saved.', 'info');
 
   const generationChanged = generation.provider !== prevProvider || generation.model !== prevModel;
-  if (generationChanged) {
+  if (generationChanged && !hooks.global) {
     const runNow = await ui.confirm(
       'Run openlore analyze now?',
       'Builds the structural index required for navigation tools (~30s–2min depending on codebase size)',
@@ -1934,6 +1947,7 @@ function registerOpenlore(
   const failedUntil = new Map<string, number>();
   const DAEMON_RETRY_COOLDOWN_MS = 30_000;
   const primed = new Set<string>();
+  const configHinted = new Set<string>();
   // Footer status state (spec: PiStatusReportsFunctionalReadiness). Keyed by cwd like the daemon
   // cache. No ExtensionContext is ever stored: each update uses the ctx of the event it handles.
   const daemonViews = new Map<string, PiDaemonView>();
@@ -2194,18 +2208,21 @@ function registerOpenlore(
   pi.registerTool({
     name: 'openlore_configure',
     label: 'openlore configure',
-    description: 'Open the openlore configuration wizard to set provider, model, embedding, and analysis settings.',
+    description: 'Open the openlore configuration wizard for project settings or user-wide defaults (global: true).',
     promptSnippet: 'Configure openlore settings (provider, model, API key, embedding).',
     promptGuidelines: ['Use openlore_configure to change the LLM provider, model, or embedding settings.'],
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+    parameters: Type.Object({
+      global: Type.Optional(Type.Boolean({ description: 'Edit user-wide defaults instead of project configuration.' })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return toolResult('Config wizard requires an interactive session (tui or rpc mode).');
-      const loaded = await loadExistingConfig(ctx.cwd);
+      const global = (params as { global?: boolean }).global === true;
+      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
       if (loaded.state === 'invalid') {
-        return toolResult(`Configuration not changed: ${loaded.detail}. Repair \`.openlore/config.json\` and retry.`);
+        return toolResult(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`);
       }
-      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null, { afterAnalyze: refreshStatus });
-      return toolResult('Configuration saved to .openlore/config.json.');
+      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null, { afterAnalyze: refreshStatus, global });
+      return toolResult(`Configuration wizard closed. Target: ${global ? globalOpenLoreConfigPath() : '.openlore/config.json'}.`);
     },
   });
 
@@ -2243,18 +2260,23 @@ function registerOpenlore(
 
   // ── /configure slash command ──
   pi.registerCommand('openlore', {
-    description: 'Open the openlore configuration wizard',
-    async handler(_args, ctx) {
+    description: 'Configure OpenLore for this project, or use configure --global for user-wide defaults',
+    async handler(args, ctx) {
       if (!ctx.hasUI) {
         ctx.ui.notify('Config wizard requires an interactive session.', 'error');
         return;
       }
-      const loaded = await loadExistingConfig(ctx.cwd);
-      if (loaded.state === 'invalid') {
-        ctx.ui.notify(`Configuration not changed: ${loaded.detail}. Repair .openlore/config.json and retry.`, 'error');
+      const global = args.trim() === 'configure --global';
+      if (args.trim() && args.trim() !== 'configure' && !global) {
+        ctx.ui.notify('Usage: /openlore configure [--global]', 'error');
         return;
       }
-      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null, { afterAnalyze: refreshStatus });
+      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
+      if (loaded.state === 'invalid') {
+        ctx.ui.notify(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`, 'error');
+        return;
+      }
+      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null, { afterAnalyze: refreshStatus, global });
     },
   });
 
@@ -2267,10 +2289,11 @@ function registerOpenlore(
 
     if (ctx.hasUI) {
       const loaded = await loadExistingConfig(ctx.cwd);
-      if (loaded.state === 'absent') {
-        await runConfigWizard(ctx, null, { afterAnalyze: refreshStatus });
+      if (loaded.state === 'absent' && !configHinted.has(ctx.cwd)) {
+        configHinted.add(ctx.cwd);
+        ctx.ui.notify('OpenLore is not configured for this project — run /openlore configure (or /openlore configure --global for user-wide defaults).', 'info');
       } else if (loaded.state === 'invalid') {
-        ctx.ui.notify(`OpenLore config not changed: ${loaded.detail}. Repair .openlore/config.json to configure it.`, 'warning');
+        ctx.ui.notify(`OpenLore config not changed: ${loaded.detail}. Repair the indicated config file to configure it.`, 'warning');
       }
     }
 

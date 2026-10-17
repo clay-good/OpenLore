@@ -651,6 +651,10 @@ The system SHALL provide scoped TLS opt-out capabilities for each network surfac
 
 ## Technical Notes
 
+- Generation and embedding settings may inherit user-wide defaults through
+  `src/core/services/config-manager.ts`; `src/cli/commands/doctor.ts` diagnoses the effective
+  configuration, including global-only setups. Existing endpoint trust checks still apply.
+
 - **Implementation**: `src/core/services/llm-service.ts, src/utils/prompt-boundary.ts, src/core/decisions/extractor.ts, src/core/decisions/consolidator.ts, src/core/decisions/verifier.ts, src/core/drift/drift-detector.ts, src/core/verifier/verification-engine.ts, src/core/generator/spec-pipeline.ts, src/core/generator/stages, src/core/test-generator/coverage-analyzer.ts, src/core/test-generator/test-generator.ts`
 - **Dependencies**: LLMProvider, CompletionRequest, CompletionResponse, TokenUsage
 

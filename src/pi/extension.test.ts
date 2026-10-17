@@ -14,6 +14,113 @@ import { pointerLineFor } from '../cli/commands/orient-inject-render.js';
 
 type PiEventHandler = (...args: unknown[]) => unknown;
 
+describe('Pi opt-in configuration onboarding', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-pi-opt-in-'));
+    vi.stubEnv('OPENLORE_GLOBAL_CONFIG', join(root, 'user.json'));
+    vi.stubEnv('OPENLORE_PI_NO_SPAWN', '1');
+  });
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it.each(['tui', 'rpc'])('starts an unconfigured %s session without waiting for a UI answer', async mode => {
+    const handlers = registerPiHandlers();
+    // An embedded host leaves selection pending until a human answers. Startup must
+    // never enter this function, even with an interactive UI advertised by RPC.
+    const select = vi.fn(() => new Promise<string>(() => {}));
+    const notify = vi.fn();
+    const ctx = { cwd: root, mode, hasUI: true, ui: { select, notify, setStatus: vi.fn() } } as unknown as ExtensionContext;
+    await handlers.get('session_start')?.({}, ctx);
+    await handlers.get('session_start')?.({}, ctx);
+    handlers.get('session_shutdown')?.({}, ctx);
+    expect(select).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('/openlore configure'), 'info');
+    await expect(access(join(root, '.openlore', 'config.json'))).rejects.toThrow();
+  });
+
+  it('deduplicates by cwd without consuming the hint during headless startup', async () => {
+    const handlers = registerPiHandlers();
+    const notify = vi.fn();
+    const ctx = { cwd: root, mode: 'json', hasUI: false, ui: { notify } } as unknown as ExtensionContext;
+    await handlers.get('session_start')?.({}, ctx);
+    expect(notify).not.toHaveBeenCalled();
+    await handlers.get('session_start')?.({}, { ...ctx, hasUI: true });
+    await handlers.get('session_start')?.({}, { ...ctx, cwd: join(root, 'second'), hasUI: true });
+    await handlers.get('session_start')?.({}, { ...ctx, hasUI: true });
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not show an onboarding hint when user-wide defaults exist', async () => {
+    await writeFile(join(root, 'user.json'), JSON.stringify({ generation: { provider: 'openai' } }));
+    const notify = vi.fn();
+    await registerPiHandlers().get('session_start')?.({}, {
+      cwd: root, mode: 'json', hasUI: true, ui: { notify, select: vi.fn() },
+    });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('opens the project wizard explicitly and leaves absent config absent on discard', async () => {
+    const select = vi.fn(async () => '✕ Discard & close');
+    await registerPiCommands().get('openlore')?.('configure', {
+      cwd: root, mode: 'rpc', hasUI: true, ui: { select, notify: vi.fn() },
+    });
+    expect(select).toHaveBeenCalledWith('openlore config', expect.any(Array));
+    await expect(access(join(root, '.openlore', 'config.json'))).rejects.toThrow();
+  });
+
+  it('saves only user defaults through configure --global, preserving global unknown keys', async () => {
+    await writeFile(join(root, 'user.json'), JSON.stringify({ generation: { provider: 'openai' }, future: { enabled: true } }));
+    await mkdir(join(root, '.openlore'));
+    const local = '{"generation":{"provider":"anthropic"}}';
+    await writeFile(join(root, '.openlore', 'config.json'), local);
+    const select = vi.fn(async () => '✓ Save & close');
+    const confirm = vi.fn();
+    await registerPiCommands().get('openlore')?.('configure --global', {
+      cwd: root, mode: 'rpc', hasUI: true, ui: { select, confirm, notify: vi.fn() },
+    });
+    expect(JSON.parse(await readFile(join(root, 'user.json'), 'utf8'))).toMatchObject({
+      generation: { provider: 'openai' }, future: { enabled: true },
+    });
+    expect(await readFile(join(root, '.openlore', 'config.json'), 'utf8')).toBe(local);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('saves the project wizard without copying user-wide defaults into the project file', async () => {
+    await writeFile(join(root, 'user.json'), JSON.stringify({
+      generation: { provider: 'openai', model: 'gpt-5' },
+      embedding: { baseUrl: 'https://embed.example.com/v1', model: 'global-embed', apiKey: 'user-secret' },
+    }));
+    const notify = vi.fn();
+    await registerPiCommands().get('openlore')?.('configure', {
+      cwd: root, mode: 'rpc', hasUI: true, ui: { select: vi.fn(async () => '✓ Save & close'), confirm: vi.fn(), notify },
+    });
+    const text = await readFile(join(root, '.openlore', 'config.json'), 'utf8');
+    expect(text).not.toContain('user-secret');
+    expect(JSON.parse(text)).not.toHaveProperty('embedding');
+    expect(JSON.parse(text).generation).not.toHaveProperty('provider');
+    // The project keeps inheriting both user defaults.
+    expect(await readConfig(root)).toMatchObject({ generation: { provider: 'openai', model: 'gpt-5' }, embedding: { model: 'global-embed' } });
+  });
+
+  it('keeps inherited embeddings disabled after removing them in the project wizard', async () => {
+    await writeFile(join(root, 'user.json'), JSON.stringify({
+      generation: { provider: 'openai' }, embedding: { baseUrl: 'http://localhost:11434', model: 'global-embed' },
+    }));
+    const choices = ['✕ Disable inherited embedding', '✓ Save & close'];
+    await registerPiCommands().get('openlore')?.('configure', {
+      cwd: root, mode: 'rpc', hasUI: true, ui: { select: vi.fn(async () => choices.shift()), notify: vi.fn() },
+    });
+    const saved = JSON.parse(await readFile(join(root, '.openlore', 'config.json'), 'utf8'));
+    expect(saved.embedding).toBeNull();
+    expect(await readConfig(root)).not.toHaveProperty('embedding');
+    expect(JSON.parse(await readFile(join(root, 'user.json'), 'utf8'))).toHaveProperty('embedding.model', 'global-embed');
+  });
+});
+
 function registerPiHandlers(orientTimeoutMs?: number): Map<string, PiEventHandler> {
   const handlers = new Map<string, PiEventHandler>();
   const pi = {

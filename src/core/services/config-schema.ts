@@ -61,6 +61,8 @@ type RequiredFieldMap<T> = Record<RequiredKeys<T>, true>
 type ConfigRuleMetadata = {
   /** Missing values written by older releases may be copied from canonical defaults. */
   compatibilityDefault?: true;
+  /** `null` is a valid value (e.g. `embedding: null` opts out of an inherited block). */
+  nullable?: true;
 };
 
 type ConfigRule = ConfigRuleMetadata & (
@@ -137,6 +139,7 @@ const llmRule: ConfigRule = {
 
 const embeddingRule: ConfigRule = {
   kind: 'object',
+  nullable: true,
   fields: fieldsFor<EmbeddingConfig>({
     provider: { kind: 'enum', values: ['remote', 'local'] },
     baseUrl: stringRule,
@@ -623,6 +626,7 @@ function validateRule(
   findings: { unknown: ConfigValidationFinding[]; missing: ConfigValidationFinding[]; mismatches: ConfigValidationFinding[] },
   fatal = false,
 ): void {
+  if (value === null && rule.nullable) return;
   if (rule.kind === 'string' || rule.kind === 'number' || rule.kind === 'boolean') {
     if (typeof value !== rule.kind) findings.mismatches.push(typeFinding(path, rule, value, fatal));
     return;

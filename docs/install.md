@@ -162,6 +162,14 @@ group. To keep every tool active from the start, set:
 
 in `.openlore/config.json`.
 
+Pi configuration is opt-in: an unconfigured project receives a non-blocking hint
+once per cwd within the extension instance. Use `/openlore configure` for project
+settings or `/openlore configure --global` for defaults shared by Pi, the CLI and
+MCP in `~/.openlore/config.json` (`%USERPROFILE%\.openlore\config.json` on Windows).
+Project object fields override global fields; arrays replace inherited arrays.
+An explicit CLI `--config` uses that file alone. See
+[Pi configuration](../examples/pi/README.md#configuration) for details.
+
 > **What the file contains.** `.pi/extensions/openlore.js` is a four-line re-export shim, not a
 > copy of the extension. The shipped extension is plain `tsc` output whose relative imports only
 > resolve inside the openlore package, so a copy fails to load. The shim's target path is

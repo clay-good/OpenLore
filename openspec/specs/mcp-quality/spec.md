@@ -924,9 +924,23 @@ The Pi extension's configuration wizard SHALL preserve every top-level key in
 `specStore`, `contextInjection`, and any future block) when it writes the file, and SHALL
 preserve unmanaged sibling keys within a block it partially edits. When the provider changes,
 the wizard SHALL clear provider-coupled managed fields (model, compatibility URL, and TLS override)
-rather than carrying an incompatible value to the new provider. The wizard SHALL auto-open only
-when the config file is absent, not merely because a field it expects is missing, and SHALL refuse
+rather than carrying an incompatible value to the new provider. The wizard SHALL open only on an
+explicit configuration command or tool call, and SHALL refuse
 to overwrite an existing malformed or non-object config.
+
+#### Scenario: An unconfigured project does not block session startup
+
+- **GIVEN** a Pi session with UI and neither project configuration nor user defaults
+- **WHEN** the session starts, including an embedded RPC session
+- **THEN** startup emits an informational hint pointing to `/openlore configure` without awaiting a dialog
+- **AND** the hint is emitted at most once per cwd within the extension instance, without creating a config file
+
+#### Scenario: Global defaults are edited explicitly
+
+- **GIVEN** a user invokes `/openlore configure --global` or `openlore_configure` with `global: true`
+- **WHEN** the wizard saves
+- **THEN** it writes the user configuration and leaves the project config unchanged
+- **AND** it does not offer to run project analysis after saving global defaults
 
 #### Scenario: A governance policy survives a wizard save
 

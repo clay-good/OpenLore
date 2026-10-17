@@ -1021,6 +1021,9 @@ The canonical statement of this decision lives in the `analyzer` domain — see 
 
 ## Technical Notes
 
+- Default configuration reads share user/project layering with the CLI and MCP through
+  `src/core/services/config-manager.ts`; explicit config paths remain self-contained.
+
 - **Implementation**: `src/core/drift/git-diff.ts, src/core/drift/spec-mapper.ts, src/core/drift/drift-detector.ts`
 - **Dependencies**: node:child_process, node:fs/promises, node:path, node:util, ChangedFile, logger, DIFF_MAX_CHARS, fs/promises, path, SpecMap, ADRMap, LLMProvider, DriftIssue, DriftResult, DriftDetectorOptions
 

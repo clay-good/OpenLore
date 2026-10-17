@@ -133,7 +133,16 @@ describe('runManifestEmit (end-to-end)', () => {
     expect(readFileSync(victim, 'utf-8')).toBe('{"original":true}\n');
   });
 
-  it('does not hang when an analysis artifact is a FIFO rather than a regular file', async () => {
+  it('refuses a directory analysis artifact and still emits a valid manifest', async () => {
+    const graph = join(dir, '.openlore', 'analysis', 'dependency-graph.json');
+    rmSync(graph);
+    mkdirSync(graph);
+    const out = join(dir, 'directory-artifact.json');
+    expect(await runManifestEmit({ projectRoot: dir, out })).toBe(0);
+    expect(validateManifest(JSON.parse(readFileSync(out, 'utf-8')))).toEqual([]);
+  });
+
+  it.runIf(process.platform !== 'win32')('does not hang when an analysis artifact is a FIFO rather than a regular file', async () => {
     // REPRODUCED before the fix: `mkfifo .openlore/analysis/dependency-graph.json` blocked the
     // emit inside `open()` on a libuv worker forever. The bounded reader refuses it instead, so
     // the manifest is still emitted — with the exports that artifact would have contributed absent.

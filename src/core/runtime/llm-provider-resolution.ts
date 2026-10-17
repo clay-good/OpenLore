@@ -6,6 +6,7 @@ import {
   DEFAULT_OPENAI_MODEL,
 } from '../../constants.js';
 import { resolveTrustedCompatBase } from '../services/repo-config-trust.js';
+import { isUserConfiguredValue } from '../../utils/config-layers.js';
 import { logger } from '../../utils/logger.js';
 
 export type ProviderName = 'anthropic' | 'openai' | 'openai-compat' | 'gemini'
@@ -76,7 +77,8 @@ export const GENERATION_PROVIDER_ENV = 'OPENLORE_GENERATION_PROVIDER';
 export function resolveConfiguredProvider(configValue: string | undefined): ProviderName | undefined {
   if (!configValue) return undefined;
   const provider = configValue as ProviderName;
-  if (NO_KEY_PROVIDERS.has(provider) && process.env[GENERATION_PROVIDER_ENV]?.trim() !== configValue) {
+  if (NO_KEY_PROVIDERS.has(provider) && process.env[GENERATION_PROVIDER_ENV]?.trim() !== configValue
+    && !isUserConfiguredValue('generation.provider', configValue)) {
     logger.warning(
       `This repository's .openlore/config.json selects generation.provider "${configValue}", ` +
         'a locally-authenticated agent CLI. It will be launched on prompt text derived from ' +

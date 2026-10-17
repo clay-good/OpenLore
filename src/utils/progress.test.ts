@@ -354,7 +354,9 @@ describe('showGenerationSuccess', () => {
       tokensUsed: 5000,
     });
     const output = consoleSpy.mock.calls.flat().join('\n');
-    expect(output).toContain('5,000 tokens');
+    // The CLI uses the operator's locale: French Windows groups thousands with
+    // a non-breaking space instead of the US comma.
+    expect(output).toMatch(/5[,.\s\u00a0\u202f]?000 tokens used/u);
   });
 });
 
