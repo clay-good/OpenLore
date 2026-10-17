@@ -759,7 +759,7 @@ export const installCommand = new Command('install')
     'Wire only this repository — skip the user-scope entries that make every future repository reach OpenLore',
     false,
   )
-  .option('--analyze', 'Build the index after configuring surfaces (default: true)', true)
+  .option('--analyze', 'Build the index after configuring surfaces', true)
   .option('--no-analyze', 'Configure surfaces only; do not run init/analyze (run "openlore analyze" yourself later)')
   .addHelpText(
     'after',

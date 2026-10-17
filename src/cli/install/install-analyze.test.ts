@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir, stat, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runInstall } from './index.js';
+import { installCommand, runInstall } from './index.js';
 import { logger } from '../../utils/logger.js';
 
 async function exists(p: string): Promise<boolean> {
@@ -130,4 +130,11 @@ describe('openlore install — auto index build', () => {
     expect(out).toContain('requires an LLM provider');
     expect(out).not.toContain('⚠ Spec index skipped');
   }, 30_000);
+});
+
+describe('openlore install --help', () => {
+  it('states the --analyze default once', () => {
+    // --analyze is the only option defaulting to true; help may wrap its line.
+    expect(installCommand.helpInformation().match(/\(default: true\)/g)).toHaveLength(1);
+  });
 });
