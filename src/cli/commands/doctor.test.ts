@@ -641,7 +641,7 @@ describe('doctor command', () => {
       const configCheck = checks.find(c => c.name === 'openlore config')!;
       expect(configCheck.status).toBe('ok');
       // Honest wording: the project file is absent, user-wide defaults are in effect.
-      expect(configCheck.detail).toMatch(/^no \.openlore\/config\.json; using user-wide defaults/);
+      expect(configCheck.detail).toMatch(/^no \.openlore[\\/]config\.json; using user-wide defaults/);
     });
 
     it('should show ok when config exists and parses', async () => {
