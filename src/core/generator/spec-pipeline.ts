@@ -29,7 +29,7 @@ import { runStage6 } from './stages/stage6-adr.js';
 import { buildDomainEvidence } from './domain-evidence.js';
 import { resolveDomainSelection } from './domain-evidence.js';
 import { normalizeDomainName } from './openspec-compat.js';
-import { safeJoin } from '../../utils/path-confinement.js';
+import { readFileConfined, safeJoin } from '../../utils/path-confinement.js';
 import { PROMPTS } from './prompts.js';
 import { SUBSPEC_SCHEMA } from './schemas.js';
 import type {
@@ -595,7 +595,8 @@ export class SpecGenerationPipeline implements PipelineContext {
           files.push({ path: fp, content: deep.content });
         } else if (this.options.rootPath) {
           try {
-            const content = await readFile(resolve(this.options.rootPath, fp), 'utf-8');
+            // Index record paths are repository data: confine them before the LLM sees the content.
+            const content = await readFileConfined(this.options.rootPath, fp);
             if (content.trim()) files.push({ path: fp, content });
           } catch { /* file not readable, skip */ }
         }
