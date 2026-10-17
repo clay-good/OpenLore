@@ -1124,8 +1124,12 @@ the per-call BFS over the same artifact — including the ORDER-dependent parts 
 reconstructed `viaPath`, the first N paths a bounded enumeration returns), not merely the set of
 results.
 
-Establishing whether a persisted structure is current SHALL cost less than rebuilding it. A
-handler that never traverses SHALL NOT pay for the structure's existence at all.
+A persisted structure SHALL be accepted only when the graph digest it is stamped with matches the
+one the served context carries, and SHALL still be refused when its own payload fails its
+integrity or bounds checks. Currency is therefore decided by what the structure describes, not by
+the bytes of the artifact it was written beside: an incremental flush that leaves the call graph
+untouched SHALL NOT cost a rebuild, and no staleness heuristic over file timestamps SHALL stand
+between a reader and that decision.
 
 `get_subgraph` and `analyze_impact` traverse the SQLite edge store one batched query per BFS
 level and never built per-call adjacency; they are therefore out of scope here, and this
@@ -1145,6 +1149,13 @@ requirement does not silently claim them.
 - **WHEN** the next traversal tool call arrives
 - **THEN** the daemon reloads the structure for the new generation before answering (same
   invalidation the context cache uses), never serving a traversal over the old graph
+
+#### Scenario: A structure survives an edit the graph did not see
+
+- **GIVEN** a warm repo whose watcher has flushed signature changes since the last full analyze
+- **WHEN** a traversal tool is called from a fresh process
+- **THEN** the persisted structure is loaded and served rather than rebuilt, because the flush
+  did not change the graph it is keyed to
 
 #### Scenario: Repeated conclusions over one graph pay the build once
 
@@ -3023,3 +3034,415 @@ cross-referenced, not duplicated.
 - **WHEN** `audit_spec_coverage` runs
 - **THEN** its scenarios are labeled `not-assessable` with the anchor reason, and no reaching
   test is claimed
+
+### Requirement: RetrievalHandlersCarryTheCoverageVerdict
+
+Every handler whose answer is produced by retrieval — code search, spec search, and the symbol
+selection inside the orientation briefing — SHALL carry the coverage verdict and, when the verdict is
+not `covered`, the question-kind disclosure. The verdict SHALL be part of the handler's structured
+output, subject to the same dispatch-time shape enforcement as the rest of the conclusion contract.
+
+#### Scenario: Search carries its verdict
+
+- **GIVEN** any code or spec search request
+- **WHEN** the handler responds
+- **THEN** the structured output carries a coverage verdict
+
+#### Scenario: Orientation states when it found nothing relevant
+
+- **GIVEN** a task description whose terms match no indexed symbol beyond noise
+- **WHEN** the orientation briefing is produced
+- **THEN** it reports that the task is not covered by the index instead of listing its highest-ranked
+  unrelated symbols, and the rest of the briefing (specs, decisions, staleness) is still returned
+
+#### Scenario: The verdict survives the dispatch contract check
+
+- **GIVEN** a retrieval-backed handler whose output omits the verdict
+- **WHEN** the conclusion shape is enforced at dispatch
+- **THEN** the omission is reported as a contract violation
+
+### Requirement: InsertionPointsWithholdRecommendationWithoutStrongEvidence
+
+`suggest_insertion_points` SHALL NOT recommend a location when the retrieval that produced its
+candidates carries an `uncovered` verdict. It SHALL return the abstention with its reason and the
+question kind, because a confidently-named wrong insertion point costs more than no answer.
+
+When the verdict is `weak`, the tool SHALL return its candidates — they remain worth inspecting —
+but SHALL withhold the action recommendation built on them: the per-candidate insertion strategy and
+the next-step instructions SHALL be absent, and the coverage disclosure SHALL be present. Naming a
+location is information; telling an agent how to edit it is advice, and advice resting on incidental
+evidence is what produced a recommended edit inside an unrelated function.
+
+#### Scenario: No insertion point is invented for an uncovered task
+
+- **GIVEN** a feature description whose retrieval verdict is `uncovered`
+- **WHEN** insertion points are requested
+- **THEN** no location is recommended, and the response states that the task is not covered
+
+#### Scenario: A weak verdict returns locations without advice
+
+- **GIVEN** a feature description whose every candidate rests on incidental evidence
+- **WHEN** insertion points are requested
+- **THEN** the candidates are returned with the coverage disclosure, and no candidate carries an
+  insertion strategy and no next-step instructions are returned
+
+#### Scenario: A covered task is unaffected
+
+- **GIVEN** a feature description whose retrieval verdict is `covered`
+- **WHEN** insertion points are requested
+- **THEN** locations are recommended exactly as before this requirement, each with its insertion
+  strategy and the next steps
+
+### Requirement: Specification Workflow Tool Registration
+
+The MCP server SHALL register `prepare_spec_generation` and `prepare_spec_repair` as read-only tools with machine-readable input schemas, structured responses, and read-only tool annotations. They SHALL be available in the full surface and in the ordinary default surface used by an unqualified OpenLore MCP server; the navigation-only escape preset MAY omit them.
+
+#### Scenario: Client connects to the default MCP surface
+
+- **WHEN** a client starts OpenLore MCP without selecting a preset
+- **THEN** both specification preparation tools are discoverable
+- **AND** their annotations do not claim destructive or write behavior
+
+#### Scenario: Client requests the navigation-only surface
+
+- **WHEN** a client explicitly selects the navigation-only preset
+- **THEN** OpenLore may omit the specification workflow tools to preserve that preset's narrow purpose
+
+### Requirement: Composite Handlers Reuse Canonical Evidence Services
+
+The composite handlers SHALL reuse the same domain-evidence, mapping, audit, drift, and structural-difference services as their atomic MCP counterparts. They SHALL NOT invoke an LLM or maintain a second client-specific implementation of those observations.
+
+#### Scenario: Atomic and composite observations are compared
+
+- **WHEN** the same analyzed repository and domain are queried through a composite and its corresponding atomic tools
+- **THEN** equivalent observations have identical provenance and domain membership
+- **AND** no observation differs because it was re-inferred in the composite handler
+
+### Requirement: Composite Argument And Error Contracts
+
+Generation SHALL reject an unknown requested domain with available-domain guidance. Repair SHALL accept an existing specification even when its current analyzed domain is absent, and SHALL distinguish absent specifications, unavailable analysis, stale artifacts, and bounded partial results with stable machine-readable states.
+
+#### Scenario: Generation domain is unknown
+
+- **WHEN** `prepare_spec_generation` receives a domain that is not present in reconciled analysis
+- **THEN** it returns a typed unknown-domain response with available domains
+- **AND** it does not silently substitute undomained or repository-wide evidence
+
+#### Scenario: Repair specification does not exist
+
+- **WHEN** `prepare_spec_repair` targets a name for which no specification exists
+- **THEN** it returns a typed absent-specification response
+- **AND** it does not reinterpret the request as Generate
+
+### Requirement: DeadFlaggedGapsRankBelowLiveGaps
+
+`report_coverage_gaps` SHALL rank a gap flagged `alsoFlaggedDead` below every gap that is not so flagged, regardless of its significance signals or fan-in. Within each of the two groups the existing order SHALL apply unchanged: load-bearing label first, then raw fan-in, then a stable file-and-name tiebreak.
+
+Ranking SHALL remain deterministic and derived from existing labels; no composite score and no new tuning constant SHALL be introduced.
+
+#### Scenario: A dead-flagged hub does not outrank a live gap
+
+- **GIVEN** a dead-flagged gap with the `hub` signal and fan-in 26, and a live gap with no significance signal and fan-in 1
+- **WHEN** the gaps are ranked
+- **THEN** the live gap is returned before the dead-flagged hub
+
+#### Scenario: Order within a group is unchanged
+
+- **GIVEN** two live gaps, one labelled `chokepoint` and one unlabelled with higher fan-in
+- **WHEN** the gaps are ranked
+- **THEN** the labelled gap precedes the unlabelled one, as it does today
+
+#### Scenario: Truncation does not hide every live gap
+
+- **GIVEN** more dead-flagged gaps than the result limit and at least one live gap
+- **WHEN** the result is truncated to `maxResults`
+- **THEN** every returned live gap precedes any dead-flagged gap, and the truncation receipt states how many of each were omitted
+
+### Requirement: DeadFlagCarriesItsReason
+
+A gap flagged `alsoFlaggedDead` SHALL carry a stable reason: `no-callers` when its fan-in is zero, and `dead-via-unreachable-callers` when its fan-in is above zero and it is still unreachable from an entry point. The existing `alsoFlaggedDead` boolean SHALL keep its current meaning.
+
+The result SHALL state that `dead-via-unreachable-callers` marks a reachability the analysis could not decide — the signature of a dynamic, reflective, or registry-mediated inbound edge — and SHALL NOT present it as evidence that the code is unused.
+
+#### Scenario: Resolved callers that are themselves unreachable
+
+- **GIVEN** a symbol with 26 resolved callers, all of them unreachable from any entry point
+- **WHEN** it is reported as a gap
+- **THEN** it carries `alsoFlaggedDead` with reason `dead-via-unreachable-callers`, and the result names the undecided-reachability caveat
+
+#### Scenario: A genuinely uncalled symbol
+
+- **GIVEN** a symbol with no resolved caller
+- **WHEN** it is reported as a gap
+- **THEN** it carries `alsoFlaggedDead` with reason `no-callers`
+
+### Requirement: GapPageDisclosesItsComposition
+
+The result SHALL report how many of the returned gaps are live and how many are dead-flagged, and the same split for the omitted remainder. A caller SHALL be able to tell a page of untested load-bearing code from a page of undecidable reachability without inspecting every entry.
+
+#### Scenario: A mostly dead-flagged gap set is legible at a glance
+
+- **GIVEN** 264 gaps of which 210 are dead-flagged
+- **WHEN** the first page of 20 is returned
+- **THEN** the response states the live and dead-flagged counts for both the returned page and the omitted remainder
+
+### Requirement: EveryDraftReachesAReasonedVerdict
+
+Consolidation SHALL assign every draft a terminal disposition — `promoted`, `merged-into` with the surviving decision id, or `rejected` — together with a stable reason code drawn from a source-declared registry. A draft SHALL NOT be removed, skipped, or left pending without a disposition.
+
+The disposition and its reason SHALL be persisted with the draft id, so the verdict outlives the background run that produced it.
+
+#### Scenario: A rejected draft carries its reason
+
+- **GIVEN** a draft whose subject matter no supporting diff evidence covers
+- **WHEN** consolidation runs
+- **THEN** the draft is recorded `rejected` with reason `no-supporting-diff`, retrievable by its id
+
+#### Scenario: A merged draft names its survivor
+
+- **GIVEN** two drafts describing the same decision
+- **WHEN** consolidation merges them
+- **THEN** the absorbed draft is recorded `merged-into` with the id of the surviving decision
+
+#### Scenario: No draft disappears
+
+- **GIVEN** any set of drafts
+- **WHEN** consolidation completes
+- **THEN** every input draft has a persisted disposition, and the count of dispositions equals the count of drafts
+
+### Requirement: RecordDecisionDisclosesDraftStatusAndVerdict
+
+`record_decision` SHALL state in its response that it records a draft subject to diff-grounded consolidation, return the draft id, and name the exact command that reads the verdict. Its tool description SHALL describe the same contract; it SHALL NOT imply that the decision is final on return.
+
+A `record_decision` call whose content and anchors match an already-decided draft SHALL return that draft's disposition and reason instead of silently creating a second draft.
+
+#### Scenario: The caller learns where to read the outcome
+
+- **WHEN** `record_decision` succeeds
+- **THEN** the response carries the draft id, the draft status, and the exact command that reports its disposition
+
+#### Scenario: Re-recording a rejected draft returns the verdict
+
+- **GIVEN** a draft already rejected with reason `not-architectural`
+- **WHEN** the same content and anchors are recorded again
+- **THEN** the response reports the existing disposition and reason rather than creating a new pending draft
+
+### Requirement: AuthorStatementSurvivesConsolidationRewrite
+
+When consolidation re-derives a decision's content from diff evidence, the agent-recorded title and rationale SHALL be retained as `authorStatement` on the resulting decision, and the response SHALL disclose that the served content is `llm-extracted` with `verificationEvidence: git-diff`. Recorded author text SHALL never be discarded or rewritten in place.
+
+#### Scenario: The author can see what replaced their wording
+
+- **GIVEN** a draft promoted with re-derived content
+- **WHEN** the decision is read
+- **THEN** the served content is disclosed as `llm-extracted` and the original author title and rationale are present as `authorStatement`
+
+### Requirement: Unavailable Coverage Uses Unknown Values
+
+Mapping-dependent coverage metrics in MCP and composite responses SHALL be `null` whenever current deterministic links cannot establish them. The response SHALL carry `mappingCoverage.state = "unavailable"` and a stable reason such as `mapping-not-generated`, `incompatible-provenance`, `fingerprint-mismatch`, or `invalid-json`. Zero in those agent-facing responses SHALL mean an observed count of zero, never unavailable evidence. The public v2 library API MAY retain its numeric summary for source compatibility only when `mappingCoverage` remains the authoritative availability signal.
+
+#### Scenario: Incompatible provenance does not look fully covered
+- **GIVEN** an audit whose mapping cache has incompatible provenance and whose in-memory link derivation cannot establish coverage
+- **WHEN** the audit response is produced
+- **THEN** covered, uncovered, percentage, and orphan-requirement metrics are `null`, while mapping-independent metrics remain populated
+
+#### Scenario: Available empty coverage remains numeric
+- **GIVEN** a current deterministic link index that establishes zero covered functions
+- **WHEN** the audit response is produced
+- **THEN** its covered count and percentage are numeric zero and `mappingCoverage.state` is `available`
+
+### Requirement: Transport-Safe Composite Pagination
+
+Generate and Repair composites SHALL accept a bounded serialized-response budget in addition to item limits. The default budget SHALL fit every bundled MCP/Pi adapter without downstream clipping. Cursors SHALL be bound to workflow, canonical domain, analysis generation, the complete stable evidence-stream identity, base-ref and item-limit shaping inputs, budget version, byte budget, logical evidence section, and offset.
+
+A receipt MAY declare `complete` only after the final serialized envelope is within the effective byte budget and contains every required item. Any recoverable omitted evidence SHALL make the receipt `partial` and provide a continuation cursor. Pagination SHALL be able to continue within signatures, inventories, relationships, mapping observations, structural changes, and other logical sections; a single large file MUST NOT make the remainder unreachable.
+
+#### Scenario: Host transport limit produces continuation
+- **GIVEN** complete domain evidence would exceed the effective serialized byte budget
+- **WHEN** the composite builds its first response
+- **THEN** the response fits the budget, is `partial`, identifies omitted sections/counts, and returns a cursor that retrieves the next deterministic page
+
+#### Scenario: Final page alone is complete
+- **GIVEN** all earlier pages have been consumed and the remaining evidence fits the budget
+- **WHEN** the final cursor is requested
+- **THEN** the response fits the budget, contains the remaining evidence, and only that page declares completion of the continuation sequence
+
+#### Scenario: Oversized individual evidence is recoverable
+- **GIVEN** one file contributes more signatures, inventory entries, or relationships than one page can hold
+- **WHEN** the composite paginates it
+- **THEN** it continues inside the relevant logical section rather than silently dropping the section or declaring the workflow complete
+
+#### Scenario: Mutable evidence changes between pages
+- **GIVEN** a continuation cursor for a specification, mapping, or Git evidence stream
+- **WHEN** any stream-shaping input changes before the next page
+- **THEN** the cursor is rejected and the host is told to restart rather than receiving a mixed composition
+
+### Requirement: Composite Repository Content Is Untrusted Data
+
+Generate and Repair SHALL mark repository-derived evidence as untrusted data, SHALL NOT grant embedded directives instructional authority, and SHALL redact secrets before enforcing the final serialized response budget. A repository configuration MUST NOT disable redaction for these source-carrying composites.
+
+#### Scenario: Repository evidence contains an instruction-shaped secret
+- **GIVEN** source or specification evidence containing an embedded directive and credential-shaped text
+- **WHEN** a composite response is produced
+- **THEN** the directive remains labeled as untrusted data, the secret is redacted, and the final response remains within its byte budget
+
+### Requirement: Follow-Ups Are Executable
+
+Every follow-up advertised by a composite SHALL either name an MCP tool callable in the active surface with valid prefilled arguments, reference a continuation of the same available composite, or provide a typed exact CLI command. A composite MUST NOT advertise an unavailable atomic tool and MUST NOT recommend an observation that merely repeats the same unavailable state.
+
+#### Scenario: Default preset follow-up remains callable
+- **GIVEN** a composite running under the default substrate preset omits recoverable evidence
+- **WHEN** it emits a follow-up
+- **THEN** the follow-up can be executed without changing presets, or it contains an exact CLI remediation instead of an unavailable tool name
+
+#### Scenario: Unavailable mapping receives remediation
+- **GIVEN** mapping coverage cannot be established
+- **WHEN** Repair emits its receipt
+- **THEN** it does not recommend rerunning the same audit and instead identifies deterministic mapping refresh or explicit-anchor repair as the remediation
+
+### Requirement: Analysis Generation Coherence
+
+Every composite and cached MCP read SHALL bind all consumed analysis artifacts to one analysis-generation identity. A server SHALL automatically reload when a newer committed generation becomes current. If a generation changes while a response is composed, the request SHALL retry against one generation or return a typed `analysis-changed` result; it MUST NOT combine old cached paths with a fresh preflight state.
+
+Generate and Repair SHALL require a generation marked `full`. A watcher-patched `incremental` generation MAY serve navigation tools, but MUST NOT seed specification authoring because its repository inventory can lag its patched context and dependency graph. The composites SHALL return `analysis-changed` with guidance to run a full analysis.
+
+#### Scenario: Incremental evidence cannot author specifications
+- **GIVEN** the watcher has published an incrementally patched analysis generation
+- **WHEN** an agent requests Generate or Repair evidence
+- **THEN** the composite returns `analysis-changed`, includes no repository evidence, and directs the agent to run a full analysis
+
+#### Scenario: External analyze invalidates daemon cache
+- **GIVEN** a daemon has cached one analysis generation and another process commits a newer generation
+- **WHEN** `orient` or a spec composite is called
+- **THEN** it reads the newer generation automatically and returns no paths solely present in the old generation
+
+#### Scenario: Generation changes during composition
+- **GIVEN** analysis commits a new generation while a multi-artifact composite is reading
+- **WHEN** the composite validates its snapshot
+- **THEN** it retries or returns `analysis-changed`, and never labels mixed-generation evidence fresh
+
+### Requirement: Existing Spec Overlap Observation
+
+Generation preparation SHALL compare the requested analyzed domain footprint with existing specification footprints and return bounded overlap observations for shared normalized files and exact symbols. The observation SHALL disclose its basis and completeness but MUST NOT decide whether the requested domain is a business domain, a technical layer, or a replacement for an existing spec.
+
+#### Scenario: Technical candidate overlaps existing specs
+- **GIVEN** a detected `components` domain shares analyzed files or symbols with existing `agent`, `theme`, and `artifact-rendering` specs
+- **WHEN** generation preparation runs
+- **THEN** it reports each deterministic overlap and leaves merge, rename, or new-domain interpretation to the host agent
+
+#### Scenario: No overlap is an observed result
+- **GIVEN** a candidate domain with a complete footprint comparison and no shared files or symbols
+- **WHEN** generation preparation runs
+- **THEN** it reports an available empty overlap set rather than omitting the observation
+
+### Requirement: Domains Without Behavior Are Disclosed, Not Specified
+
+The Generate and Repair composites SHALL report, as a page-global observation, whether the resolved domain contains any symbol a requirement could describe. The no-behavior state SHALL be decided on POSITIVE evidence of prose — every file that defines the domain is documentation — and MUST NOT be inferred from the absence of extracted signatures, which a declarative or bootstrap-style domain also lacks. A documentation-only domain SHALL be disclosed as such together with the evidence behind it (symbol count, defining-file count, documentation-file count), and the terminal page SHALL carry a stop-and-ask follow-up rather than a verdict. The symbol count SHALL count symbols, not the files that carry them, and SHALL count DEFINING symbols only: a requirement anchors to the implementation, never to a test, so a domain whose only symbols live in an attached test file SHALL still be reported as having no behavior. Supporting symbols SHALL be disclosed alongside rather than folded into the count.
+
+When no analyzed domain backs the request at all, the behavior state SHALL be `unavailable` with null counts, never a fabricated zero. The stop-and-ask follow-up SHALL then be emitted only on positive evidence of prose — every source file the specification cites is documentation — a cited path carrying an anchor (`README.md#Installation`) SHALL be classified by the file it names rather than the fragment, and the specification corpus's own files SHALL be excluded from that evidence using the CONFIGURED specification root rather than the default directory name, so a corpus-level specification such as `overview` or `architecture`, which owns no source by design and cites other specifications, SHALL remain repairable.
+
+This is an observation, never a decision: the system MUST NOT declare such a domain illegitimate, and MUST NOT author or withhold a specification on its own. Canonical agent skills SHALL key their stop on the emitted follow-up rather than on the behavior state alone — a bare `unavailable` without that follow-up is not a stop — and SHALL then ask the human whether the domain should be specified at all. They MUST NOT paraphrase documentation into requirement statements.
+
+- **Implementation**: `domainBehaviorOf::src/core/services/spec-workflow.ts`
+
+#### Scenario: A behavior-free domain raises a stop, not a spec
+- **GIVEN** a resolved domain every one of whose defining files is documentation
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the page discloses the domain has no behavior with its supporting counts, and the terminal page carries a stop-and-ask follow-up
+
+#### Scenario: A surviving prose-only spec whose domain is gone still raises the stop
+- **GIVEN** a specification whose domain is no longer produced by the analysis and whose every cited source file is documentation
+- **WHEN** Repair evidence is prepared for it
+- **THEN** the behavior state is `unavailable` with null counts, and the terminal page carries the stop-and-ask follow-up
+
+#### Scenario: A relocated specification root is honored
+- **GIVEN** a repository whose configured specification root is not the default directory name
+- **WHEN** a specification under it is loaded or its corpus files are excluded from prose evidence
+- **THEN** the configured root is used for retrieval, for domain discovery, and for the corpus exclusion, so the specification resolves and no corpus-level specification is misread as a prose-only orphan
+
+#### Scenario: A configured specification root cannot escape the project
+- **GIVEN** repository configuration names an absolute or parent-relative specification root outside the project
+- **WHEN** a specification workflow or MCP domain lookup resolves that root
+- **THEN** the existing confined resolver falls back to the in-project default, discloses the fallback, and reads no specification content from outside the project
+
+#### Scenario: A corpus-level spec stays repairable
+- **GIVEN** a specification that owns no analyzed domain and cites only other specifications
+- **WHEN** Repair evidence is prepared for it
+- **THEN** the behavior state is `unavailable` and no stop-and-ask follow-up is emitted
+
+#### Scenario: A code domain without extracted signatures is behavior
+- **GIVEN** a domain defined by source files that yield no extracted signatures
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the domain is reported as behavioral and no stop-and-ask follow-up is emitted
+
+#### Scenario: Test-only symbols do not count as behavior
+- **GIVEN** a domain defined only by documentation whose attached test file carries symbols
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the domain is reported as documentation-only, the supporting symbols are disclosed separately, and the stop-and-ask follow-up is emitted
+
+#### Scenario: A domain with symbols raises no stop
+- **GIVEN** a resolved domain whose evidence names at least one symbol
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the domain is disclosed as behavioral and no stop-and-ask follow-up is emitted
+
+### Requirement: StalenessDisclosingHandlersServeTheOverlay
+
+`search_code` SHALL reconcile cited stale files with the live overlay when the overlay succeeds,
+and `locate_symbol_span` SHALL prefer live spans for an edited file. `search_code` SHALL also inspect
+a bounded Git working-tree candidate set when the index has no symbol hits, so a newly added symbol
+can be found. The answer SHALL distinguish files read from source from files still served from the
+index; incoming call edges remain subject to the existing staleness disclosure.
+
+#### Scenario: The overlay disclosure names what was read
+
+- **GIVEN** a query whose stale set was fully overlaid
+- **WHEN** the answer is produced
+- **THEN** the overlay disclosure names the edited files read from source and states that incoming
+  call edges can still predate the edit
+
+#### Scenario: A skipped overlay keeps today's behavior
+
+- **GIVEN** a query whose overlay was skipped for exceeding its bound
+- **WHEN** the answer is produced
+- **THEN** the indexed answer is retained with a disclosure naming why the overlay was skipped
+
+### Requirement: ExactPositionsPreferTheOverlay
+
+A handler that returns exact source positions SHALL prefer overlaid spans over indexed spans for any
+file in the stale set, so positions handed to an editing caller match the bytes on disk. When no
+overlay is available for such a file, the handler SHALL keep its existing warning that the recorded
+offsets are not trustworthy.
+
+#### Scenario: Positions in an edited file are current
+
+- **GIVEN** a request for a symbol's span in a file edited since the index was built
+- **WHEN** the overlay covered that file
+- **THEN** the returned offsets address the current bytes, with no untrustworthy-offset warning
+
+#### Scenario: Without an overlay the warning stands
+
+- **GIVEN** the same request when the overlay was skipped
+- **WHEN** the span is returned
+- **THEN** the existing untrustworthy-offset warning is returned with it
+
+### Requirement: Mapping Coverage Availability Disclosure
+`audit_spec_coverage` SHALL disclose mapping-derived coverage as `available` or `unavailable`. An unavailable response SHALL include a stable machine-readable reason such as `mapping-not-generated`, `invalid-json`, `incompatible-provenance`, or `fingerprint-mismatch`, plus the mapping artifact path. This requirement is refined by `harden-spec-workflow-lifecycle`; the reason carries the former missing/invalid/stale distinction without creating a conflicting state machine.
+
+#### Scenario: Mapping artifact is absent
+- **WHEN** `audit_spec_coverage` runs without `mapping.json`
+- **THEN** its mapping-coverage state is `unavailable` with reason `mapping-not-generated`
+- **AND** it does not report every function as uncovered
+- **AND** it continues to report independently derived stale domains
+
+#### Scenario: Mapping fingerprint does not match cached analysis
+- **WHEN** `audit_spec_coverage` reads a valid mapping artifact whose source-analysis fingerprint differs from the current analysis
+- **THEN** its mapping-coverage state is `unavailable` with reason `fingerprint-mismatch`
+- **AND** it withholds mapping-derived uncovered-function, hub-gap and orphan-requirement conclusions
+
+### Requirement: Coverage Consumers Present Honest Degradation
+The audit CLI and MCP response contracts SHALL present an unavailable mapping-coverage state as unavailable rather than as zero coverage or an empty gap set.
+
+#### Scenario: An agent receives a degraded audit response
+- **WHEN** the mapping-coverage state is not `available`
+- **THEN** the response includes the state and reason needed to refresh or regenerate the artifact
+- **AND** the agent can distinguish unavailable coverage evidence from a codebase with no gaps

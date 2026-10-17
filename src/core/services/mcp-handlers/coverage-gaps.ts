@@ -28,7 +28,7 @@
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
-import { loadTraversalIndex } from './traversal.js';
+import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { deadCodeIds, wiringKey, loadExternalWiring, externalWiringCaveats } from './reachability.js';
 import type { WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import {
@@ -154,7 +154,12 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   for (const e of cg.edges) {
     if (e.kind === 'tested_by' && e.callerId) testSeeds.add(e.callerId);
   }
-  const reachedByTest = traversal.reachAll(testSeeds, 'forward', { directResolvedOnly: input.directResolvedOnly });
+  // A message a test sends (often to a fake) does not run the handler, so a message-topology edge
+  // never counts as test reach: following it would hide a real gap — the unsound direction for this
+  // report (change: add-message-topology-edges). Strict mode already excludes every synthesized
+  // edge, and a graph with no message edge keeps the precomputed index.
+  const testTraversal = input.directResolvedOnly ? traversal : messageFreeTraversalIndexFor(cg, traversal);
+  const reachedByTest = testTraversal.reachAll(testSeeds, 'forward', { directResolvedOnly: input.directResolvedOnly });
 
   // ── Candidate universe: internal, non-test, non-infra, non-generated code ───
   const universe = cg.nodes.filter(n => isCodeNode(n) && !n.isTest && !isExcludedPath(n.filePath));

@@ -8,6 +8,23 @@ status line. Two signals, both cheap to re-check:
   code before trusting a marker-less "shipped" claim)
 - **archivable** — `openspec archive <name>` completes
 
+## State as of 2026-10-17 (archive sweep)
+
+27 changes that had shipped but were still open were checked against `src/` and their PRs, then
+archived as `2026-10-17-*`. `bound-served-content-trust` was archived `--skip-specs` because its
+requirements were already in the main specs. `openspec validate --specs` passes. Still open but
+built: `honour-npmrc-in-update-check` (task 2.3 is a manual private-registry check for the
+author). `add-memory-trigger-predicates` is unbuilt. 70 changes stay open; 22 of them are the
+Kotlin changes marked NOT DOING. The counts in the sections below predate this sweep.
+
+Shipped and archived since: `add-message-topology-edges` (2026-10-17, PR #580) — a tagged object
+literal handed to a transport call (`send`, `postMessage`, `dispatch`, …) pairs with each clause
+that selects the same field and tag, as `message-topology` synthesized edges; an unpaired send is a
+disclosed `message-send` dynamic-boundary site. Four review rounds (16 reviewers, 7 real-repo
+dogfoods) took real-repo precision from 62% to about 80%, removed two distance/name narrowings that
+silently dropped real consumers, kept message hops out of call claims, exception flow and test
+reach, and fixed two quadratic collector shapes. Declared-union discriminants are deferred.
+
 ## State as of 2026-07-27 (spec-backlog repair pass)
 
 The corpus is fully green: **all 15 main specs and all 94 open changes pass `openspec

@@ -54,6 +54,7 @@ import {
   type ReceiverFieldFact,
 } from './receiver-registry.js';
 import { logger } from '../../utils/logger.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { HUB_THRESHOLD } from '../../constants.js';
 import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
 import { computeFileContentHashes, contentHashesRequested, withContentHashes, type FileContentHashes, type HashTreeNode } from './symbol-content-hash.js';
@@ -70,12 +71,26 @@ import {
   finalizeDynamicBoundarySites,
   boundDynamicBoundarySites,
   buildFileDynamicBoundary,
+  toEvidence,
+  EVIDENCE_SCAN_WINDOW,
   REFLECTIVE_RESOLUTION_RULE,
   type AttributedCandidate,
   type DynamicBoundaryNode,
   type FileDynamicBoundary,
   type ResolutionProbe,
+  type DynamicBoundarySite,
 } from './dynamic-boundary.js';
+import {
+  collectMessageSites,
+  mayContainMessageTopology,
+  MESSAGE_TOPOLOGY_RULE,
+  isMarkerKey,
+  keyField,
+  tagConstantName,
+  uncomparableKey,
+  unattributedConsumerKey,
+  type MessageSites,
+} from './message-topology.js';
 import {
   resolveLiteralReflection,
   literalReflectionKey,
@@ -118,6 +133,7 @@ import type {
   FileExtractResult,
   ClassRelationshipFact,
   DynamicDispatchFacts,
+  DynamicMessageSendFact,
 } from './call-graph-types.js';
 import { classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.js';
 
@@ -4074,7 +4090,7 @@ function resolveHandlerTargets(
 }
 
 // Shared registration/dispatch site shapes produced by each language's collector.
-interface EventRegistration { key: string; handlerIds: string[] }
+interface EventRegistration { key: string; handlerIds: string[]; container?: string; file?: string }
 interface EventDispatch { key: string; callerId: string; line: number }
 interface EventSites { registrations: EventRegistration[]; dispatches: EventDispatch[] }
 
@@ -4088,22 +4104,7 @@ interface EventSites { registrations: EventRegistration[]; dispatches: EventDisp
 function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, FunctionNode>, ruleName: string): CallEdge[] {
   if (sites.dispatches.length === 0) return [];
 
-  const handlersByKey = new Map<string, Set<string>>();
-  for (const reg of sites.registrations) {
-    let set = handlersByKey.get(reg.key);
-    if (!set) handlersByKey.set(reg.key, (set = new Set()));
-    for (const id of reg.handlerIds) set.add(id);
-  }
-
-  // Fan-out cap: DROP over-cap channels (typically generic keys) rather than guess.
-  for (const [key, set] of handlersByKey) {
-    if (set.size > EVENT_CHANNEL_FANOUT_CAP) {
-      logger.debug(
-        `[edge-synthesis] event-channel '${key}' dropped: ${set.size} handlers exceed cap ${EVENT_CHANNEL_FANOUT_CAP}`,
-      );
-      handlersByKey.delete(key);
-    }
-  }
+  const { handlersByKey } = groupHandlersByKey(sites);
 
   const edges: CallEdge[] = [];
   const seen = new Set<string>();
@@ -4128,6 +4129,210 @@ function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, Function
     }
   }
   return edges;
+}
+
+/**
+ * Group a site set's handlers by key and drop every key over the fan-out cap. Shared by the pairing
+ * and by the message-topology boundary pass, so both read the same cap decision.
+ */
+function groupHandlersByKey(
+  sites: EventSites, ruleName = 'event-channel',
+): { handlersByKey: Map<string, Set<string>>; dropped: Set<string> } {
+  const handlersByKey = new Map<string, Set<string>>();
+  const dropped = new Set<string>();
+  for (const reg of sites.registrations) {
+    let set = handlersByKey.get(reg.key);
+    if (!set) handlersByKey.set(reg.key, (set = new Set()));
+    for (const id of reg.handlerIds) set.add(id);
+  }
+
+  // Fan-out cap: DROP over-cap channels (typically generic keys) rather than guess.
+  for (const [key, set] of handlersByKey) {
+    if (set.size > EVENT_CHANNEL_FANOUT_CAP) {
+      logger.debug(
+        `[edge-synthesis] ${ruleName} '${sanitizeForTerminal(key)}' dropped: ${set.size} handlers exceed cap ${EVENT_CHANNEL_FANOUT_CAP}`,
+      );
+      handlersByKey.delete(key);
+      dropped.add(key);
+    }
+  }
+  return { handlersByKey, dropped };
+}
+
+type DynamicEventFactsRule = 'event-channel' | 'type-event' | 'actor-message' | 'message-topology';
+
+/** A message-topology boundary site, with the file it belongs to. */
+export interface MessageBoundarySite { filePath: string; language: string; site: DynamicBoundarySite }
+
+/** The Pass-1 group name for message-topology facts, kept apart from the TS event-channel group. */
+const MESSAGE_TOPOLOGY_GROUP = 'TypeScript/message';
+
+/**
+ * Collect one TS/JS file's message-topology sites (change: add-message-topology-edges): handler
+ * clauses as registrations, tagged object literals as dispatches, and transport sends with their
+ * evidence already neutralized.
+ */
+function collectTsMessageFacts(
+  tree: Parser.Tree, content: string, fileNodes: FunctionNode[], filePath: string, language: string,
+  resolveHandler: HandlerResolver,
+): { sites: EventSites; sends: DynamicMessageSendFact[] } {
+  const raw: MessageSites = { registrations: [], dispatches: [], sends: [] };
+  collectMessageSites(tree.rootNode, {
+    filePath,
+    enclosingId: (offset) => findEnclosingFunction(fileNodes, offset)?.id,
+    resolveCallee: (name) => resolveHandler(name, filePath)?.id,
+  }, raw);
+  const sends = raw.sends.map((send): DynamicMessageSendFact => {
+    // One bounded slice per send (one past the scan window, so a longer call still reads as
+    // truncated): never the call's full text, which nested sends would copy quadratically.
+    const { evidence, truncated } = toEvidence(content.slice(send.start, Math.min(send.end, send.start + EVIDENCE_SCAN_WINDOW + 1)));
+    return {
+      filePath, language, key: send.key, ...(send.callerId ? { callerId: send.callerId } : {}), line: send.line, evidence,
+      ...(truncated ? { evidenceTruncated: true as const } : {}),
+    };
+  });
+  return { sites: { registrations: raw.registrations, dispatches: raw.dispatches }, sends };
+}
+
+/**
+ * The handlers a send in `senderFile` pairs with: every handler of its key, except that a handler
+ * in a TEST file pairs only with a send in that same file — a test's protocol (a fake worker, a
+ * local reducer) is its own. Without this, a generic tag (`INCREMENT`) in one type test paired with
+ * a reducer in another test (found dogfooding reduxjs/redux).
+ *
+ * Deliberately NOT narrowed by distance or name. Review round 2 tried preferring the closest
+ * handler, and round 3 withholding a same-named farther one; both silently dropped real consumers
+ * (a server handler behind a client reducer; two classes' `onMessage`). A missing edge is the worse
+ * failure for a graph whose conclusions are lower bounds, so near-copies in a sample collection
+ * pair with each other instead — the measured cost is precision on such collections only.
+ */
+function selectMessageHandlers(
+  senderFile: string | undefined, handlerIds: Iterable<string>, allNodes: Map<string, FunctionNode>,
+): string[] {
+  return [...handlerIds].filter(h => {
+    const f = allNodes.get(h)?.filePath;
+    return f === undefined || !isTestFile(f) || f === senderFile;
+  });
+}
+
+/** Marker registrations of a site set, by key, with the files they were recorded in. */
+function messageMarkers(registrations: EventRegistration[]): Map<string, Set<string | undefined>> {
+  const markers = new Map<string, Set<string | undefined>>();
+  for (const r of registrations) {
+    if (!isMarkerKey(r.key)) continue;
+    (markers.get(r.key) ?? markers.set(r.key, new Set()).get(r.key)!).add(r.file);
+  }
+  return markers;
+}
+
+/**
+ * The most specific reason a send that pairs with nothing was not paired, from the markers a
+ * clause left, or `undefined` when no marker applies. A marker recorded in a test file only speaks
+ * for a send in that same file, as for real handlers.
+ */
+function markerRefusal(
+  send: DynamicMessageSendFact, markers: Map<string, Set<string | undefined>>,
+): DynamicBoundarySite['refusal'] | undefined {
+  const applies = (key: string): boolean =>
+    [...(markers.get(key) ?? [])].some(f => f === undefined || !isTestFile(f) || f === send.filePath);
+  const name = tagConstantName(send.key);
+  const keys = [unattributedConsumerKey(send.key), ...(name ? [uncomparableKey(keyField(send.key), name)] : [])];
+  if (applies(keys[0])) return 'unattributed-message-consumer';
+  if (keys[1] && applies(keys[1])) return 'uncomparable-message-consumer';
+  // A marker only a test file left speaks for no production send, but it does exist.
+  if (keys.some(k => markers.has(k))) return 'test-only-message-consumer';
+  return undefined;
+}
+
+/**
+ * Pair resolved message sites into edges (the event-channel edge shape and fan-out cap, with the
+ * handler selection of {@link selectMessageHandlers}), and turn each transport send that pairs with
+ * no handler into a boundary site carrying the most specific reason that holds:
+ *   - `over-cap` — the fan-out cap dropped the key;
+ *   - `unattributed-caller` — a handler exists, but no indexed function contains the send;
+ *   - `unattributed-message-consumer` — a clause selects the tag, but no indexed function contains it;
+ *   - `uncomparable-message-consumer` — a clause compares the field against a constant spelled like
+ *     this tag, which the rule cannot evaluate;
+ *   - `test-only-message-consumer` — only test files handle the tag;
+ *   - `unindexed-message-consumer` — otherwise.
+ * A paired send records nothing.
+ */
+function pairMessageTopology(
+  sites: EventSites,
+  sends: DynamicMessageSendFact[],
+  allNodes: Map<string, FunctionNode>,
+): { edges: CallEdge[]; boundaries: MessageBoundarySite[] } {
+  const fileOf = (id: string): string | undefined => allNodes.get(id)?.filePath;
+  const real = sites.registrations.filter(r => !isMarkerKey(r.key) && r.handlerIds.length > 0);
+  const handlersByKey = new Map<string, Set<string>>();
+  for (const r of real) {
+    const set = handlersByKey.get(r.key) ?? handlersByKey.set(r.key, new Set()).get(r.key)!;
+    for (const id of r.handlerIds) set.add(id);
+  }
+  // The fan-out cap counts CLAUSE CONTAINERS, not handler ids: a clause contributes its callee and
+  // its container, and counting both would halve the cap. A clause no function contains counts as
+  // itself. Over-cap keys are dropped, as for every other rule.
+  const { dropped } = groupHandlersByKey({
+    registrations: real.map((r, i) => ({ key: r.key, handlerIds: [r.container ?? `clause\u0000${r.file ?? ''}\u0000${i}`] })),
+    dispatches: [],
+  }, MESSAGE_TOPOLOGY_RULE);
+  for (const key of dropped) handlersByKey.delete(key);
+  const markers = messageMarkers(sites.registrations);
+
+  const edges: CallEdge[] = [];
+  const seen = new Set<string>();
+  for (const disp of sites.dispatches) {
+    const handlers = handlersByKey.get(disp.key);
+    if (!handlers) continue;
+    for (const handlerId of selectMessageHandlers(fileOf(disp.callerId), handlers, allNodes)) {
+      if (handlerId === disp.callerId) continue; // no trivial self-edge
+      const pair = `${disp.callerId}\0${handlerId}`;
+      if (seen.has(pair)) continue;
+      seen.add(pair);
+      edges.push({
+        callerId: disp.callerId,
+        calleeId: handlerId,
+        calleeName: allNodes.get(handlerId)?.name ?? '',
+        line: disp.line,
+        confidence: 'synthesized',
+        kind: 'calls',
+        callType: 'direct',
+        synthesizedBy: MESSAGE_TOPOLOGY_RULE,
+      });
+    }
+  }
+
+  const boundaries: MessageBoundarySite[] = [];
+  for (const send of sends) {
+    const all = handlersByKey.get(send.key);
+    // A send whose only handler is its own function (a relay) reaches no OTHER consumer.
+    const selected = all ? selectMessageHandlers(send.filePath, all, allNodes).filter(h => h !== send.callerId) : [];
+    let refusal: DynamicBoundarySite['refusal'];
+    if (dropped.has(send.key)) refusal = 'over-cap';
+    else if (selected.length > 0) {
+      if (send.callerId) continue;
+      refusal = 'unattributed-caller';
+    } else {
+      refusal = markerRefusal(send, markers)
+        ?? ([...(all ?? [])].some(h => h !== send.callerId) ? 'test-only-message-consumer' : 'unindexed-message-consumer');
+    }
+    boundaries.push({ filePath: send.filePath, language: send.language, site: messageSendSite(send, refusal) });
+  }
+  // Sorted, so the edge list does not depend on the order a caller supplied the files in.
+  edges.sort((a, b) => (a.callerId < b.callerId ? -1 : a.callerId > b.callerId ? 1 : 0)
+    || (a.calleeId < b.calleeId ? -1 : a.calleeId > b.calleeId ? 1 : 0) || (a.line ?? 0) - (b.line ?? 0));
+  return { edges, boundaries };
+}
+
+function messageSendSite(send: DynamicMessageSendFact, refusal: DynamicBoundarySite['refusal']): DynamicBoundarySite {
+  return {
+    line: send.line,
+    kind: 'message-send',
+    refusal,
+    ...(send.callerId ? { symbolId: send.callerId } : { unattributed: true as const }),
+    evidence: send.evidence,
+    ...(send.evidenceTruncated ? { evidenceTruncated: true as const } : {}),
+  };
 }
 
 /** Collect JS/TS event-channel sites from one parsed file into `sites`. */
@@ -5110,6 +5315,23 @@ function collectPass1DynamicDispatch(
     events.length = 0;
   }
 
+  // Message topology is a second TS/JS rule beside event channels, so it is collected on its own
+  // rather than in the per-language chain above (change: add-message-topology-edges).
+  let messageSends: DynamicMessageSendFact[] = [];
+  try {
+    if ((language === 'TypeScript' || language === 'JavaScript') && mayContainMessageTopology(content)) {
+      const collected = collectTsMessageFacts(tree, content, nodes, filePath, language, unresolved);
+      if (collected.sites.registrations.length || collected.sites.dispatches.length) {
+        events.push({ group: MESSAGE_TOPOLOGY_GROUP, rule: 'message-topology', ...collected.sites });
+      }
+      messageSends = collected.sends;
+    }
+  } catch {
+    // Message synthesis is optional and independent from the other rules. The events push above
+    // is its last statement that can throw, so only the sends need discarding.
+    messageSends = [];
+  }
+
   try {
     const callbackEdges: CallEdge[] = [];
     const seen = new Set<string>();
@@ -5129,7 +5351,9 @@ function collectPass1DynamicDispatch(
     callbacks.length = 0;
   }
 
-  return events.length || callbacks.length ? { events, callbacks } : undefined;
+  return events.length || callbacks.length || messageSends.length
+    ? { events, callbacks, ...(messageSends.length ? { messageSends } : {}) }
+    : undefined;
 }
 
 export async function synthesizeDynamicDispatchEdges(
@@ -5137,10 +5361,11 @@ export async function synthesizeDynamicDispatchEdges(
   allNodes: Map<string, FunctionNode>,
   resolveHandler: HandlerResolver,
   pass1Facts?: DynamicDispatchFacts[],
+  out?: { messageBoundaries?: MessageBoundarySite[] },
 ): Promise<CallEdge[]> {
   if (pass1Facts) {
     const groupOrder = ['TypeScript', 'Python', 'Ruby', 'PHP', 'Java', 'C#', 'Kotlin', 'Swift', 'Elixir'];
-    const grouped = new Map<string, { rule: 'event-channel' | 'type-event' | 'actor-message'; sites: EventSites }>();
+    const grouped = new Map<string, { rule: DynamicEventFactsRule; sites: EventSites }>();
     for (const facts of pass1Facts) {
       for (const event of facts.events) {
         const bucket = grouped.get(event.group) ?? { rule: event.rule, sites: { registrations: [], dispatches: [] } };
@@ -5151,21 +5376,24 @@ export async function synthesizeDynamicDispatchEdges(
     }
     const eventEdges: CallEdge[] = [];
     const actorEdges: CallEdge[] = [];
+    const resolveSites = (sites: EventSites): EventSites => ({
+      registrations: sites.registrations.map(reg => {
+        const handlerIds = reg.handlerIds.flatMap(id => {
+          const ref = decodeHandlerRef(id);
+          if (!ref) return [id];
+          const node = resolveHandler(ref.name, ref.preferFile);
+          return node ? [node.id] : [];
+        });
+        return {
+          key: reg.key, handlerIds, ...(reg.container ? { container: reg.container } : {}), ...(reg.file ? { file: reg.file } : {}),
+        };
+      }),
+      dispatches: sites.dispatches,
+    });
     for (const group of groupOrder) {
       const bucket = grouped.get(group);
       if (!bucket) continue;
-      const resolved: EventSites = {
-        registrations: bucket.sites.registrations.map(reg => ({
-          key: reg.key,
-          handlerIds: reg.handlerIds.flatMap(id => {
-            const ref = decodeHandlerRef(id);
-            if (!ref) return [id];
-            const node = resolveHandler(ref.name, ref.preferFile);
-            return node ? [node.id] : [];
-          }),
-        })),
-        dispatches: bucket.sites.dispatches,
-      };
+      const resolved = resolveSites(bucket.sites);
       const emitted = pairAndEmitEventEdges(resolved, allNodes, bucket.rule);
       (bucket.rule === 'actor-message' ? actorEdges : eventEdges).push(...emitted);
     }
@@ -5182,16 +5410,69 @@ export async function synthesizeDynamicDispatchEdges(
       }
     }
     const routeEdges = await synthesizeRouteHandlerEdges(files, allNodes, resolveHandler).catch(() => []);
-    return [...eventEdges, ...routeEdges, ...callbackEdges, ...actorEdges];
+    // Message-topology edges go LAST, so every other rule's edges keep their order and position
+    // (change: add-message-topology-edges).
+    let messageEdges: CallEdge[] = [];
+    try {
+      const bucket = grouped.get(MESSAGE_TOPOLOGY_GROUP);
+      const sends = pass1Facts.flatMap(f => f.messageSends ?? []);
+      const resolved = bucket ? resolveSites(bucket.sites) : { registrations: [], dispatches: [] };
+      // A clause whose callee resolves to nothing and that no indexed function contains is the same
+      // unattributed consumer the re-parsing lane records at collection time.
+      resolved.registrations = resolved.registrations.map(r =>
+        r.handlerIds.length === 0 && !isMarkerKey(r.key) ? { ...r, key: unattributedConsumerKey(r.key) } : r);
+      const paired = pairMessageTopology(resolved, sends, allNodes);
+      messageEdges = paired.edges;
+      if (out) out.messageBoundaries = paired.boundaries;
+    } catch {
+      // Message synthesis is best-effort and independent from the other rules.
+    }
+    return [...eventEdges, ...routeEdges, ...callbackEdges, ...actorEdges, ...messageEdges];
   }
   const rules: Array<Promise<CallEdge[]>> = [
     synthesizeEventChannelEdges(files, allNodes, resolveHandler).catch(() => []),
     synthesizeRouteHandlerEdges(files, allNodes, resolveHandler).catch(() => []),
     synthesizeCallbackRegistrationEdges(files, allNodes, resolveHandler).catch(() => []),
     synthesizeActorMessageEdges(files, allNodes, resolveHandler).catch(() => []),
+    synthesizeMessageTopologyEdges(files, allNodes, resolveHandler, out).catch(() => []),
   ];
   const results = await Promise.all(rules);
   return results.flat();
+}
+
+/**
+ * The re-parsing lane of the message-topology rule (change: add-message-topology-edges): the same
+ * collector and pairing as the Pass-1 lane, over files parsed here.
+ */
+async function synthesizeMessageTopologyEdges(
+  files: Array<{ path: string; content: string; language: string }>,
+  allNodes: Map<string, FunctionNode>,
+  resolveHandler: HandlerResolver,
+  out?: { messageBoundaries?: MessageBoundarySite[] },
+): Promise<CallEdge[]> {
+  const nodesByFile = new Map<string, FunctionNode[]>();
+  for (const n of allNodes.values()) {
+    if (n.isExternal) continue;
+    (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  const sites: EventSites = { registrations: [], dispatches: [] };
+  const sends: DynamicMessageSendFact[] = [];
+  for (const file of files) {
+    if (file.language !== 'TypeScript' && file.language !== 'JavaScript') continue;
+    if (!mayContainMessageTopology(file.content)) continue;
+    const r = await getTSParser(file.path);
+    if (!r) continue;
+    try {
+      const tree = parseWithBudget(r.parser as unknown as BudgetableParser<Parser.Tree>, file.content);
+      const collected = collectTsMessageFacts(tree, file.content, nodesByFile.get(file.path) ?? [], file.path, file.language, resolveHandler);
+      sites.registrations.push(...collected.sites.registrations);
+      sites.dispatches.push(...collected.sites.dispatches);
+      sends.push(...collected.sends);
+    } catch { /* skip unparseable file */ }
+  }
+  const paired = pairMessageTopology(sites, sends, allNodes);
+  if (out) out.messageBoundaries = paired.boundaries;
+  return paired.edges;
 }
 
 /**
@@ -5225,8 +5506,18 @@ function finalizeDynamicBoundaries(
   byFile: Map<string, { language: string; candidates: AttributedCandidate[] }>,
   allNodes: Map<string, FunctionNode>,
   literalReflection: LiteralReflectionResult | undefined,
+  messageBoundaries: MessageBoundarySite[] = [],
 ): Map<string, FileDynamicBoundary> | undefined {
-  if (byFile.size === 0) return undefined;
+  // Message-topology sites are decided by the whole repository's pairing, after extraction. They
+  // are real boundaries, so they join a file's sites BEFORE its record is bounded — never after,
+  // where the cap could rank them below the deferred sites (change: add-message-topology-edges).
+  const messageByFile = new Map<string, { language: string; sites: DynamicBoundarySite[] }>();
+  for (const m of messageBoundaries) {
+    const entry = messageByFile.get(m.filePath) ?? { language: m.language, sites: [] };
+    entry.sites.push(m.site);
+    messageByFile.set(m.filePath, entry);
+  }
+  if (byFile.size === 0 && messageByFile.size === 0) return undefined;
 
   // Internal symbols only: an `external::` placeholder is not something a reflective selector can
   // be said to have resolved to, and counting it would mask a genuine boundary as "resolved".
@@ -5249,7 +5540,9 @@ function finalizeDynamicBoundaries(
       countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
       refusalFor: (c) => literalReflection?.refusals.get(key(c)),
     };
-    const sites = finalizeDynamicBoundarySites(candidates.filter(c => !c.recoverable), probe);
+    const messageSites = messageByFile.get(filePath)?.sites ?? [];
+    messageByFile.delete(filePath);
+    const sites = [...finalizeDynamicBoundarySites(candidates.filter(c => !c.recoverable), probe), ...messageSites];
     const deferred = finalizeDynamicBoundarySites(candidates.filter(c => c.recoverable), probe);
     const bound = boundDynamicBoundarySites(candidates, probe);
     // Constructs the matcher counted but did not retain are never resolved, so each is a site. The
@@ -5261,6 +5554,10 @@ function finalizeDynamicBoundaries(
       unretained > 0 ? sites.length + deferred.length + unretained : undefined,
       { deferred, bound },
     );
+    if (record) out.set(filePath, record);
+  }
+  for (const [filePath, { language, sites }] of messageByFile) {
+    const record = buildFileDynamicBoundary(filePath, language, sites);
     if (record) out.set(filePath, record);
   }
   return out.size > 0 ? out : undefined;
@@ -6246,6 +6543,8 @@ export class CallGraphBuilder {
       // IaC extraction is best-effort; never fail the whole build
     }
 
+    // Transport sends no indexed consumer selects, disclosed as boundary sites below.
+    const synthesisOut: { messageBoundaries?: MessageBoundarySite[] } = {};
     // Pass 2d: synthesized dynamic-dispatch edges (spec: add-synthesized-dynamic-dispatch-edges).
     // Additive and provenance-labeled (confidence: 'synthesized'); runs after direct
     // resolution and only *adds* edges. Best-effort: synthesis never fails the build.
@@ -6267,6 +6566,7 @@ export class CallGraphBuilder {
         allNodes,
         resolveHandler,
         this.legacyLatePassesForTesting ? undefined : dynamicDispatchFacts,
+        synthesisOut,
       ));
     } catch {
       // Synthesis is best-effort; a failure must never abort the build.
@@ -6301,6 +6601,9 @@ export class CallGraphBuilder {
     const callsEdges = edges.filter(e => !e.kind || e.kind === 'calls');
     const testedByPairs = new Set<string>(); // deduplicate across sources
     for (const edge of callsEdges) {
+      // A message a test sends does not execute the handler, so it is no evidence the handler is
+      // tested (change: add-message-topology-edges).
+      if (edge.synthesizedBy === MESSAGE_TOPOLOGY_RULE) continue;
       const caller = allNodes.get(edge.callerId);
       if (!caller || !isTestFile(caller.filePath)) continue;
       const callee = allNodes.get(edge.calleeId);
@@ -6609,7 +6912,9 @@ export class CallGraphBuilder {
       },
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
-      dynamicBoundaryByFile: finalizeDynamicBoundaries(dynamicBoundaryCandidates, allNodes, literalReflection),
+      dynamicBoundaryByFile: finalizeDynamicBoundaries(
+        dynamicBoundaryCandidates, allNodes, literalReflection, synthesisOut.messageBoundaries ?? [],
+      ),
       httpClientDegradations: httpClientDegradations.length > 0 ? httpClientDegradations : undefined,
       grammarUnavailable: grammarUnavailableByLanguage.size > 0
         ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
@@ -6883,10 +7188,14 @@ export async function extractFileParseHealth(
  */
 export async function extractFileDynamicBoundary(
   file: { path: string; content: string; language: string },
+  opts?: { pairedSend?: (callerId: string, line: number) => boolean },
 ): Promise<FileDynamicBoundary | undefined> {
   const result = await dispatchFileExtract(file);
-  const candidates = result?.dynamicBoundary;
-  if (!candidates?.length) return undefined;
+  const candidates = result?.dynamicBoundary ?? [];
+  const messageSites = singleFileMessageBoundaries(result?.dynamicDispatch, opts?.pairedSend);
+  if (candidates.length === 0) {
+    return messageSites.length ? buildFileDynamicBoundary(file.path, file.language, messageSites) : undefined;
+  }
   const singleFileProbe: ResolutionProbe = {
     // Pass-1 raw edges predate resolution entirely — no reflective-resolution edge can exist here,
     // so nothing retracts on this lane. Deliberate and sound in the disclosing direction: a
@@ -6902,7 +7211,61 @@ export async function extractFileDynamicBoundary(
   };
   const sites = finalizeDynamicBoundarySites(candidates.filter(c => !c.recoverable), singleFileProbe);
   const deferred = finalizeDynamicBoundarySites(candidates.filter(c => c.recoverable), singleFileProbe);
-  return buildFileDynamicBoundary(file.path, file.language, sites, maxMatchedTotal(candidates), { deferred });
+  const matched = maxMatchedTotal(candidates);
+  return buildFileDynamicBoundary(
+    file.path, file.language, [...sites, ...messageSites],
+    matched !== undefined ? matched + messageSites.length : undefined, { deferred },
+  );
+}
+
+/**
+ * The single-file lane's message-topology boundaries (change: add-message-topology-edges). A send
+ * whose key this file's own handler clauses select is paired, exactly as the full build pairs it.
+ * Any other send is disclosed as `unresolved-in-file-scope`: this lane sees one file, so it can
+ * never say that no handler exists elsewhere.
+ */
+function singleFileMessageBoundaries(
+  facts: DynamicDispatchFacts | undefined, pairedSend?: (callerId: string, line: number) => boolean,
+): DynamicBoundarySite[] {
+  // A send whose message edge the graph still holds was paired by the last full build with a
+  // handler this one file cannot see; it is not re-disclosed (the watcher passes that probe).
+  const sends = (facts?.messageSends ?? []).filter(s => !(s.callerId && pairedSend?.(s.callerId, s.line)));
+  if (sends.length === 0) return [];
+  // Handlers this file proves per key: concrete node ids (an enclosing function, or a callee's
+  // fallback). A callee recorded only by name may resolve to nothing in the full build, so it proves
+  // nothing here. Concrete handlers are a lower bound on the repository's, so over the cap here is
+  // over the cap there too.
+  // Only handlers that are already node ids (enclosing functions) count: a callee recorded by name
+  // may resolve to one function shared by many clauses, or to nothing. Concrete handlers are a lower
+  // bound on the full build's, so over the cap here is over the cap there too.
+  const registrations: EventRegistration[] = [];
+  const concrete = new Map<string, Set<string>>();
+  const handled = new Map<string, Set<string>>();
+  for (const e of facts?.events ?? []) {
+    if (e.group !== MESSAGE_TOPOLOGY_GROUP) continue;
+    for (const reg of e.registrations) {
+      registrations.push(reg);
+      if (isMarkerKey(reg.key)) continue;
+      // Containers, as the full build's cap counts them; a resolved callee is only proof of a handler.
+      const set = concrete.get(reg.key) ?? new Set<string>();
+      if (reg.container) set.add(reg.container);
+      concrete.set(reg.key, set);
+      const proven = handled.get(reg.key) ?? new Set<string>();
+      if (reg.container) proven.add(reg.container);
+      for (const id of reg.handlerIds) if (!decodeHandlerRef(id)) proven.add(id);
+      handled.set(reg.key, proven);
+    }
+  }
+  const markers = messageMarkers(registrations);
+  const unpaired = sends.flatMap((send): Array<{ send: DynamicMessageSendFact; refusal: DynamicBoundarySite['refusal'] }> => {
+    if ((concrete.get(send.key)?.size ?? 0) > EVENT_CHANNEL_FANOUT_CAP) return [{ send, refusal: 'over-cap' }];
+    // A handler other than the sender's own function (a relay reaches no other consumer).
+    if ([...(handled.get(send.key) ?? [])].some(id => id !== send.callerId)) {
+      return send.callerId ? [] : [{ send, refusal: 'unattributed-caller' }];
+    }
+    return [{ send, refusal: markerRefusal(send, markers) ?? 'unresolved-in-file-scope' }];
+  });
+  return unpaired.map(({ send, refusal }) => messageSendSite(send, refusal));
 }
 
 export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph {

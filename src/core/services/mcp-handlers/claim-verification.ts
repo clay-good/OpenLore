@@ -38,7 +38,7 @@
 import { join } from 'node:path';
 import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
-import { traversalIndexFor } from './traversal.js';
+import { traversalIndexFor, messageFreeTraversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
 import { deadCodeIds, loadExternalWiring } from './reachability.js';
 import {
@@ -64,6 +64,7 @@ import { loadDecisionStore } from '../../decisions/store.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import { ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
+import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 import type { GroundingCertificate, StructuralAnchor, PendingDecision } from '../../../types/index.js';
 
 export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current';
@@ -193,7 +194,7 @@ function reachWithPath(
 }
 
 const SYNTH_DISPATCH_DETAIL =
-  'reached only through synthesized dynamic-dispatch edges (callback/event/route or class-hierarchy ' +
+  'reached only through synthesized dynamic-dispatch edges (callback/event/route/message or class-hierarchy ' +
   'dispatch), whose true target is not statically guaranteed — so static reachability cannot decide this ' +
   'claim. Read the source or run the code to confirm.';
 
@@ -201,10 +202,13 @@ const SYNTH_DISPATCH_DETAIL =
 function verifyCalls(cg: SerializedCallGraph, subject: FunctionNode, object: FunctionNode): ClaimResult {
   let direct: BoundaryEdge | undefined;
   let synthesized: BoundaryEdge | undefined;
+  let messageHop: BoundaryEdge | undefined;
   for (const e of cg.edges) {
     if (e.callerId !== subject.id || e.calleeId !== object.id) continue;
     if (e.kind && e.kind !== 'calls') continue; // only true call edges decide "calls"
-    if (e.confidence === 'synthesized') synthesized ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
+    // A message-topology edge is a message hop, not a call (change: add-message-topology-edges).
+    if (e.synthesizedBy === MESSAGE_TOPOLOGY_RULE) messageHop ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
+    else if (e.confidence === 'synthesized') synthesized ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
     else direct ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
   }
   if (direct) {
@@ -221,6 +225,14 @@ function verifyCalls(cg: SerializedCallGraph, subject: FunctionNode, object: Fun
       basisEdges: [synthesized],
     };
   }
+  if (messageHop) {
+    return {
+      verdict: 'unverifiable',
+      reason: `"${object.name}" handles a tagged message "${subject.name}" sends — a message hop recovered by the `
+        + 'message-topology rule, not a call. Whether the handler runs, and when, depends on the transport.',
+      basisEdges: [messageHop],
+    };
+  }
   return {
     verdict: 'refuted',
     reason: `No direct call edge from "${subject.name}" to "${object.name}" in the call graph.`,
@@ -235,12 +247,31 @@ function verifyReach(
   object: FunctionNode,
   kind: 'reaches' | 'impacts',
 ): ClaimResult {
-  const traversal = traversalIndexFor(cg);
   const pairIndex = buildPairEdgeIndex(cg.edges);
   // `reaches`: does subject call through to object (forward from subject)?
   // `impacts`: does changing subject affect object — i.e. object transitively
   // calls subject, so we walk backward from subject and look for object.
-  const path = reachWithPath(subject.id, object.id, traversal, kind === 'reaches' ? 'forward' : 'backward');
+  const dir = kind === 'reaches' ? 'forward' : 'backward';
+  let path = reachWithPath(subject.id, object.id, traversalIndexFor(cg), dir);
+  // A path that crosses a message hop is not a call chain (change: add-message-topology-edges): it
+  // decides the claim only when a path WITHOUT one exists too. Otherwise the claim is unverifiable.
+  const crossesMessageHop = (p: string[]): boolean =>
+    p.some((id, i) => i > 0 && pairIndex.get((dir === 'forward' ? p[i - 1] : id) + '\x00' + (dir === 'forward' ? id : p[i - 1]))?.synthesizedBy === MESSAGE_TOPOLOGY_RULE);
+  if (path && crossesMessageHop(path)) {
+    const callPath = reachWithPath(subject.id, object.id, messageFreeTraversalIndexFor(cg), dir);
+    if (!callPath) {
+      const nameOf = new Map(cg.nodes.map(n => [n.id, n.name] as const));
+      const names = (kind === 'reaches' ? path : [...path].reverse()).map(id => nameOf.get(id) ?? id);
+      return {
+        verdict: 'unverifiable',
+        reason: `The only path ${kind === 'reaches' ? `from "${subject.name}" to "${object.name}"` : `from "${object.name}" to "${subject.name}"`} `
+          + 'crosses a message hop recovered by the message-topology rule — a message, not a call. Whether the handler runs depends on the transport.',
+        basisEdges: chainEdges(kind === 'reaches' ? path : [...path].reverse(), pairIndex),
+        receiptVia: names,
+      };
+    }
+    path = callPath;
+  }
   if (!path) {
     return {
       verdict: 'refuted',

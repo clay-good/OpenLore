@@ -49,6 +49,7 @@ import {
   type TraversalIndex,
 } from '../../analyzer/condensation.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
+import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 
 /**
  * Hard ceiling on the persisted structure before we read it, mirroring the
@@ -93,6 +94,25 @@ export function traversalIndexFor(cg: SerializedCallGraph): TraversalIndex {
   if (!ix) {
     ix = buildTraversalIndex(cg);
     indexByGraph.set(cg, ix);
+  }
+  return ix;
+}
+
+const messageFreeByGraph = new WeakMap<SerializedCallGraph, TraversalIndex>();
+
+/**
+ * The traversal structure for `cg` without its `message-topology` edges, for a conclusion a
+ * message hop must not decide (test reach, a `reaches` claim). Memoized per graph object like
+ * {@link traversalIndexFor}; a graph with no such edge returns that index itself
+ * (change: add-message-topology-edges).
+ */
+export function messageFreeTraversalIndexFor(cg: SerializedCallGraph, fallback?: TraversalIndex): TraversalIndex {
+  let ix = messageFreeByGraph.get(cg);
+  if (!ix) {
+    ix = cg.edges.some(e => e.synthesizedBy === MESSAGE_TOPOLOGY_RULE)
+      ? buildTraversalIndex({ ...cg, edges: cg.edges.filter(e => e.synthesizedBy !== MESSAGE_TOPOLOGY_RULE) })
+      : fallback ?? traversalIndexFor(cg);
+    messageFreeByGraph.set(cg, ix);
   }
   return ix;
 }

@@ -125,6 +125,16 @@ describe('handleReportCoverageGaps', () => {
     expect(r.reachableFromTest).toBe(1); // only testedHub
   });
 
+  it('never counts a message a test sends as test reach (change: add-message-topology-edges)', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, [
+      ...EDGES,
+      { ...edge('src/a.test.ts::testA', 'src/entry.ts::main'), confidence: 'synthesized', synthesizedBy: 'message-topology' },
+    ], { hubFunctions: [testedHub, untestedHub] }) } as never);
+    const r = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    expect(r.coverageGaps.map(g => g.name)).toContain('main');
+    expect(r.reachableFromTest).toBe(1);
+  });
+
   it('partitions the analyzed set: gapCount + reachableFromTest == analyzedSymbols', async () => {
     const r = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
     // universe (5: testedHub, untestedHub, leaf1, leaf2, main) splits exactly into

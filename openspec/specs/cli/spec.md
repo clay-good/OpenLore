@@ -1748,7 +1748,8 @@ The one-shot CLI read paths that install wires as agent hooks — `orient --json
 carry the same staleness disclosure: in `--json` output as a payload field, in `--inject` output
 as a single factual line inside the injection block (within the token budget). Configured
 injection budgets below the 68-token mandatory-frame floor SHALL be clamped to that floor. The check SHALL
-never block, never spawn analysis from the hook, and never write to stdout outside the
+never block, never wait on analysis from the hook (it MAY start the detached build that
+`OneShotOrientSelfBootstraps` specifies), and never write to stdout outside the
 JSON/injection block.
 
 #### Scenario: A hook-driven orientation after an unindexed edit discloses staleness
@@ -2547,6 +2548,570 @@ agent guidance SHALL name `openlore decisions record` as the way to record a dec
 - **GIVEN** a repository whose wired preset does not include `record_decision`
 - **WHEN** agent guidance is generated
 - **THEN** the decisions section names `openlore decisions record`
+
+### Requirement: InstallRegeneratesGuidanceOnPresetChange
+
+`openlore install` SHALL pass the effective wired preset to guidance generation, and SHALL rewrite the managed guidance block whenever that preset differs from the one the existing block was written for. The install summary SHALL name the preset the guidance now assumes.
+
+Content outside the managed block SHALL remain untouched.
+
+#### Scenario: Reinstalling with a wider preset updates the guidance
+
+- **GIVEN** a repository whose guidance was generated for the default preset
+- **WHEN** `openlore install --preset full` is run
+- **THEN** the managed block is rewritten for the full surface and the summary names it
+
+#### Scenario: Reinstalling with the same preset is idempotent
+
+- **GIVEN** a repository already installed with a given preset
+- **WHEN** install runs again with that preset
+- **THEN** the managed block is unchanged
+
+#### Scenario: Unmanaged content is preserved
+
+- **GIVEN** an agent configuration file with hand-written sections around the managed block
+- **WHEN** the block is rewritten for a new preset
+- **THEN** only the managed block changes
+
+### Requirement: OneShotOrientSelfBootstraps
+
+A one-shot `openlore orient` (`--task`, `--inject`, or the primer) that finds the index absent or
+stale SHALL start one detached background build and return without waiting. The build SHALL follow
+`AutoInitIsConsentGuarded` and be fail-soft. At most one build SHALL run per repository at a time,
+and a finished attempt SHALL NOT repeat inside a short cooldown. The not-ready conclusion SHALL say
+a build is running, or name why none started.
+
+#### Scenario: First orient in a fresh worktree builds the index
+
+- **GIVEN** a git worktree with no `.openlore/analysis` and no opt-out
+- **WHEN** `openlore orient --json --task "<task>"` runs
+- **THEN** it starts one detached build, returns a not-ready conclusion that says a build is
+  running, and exits 0 without waiting
+- **AND** a later invocation, after the build completes, returns a real orientation
+
+#### Scenario: Concurrent hook calls start one build
+
+- **GIVEN** a repository with no index
+- **WHEN** several one-shot orient invocations run at the same time
+- **THEN** exactly one build process runs
+
+#### Scenario: A stale index is refreshed and still served
+
+- **GIVEN** an index whose cited files changed after the last analyze
+- **WHEN** a one-shot orient runs
+- **THEN** it serves the existing orientation with its staleness disclosure and starts one
+  background rebuild
+
+#### Scenario: A build that cannot succeed is not restarted on every prompt
+
+- **GIVEN** a background build that finished moments ago and produced no index
+- **WHEN** a one-shot orient runs again inside the cooldown
+- **THEN** no build starts and the conclusion says a recent attempt produced no index
+
+#### Scenario: An opted-out repository is left alone
+
+- **GIVEN** a repository with `autoInit: false`, or `OPENLORE_NO_AUTO_ANALYZE` set
+- **WHEN** a one-shot orient finds no index
+- **THEN** no build starts and the conclusion names the opt-out and the manual command
+
+### Requirement: DecisionStatusReportsDispositionAndReason
+
+`openlore decisions` SHALL report, for a draft id, its terminal disposition and stable reason code, or an explicit pending state when consolidation has not yet run. A decided draft SHALL never render as absent or unknown.
+
+Where the disposition is `rejected`, the output SHALL name the reason and the concrete next action (for example: add the missing evidence, or record the decision with a narrower subject).
+
+#### Scenario: A rejected draft is explainable from the CLI
+
+- **GIVEN** a draft rejected with reason `no-supporting-diff`
+- **WHEN** the user asks for its status by id
+- **THEN** the output states `rejected`, the reason, and what to do next
+
+#### Scenario: Pending is distinguishable from decided
+
+- **GIVEN** a draft recorded while background consolidation has not completed
+- **WHEN** the user asks for its status
+- **THEN** the output states an explicit pending state, never a rejection
+
+### Requirement: OptionalFeatureDependenciesDegradeAtTheirOwnCommand
+
+A package that only one command needs SHALL be an optional dependency, loaded dynamically at the
+point of use rather than at module scope. This applies to the graph viewer's build toolchain and UI
+runtime, and to the stdio MCP transport SDK. A package that no code under `src/` imports SHALL NOT
+be a dependency at all.
+
+The CLI SHALL start, list its commands, and run every command that does not need an optional
+package, with that package absent. Analysis, the programmatic API, and the local HTTP daemon SHALL
+all function with every optional feature dependency absent — none of them may require the viewer
+toolchain or the stdio transport SDK.
+
+When a command whose feature dependency is absent is invoked, it SHALL fail with a message that
+names the missing package and the exact install command that fixes it, and SHALL NOT surface a raw
+module-resolution error. Absence SHALL be reported as an uninstalled optional feature, never as a
+broken installation. This is the same fail-soft posture the optional tree-sitter grammars and the
+local embedding service already take.
+
+#### Scenario: The CLI starts without the optional packages
+
+- **GIVEN** an installation with the viewer toolchain and the stdio transport SDK absent
+- **WHEN** the user runs the CLI with no arguments or `--help`
+- **THEN** it starts and lists every command, including the ones whose dependency is absent
+
+#### Scenario: Analysis and the daemon do not need them
+
+- **GIVEN** the same installation
+- **WHEN** the user analyzes a repository and starts the local HTTP daemon
+- **THEN** both succeed, and no optional feature package is loaded
+
+#### Scenario: A viewer command names its missing package
+
+- **GIVEN** an installation without the viewer build toolchain
+- **WHEN** the user runs the viewer command
+- **THEN** it reports the missing package and the install command, and no raw module-resolution
+  error reaches the user
+
+#### Scenario: The stdio MCP command names its missing package
+
+- **GIVEN** an installation without the stdio transport SDK
+- **WHEN** the user starts the stdio MCP server
+- **THEN** it reports the missing package and the install command, and the HTTP daemon remains
+  usable as the alternative transport
+
+#### Scenario: An unreferenced package is not a dependency
+
+- **GIVEN** a package declared in `dependencies` that no file under `src/` imports
+- **WHEN** the dependency audit runs
+- **THEN** it fails naming that package
+
+### Requirement: Deterministic Mapping Refresh Command
+
+The CLI SHALL provide `openlore mapping refresh` to derive the current deterministic spec link index from existing specs and the committed analysis generation, persist it as `mapping.json`, and summarize linked, ambiguous, unmapped, and stale requirements. The command SHALL perform no LLM call and SHALL exit nonzero only for an unusable analysis/spec input or an explicitly requested strict ambiguity policy.
+
+#### Scenario: Refresh replaces LLM-owned mapping
+- **GIVEN** existing specs and a current analysis but a missing or incompatible mapping cache
+- **WHEN** `openlore mapping refresh` runs
+- **THEN** it writes a provenance-bound mapping cache and prints unresolved or ambiguous links without invoking a generation provider
+
+#### Scenario: Strict refresh exposes ambiguity to automation
+- **GIVEN** one or more ambiguous requirement anchors
+- **WHEN** refresh runs with the strict ambiguity option
+- **THEN** it still writes the honest index, reports every bounded ambiguity with continuation/export guidance, and exits nonzero
+
+### Requirement: Analysis Ownership Is Actionable From CLI
+
+CLI analysis and status output SHALL expose the repository-scoped owner PID, stage, elapsed duration, and heartbeat age when analysis is active. The analyze command SHALL offer a wait/attach option and MUST NOT start a second full analysis merely because the first was launched by another frontend.
+
+#### Scenario: CLI sees analysis started by MCP
+- **GIVEN** an MCP process owns an active full analysis
+- **WHEN** a user runs the CLI analyze command
+- **THEN** the CLI reports the shared owner and either exits or follows it when wait mode is selected
+
+### Requirement: Generation Planning Remains Free And Preview Is Explicitly Paid
+
+`openlore generate --dry-run` and its explicit `--plan` alias SHALL list the selected generation workflow without resolving, constructing, or calling a provider and without writing. `openlore generate --preview` SHALL run the selected workflow into isolated temporary output, perform no writes to project specs, mapping, configuration, manifest, backups, or analysis artifacts, display a normalized summary of candidate specification changes, and disclose that provider calls and cost occur.
+
+#### Scenario: Paid preview generates candidate specifications
+- **GIVEN** a configured generation provider and current analysis
+- **WHEN** `openlore generate --preview` runs
+- **THEN** candidate specifications are generated in isolation, the proposed diff is returned, and the project tree remains unchanged
+
+#### Scenario: Dry run performs no provider call
+- **GIVEN** a user only wants to inspect intended stages and domains
+- **WHEN** `openlore generate --dry-run` or `openlore generate --plan` runs
+- **THEN** it lists the planned work, performs no provider call, and writes nothing
+
+#### Scenario: Preview preserves real write-mode semantics
+- **GIVEN** current specs, configuration, and stage cache exist
+- **WHEN** preview runs in replace, merge, skip, scoped, forced, or custom-output mode
+- **THEN** its isolated candidate has the same result an applied run would produce, while symlinks and special files from the source trees are not copied or followed
+
+#### Scenario: Preview is interrupted
+- **GIVEN** a preview workspace contains provider logs or generated candidates
+- **WHEN** the process receives SIGINT or SIGTERM
+- **THEN** the workspace is registered with the shared shutdown cleanup and is removed before exit
+
+### Requirement: Repository Configuration Cannot Select A Remote Credential Destination
+
+A non-loopback OpenAI-compatible endpoint from repository configuration MUST be ignored. A remote compatibility endpoint MAY be used only when supplied through an operator-controlled command/API option or environment variable.
+
+#### Scenario: A clone redirects the compatibility provider
+- **GIVEN** repository configuration names a remote compatibility endpoint and the operator has an API key
+- **WHEN** generation resolves its provider
+- **THEN** no request or credential is sent to that endpoint unless the operator independently selected it
+
+### Requirement: Domain Selection Uses One Canonical Identity
+
+Planning and applied generation SHALL resolve case and punctuation through the same normalized domain identity, reject unknown names, and fail closed when distinct detected names collide after normalization.
+
+#### Scenario: Display name contains spaces
+- **GIVEN** analysis detects `User Accounts`
+- **WHEN** a user selects `user-accounts`
+- **THEN** planning and applied generation both select the same domain and write `specs/user-accounts/spec.md`
+
+### Requirement: WiredCommandStringsRoundTripThroughTheShellThatRunsThem
+
+A command string OpenLore writes into a host config file SHALL be quoted for the shell that
+will run it, and SHALL be refused when no quoting form can carry it.
+
+On Windows that shell is not cmd.exe. Claude Code runs a hook command through Git Bash, where
+a bare `\` is an escape: a path quoted only when it contains a space left every space-free
+entry path bare, and Git Bash dropped every separator, so each hook invocation failed to
+resolve the module (#483).
+
+A part SHALL be quoted unless it consists only of characters no shell treats specially. The
+rule SHALL be an allowlist rather than a list of characters that force quoting: an unquoted
+word is exposed to `;`, `'`, `~`, `*`, `?`, `#`, brace expansion and the empty string, so a
+denylist leaves a second, unmodelled quoting rule on the bare branch — `a;id` emitted bare
+runs `id`. The POSIX branch is already allowlist-shaped, and the two SHALL NOT differ in
+soundness for the same input.
+
+Double quotes are the form both shells accept, but they do NOT make a POSIX shell literal —
+inside them a backslash still escapes `` $ ` " \ `` and newline, and `$`/backtick still expand.
+A part containing an embedded `"`, a trailing backslash, an unescaped expansion or backtick, or
+a backslash pair (a UNC prefix, `C:\$Recycle.Bin`) therefore cannot be represented for both
+shells at once. Such a part SHALL be refused rather than emitted: an embedded `"` ends the
+quoted run and lets the remainder of the line execute, and a trailing backslash escapes the
+closing quote and swallows the arguments after it, so emitting either is worse than the bug
+that motivated quoting.
+
+Such a host SHALL still receive every part of the install that does NOT depend on a shell
+string — the MCP server entry, which is an argv; the instruction block; the tool permission —
+and SHALL lose only the hooks, named with the reason. It SHALL NOT be reported as a conflict:
+an unquotable path is a property of the host rather than a clash with the user's file, and
+conflict semantics fail the run, which also skips the index build.
+
+A hook OpenLore wired earlier SHALL be REMOVED on such a host rather than left in place, since
+it names a command the host mangles and would fail on every invocation; entries the user
+authored in the same hook group SHALL survive.
+
+A command that is only DISPLAYED — `openlore update` prints an upgrade line and executes its
+own argv without a shell — SHALL print a command the user can actually run. On Windows that is
+the plain package-manager instruction, not the resolved invocation: a statement whose first
+token is a quoted path parses in PowerShell as a string expression rather than a command.
+
+The removal path SHALL NOT format a command at all, so that a host whose paths became
+unformattable can still uninstall what was wired.
+
+The guard SHALL be pinned against a REAL POSIX shell rather than against a restated expected
+string: the emitted line is handed to `bash` and the argv it yields is compared to the intended
+argv. A test that asserts the emitter's output matches the emitter's own assumption about a
+shell cannot fail when that assumption is wrong, which is precisely how #483 shipped green.
+
+#### Scenario: A space-free Windows entry path is wired
+
+- **GIVEN** an nvm-windows install, whose CLI entry path contains no space
+- **WHEN** the hook command is formatted for `win32`
+- **THEN** the entry path is double-quoted, and a POSIX shell reproduces it separator-for-separator
+
+#### Scenario: A path the quoted form cannot carry
+
+- **GIVEN** a host whose profile directory is a shell expansion (`C:\Users\a$b`)
+- **WHEN** `openlore install` runs
+- **THEN** the hooks file and the Continue config are declined, each naming the offending part and
+  why, the MCP entry (an argv, never a shell string) is still written, and the run does not crash
+
+#### Scenario: Uninstalling from a host that can no longer be formatted
+
+- **GIVEN** hooks wired earlier, on a host whose paths are now unformattable
+- **WHEN** `openlore install --uninstall` runs
+- **THEN** the marker-identified hook groups are removed, because removal needs the keys only
+
+### Requirement: DoctorReportsTheRetrievalModeActuallyServed
+
+`openlore doctor` SHALL report the retrieval mode the repository's index actually serves, derived
+from the on-disk index rather than from configuration or endpoint reachability alone. An embedding
+endpoint check SHALL NOT be presented as evidence that semantic retrieval is available: the two
+SHALL be distinct lines with distinct verdicts.
+
+When a semantic provider is resolvable (configured endpoint, `EMBED_*` environment, or the local
+provider) and the on-disk index carries no vectors, `doctor` SHALL raise a finding stating that the
+configured expectation is unrealized, naming the remedy that rebuilds the index. A repository with
+no embedding provider configured SHALL NOT produce that finding — its keyword index is the
+first-class default and reports a passing verdict.
+
+#### Scenario: A reachable endpoint with a keyword index is a finding, not a pass
+
+- **GIVEN** a repository whose configuration names a reachable embedding endpoint
+- **AND** an on-disk index built without vectors
+- **WHEN** `openlore doctor` runs
+- **THEN** the endpoint line reports reachable, and a separate finding states the served retrieval
+  mode is keyword while a semantic provider is configured, naming the rebuild remedy
+
+#### Scenario: An unconfigured repository passes
+
+- **GIVEN** a repository with no embedding provider configured and a keyword index
+- **WHEN** `openlore doctor` runs
+- **THEN** the served mode is stated as the keyword default and no finding is raised
+
+#### Scenario: A realized semantic index passes
+
+- **GIVEN** a repository whose index carries vectors from its configured provider
+- **WHEN** `openlore doctor` runs
+- **THEN** the served mode is reported as the semantic mode in use, with no mismatch finding
+
+### Requirement: IndexSelfStateIsQueryableInOneCommand
+
+The CLI SHALL provide a command that reports the index's own state for the current repository
+without rebuilding it: the retrieval mode served, when the index was built, whether it is behind the
+working tree, and — when the served mode is keyword — which of the two causes applies (no provider
+configured, or a configured provider whose vectors are absent). The command SHALL be read-only, SHALL
+exit non-zero only when it cannot read the index, and SHALL offer a `--json` form carrying the same
+fields.
+
+#### Scenario: The served mode and its cause are stated
+
+- **GIVEN** a repository whose configuration names an embedding provider and whose index has no vectors
+- **WHEN** the user runs the status command
+- **THEN** the output states the keyword mode served, the configured provider, and that the configured
+  provider is unrealized in the current index
+
+#### Scenario: Reading the state never mutates it
+
+- **GIVEN** any repository with an index
+- **WHEN** the status command runs
+- **THEN** no index file, lock, or receipt is written, and the index's build stamp is unchanged
+
+#### Scenario: A missing index is reported, not crashed
+
+- **GIVEN** a repository with no analysis directory
+- **WHEN** the status command runs
+- **THEN** it states that no index exists and names the command that builds one
+
+#### Scenario: Working-tree freshness cannot be checked
+
+- **GIVEN** Git status or the index build timestamp is unavailable
+- **WHEN** the status command runs
+- **THEN** it reports working-tree freshness as unknown rather than claiming the index is current
+
+### Requirement: IndexBuildFailureIsVisibleOutsideTheDaemonLog
+
+A failure to build the semantic index when a provider was resolved — an unreachable endpoint, a
+provider error, or contention on the index's mutation lock — SHALL be recorded in the index receipt
+that `doctor`, the status command, and the agent-facing freshness lease read. Recording the failure
+only in a daemon log file SHALL NOT satisfy this requirement.
+
+#### Scenario: A watcher-side embed failure reaches the agent surface
+
+- **GIVEN** a background watcher whose embedding requests to a configured endpoint fail
+- **WHEN** the next `doctor` or status command runs
+- **THEN** the failure is reported from the receipt, naming the configured endpoint and the time of
+  the failure
+
+#### Scenario: A recovered build clears the report
+
+- **GIVEN** a recorded embed failure and a subsequent successful index build
+- **WHEN** the same surfaces are consulted
+- **THEN** no stale failure is reported
+
+### Requirement: InjectionRequiresCodeWorkIntent
+
+The pre-turn context injection SHALL emit a structural briefing only for a turn whose intent involves reading or changing code. A turn whose intent is repository or process management — pushing, opening, reviewing, merging or closing a pull request, releasing, tagging, writing a changelog, rebasing, or asking for repository status — SHALL receive the pointer line instead of a briefing, even when its words match indexed symbols.
+
+The intent classification SHALL be deterministic and local, with no LLM call and no new relevance score. It SHALL run before the existing relevance gate; a turn that passes the intent gate is still subject to that gate. Classification failure SHALL fail open to the code-work branch, so an unrecognized turn keeps today's behavior.
+
+#### Scenario: Repository-management turn gets no briefing
+
+- **GIVEN** an indexed repository whose graph contains symbols named in the prompt
+- **WHEN** the user's turn is "push and open the PR"
+- **THEN** the hook emits the pointer line and no structural briefing
+
+#### Scenario: Code-work turn still gets its briefing
+
+- **GIVEN** the same repository
+- **WHEN** the user's turn is "add a test for the file browser's write path"
+- **THEN** the intent gate passes and the relevance gate decides the block as it does today
+
+#### Scenario: Unrecognized intent keeps current behavior
+
+- **GIVEN** a turn the intent classifier matches no management pattern in
+- **WHEN** the injection is built
+- **THEN** the turn is treated as code work and only the relevance gate applies
+
+### Requirement: WithheldInjectionDisclosesItsReason
+
+When the injection is withheld, the hook SHALL record a stable machine-readable reason — at minimum `management-intent`, `weak-relevance`, `no-graph`, `empty-prompt`, and `error` — through the existing gate-evaluation callback, and telemetry SHALL carry it. Withholding SHALL remain fail-open and exit zero.
+
+#### Scenario: Management-intent withhold is attributable
+
+- **GIVEN** telemetry is enabled
+- **WHEN** a turn is withheld by the intent gate
+- **THEN** the emitted event carries reason `management-intent`, distinguishable from a weak-relevance withhold
+
+### Requirement: AbsenceOfABriefingIsNeverAmbiguous
+
+While injection is enabled, the hook SHALL always emit output. A withheld briefing SHALL be replaced by a pointer line that states, in the agent-visible text, that the gate withheld it and why — at minimum distinguishing "this turn was not classified as code work" from "nothing in the graph matched this turn strongly" and from "orientation was unavailable" — and SHALL name the manual call that retrieves the structure on demand.
+
+The agent SHALL never have to infer whether an absent briefing means "nothing relevant was found" or "no lookup was performed". Emitting nothing SHALL be reserved for an operator who disabled injection (`mode: "off"`), which is a configured absence, not a gate decision.
+
+This requirement bounds the intent gate's failure mode: a misclassified code-work turn loses the pre-computed briefing but never the knowledge that a briefing was skipped, nor the way to ask for one.
+
+#### Scenario: A misclassified turn still tells the agent what happened
+
+- **GIVEN** a code-work turn the intent gate wrongly classifies as repository management
+- **WHEN** the hook runs
+- **THEN** the agent receives a pointer line stating the turn was not classified as code work and naming the manual orientation call
+
+#### Scenario: Weak relevance is distinguishable from a skipped lookup
+
+- **GIVEN** two turns, one withheld for weak relevance and one withheld by the intent gate
+- **WHEN** each hook runs
+- **THEN** the two pointer lines differ in their stated reason, so absence never reads the same for both causes
+
+#### Scenario: An enabled install never emits silence
+
+- **GIVEN** injection is enabled in any mode other than `off`
+- **WHEN** the hook runs on any turn, including failure paths
+- **THEN** the output is non-empty and carries a stated reason
+
+#### Scenario: A disabled install stays silent
+
+- **GIVEN** `contextInjection.mode` is `off`
+- **WHEN** the hook runs
+- **THEN** nothing is emitted, and no pointer line implies a gate decision
+
+### Requirement: TelemetryEventsCarryAgentAndSessionIdentity
+
+Every emitted telemetry event SHALL carry the emitting agent's name and version and a session id that is stable for the emitting process and distinct across processes. Identity SHALL be stamped at emit time, not inferred at read time.
+
+Emission SHALL remain non-throwing and SHALL keep redacting secrets; a missing or unknown agent name SHALL be recorded as `unknown` rather than omitted.
+
+#### Scenario: Two agents in one checkout stay distinguishable
+
+- **GIVEN** two agent processes emitting into the same repository
+- **WHEN** their events are written
+- **THEN** each event carries its own agent identity and session id, and no event of one process carries the other's
+
+#### Scenario: Telemetry failure still cannot break the hot path
+
+- **GIVEN** an identity source that throws
+- **WHEN** an event is emitted
+- **THEN** the event is written with `unknown` identity or dropped silently, and the caller is unaffected
+
+### Requirement: TelemetryAggregatesAreAgentScoped
+
+The telemetry report SHALL compute call, error, cache, and behavioral aggregates per agent, and SHALL present an explicit cross-agent total distinct from any single agent's figures. An `--agent` filter SHALL restrict the report to one agent. Events without identity SHALL be reported under `unknown` and SHALL NOT be merged into a named agent.
+
+The report SHALL state the agents and session count observed.
+
+#### Scenario: A tool another agent called is not attributed to mine
+
+- **GIVEN** a telemetry file containing calls from two agents
+- **WHEN** the report is produced for one of them
+- **THEN** only that agent's calls appear in its aggregates, and the other agent's tools are absent from them
+
+#### Scenario: Legacy events are attributable to nobody
+
+- **GIVEN** events written before identity stamping
+- **WHEN** the report is produced
+- **THEN** those events appear under `unknown` and are excluded from every named agent's figures
+
+### Requirement: IntervalMetricsAreSessionBounded
+
+A metric measured between two events — including stale-warning to orientation latency and recovery latency — SHALL pair events only within one session of one agent. A candidate pair spanning two sessions or two agents SHALL be excluded from the metric, never averaged into it.
+
+The report SHALL state how many sessions contributed to each interval metric and how many candidate pairs were excluded, so a small or empty sample is visible rather than silently averaged.
+
+#### Scenario: Cross-session pairs do not inflate a latency
+
+- **GIVEN** a stale warning in one session and an orientation two hours later in another session
+- **WHEN** the stale-to-orient latency is computed
+- **THEN** the pair is excluded and the exclusion is counted in the report
+
+#### Scenario: Legacy events form one declared bucket
+
+- **GIVEN** events written before identity stamping, carrying no session id
+- **WHEN** an interval metric is computed
+- **THEN** they are treated as a single implicit session under `unknown`, never paired with an identified event, and the report states that this bucket's internal boundaries are unknown
+
+#### Scenario: An empty sample is disclosed
+
+- **GIVEN** no session containing both event kinds
+- **WHEN** the metric is computed
+- **THEN** the report states that the metric has no qualifying pair, rather than showing a value derived from cross-session events
+
+### Requirement: SubprocessesNeverSurfaceAConsoleWindow
+
+Every subprocess spawned from `src/` SHALL set `windowsHide: true`, unless it inherits the parent's
+console (`stdio: 'inherit'`). On Windows a console program spawned from a process that has no
+console of its own — the `serve`/`mcp` daemon, a Git hook or agent hook invocation, an editor
+extension host — is given a brand new visible console window, one per spawn; a path that shells out
+per file turns that into a continuous flash that makes the tool unusable for real work.
+
+The exemption is exact rather than incidental: an inheriting child is by construction attached to a
+console its parent already has, so no window is created, and suppressing one would cut the user's
+own interactive command off from the terminal it is writing to.
+
+Spawning `git` SHALL additionally route through a single shared helper, so that `windowsHide` — and
+any future cross-cutting concern on git subprocesses — is applied in one place instead of being
+re-remembered at every call site.
+
+An automated guard SHALL enforce both invariants on every platform, by reading the source rather
+than by running it: a headless Windows runner cannot observe a window flashing, so no behavioural
+test on any runner can fail when the option is dropped. The guard SHALL resolve which local
+identifiers are bound to the process-spawning module, so that it neither reports method calls that
+merely share a name (`regex.exec`, `db.exec`) nor misses a spawn imported under an alias, and it
+SHALL scope its exemptions to individual call sites rather than to whole files.
+
+#### Scenario: A new spawn on a daemon path omits the option
+
+- **GIVEN** a contributor adds a subprocess spawn that does not inherit a console
+- **WHEN** the guard test runs in CI, on any platform
+- **THEN** it fails, naming the offending file and line, and states both remedies — set
+  `windowsHide: true`, or route a `git` spawn through the shared helper
+
+#### Scenario: A migrated file grows a second, raw git spawn
+
+- **GIVEN** a file that already calls the shared git helper under a local alias
+- **WHEN** a new raw `node:child_process` spawn of `git` is added beside it
+- **THEN** the guard fails on the new site, and does not treat the file's existing use of the helper
+  as blanket permission
+
+#### Scenario: An interactive command keeps its console
+
+- **GIVEN** a command that re-executes the user's own invocation with `stdio: 'inherit'`
+- **WHEN** the guard test runs
+- **THEN** it passes without `windowsHide`, because the child writes to the console it inherited
+
+#### Scenario: A stopping daemon whose teardown fails still exits
+
+- **GIVEN** a daemon asked to stop, whose teardown rejects
+- **WHEN** the shutdown path settles
+- **THEN** the process still exits, rather than leaving a live OS process behind after the client
+  has been told the stop succeeded
+
+### Requirement: PiIsAFirstClassManagedInstallSurface
+
+The CLI SHALL support Pi through automatic install-surface detection, explicit
+`openlore install --agent pi`, `openlore connect pi`, and connection status. It SHALL install
+a JavaScript shim that loads the compiled extension from inside the OpenLore package rather
+than copying compiled output whose relative imports cannot resolve at the destination.
+
+The CLI SHALL preserve user-authored Pi extensions by default. It MAY replace a
+fingerprint-valid OpenLore shim, a stale OpenLore shim, or a compiled copy identified by
+OpenLore-specific provenance, and SHALL require `--force` before replacing or deleting an
+unrecognized file. Dry-run SHALL report the same writes and deletions that a real run would
+perform.
+
+#### Scenario: Pi is installed through the primary onboarding path
+
+- **GIVEN** a project with a Pi marker, or an explicit Pi surface selection
+- **WHEN** `openlore install` or `openlore connect pi` runs
+- **THEN** `.pi/extensions/openlore.js` is a managed re-export shim that Pi can load
+- **AND** no MCP registration or markdown guidance block is written for Pi
+
+#### Scenario: A broken historical artifact is migrated
+
+- **GIVEN** `.pi/extensions/openlore.js` is a copied OpenLore bundle whose package-relative
+  imports cannot resolve, or is an intact shim pointing at an old OpenLore location
+- **WHEN** the Pi install surface runs without `--force`
+- **THEN** the file is replaced with a shim pointing at the current OpenLore package
+- **AND** a recognized legacy `.ts` artifact is removed only after the shim is present
+
+#### Scenario: User-authored extension content is preserved
+
+- **GIVEN** a Pi extension path containing content OpenLore cannot prove it owns
+- **WHEN** install or uninstall runs without `--force`
+- **THEN** the content remains unchanged
+- **AND** the CLI reports the ownership conflict or warning
 
 ## Technical Notes
 

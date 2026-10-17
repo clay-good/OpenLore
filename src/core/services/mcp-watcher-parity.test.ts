@@ -1362,6 +1362,96 @@ describe('adversarial regressions (PR #189 review findings)', () => {
     if (!stale) expect(got).toEqual(oracleOutgoingSig(oracle.edges, 'src/w.ts'));
   });
 
+  it('deleting a message consumer discloses the send it leaves unpaired (change: add-message-topology-edges)', async () => {
+    const v1: Files = {
+      'src/client.ts': 'export function requestRestart(ws: any) { ws.send({ type: "restart" }); }\n',
+      'src/server.ts': 'export function onMessage(m: any) { if (m.type === "restart") { return 1; } }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const graph = await fullBuild(v1);
+    expect(graph.edges.some(e => e.synthesizedBy === 'message-topology')).toBe(true);
+    seedStore(store, v1, graph);
+    store.close();
+
+    await rm(join(root, 'src/server.ts'), { force: true });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    await watcher['handleDeletions']([join(root, 'src/server.ts')]);
+
+    const report = JSON.parse(await readFile(join(outputPath, 'dynamic-boundary.json'), 'utf-8')) as {
+      files: Array<{ filePath: string; sites: Array<{ kind: string }> }>;
+    };
+    expect(report.files.find(f => f.filePath === 'src/client.ts')?.sites.map(x => x.kind)).toEqual(['message-send']);
+  });
+
+  it('re-derives a no-consumer claim when a consumer appears, and keeps still-paired sends paired (change: add-message-topology-edges)', async () => {
+    const v1: Files = {
+      'src/a.ts': 'export function lonely(ws: any) { ws.send({ type: "ping" }); }\n',
+      'src/b.ts': 'export function paired(ws: any) { ws.send({ type: "pong" }); }\n',
+      'src/c.ts': 'export function onPong(m: any) { if (m.type === "pong") { return 1; } }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const graph = await fullBuild(v1);
+    seedStore(store, v1, graph);
+    store.close();
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    const boundary = async () => JSON.parse(await readFile(join(outputPath, 'dynamic-boundary.json'), 'utf-8')) as {
+      files: Array<{ filePath: string; sites: Array<{ kind: string; refusal: string }> }>;
+    };
+    const splice = (files: Files) => (watcher as unknown as {
+      updateDynamicBoundary(c: Array<{ rel: string; content: string }>): Promise<void>;
+    }).updateDynamicBoundary(Object.entries(files).map(([rel, content]) => ({ rel, content })));
+
+    // Publish the full build's records: the lonely send claims no consumer exists anywhere.
+    const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
+    const { buildDynamicBoundaryReport } = await import('../analyzer/dynamic-boundary.js');
+    const built = await new CallGraphBuilder().build(Object.entries(v1).map(([path, content]) => ({ path, content, language: 'TypeScript' })));
+    await writeFile(join(outputPath, 'dynamic-boundary.json'),
+      JSON.stringify(buildDynamicBoundaryReport([...built.dynamicBoundaryByFile!.values()])), 'utf-8');
+    expect((await boundary()).files.map(f => [f.filePath, f.sites.map(s => s.refusal)])).toEqual([['src/a.ts', ['unindexed-message-consumer']]]);
+
+    // Re-deriving the paired sender keeps it paired: its message edge is still in the graph.
+    await splice({ 'src/b.ts': v1['src/b.ts'] });
+    expect((await boundary()).files.find(f => f.filePath === 'src/b.ts')).toBeUndefined();
+
+    // A consumer for "ping" appears: the repository-wide claim about a.ts is re-derived.
+    const added = 'export function onPing(m: any) { if (m.type === "ping") { return 1; } }\n';
+    await writeFiles({ 'src/d.ts': added });
+    await splice({ 'src/d.ts': added });
+    const after = await boundary();
+    expect(after.files.find(f => f.filePath === 'src/b.ts')).toBeUndefined();
+    expect(after.files.find(f => f.filePath === 'src/a.ts')?.sites.map(s => s.refusal)).toEqual(['unresolved-in-file-scope']);
+  });
+
+  it('downgrades no-consumer claims past the re-derive bound instead of serving them stale (change: add-message-topology-edges)', async () => {
+    const v1: Files = {};
+    for (let i = 0; i < 70; i++) v1[`src/s${String(i).padStart(3, '0')}.ts`] = `export function s${i}(ws: any) { ws.send({ type: "t${i}" }); }\n`;
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
+    const { buildDynamicBoundaryReport } = await import('../analyzer/dynamic-boundary.js');
+    const built = await new CallGraphBuilder().build(Object.entries(v1).map(([path, content]) => ({ path, content, language: 'TypeScript' })));
+    await writeFile(join(outputPath, 'dynamic-boundary.json'),
+      JSON.stringify(buildDynamicBoundaryReport([...built.dynamicBoundaryByFile!.values()])), 'utf-8');
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    const consumer = 'export function onT(m: any) { if (m.type === "t69") { return 1; } }\n';
+    await writeFiles({ 'src/consumer.ts': consumer });
+    await (watcher as unknown as { updateDynamicBoundary(c: Array<{ rel: string; content: string }>): Promise<void> })
+      .updateDynamicBoundary([{ rel: 'src/consumer.ts', content: consumer }]);
+    const report = JSON.parse(await readFile(join(outputPath, 'dynamic-boundary.json'), 'utf-8')) as {
+      files: Array<{ sites: Array<{ refusal: string }> }>;
+    };
+    const refusals = report.files.flatMap(f => f.sites.map(s => s.refusal));
+    expect(refusals).toHaveLength(70);
+    expect(refusals.every(r => r === 'unresolved-in-file-scope')).toBe(true);
+  });
+
   it('deletion clears any stale mark for the removed file (no phantom stale rows)', async () => {
     const v1: Files = { 'src/c.ts': 'export function target() { return 1; }\n' };
     for (let i = 0; i < 5; i++) v1[`src/caller${i}.ts`] = `export function call${i}() { return target(); }\n`;

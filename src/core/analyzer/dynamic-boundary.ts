@@ -61,6 +61,11 @@ export const DYNAMIC_BOUNDARY_KINDS = [
   'dynamic-import',
   'metaprogrammed-definition',
   'container-resolution',
+  /**
+   * A statically tagged message handed to a transport call whose consumer the message-topology
+   * rule could not pair (change: add-message-topology-edges). It hides a CALLEE, never a caller.
+   */
+  'message-send',
 ] as const;
 
 export type DynamicBoundaryKind = (typeof DYNAMIC_BOUNDARY_KINDS)[number];
@@ -73,6 +78,7 @@ export const DYNAMIC_BOUNDARY_KIND_LABEL: Record<DynamicBoundaryKind, string> = 
   'dynamic-import': 'dynamic module import',
   'metaprogrammed-definition': 'metaprogrammed definition',
   'container-resolution': 'DI container resolution',
+  'message-send': 'tagged message send',
 };
 
 /**
@@ -115,6 +121,21 @@ export const DYNAMIC_BOUNDARY_REFUSALS = [
   'synthesized-binding',
   /** The targets resolve, but no indexed symbol contains the construct to be the edge's caller. */
   'unattributed-caller',
+  /**
+   * A statically tagged message no indexed handler selects on: its consumer lives outside this
+   * index (another service, an unindexed repository), or does not exist (change:
+   * add-message-topology-edges).
+   */
+  'unindexed-message-consumer',
+  /**
+   * A clause selects this message field on a tag that cannot be compared statically (an imported
+   * constant, another message's field), so whether it handles this send is unknown.
+   */
+  'uncomparable-message-consumer',
+  /** A clause selects this message tag, but no indexed function contains it (an anonymous listener). */
+  'unattributed-message-consumer',
+  /** Only clauses in test files select this tag, and a test's handler pairs only within its file. */
+  'test-only-message-consumer',
 ] as const;
 
 export type DynamicBoundaryRefusal = (typeof DYNAMIC_BOUNDARY_REFUSALS)[number];
@@ -130,6 +151,10 @@ export const DYNAMIC_BOUNDARY_REFUSAL_LABEL: Record<DynamicBoundaryRefusal, stri
   'over-cap': 'the dispatch table binds more targets than the synthesis fan-out cap',
   'synthesized-binding': 'a literal-reflective edge binds this dispatch, but directly-resolved-only traversal does not follow it',
   'unattributed-caller': 'the target resolves, but no indexed symbol contains the call to attach it to',
+  'unindexed-message-consumer': 'no handler the rule recognizes selects on this message tag',
+  'uncomparable-message-consumer': 'a handler compares this message field against a constant spelled like this tag, which cannot be evaluated statically',
+  'unattributed-message-consumer': 'a handler selects this message tag, but no indexed function contains it',
+  'test-only-message-consumer': 'only test code selects this message tag',
 };
 
 /**
@@ -689,7 +714,7 @@ function textOf(source: string, n: DynamicBoundaryNode): string {
  * 320MB on a 1.9MB adversarial file, against 23ms for the same bytes with no trigger. The window is
  * generous enough that redaction still sees whole tokens around the kept span.
  */
-const EVIDENCE_SCAN_WINDOW = DYNAMIC_BOUNDARY_EVIDENCE_MAX * 8;
+export const EVIDENCE_SCAN_WINDOW = DYNAMIC_BOUNDARY_EVIDENCE_MAX * 8;
 
 /**
  * Neutralize, redact, collapse and truncate one matched construct's source into storable evidence.

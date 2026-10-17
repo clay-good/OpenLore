@@ -973,3 +973,37 @@ describe('Kotlin source scanners are not quadratic on a hostile file', () => {
     }), `ImportExportParser(Kotlin): ${label}`);
   }, TIMEOUT_MS);
 });
+
+// change: add-message-topology-edges — review round 4 found both shapes quadratic: a constant tag
+// re-scanned every enclosing block's declarations (a 256 KB file took ~110 s), and each nested send
+// copied the whole enclosing call's text (4x retained memory per 2x input).
+describe('the message-topology collector is not quadratic on a hostile file', () => {
+  const parseTs = async (source: string): Promise<import('tree-sitter').SyntaxNode> => {
+    const { default: Parser } = await import('tree-sitter');
+    const { default: TS } = await import('tree-sitter-typescript');
+    const parser = new Parser();
+    parser.setLanguage((TS as unknown as { typescript: import('tree-sitter').Language }).typescript);
+    return parser.parse(source, undefined, { bufferSize: source.length * 2 + 1024 }).rootNode;
+  };
+  const collect = async (source: string): Promise<void> => {
+    const { collectMessageSites } = await import('./message-topology.js');
+    const out = { registrations: [], dispatches: [], sends: [] };
+    collectMessageSites(await parseTs(source), { filePath: 'h.ts', enclosingId: () => 'h.ts::h', resolveCallee: () => undefined }, out);
+  };
+
+  it('survives thousands of constant tags under a block with thousands of declarations', async () => {
+    expectLinearAndFast(await measure(async b => {
+      const n = Math.ceil(b / 48);
+      const decls = Array.from({ length: n }, (_, i) => `const v${i} = ${i};`).join('\n');
+      const cases = Array.from({ length: n }, (_, i) => `case Msg.A${i}: g${i}(); break;`).join('\n');
+      await collect(`const Msg = {} as any;\nfunction h(m: any) {\n${decls}\nswitch (m.type) {\n${cases}\n}\n}\n`);
+    }), 'message-topology: constant tags under a large block');
+  }, TIMEOUT_MS);
+
+  it('survives deeply nested sends', async () => {
+    expectLinearAndFast(await measure(async b => {
+      const n = Math.ceil(b / 24);
+      await collect(`function h(ws: any) {\n${'ws.send({ type: "a", p: '.repeat(n)}0${' })'.repeat(n)};\n}\n`);
+    }), 'message-topology: nested sends');
+  }, TIMEOUT_MS);
+});

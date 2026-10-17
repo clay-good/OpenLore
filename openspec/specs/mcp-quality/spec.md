@@ -1250,6 +1250,107 @@ agent what to do, not only what is wrong.
 - **WHEN** the remediation is instantiated
 - **THEN** the two remediation strings are byte-identical
 
+### Requirement: NoFalseCoverage
+
+A retrieval-backed conclusion SHALL NOT be shaped like an answered question when its results rest on
+evidence too weak to answer it. Every such conclusion SHALL carry a coverage verdict derived from the
+match evidence already attached to its results: `covered`, `weak`, or `uncovered`. A conclusion whose
+verdict is `uncovered` SHALL NOT return a ranked list of results; it SHALL return the reason and the
+remedy. A conclusion whose verdict is `weak` MAY return results, and SHALL state that every result
+rests on low-tier evidence.
+
+The verdict SHALL be computed from the existing evidence tiers, with no relevance threshold, no new
+score, and no LLM. This is the coverage counterpart to `NoFalseCompleteness`: a caller can always
+tell "this is what you asked for" from "this is the closest thing I hold."
+
+#### Scenario: An uncovered question returns no ranked list
+
+- **GIVEN** a query whose every candidate result matches only on incidental, low-tier evidence
+- **WHEN** a retrieval-backed conclusion is produced
+- **THEN** the verdict is `uncovered`, no ranked results are returned, and the response names why
+  and what would answer it
+
+#### Scenario: Weak coverage is stated, not hidden
+
+- **GIVEN** a query whose results all rest on low-tier evidence but are not noise
+- **WHEN** the conclusion is produced
+- **THEN** the verdict is `weak` and the response states that every result rests on low-tier evidence
+
+#### Scenario: A covered question is unchanged
+
+- **GIVEN** a query with at least one result matching on a strong field
+- **WHEN** the conclusion is produced
+- **THEN** the verdict is `covered` and the result set is the same as before this requirement
+
+#### Scenario: The verdict is derived, not tuned
+
+- **GIVEN** two runs of the same query against the same index
+- **WHEN** the verdict is computed
+- **THEN** both produce the identical verdict, from the evidence tiers alone, with no configurable
+  relevance threshold involved
+
+### Requirement: UnservedQuestionKindsAreNamed
+
+A conclusion whose coverage verdict is `weak` or `uncovered` SHALL name the kind of question it could
+not serve, from a closed vocabulary: `where-is`, `who-calls`, `what-gates`, `what-order`,
+`is-it-tested`, `why-decided`. When another shipped tool answers that kind, the response SHALL name
+that tool. When no shipped tool answers it, the response SHALL say so plainly rather than offering a
+substitute.
+
+#### Scenario: A structural question is routed to the tool that answers it
+
+- **GIVEN** an uncovered query asking which functions call a symbol
+- **WHEN** the conclusion is produced
+- **THEN** the question kind `who-calls` is named together with the tool that answers it
+
+#### Scenario: An unserved kind is admitted
+
+- **GIVEN** an uncovered query asking what makes a piece of interface appear
+- **WHEN** the conclusion is produced
+- **THEN** the question kind `what-gates` is named and the response states that no shipped tool
+  answers it, offering no substitute ranking
+
+#### Scenario: The vocabulary is closed
+
+- **GIVEN** any conclusion carrying a question-kind disclosure
+- **WHEN** the value is read
+- **THEN** it is one of the six defined kinds, and an unrecognized kind is a contract violation
+
+### Requirement: PiDaemonSpawnAuthorityIsOverridable
+
+The Pi extension SHALL support an explicit opt-out that makes it **discover and use** an existing
+daemon but never spawn one. The opt-out SHALL be reachable through the extension's normal
+configuration surface — an environment variable and a configuration key — and SHALL apply to the
+extension's default daemon-acquisition path, not only to an internal seam a caller can override.
+
+Spawning is the correct default when nothing else manages a daemon. When a supervising host already
+runs one daemon per working tree — with its own restart bound, retained diagnostics, and a handle
+released at shutdown — an extension-initiated spawn produces a second, unsupervised process that can
+outlive the session and silently defeats the host's stop-retrying policy. With the opt-out set, the
+extension SHALL treat "no healthy daemon discovered" exactly as it treats a daemon connection
+failure today: a bounded, honest, retryable outcome that names the absent daemon as the cause, never
+a silent spawn and never a misleading remediation.
+
+#### Scenario: A supervised daemon is used, never duplicated
+
+- **GIVEN** a host that already supervises a healthy daemon for the working tree, with the spawn
+  opt-out set
+- **WHEN** the Pi extension needs the daemon for a tool call
+- **THEN** it discovers and uses the supervised daemon, and starts no process of its own
+
+#### Scenario: No daemon means an honest failure, not a spawn
+
+- **GIVEN** the spawn opt-out is set and no healthy daemon is discoverable for the working tree
+- **WHEN** the Pi extension needs the daemon
+- **THEN** it reports a bounded, retryable daemon-connection failure naming the absent daemon, and
+  no daemon process is launched
+
+#### Scenario: The default is unchanged
+
+- **GIVEN** the spawn opt-out is not set
+- **WHEN** the Pi extension finds no healthy daemon
+- **THEN** it launches one exactly as it does today, with its existing bounded failure handling
+
 ## Technical Notes
 
 - **Implementation**: `bench/PROTOCOL.md`, `bench/corpora/default-surface.json`,

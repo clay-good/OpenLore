@@ -27,8 +27,8 @@ and the dispatch is not a named call but the **construction of a tagged object l
 
 - Recover the producer → handler hop for tagged-message protocols with the same precision discipline
   as the existing rules: static-only, additive-only, deterministic, no LLM.
-- Reuse `pairAndEmitEventEdges`, the key-kind namespacing and the fan-out cap unchanged, so the new
-  rule cannot alter the edges any existing rule produces.
+- Reuse the event-channel key-kind namespacing and fan-out cap, and leave the existing rules'
+  pairing untouched, so the new rule cannot alter the edges any existing rule produces.
 - Make the hop *legible as a message hop* wherever it is reported, and make an unpairable send
   visible as a boundary rather than as silence.
 
@@ -54,18 +54,34 @@ handler function, while a `case` clause names only a position in a switch.
 matched exhaustively.
 
 **2. The consumer side is modelled as a registration, so pairing is untouched.**
-A `case "x":` clause is collected as a registration on key `"x"` whose handler is the nearest
-enclosing function of the clause body — or, when the clause body's only statement is a call, that
-callee, which is the common `case "x": handleX(msg)` shape and gives the more useful edge target.
-A construction site is collected as a dispatch on the same key. Both then flow through
-`pairAndEmitEventEdges` unchanged, inheriting the cap and the kind namespacing.
-*Alternative considered:* a bespoke pairing pass for clauses. Rejected — it would duplicate the cap
-and namespacing logic, which is exactly the drift the existing per-rule structure avoids.
+A `case "x":` clause is collected as a registration on key `"x"`. *As built:* its handlers are the
+enclosing function of the clause (the code that selects the tag, so a verdict about it sees the
+hop) and, when the clause body is one call, that callee too (`case "x": handleX(msg)`).
+A construction site is collected as a dispatch on the same key.
+*As built:* pairing runs in its own `pairMessageTopology`. It shares the event-channel fan-out cap
+(`groupHandlersByKey`, counting one per clause container) and edge shape, and adds a test-file rule
+(a test's handler pairs only within its file) and the boundary pass. Rounds 2–3 also tried
+narrowing by directory distance and by name; both silently dropped real consumers and were removed,
+so near-copies in a sample collection pair with each other (precision cost on such collections
+only). The other rules' pairing is unchanged.
 
 **3. The discriminant field is namespaced into the key.**
-Keys become `<field>:<literal>` (`type:restart`), reusing the existing kind-namespacing mechanism,
-so a protocol keyed on `type` can never pair with one keyed on `kind` that happens to share a tag
-literal. This is what makes the rule safe in a repository holding several protocols.
+Keys are `<field>=<tag>`, where the tag keeps the event-channel namespacing (`type=str:restart`,
+`type=const:Msg.Restart`), so a protocol keyed on `type` can never pair with one keyed on `kind`
+that shares a tag, and a string never pairs with a constant. Marker registrations (a clause no
+indexed function contains, or one testing an uncomparable constant) use NUL-separated keys that
+never pair; a tag containing NUL is refused so it cannot forge one.
+
+**4a. As built: a construction counts only when it is handed to a transport call.**
+Measured on this repository before merge: with every tagged literal counted, the rule produced 154
+edges, about 150 of them data-flow pairings such as a `CallEdge` literal `{ kind: "calls" }` and a
+far-away `if (e.kind === "calls")`. Requiring the literal to be an argument of `send`, `postMessage`,
+`sendMessage`, `dispatch`, `broadcast`, `publish` or `emit` (directly or through `JSON.stringify`)
+left 7 edges, all real worker-message hops, and 40 disclosed `message-send` boundary sites
+(telemetry `emit` calls and a watchdog protocol whose consumer is inside a worker-source string).
+A Redux action creator that returns its action is not paired; its `dispatch({ type })` call site is.
+The field set is closed for the same reason. Decision 4 (declared unions) is deferred: with the
+transport gate, the false pairings it was meant to suppress no longer occur.
 
 **4. Declared unions are an optional precision input, never a requirement.**
 When a discriminated-union type is in the index, its discriminant field name is used to decide which
@@ -76,14 +92,11 @@ consumer field produces nothing.
 *Alternative considered:* require a declared union. Rejected — plain JavaScript and untyped IPC
 envelopes are exactly where the graph is emptiest, and the consumer-side evidence is sufficient.
 
-**5. TypeScript gets two collectors, so the language dispatch chain stops being exclusive.**
-Today `addEvents` runs in an `else if` chain, one collector per language. TS needs both
-`event-channel` and `message-topology`, so the chain becomes per-language additive calls. Each
-collector keeps its own prefilter (a cheap `content` regex) so a file with no tagged literals and no
-switch on a member expression costs one failed regex.
-*Risk of this edit:* it touches the dispatch of every language's collector. Mitigated by the
-existing per-rule tests plus a graph-equality test asserting non-TS languages produce byte-identical
-edge sets before and after.
+**5. TypeScript gets a second collector beside the per-language chain.**
+*As built:* the `addEvents` `else if` chain is untouched; message topology is collected in its own
+block after it, under its own Pass-1 group, with its own prefilter (a cheap `content` regex), and
+its edges are appended after every other rule's. So no other language's collection or edge order
+can change, which an additive-only test asserts.
 
 **6. An unpaired static send becomes a dynamic-boundary site with a new refusal reason.**
 The vocabulary is closed, so the reason is added to it (`unindexed-message-consumer`). This is the
@@ -106,6 +119,16 @@ designing for it now.
   on this repository and on a client/server app before merge (task 5.2).
 - **Edges are reachability, not execution** → stated in the spec and carried in the label; the risk
   is a consumer reporting a message hop as a proven call, which the labelling requirement forbids.
+
+- **Watcher drift between full analyses** → the watcher re-derives one file at a time and does not
+  re-synthesize edges (as for every synthesized rule). Saving a sender drops its message hops until
+  the next `analyze`, and its sends are disclosed as `unresolved-in-file-scope` meanwhile. Saving a
+  file that may hold consumers re-derives up to 64 senders whose sites claim repository-wide
+  absence and downgrades the rest in place, so no stale "no consumer" claim is served; a sender
+  whose message edge is still in the graph stays paired. All of it converges at the next `analyze`.
+- **A clause calling a method on some other object** (`console.log(m)`, `m.reply()`) or a name
+  imported from a package is attributed to the enclosing function, never resolved by its bare
+  name to a same-named function elsewhere (found in review).
 
 ## Migration Plan
 

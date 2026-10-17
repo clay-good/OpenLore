@@ -269,8 +269,18 @@ export async function handleFindPath(
   // garbage whenever the MCP server's cwd differed from the analyzed directory (the
   // normal case) — it only looked right when cwd happened to equal absDir.
   const displayFile = (filePath: string): string => (isAbsolute(filePath) ? relative(absDir, filePath) : filePath);
+  // A hop that only a synthesized edge realizes names its rule on the node it reaches, so a message
+  // or event hop never reads as a call (change: add-message-topology-edges).
   const toChain = (p: { ids: string[]; hops: number; distance: number }) => ({
-    chain: p.ids.map(id => { const n = nodeMap.get(id); return { name: n?.name ?? id, file: n ? displayFile(n.filePath) : '' }; }),
+    chain: p.ids.map((id, i) => {
+      const n = nodeMap.get(id);
+      const edge = i > 0 ? pairIndex.get(p.ids[i - 1] + '\x00' + id) : undefined;
+      // The rule name comes from a repository-controlled artifact: only a plain rule-shaped name is echoed.
+      const rule = edge?.synthesizedBy;
+      const via = edge?.confidence !== 'synthesized' ? undefined
+        : typeof rule === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(rule) ? rule : 'synthesized';
+      return { name: n?.name ?? id, file: n ? displayFile(n.filePath) : '', ...(via ? { via } : {}) };
+    }),
     hops: p.hops,
     distance: useCallDistance ? p.distance : undefined,
   });

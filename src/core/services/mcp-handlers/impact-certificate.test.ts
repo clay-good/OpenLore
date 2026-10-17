@@ -178,6 +178,24 @@ describe('detectNewlyOpenedPaths', () => {
     expect(p.reaches).toBe('surfaceFn');
   });
 
+  it('labels a path that crosses a message hop (change: add-message-topology-edges)', () => {
+    const msgCg = graph([node(A), node(B), node(S)], [{ ...edge(B, S), confidence: 'synthesized', synthesizedBy: 'message-topology' }]);
+    const out = detectNewlyOpenedPaths(msgCg, surfaces, { added: [{ from: A, to: B }], removed: [], unresolved: [] });
+    expect(out.map(p => p.crossesMessageHop)).toEqual([true]);
+    const direct = detectNewlyOpenedPaths(cg, surfaces, { added: [{ from: A, to: B }], removed: [], unresolved: [] });
+    expect(direct[0].crossesMessageHop).toBeUndefined();
+  });
+
+  it('prefers a plain-call path over a shorter one across a message hop', () => {
+    const M = 'src/m.ts::audit';
+    const msgCg = graph([node(A), node(B), node(S), node(M)], [
+      { ...edge(B, S), confidence: 'synthesized', synthesizedBy: 'message-topology' },
+      edge(B, M), edge(M, S),
+    ]);
+    const out = detectNewlyOpenedPaths(msgCg, surfaces, { added: [{ from: A, to: B }], removed: [], unresolved: [] });
+    expect(out.map(p => [p.pathIds, p.crossesMessageHop])).toEqual([[[A, B, M, S], undefined]]);
+  });
+
   it('reports a direct opening edge into a surface member', () => {
     const out = detectNewlyOpenedPaths(cg, surfaces, { added: [{ from: A, to: S }], removed: [], unresolved: [] });
     expect(out).toHaveLength(1);

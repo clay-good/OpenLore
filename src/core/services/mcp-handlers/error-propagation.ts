@@ -41,6 +41,7 @@ import {
 } from '../../analyzer/exception-flow.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge, AmbiguousCallSite } from '../../analyzer/call-graph.js';
 import { parseWithBudget, type BudgetableParser } from '../../analyzer/parse-budget.js';
+import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 
 export interface AnalyzeErrorPropagationInput {
   directory: string;
@@ -177,7 +178,17 @@ export async function handleAnalyzeErrorPropagation(
   const nodeById = new Map<string, FunctionNode>();
   for (const n of allNodes) nodeById.set(n.id, n);
   const calleesByCaller = new Map<string, CallEdge[]>();
+  // A message-topology edge is a message hop, not a call: an exception its handler throws never
+  // reaches the sender. It is not followed, and each one the traversal meets is disclosed
+  // (change: add-message-topology-edges).
+  const messageHopsByCaller = new Map<string, CallEdge[]>();
   for (const e of edges) {
+    if (e.synthesizedBy === MESSAGE_TOPOLOGY_RULE) {
+      const hops = messageHopsByCaller.get(e.callerId);
+      if (hops) hops.push(e);
+      else messageHopsByCaller.set(e.callerId, [e]);
+      continue;
+    }
     const arr = calleesByCaller.get(e.callerId);
     if (arr) arr.push(e);
     else calleesByCaller.set(e.callerId, [e]);
@@ -433,6 +444,8 @@ export async function handleAnalyzeErrorPropagation(
   // harden-call-resolution-ambiguity). Keyed by caller+line+name so a site is
   // disclosed once regardless of how often the node is revisited.
   const ambiguousCallSites = new Map<string, string>();
+  // Message hops the traversal met and did not follow (change: add-message-topology-edges).
+  const messageHopsNotFollowed = new Map<string, string>();
   let parsedCount = 0;
   let sourceBytes = 0;
   let capHit = false;
@@ -606,6 +619,10 @@ export async function handleAnalyzeErrorPropagation(
       unresolvedSelfCalls.set(`${n.id}@${cs.line}@${cs.calleeName}`, `${selfLabel}:${cs.line} (${cs.calleeName})`);
     }
 
+    for (const hop of messageHopsByCaller.get(n.id) ?? []) {
+      messageHopsNotFollowed.set(`${n.id}@${hop.line ?? -1}@${hop.calleeId}`, `${selfLabel}:${hop.line ?? '?'} → ${hop.calleeName}`);
+    }
+
     // Disclose unresolved-ambiguous call sites at this node: a call the resolver
     // refused to bind because >1 candidate was viable with no affinity. Its callees'
     // exceptions are out of scope — a clean escape set does not clear these paths
@@ -738,6 +755,13 @@ export async function handleAnalyzeErrorPropagation(
         'does not clear these paths.',
     );
   }
+  const messageHopSample = [...messageHopsNotFollowed.values()].sort();
+  if (messageHopsNotFollowed.size > 0) {
+    boundaries.add(
+      `${messageHopsNotFollowed.size} message hop(s) (a tagged message handed to a transport) were NOT followed — ` +
+        'an exception a message handler throws does not reach the sender, so those handlers are not in this result.',
+    );
+  }
   const ambiguousSample = [...ambiguousCallSites.values()].sort();
   if (ambiguousCallSites.size > 0) {
     boundaries.add(
@@ -795,6 +819,9 @@ export async function handleAnalyzeErrorPropagation(
       : {}),
     ...(ambiguousCallSites.size > 0
       ? { ambiguousCallSites: { count: ambiguousCallSites.size, sample: ambiguousSample.slice(0, 15) } }
+      : {}),
+    ...(messageHopsNotFollowed.size > 0
+      ? { messageHopsNotFollowed: { count: messageHopsNotFollowed.size, sample: messageHopSample.slice(0, 15) } }
       : {}),
     note:
       'escapes = exception types that can propagate OUT of this function to its callers (each with ' +
