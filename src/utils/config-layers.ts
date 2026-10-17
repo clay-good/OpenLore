@@ -128,9 +128,28 @@ export function isUserConfiguredValue(field: string, value: unknown): boolean {
   }
 }
 
+/**
+ * Blocks whose user `apiKey` the merge withholds because the project chose its own endpoint
+ * for them. Pure; callers report it, so a key that silently stops being sent has a reason.
+ */
+export function withheldUserCredentials(
+  user: Record<string, unknown>,
+  project: Record<string, unknown>,
+): string[] {
+  const withheld: string[] = [];
+  for (const [key, value] of Object.entries(project)) {
+    const lower = user[key];
+    if (!isObject(value) || !isObject(lower)) continue;
+    if (!Object.hasOwn(lower, 'apiKey') || Object.hasOwn(value, 'apiKey')) continue;
+    if (ENDPOINT_KEYS.some((field) => Object.hasOwn(value, field) && value[field] !== lower[field])) withheld.push(key);
+  }
+  return withheld;
+}
+
 export async function readLayeredConfig(
   projectPath: string,
   builtInDefaults?: Record<string, unknown>,
+  onWithheldCredential?: (block: string, userPath: string) => void,
 ): Promise<Record<string, unknown> | null> {
   const userPath = globalOpenLoreConfigPath();
   if (resolve(projectPath) === resolve(userPath)) {
@@ -142,6 +161,7 @@ export async function readLayeredConfig(
   if (!user) return project ? mergeConfigLayers({}, project) : null;
   const defaults = mergeConfigLayers(builtInDefaults ?? {}, user);
   if (!project) return defaults;
+  for (const block of withheldUserCredentials(user, project)) onWithheldCredential?.(block, userPath);
   return mergeConfigLayers(defaults, project);
 }
 

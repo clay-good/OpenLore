@@ -1309,7 +1309,7 @@ async function runRemediation(rootPath: string, r: Remediation): Promise<string>
       // Re-wire only — do NOT also re-analyze here (that is the 'analyze'
       // remediation's job, run separately if its own check surfaced it).
       await runInstall({ agent: 'claude-code', force: true, analyze: false, cwd: rootPath });
-      return 'MCP wiring corrected (.mcp.json)';
+      return 'MCP wiring re-written (user scope and this repository)';
     }
   }
 }

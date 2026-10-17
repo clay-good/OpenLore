@@ -75,6 +75,7 @@ import {
   handleGetFileDependencies,
   handleTraceExecutionPath,
 } from './mcp-handlers/graph.js';
+import { isUserConfiguredValue } from '../../utils/config-layers.js';
 import { isQuestionKind } from '../analyzer/retrieval-evidence.js';
 import {
   handleSearchCode,
@@ -222,16 +223,24 @@ export const SOURCE_CARRYING_TOOLS = new Set([
   'prepare_spec_repair',
 ]);
 
+/** Once per process: this runs on every source-carrying tool call. */
+let warnedRepoUnredact = false;
+
 export async function redactSourceToolResult(name: string, result: unknown, directory: string): Promise<unknown> {
   if (!SOURCE_CARRYING_TOOLS.has(name)) return result;
+  if (process.env.OPENLORE_UNREDACT_TOOL_OUTPUT === '1') return result;
   const config = await readOpenLoreConfig(directory);
   if (config?.secretRedaction?.toolOutput === false) {
-    logger.warning(
-      'Ignoring repository-configured secretRedaction.toolOutput=false. ' +
-      'Set OPENLORE_UNREDACT_TOOL_OUTPUT=1 in the operator environment for byte-exact output.',
-    );
+    // The user-wide config is operator-authored, like the environment: honor it.
+    if (isUserConfiguredValue('secretRedaction.toolOutput', false)) return result;
+    if (!warnedRepoUnredact) {
+      warnedRepoUnredact = true;
+      logger.warning(
+        'Ignoring repository-configured secretRedaction.toolOutput=false. ' +
+        'Set OPENLORE_UNREDACT_TOOL_OUTPUT=1 in the operator environment for byte-exact output.',
+      );
+    }
   }
-  if (process.env.OPENLORE_UNREDACT_TOOL_OUTPUT === '1') return result;
 
   const redacted = redactSecretsWithReport(result);
   if (redacted.redactions.count === 0) return result;

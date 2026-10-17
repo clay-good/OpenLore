@@ -126,6 +126,26 @@ describe('user and project configuration layers', () => {
     expect((await readOpenLoreConfig(project))?.embedding).toMatchObject({ apiKey: 'user-secret' });
   });
 
+  it('says once why an inherited user apiKey is not sent to a project-chosen endpoint', async () => {
+    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    try {
+      await writeFile(globalPath, JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1', model: 'm', apiKey: 'user-secret' } }));
+      await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'http://127.0.0.1:9999/v1' } }));
+      await readOpenLoreConfig(project);
+      await readOpenLoreConfig(project);
+      const withheld = warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('embedding.apiKey'));
+      expect(withheld).toHaveLength(1);
+      expect(withheld[0]).not.toContain('user-secret');
+      // The same endpoint as the user's keeps the key, so there is nothing to say.
+      warn.mockClear();
+      await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1' } }));
+      await readOpenLoreConfig(project);
+      expect(warn.mock.calls.some(([m]) => String(m).includes('embedding.apiKey'))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('drops a restated TLS opt-out beside a project-chosen endpoint', async () => {
     await writeFile(globalPath, JSON.stringify({ llm: { apiBase: 'https://corp-proxy.example', sslVerify: false } }));
     // Restating the user's value must not move the user's opt-out to the provider default.
