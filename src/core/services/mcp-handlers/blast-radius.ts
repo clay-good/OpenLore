@@ -33,13 +33,28 @@ import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { assembleBoundary, computeStaleness, crossingsFromBasis, type EdgeBasis } from './confidence-boundary.js';
 
-/** A basis's per-rule synthesized-edge counts, only rule-shaped names, or undefined when none. */
+/**
+ * A basis's per-rule synthesized-edge counts, or undefined when none. A rule name that is not
+ * rule-shaped (the basis comes from a repository-controlled artifact) counts as `synthesized`
+ * rather than vanishing, so a closure that relied on such an edge never reads as complete.
+ */
 function synthesizedByRule(basis: EdgeBasis | undefined): Record<string, number> | undefined {
   const out: Record<string, number> = {};
   for (const [rule, n] of Object.entries(basis?.synthesizedByRule ?? {})) {
-    if (/^[a-z][a-z0-9-]{0,63}$/.test(rule) && Number.isSafeInteger(n) && n > 0) out[rule] = n;
+    if (!Number.isSafeInteger(n) || n <= 0) continue;
+    const key = /^[a-z][a-z0-9-]{0,63}$/.test(rule) ? rule : 'synthesized';
+    out[key] = (out[key] ?? 0) + n;
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * The boundary an ambiguous name's `analyze_impact` envelope carries. It covers EVERY match's
+ * closure, so it can only feed the briefing-level crossings, never one match's label.
+ */
+function envelopeBasis(raw: unknown): EdgeBasis | undefined {
+  if (raw === null || typeof raw !== 'object' || !('matches' in (raw as Record<string, unknown>))) return undefined;
+  return (raw as { confidenceBoundary?: { basis?: EdgeBasis } }).confidenceBoundary?.basis;
 }
 import {
   loadDynamicBoundaryReport,
@@ -211,9 +226,8 @@ function impactResults(raw: unknown): ImpactResult[] {
   if (raw === null || typeof raw !== 'object') return [];
   if ('error' in (raw as Record<string, unknown>)) return [];
   if ('matches' in (raw as Record<string, unknown>)) {
-    const { matches: m, confidenceBoundary } = raw as { matches: unknown; confidenceBoundary?: ImpactResult['confidenceBoundary'] };
-    // An ambiguous name's boundary sits on the envelope, covering every match.
-    return Array.isArray(m) ? (m as ImpactResult[]).map(r => (confidenceBoundary && !r.confidenceBoundary ? { ...r, confidenceBoundary } : r)) : [];
+    const m = (raw as { matches: unknown }).matches;
+    return Array.isArray(m) ? (m as ImpactResult[]) : [];
   }
   return [raw as ImpactResult];
 }
@@ -292,6 +306,9 @@ export async function computeBlastRadius(
       raw = await handleAnalyzeImpact(absDir, seed.name, depth);
     } catch { impactFailures++; continue; }
     const candidates = impactResults(raw);
+    for (const [rule, n] of Object.entries(synthesizedByRule(envelopeBasis(raw)) ?? {})) {
+      synthesizedAcross.set(rule, Math.max(synthesizedAcross.get(rule) ?? 0, n));
+    }
     // Prefer the resolution whose file matches the changed seed (names can collide).
     const r = candidates.find(c => c.file === seed.filePath) ?? candidates[0];
     if (!r) continue;

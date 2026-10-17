@@ -129,16 +129,33 @@ describe('computeBlastRadius', () => {
       metrics: { fanIn: 58, fanOut: 1, isHub: true },
       blastRadius: { total: 60, upstream: 58, downstream: 2 },
       riskLevel: 'critical',
-      confidenceBoundary: { complete: false, basis: { directEdges: 10, synthesizedEdges: 3, synthesizedByRule: { 'message-topology': 2, 'event-channel': 1, '\u001b[31m': 5 } } },
+      confidenceBoundary: { complete: false, basis: { directEdges: 10, synthesizedEdges: 8, synthesizedByRule: { 'message-topology': 2, 'event-channel': 1, '\u001b[31m': 5 } } },
     } as never);
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing & {
       impact: { topSymbols: Array<{ synthesizedEdges?: Record<string, number> }> };
       confidenceBoundary?: { complete: boolean; knownUnknowable?: Array<{ kind: string; rule?: string; count: number }> };
     };
-    expect(b.impact.topSymbols[0].synthesizedEdges).toEqual({ 'message-topology': 2, 'event-channel': 1 });
+    // A hostile rule name is counted as `synthesized`, never dropped (that would read as complete).
+    expect(b.impact.topSymbols[0].synthesizedEdges).toEqual({ 'message-topology': 2, 'event-channel': 1, synthesized: 5 });
     const synth = b.confidenceBoundary?.knownUnknowable?.filter(k => k.kind === 'synthesized-dispatch').map(k => [k.rule, k.count]);
-    expect(synth).toEqual([['event-channel', 1], ['message-topology', 2]]);
+    expect(synth).toEqual([['event-channel', 1], ['message-topology', 2], ['synthesized', 5]]);
     expect(b.confidenceBoundary?.complete).toBe(false);
+  });
+
+  it('keeps an ambiguous name\'s envelope basis off the match it picks, but in the briefing boundary', async () => {
+    vi.mocked(handleAnalyzeImpact).mockResolvedValue({
+      matches: [
+        { symbol: 'validateDirectory', file: 'src/utils.ts', metrics: { fanIn: 58, fanOut: 1, isHub: true }, blastRadius: { total: 60, upstream: 58, downstream: 2 }, riskLevel: 'critical' },
+        { symbol: 'validateDirectory', file: 'src/other.ts', metrics: { fanIn: 1, fanOut: 0, isHub: false }, blastRadius: { total: 1, upstream: 1, downstream: 0 }, riskLevel: 'low' },
+      ],
+      confidenceBoundary: { complete: false, basis: { directEdges: 3, synthesizedEdges: 4, synthesizedByRule: { 'message-topology': 4 } } },
+    } as never);
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing & {
+      impact: { topSymbols: Array<{ file: string; synthesizedEdges?: Record<string, number> }> };
+      confidenceBoundary?: { knownUnknowable?: Array<{ kind: string; rule?: string }> };
+    };
+    expect(b.impact.topSymbols[0].synthesizedEdges).toBeUndefined();
+    expect(b.confidenceBoundary?.knownUnknowable?.some(k => k.kind === 'synthesized-dispatch' && k.rule === 'message-topology')).toBe(true);
   });
 
   it('briefs a hub change: callers, layers, tests, and anchored drift, as one conclusion', async () => {
