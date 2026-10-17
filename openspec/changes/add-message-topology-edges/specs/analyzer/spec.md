@@ -92,9 +92,10 @@ selected by that handler, not that the hop occurs on any particular execution.
 ### Requirement: UnpairedMessageSendsAreDisclosedAsTransportBoundaries
 
 A send that no indexed clause can be paired with SHALL be recorded as a `message-send`
-dynamic-boundary site with its reason: `unindexed-message-consumer` when no clause selects its key,
-`over-cap` when the fan-out cap dropped the key. It SHALL NOT be reported as having no consumers,
-and no edge SHALL be invented to an unindexed consumer.
+dynamic-boundary site with the most specific reason: `over-cap`, `unattributed-caller` (a handler
+exists but no indexed function contains the send), `uncomparable-message-consumer` (a clause tests
+the field against a constant that cannot be compared), or `unindexed-message-consumer`. No edge
+SHALL be invented to an unindexed consumer.
 
 #### Scenario: A message leaving the indexed repository is disclosed
 
@@ -107,6 +108,32 @@ and no edge SHALL be invented to an unindexed consumer.
 - **GIVEN** a recorded transport boundary in a function
 - **WHEN** a consumer reports that function's outgoing structure
 - **THEN** the boundary is disclosed, so an empty message fan-out is never read as proof of absence
+
+#### Scenario: An uncomparable consumer is not called absent
+
+- **GIVEN** a send of `{ type: types.CHECKOUT_REQUEST }` and a clause `case CHECKOUT_REQUEST:` on
+  `action.type`, where the constant is imported
+- **WHEN** the call graph is built
+- **THEN** no edge is synthesized, and the send's site carries `uncomparable-message-consumer`
+
+#### Scenario: A send outside any indexed function is still disclosed
+
+- **GIVEN** a send inside an anonymous callback at module level, with an indexed handler
+- **WHEN** the call graph is built
+- **THEN** the send is a `message-send` site marked unattributed with `unattributed-caller`
+
+### Requirement: TestFileHandlersPairOnlyWithinTheirFile
+
+A handler clause in a test file SHALL pair only with a send in the same file, because a test's
+protocol (a fake worker, a local reducer) is its own. A send in a test file MAY pair with a handler
+in production code.
+
+#### Scenario: A generic tag does not cross unrelated tests
+
+- **GIVEN** `dispatch({ type: "INCREMENT" })` in one test file and a reducer selecting `"INCREMENT"`
+  in another test file
+- **WHEN** the call graph is built
+- **THEN** no edge connects them, while a send in the reducer's own file does pair with it
 
 ### Requirement: SingleFileMessageBoundariesClaimNoRepositoryWideAbsence
 

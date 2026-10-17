@@ -112,6 +112,17 @@ describe('verify_claim — calls', () => {
   });
 });
 
+describe('verify_claim — a message hop is not a call (change: add-message-topology-edges)', () => {
+  it('is unverifiable for calls, naming the hop', async () => {
+    useGraph([MAIN, HANDLER], [
+      edge('src/main.ts::main', 'src/app.ts::handler', { confidence: 'synthesized', synthesizedBy: 'message-topology' }),
+    ]);
+    const r = await handleVerifyClaim({ directory: '/p', kind: 'calls', subject: 'main', object: 'handler' }) as { verdict: string; reason: string };
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.reason).toMatch(/message hop/);
+  });
+});
+
 describe('verify_claim — reaches', () => {
   it('confirms a transitive reach and reports the hop count', async () => {
     const r = await handleVerifyClaim({ directory: '/p', kind: 'reaches', subject: 'main', object: 'helper' }) as { verdict: string; reason: string };

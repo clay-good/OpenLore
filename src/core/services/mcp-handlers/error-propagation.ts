@@ -41,6 +41,7 @@ import {
 } from '../../analyzer/exception-flow.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge, AmbiguousCallSite } from '../../analyzer/call-graph.js';
 import { parseWithBudget, type BudgetableParser } from '../../analyzer/parse-budget.js';
+import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 
 export interface AnalyzeErrorPropagationInput {
   directory: string;
@@ -177,7 +178,17 @@ export async function handleAnalyzeErrorPropagation(
   const nodeById = new Map<string, FunctionNode>();
   for (const n of allNodes) nodeById.set(n.id, n);
   const calleesByCaller = new Map<string, CallEdge[]>();
+  // A message-topology edge is a message hop, not a call: an exception its handler throws never
+  // reaches the sender. It is not followed, and each one the traversal meets is disclosed
+  // (change: add-message-topology-edges).
+  const messageHopsByCaller = new Map<string, CallEdge[]>();
   for (const e of edges) {
+    if (e.synthesizedBy === MESSAGE_TOPOLOGY_RULE) {
+      const hops = messageHopsByCaller.get(e.callerId);
+      if (hops) hops.push(e);
+      else messageHopsByCaller.set(e.callerId, [e]);
+      continue;
+    }
     const arr = calleesByCaller.get(e.callerId);
     if (arr) arr.push(e);
     else calleesByCaller.set(e.callerId, [e]);
@@ -604,6 +615,13 @@ export async function handleAnalyzeErrorPropagation(
       if (cs.receiver !== 'self' && cs.receiver !== 'constructor') continue;
       if (resolvedHere.has(`${cs.calleeName}@${cs.line}`)) continue;
       unresolvedSelfCalls.set(`${n.id}@${cs.line}@${cs.calleeName}`, `${selfLabel}:${cs.line} (${cs.calleeName})`);
+    }
+
+    for (const hop of messageHopsByCaller.get(n.id) ?? []) {
+      boundaries.add(
+        `${selfLabel}:${hop.line ?? '?'} message hop to ${hop.calleeName} not followed — `
+        + 'exceptions its handler throws do not reach the sender',
+      );
     }
 
     // Disclose unresolved-ambiguous call sites at this node: a call the resolver

@@ -64,6 +64,7 @@ import { loadDecisionStore } from '../../decisions/store.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import { ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
+import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 import type { GroundingCertificate, StructuralAnchor, PendingDecision } from '../../../types/index.js';
 
 export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current';
@@ -193,7 +194,7 @@ function reachWithPath(
 }
 
 const SYNTH_DISPATCH_DETAIL =
-  'reached only through synthesized dynamic-dispatch edges (callback/event/route or class-hierarchy ' +
+  'reached only through synthesized dynamic-dispatch edges (callback/event/route/message or class-hierarchy ' +
   'dispatch), whose true target is not statically guaranteed — so static reachability cannot decide this ' +
   'claim. Read the source or run the code to confirm.';
 
@@ -201,10 +202,13 @@ const SYNTH_DISPATCH_DETAIL =
 function verifyCalls(cg: SerializedCallGraph, subject: FunctionNode, object: FunctionNode): ClaimResult {
   let direct: BoundaryEdge | undefined;
   let synthesized: BoundaryEdge | undefined;
+  let messageHop: BoundaryEdge | undefined;
   for (const e of cg.edges) {
     if (e.callerId !== subject.id || e.calleeId !== object.id) continue;
     if (e.kind && e.kind !== 'calls') continue; // only true call edges decide "calls"
-    if (e.confidence === 'synthesized') synthesized ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
+    // A message-topology edge is a message hop, not a call (change: add-message-topology-edges).
+    if (e.synthesizedBy === MESSAGE_TOPOLOGY_RULE) messageHop ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
+    else if (e.confidence === 'synthesized') synthesized ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
     else direct ??= { confidence: e.confidence, synthesizedBy: e.synthesizedBy };
   }
   if (direct) {
@@ -219,6 +223,14 @@ function verifyCalls(cg: SerializedCallGraph, subject: FunctionNode, object: Fun
       verdict: 'confirmed',
       reason: `"${subject.name}" calls "${object.name}" via a synthesized ${synthesized.synthesizedBy ?? 'dynamic-dispatch'} edge — recovered heuristically, not by direct name resolution; verify before asserting.`,
       basisEdges: [synthesized],
+    };
+  }
+  if (messageHop) {
+    return {
+      verdict: 'unverifiable',
+      reason: `"${subject.name}" sends a tagged message that a clause in "${object.name}" selects — a message hop `
+        + 'recovered by the message-topology rule, not a call. Whether the handler runs, and when, depends on the transport.',
+      basisEdges: [messageHop],
     };
   }
   return {

@@ -136,8 +136,22 @@ const KNOWN_KINDS = new Set<string>(DYNAMIC_BOUNDARY_KINDS);
 function validSite(site: unknown): site is DynamicBoundarySite {
   return !!site && typeof site === 'object'
     && Number.isSafeInteger((site as DynamicBoundarySite).line)
-    && KNOWN_KINDS.has((site as DynamicBoundarySite).kind)
+    && isServableKind((site as DynamicBoundarySite).kind)
     && isServableRefusal((site as DynamicBoundarySite).refusal);
+}
+
+/**
+ * A kind this reader may serve. A kind a newer writer added is kept, for the same reason as an
+ * unrecognised refusal below: dropping the file for it would also drop that file's known sites and
+ * serve a false "no boundary" (found when `message-send` was added — change:
+ * add-message-topology-edges). An unknown kind renders through the neutral label fallback and never
+ * qualifies a verdict, since only listed kinds hide a caller. It must still look like a vocabulary
+ * word: a lowercase hyphenated name of bounded length, never an `Object.prototype` name.
+ */
+function isServableKind(kind: unknown): boolean {
+  if (typeof kind !== 'string') return false;
+  if (KNOWN_KINDS.has(kind)) return true;
+  return /^[a-z][a-z0-9-]{0,63}$/.test(kind) && !(kind in Object.prototype);
 }
 
 /**

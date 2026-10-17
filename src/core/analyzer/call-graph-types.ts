@@ -86,7 +86,8 @@ export interface ClassRelationshipFact {
 export interface DynamicEventFacts {
   group: string;
   rule: 'event-channel' | 'type-event' | 'actor-message' | 'message-topology';
-  registrations: Array<{ key: string; handlerIds: string[] }>;
+  /** `fallbackId`: the enclosing function, used by message-topology when no handler id resolves. */
+  registrations: Array<{ key: string; handlerIds: string[]; fallbackId?: string }>;
   dispatches: Array<{ key: string; callerId: string; line: number }>;
 }
 
@@ -105,7 +106,8 @@ export interface DynamicMessageSendFact {
   filePath: string;
   language: string;
   key: string;
-  callerId: string;
+  /** Absent when no indexed function contains the send (a top-level or anonymous-callback send). */
+  callerId?: string;
   line: number;
   /** Already neutralized, redacted and truncated, like every dynamic-boundary evidence string. */
   evidence: string;

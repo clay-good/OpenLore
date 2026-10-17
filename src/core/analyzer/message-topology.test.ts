@@ -218,6 +218,120 @@ describe('message-topology edges', () => {
   });
 });
 
+describe('message-topology review regressions (round 1)', () => {
+  it('never resolves a method call on another receiver by its bare name', async () => {
+    const files = [
+      ts('src/logger.ts', 'export function log() { return 1; }\nexport function reply() { return 2; }'),
+      ts('src/w.ts', `
+        export function go(ws: any) { ws.send({ type: "a" }); ws.send({ type: "b" }); }
+        export function onMsg(m: any) {
+          switch (m.type) {
+            case "a": console.log(m); break;
+            case "b": m.reply(); break;
+          }
+        }
+      `),
+    ];
+    for (const b of [await build(...files), await legacyBuild(...files)]) {
+      expect(hasMessageEdge(b, 'go', 'log')).toBe(false);
+      expect(hasMessageEdge(b, 'go', 'reply')).toBe(false);
+      expect(hasMessageEdge(b, 'go', 'onMsg')).toBe(true);
+    }
+  });
+
+  it('still resolves a this-method call to that method', async () => {
+    const b = await build(ts('src/w.ts', `
+      class Server {
+        onRestart() { return 1; }
+        route(m: any) { switch (m.type) { case "restart": this.onRestart(); } }
+      }
+      export function go(ws: any) { ws.send({ type: "restart" }); }
+    `));
+    expect(hasMessageEdge(b, 'go', 'onRestart')).toBe(true);
+  });
+
+  it('refuses a tag read from another message', async () => {
+    const b = await build(ts('src/w.ts', `
+      export function dropIt() { return 1; }
+      export function relay(ws: any, m: any) { ws.send({ type: m.type }); }
+      export function filter(x: any, m: any) { if (x.type === m.type) { dropIt(); } }
+    `));
+    expect(messageEdges(b)).toHaveLength(0);
+  });
+
+  it('does not resolve a package import to a same-named repo function', async () => {
+    const files = [
+      ts('src/util/info.ts', 'export function info() { return 1; }'),
+      ts('src/w.ts', `
+        import { info } from 'pino';
+        export function go(ws: any) { ws.send({ type: "b2" }); }
+        export function onMsg(m: any) { switch (m.type) { case "b2": info(m); } }
+      `),
+    ];
+    for (const b of [await build(...files), await legacyBuild(...files)]) {
+      expect(hasMessageEdge(b, 'go', 'info')).toBe(false);
+      expect(hasMessageEdge(b, 'go', 'onMsg')).toBe(true);
+    }
+  });
+
+  it('falls back to the enclosing function on both lanes when the callee is not indexed', async () => {
+    const files = [
+      ts('src/client.ts', 'export function go(ws: any) { ws.send({ type: "restart" }); }'),
+      ts('src/server.ts', `
+        import { ext } from './lib';
+        export function onMsg(m: any) { switch (m.type) { case "restart": ext(m); } }
+      `),
+    ];
+    const pass1 = await build(...files);
+    const legacy = await legacyBuild(...files);
+    expect(hasMessageEdge(pass1, 'go', 'onMsg')).toBe(true);
+    expect(messageEdges(pass1).map(edgeKey)).toEqual(messageEdges(legacy).map(edgeKey));
+    expect(pass1.dynamicBoundaryByFile?.get('src/client.ts')).toBeUndefined();
+  });
+
+  it('sees through type-only wrappers and quoted keys', async () => {
+    const b = await build(ts('src/w.ts', `
+      function onX() { return 1; }
+      function route(m: any) { switch (m.type) { case "x": onX(); } }
+      function a(ws: any) { ws.send({ type: "x" } as any); }
+      function c(ws: any) { ws.send({ "type": "x" }); }
+    `));
+    expect(hasMessageEdge(b, 'a', 'onX')).toBe(true);
+    expect(hasMessageEdge(b, 'c', 'onX')).toBe(true);
+  });
+});
+
+describe('message-topology dogfood regressions (round 1)', () => {
+  it('discloses a send no indexed function contains instead of dropping it', async () => {
+    const b = await build(
+      ts('src/a.ts', 'setInterval(() => { vscode.postMessage({ command: "alert" }); }, 100);\nexport function onAlert() { return 1; }'),
+      ts('src/b.ts', 'export function route(m: any) { if (m.command === "alert") { return 1; } }'),
+    );
+    const sites = b.dynamicBoundaryByFile?.get('src/a.ts')?.sites ?? [];
+    expect(sites).toEqual([expect.objectContaining({ kind: 'message-send', refusal: 'unattributed-caller', unattributed: true })]);
+  });
+
+  it('never claims no consumer when a clause compares the field to an uncomparable constant', async () => {
+    const b = await build(
+      ts('src/actions.ts', `import * as types from './types';\nexport function checkout(store: any) { store.dispatch({ type: types.CHECKOUT_REQUEST }); }`),
+      ts('src/cart.ts', `import { CHECKOUT_REQUEST } from './types';\nexport function cart(state: any, action: any) { switch (action.type) { case CHECKOUT_REQUEST: return []; default: return state; } }`),
+    );
+    expect(messageEdges(b)).toHaveLength(0);
+    expect(b.dynamicBoundaryByFile?.get('src/actions.ts')?.sites.map(s => s.refusal)).toEqual(['uncomparable-message-consumer']);
+  });
+
+  it('pairs a handler in a test file only with a send in that same file', async () => {
+    const b = await build(
+      ts('test/a.test.ts', 'export function inc(store: any) { store.dispatch({ type: "INCREMENT" }); }'),
+      ts('test/b.test.ts', 'export function reducer(s: any, a: any) { switch (a.type) { case "INCREMENT": return s + 1; default: return s; } }\nexport function local(store: any) { store.dispatch({ type: "INCREMENT" }); }'),
+      ts('src/counter.ts', 'export function counter(s: any, a: any) { if (a.type === "INCREMENT") { return s + 1; } return s; }'),
+    );
+    expect(hasMessageEdge(b, 'inc', 'reducer')).toBe(false);
+    expect(hasMessageEdge(b, 'local', 'reducer')).toBe(true);
+    expect(hasMessageEdge(b, 'inc', 'counter')).toBe(true);
+  });
+});
+
 describe('message-topology transport boundaries', () => {
   it('discloses a send no indexed consumer selects, and invents no edge', async () => {
     const b = await build(ts('src/out.ts', `export function ping(ws: any) { ws.send(JSON.stringify({ type: "ping" })); }`));
@@ -234,6 +348,16 @@ describe('message-topology transport boundaries', () => {
     for (const record of b.dynamicBoundaryByFile?.values() ?? []) {
       expect(record.sites.filter(s => s.kind === 'message-send')).toEqual([]);
     }
+  });
+
+  it('applies the fan-out cap on the single-file lane as the full build does', async () => {
+    const consumers = Array.from({ length: EVENT_CHANNEL_FANOUT_CAP + 1 }, (_, i) =>
+      `function c${i}(m: any) { if (m.type === "wide") { const x = ${i}; return x; } }`).join('\n');
+    const file = ts('src/a.ts', `${consumers}\nfunction send(ws: any) { ws.send({ type: "wide" }); }`);
+    const single = await extractFileDynamicBoundary(file);
+    const full = (await build(file)).dynamicBoundaryByFile?.get('src/a.ts');
+    expect(single?.sites.map(s => s.refusal)).toEqual(['over-cap']);
+    expect(full?.sites.map(s => s.refusal)).toEqual(['over-cap']);
   });
 
   it('keeps the vocabulary closed', () => {

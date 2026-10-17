@@ -275,7 +275,10 @@ export async function handleFindPath(
     chain: p.ids.map((id, i) => {
       const n = nodeMap.get(id);
       const edge = i > 0 ? pairIndex.get(p.ids[i - 1] + '\x00' + id) : undefined;
-      const via = edge?.confidence === 'synthesized' ? edge.synthesizedBy ?? 'synthesized' : undefined;
+      // The rule name comes from a repository-controlled artifact: only a plain rule-shaped name is echoed.
+      const rule = edge?.synthesizedBy;
+      const via = edge?.confidence !== 'synthesized' ? undefined
+        : typeof rule === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(rule) ? rule : 'synthesized';
       return { name: n?.name ?? id, file: n ? displayFile(n.filePath) : '', ...(via ? { via } : {}) };
     }),
     hops: p.hops,

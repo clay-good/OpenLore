@@ -70,7 +70,6 @@ import {
   finalizeDynamicBoundarySites,
   boundDynamicBoundarySites,
   buildFileDynamicBoundary,
-  mergeFileDynamicBoundarySites,
   toEvidence,
   REFLECTIVE_RESOLUTION_RULE,
   type AttributedCandidate,
@@ -83,6 +82,7 @@ import {
   collectMessageSites,
   mayContainMessageTopology,
   MESSAGE_TOPOLOGY_RULE,
+  MESSAGE_UNCOMPARABLE_TAG,
   type MessageSites,
 } from './message-topology.js';
 import {
@@ -4084,7 +4084,7 @@ function resolveHandlerTargets(
 }
 
 // Shared registration/dispatch site shapes produced by each language's collector.
-interface EventRegistration { key: string; handlerIds: string[] }
+interface EventRegistration { key: string; handlerIds: string[]; fallbackId?: string }
 interface EventDispatch { key: string; callerId: string; line: number }
 interface EventSites { registrations: EventRegistration[]; dispatches: EventDispatch[] }
 
@@ -4095,7 +4095,10 @@ interface EventSites { registrations: EventRegistration[]; dispatches: EventDisp
  * pairing/fan-out/provenance stay identical across languages and adding a language
  * cannot change another's edges.
  */
-function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, FunctionNode>, ruleName: string): CallEdge[] {
+function pairAndEmitEventEdges(
+  sites: EventSites, allNodes: Map<string, FunctionNode>, ruleName: string,
+  eligible?: (callerId: string, handlerId: string) => boolean,
+): CallEdge[] {
   if (sites.dispatches.length === 0) return [];
 
   const { handlersByKey } = groupHandlersByKey(sites);
@@ -4107,6 +4110,7 @@ function pairAndEmitEventEdges(sites: EventSites, allNodes: Map<string, Function
     if (!handlers) continue;
     for (const handlerId of handlers) {
       if (handlerId === disp.callerId) continue; // no trivial self-edge
+      if (eligible && !eligible(disp.callerId, handlerId)) continue;
       const pair = `${disp.callerId}\0${handlerId}`;
       if (seen.has(pair)) continue;
       seen.add(pair);
@@ -4178,7 +4182,7 @@ function collectTsMessageFacts(
   const sends = raw.sends.map((send): DynamicMessageSendFact => {
     const { evidence, truncated } = toEvidence(send.source);
     return {
-      filePath, language, key: send.key, callerId: send.callerId, line: send.line, evidence,
+      filePath, language, key: send.key, ...(send.callerId ? { callerId: send.callerId } : {}), line: send.line, evidence,
       ...(truncated ? { evidenceTruncated: true as const } : {}),
     };
   });
@@ -4186,34 +4190,62 @@ function collectTsMessageFacts(
 }
 
 /**
+ * Can a send in `senderFile` be paired with this handler? A handler in a TEST file is a test's own
+ * protocol (a fake worker, a local reducer): it pairs only with a send in that same file. Without
+ * this, a generic tag (`INCREMENT`) in one type test paired with a reducer in another test and an
+ * unrelated example app (found dogfooding reduxjs/redux).
+ */
+function messageHandlerEligible(senderFile: string | undefined, handlerId: string, allNodes: Map<string, FunctionNode>): boolean {
+  const handlerFile = allNodes.get(handlerId)?.filePath;
+  return handlerFile === undefined || !isTestFile(handlerFile) || handlerFile === senderFile;
+}
+
+/**
  * Pair resolved message sites into edges, and turn each transport send no indexed consumer can be
- * paired with into a boundary site: `unindexed-message-consumer` when no handler selects its key,
- * `over-cap` when the key was dropped by the fan-out cap. A paired send records nothing.
+ * paired with into a boundary site. The reason is the most specific one that holds:
+ *   - `over-cap` — the fan-out cap dropped the key;
+ *   - `unattributed-caller` — a handler exists, but no indexed function contains the send;
+ *   - `uncomparable-message-consumer` — some clause selects this field on a tag that cannot be
+ *     compared statically (an imported constant), so "no consumer" cannot be claimed;
+ *   - `unindexed-message-consumer` — otherwise.
+ * A paired send records nothing.
  */
 function pairMessageTopology(
   sites: EventSites,
   sends: DynamicMessageSendFact[],
   allNodes: Map<string, FunctionNode>,
 ): { edges: CallEdge[]; boundaries: MessageBoundarySite[] } {
-  const edges = pairAndEmitEventEdges(sites, allNodes, MESSAGE_TOPOLOGY_RULE);
+  const edges = pairAndEmitEventEdges(sites, allNodes, MESSAGE_TOPOLOGY_RULE,
+    (callerId, handlerId) => messageHandlerEligible(allNodes.get(callerId)?.filePath, handlerId, allNodes));
   const { handlersByKey, dropped } = groupHandlersByKey(sites);
+  const uncomparableFields = new Set(
+    sites.registrations.filter(r => r.key.endsWith(MESSAGE_UNCOMPARABLE_TAG)).map(r => r.key.slice(0, r.key.indexOf('='))),
+  );
   const boundaries: MessageBoundarySite[] = [];
   for (const send of sends) {
-    if ((handlersByKey.get(send.key)?.size ?? 0) > 0) continue;
-    boundaries.push({
-      filePath: send.filePath,
-      language: send.language,
-      site: {
-        line: send.line,
-        kind: 'message-send',
-        refusal: dropped.has(send.key) ? 'over-cap' : 'unindexed-message-consumer',
-        symbolId: send.callerId,
-        evidence: send.evidence,
-        ...(send.evidenceTruncated ? { evidenceTruncated: true as const } : {}),
-      },
-    });
+    const handlers = [...(handlersByKey.get(send.key) ?? [])]
+      .filter(h => messageHandlerEligible(send.filePath, h, allNodes));
+    let refusal: DynamicBoundarySite['refusal'];
+    if (dropped.has(send.key)) refusal = 'over-cap';
+    else if (handlers.length > 0) {
+      if (send.callerId) continue;
+      refusal = 'unattributed-caller';
+    } else if (uncomparableFields.has(send.key.slice(0, send.key.indexOf('=')))) refusal = 'uncomparable-message-consumer';
+    else refusal = 'unindexed-message-consumer';
+    boundaries.push({ filePath: send.filePath, language: send.language, site: messageSendSite(send, refusal) });
   }
   return { edges, boundaries };
+}
+
+function messageSendSite(send: DynamicMessageSendFact, refusal: DynamicBoundarySite['refusal']): DynamicBoundarySite {
+  return {
+    line: send.line,
+    kind: 'message-send',
+    refusal,
+    ...(send.callerId ? { symbolId: send.callerId } : { unattributed: true as const }),
+    evidence: send.evidence,
+    ...(send.evidenceTruncated ? { evidenceTruncated: true as const } : {}),
+  };
 }
 
 /** Collect JS/TS event-channel sites from one parsed file into `sites`. */
@@ -5260,15 +5292,17 @@ export async function synthesizeDynamicDispatchEdges(
     const eventEdges: CallEdge[] = [];
     const actorEdges: CallEdge[] = [];
     const resolveSites = (sites: EventSites): EventSites => ({
-      registrations: sites.registrations.map(reg => ({
-        key: reg.key,
-        handlerIds: reg.handlerIds.flatMap(id => {
+      registrations: sites.registrations.map(reg => {
+        const handlerIds = reg.handlerIds.flatMap(id => {
           const ref = decodeHandlerRef(id);
           if (!ref) return [id];
           const node = resolveHandler(ref.name, ref.preferFile);
           return node ? [node.id] : [];
-        }),
-      })),
+        });
+        // A message clause whose single callee resolves to nothing is handled by its enclosing
+        // function, exactly as the re-parsing lane decides at collection time.
+        return { key: reg.key, handlerIds: handlerIds.length === 0 && reg.fallbackId ? [reg.fallbackId] : handlerIds };
+      }),
       dispatches: sites.dispatches,
     });
     for (const group of groupOrder) {
@@ -5384,8 +5418,18 @@ function finalizeDynamicBoundaries(
   byFile: Map<string, { language: string; candidates: AttributedCandidate[] }>,
   allNodes: Map<string, FunctionNode>,
   literalReflection: LiteralReflectionResult | undefined,
+  messageBoundaries: MessageBoundarySite[] = [],
 ): Map<string, FileDynamicBoundary> | undefined {
-  if (byFile.size === 0) return undefined;
+  // Message-topology sites are decided by the whole repository's pairing, after extraction. They
+  // are real boundaries, so they join a file's sites BEFORE its record is bounded — never after,
+  // where the cap could rank them below the deferred sites (change: add-message-topology-edges).
+  const messageByFile = new Map<string, { language: string; sites: DynamicBoundarySite[] }>();
+  for (const m of messageBoundaries) {
+    const entry = messageByFile.get(m.filePath) ?? { language: m.language, sites: [] };
+    entry.sites.push(m.site);
+    messageByFile.set(m.filePath, entry);
+  }
+  if (byFile.size === 0 && messageByFile.size === 0) return undefined;
 
   // Internal symbols only: an `external::` placeholder is not something a reflective selector can
   // be said to have resolved to, and counting it would mask a genuine boundary as "resolved".
@@ -5408,7 +5452,9 @@ function finalizeDynamicBoundaries(
       countSymbolsNamed: (name) => nameCounts.get(name) ?? 0,
       refusalFor: (c) => literalReflection?.refusals.get(key(c)),
     };
-    const sites = finalizeDynamicBoundarySites(candidates.filter(c => !c.recoverable), probe);
+    const messageSites = messageByFile.get(filePath)?.sites ?? [];
+    messageByFile.delete(filePath);
+    const sites = [...finalizeDynamicBoundarySites(candidates.filter(c => !c.recoverable), probe), ...messageSites];
     const deferred = finalizeDynamicBoundarySites(candidates.filter(c => c.recoverable), probe);
     const bound = boundDynamicBoundarySites(candidates, probe);
     // Constructs the matcher counted but did not retain are never resolved, so each is a site. The
@@ -5420,6 +5466,10 @@ function finalizeDynamicBoundaries(
       unretained > 0 ? sites.length + deferred.length + unretained : undefined,
       { deferred, bound },
     );
+    if (record) out.set(filePath, record);
+  }
+  for (const [filePath, { language, sites }] of messageByFile) {
+    const record = buildFileDynamicBoundary(filePath, language, sites);
     if (record) out.set(filePath, record);
   }
   return out.size > 0 ? out : undefined;
@@ -6771,9 +6821,8 @@ export class CallGraphBuilder {
       },
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
-      dynamicBoundaryByFile: mergeFileDynamicBoundarySites(
-        finalizeDynamicBoundaries(dynamicBoundaryCandidates, allNodes, literalReflection),
-        synthesisOut.messageBoundaries ?? [],
+      dynamicBoundaryByFile: finalizeDynamicBoundaries(
+        dynamicBoundaryCandidates, allNodes, literalReflection, synthesisOut.messageBoundaries ?? [],
       ),
       httpClientDegradations: httpClientDegradations.length > 0 ? httpClientDegradations : undefined,
       grammarUnavailable: grammarUnavailableByLanguage.size > 0
@@ -7086,19 +7135,26 @@ export async function extractFileDynamicBoundary(
 function singleFileMessageBoundaries(facts: DynamicDispatchFacts | undefined): DynamicBoundarySite[] {
   const sends = facts?.messageSends ?? [];
   if (sends.length === 0) return [];
-  const handled = new Set<string>();
+  // Distinct handlers per key in THIS file: a lower bound on the repository's, so a key over the cap
+  // here is over it in the full build too, and is disclosed the same way.
+  const handlers = new Map<string, Set<string>>();
   for (const e of facts?.events ?? []) {
     if (e.group !== MESSAGE_TOPOLOGY_GROUP) continue;
-    for (const reg of e.registrations) if (reg.handlerIds.length) handled.add(reg.key);
+    for (const reg of e.registrations) {
+      const set = handlers.get(reg.key) ?? new Set<string>();
+      for (const id of reg.handlerIds.length ? reg.handlerIds : reg.fallbackId ? [reg.fallbackId] : []) set.add(id);
+      handlers.set(reg.key, set);
+    }
   }
-  return sends.filter(send => !handled.has(send.key)).map(send => ({
-    line: send.line,
-    kind: 'message-send' as const,
-    refusal: 'unresolved-in-file-scope' as const,
-    symbolId: send.callerId,
-    evidence: send.evidence,
-    ...(send.evidenceTruncated ? { evidenceTruncated: true as const } : {}),
-  }));
+  const uncomparable = new Set([...handlers.keys()].filter(k => k.endsWith(MESSAGE_UNCOMPARABLE_TAG)).map(k => k.slice(0, k.indexOf('='))));
+  const unpaired = sends.flatMap((send): Array<{ send: DynamicMessageSendFact; refusal: DynamicBoundarySite['refusal'] }> => {
+    const count = handlers.get(send.key)?.size ?? 0;
+    if (count > EVENT_CHANNEL_FANOUT_CAP) return [{ send, refusal: 'over-cap' }];
+    if (count > 0) return send.callerId ? [] : [{ send, refusal: 'unattributed-caller' }];
+    if (uncomparable.has(send.key.slice(0, send.key.indexOf('=')))) return [{ send, refusal: 'uncomparable-message-consumer' }];
+    return [{ send, refusal: 'unresolved-in-file-scope' }];
+  });
+  return unpaired.map(({ send, refusal }) => messageSendSite(send, refusal));
 }
 
 export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph {

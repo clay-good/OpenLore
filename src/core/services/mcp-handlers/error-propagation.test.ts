@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { handleAnalyzeErrorPropagation } from './error-propagation.js';
@@ -117,6 +117,24 @@ describe('handleAnalyzeErrorPropagation', () => {
       caughtIn: 'guarded::guarded.ts',
       fromCallee: 'helper::helper.ts',
     });
+  });
+
+  it('does not carry a handler exception back across a message hop, and discloses the hop', async () => {
+    // change: add-message-topology-edges — `ws.send({ type })` hands a message to a transport; the
+    // handler that throws runs elsewhere, so the sender is not exposed to its exception.
+    const SENDER = `function sender(ws) {\n  ws.send({ type: "x" });\n}\n`;
+    writeFileSync(join(dir, 'sender.ts'), SENDER, 'utf-8');
+    const ctxPath = join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT);
+    const ctx = JSON.parse(readFileSync(ctxPath, 'utf-8'));
+    ctx.callGraph.nodes.push(node('sender', 'sender', 'sender.ts', SENDER));
+    ctx.callGraph.edges.push({
+      callerId: 'sender', calleeId: 'helper', calleeName: 'helper', line: 2,
+      confidence: 'synthesized', kind: 'calls', synthesizedBy: 'message-topology',
+    });
+    writeFileSync(ctxPath, JSON.stringify(ctx), 'utf-8');
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'sender' })) as Result;
+    expect(res.summary.escapes).toBe(0);
+    expect(res.boundaries.some(b => /sender::sender\.ts:2 message hop to helper not followed/.test(b))).toBe(true);
   });
 
   it('discloses an external callee as a boundary, never assumed exception-free', async () => {

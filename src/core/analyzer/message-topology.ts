@@ -48,6 +48,13 @@ export const MESSAGE_DISCRIMINANT_FIELDS: ReadonlySet<string> = new Set([
   'type', 'kind', 'action', 'event', 'op', 'cmd', 'command', 'tag',
 ]);
 
+/**
+ * The tag recorded for a clause whose tag cannot be compared (`case CHECKOUT_REQUEST`, an imported
+ * constant). It pairs with nothing; it only stops a send on the same field from claiming that no
+ * consumer exists.
+ */
+export const MESSAGE_UNCOMPARABLE_TAG = '=*';
+
 /** Calls that hand a message to a transport. A construction passed to one is a send. */
 const TRANSPORT_METHODS: ReadonlySet<string> = new Set([
   'send', 'postMessage', 'sendMessage', 'dispatch', 'broadcast', 'publish', 'emit',
@@ -63,14 +70,20 @@ export function mayContainMessageTopology(content: string): boolean {
   return MESSAGE_PREFILTER.test(content);
 }
 
-/** One handler clause: key → the node ids that handle it. */
-export interface MessageRegistration { key: string; handlerIds: string[] }
+/**
+ * One handler clause: key → the node ids that handle it. `fallbackId` is the enclosing function,
+ * used when the clause's single callee was recorded by name and later resolves to nothing — so the
+ * Pass-1 lane, which resolves names only after collection, attributes the clause exactly as the
+ * re-parsing lane does.
+ */
+export interface MessageRegistration { key: string; handlerIds: string[]; fallbackId?: string }
 /** One construction site. */
 export interface MessageDispatch { key: string; callerId: string; line: number }
 /** A construction site, with the source of the transport call it is handed to. */
 export interface MessageSend {
   key: string;
-  callerId: string;
+  /** Absent when no indexed function contains the send. */
+  callerId?: string;
   filePath: string;
   line: number;
   /** Source of the transport call, raw. The caller neutralizes it into evidence. */
@@ -111,8 +124,37 @@ function methodName(callee: Parser.SyntaxNode | null): string | undefined {
 }
 
 /**
+ * A tag that can be paired. `env.staticKey` reads `ident.prop` as a constant, which is right for
+ * `Msg.Open` and wrong for `m.type`: a tag read from another message's discriminant is a run-time
+ * value that only shares a spelling, so it is refused.
+ */
+function tagKey(node: Parser.SyntaxNode | null | undefined, env: MessageCollectorEnv): string | undefined {
+  if (!node || testedField(node)) return undefined;
+  return env.staticKey(node);
+}
+
+/**
+ * Names bound by an import from a package (`import { info } from "pino"`). A clause calling one
+ * calls code outside the index, so the name must not resolve to a same-named function in the repo.
+ */
+function packageImportedNames(root: Parser.SyntaxNode): Set<string> {
+  const names = new Set<string>();
+  for (const imp of root.descendantsOfType('import_statement')) {
+    const source = imp.childForFieldName('source')?.text.slice(1, -1) ?? '';
+    if (source === '' || source.startsWith('.') || source.startsWith('/')) continue;
+    for (const id of imp.descendantsOfType(['identifier', 'property_identifier'])) {
+      if (id.parent?.type === 'import_specifier' && id.parent.childForFieldName('alias') && id.parent.childForFieldName('name')?.startIndex === id.startIndex) continue;
+      names.add(id.text);
+    }
+  }
+  return names;
+}
+
+/**
  * The single callee of a clause body, when the body is exactly one call (`handle(m)`,
- * `return handle(m)`, `await handle(m)`), ignoring a trailing `break`. Otherwise undefined.
+ * `return handle(m)`, `await handle(m)`, `this.handle(m)`), ignoring a trailing `break`. A call on
+ * any other receiver (`console.log(m)`, `m.reply()`) names a method of an unknown object, so it is
+ * not resolved by its bare name. Otherwise undefined.
  */
 function singleCallee(statements: Parser.SyntaxNode[]): string | undefined {
   let body = statements.filter(s => s.type !== 'break_statement' && s.type !== 'comment');
@@ -125,16 +167,24 @@ function singleCallee(statements: Parser.SyntaxNode[]): string | undefined {
     stmt.type === 'expression_statement' || stmt.type === 'return_statement' ? stmt.namedChildren[0] : undefined;
   if (expr?.type === 'await_expression') expr = expr.namedChildren[0];
   if (expr?.type !== 'call_expression') return undefined;
-  return methodName(expr.childForFieldName('function'));
+  const callee = expr.childForFieldName('function');
+  if (callee?.type === 'member_expression' && callee.childForFieldName('object')?.type !== 'this') return undefined;
+  return methodName(callee);
 }
 
-function handlerFor(statements: Parser.SyntaxNode[], clause: Parser.SyntaxNode, env: MessageCollectorEnv): string[] {
+function registrationFor(
+  key: string, statements: Parser.SyntaxNode[], clause: Parser.SyntaxNode, env: CollectorState,
+): MessageRegistration | undefined {
   const callee = singleCallee(statements);
-  const id = (callee ? env.resolveCallee(callee) : undefined) ?? env.enclosingId(clause.startIndex);
-  return id ? [id] : [];
+  const enclosing = env.enclosingId(clause.startIndex);
+  const resolved = callee && !env.packageNames.has(callee) ? env.resolveCallee(callee) : undefined;
+  if (resolved) return { key, handlerIds: [resolved], ...(enclosing ? { fallbackId: enclosing } : {}) };
+  return enclosing ? { key, handlerIds: [enclosing] } : undefined;
 }
 
-function collectSwitchClauses(sw: Parser.SyntaxNode, env: MessageCollectorEnv, out: MessageSites): void {
+interface CollectorState extends MessageCollectorEnv { packageNames: Set<string> }
+
+function collectSwitchClauses(sw: Parser.SyntaxNode, env: CollectorState, out: MessageSites): void {
   const field = testedField(sw.childForFieldName('value'));
   if (!field) return;
   const body = sw.childForFieldName('body');
@@ -145,13 +195,14 @@ function collectSwitchClauses(sw: Parser.SyntaxNode, env: MessageCollectorEnv, o
   for (const clause of body.namedChildren) {
     if (clause.type !== 'switch_case' && clause.type !== 'switch_default') continue;
     const value = clause.type === 'switch_case' ? clause.childForFieldName('value') : null;
-    const tag = value ? env.staticKey(value) : undefined;
+    const tag = tagKey(value, env);
     const statements = clause.namedChildren.filter(c => !(value && c.startIndex === value.startIndex && c.endIndex === value.endIndex) && c.type !== 'comment');
     if (tag !== undefined) pending.push(`${field}=${tag}`);
+    else if (isConstantLike(value)) out.registrations.push({ key: `${field}${MESSAGE_UNCOMPARABLE_TAG}`, handlerIds: [] });
     if (statements.length === 0) continue;
-    if (pending.length > 0) {
-      const handlerIds = handlerFor(statements, clause, env);
-      if (handlerIds.length) for (const key of pending) out.registrations.push({ key, handlerIds });
+    for (const key of pending) {
+      const reg = registrationFor(key, statements, clause, env);
+      if (reg) out.registrations.push(reg);
     }
     pending = [];
   }
@@ -163,7 +214,10 @@ function unparen(node: Parser.SyntaxNode | null | undefined): Parser.SyntaxNode 
   return n;
 }
 
-/** `x.<field> === <tag>` (either side), as its key, or undefined. */
+/**
+ * `x.<field> === <tag>` (either side), as its key, or undefined. A comparison of a discriminant
+ * field against a tag that is not static yields `<field>=*` ({@link MESSAGE_UNCOMPARABLE_TAG}).
+ */
 function equalityKey(node: Parser.SyntaxNode | null | undefined, env: MessageCollectorEnv): string | undefined {
   const cond = unparen(node);
   if (cond?.type !== 'binary_expression') return undefined;
@@ -172,12 +226,25 @@ function equalityKey(node: Parser.SyntaxNode | null | undefined, env: MessageCol
   const left = cond.childForFieldName('left');
   const right = cond.childForFieldName('right');
   let field = testedField(left);
-  let tag = field ? env.staticKey(right ?? undefined) : undefined;
+  let tag = field ? tagKey(right, env) : undefined;
   if (tag === undefined) {
     field = testedField(right);
-    tag = field ? env.staticKey(left ?? undefined) : undefined;
+    tag = field ? tagKey(left, env) : undefined;
   }
-  return field && tag !== undefined ? `${field}=${tag}` : undefined;
+  if (field && tag !== undefined) return `${field}=${tag}`;
+  const opaque = testedField(left) && isConstantLike(right) ? testedField(left)
+    : testedField(right) && isConstantLike(left) ? testedField(right) : undefined;
+  return opaque ? `${opaque}${MESSAGE_UNCOMPARABLE_TAG}` : undefined;
+}
+
+/**
+ * A tag that names a value this rule cannot compare — an identifier (`CHECKOUT_REQUEST`) or a
+ * member chain — but is not another message's discriminant (`a.type === b.type` compares two
+ * messages; it selects no tag).
+ */
+function isConstantLike(node: Parser.SyntaxNode | null | undefined): boolean {
+  const n = unparen(node);
+  return !!n && (n.type === 'identifier' || n.type === 'member_expression') && !testedField(n);
 }
 
 /**
@@ -201,19 +268,33 @@ function conditionKey(node: Parser.SyntaxNode | null | undefined, env: MessageCo
   return keys.length === 1 ? keys[0] : undefined;
 }
 
-function collectIfClause(stmt: Parser.SyntaxNode, env: MessageCollectorEnv, out: MessageSites): void {
+function collectIfClause(stmt: Parser.SyntaxNode, env: CollectorState, out: MessageSites): void {
   const key = conditionKey(stmt.childForFieldName('condition'), env);
   if (!key) return;
+  if (key.endsWith(MESSAGE_UNCOMPARABLE_TAG)) { out.registrations.push({ key, handlerIds: [] }); return; }
   const consequence = stmt.childForFieldName('consequence');
   if (!consequence) return;
-  const handlerIds = handlerFor([consequence], stmt, env);
-  if (handlerIds.length) out.registrations.push({ key, handlerIds });
+  const reg = registrationFor(key, [consequence], stmt, env);
+  if (reg) out.registrations.push(reg);
+}
+
+const TYPE_ONLY_WRAPPERS: ReadonlySet<string> = new Set([
+  'as_expression', 'satisfies_expression', 'non_null_expression', 'parenthesized_expression', 'type_assertion',
+]);
+
+/** The key text of an object pair: `type: …` or `"type": …`. Computed keys are not static here. */
+function pairKeyName(keyNode: Parser.SyntaxNode | null): string | undefined {
+  if (keyNode?.type === 'property_identifier') return keyNode.text;
+  if (keyNode?.type === 'string') return keyNode.text.slice(1, -1);
+  return undefined;
 }
 
 /** The transport call an object literal is handed to, directly or through `JSON.stringify`. */
 function transportCall(obj: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
   let arg: Parser.SyntaxNode = obj;
   for (let depth = 0; depth < 2; depth++) {
+    // A type-only wrapper (`{ … } as Msg`, `satisfies`, `!`, parentheses) does not change the value.
+    while (arg.parent && TYPE_ONLY_WRAPPERS.has(arg.parent.type)) arg = arg.parent;
     const args = arg.parent;
     if (args?.type !== 'arguments') return undefined;
     const call = args.parent;
@@ -235,27 +316,29 @@ function collectConstruction(obj: Parser.SyntaxNode, env: MessageCollectorEnv, o
   for (let i = 0; i < members.length; i++) {
     const pair = members[i];
     if (pair.type !== 'pair') continue;
-    const keyNode = pair.childForFieldName('key');
-    if (keyNode?.type !== 'property_identifier' || !MESSAGE_DISCRIMINANT_FIELDS.has(keyNode.text)) continue;
+    const field = pairKeyName(pair.childForFieldName('key'));
+    if (!field || !MESSAGE_DISCRIMINANT_FIELDS.has(field)) continue;
     // A later spread can overwrite the tag at run time, so the tag is not static.
     if (members.slice(i + 1).some(m => m.type === 'spread_element')) continue;
-    const tag = env.staticKey(pair.childForFieldName('value') ?? undefined);
-    if (tag !== undefined) keys.push(`${keyNode.text}=${tag}`);
+    const tag = tagKey(pair.childForFieldName('value'), env);
+    if (tag !== undefined) keys.push(`${field}=${tag}`);
   }
   if (keys.length === 0) return;
   const transport = transportCall(obj);
   if (!transport) return;
+  // A send no indexed function contains (top level, an anonymous callback) has no edge to carry,
+  // but is still recorded as a send, so it is disclosed rather than dropped.
   const callerId = env.enclosingId(obj.startIndex);
-  if (!callerId) return;
   const line = obj.startPosition.row + 1;
   for (const key of keys) {
-    out.dispatches.push({ key, callerId, line });
-    out.sends.push({ key, callerId, filePath: env.filePath, line, source: transport.text });
+    if (callerId) out.dispatches.push({ key, callerId, line });
+    out.sends.push({ key, ...(callerId ? { callerId } : {}), filePath: env.filePath, line, source: transport.text });
   }
 }
 
 /** Collect one parsed TS/JS file's message-topology sites into `out`. */
-export function collectMessageSites(root: Parser.SyntaxNode, env: MessageCollectorEnv, out: MessageSites): void {
+export function collectMessageSites(root: Parser.SyntaxNode, baseEnv: MessageCollectorEnv, out: MessageSites): void {
+  const env: CollectorState = { ...baseEnv, packageNames: packageImportedNames(root) };
   for (const sw of root.descendantsOfType('switch_statement')) collectSwitchClauses(sw, env, out);
   for (const stmt of root.descendantsOfType('if_statement')) collectIfClause(stmt, env, out);
   for (const obj of root.descendantsOfType('object')) collectConstruction(obj, env, out);

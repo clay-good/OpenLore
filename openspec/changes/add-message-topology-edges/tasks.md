@@ -52,7 +52,8 @@
   verify a path exists from the client action to the reducer clause
 - [x] 5.2 Measure edge-count and analysis-time delta on this repository and on a client/server app;
   verify the growth is within the fan-out cap's bound and record the numbers in the change —
-  this repository (1,379 analyzed files): 7 message edges (+0.02%), 40 `message-send` boundary sites, no
+  this repository (1,379 analyzed files): 10 message edges (+0.03%, all real worker-protocol and
+  telemetry hops after review round 1), 54 `message-send` boundary sites; earlier cut: 7 edges, 40 sites, no
   other edge changed except 2 `tested_by` edges derived from test-caller message edges; analysis
   time 24–26 s with and without the rule over three runs each (no measurable change)
 - [x] 5.3 Run `openspec validate --strict` for this change and the reaching tests from

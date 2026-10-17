@@ -282,6 +282,28 @@ describe('the loader fails open on anything it cannot trust', () => {
     }
   });
 
+  it('keeps a record whose site kind a newer writer added, so its known sites are still served', async () => {
+    // change: add-message-topology-edges — dropping the file for an unknown kind would also drop
+    // the file's known sites and read as "no boundary".
+    await write({
+      version: DYNAMIC_BOUNDARY_SCHEMA_VERSION,
+      files: [{
+        filePath: 'a.py', language: 'Python',
+        sites: [
+          { line: 1, kind: 'reflective-invoke', refusal: 'no-static-target', evidence: 'x' },
+          { line: 2, kind: 'future-kind', refusal: 'no-static-target', evidence: 'y' },
+        ],
+      }],
+    });
+    expect((await load())?.files[0].sites.map(s => s.kind)).toEqual(['reflective-invoke', 'future-kind']);
+    for (const kind of ['Bad Kind', 'x'.repeat(65), '\u001b[31m']) {
+      await write({ version: DYNAMIC_BOUNDARY_SCHEMA_VERSION, files: [{
+        filePath: 'a.py', language: 'Python', sites: [{ line: 1, kind, refusal: 'no-static-target', evidence: 'x' }],
+      }] });
+      expect(await load(), kind).toBeNull();
+    }
+  });
+
   it('a totalSites that is not a plausible integer is refused, not summed into a count', async () => {
     // It is rendered into a sentence a human reads: `"09"`, `1e308` and an object each turn the
     // count into a string, an infinity, or "0[object Object]".

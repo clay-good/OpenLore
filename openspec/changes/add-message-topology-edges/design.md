@@ -118,6 +118,14 @@ designing for it now.
 - **Edges are reachability, not execution** → stated in the spec and carried in the label; the risk
   is a consumer reporting a message hop as a proven call, which the labelling requirement forbids.
 
+- **Watcher drift between full analyses** → the watcher re-derives one file at a time, so saving
+  a sender records `unresolved-in-file-scope` for a send the full build paired in another file
+  (over-disclosure, the safe direction), and saving a consumer does not refresh a stale site in an
+  unchanged sender. Both clear at the next `analyze`, as for every other cross-file disclosure.
+- **A clause calling a method on some other object** (`console.log(m)`, `m.reply()`) or a name
+  imported from a package is attributed to the enclosing function, never resolved by its bare
+  name to a same-named function elsewhere (found in review).
+
 ## Migration Plan
 
 Additive: a graph built without the rule and one built with it differ only by added edges, which is
