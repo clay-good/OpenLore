@@ -245,6 +245,13 @@ describe('orient command', () => {
       expect(output()).not.toBe(pointerLineFor('no-graph'));
     });
 
+    it('--inject says nothing outside a git work tree with no index and no build', async () => {
+      mockStartBuild.mockReturnValue({ state: 'suppressed', detail: 'this directory is not inside a git work tree' });
+      mockHandleOrient.mockResolvedValue({ ...notReady });
+      await orientCommand.parseAsync(['--inject', '--task', 'fix the auth flow bug'], { from: 'user' });
+      expect(output()).toBe('');
+    });
+
     it('starts no build when an analysis exists', async () => {
       mockExistsSync.mockReturnValue(true);
       await orientCommand.parseAsync(['--json'], { from: 'user' });

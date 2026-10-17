@@ -32,6 +32,7 @@ import {
   type OneShotBuild,
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
+import { isInsideGitWorkTree } from '../../core/services/cold-start-bootstrap.js';
 
 interface OrientCliOptions {
   task?: string;
@@ -57,7 +58,12 @@ export { readStdin };
  * pre-turn agent hook. Reads the task from --task or the hook's stdin payload.
  * Always exits 0: a hook must never break the user's turn.
  */
-async function runInject(directory: string, taskOpt: string | undefined, buildNote?: string): Promise<void> {
+async function runInject(
+  directory: string,
+  taskOpt: string | undefined,
+  buildNote?: string,
+  silentWithoutIndex = false,
+): Promise<void> {
   let prompt = taskOpt ?? '';
   if (!prompt) {
     try {
@@ -80,6 +86,9 @@ async function runInject(directory: string, taskOpt: string | undefined, buildNo
         `failed=${evaluation.failedCriteria.join(',') || 'none'}\n`,
       );
     } : undefined));
+    // Outside any git work tree (e.g. $HOME) with no index, say nothing: "run openlore
+    // analyze" on every prompt there invites an agent to index the whole directory.
+    if (block === pointerLineFor('no-graph') && silentWithoutIndex) return;
     // With a build in flight, "run openlore analyze" is the wrong remedy: say what is happening.
     if (block) console.log(buildNote && block === pointerLineFor('no-graph') ? `[OpenLore] ${safe(buildNote)}` : block);
   } catch {
@@ -252,7 +261,8 @@ prints a short session-start primer (used by the install SessionStart hook).
     // pointer line) to stdout and always exit 0 — a pre-turn hook must never
     // break the user's turn. Reads the task from --task or stdin.
     if (opts.inject) {
-      await runInject(directory, task, buildNote());
+      const building = build?.state === 'started' || build?.state === 'running';
+      await runInject(directory, task, buildNote(), !building && !hasAnalysis(root) && !isInsideGitWorkTree(root));
       return;
     }
 
