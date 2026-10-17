@@ -123,6 +123,33 @@ describe('one-shot index build', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('counts the cooldown from the end of a build, not its start', async () => {
+    const { calls, spawnProcess } = fakeSpawn(deadPid());
+    const opts = { cliPath: '/cli.js', spawnProcess };
+    startDetachedIndexBuild(dir, 'index-absent', opts);
+    // A build that ran longer than the cooldown, then failed.
+    utimesSync(join(dir, STAMP), new Date(0), new Date(0));
+    const build = vi.fn(async () => { throw new Error('boom'); });
+    await runBackgroundIndexBuild(dir, { build });
+    expect(startDetachedIndexBuild(dir, 'index-absent', opts)).toEqual({ state: 'recently-attempted' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('does not replace an expired stamp while a peer holds the replacement claim', () => {
+    const { calls, spawnProcess } = fakeSpawn(deadPid());
+    const opts = { cliPath: '/cli.js', spawnProcess };
+    startDetachedIndexBuild(dir, 'index-absent', opts);
+    utimesSync(join(dir, STAMP), new Date(0), new Date(0));
+    writeFileSync(join(dir, `${STAMP}.claim`), '');
+    expect(startDetachedIndexBuild(dir, 'index-absent', opts)).toEqual({ state: 'running' });
+    expect(calls).toHaveLength(1);
+    // A claim left by a crashed peer is broken once it is stale.
+    utimesSync(join(dir, `${STAMP}.claim`), new Date(0), new Date(0));
+    expect(startDetachedIndexBuild(dir, 'index-absent', opts)).toEqual({ state: 'started' });
+    expect(calls).toHaveLength(2);
+    expect(existsSync(join(dir, `${STAMP}.claim`))).toBe(false);
+  });
+
   it('supervisor runs the build and never throws', async () => {
     const build = vi.fn(async () => { throw new Error('boom'); });
     await expect(runBackgroundIndexBuild(dir, { repair: true, build })).resolves.toBeUndefined();

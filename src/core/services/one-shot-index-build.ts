@@ -11,7 +11,7 @@
  * and stops a build that cannot succeed from being restarted on every prompt.
  */
 
-import { closeSync, fstatSync, mkdirSync, openSync, readSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fstatSync, mkdirSync, openSync, readSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { AUTO_INIT_DEGRADED_FILE_CEILING, OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
@@ -33,6 +33,27 @@ import { childEnvWithoutScopedTlsRelaxation } from './tls-scope.js';
 export const ONE_SHOT_BUILD_COOLDOWN_MS = 2 * 60_000;
 
 const ATTEMPT_STAMP_FILE = 'auto-build-attempt';
+/**
+ * Held only while an EXPIRED stamp is replaced, so two racing hooks cannot both delete
+ * and re-create it. A claim older than this is a crashed claimant and is broken.
+ */
+const STAMP_CLAIM_STALE_MS = 10_000;
+
+/** Exclusive claim on replacing an expired stamp, or false when a peer holds it. */
+function claimStampReplacement(claimPath: string, now: number): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      closeSync(openSync(claimPath, 'wx'));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const claim = readState(claimPath);
+      if (claim && now - claim.mtimeMs < STAMP_CLAIM_STALE_MS) return false;
+      try { unlinkSync(claimPath); } catch { /* a peer broke it first */ }
+    }
+  }
+  return false;
+}
 /** Both files hold one short line; a fixed prefix bounds the read whatever is there. */
 const MAX_STATE_BYTES = 64 * 1024;
 
@@ -103,13 +124,27 @@ export function startDetachedIndexBuild(
 
   const cliPath = opts.cliPath ?? process.argv[1];
   if (!cliPath) return { state: 'unavailable' };
+  const claimPath = `${stampPath}.claim`;
+  let claimed = false;
   try {
     mkdirSync(runtimeDir, { recursive: true });
-    if (stamp) unlinkSync(stampPath);
+    if (stamp) {
+      // Replace the expired stamp under a claim: without it, a peer that read the same
+      // expired stamp could delete the fresh one this call creates, and both would spawn.
+      if (!claimStampReplacement(claimPath, (opts.now ?? Date.now)())) return { state: 'running' };
+      claimed = true;
+      const current = readState(stampPath);
+      if (current && current.mtimeMs !== stamp.mtimeMs) return { state: 'running' };
+      if (current) unlinkSync(stampPath);
+    }
     // Exclusive create: of several hook calls racing here, one claims the attempt.
     closeSync(openSync(stampPath, 'wx'));
   } catch (error) {
     return { state: (error as NodeJS.ErrnoException).code === 'EEXIST' ? 'running' : 'unavailable' };
+  } finally {
+    if (claimed) {
+      try { unlinkSync(claimPath); } catch { /* already gone */ }
+    }
   }
   try {
     const child = (opts.spawnProcess ?? spawn)(
@@ -163,6 +198,15 @@ export async function runBackgroundIndexBuild(
     // Fail-soft: a later one-shot call, past the cooldown, tries again.
   } finally {
     clearInterval(keepAlive);
+    // The cooldown counts from the END of the attempt. Counted from the spawn, a build
+    // that runs past the cooldown and fails would be restarted on the very next prompt.
+    const stampPath = join(runtimeDirOf(join(directory, OPENLORE_ANALYSIS_REL_PATH)), ATTEMPT_STAMP_FILE);
+    try {
+      const at = new Date();
+      utimesSync(stampPath, at, at);
+    } catch {
+      // No stamp (the build was started another way): nothing to refresh.
+    }
   }
 }
 
