@@ -18,7 +18,7 @@ import { buildWeightedAdjacency, weightedBfs } from './graph.js';
 import { loadTraversalIndex, traversalIndexFor } from './traversal.js';
 import type { TraversalIndex, TraversalFilter } from '../../analyzer/condensation.js';
 import type { WeightedReach } from './graph.js';
-import { assembleBoundary, buildPairEdgeIndex, computeStaleness, edgeBasisForChains } from './confidence-boundary.js';
+import { assembleBoundary, buildPairEdgeIndex, computeStaleness, edgeBasisForChains, hopVia } from './confidence-boundary.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
@@ -274,11 +274,7 @@ export async function handleFindPath(
   const toChain = (p: { ids: string[]; hops: number; distance: number }) => ({
     chain: p.ids.map((id, i) => {
       const n = nodeMap.get(id);
-      const edge = i > 0 ? pairIndex.get(p.ids[i - 1] + '\x00' + id) : undefined;
-      // The rule name comes from a repository-controlled artifact: only a plain rule-shaped name is echoed.
-      const rule = edge?.synthesizedBy;
-      const via = edge?.confidence !== 'synthesized' ? undefined
-        : typeof rule === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(rule) ? rule : 'synthesized';
+      const via = i > 0 ? hopVia(pairIndex.get(p.ids[i - 1] + '\x00' + id)) : undefined;
       return { name: n?.name ?? id, file: n ? displayFile(n.filePath) : '', ...(via ? { via } : {}) };
     }),
     hops: p.hops,
