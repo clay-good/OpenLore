@@ -3023,6 +3023,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         // orient emits navigation telemetry tied to the MCP session's agent.
         if (name === 'orient' && result && typeof result === 'object') {
           const r = result as Record<string, unknown>;
+          // Suggest only tools this server actually exposes.
+          if (Array.isArray(r['suggestedTools'])) {
+            r['suggestedTools'] = (r['suggestedTools'] as string[]).filter((t) => activeToolNames.has(t));
+          }
           emit(directory, 'orient', {
             event: 'orient_call',
             agent: agentName,
