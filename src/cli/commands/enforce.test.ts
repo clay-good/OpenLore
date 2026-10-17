@@ -434,6 +434,28 @@ describe('architecture assessment hardening', () => {
   });
 });
 
+describe('enforce --hook on an unborn HEAD', () => {
+  it('does not block a first commit when no policy is configured', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-enforce-unborn-'));
+    try {
+      await execFileAsync('git', ['init', '-q'], { cwd: root });
+      await mkdir(join(root, '.openlore'), { recursive: true });
+      await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({
+        version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+        analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+        generation: { domains: 'auto' }, createdAt: '2026-10-17T00:00:00Z', lastRun: null,
+      }));
+      await writeFile(join(root, 'a.ts'), 'export const a = 1;\n');
+      await execFileAsync('git', ['add', '-A'], { cwd: root });
+      const { code, stderr } = await gateHookHuman(root);
+      expect(stderr).not.toMatch(/readable Git HEAD|unrecognized baseline header/);
+      expect(code).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('enforce git hook install/uninstall', () => {
   const readHook = (root: string) => readFile(join(root, '.git', 'hooks', 'pre-commit'), 'utf-8');
 

@@ -606,7 +606,14 @@ async function inspectWorktreeStatus(
 
 async function trustedBaselineAtHead(cwd: string): Promise<{ text?: string | null; error?: string }> {
   try {
-    await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd });
+    try {
+      await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd });
+    } catch (error) {
+      // An unborn HEAD (first commit, orphan branch) has no committed baseline, so
+      // nothing is frozen. Only a readable repository qualifies; anything else is an error.
+      await execFileAsync('git', ['rev-parse', '--git-dir'], { cwd }).catch(() => { throw error; });
+      return { text: null };
+    }
     const { stdout } = await execFileAsync('git', gitPathArgs(
       'ls-tree', '-z', '--name-only', 'HEAD', '--', ENFORCEMENT_BASELINE_REPO_PATH,
     ), { cwd });
