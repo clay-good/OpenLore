@@ -19,6 +19,14 @@ describe('detectInstallMethod', () => {
     ).toBe('npm-global');
   });
 
+  it('classifies the stable opt alias of the Homebrew formula as Homebrew', () => {
+    expect(
+      detectInstallMethod('/opt/homebrew/opt/openlore/libexec/lib/node_modules/openlore/dist/cli/index.js', {
+        npmGlobalRoots: ['/opt/homebrew/lib/node_modules'],
+      })
+    ).toBe('homebrew');
+  });
+
   it('detects npx (transient) installs', () => {
     expect(detectInstallMethod('/Users/x/.npm/_npx/abc123/node_modules/openlore/dist/cli/update.js')).toBe('npx');
   });

@@ -62,9 +62,10 @@ export function detectInstallMethod(
   evidence: InstallEvidence = {}
 ): InstallMethod {
   const p = normalizePath(modulePath);
-  // Only the Cellar is a Homebrew formula install. The prefix alone is not: a
-  // Homebrew node puts `npm i -g` packages under `<prefix>/lib/node_modules`.
-  if (p.includes('/cellar/')) return 'homebrew';
+  // Only the Cellar (or its stable `opt/<formula>/libexec` alias) is a Homebrew formula
+  // install. The prefix alone is not: a Homebrew node puts `npm i -g` packages under
+  // `<prefix>/lib/node_modules`.
+  if (p.includes('/cellar/') || p.includes('/opt/openlore/libexec/')) return 'homebrew';
   // npx caches under .../_npx/<hash>/node_modules/... (npm) — transient, auto-floats.
   if (p.includes('/_npx/') || p.includes('/npm-cache/_npx/')) return 'npx';
 
