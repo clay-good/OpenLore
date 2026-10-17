@@ -62,6 +62,7 @@ import {
   type ServedContentProvenance,
 } from '../served-content.js';
 import { withIndexStaleness } from './index-staleness.js';
+import { buildPairEdgeIndex, hopVia } from './confidence-boundary.js';
 
 // ============================================================================
 // MANIFEST CACHE
@@ -151,6 +152,8 @@ interface CallNeighbour {
   filePath: string;
   /** Present only for infrastructure neighbors (IaC resources) — spec-17 cross-domain. */
   domain?: 'infra';
+  /** The synthesis rule, when only a synthesized edge links this neighbour (a message or event hop, not a call). */
+  via?: string;
   provenance: AnalysisContentProvenance;
 }
 
@@ -369,18 +372,33 @@ export async function handleOrient(
     }
     const es = llmCtx.edgeStore;
     // Tag IaC resources so an agent can tell infrastructure neighbors from code (spec-17).
-    const toNeighbour = (n: ReturnType<typeof es.getNode>): CallNeighbour | null =>
+    const toNeighbour = (n: ReturnType<typeof es.getNode>, via: string | undefined): CallNeighbour | null =>
       n && !n.isExternal
-        ? { name: n.name, filePath: n.filePath, provenance: analysisProvenance, ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}) }
+        ? {
+          name: n.name, filePath: n.filePath, provenance: analysisProvenance,
+          ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}),
+          ...(via ? { via } : {}),
+        }
         : null;
-    const callers = es.getCallers(r.record.id)
-      .map(e => toNeighbour(es.getNode(e.callerId)))
-      .filter((x): x is CallNeighbour => x !== null)
-      .slice(0, 5);
-    const callees = es.getCallees(r.record.id)
-      .map(e => toNeighbour(es.getNode(e.calleeId)))
-      .filter((x): x is CallNeighbour => x !== null)
-      .slice(0, 5);
+    // One neighbour per linked node; a directly-resolved edge wins over a synthesized one for the
+    // same pair, and a hop only a synthesized edge realizes names its rule (change: label-synthesized-hops).
+    const neighbours = (edges: ReturnType<typeof es.getCallers>, otherOf: (e: (typeof edges)[number]) => string): CallNeighbour[] => {
+      // Keyed by the neighbour alone (a placeholder for the fixed side of every edge).
+      const byNode = buildPairEdgeIndex(edges.map(e => ({ ...e, callerId: 'self', calleeId: otherOf(e) })));
+      const seen = new Set<string>();
+      const out: CallNeighbour[] = [];
+      for (const e of edges) {
+        const id = otherOf(e);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const n = toNeighbour(es.getNode(id), hopVia(byNode.get('self\x00' + id)));
+        if (n) out.push(n);
+        if (out.length === 5) break;
+      }
+      return out;
+    };
+    const callers = neighbours(es.getCallers(r.record.id), e => e.callerId);
+    const callees = neighbours(es.getCallees(r.record.id), e => e.calleeId);
     return { function: r.record.name, filePath: r.record.filePath, callers, callees, provenance: analysisProvenance };
   };
   const callPaths: OrientCallPath[] = callPathResults.map(toCallPath);

@@ -80,7 +80,15 @@ const CONF_RANK: Record<Confidence, number> = { high: 3, medium: 2, low: 1 };
 export const SELECTION_REASON = {
   newTest: 'included: new test',
   changedTest: 'included: test file itself changed',
-  reaches: (depth: number) => `included: reaches changed symbol at depth ${depth}`,
+  /**
+   * A path across a synthesized edge names its rules: a message or event hop is not proof the test
+   * executes the symbol (change: label-synthesized-hops). The depth stays the reason's last NUMBER.
+   */
+  reaches: (depth: number, viaRules: readonly string[] = []) => {
+    // Rule names come from a repository-controlled artifact: only rule-shaped names are echoed.
+    const rules = [...new Set(viaRules.map(r => (/^[a-z][a-z0-9-]{0,63}$/.test(r) ? r : 'synthesized')))].sort();
+    return `included: reaches changed symbol at depth ${depth}${rules.length ? ` via ${rules.join(', ')}` : ''}`;
+  },
   sameFile: 'included: tests a function in the same file as a changed symbol',
 } as const;
 
@@ -94,7 +102,7 @@ function reasonRank(reason: string): number {
 
 /** Tier first, then the shallower reaching depth (numerically — "depth 10" is weaker than "depth 2"). */
 function compareReasons(a: string, b: string): number {
-  const depth = (reason: string) => Number(/depth (\d+)$/.exec(reason)?.[1] ?? 0);
+  const depth = (reason: string) => Number(/depth (\d+)/.exec(reason)?.[1] ?? 0);
   return reasonRank(a) - reasonRank(b) || depth(a) - depth(b) || a.localeCompare(b);
 }
 
@@ -460,7 +468,8 @@ export async function handleSelectTests(
     const idPath = idPathToSeed(id);
     if (crossesTestedBy(idPath)) continue;
     const confidence: Confidence = depth === 1 ? 'high' : depth <= 3 ? 'medium' : 'low';
-    add(n.filePath, n.name, pathToSeed(id), confidence, SELECTION_REASON.reaches(depth), basisOfPath(idPath));
+    const basis = basisOfPath(idPath);
+    add(n.filePath, n.name, pathToSeed(id), confidence, SELECTION_REASON.reaches(depth, basis?.synthesizedBy), basis);
   }
 
   // Source 2 — `tested_by` edges on any reached production node (catches import-
@@ -476,10 +485,11 @@ export async function handleSelectTests(
     const testFile = e.calleeId.includes('::') ? e.calleeId.split('::')[0] : e.calleeId;
     const onSeed = seedIds.has(e.callerId);
     const confidence: Confidence = onSeed ? 'high' : 'medium';
+    const basis = withEdgeBasis(basisOfPath(idPath), e);
     add(
       testFile, e.calleeName, [e.calleeName, ...pathToSeed(e.callerId)], confidence,
-      SELECTION_REASON.reaches((depthOf.get(e.callerId) ?? 0) + 1),
-      withEdgeBasis(basisOfPath(idPath), e),
+      SELECTION_REASON.reaches((depthOf.get(e.callerId) ?? 0) + 1, basis?.synthesizedBy),
+      basis,
     );
   }
 

@@ -137,7 +137,7 @@ Reachability alone can miss the test that matters most: the one you just edited 
 |---|---|---|
 | New test | a test file added since the base ref, or an **untracked**, non-ignored test file (which `git diff` never lists) | `included: new test` |
 | Changed test | a test file modified since the base ref | `included: test file itself changed` |
-| Reachability | a test that transitively reaches a changed symbol (the existing walk) | `included: reaches changed symbol at depth N` |
+| Reachability | a test that transitively reaches a changed symbol (the existing walk) | `included: reaches changed symbol at depth N`, plus ` via <rules>` when the path crosses a synthesized edge |
 | Same-file fallback | a test of another function in a changed function's file, when nothing reaches that function | `included: tests a function in the same file as a changed symbol` |
 
 Tiers only **add** selections, never remove one. A tier file must satisfy the analyzer's own
@@ -156,7 +156,8 @@ Every selected test carries the `reason` behind the path it is served with (so `
 and `confidence` always agree; a tier reason always wins), and `alsoIncludedBecause` lists any other
 reason that selected it, tier first, then shallowest depth. A selection whose reaching path crosses a synthesized (heuristically recovered)
 edge carries `structuralBasis: { synthesizedEdges, synthesizedBy }`, built from the existing edge
-provenance labels (a direct edge for the same pair wins). A synthesized `tested_by` association counts
+provenance labels (a direct edge for the same pair wins), and its `reason` names those rules
+(`… at depth 2 via message-topology`): a message or event hop is not proof the test runs the symbol. A synthesized `tested_by` association counts
 as one such edge, and `directResolvedOnly` skips it. A path that only exists by crossing a `tested_by` association (production to test) backward is not a reaching path, so it selects nothing. A directly-resolved selection carries none,
 and the response-level `confidenceBoundary` is unchanged.
 
