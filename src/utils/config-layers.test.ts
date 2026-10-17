@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { globalOpenLoreConfigPath, mergeConfigLayers, readLayeredConfig } from './config-layers.js';
 import { getDefaultConfig, readOpenLoreConfig, readOpenLoreConfigStrict, readProjectOpenLoreConfig, writeOpenLoreConfig } from '../core/services/config-manager.js';
-import { refuseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut, resolveTrustedCompatBase } from '../core/services/repo-config-trust.js';
+import { refuseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut, resolveTrustedCompatBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 import { logger } from './logger.js';
 import { readConfig, readContextInjection, piMaySpawnDaemon, piToolSurface } from '../pi/extension.js';
 import { autoInitSuppression, repairInBackground } from '../core/services/cold-start-bootstrap.js';
@@ -124,6 +124,15 @@ describe('user and project configuration layers', () => {
     // The same endpoint as the user's keeps the user's key: the user chose that destination.
     await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ embedding: { baseUrl: 'https://embed.example.com/v1', batchSize: 8 } }));
     expect((await readOpenLoreConfig(project))?.embedding).toMatchObject({ apiKey: 'user-secret' });
+  });
+
+  it('drops a restated TLS opt-out beside a project-chosen endpoint', async () => {
+    await writeFile(globalPath, JSON.stringify({ llm: { apiBase: 'https://corp-proxy.example', sslVerify: false } }));
+    // Restating the user's value must not move the user's opt-out to the provider default.
+    await writeFile(join(project, '.openlore', 'config.json'), JSON.stringify({ llm: { apiBase: '', sslVerify: false } }));
+    const cfg = await readOpenLoreConfig(project);
+    expect(cfg?.llm?.sslVerify).toBeUndefined();
+    expect(resolveTrustedSslVerify(undefined, cfg?.llm?.sslVerify)).toBe(true);
   });
 
   it('applies repository trust checks to project values only, not user-wide values', async () => {

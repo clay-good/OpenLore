@@ -101,12 +101,17 @@ export function mergeConfigLayers(
     for (const field of ENDPOINT_BOUND_KEYS) {
       if (!Object.hasOwn(value, field)) delete block[field];
     }
+    // A TLS opt-out beside a repository-chosen endpoint is dropped even when the project
+    // restates the user's value: trust checks accept a value that matches the user file,
+    // and that match must not carry the user's opt-out to an endpoint the user never chose.
+    for (const field of ENDPOINT_TLS_KEYS) delete block[field];
   }
   return merged;
 }
 
 const ENDPOINT_KEYS = ['baseUrl', 'apiBase', 'openaiCompatBaseUrl'];
 const ENDPOINT_BOUND_KEYS = ['apiKey', 'skipSslVerify', 'sslVerify'];
+const ENDPOINT_TLS_KEYS = ['skipSslVerify', 'sslVerify'];
 
 /**
  * True when `value` at dotted `field` is the one the user-wide config sets. Such a value
