@@ -954,6 +954,12 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         logRoot: rootPath,
       });
 
+      // In --gate mode an agent parses the gated JSON on stdout: progress goes to stderr.
+      const progress = (message: string): void => {
+        if (options.gate) process.stderr.write(`[scan] ${message}\n`);
+        else logger.discovery(message);
+      };
+
       // Step 1 — Consolidate drafts OR extract from diff as fallback
       const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specMapResult = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
@@ -961,13 +967,13 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       let supersededIds: string[] = [];
       let dispositions: DraftDisposition[] = [];
       if (hasDrafts) {
-        if (!options.json) logger.discovery(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
+        if (!options.json) progress(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
         const result = await consolidateDrafts(store, llm, specMapResult);
         consolidated = result.decisions;
         supersededIds = result.supersededIds;
         dispositions = result.dispositions;
       } else {
-        if (!options.json) logger.discovery(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
+        if (!options.json) progress(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
         const specMap = specMapResult ?? await buildSpecMap({ rootPath, openspecPath });
         // Use staged-only scope so the fallback only sees what's actually being committed.
         consolidated = await extractFromDiff({ rootPath, stagedOnly: true, specMap, sessionId: store.sessionId, llm });
@@ -976,17 +982,24 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         // Nothing survived — but every draft still gets its verdict, so the author
         // can read WHY rather than watch the draft disappear
         // (change: explain-decision-rejection).
-        const updatedStore = dispositions.length > 0
-          ? await updateDecisionStore(rootPath, (s) => applyConsolidationOutcome(s, {
-            originalDraftIds: new Set(drafts.map((draft) => draft.id)),
-            originalDrafts: drafts,
-            capturedDecisions: store.decisions,
-            verified: [],
-            phantom: [],
-            supersededIds,
-            dispositions,
-          }), 'agent')
-          : store;
+        // A consolidation that honestly finds nothing still happened: write its receipt,
+        // or the gate reports `no_decisions_recorded` again and the documented flow loops.
+        const emptySnapshot = await sourceSnapshotFingerprint(rootPath, true);
+        const updatedStore = await updateDecisionStore(rootPath, (s) => ({
+          ...(dispositions.length > 0
+            ? applyConsolidationOutcome(s, {
+              originalDraftIds: new Set(drafts.map((draft) => draft.id)),
+              originalDrafts: drafts,
+              capturedDecisions: store.decisions,
+              verified: [],
+              phantom: [],
+              supersededIds,
+              dispositions,
+            })
+            : s),
+          lastConsolidatedAt: new Date().toISOString(),
+          lastConsolidatedSourceFingerprint: emptySnapshot?.fingerprint,
+        }), 'agent');
         const classifications = reconcileDecisionClassifications(updatedStore, {
           verified: [],
           phantom: [],
@@ -1063,7 +1076,9 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         dispositions.filter((disposition) => !unassessedIds.has(disposition.id)),
         new Set(phantom.map((d) => d.id)),
       );
-      const consolidationSnapshot = await sourceSnapshotFingerprint(rootPath, false);
+      // Staged scope, like the gate that checks this receipt: a working-tree fingerprint
+      // never matches when any untracked or unstaged source file exists.
+      const consolidationSnapshot = await sourceSnapshotFingerprint(rootPath, true);
       const updatedStore = await updateDecisionStore(rootPath, (s) => {
         // Every input draft's verdict, written alongside the status transition.
         const next = applyConsolidationOutcome(s, {
