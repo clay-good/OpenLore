@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { execFileGitSync } from '../../../utils/git-exec.js';
 import { simulateMerge, gitVersionAtLeast } from './merge-oracle.js';
 import { defaultEnumeratePullRequests } from './interference-map.js';
@@ -138,8 +139,11 @@ describe('simulateMerge', () => {
     expect(prs.changes[0].tip).toBeUndefined();
     expect(existsSync(marker)).toBe(false);
     // Non-vacuity: a plain read of the missing object in that repository does run the command.
+    // Raw git on purpose: the hardened helper turns lazy fetching off for every git spawn.
     if (process.platform !== 'win32') {
-      try { git(promisor, 'cat-file', '-e', `${missing}^{commit}`); } catch { /* missing object */ }
+      try {
+        execFileSync('git', ['cat-file', '-e', `${missing}^{commit}`], { cwd: promisor, stdio: 'ignore', windowsHide: true });
+      } catch { /* missing object */ }
       expect(existsSync(marker)).toBe(true);
     }
   });
