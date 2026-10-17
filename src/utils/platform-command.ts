@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -293,6 +293,25 @@ export function openloreCliEntry(runtime: PlatformCommandRuntime = {}): string |
 }
 
 /**
+ * The stable form of a Homebrew Cellar path, or the path unchanged.
+ *
+ * `<prefix>/Cellar/<formula>/<version>/…` is deleted by `brew upgrade <formula>`, so a
+ * config that names it stops working at the next upgrade. Homebrew keeps
+ * `<prefix>/opt/<formula>` pointed at the current version; that alias is returned only
+ * when it resolves to the very same file today, so the rewrite cannot change what runs.
+ */
+export function stableHomebrewPath(path: string): string {
+  const match = /^(.*)\/Cellar\/([^/]+)\/[^/]+\/(.+)$/.exec(path);
+  if (!match) return path;
+  const stable = `${match[1]}/opt/${match[2]}/${match[3]}`;
+  try {
+    return realpathSync(stable) === realpathSync(path) ? stable : path;
+  } catch {
+    return path;
+  }
+}
+
+/**
  * Resolve an invocation of OpenLore's OWN CLI for a host config file (MCP server
  * entry, agent hook, …).
  *
@@ -311,9 +330,10 @@ export function openloreCliEntry(runtime: PlatformCommandRuntime = {}): string |
  * no shim, no `cmd.exe`, and one process hop fewer on every invocation.
  *
  * TRADE-OFF: this writes an absolute path, so it binds the config to this install
- * location. A global npm install keeps that path across upgrades; a moved or removed
- * install needs `openlore install` re-run, where the `npx` form would have re-fetched.
- * That is the deliberate price of not opening a window on every turn.
+ * location. A global npm install keeps that path across upgrades, and a Homebrew
+ * install is written through its stable `opt` alias (see `stableHomebrewPath`); a moved
+ * or removed install needs `openlore install` re-run, where the `npx` form would have
+ * re-fetched. That is the deliberate price of not opening a window on every turn.
  */
 export function resolveOpenloreCommand(
   args: readonly string[],
@@ -326,7 +346,10 @@ export function resolveOpenloreCommand(
   // shell, so it must be absolute — the same precondition resolvePlatformCommand
   // enforces. Anything else falls back rather than emitting an unusable command.
   if (entry && (platform !== 'win32' || win32.isAbsolute(nodeExecutable))) {
-    return { command: nodeExecutable, args: [entry, ...args] };
+    return {
+      command: stableHomebrewPath(nodeExecutable),
+      args: [stableHomebrewPath(entry), ...args],
+    };
   }
   return resolvePlatformCommand('npx', ['--yes', 'openlore', ...args], platform, runtime);
 }
