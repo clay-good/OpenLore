@@ -636,11 +636,14 @@ describe('handleTraceExecutionPath', () => {
     const result = await handleTraceExecutionPath('/tmp/proj', 'main', 'area') as {
       pathsFound: number;
       shortestPath: string;
+      paths: Array<{ steps: Array<{ name: string; via?: string }> }>;
       confidenceBoundary: { complete: boolean };
     };
 
     expect(result.pathsFound).toBe(1);
-    expect(result.shortestPath).toBe('main → totalArea → area'); // reached the literal target
+    // Reached the literal target, and the synthesized hop names its rule (change: label-synthesized-hops).
+    expect(result.shortestPath).toBe('main → totalArea → area [via cha-name-only]');
+    expect(result.paths[0].steps.map(s => s.via)).toEqual([undefined, undefined, 'cha-name-only']);
     expect(result.confidenceBoundary.complete).toBe(false);      // leaned on a synthesized edge — disclosed
   });
 

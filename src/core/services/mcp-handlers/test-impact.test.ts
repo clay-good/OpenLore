@@ -632,6 +632,18 @@ describe('select_tests safeguard tiers', () => {
     expect(find(r, 'testBar')?.structuralBasis).toBeUndefined();
   });
 
+  it('names the synthesized rules a reaching path crosses in its reason (change: label-synthesized-hops)', async () => {
+    const synthEdges: CallEdge[] = [
+      { callerId: 'src/foo.test.ts::testFoo', calleeId: 'src/foo.ts::foo', calleeName: 'foo', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'message-topology' },
+      ...EDGES.slice(1),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, synthEdges) } as never);
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as Result;
+    expect(find(r, 'testFoo')?.reason).toBe('included: reaches changed symbol at depth 2 via message-topology');
+    expect(find(r, 'testBar')?.reason).toBe(SELECTION_REASON.reaches(1));
+    expect(SELECTION_REASON.reaches(3, ['\u001b[31mx', 'event-channel'])).toBe('included: reaches changed symbol at depth 3 via event-channel, synthesized');
+  });
+
   it('serves the reason behind the kept path, and lists other depths shallowest first', async () => {
     // T is tested_by b1 (depth 1) and b9 (depth 9) of a ten-link chain to the seed b0.
     const chain = Array.from({ length: 10 }, (_, i) => node({ id: `src/c.ts::b${i}` }));
