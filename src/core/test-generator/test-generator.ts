@@ -10,10 +10,10 @@
  *     by reading mapped function source code.
  */
 
-import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { fileExists } from '../../utils/command-helpers.js';
+import { readFileConfined } from '../../utils/path-confinement.js';
 import type { ParsedScenario, GeneratedTestFile, TestFramework, FunctionRef } from '../../types/test-generator.js';
 import type { LLMService } from '../services/llm-service.js';
 import { matchThenClauses } from './then-matchers.js';
@@ -23,6 +23,9 @@ import { toKebabCase } from './scenario-parser.js';
 import { toSnakeCase, toPascalCase } from './renderers/shared.js';
 import { FRAMEWORK_EXTENSIONS } from '../../types/test-generator.js';
 import { protectPrompt } from '../../utils/prompt-boundary.js';
+
+/** A snippet uses 40 lines; a source file past this is skipped, not read whole. */
+const MAX_SNIPPET_SOURCE_BYTES = 4 * 1024 * 1024;
 
 // ============================================================================
 // TYPES
@@ -56,7 +59,9 @@ async function readFunctionSnippets(
     const absPath = resolve(rootPath, fn.file);
     if (!(await fileExists(absPath))) continue;
     try {
-      const source = await readFile(absPath, 'utf-8');
+      // `fn.file` comes from a committed mapping.json: confine it, or a clone could have a
+      // file outside the repository (e.g. ~/.ssh/id_rsa) pasted into the LLM prompt.
+      const source = await readFileConfined(rootPath, fn.file, MAX_SNIPPET_SOURCE_BYTES);
       const lines = source.split('\n');
       const start = Math.max(0, (fn.line ?? 1) - 1);
       const end = Math.min(lines.length, start + 40);
