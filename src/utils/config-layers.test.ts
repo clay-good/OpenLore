@@ -146,6 +146,22 @@ describe('user and project configuration layers', () => {
     }
   });
 
+  it('does not keep the user llm endpoint or TLS opt-out when a project switches provider', () => {
+    const merged = mergeConfigLayers(
+      { generation: { provider: 'openai-compat', openaiCompatBaseUrl: 'https://gw.corp/v1' }, llm: { apiBase: 'https://gw.corp/v1', sslVerify: false, timeout: 5 } },
+      { generation: { provider: 'anthropic' } },
+    );
+    expect(merged.llm).toEqual({ timeout: 5 });
+  });
+
+  it('does not reuse a user remote embedding model, endpoint or key when a project switches provider', () => {
+    const merged = mergeConfigLayers(
+      { embedding: { baseUrl: 'https://api.openai.com/v1', model: 'acme/embed-small', apiKey: 'sk-user', batchSize: 8 } },
+      { embedding: { provider: 'local' } },
+    );
+    expect(merged.embedding).toEqual({ provider: 'local', batchSize: 8 });
+  });
+
   it('drops a restated TLS opt-out beside a project-chosen endpoint', async () => {
     await writeFile(globalPath, JSON.stringify({ llm: { apiBase: 'https://corp-proxy.example', sslVerify: false } }));
     // Restating the user's value must not move the user's opt-out to the provider default.

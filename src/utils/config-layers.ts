@@ -81,6 +81,24 @@ export function mergeConfigLayers(
     for (const key of ['model', 'openaiCompatBaseUrl', 'skipSslVerify']) {
       if (!Object.hasOwn(project.generation, key)) delete merged.generation[key];
     }
+    // The `llm` endpoint and TLS opt-out were set up for the user's provider: a project
+    // that picks another provider must not send that provider's key through them.
+    if (isObject(merged.llm)) {
+      const projectLlm = isObject(project.llm) ? project.llm : {};
+      for (const key of ['apiBase', 'sslVerify']) {
+        if (!Object.hasOwn(projectLlm, key)) delete merged.llm[key];
+      }
+    }
+  }
+  // Embedding model, endpoint, key and TLS opt-out belong to the user's embedding provider.
+  // A project that switches provider (e.g. to `local`) must not reuse a remote model name
+  // as a model id to download, or the remote key and TLS setting.
+  if (isObject(defaults.embedding) && isObject(project.embedding) && isObject(merged.embedding)
+    && Object.hasOwn(project.embedding, 'provider')
+    && project.embedding.provider !== defaults.embedding.provider) {
+    for (const key of ['model', 'baseUrl', 'apiKey', 'skipSslVerify']) {
+      if (!Object.hasOwn(project.embedding, key)) delete merged.embedding[key];
+    }
   }
   // A model with no provider beside it belongs to the built-in provider (`openlore init`
   // writes the built-in model this way). It must not pair with an inherited provider.
