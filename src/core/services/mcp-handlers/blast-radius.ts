@@ -25,7 +25,7 @@ import { buildRetirementGraph } from './stale-decision-reference.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import {
-  hasPushableMemory, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
+  hasPushableMemory, hasSpecDomainTrigger, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
   type InjectedMemory, type StaleTriggeredMemory,
 } from './memory-triggers.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
@@ -627,7 +627,7 @@ async function triggeredMemoriesForDiff(
     const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
     const prefix = (await getRepoPrefix(absDir)) ?? '';
     const files = changedFiles.map(f => reframeRepoPath(f, prefix)).filter((f): f is string => f !== null);
-    const domains = await specDomainsForFiles(absDir, files);
+    const domains = hasSpecDomainTrigger(memories) ? await specDomainsForFiles(absDir, files) : [];
     const { decisions } = await loadDecisionStore(absDir);
     const symbols = seeds.map(s => ({ id: s.id, name: s.name, ...(s.className ? { className: s.className } : {}) }));
     const view = ctx.edgeStore ? makeFreshnessView(ctx.edgeStore, absDir) : UNVERIFIABLE_VIEW;

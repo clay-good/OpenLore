@@ -175,7 +175,7 @@ function renderHuman(b: BlastRadiusBriefing): string {
     const shown = text.length > 160 ? `${text.slice(0, 159).replace(/[\uD800-\uDBFF]$/, '')}…` : text;
     const flags = [
       ...(m.staleDecisionRef ? ['cites a superseded decision'] : []),
-      ...(m.unreconciledWith ? ['conflicts with another memory'] : []),
+      ...(m.unreconciledWith ? ['conflicts with another memory or decision'] : []),
       ...(m.verify && !m.staleDecisionRef && !m.unreconciledWith ? ['verify'] : []),
     ];
     lines.push(`   📌 memory ${oneLine(m.id)} [${m.provenance}] via ${m.firedPredicate.kind}${flags.length ? ` (${flags.join('; ')})` : ''}: ${shown}`);

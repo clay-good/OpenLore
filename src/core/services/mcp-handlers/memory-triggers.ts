@@ -63,7 +63,7 @@ export interface PushedAnchor {
   file: string;
   freshness: 'fresh' | 'drifted' | 'orphaned';
   relocatedTo?: string;
-  carriedAcross?: unknown;
+  carriedAcross?: { from: { symbolName?: string; filePath: string }; reason: string; basis: string };
   possiblyMovedTo?: string[];
   staleRegion?: true;
   staleRegionComposition?: StaleRegionComposition;
@@ -72,19 +72,39 @@ export interface PushedAnchor {
 /** Anchors summarized per note: the same cap `remember` puts on how many a note may record. */
 const MAX_PUSHED_ANCHORS = 25;
 
+/** A string field from a stored anchor, cut to the trigger text bound; anything else is dropped. */
+function anchorText(value: unknown): string | undefined {
+  return typeof value === 'string' ? value.slice(0, MAX_TRIGGER_TEXT_LENGTH) : undefined;
+}
+
+/** Only the known fields of a carry receipt, each bounded — the store is repo content. */
+function carriedReceipt(value: unknown): PushedAnchor['carriedAcross'] {
+  if (value === null || typeof value !== 'object') return undefined;
+  const { from, reason, basis } = value as Record<string, unknown>;
+  const fromFile = from && typeof from === 'object' ? anchorText((from as Record<string, unknown>).filePath) : undefined;
+  if (fromFile === undefined || anchorText(reason) === undefined || anchorText(basis) === undefined) return undefined;
+  const fromSymbol = anchorText((from as Record<string, unknown>).symbolName);
+  return { from: { ...(fromSymbol !== undefined ? { symbolName: fromSymbol } : {}), filePath: fromFile }, reason: anchorText(reason)!, basis: anchorText(basis)! };
+}
+
 function summarizeAnchors(verdicts: readonly AnchorVerdict[]): PushedAnchor[] {
-  return verdicts.slice(0, MAX_PUSHED_ANCHORS).map(v => ({
-    ...(typeof v.anchor.symbolName === 'string' ? { symbol: v.anchor.symbolName } : {}),
-    file: v.anchor.filePath,
+  return verdicts.slice(0, MAX_PUSHED_ANCHORS).map(v => {
+    const symbol = anchorText(v.anchor.symbolName);
+    const carried = carriedReceipt(v.anchor.carriedAcross);
+    const moved = v.freshness === 'orphaned' && Array.isArray(v.anchor.possiblyMovedTo)
+      ? v.anchor.possiblyMovedTo.map(anchorText).filter((x): x is string => x !== undefined).slice(0, MAX_PUSHED_ANCHORS)
+      : [];
+    return {
+    ...(symbol !== undefined ? { symbol } : {}),
+    file: anchorText(v.anchor.filePath) ?? '',
     freshness: v.freshness,
-    ...(v.relocatedTo ? { relocatedTo: v.relocatedTo } : {}),
-    ...(v.anchor.carriedAcross ? { carriedAcross: v.anchor.carriedAcross } : {}),
-    ...(v.freshness === 'orphaned' && Array.isArray(v.anchor.possiblyMovedTo) && v.anchor.possiblyMovedTo.length
-      ? { possiblyMovedTo: v.anchor.possiblyMovedTo.slice(0, MAX_PUSHED_ANCHORS) }
-      : {}),
+    ...(v.relocatedTo ? { relocatedTo: anchorText(v.relocatedTo) } : {}),
+    ...(carried ? { carriedAcross: carried } : {}),
+    ...(moved.length ? { possiblyMovedTo: moved } : {}),
     ...(v.staleRegion ? { staleRegion: true as const } : {}),
     ...(v.staleRegionComposition ? { staleRegionComposition: v.staleRegionComposition } : {}),
-  }));
+    };
+  });
 }
 
 /** A note pushed into a briefing: its content plus the receipt (id, fired predicate, verdict). */
@@ -137,7 +157,16 @@ export interface MemoryInjection {
 
 /** True when some live note has a trigger or a pin — so a briefing pays nothing when none does. */
 export function hasPushableMemory(memories: readonly unknown[]): boolean {
-  return memories.some(m => isWellFormedMemory(m) && !m.invalidatedAt && (m.trigger !== undefined || m.pinned === true));
+  return memories.some(m => isWellFormedMemory(m) && !m.invalidatedAt && (storedTrigger(m) !== undefined || m.pinned === true));
+}
+
+/** True when some live note has a `specDomain` trigger — the only kind that needs the spec link index. */
+export function hasSpecDomainTrigger(memories: readonly unknown[]): boolean {
+  return memories.some(m => {
+    if (!isWellFormedMemory(m) || m.invalidatedAt) return false;
+    const trigger = storedTrigger(m);
+    return trigger !== undefined && 'specDomain' in trigger;
+  });
 }
 
 // ── spec domains of touched files ───────────────────────────────────────────
@@ -223,10 +252,11 @@ export function validateMemoryTrigger(raw: unknown): { trigger: MemoryTrigger } 
     return { error: `trigger.${kind} is too long: ${value.length} characters (max ${MAX_TRIGGER_TEXT_LENGTH}).` };
   }
   if (/[\r\n]/.test(value)) return { error: `trigger.${kind} must be a single line.` };
-  // Only `*`, `?` and `**` are glob syntax here; braces, classes and negation would be stored and
-  // silently never match, so they are refused.
-  if (kind !== 'specDomain' && /[{}[\]!]/.test(value)) {
-    return { error: `trigger.${kind} supports only * ? ** as glob syntax ({ } [ ] ! are not supported).` };
+  // Only `*`, `?` and `**` are glob syntax here; every other character is literal (so a route
+  // directory like `app/[slug]/**` matches as written). A brace list or a leading `!` reads as
+  // syntax this matcher does not have, would never match, and is refused.
+  if (kind !== 'specDomain' && (/\{[^}]*,[^}]*\}/.test(value) || value.trim().startsWith('!'))) {
+    return { error: `trigger.${kind} supports only * ? ** as glob syntax; brace lists {a,b} and leading ! negation are not supported.` };
   }
   const text = value.trim();
   if (kind === 'fileGlob') return { trigger: { fileGlob: text.replace(/^\.\//, '') } };

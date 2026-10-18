@@ -48,7 +48,7 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import { hasPushableMemory, isWellFormedMemory, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
+import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import type { MemoryFreshness } from '../../../types/index.js';
@@ -672,7 +672,7 @@ export async function handleOrient(
         ...(r.record.className ? { className: r.record.className } : {}),
       }));
       const touchedFiles = [...new Set(touchedResults.map((r) => r.record.filePath))];
-      const fileDomains = await specDomainsForFiles(absDir, touchedFiles);
+      const fileDomains = hasSpecDomainTrigger(memStore.memories) ? await specDomainsForFiles(absDir, touchedFiles) : [];
       const domains = fileDomains === undefined
         ? (specDomains.length > 0 ? specDomains.map((d) => d.domain) : undefined)
         : [...new Set([...fileDomains, ...specDomains.map((d) => d.domain)])].sort();

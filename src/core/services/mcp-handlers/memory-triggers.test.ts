@@ -136,6 +136,11 @@ async function remember(content: string, extra: { anchors?: Array<{ symbol?: str
 // ── validation ──────────────────────────────────────────────────────────────
 
 describe('validateMemoryTrigger', () => {
+  it('accepts route-style paths whose brackets match literally', () => {
+    expect(validateMemoryTrigger({ fileGlob: 'app/[slug]/**' })).toEqual({ trigger: { fileGlob: 'app/[slug]/**' } });
+    expect(matchGlob('app/[slug]/**', 'app/[slug]/page.tsx')).toBe(true);
+  });
+
   it('accepts exactly one predicate from the closed union', () => {
     expect(validateMemoryTrigger({ fileGlob: './src/**' })).toEqual({ trigger: { fileGlob: 'src/**' } });
     expect(validateMemoryTrigger({ symbolPattern: 'handle*' })).toEqual({ trigger: { symbolPattern: 'handle*' } });
@@ -147,7 +152,7 @@ describe('validateMemoryTrigger', () => {
     [null], ['src/**'], [[]], [{}], [{ fileGlob: 'a', specDomain: 'b' }], [{ regex: '.*' }],
     [{ fileGlob: '' }], [{ fileGlob: '   ' }], [{ fileGlob: 3 }], [{ fileGlob: 'a\nb' }], [{ fileGlob: 'x'.repeat(257) }],
     [{ withinHops: 0 }], [{ withinHops: 21 }], [{ withinHops: 1.5 }], [{ withinHops: '2' }], [{ withinHops: Number.NaN }],
-    [{ fileGlob: 'src/{a,b}/*.ts' }], [{ fileGlob: 'src/[ab].ts' }], [{ symbolPattern: '!handle' }],
+    [{ fileGlob: 'src/{a,b}/*.ts' }], [{ symbolPattern: '!handle' }],
   ])('rejects malformed trigger %j', (raw) => {
     expect(validateMemoryTrigger(raw)).toHaveProperty('error');
   });
@@ -592,6 +597,19 @@ describe('contradictions and anchor provenance, as recall serves them', () => {
     ] as unknown as AnchoredMemory[];
     const out = selectInjectedMemories(hostile, { files: [], symbols: [], domains: [] }, UNVERIFIABLE_VIEW, { includePinned: true });
     expect(out.injected).toEqual([]);
+  });
+
+  it('bounds every anchor field copied from the store', () => {
+    const huge = 'x'.repeat(600_000);
+    const anchors = [{
+      nodeId: 'gone::x', symbolName: huge, filePath: 'gone.ts', contentHash: 'h',
+      carriedAcross: { from: { symbolName: huge, filePath: 'old.ts' }, reason: 'renamed', basis: 'exact-signature', extra: huge },
+      possiblyMovedTo: [{ evil: huge }, huge, 'a.ts::x'],
+    }] as unknown as AnchoredMemory['anchors'];
+    const out = selectInjectedMemories([{ id: 'h', kind: 'note', content: 'c', anchors, recordedAt: '', pinned: true }],
+      { files: [], symbols: [], domains: [] }, UNVERIFIABLE_VIEW, { includePinned: true });
+    expect(JSON.stringify(out.stale).length).toBeLessThan(2_000);
+    expect(out.stale[0].anchors[0].possiblyMovedTo).toEqual(['x'.repeat(256), 'a.ts::x']);
   });
 
   it('never ends cut content on half a surrogate pair', () => {

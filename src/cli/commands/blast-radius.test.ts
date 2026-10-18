@@ -187,7 +187,7 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     expect(await runBlastRadiusCli({ cwd: '/p' })).toBe(0);
     const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
     // ESC is removed (so no sequence can act); the inert remainder stays visible.
-    expect(out).toContain('📌 memory m1 [local-unreviewed] via fileGlob (conflicts with another memory): line1 line2 [31mred[0m');
+    expect(out).toContain('📌 memory m1 [local-unreviewed] via fileGlob (conflicts with another memory or decision): line1 line2 [31mred[0m');
     expect(out).not.toContain('\u001b');
     expect(out).toMatch(/📌 memory m2 \[local-unreviewed\] via withinHops: x{159}…/);
     expect(out).toContain('1 triggered memory is not shown');
