@@ -38,6 +38,22 @@ index shape (it never fired before), and hardened the push against a hostile com
 dependence. The prompt-hook and Pi injection blocks render pushed notes as short, budget-gated lines
 (lean `orient` takes an opt-in `pushMemories` for the hook; Pi already received them from full `orient`).
 
+Shipped and archived since: `add-memory-anchor-verdicts` (2026-10-18, PR #589) — a `remember` anchor
+takes an optional `span` (exact text inside the symbol, CRLF read as LF): freshness finds it again in
+the symbol's current body (one match fresh wherever it moved, none drifted, several orphaned with
+candidate lines), so an edit elsewhere in a function no longer drifts a memory about one line. Each
+recalled anchor carries an `outcome` (`silently-carried` / `re-pointed-with-provenance` /
+`needs-human-reselection` with a reason), and a note that needs reselection is a registered
+`memory-anchor-lost` finding (advisory) that `recall` returns and `openlore enforce` always collects.
+Five review rounds (18 reviewers, five real-repo dogfoods on ky and commander.js) added: span search
+only where the stored offsets provably describe the file on disk (watcher hash or Pass-1 key, with the
+file's real language; no key is "unverified", never "changed"); a shared `bodyHash` continuity baseline
+per span-anchored symbol, computed after carries, so edit-then-rename and consecutive renames carry
+(pooling every recorded hash was tried and withdrawn: it made false carries onto copies of stale
+bodies); a linear (KMP) matcher; non-blocking, regular-file-only anchored reads; read-only memory-store
+loads in the gate (a torn `notes.json` is no longer renamed away, and corpus integrity now blocks on
+it); and bounded automatic store writes.
+
 ## State as of 2026-07-27 (spec-backlog repair pass)
 
 The corpus is fully green: **all 15 main specs and all 94 open changes pass `openspec

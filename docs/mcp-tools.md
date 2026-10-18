@@ -59,12 +59,12 @@ live registry.
 |---|---:|---:|---:|
 | `minimal` | 6 | 2,818 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
-| `memory` | 3 | 1,362 | 1,450 |
+| `memory` | 3 | 1,399 | 1,450 |
 | `verify` | 3 | 1,345 | 1,350 |
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 5 | 2,499 | 2,650 |
 | `substrate` | 15 | 5,247 | 5,500 |
-| `full` | 76 | 24,577 | 25,500 |
+| `full` | 76 | 24,613 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
@@ -298,8 +298,8 @@ Durable, code-anchored notes that self-invalidate when the code they describe mo
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `remember` | Persist a durable, code-anchored memory (invariant / gotcha / rationale). Anchor it to a symbol and/or file so it self-invalidates when that code changes. Re-recording the same content+anchor updates in place; `supersedes` retires a prior memory. Optional `trigger` (one of `fileGlob`, `symbolPattern` — globs support `* ? **` — `specDomain`, `withinHops`) pushes the note into `orient` / `blast_radius` briefings as `injectedMemories`, each with the predicate that fired and its freshness verdict; `pinned` pushes it into every full `orient` briefing. The prompt-hook and Pi context-injection blocks show pushed notes as short, budget-gated lines. At most 10 are pushed, most specific first; credentials are redacted and instruction-shaped content is withheld. | Yes |
-| `recall` | Recall code-anchored memories (notes + decisions) for a task with a freshness verdict — fresh, drifted (verify), or orphaned (never served as authoritative). Optional `asOf`/`changedSince` for history and a `type` filter. | Yes |
+| `remember` | Persist a durable, code-anchored memory (invariant / gotcha / rationale). Anchor it to a symbol and/or file so it self-invalidates when that code changes. An anchor's optional `span` (exact text inside the symbol, at most 2,000 characters) narrows it to that text: while the index is current for the file, only an edit to the span drifts the memory, the span is found again wherever it moves in the symbol (CRLF and LF line endings match each other), and a span that then occurs more than once orphans the memory with its candidate lines. A span that does not occur exactly once at record time is not stored, and the result says why (`spanNotRecorded`). To keep renames working, analyze records a span-anchored symbol's last-analyzed body on its anchors, so `notes.json` changes when such a symbol changes. Re-recording the same content+anchor updates in place; `supersedes` retires a prior memory. Optional `trigger` (one of `fileGlob`, `symbolPattern` — globs support `* ? **` — `specDomain`, `withinHops`) pushes the note into `orient` / `blast_radius` briefings as `injectedMemories`, each with the predicate that fired and its freshness verdict; `pinned` pushes it into every full `orient` briefing. The prompt-hook and Pi context-injection blocks show pushed notes as short, budget-gated lines. At most 10 are pushed, most specific first; credentials are redacted and instruction-shaped content is withheld. | Yes |
+| `recall` | Recall code-anchored memories (notes + decisions) for a task with a freshness verdict — fresh, drifted (verify), or orphaned (never served as authoritative). Each anchor carries an `outcome`: `silently-carried` (unchanged where it resolves), `re-pointed-with-provenance` (carried across a rename or move), or `needs-human-reselection` (lost or ambiguous, with a `reselectReason`); a drifted anchor that was not carried has none. Each returned note that needs reselection is also a `memory-anchor-lost` finding in `findings`. Optional `asOf`/`changedSince` for history and a `type` filter. | Yes |
 
 **Memory survives refactors (symbol identity continuity).** A pure rename or a file move changes a symbol's identity and would otherwise orphan every memory and decision anchored to it. At each `openlore analyze`, OpenLore detects the rename/move between the prior and new graph and **carries the anchors forward** to the new symbol, recording `carriedAcross: { from, reason, basis, atCommit }` provenance that `recall` surfaces on the anchor — so the note recalls as `fresh`/`drifted (carried)` instead of `orphaned`. The match is deterministic and conservative: `exact-body` (byte-identical span — a move) or `exact-signature` (body identical *modulo the symbol's own name* — a rename, verified by name substitution against the recorded baseline hash), admitted only on a strict one-to-one match where the name-independent body is unique among new symbols. A deleted symbol is never re-anchored onto an unrelated newcomer that merely shares a parameter shape; an ambiguous move stays `orphaned` and discloses `possiblyMovedTo: [...]` candidates rather than guessing. No new tool, no LLM; the carry runs as part of `analyze`.
 

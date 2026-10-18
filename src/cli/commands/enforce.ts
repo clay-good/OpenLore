@@ -13,6 +13,8 @@
  * Sources:
  *   - stale-decision-reference — always (cheap: a pure walk of the decision graph
  *     + anchored references).
+ *   - memory-anchor-lost — always (a freshness pass over recorded notes; a note
+ *     with a lost or ambiguous anchor is one finding).
  *   - blast-radius orphan patterns — collected only when the repo configured the
  *     blast-radius guard (`blastRadius.block`) or named an orphan code in the policy,
  *     because the briefing is diff-heavy.
@@ -42,12 +44,15 @@ import {
   unknownPolicyCodes,
   classifyFindings,
   resolveEnforcementClass,
+  type EnforcementPolicy,
   type GovernanceFinding,
   CORPUS_INTENT_FINDING_CODES,
   ARCHITECTURE_FINDING_CODES,
 } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
+import { detectMemoryAnchorLoss } from '../../core/services/mcp-handlers/memory.js';
+import { loadMemoryStore } from '../../core/decisions/memory-store.js';
 import {
   CORPUS_FINDING_CODES,
   detectCorpusIntegrity,
@@ -359,9 +364,43 @@ export async function collectGovernanceFindings(
   const failedCodes = new Set<string>();
   let decisionConstraints: Pick<DecisionConstraintState, 'ledger' | 'retiredRules'> | undefined;
 
+  // memory-anchor-lost — always (a freshness pass over recorded notes, no diff).
+  // Read-only, like the stale-decision-reference memory load below: a torn memory
+  // store stays in place and keeps the check incomplete on every run until repaired.
+  // An anchored file that changed since analysis can hide or fake a lost anchor,
+  // so it marks the assessment incomplete; a content-identical commit does not.
+  // Like scenario checkability, an incomplete assessment fails the gate only when
+  // the policy makes this code blocking or frozen: the advisory default must not
+  // turn every other blocking code's gate into "unavailable".
+  {
+    const gatedClass = resolveEnforcementClass('memory-anchor-lost', policy as EnforcementPolicy);
+    const gated = gatedClass === 'blocking' || gatedClass === 'frozen';
+    const incomplete = (reason: string) => {
+      caveats.push(`memory-anchor-lost check incomplete: ${reason}`);
+      if (gated) failedCodes.add('memory-anchor-lost');
+    };
+    try {
+      const loss = await detectMemoryAnchorLoss(cwd);
+      findings.push(...loss.findings);
+      if (loss.unassessedReason) incomplete(loss.unassessedReason);
+      else if (loss.staleFiles.length > 0) {
+        incomplete(`${loss.staleFiles.length} anchored file(s) changed since analysis; run openlore analyze`);
+      } else {
+        // No content key (an imported bundle) proves nothing either way: disclose it,
+        // but do not call it a change or fail the gate on it.
+        if (loss.unverifiedFiles?.length) {
+          caveats.push(`memory-anchor-lost: ${loss.unverifiedFiles.length} anchored file(s) have no recorded content key in the index (for example an imported bundle); run openlore analyze --reanalyze to verify them`);
+        }
+        assessedCodes.add('memory-anchor-lost');
+      }
+    } catch (err) {
+      incomplete(`check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // stale-decision-reference — always (cheap).
   try {
-    for (const f of await detectStaleDecisionReferences(cwd)) {
+    for (const f of await detectStaleDecisionReferences(cwd, { readOnly: true })) {
       findings.push({
         code: f.code,
         severity: f.severity,
@@ -374,7 +413,13 @@ export async function collectGovernanceFindings(
     assessedCodes.add('stale-decision-reference');
   } catch (err) {
     caveats.push(`stale-decision-reference check unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    failedCodes.add('stale-decision-reference');
+    // Its store load is read-only now, so a torn notes.json throws here instead of
+    // being renamed away. Advisory keeps its fail-soft behavior: only a blocking or
+    // frozen policy fails the gate on an incomplete check (add-memory-anchor-verdicts).
+    const staleClass = resolveEnforcementClass('stale-decision-reference', policy as EnforcementPolicy);
+    if (staleClass === 'blocking' || staleClass === 'frozen') {
+      failedCodes.add('stale-decision-reference');
+    }
   }
 
   // Decision-bound constraints — always load the declared eligibility corpus.
@@ -526,6 +571,10 @@ export async function collectGovernanceFindings(
   // blast-radius orphan patterns — only when configured (diff-heavy).
   if (blastRadiusInUse(config, policy)) {
     try {
+      // The briefing loads the memory store for writing, which renames a torn store:
+      // check it read-only first, so a torn store stays in place and keeps every
+      // memory-dependent check incomplete on every run (add-memory-anchor-verdicts).
+      await loadMemoryStore(cwd, { readOnly: true });
       const b = await computeBlastRadius({ directory: cwd, baseRef });
       if (!('error' in b)) {
         findings.push(...blastRadiusFindings(b));
@@ -914,8 +963,8 @@ function renderHuman(
       const label = f.enforcementClass === 'frozen'
         ? f.baselineState === 'new' ? 'frozen:new' : f.baselineState === 'frozen' ? 'frozen' : 'frozen:invalid'
         : f.enforcementClass;
-      if (f.remediation) lines.push(`      Action: ${f.remediation}`);
       lines.push(`   ${ICON[f.enforcementClass]} [${label}] ${f.code} (${f.source}): ${f.message}`);
+      if (f.remediation) lines.push(`      Action: ${f.remediation}`);
     }
   }
   if (baseline.initialized.length > 0) {

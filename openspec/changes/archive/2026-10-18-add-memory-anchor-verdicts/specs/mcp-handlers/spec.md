@@ -14,6 +14,8 @@ the span SHALL be re-located inside the new body by the same exact-text rule. Sp
 use no similarity score, threshold, or model. A span that cannot be located at record time SHALL
 be recorded at symbol level with disclosure, never silently span-less.
 
+- **Implementation**: `anchorFreshness::src/core/decisions/anchor.ts`
+
 #### Scenario: An unrelated edit no longer drifts a line-specific memory
 
 - **GIVEN** a memory span-anchored to one statement inside a large function
@@ -40,6 +42,8 @@ track lost anchors as a burndown. Authoritative filtering SHALL be unchanged: a
 needs-human-reselection memory is never served as authoritative. A continuity gap the adjacent-
 states matcher cannot bridge (e.g. a rename that occurred across multiple unindexed states) SHALL
 land in `needs-human-reselection` with that reason disclosed, never in a guessed re-attachment.
+
+- **Implementation**: `anchorOutcome::src/core/decisions/anchor.ts`
 
 #### Scenario: A lost anchor becomes a trackable finding
 

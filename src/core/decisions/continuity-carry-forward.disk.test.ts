@@ -12,8 +12,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { EdgeStore } from '../services/edge-store.js';
 import { stableSymbolId } from '../scip/moniker.js';
@@ -52,6 +53,230 @@ describe('carryForwardContinuity (disk)', () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+  });
+
+  it('carries a span anchor that stayed fresh through an edit across a later rename (add-memory-anchor-verdicts)', async () => {
+    const file = 'src/tax.ts';
+    const v1 = 'export function computeTax(amount: number) {\n  // rate\n  return amount * 0.2;\n}\n';
+    const v2 = v1.replace('// rate', '// the standard rate');
+    const v3 = v2.replace('computeTax', 'calculateTax');
+    const reindex = async (src: string, name: string): Promise<FunctionNode> => {
+      await writeFile(join(root, file), src);
+      const n = node({ id: `${file}::${name}`, name, filePath: file, signature: `function ${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+      const s = EdgeStore.open(EdgeStore.dbPath(storeDir));
+      s.clearAll();
+      s.insertNodes([n]);
+      s.setFileHash(file, createHash('sha256').update(src).digest('hex'));
+      s.close();
+      return n;
+    };
+    const first = await reindex(v1, 'computeTax');
+    const plain = { nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1) };
+    const span = { ...plain, spanText: 'return amount * 0.2;' };
+    await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [{
+      // A plain memory first, and a superseded copy of the span memory: neither may
+      // decide the symbol's baseline, whatever their order.
+      id: 'mem-plain',
+      kind: 'note',
+      content: 'computeTax is pure',
+      anchors: [plain],
+      recordedAt: new Date(0).toISOString(),
+    }, {
+      id: 'mem-old',
+      kind: 'note',
+      content: 'old wording',
+      anchors: [span],
+      recordedAt: new Date(0).toISOString(),
+      invalidatedAt: new Date(1).toISOString(),
+    }, {
+      id: 'mem-span',
+      kind: 'note',
+      content: 'the 20% rate is the standard one',
+      anchors: [{ nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1), spanText: 'return amount * 0.2;' }],
+      recordedAt: new Date(0).toISOString(),
+    }] });
+
+    // Analysis 1: an edit elsewhere in the symbol. The span is still there, so the
+    // anchor's whole-symbol baseline follows the body it was verified in.
+    let oldNodes = snapshotOldNodes(storeDir);
+    await reindex(v2, 'computeTax');
+    await carryForwardContinuity(root, oldNodes, storeDir);
+    const afterEdit = await loadMemoryStore(root);
+    const byId = (store: typeof afterEdit, id: string) => store.memories.find((m) => m.id === id)!.anchors[0];
+    // Every live anchor on the symbol shares its last-analyzed body; the recorded
+    // freshness baselines and the superseded note are left as they were.
+    expect(byId(afterEdit, 'mem-span')).toMatchObject({ contentHash: hashSpan(v1), bodyHash: hashSpan(v2) });
+    expect(byId(afterEdit, 'mem-plain')).toMatchObject({ contentHash: hashSpan(v1), bodyHash: hashSpan(v2) });
+    expect(byId(afterEdit, 'mem-old').bodyHash).toBeUndefined();
+
+    // Analysis 2: a clean rename now finds its successor.
+    oldNodes = snapshotOldNodes(storeDir);
+    await reindex(v3, 'calculateTax');
+    const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+    expect(summary.carried).toHaveLength(1);
+    const a = (await loadMemoryStore(root)).memories.find((m) => m.id === 'mem-span')!.anchors[0];
+    expect(a).toMatchObject({ symbolName: 'calculateTax', spanText: 'return amount * 0.2;', carriedAcross: { reason: 'renamed' } });
+  });
+
+  for (const order of ['drifted-first', 'drifted-last'] as const) {
+    it(`carries a symbol whose anchors hold different baselines, in any store order (${order})`, async () => {
+      // Two span anchors on one symbol: an edit removes the second span's text, so only
+      // the first is re-baselined. A later clean rename must still carry the symbol,
+      // whichever hash sorts first (add-memory-anchor-verdicts).
+      const file = 'src/tax.ts';
+      const v1 = 'export function computeTax(amount: number) {\n  // keep\n  return amount * 0.2;\n}\n';
+      const v2 = v1.replace('  // keep\n', '');
+      const v3 = v2.replace('computeTax', 'calculateTax');
+      const reindex = async (src: string, name: string): Promise<FunctionNode> => {
+        await writeFile(join(root, file), src);
+        const n = node({ id: `${file}::${name}`, name, filePath: file, signature: `function ${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+        const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+        st.clearAll();
+        st.insertNodes([n]);
+        st.setFileHash(file, createHash('sha256').update(src).digest('hex'));
+        st.close();
+        return n;
+      };
+      const first = await reindex(v1, 'computeTax');
+      const base = { nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1) };
+      const keep = { id: 'mem-keep', kind: 'note' as const, content: 'rate', anchors: [{ ...base, spanText: 'return amount * 0.2;' }], recordedAt: new Date(0).toISOString() };
+      const gone = { id: 'mem-gone', kind: 'note' as const, content: 'keep', anchors: [{ ...base, spanText: '// keep' }], recordedAt: new Date(0).toISOString() };
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: order === 'drifted-first' ? [gone, keep] : [keep, gone] });
+
+      let oldNodes = snapshotOldNodes(storeDir);
+      await reindex(v2, 'computeTax');
+      await carryForwardContinuity(root, oldNodes, storeDir);
+      oldNodes = snapshotOldNodes(storeDir);
+      await reindex(v3, 'calculateTax');
+      const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+      expect(summary.carried).toHaveLength(1);
+      const kept = (await loadMemoryStore(root)).memories.find((m) => m.id === 'mem-keep')!.anchors[0];
+      expect(kept).toMatchObject({ symbolName: 'calculateTax', carriedAcross: { reason: 'renamed' } });
+    });
+  }
+
+  describe('one baseline per symbol (add-memory-anchor-verdicts)', () => {
+    const file = 'src/tax.ts';
+    const v1 = 'export function computeTax(amount: number) {\n  return amount * 0.2;\n}\n';
+    const v2 = v1.replace('return', '// edited\n  return');
+    const reindex = async (src: string, name: string): Promise<FunctionNode> => {
+      await writeFile(join(root, file), src);
+      const n = node({ id: `${file}::${name}`, name, filePath: file, signature: `function ${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+      const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+      st.clearAll();
+      st.insertNodes([n]);
+      st.setFileHash(file, createHash('sha256').update(src).digest('hex'));
+      st.close();
+      return n;
+    };
+    const anchorFor = (n: FunctionNode, body: string, spanText?: string) => ({
+      nodeId: n.id, stableId: n.stableId, symbolName: n.name, filePath: file, contentHash: hashSpan(body), ...(spanText ? { spanText } : {}),
+    });
+
+    it('ignores a leftover bodyHash once no live span anchor remains', async () => {
+      const n1 = await reindex(v1, 'computeTax');
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+        { id: 'plain', kind: 'note', content: 'pure', anchors: [anchorFor(n1, v1)], recordedAt: new Date(0).toISOString() },
+        { id: 'span', kind: 'note', content: 'rate', anchors: [anchorFor(n1, v1, 'return amount * 0.2;')], recordedAt: new Date(0).toISOString() },
+      ] });
+      let old = snapshotOldNodes(storeDir);
+      await reindex(v2, 'computeTax');
+      await carryForwardContinuity(root, old, storeDir); // both anchors get bodyHash v2
+      const s = await loadMemoryStore(root);
+      s.memories = s.memories.map((m) => (m.id === 'span' ? { ...m, invalidatedAt: new Date(1).toISOString() } : m));
+      await saveMemoryStore(root, s);
+      old = snapshotOldNodes(storeDir);
+      await reindex(v1, 'computeTax'); // reverted: the plain anchor's recorded body is current again
+      await carryForwardContinuity(root, old, storeDir);
+      old = snapshotOldNodes(storeDir);
+      await reindex(v1.replace('computeTax', 'calculateTax'), 'calculateTax');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+    });
+
+    it('carries a span-anchored symbol through two renames in consecutive analyses', async () => {
+      const n1 = await reindex(v1, 'computeTax');
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+        { id: 'span', kind: 'note', content: 'rate', anchors: [anchorFor(n1, v1, 'return amount * 0.2;')], recordedAt: new Date(0).toISOString() },
+      ] });
+      let old = snapshotOldNodes(storeDir);
+      await reindex(v1.replace('computeTax', 'calculateTax'), 'calculateTax');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+      old = snapshotOldNodes(storeDir);
+      await reindex(v1.replace('computeTax', 'taxFor'), 'taxFor');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+      expect((await loadMemoryStore(root)).memories[0].anchors[0]).toMatchObject({ symbolName: 'taxFor' });
+    });
+
+    it('uses a span anchor recorded after an edit before any analysis wrote a bodyHash', async () => {
+      const n1 = await reindex(v1, 'computeTax');
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+        { id: 'plain', kind: 'note', content: 'pure', anchors: [anchorFor(n1, v1)], recordedAt: new Date(0).toISOString() },
+      ] });
+      const n2 = await reindex(v2, 'computeTax');
+      const s = await loadMemoryStore(root);
+      s.memories.push({ id: 'span', kind: 'note', content: 'rate', anchors: [anchorFor(n2, v2, 'return amount * 0.2;')], recordedAt: new Date(5).toISOString() });
+      await saveMemoryStore(root, s);
+      const old = snapshotOldNodes(storeDir);
+      await reindex(v2.replace('computeTax', 'calculateTax'), 'calculateTax');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+    });
+  });
+
+  it('does not let the automatic baseline write blow up a hostile store (add-memory-anchor-verdicts)', async () => {
+    const file = 'src/tax.ts';
+    const v1 = 'export function computeTax(amount: number) {\n  return amount * 0.2;\n}\n';
+    await writeFile(join(root, file), v1);
+    const n = node({ id: `${file}::computeTax`, name: 'computeTax', filePath: file, signature: 'function computeTax(amount: number)', startIndex: 0, endIndex: v1.length });
+    const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+    st.insertNodes([n]);
+    st.setFileHash(file, createHash('sha256').update(v1).digest('hex'));
+    st.close();
+    // 4,000-deep nesting: compact it is ~8 KB; pretty-printed it is ~16 MB.
+    const pad = JSON.parse('['.repeat(4000) + ']'.repeat(4000));
+    const notesPath = join(root, OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR, 'notes.json');
+    await writeFile(notesPath, JSON.stringify({ version: '1', updatedAt: '', sequence: 0, memories: [{
+      id: 'mem-span', kind: 'note', content: 'rate', recordedAt: new Date(0).toISOString(), pad,
+      anchors: [{ nodeId: n.id, stableId: n.stableId, symbolName: 'computeTax', filePath: file, contentHash: 'deadbeef', spanText: 'return amount * 0.2;' }],
+    }] }));
+    const before = (await readFile(notesPath, 'utf-8')).length;
+    await carryForwardContinuity(root, snapshotOldNodes(storeDir), storeDir);
+    expect((await readFile(notesPath, 'utf-8')).length).toBe(before);
+  });
+
+  it('does not carry onto an unrelated copy of a stale recorded body (add-memory-anchor-verdicts)', async () => {
+    const file = 'src/tax.ts';
+    const legacyFile = 'src/legacy.ts';
+    const v1 = 'computeTax(amount: number) {\n  // keep\n  return amount * 0.2;\n}\n';
+    const v2 = v1.replace('  // keep\n', '');
+    const v3 = v2.replace('computeTax', 'calculateTax');
+    const method = (id: string, name: string, className: string, filePath: string, src: string) =>
+      node({ id, name, className, filePath, signature: `${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+    const write = async (entries: Array<{ n: FunctionNode; src: string }>) => {
+      for (const e of entries) await writeFile(join(root, e.n.filePath), e.src);
+      const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+      st.clearAll();
+      st.insertNodes(entries.map((e) => e.n));
+      for (const e of entries) st.setFileHash(e.n.filePath, createHash('sha256').update(e.src).digest('hex'));
+      st.close();
+    };
+    const first = method(`${file}::Calc.computeTax`, 'computeTax', 'Calc', file, v1);
+    await write([{ n: first, src: v1 }]);
+    const base = { nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1) };
+    await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+      { id: 'mem-plain', kind: 'note', content: 'pure', anchors: [base], recordedAt: new Date(0).toISOString() },
+      { id: 'mem-span', kind: 'note', content: 'rate', anchors: [{ ...base, spanText: 'return amount * 0.2;' }], recordedAt: new Date(0).toISOString() },
+    ] });
+    let oldNodes = snapshotOldNodes(storeDir);
+    await write([{ n: method(first.id, 'computeTax', 'Calc', file, v2), src: v2 }]);
+    await carryForwardContinuity(root, oldNodes, storeDir);
+    // Rename in place, while a legacy class appears holding the OLD v1 body verbatim.
+    oldNodes = snapshotOldNodes(storeDir);
+    await write([
+      { n: method(`${file}::Calc.calculateTax`, 'calculateTax', 'Calc', file, v3), src: v3 },
+      { n: method(`${legacyFile}::LegacyCalc.computeTax`, 'computeTax', 'LegacyCalc', legacyFile, v1), src: v1 },
+    ]);
+    const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+    expect(summary.carried.map((p) => p.to.id)).toEqual([`${file}::Calc.calculateTax`]);
   });
 
   it('carries an anchored memory across a pure rename → recalls re-pointed with provenance', async () => {
