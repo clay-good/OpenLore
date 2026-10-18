@@ -1362,6 +1362,13 @@ export const NAV_TOOLS: NavToolSpec[] = [
       type: Type.Optional(StringEnum(['invariant', 'gotcha', 'rationale', 'convention', 'preference', 'todo', 'note'] as const, { description: 'Classification (default note); never inferred.' })),
       tags: Type.Optional(Type.Array(Type.String(), { description: 'Optional retrieval tags.' })),
       supersedes: Type.Optional(Type.String({ description: 'Id of a prior memory to retire (kept queryable via asOf).' })),
+      trigger: Type.Optional(Type.Object({
+        fileGlob: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'Glob over touched files, e.g. "src/routes/**" (* ? ** only).' })),
+        symbolPattern: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'Glob over touched symbol names, e.g. "handle*".' })),
+        specDomain: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'A spec domain the task touches.' })),
+        withinHops: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Anchor is within N call hops of a touched symbol.' })),
+      }, { additionalProperties: false, maxProperties: 1, description: 'Optional: give exactly one predicate; the memory is pushed into orient/blast_radius briefings when it matches what they touch.' })),
+      pinned: Type.Optional(Type.Boolean({ description: 'Push this memory into every full (non-lean) orient briefing (at most 10 notes are pushed; the rest are counted).' })),
     }),
   },
   {

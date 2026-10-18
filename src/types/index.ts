@@ -1161,7 +1161,24 @@ export interface AnchoredMemory {
   invalidatedByCommit?: string;
   /** Id of the prior memory this one supersedes (provenance for the lifecycle op). */
   supersedes?: string;
+  /**
+   * Deterministic predicate that pushes this memory into a briefing whose touched set matches it
+   * (change: add-memory-trigger-predicates). Absent ⇒ pull-only, as before.
+   */
+  trigger?: MemoryTrigger;
+  /** Always pushed into `orient`'s briefing for the repo (change: add-memory-trigger-predicates). */
+  pinned?: boolean;
 }
+
+/**
+ * The closed union of memory trigger predicates (change: add-memory-trigger-predicates). Each is
+ * evaluated by set membership or bounded call-graph reachability — no LLM interprets a trigger.
+ */
+export type MemoryTrigger =
+  | { fileGlob: string }
+  | { symbolPattern: string }
+  | { specDomain: string }
+  | { withinHops: number };
 
 /** Persistent store written to .openlore/memory/notes.json */
 export interface MemoryStore {

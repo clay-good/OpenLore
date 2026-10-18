@@ -19,6 +19,15 @@
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
+import { loadMemoryStore } from '../../decisions/memory-store.js';
+import { loadDecisionStore } from '../../decisions/store.js';
+import { buildRetirementGraph } from './stale-decision-reference.js';
+import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
+import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
+import {
+  hasPushableMemory, hasSpecDomainTrigger, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
+  type InjectedMemory, type StaleTriggeredMemory,
+} from './memory-triggers.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
 import {
   carriedCaveat,
@@ -211,6 +220,13 @@ export interface BlastRadiusBriefing {
    * fix-git-derived-signal-honesty; BriefingCapabilityClaimsAreCurrent)
    */
   federation: { evaluated: false; note: string } | ({ evaluated: true } & Record<string, unknown>);
+  /**
+   * Notes whose trigger matches this diff, pushed with their receipts; orphaned ones are listed
+   * apart, never as content (change: add-memory-trigger-predicates). Absent when none fired.
+   */
+  injectedMemories?: InjectedMemory[];
+  staleTriggeredMemories?: StaleTriggeredMemory[];
+  injectedMemoriesNote?: string;
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -417,6 +433,11 @@ export async function computeBlastRadius(
   const memDrifted = memWillDrift.filter(m => m.kind === 'memory-drifted').length;
   const decisionsOrphaned = decisionItems.filter(d => d.kind === 'adr-orphaned').length;
 
+  // ── 4b. Triggered memories (change: add-memory-trigger-predicates) ──────────
+  // The touched set is the diff: its files, its changed symbols, and the spec domains those files
+  // map to. Pinned notes belong to orient's briefing, not to a diff review.
+  const memoryInjection = await triggeredMemoriesForDiff(absDir, ctx, cg, changedFiles, seeds.filter(s => !narrowed.unchangedSeedIds?.has(s.id)));
+
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
   const caveats: string[] = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
@@ -550,6 +571,7 @@ export async function computeBlastRadius(
       ...(driftUnavailable ? { unavailable: driftUnavailable } : {}),
     },
     federation,
+    ...memoryInjection,
     headline: '',
     posture: 'advisory',
     caveats,
@@ -581,7 +603,44 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
   if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
+  const pushed = b.injectedMemories?.length ?? 0;
+  if (pushed > 0) parts.push(`${pushed} triggered memor${pushed === 1 ? 'y' : 'ies'} to read`);
   return parts.join('; ') + '.';
+}
+
+/**
+ * Evaluate memory triggers against a diff's touched set. Best-effort like the drift pass: a failure
+ * yields no injection rather than aborting the advisory briefing.
+ */
+async function triggeredMemoriesForDiff(
+  absDir: string,
+  ctx: NonNullable<Awaited<ReturnType<typeof readCachedContext>>>,
+  cg: SerializedCallGraph,
+  changedFiles: string[],
+  seeds: Array<{ id: string; name: string; className?: string }>,
+): Promise<ReturnType<typeof injectionFields>> {
+  try {
+    const { memories } = await loadMemoryStore(absDir);
+    if (!hasPushableMemory(memories)) return {};
+    // git names files from the repository root; globs, anchors and the mapping index are framed
+    // on the analyzed root. Re-frame (a no-op at the root) and drop files outside the analyzed tree.
+    const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const prefix = (await getRepoPrefix(absDir)) ?? '';
+    const files = changedFiles.map(f => reframeRepoPath(f, prefix)).filter((f): f is string => f !== null);
+    const domains = hasSpecDomainTrigger(memories) ? await specDomainsForFiles(absDir, files) : [];
+    const { decisions } = await loadDecisionStore(absDir);
+    const symbols = seeds.map(s => ({ id: s.id, name: s.name, ...(s.className ? { className: s.className } : {}) }));
+    const view = ctx.edgeStore ? makeFreshnessView(ctx.edgeStore, absDir) : UNVERIFIABLE_VIEW;
+    const hops = maxTriggerHops(memories);
+    const probe = hops > 0
+      ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), symbols, hops)
+      : undefined;
+    return injectionFields(selectInjectedMemories(memories, { files, symbols, domains }, view, {
+      includePinned: false, probe, retirement: buildRetirementGraph(decisions), graphUnavailable: !ctx.edgeStore, decisions,
+    }));
+  } catch (err) {
+    return { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /** MCP dispatch entry. Returns the briefing object directly (additive-by-cast). */

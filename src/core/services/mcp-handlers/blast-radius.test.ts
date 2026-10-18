@@ -23,6 +23,8 @@ vi.mock('../../drift/git-diff.js', () => ({
     resolved: !requested || requested === 'auto' ? 'HEAD' : requested,
     fellBack: false,
   })),
+  getRepoPrefix: vi.fn(async () => ''),
+  reframeRepoPath: (p: string, prefix: string) => (!prefix ? p : p.startsWith(prefix) ? p.slice(prefix.length) || null : null),
 }));
 
 // Partial mock: stub handleAnalyzeImpact but keep buildAdjacency real (select_tests needs it).
@@ -435,6 +437,50 @@ describe('computeBlastRadius', () => {
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
     expect(b.specs.willGoStale).toBe(0);
     expect(b.caveats.join(' ')).toMatch(/drift could not be evaluated.*git exploded/i);
+  });
+
+  it('pushes notes whose trigger matches the diff, with receipts, and leaves pinned notes to orient (change: add-memory-trigger-predicates)', async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-blast-trigger-'));
+    try {
+      await mkdir(join(dir, OPENLORE_DIR, 'memory'), { recursive: true });
+      const note = (id: string, extra: Record<string, unknown>) =>
+        ({ id, kind: 'note', content: `content of ${id}`, anchors: [], recordedAt: '2026-01-01T00:00:00Z', ...extra });
+      await writeFile(join(dir, OPENLORE_DIR, 'memory', 'notes.json'), JSON.stringify({
+        version: '1', updatedAt: '', memories: [
+          note('glob0001', { trigger: { fileGlob: 'src/*.ts' } }),
+          note('sym00001', { trigger: { symbolPattern: 'validate*' } }),
+          note('dom00001', { trigger: { specDomain: 'mcp-handlers' } }),
+          note('miss0001', { trigger: { fileGlob: 'docs/**' } }),
+          note('pin00001', { pinned: true }),
+        ],
+      }), 'utf-8');
+      // The current spec link index shape: a file-only anchor is domain evidence.
+      await mkdir(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true });
+      await writeFile(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, 'mapping.json'), JSON.stringify({
+        version: 8, links: [{ requirement: 'R', domain: 'mcp-handlers', specFile: 's', state: 'unmapped', anchors: [], functions: [], footprintFiles: ['src/utils.ts'] }],
+      }), 'utf-8');
+      const b = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
+      expect(b.injectedMemories?.map(m => [m.id, m.firedPredicate])).toEqual([
+        ['sym00001', { kind: 'symbolPattern', pattern: 'validate*', matched: 'validateDirectory' }],
+        ['glob0001', { kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' }],
+        ['dom00001', { kind: 'specDomain', domain: 'mcp-handlers' }],
+      ]);
+      expect(b.headline).toMatch(/3 triggered memories to read/);
+
+      // Analyzed below the repository root: git's repo-root paths are re-framed before matching.
+      const { getChangedFiles, getRepoPrefix } = await import('../../drift/git-diff.js');
+      vi.mocked(getRepoPrefix).mockResolvedValue('pkg/');
+      vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [{ path: 'pkg/src/utils.ts' }, { path: 'other/x.ts' }] } as never);
+      const sub = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
+      expect(sub.injectedMemories?.find(m => m.id === 'glob0001')?.firedPredicate)
+        .toEqual({ kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' });
+      expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
+    } finally {
+      const { getRepoPrefix } = await import('../../drift/git-diff.js');
+      vi.mocked(getRepoPrefix).mockResolvedValue('');
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

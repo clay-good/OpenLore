@@ -14,7 +14,7 @@ status line. Two signals, both cheap to re-check:
 archived as `2026-10-17-*`. `bound-served-content-trust` was archived `--skip-specs` because its
 requirements were already in the main specs. `openspec validate --specs` passes. Still open but
 built: `honour-npmrc-in-update-check` (task 2.3 is a manual private-registry check for the
-author). `add-memory-trigger-predicates` is unbuilt. 70 changes stay open; 22 of them are the
+author). 70 changes stay open; 22 of them are the
 Kotlin changes marked NOT DOING. The counts in the sections below predate this sweep.
 
 Shipped and archived since: `add-message-topology-edges` (2026-10-17, PR #580) — a tagged object
@@ -24,6 +24,18 @@ disclosed `message-send` dynamic-boundary site. Four review rounds (16 reviewers
 dogfoods) took real-repo precision from 62% to about 80%, removed two distance/name narrowings that
 silently dropped real consumers, kept message hops out of call claims, exception flow and test
 reach, and fixed two quadratic collector shapes. Declared-union discriminants are deferred.
+
+Shipped and archived since: `add-memory-trigger-predicates` (2026-10-17, PR #585) — `remember` takes
+one trigger (`fileGlob` / `symbolPattern` over `* ? **`, `specDomain`, `withinHops: N`) or `pinned`;
+non-lean `orient`, `blast_radius`, and `working_set_context` push matching notes as
+`injectedMemories` with a receipt (fired predicate, freshness verdict, per-anchor verdicts), most
+specific first and at most 10, and list orphaned matches apart as `staleTriggeredMemories`. Four
+review rounds (16 reviewers, real-repo dogfoods, a fuzz suite) replaced a regex glob library that
+backtracked exponentially on repo-supplied patterns, made `specDomain` read the current spec link
+index shape (it never fired before), and hardened the push against a hostile committed
+`notes.json`: malformed entries, unbounded fields, credentials (redacted), instruction-shaped text
+(withheld), conflicting notes and superseded-decision citations (flagged), and store-order
+dependence. Rendering pushed notes in the lean prompt-hook / Pi injection block is deferred.
 
 ## State as of 2026-07-27 (spec-backlog repair pass)
 

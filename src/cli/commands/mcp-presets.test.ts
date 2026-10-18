@@ -675,7 +675,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // contracts rather than treating the added schema as free bytes.
     // questionKind adds one closed-vocabulary input to search_code: 97,500 → 97,800 B
     // (measured 97,727 B), leaving 73 B rather than silently removing the guard.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(97_800);
+    // remember's optional trigger/pinned inputs, with transport-enforced bounds: 97,800 → 98,500 B
+    // (measured 98,283 B; change: add-memory-trigger-predicates). Their descriptions were trimmed first.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(98_500);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

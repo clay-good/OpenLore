@@ -173,6 +173,27 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     expect(out).toContain('substring fallback');
   });
 
+  it('human render lists pushed memories on one safe line each, with flags and the note (change: add-memory-trigger-predicates)', async () => {
+    const pushed = {
+      ...orphanBriefing,
+      injectedMemories: [
+        { id: 'm1', content: 'line1\nline2 \u001b[31mred\u001b[0m', provenance: 'local-unreviewed', firedPredicate: { kind: 'fileGlob' }, verify: true, unreconciledWith: ['m2'] },
+        { id: 'm2', content: 'x'.repeat(400), provenance: 'local-unreviewed', firedPredicate: { kind: 'withinHops' } },
+      ],
+      staleTriggeredMemories: [{ id: 'm3' }],
+      injectedMemoriesNote: '3 more triggered or pinned memories matched but were not pushed (cap 10).',
+    } as unknown as BlastRadiusBriefing;
+    vi.mocked(computeBlastRadius).mockResolvedValue(pushed);
+    expect(await runBlastRadiusCli({ cwd: '/p' })).toBe(0);
+    const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    // ESC is removed (so no sequence can act); the inert remainder stays visible.
+    expect(out).toContain('📌 memory m1 [local-unreviewed] via fileGlob (conflicts with another memory or decision): line1 line2 [31mred[0m');
+    expect(out).not.toContain('\u001b');
+    expect(out).toMatch(/📌 memory m2 \[local-unreviewed\] via withinHops: x{159}…/);
+    expect(out).toContain('1 triggered memory is not shown');
+    expect(out).toContain('3 more triggered or pinned memories matched');
+  });
+
   it('never blocks on a malformed blastRadius.block (valid JSON, wrong type)', async () => {
     vi.mocked(computeBlastRadius).mockResolvedValue(orphanBriefing);
     // A wrong-typed `block` (object) would throw on iteration if not coerced — must not block.

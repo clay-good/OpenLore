@@ -34,7 +34,7 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **76 tools / ~93 KB / ~24k tokens** (estimated) of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **76 tools / ~96 KB / ~24k tokens** (estimated) of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **The default surface is the `substrate` preset (the navigation core plus governance and spec-workflow reads)**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`substrate`** preset — 15 tools: the navigation graph-traversal core, the three highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and `prepare_spec_generation` / `prepare_spec_repair`. An out-of-box capable MCP agent can therefore obtain a bounded evidence bundle and author specs with its native editor; OpenLore performs no internal LLM call in these composites. The lean navigate-only **`navigation`** preset (10 tools) stays a one-flag escape (`--preset navigation`); the full surface is one explicit opt-in away (`--preset full` / `--all-tools`). When the default surface is active, the server advertises breadth once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
 
@@ -59,12 +59,12 @@ live registry.
 |---|---:|---:|---:|
 | `minimal` | 6 | 2,818 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
-| `memory` | 3 | 1,222 | 1,300 |
+| `memory` | 3 | 1,362 | 1,450 |
 | `verify` | 3 | 1,345 | 1,350 |
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 5 | 2,499 | 2,650 |
 | `substrate` | 15 | 5,247 | 5,500 |
-| `full` | 76 | 24,436 | 25,500 |
+| `full` | 76 | 24,577 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
@@ -298,7 +298,7 @@ Durable, code-anchored notes that self-invalidate when the code they describe mo
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `remember` | Persist a durable, code-anchored memory (invariant / gotcha / rationale). Anchor it to a symbol and/or file so it self-invalidates when that code changes. Re-recording the same content+anchor updates in place; `supersedes` retires a prior memory. | Yes |
+| `remember` | Persist a durable, code-anchored memory (invariant / gotcha / rationale). Anchor it to a symbol and/or file so it self-invalidates when that code changes. Re-recording the same content+anchor updates in place; `supersedes` retires a prior memory. Optional `trigger` (one of `fileGlob`, `symbolPattern` — globs support `* ? **` — `specDomain`, `withinHops`) pushes the note into `orient` / `blast_radius` briefings as `injectedMemories`, each with the predicate that fired and its freshness verdict; `pinned` pushes it into every full (non-lean) `orient` briefing. At most 10 are pushed, most specific first; credentials are redacted and instruction-shaped content is withheld. | Yes |
 | `recall` | Recall code-anchored memories (notes + decisions) for a task with a freshness verdict — fresh, drifted (verify), or orphaned (never served as authoritative). Optional `asOf`/`changedSince` for history and a `type` filter. | Yes |
 
 **Memory survives refactors (symbol identity continuity).** A pure rename or a file move changes a symbol's identity and would otherwise orphan every memory and decision anchored to it. At each `openlore analyze`, OpenLore detects the rename/move between the prior and new graph and **carries the anchors forward** to the new symbol, recording `carriedAcross: { from, reason, basis, atCommit }` provenance that `recall` surfaces on the anchor — so the note recalls as `fresh`/`drifted (carried)` instead of `orphaned`. The match is deterministic and conservative: `exact-body` (byte-identical span — a move) or `exact-signature` (body identical *modulo the symbol's own name* — a rename, verified by name substitution against the recorded baseline hash), admitted only on a strict one-to-one match where the name-independent body is unique among new symbols. A deleted symbol is never re-anchored onto an unrelated newcomer that merely shares a parameter shape; an ambiguous move stays `orphaned` and discloses `possiblyMovedTo: [...]` candidates rather than guessing. No new tool, no LLM; the carry runs as part of `analyze`.

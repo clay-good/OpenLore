@@ -17,6 +17,7 @@ import {
 } from '../../core/services/mcp-handlers/working-set.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { configureLogger, logger } from '../../utils/logger.js';
+import { renderPushedMemories } from './pushed-memory-render.js';
 
 const SEVERITY_MARK: Record<WorkingSetFinding['severity'], string> = {
   error: '✗',
@@ -37,6 +38,7 @@ function renderHuman(report: WorkingSetContextReport): string {
     if (t.briefed) {
       const intent = t.anchoredIntent.length ? `, ${t.anchoredIntent.length} anchored intent` : '';
       lines.push(`  ✓ ${t.target}: ${t.specDomains.length} spec domain(s)${intent}`);
+      lines.push(...renderPushedMemories(t, '      '));
     } else {
       lines.push(`  ⚠ ${t.target}: ${t.reason ?? 'not briefed'}`);
     }

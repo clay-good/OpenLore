@@ -48,6 +48,9 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
+import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, reconcileInjectionNote, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW, type InjectedMemory, type StaleTriggeredMemory } from './memory-triggers.js';
+import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
+import { buildRetirementGraph } from './stale-decision-reference.js';
 import type { MemoryFreshness } from '../../../types/index.js';
 
 import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
@@ -573,6 +576,9 @@ export async function handleOrient(
   // (ReversalAwareness). Read from the bitemporal supersession record + decision
   // supersedes links; never re-served as authoritative current context.
   let reversals: Reversal[] | undefined;
+  // Notes pushed into the briefing by a matching trigger or `pinned`, with their receipts
+  // (change: add-memory-trigger-predicates).
+  let memoryInjection: ReturnType<typeof injectionFields> = {};
   // Ids of decisions superseded by another (shared by every authoritative decision
   // surface below — pendingDecisions and governingDecisions — so a superseded decision
   // is never served as current intent on any of them). Populated in the block below.
@@ -639,7 +645,10 @@ export async function handleOrient(
     const scopeFiles = new Set<string>(relevantFileSet);
     for (const d of active) for (const f of d.affectedFiles) scopeFiles.add(f);
     // Loaded once and reused for both the contradiction fold and the reversal scan.
+    // notes.json is committed repo content: an entry OpenLore could not have written is skipped
+    // here, once, so no section below can throw on it.
     const memStore = await loadMemoryStore(absDir);
+    memStore.memories = memStore.memories.filter(isWellFormedMemory);
     if (view && scopeFiles.size > 0) {
       for (const m of memStore.memories) {
         if (m.invalidatedAt) continue;
@@ -648,6 +657,42 @@ export async function handleOrient(
         contradictionItems.push({ id: m.id, anchors: m.anchors, freshness: f.freshness, invalidated: false });
       }
     }
+
+    // ── Triggered and pinned memories (push, not pull) ───────────────────────
+    // Evaluated against the touched set this briefing computed — under a tokenBudget the whole
+    // candidate pool, since the budget may add those functions back. Without a graph the anchors
+    // cannot be verified, so a note is judged exactly as recall would judge it then. Its own
+    // try/catch: a failure here must not take the decision and reversal sections with it. Skipped
+    // outright when no live note has a trigger or a pin, so a repo without them pays nothing.
+    if (hasPushableMemory(memStore.memories)) try {
+      const touchedResults = tokenBudget ? topResults : topResults.slice(0, relevantFunctions.length);
+      const touchedSymbols = touchedResults.map((r) => ({
+        id: r.record.id,
+        name: r.record.name,
+        ...(r.record.className ? { className: r.record.className } : {}),
+      }));
+      const touchedFiles = [...new Set(touchedResults.map((r) => r.record.filePath))];
+      const fileDomains = hasSpecDomainTrigger(memStore.memories) ? await specDomainsForFiles(absDir, touchedFiles) : [];
+      const domains = fileDomains === undefined
+        ? (specDomains.length > 0 ? specDomains.map((d) => d.domain) : undefined)
+        : [...new Set([...fileDomains, ...specDomains.map((d) => d.domain)])].sort();
+      const touched = { files: touchedFiles, symbols: touchedSymbols, domains };
+      const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
+      const hops = maxTriggerHops(memStore.memories);
+      const probe = cg && hops > 0
+        ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols, hops)
+        : undefined;
+      const injection = selectInjectedMemories(memStore.memories, touched, view ?? UNVERIFIABLE_VIEW, {
+        includePinned: true, probe, retirement: buildRetirementGraph(store.decisions), graphUnavailable: !view, decisions: store.decisions,
+      });
+      // A pushed note joins the contradiction check, wherever it is anchored.
+      if (view) contradictionItems.push(...injection.authoritative);
+      memoryInjection = injectionFields(injection);
+    } catch (err) {
+      // Non-fatal: the briefing is served without pushed memories, and says so.
+      memoryInjection = { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
+    }
+
     const groups = findUnreconciled(contradictionItems);
     if (groups.length > 0) unreconciledMemories = groups;
 
@@ -1082,6 +1127,7 @@ export async function handleOrient(
     ...(staleDecisions !== undefined ? { staleDecisions } : {}),
     ...(unreconciledMemories !== undefined ? { unreconciledMemories } : {}),
     ...(reversals !== undefined ? { reversals } : {}),
+    ...memoryInjection,
     ...(governingDecisions !== undefined ? { governingDecisions } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
     ...(changeCoupling !== undefined ? { changeCoupling } : {}),
@@ -1099,13 +1145,14 @@ export async function handleOrient(
 /**
  * Sections trimmed when the top-`limit` answer itself exceeds a `tokenBudget`, most peripheral first;
  * each is drained before the next is touched, always from its lowest-ranked end. A call path is kept
- * exactly when its function is. Never trimmed: governance context (pending, stale, reversed, and
+ * exactly when its function is. Triggered and pinned memories are trimmed from their pinned end, and the
+ * receipt counts them (change: add-memory-trigger-predicates). Never trimmed: governance context (pending, stale, reversed, and
  * governing decisions, unreconciled memories), architecture violations, matching specs (they carry
  * synced decisions), the file scope the answer was computed for, and next steps.
  */
 const ORIENT_BUDGET_TRIM_ORDER = [
   'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
-  'insertionPoints', 'specDomains', 'relevantFunctions',
+  'insertionPoints', 'staleTriggeredMemories', 'injectedMemories', 'specDomains', 'relevantFunctions',
 ] as const;
 
 /** Estimated tokens of a payload as it is sent: pretty-printed JSON, as the MCP server and `--json` emit. */
@@ -1180,6 +1227,20 @@ async function fitOrientToBudget(
     const callPaths = allPaths.slice(0, kept);
     if (allPaths.length > callPaths.length) receipt.callPaths = allPaths.length - callPaths.length;
     const droppedFunctions = omitted.relevantFunctions ?? 0;
+    // A fully trimmed pushed-memory list reads as "none fired" only when absent; the receipt counts it.
+    for (const key of ['injectedMemories', 'staleTriggeredMemories'] as const) {
+      if (Array.isArray(trimmed[key]) && (trimmed[key] as unknown[]).length === 0) delete trimmed[key];
+    }
+    // The note's item sentences describe the lists as trimmed, never items that were cut.
+    if (typeof trimmed.injectedMemoriesNote === 'string') {
+      const note = reconcileInjectionNote(
+        trimmed.injectedMemoriesNote,
+        trimmed.injectedMemories as InjectedMemory[] | undefined,
+        trimmed.staleTriggeredMemories as StaleTriggeredMemory[] | undefined,
+      );
+      if (note) trimmed.injectedMemoriesNote = note;
+      else delete trimmed.injectedMemoriesNote;
+    }
     return finish({
       ...trimmed,
       callPaths,

@@ -37,14 +37,17 @@ unbounded or undisclosed section. (Realized by orient's `pendingDecisions` / `st
 
 ### Requirement: MemoryTriggerPredicates
 
-`remember` SHALL accept an optional deterministic trigger predicate from a closed union — file
-glob, symbol-name pattern, spec domain, or anchor-within-N-call-hops of a touched symbol (computed
-with the existing backward-reachability machinery, depth-capped) — and an optional `pinned` flag
-(always included in orient's briefing for the repo). Predicate evaluation SHALL be deterministic
-set membership and bounded graph reachability; no LLM interprets a trigger. A pushed memory SHALL
-carry its freshness verdict, and an orphaned memory SHALL never be pushed as authoritative — a
-trigger widens when a memory surfaces, never whether it is trustworthy. A malformed predicate
-SHALL be rejected at record time with a message, never stored and silently ignored.
+`remember` SHALL accept one optional trigger — file glob, symbol pattern, spec domain, or
+anchor within N call hops of a touched symbol — and an optional `pinned` flag (pushed, within the bound, into
+orient's full briefing). Evaluation SHALL be deterministic set membership and depth-capped
+reachability, with no LLM. A pushed memory SHALL carry its freshness verdict; an orphaned one SHALL
+never be pushed as authoritative. A malformed trigger SHALL be rejected at record time.
+
+#### Scenario: A malformed trigger is rejected, not stored
+
+- **GIVEN** a `remember` call whose trigger names two predicates, or none from the closed union
+- **WHEN** the memory is recorded
+- **THEN** the call returns an error naming the closed union and nothing is stored
 
 #### Scenario: A call-hop trigger fires on structural proximity
 

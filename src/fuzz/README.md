@@ -25,6 +25,7 @@ npm run fuzz
 | `serve-health.fuzz.test.ts` | `validateServeHealth` | never throws; a non-null result always proves the root/identity match |
 | `secret-redaction.fuzz.test.ts` | `redactSecretString`, `redactSecrets` | a credential never survives redaction into any output; cycle-safe; input not mutated |
 | `git-ref.fuzz.test.ts` | `validateGitRef` | rejects flag-shaped (`-…`) and metacharacter refs; accepts legitimate refs; never hangs |
+| `memory-triggers.fuzz.test.ts` | `validateMemoryTrigger`, `matchGlob`, `makeHopProbe`, `selectInjectedMemories` | never throws on hostile notes.json; bounded receipts; store-order independent; matcher/BFS agree with references |
 
 ## Adding a target
 

@@ -15,6 +15,7 @@ import { Command } from 'commander';
 import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { writeStdout, writeStderr } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
+import { renderPushedMemories } from './pushed-memory-render.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
@@ -166,6 +167,9 @@ function renderHuman(b: BlastRadiusBriefing): string {
   for (const m of b.memory.willDrift) lines.push(`   ⚠ memory [${m.provenance}] ${m.kind === 'memory-orphaned' ? 'ORPHANED' : 'drifted'}: ${m.message}`);
   const memTotal = b.memory.drifted + b.memory.orphaned;
   if (memTotal > b.memory.willDrift.length) lines.push(`   … and ${memTotal - b.memory.willDrift.length} more anchored memor${memTotal - b.memory.willDrift.length === 1 ? 'y' : 'ies'}`);
+  // Notes pushed by a matching trigger: one line each, terminal-safe and cut short — the JSON carries
+  // the full content (change: add-memory-trigger-predicates).
+  lines.push(...renderPushedMemories(b, '   '));
   for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;

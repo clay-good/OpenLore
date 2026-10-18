@@ -2268,6 +2268,19 @@ export const TOOL_DEFINITIONS = [
           description: 'Classification (default note); never inferred.',
         },
         supersedes: { type: 'string', description: 'Id of a prior memory to retire (kept queryable via asOf).' },
+        trigger: {
+          type: 'object',
+          additionalProperties: false,
+          maxProperties: 1,
+          description: 'One predicate; pushed into orient/blast_radius on a match. Globs: * ? **.',
+          properties: {
+            fileGlob: { type: 'string', minLength: 1, maxLength: 256 },
+            symbolPattern: { type: 'string', minLength: 1, maxLength: 256 },
+            specDomain: { type: 'string', minLength: 1, maxLength: 256 },
+            withinHops: { type: 'integer', minimum: 1, maximum: 20, description: 'Call hops from a touched symbol.' },
+          },
+        },
+        pinned: { type: 'boolean', description: 'Push into every full orient briefing (cap 10).' },
       },
       required: ['content'],
     },
@@ -2501,7 +2514,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
 }> = {
   minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
-  memory: { baselineTokens: 1_216, maxTokens: 1_300, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
+  memory: { baselineTokens: 1_357, maxTokens: 1_450, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), plus 6.9% headroom.' },
   verify: { baselineTokens: 1_262, maxTokens: 1_350, rationale: 'Exact v1 wire baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
   coordination: { baselineTokens: 2_487, maxTokens: 2_650, rationale: 'Exact v1 wire baseline plus 6.6% headroom.' },
