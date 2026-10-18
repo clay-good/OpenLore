@@ -40,7 +40,7 @@ afterEach(() => {
 });
 
 describe('heap re-exec supervisor', () => {
-  it.skipIf(process.platform === 'win32')('takes its child down with it on a directed SIGTERM', async () => {
+  const supervise = async (signal: NodeJS.Signals): Promise<void> => {
     dir = mkdtempSync(join(tmpdir(), 'heap-signals-'));
     const script = join(dir, 'supervised.mjs');
     writeFileSync(script, [
@@ -64,9 +64,13 @@ describe('heap re-exec supervisor', () => {
     childPid = Number(/child (\d+)/.exec(out)![1]);
     expect(childPid).not.toBe(parent.pid);
 
-    process.kill(parent.pid!, 'SIGTERM');
+    process.kill(parent.pid!, signal);
     const result = await exited;
     expect(result.signal ?? result.code).toBeTruthy(); // died of (or reported) the signal
-    expect(await until(() => !alive(childPid!), 10_000), 'the child exited with its supervisor').toBe(true);
-  }, 60_000);
+    expect(await until(() => !alive(childPid!), 15_000), 'the child exited with its supervisor').toBe(true);
+  };
+
+  it.skipIf(process.platform === 'win32')('takes its child down with it on a directed SIGTERM', () => supervise('SIGTERM'), 60_000);
+  // A SIGINT sent to the supervisor alone (not the terminal's process group) is forwarded after a grace period.
+  it.skipIf(process.platform === 'win32')('takes its child down with it on a directed SIGINT', () => supervise('SIGINT'), 60_000);
 });

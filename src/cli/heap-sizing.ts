@@ -329,6 +329,9 @@ export function gatherHeapPlanInputs(): HeapPlanInputs {
   };
 }
 
+/** How long a SIGINT is left to the process group before the supervisor forwards it itself. */
+const SIGINT_FORWARD_GRACE_MS = 3000;
+
 /** Signals the supervisor forwards to the child: a directed signal reaches only the supervisor. */
 const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGHUP'];
 
@@ -369,18 +372,26 @@ export async function maybeReexecForHeap(): Promise<void> {
       stdio: 'inherit',
       env: { ...process.env, [HEAP_REEXEC_MARKER_ENV]: '1' },
     });
-    // While the child runs, this process is only its supervisor: a directed signal is passed on,
-    // and a SIGINT (already delivered to the child by the foreground process group) is waited out
-    // rather than killing the supervisor and orphaning nothing — or, worse, leaving the terminal.
+    // While the child runs, this process is only its supervisor: a directed signal is passed on.
+    // A terminal Ctrl-C reaches the child itself through the foreground process group, so a SIGINT
+    // is forwarded only if the child is still running after a grace period — a SIGINT sent to the
+    // supervisor alone (`kill -INT`, a host's `child.kill('SIGINT')`) still stops the run.
     const forward = (signal: NodeJS.Signals) => () => { child.kill(signal); };
     const handlers = FORWARDED_SIGNALS.map(signal => [signal, forward(signal)] as const);
     for (const [signal, handler] of handlers) process.on(signal, handler);
-    const ignoreInterrupt = (): void => {};
+    let interruptTimer: NodeJS.Timeout | undefined;
+    const ignoreInterrupt = (): void => {
+      interruptTimer ??= setTimeout(() => {
+        interruptTimer = undefined;
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGINT');
+      }, SIGINT_FORWARD_GRACE_MS);
+    };
     process.on('SIGINT', ignoreInterrupt);
 
     await new Promise<never>((_, reject) => {
       child.once('error', reject);
       child.once('exit', (code, signal) => {
+        if (interruptTimer) clearTimeout(interruptTimer);
         for (const [sig, handler] of handlers) process.off(sig, handler);
         process.off('SIGINT', ignoreInterrupt);
         // Propagate a signal death faithfully; otherwise exit with the child's status.
@@ -393,6 +404,7 @@ export async function maybeReexecForHeap(): Promise<void> {
         process.exit(code ?? 0);
       });
     }).catch((err: Error) => {
+      if (interruptTimer) clearTimeout(interruptTimer);
       for (const [sig, handler] of handlers) process.off(sig, handler);
       process.off('SIGINT', ignoreInterrupt);
       // The re-exec could not be spawned — continue in THIS process at the default heap rather than

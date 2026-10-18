@@ -227,8 +227,9 @@ async function reportActiveAnalysis(
     // Reclaiming needs BOTH a dead owner and a heartbeat older than the window; saying "the next
     // analyze reclaims it" inside the window sent users to delete the lock by hand.
     const waitMs = OWNERSHIP_HEARTBEAT_STALE_MS - ownership.heartbeatAgeMs;
-    logger.info('Reclaim', waitMs > 0
-      ? `The owner is dead; the lock becomes reclaimable in ${formatDuration(waitMs)}, and the next analyze after that reclaims it automatically.`
+    // Reclaim requires silence STRICTLY longer than the window, so the boundary itself still waits.
+    logger.info('Reclaim', waitMs >= 0
+      ? `The owner is dead; the lock becomes reclaimable in ${formatDuration(waitMs + 1000)}, and the next analyze after that reclaims it automatically.`
       : 'The owner is dead; the next analyze reclaims this lock automatically.');
   }
 
