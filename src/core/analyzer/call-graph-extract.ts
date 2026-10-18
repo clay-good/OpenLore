@@ -60,6 +60,13 @@ export function extractDocstringBefore(
   // ── All other languages: scan backward from startIndex ─────────────────
   // Move to the character just before startIndex
   let pos = startIndex - 1;
+  if (language === 'TypeScript' || language === 'JavaScript') {
+    // The node can start after `export` / modifiers, or be the value of `const name =`; the JSDoc
+    // block sits before all of that (same rule as extractDeprecation).
+    const windowStart = Math.max(0, startIndex - 300);
+    const prefix = TS_DECLARATION_PREFIX.exec(source.slice(windowStart, startIndex));
+    if (prefix) pos = windowStart + prefix.index - 1;
+  }
 
   // Skip trailing whitespace / newlines before the declaration
   while (pos >= 0 && (source[pos] === ' ' || source[pos] === '\t' || source[pos] === '\n' || source[pos] === '\r')) {
