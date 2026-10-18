@@ -281,8 +281,11 @@ function symbolBodyBaselines(
     if (m.invalidatedAt || !Array.isArray(m.anchors)) continue;
     for (const a of m.anchors) {
       if (!a?.nodeId || out.has(a.nodeId) || spanTextOf(a) === undefined) continue;
-      const source = view.nodeSource?.(a.nodeId);
-      if (source) out.set(a.nodeId, hashSpan(source.text));
+      // Offsets must describe the file; the hash is of the raw span, as continuity hashes.
+      if (!view.nodeSource?.(a.nodeId)) continue;
+      const node = store.getNode(a.nodeId);
+      const raw = node ? nodeSpanText(rootPath, node, new Map()) : undefined;
+      if (raw !== undefined) out.set(a.nodeId, hashSpan(raw));
     }
   }
   return out;

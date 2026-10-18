@@ -19,6 +19,7 @@ import {
   anchorFreshness,
   anchorOutcome,
   spanLines,
+  normalizeLineEndings,
   MAX_SPAN_CHARS,
   type GraphFreshnessView,
 } from '../../decisions/anchor.js';
@@ -431,6 +432,38 @@ describe('round-1 review regressions', () => {
     expect(rec.findings).toBeUndefined();
   });
 
+  it('issues no certificate for a symbol anchor in a file that changed since analysis', async () => {
+    await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }]);
+    // A same-length edit after the anchored symbol keeps its stored slice byte-identical.
+    await writeFile(join(root, 'src', 'big.ts'), `${SRC}// x\n`, 'utf-8');
+    const rec = (await handleRecall(root)) as Recall & { authoritative: Array<{ verifiedCurrent?: boolean }> };
+    expect(rec.authoritative[0].freshness).toBe('fresh');
+    expect(rec.authoritative[0].verifiedCurrent).toBeUndefined();
+    expect(rec.authoritative[0].certificates).toBeUndefined();
+  });
+
+  it('checks the file a moved symbol resolves to, not its recorded file', async () => {
+    await rememberSpan();
+    // Move big to another file under the same stable id, then edit it without analyzing.
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await rm(join(root, 'src', 'big.ts'));
+    await writeFile(join(root, 'src', 'moved.ts'), SRC, 'utf-8');
+    const st = EdgeStore.open(EdgeStore.dbPath(dir));
+    st.clearAll();
+    st.insertNodes([{ ...nodeFor('src/moved.ts', 'big', SRC), stableId: 'S1' }]);
+    st.setFileHash('src/moved.ts', createHash('sha256').update(SRC).digest('hex'));
+    st.close();
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const store = JSON.parse(await readFile(path, 'utf-8'));
+    store.memories[0].anchors[0].stableId = 'S1';
+    await writeFile(path, JSON.stringify(store), 'utf-8');
+    await writeFile(join(root, 'src', 'moved.ts'), SRC.replace(SPAN, `${SPAN}\n${SPAN}`), 'utf-8');
+    const loss = await detectMemoryAnchorLoss(root);
+    expect(loss.staleFiles).toEqual(['src/moved.ts']);
+    const gated = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'blocking' });
+    expect(gated.failedCodes.has('memory-anchor-lost')).toBe(true);
+  });
+
   it('treats a file with no recorded content key as unverified, not changed', async () => {
     await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }]);
     // What an imported bundle looks like: nodes, but no watcher hash and no Pass-1 key.
@@ -601,5 +634,7 @@ describe('span freshness (pure)', () => {
     expect(spanLines('abc', '', 10)).toEqual([]);
     expect(spanLines('x\r\ny\r\nx\r\ny', 'x\ny', 10, 5)).toEqual([5, 7]);
     expect(spanLines('x\ny', 'x\r\ny', 10)).toEqual([1]);
+    // Idempotent: a stored, already-normalized span reads back the same.
+    expect(normalizeLineEndings(normalizeLineEndings('x\r\r\ny'))).toBe(normalizeLineEndings('x\r\r\ny'));
   });
 });

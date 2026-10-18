@@ -115,8 +115,8 @@ export interface GraphFreshnessView {
   /** Persisted structural context for a stale file's region. */
   staleRegionComposition?(filePath: string): StaleRegionComposition | undefined;
   /**
-   * Current source text of a node's span and the 1-based file line it starts on —
-   * what a span anchor is re-located in (add-memory-anchor-verdicts). Optional: a
+   * Current source text of a node's span, CRLF read as LF, and the 1-based file line
+   * it starts on — what a span anchor is re-located in (add-memory-anchor-verdicts). Optional: a
    * view without it decides a span anchor by the whole-symbol hash, which reports
    * the span `fresh` only when the whole symbol is unchanged.
    */
@@ -126,10 +126,11 @@ export interface GraphFreshnessView {
 /**
  * CRLF read as LF (add-memory-anchor-verdicts). notes.json is committed, and a
  * checkout may convert line endings, so a span recorded on one platform must match
- * on another. Line numbers are unchanged: only `\r` before `\n` is dropped.
+ * on another. Line numbers are unchanged: only `\r` before `\n` is dropped. Every
+ * run of `\r` before a `\n` goes, so normalizing twice equals normalizing once.
  */
 export function normalizeLineEndings(text: string): string {
-  return text.includes('\r\n') ? text.replace(/\r\n/g, '\n') : text;
+  return text.includes('\r\n') ? text.replace(/\r+\n/g, '\n') : text;
 }
 
 /**

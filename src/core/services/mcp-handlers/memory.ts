@@ -723,7 +723,7 @@ const MAX_FINDING_ANCHORS = 3;
 const RESELECTION_REASON_TEXT: Record<ReselectionReason, string> = {
   'span-ambiguous': 'its span text now occurs more than once in the symbol',
   'move-ambiguous': 'the symbol disappeared and more than one symbol could be it',
-  'no-successor': 'the symbol disappeared with no unambiguous successor (it was deleted, renamed or moved together with other edits, or renamed across several analyses)',
+  'no-successor': 'the symbol disappeared with no unambiguous successor: it was deleted, renamed or moved together with other edits, or renamed across several analyses',
   'file-missing': 'the file no longer exists',
 };
 
@@ -842,7 +842,7 @@ export async function detectMemoryAnchorLoss(rootPath: string): Promise<{
     }
     // A symbol anchor in a file that changed since analysis was checked against
     // offsets that no longer describe it (file-level anchors check the disk only).
-    const symbolFiles = [...new Set(notes.flatMap((m) => m.anchors.filter((a) => a.nodeId).map((a) => a.filePath)))].sort();
+    const symbolFiles = [...new Set(notes.flatMap((m) => m.anchors.filter((a) => a.nodeId).map((a) => ctx.resolvedFileOf(a))))].sort();
     const states = symbolFiles.map((f) => [f, ctx.fileIndexedAsOnDisk(f)] as const);
     return {
       findings,

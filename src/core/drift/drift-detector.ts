@@ -763,7 +763,9 @@ function makeMemoryStalenessIssue(
     domain,
     specPath: null,
     suggestion:
-      freshness === 'orphaned'
+      freshness === 'orphaned' && spanLines
+        ? `Re-record this ${memKind} with a span that occurs once in ${subject}, or supersede it.`
+        : freshness === 'orphaned'
         ? `Re-record this ${memKind} against current code, or reject it — its subject was renamed, moved, or deleted.`
         : `Verify this ${memKind} still holds and re-record it; the code it describes was modified.`,
   };

@@ -91,10 +91,19 @@ export function nodeSpanText(rootPath: string, node: FunctionNode, cache: Map<st
 interface ViewMemo {
   offsetsCurrent: Map<string, OffsetsState>;
   newlines: Map<string, number[]>;
+  /** Per node id: its span hash, and its span text with CRLF read as LF. */
+  nodeHashes: Map<string, string | undefined>;
+  nodeSources: Map<string, { text: string; startLine: number } | undefined>;
 }
 
 function newViewMemo(): ViewMemo {
-  return { offsetsCurrent: new Map(), newlines: new Map() };
+  return { offsetsCurrent: new Map(), newlines: new Map(), nodeHashes: new Map(), nodeSources: new Map() };
+}
+
+/** A node's span hash, computed once per view. */
+function memoNodeHash(rootPath: string, node: FunctionNode, cache: Map<string, string | null>, memo: ViewMemo): string | undefined {
+  if (!memo.nodeHashes.has(node.id)) memo.nodeHashes.set(node.id, hashNodeSpan(rootPath, node, cache));
+  return memo.nodeHashes.get(node.id);
 }
 
 /**
@@ -149,8 +158,10 @@ function offsetsState(
 }
 
 /**
- * A node's current span text and the 1-based file line it starts on, or undefined
- * when the file is unreadable or the stored offsets no longer describe it.
+ * A node's current span text (CRLF read as LF) and the 1-based file line it starts
+ * on, or undefined when the file is unreadable or the stored offsets no longer
+ * describe it. Computed once per node per view: a large body is normalized once,
+ * not once per span anchor on it.
  */
 function nodeSource(
   store: EdgeStore,
@@ -159,9 +170,13 @@ function nodeSource(
   cache: Map<string, string | null>,
   memo: ViewMemo,
 ): { text: string; startLine: number } | undefined {
+  if (memo.nodeSources.has(node.id)) return memo.nodeSources.get(node.id);
   const content = readFileCached(rootPath, node.filePath, cache);
-  if (content === null || offsetsState(store, node, content, memo) !== 'current') return undefined;
-  return { text: sliceNodeSpan(content, node), startLine: lineOf(content, node.startIndex, node.filePath, memo) };
+  const source = content === null || offsetsState(store, node, content, memo) !== 'current'
+    ? undefined
+    : { text: normalizeLineEndings(sliceNodeSpan(content, node)), startLine: lineOf(content, node.startIndex, node.filePath, memo) };
+  memo.nodeSources.set(node.id, source);
+  return source;
 }
 
 /**
@@ -233,12 +248,12 @@ export function makeFreshnessView(
   return {
     nodeHash: (nodeId: string): string | undefined => {
       const node = store.getNode(nodeId);
-      return node ? hashNodeSpan(rootPath, node, cache) : undefined;
+      return node ? memoNodeHash(rootPath, node, cache, memo) : undefined;
     },
     resolveStableId: (stableId: string): { nodeId: string; contentHash: string } | undefined => {
       const node = store.getNodeByStableId(stableId);
       if (!node) return undefined;
-      const contentHash = hashNodeSpan(rootPath, node, cache);
+      const contentHash = memoNodeHash(rootPath, node, cache, memo);
       return contentHash === undefined ? undefined : { nodeId: node.id, contentHash };
     },
     fileExists: (filePath: string): boolean => existsSync(join(rootPath, filePath)),
@@ -337,6 +352,17 @@ export class AnchorContext {
     return offsetsState(this.store, node, content, this.viewMemo);
   }
 
+  /**
+   * The file a symbol anchor's freshness is actually checked in: its node's file, or
+   * the file its stable id relocated it to (add-memory-anchor-verdicts).
+   */
+  resolvedFileOf(anchor: StructuralAnchor): string {
+    if (!anchor.nodeId) return anchor.filePath;
+    const node = this.store.getNode(anchor.nodeId)
+      ?? (anchor.stableId ? this.store.getNodeByStableId(anchor.stableId) : null);
+    return node?.filePath ?? anchor.filePath;
+  }
+
   /** Current whole-file content hash, or undefined when the file is gone. */
   fileContentHash(filePath: string): string | undefined {
     const content = readFileCached(this.rootPath, filePath, this.fileCache);
@@ -363,6 +389,9 @@ export class AnchorContext {
       const node = this.store.getNode(anchor.nodeId)
         ?? (anchor.stableId ? this.store.getNodeByStableId(anchor.stableId) : null);
       if (!node) return undefined;
+      // Offsets known to describe other content cite the wrong lines: no evidence.
+      const content = readFileCached(this.rootPath, node.filePath, this.fileCache);
+      if (content === null || offsetsState(this.store, node, content, this.viewMemo) === 'changed') return undefined;
       // A span anchor was verified by re-locating its text, so its evidence is that
       // text's lines and hash, not the whole symbol's (add-memory-anchor-verdicts).
       const span = spanTextOf(anchor);
