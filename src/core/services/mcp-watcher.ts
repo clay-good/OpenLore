@@ -44,6 +44,9 @@ import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth, extractFileDynamicBoundary } from '../analyzer/call-graph.js';
 import { MESSAGE_TOPOLOGY_RULE, mayContainMessageTopology } from '../analyzer/message-topology.js';
 
+/** Leading characters checked for a NUL, as the file walker's binary guard does (git's 8,000-byte heuristic). */
+const BINARY_PROBE_CHARS = 8000;
+
 /** Message-send refusals that claim something about the whole repository, not one file. */
 const REPOSITORY_WIDE_MESSAGE_CLAIMS: ReadonlySet<string> = new Set([
   'unindexed-message-consumer', 'test-only-message-consumer', 'uncomparable-message-consumer', 'unattributed-message-consumer',
@@ -1257,6 +1260,7 @@ export class McpWatcher {
     // timestamps, which a Windows sharing violation (an indexer or AV holding the
     // file) produces by making libuv fall back to an attribute-only stat.
     const unreadable: Array<{ abs: string; reason: string }> = [];
+    const binary: string[] = [];
     for (const abs of absPaths) {
       const rel = toRepositoryPath(relative(this.rootPath, abs));
       if (isTestFile(rel)) continue;
@@ -1272,8 +1276,12 @@ export class McpWatcher {
         unreadable.push({ abs, reason: (err as Error).message });
         continue;
       }
+      // Binary content with a source extension (a video segment named `.ts`): the full build's file
+      // walker skips it, so the watcher drops whatever it held rather than extracting it.
+      if (content.slice(0, BINARY_PROBE_CHARS).includes('\u0000')) { binary.push(abs); continue; }
       files.push({ rel, abs, content });
     }
+    if (binary.length > 0) await this.handleDeletions(binary, false);
     // Re-queue only on the watch lane. `handleChange` and `applyRepositoryDelta`
     // are synchronous callers with no debounce behind them: they get the
     // disclosure and decide for themselves.
