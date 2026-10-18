@@ -53,6 +53,7 @@ import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enfor
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
 import { detectMemoryAnchorLoss } from '../../core/services/mcp-handlers/memory.js';
 import { loadMemoryStore } from '../../core/decisions/memory-store.js';
+import { loadDecisionStore } from '../../core/decisions/store.js';
 import {
   CORPUS_FINDING_CODES,
   detectCorpusIntegrity,
@@ -341,6 +342,14 @@ function impactCertificateAssessmentComplete(cert: ImpactCertificate): boolean {
 }
 
 /**
+ * Load the memory and decision stores read-only, throwing when either is torn. Sources
+ * that load them for writing (and so would quarantine a torn store) run after this.
+ */
+async function assertStoresReadable(cwd: string): Promise<void> {
+  await Promise.all([loadMemoryStore(cwd, { readOnly: true }), loadDecisionStore(cwd, { readOnly: true })]);
+}
+
+/**
  * Collect governance findings from every in-scope source, mapping each native
  * finding onto the unified {@link GovernanceFinding} shape. Source failures are
  * recorded per code: advisory policies keep their historical fail-soft behavior,
@@ -426,7 +435,7 @@ export async function collectGovernanceFindings(
   // An active rule requires the whole stored dependency graph; malformed blocks
   // remain visible even when no graph is available.
   try {
-    const state = await loadDecisionConstraintState(cwd, config?.openspecPath);
+    const state = await loadDecisionConstraintState(cwd, config?.openspecPath, { readOnly: true });
     decisionConstraints = { ledger: state.ledger, retiredRules: state.retiredRules };
     findings.push(...state.malformedFindings);
     assessedCodes.add('decision-constraint-malformed');
@@ -461,8 +470,13 @@ export async function collectGovernanceFindings(
     }
   } catch (err) {
     caveats.push(`decision-constraint check unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    failedCodes.add('decision-constraint-malformed');
-    failedCodes.add('decision-constraint-violation');
+    // Its decision-store load is read-only, so a torn pending.json throws here instead
+    // of being renamed away. Advisory keeps its fail-soft behavior: only a blocking or
+    // frozen policy fails the gate on an incomplete check.
+    for (const code of ['decision-constraint-malformed', 'decision-constraint-violation']) {
+      const cls = resolveEnforcementClass(code, policy as EnforcementPolicy);
+      if (cls === 'blocking' || cls === 'frozen') failedCodes.add(code);
+    }
   }
 
   // Author-declared architecture rules — deterministic and opt-in. Decision-carried
@@ -571,10 +585,10 @@ export async function collectGovernanceFindings(
   // blast-radius orphan patterns — only when configured (diff-heavy).
   if (blastRadiusInUse(config, policy)) {
     try {
-      // The briefing loads the memory store for writing, which renames a torn store:
-      // check it read-only first, so a torn store stays in place and keeps every
-      // memory-dependent check incomplete on every run (add-memory-anchor-verdicts).
-      await loadMemoryStore(cwd, { readOnly: true });
+      // The briefing loads the memory and decision stores for writing, which renames a
+      // torn store: check both read-only first, so a torn store stays in place and keeps
+      // every dependent check incomplete on every run.
+      await assertStoresReadable(cwd);
       const b = await computeBlastRadius({ directory: cwd, baseRef });
       if (!('error' in b)) {
         findings.push(...blastRadiusFindings(b));
@@ -602,6 +616,8 @@ export async function collectGovernanceFindings(
   // impact-certificate surfaces — only when surfaces are declared (diff-heavy).
   if (impactCertificateInUse(config)) {
     try {
+      // Same as blast-radius above: its graph and anchor reads must not rename a torn store.
+      await assertStoresReadable(cwd);
       const cert = await computeImpactCertificate({ directory: cwd, baseRef });
       if (!('error' in cert)) {
         findings.push(...impactCertificateFindings(cert));

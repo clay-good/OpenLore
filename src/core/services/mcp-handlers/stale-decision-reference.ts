@@ -322,8 +322,8 @@ async function collectSpecFiles(specsRoot: string, max = 500): Promise<string[]>
  * resolve memory freshness against the current call graph, and run the pure
  * detector. Never throws for an infrastructure problem — a missing store/graph
  * degrades to "no findings" (advisory-safe), consistent with the other guards.
- * `readOnly` (the commit gate): an unreadable memory store throws instead of being
- * quarantined, so the gate never renames repo content or reads it as empty.
+ * `readOnly` (the commit gate): an unreadable memory or decision store throws instead
+ * of being quarantined, so the gate never renames repo content or reads it as empty.
  */
 export async function detectStaleDecisionReferences(
   directory: string,
@@ -331,7 +331,7 @@ export async function detectStaleDecisionReferences(
 ): Promise<StaleDecisionReferenceFinding[]> {
   const rootPath = await validateDirectory(directory);
   const [decisionStore, memStore, config] = await Promise.all([
-    loadDecisionStore(rootPath),
+    loadDecisionStore(rootPath, { readOnly: opts.readOnly }),
     loadMemoryStore(rootPath, { readOnly: opts.readOnly }),
     readOpenLoreConfig(rootPath),
   ]);
