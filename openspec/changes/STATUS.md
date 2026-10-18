@@ -54,6 +54,14 @@ bodies); a linear (KMP) matcher; non-blocking, regular-file-only anchored reads;
 loads in the gate (a torn `notes.json` is no longer renamed away, and corpus integrity now blocks on
 it); and bounded automatic store writes.
 
+Shipped and archived since: `add-memory-claim-verdicts` (2026-10-18) — `remember` takes optional
+`claims` in `verify_claim`'s grammar (at most 10); each must be confirmed now or nothing is stored
+and every verdict is returned. `recall` checks a returned note's claims again with the same
+evaluator: a refuted claim moves the note to `evidenceRefuted`, one that can no longer be checked
+to `evidenceUnverifiable`; neither is authoritative, so an unchanged anchor no longer hides a fact
+that stopped being true. A claim shared by several notes is checked once per call. Deferred: a
+cross-call fingerprint cache, claim checks on pushed memories, and a governance finding.
+
 ## State as of 2026-07-27 (spec-backlog repair pass)
 
 The corpus is fully green: **all 15 main specs and all 94 open changes pass `openspec

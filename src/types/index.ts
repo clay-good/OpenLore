@@ -1196,6 +1196,21 @@ export interface AnchoredMemory {
   trigger?: MemoryTrigger;
   /** Always pushed into `orient`'s briefing for the repo (change: add-memory-trigger-predicates). */
   pinned?: boolean;
+  /**
+   * Structural claims the memory rests on, in `verify_claim`'s grammar; each was confirmed when
+   * recorded and is checked again at every recall (change: add-memory-claim-verdicts).
+   */
+  claims?: MemoryClaim[];
+}
+
+/** A `verify_claim` claim a memory rests on (change: add-memory-claim-verdicts). */
+export interface MemoryClaim {
+  kind: 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current';
+  subject: string;
+  /** The second symbol, for `calls` / `reaches` / `impacts`. */
+  object?: string;
+  /** Short SHA of the index the claim was confirmed against when recorded, when captured. */
+  recordedIndexCommit?: string;
 }
 
 /**

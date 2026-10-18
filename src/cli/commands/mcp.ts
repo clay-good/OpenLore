@@ -2282,6 +2282,21 @@ export const TOOL_DEFINITIONS = [
           },
         },
         pinned: { type: 'boolean', description: 'Push into every full orient briefing (cap 10).' },
+        claims: {
+          type: 'array',
+          maxItems: 10,
+          description: 'verify_claim claims it rests on; must hold now, rechecked at recall.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['kind', 'subject'],
+            properties: {
+              kind: { type: 'string', enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'] },
+              subject: { type: 'string', minLength: 1, maxLength: 256 },
+              object: { type: 'string', minLength: 1, maxLength: 256 },
+            },
+          },
+        },
       },
       required: ['content'],
     },
@@ -2515,7 +2530,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
 }> = {
   minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
-  memory: { baselineTokens: 1_357, maxTokens: 1_450, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), plus 6.9% headroom.' },
+  memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },
   verify: { baselineTokens: 1_262, maxTokens: 1_350, rationale: 'Exact v1 wire baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
   coordination: { baselineTokens: 2_487, maxTokens: 2_650, rationale: 'Exact v1 wire baseline plus 6.6% headroom.' },

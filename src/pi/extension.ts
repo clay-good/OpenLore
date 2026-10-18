@@ -1370,6 +1370,14 @@ export const NAV_TOOLS: NavToolSpec[] = [
         withinHops: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Anchor is within N call hops of a touched symbol.' })),
       }, { additionalProperties: false, maxProperties: 1, description: 'Optional: give exactly one predicate; the memory is pushed into orient/blast_radius briefings when it matches what they touch.' })),
       pinned: Type.Optional(Type.Boolean({ description: 'Push this memory into every full (non-lean) orient briefing (at most 10 notes are pushed; the rest are counted).' })),
+      claims: Type.Optional(Type.Array(
+        Type.Object({
+          kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'] as const),
+          subject: Type.String({ minLength: 1, maxLength: 256, description: 'Symbol name, or a decision id for decision-current.' }),
+          object: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'Second symbol, for calls / reaches / impacts.' })),
+        }, { additionalProperties: false }),
+        { maxItems: 10, description: 'Optional: verify_claim claims the memory rests on. Each must hold now; recall checks them again and moves the memory out of the authoritative set when one no longer holds.' },
+      )),
     }),
   },
   {

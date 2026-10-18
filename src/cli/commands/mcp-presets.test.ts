@@ -677,7 +677,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // (measured 97,727 B), leaving 73 B rather than silently removing the guard.
     // remember's optional trigger/pinned inputs, with transport-enforced bounds: 97,800 → 98,500 B
     // (measured 98,283 B; change: add-memory-trigger-predicates). Their descriptions were trimmed first.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(98_500);
+    // remember's optional claims input (closed kind enum, bounded terms): 98,500 → 99,200 B
+    // (measured 98,897 B; change: add-memory-claim-verdicts). Its description was trimmed first.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(99_200);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
