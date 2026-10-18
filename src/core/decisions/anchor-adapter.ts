@@ -14,6 +14,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import {
   OPENLORE_DIR,
@@ -21,6 +22,8 @@ import {
 } from '../../constants.js';
 import { EdgeStore } from '../services/edge-store.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
+import { factKey } from '../analyzer/pass1-fact-cache.js';
+import { detectLanguage } from '../analyzer/language-detection.js';
 import type { StructuralAnchor, GroundingCertificate } from '../../types/index.js';
 import {
   hashSpan,
@@ -81,28 +84,93 @@ export function nodeSpanText(rootPath: string, node: FunctionNode, cache: Map<st
   return sliceNodeSpan(content, node);
 }
 
-/** A node's current span text and the 1-based file line it starts on, or undefined when unreadable. */
-function nodeSource(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): { text: string; startLine: number } | undefined {
-  const content = readFileCached(rootPath, node.filePath, cache);
-  if (content === null) return undefined;
-  return { text: sliceNodeSpan(content, node), startLine: lineOf(content, node.startIndex) };
+/**
+ * Whether the stored offsets of `node` still describe the file on disk
+ * (add-memory-anchor-verdicts). Offsets come from the last analysis; after an edit
+ * they point at other text, and a span search there could find the span in a
+ * neighboring symbol. The watcher records the hash of each file it re-indexed; a
+ * full analyze records the content key of each file it extracted. Either must match
+ * the current content, or the offsets are not trusted. Memoized per file.
+ */
+/** Per-view memos keyed by file path; a view's file cache holds one content per path. */
+interface ViewMemo {
+  offsetsCurrent: Map<string, boolean>;
+  newlines: Map<string, number[]>;
 }
 
-/** 1-based line of a code-unit offset in `content`. */
-function lineOf(content: string, offset: number): number {
-  let line = 1;
-  const end = Math.min(offset, content.length);
-  for (let i = 0; i < end; i++) if (content.charCodeAt(i) === 10) line++;
-  return line;
+function newViewMemo(): ViewMemo {
+  return { offsetsCurrent: new Map(), newlines: new Map() };
+}
+
+function offsetsCurrent(
+  store: EdgeStore,
+  node: FunctionNode,
+  content: string,
+  viewMemo: ViewMemo,
+): boolean {
+  const memo = viewMemo.offsetsCurrent;
+  const hit = memo.get(node.filePath);
+  if (hit !== undefined) return hit;
+  let current: boolean;
+  try {
+    const indexed = store.getFileHash(node.filePath);
+    current = indexed !== null
+      ? indexed === createHash('sha256').update(content).digest('hex')
+      : store.getPass1FactHash(node.filePath) === factKey({ path: node.filePath, language: node.language, content });
+  } catch {
+    current = false;
+  }
+  memo.set(node.filePath, current);
+  return current;
+}
+
+/**
+ * A node's current span text and the 1-based file line it starts on, or undefined
+ * when the file is unreadable or the stored offsets no longer describe it.
+ */
+function nodeSource(
+  store: EdgeStore,
+  rootPath: string,
+  node: FunctionNode,
+  cache: Map<string, string | null>,
+  memo: ViewMemo,
+): { text: string; startLine: number } | undefined {
+  const content = readFileCached(rootPath, node.filePath, cache);
+  if (content === null || !offsetsCurrent(store, node, content, memo)) return undefined;
+  return { text: sliceNodeSpan(content, node), startLine: lineOf(content, node.startIndex, node.filePath, memo) };
+}
+
+/**
+ * 1-based line of a code-unit offset in `content`, by binary search over the
+ * file's newline offsets. The offsets are computed once per content string, so
+ * many span anchors in one large file cost one scan, not one scan each.
+ */
+function lineOf(content: string, offset: number, filePath: string, memo: ViewMemo): number {
+  let starts = memo.newlines.get(filePath);
+  if (!starts) {
+    starts = [];
+    for (let i = content.indexOf('\n'); i !== -1; i = content.indexOf('\n', i + 1)) starts.push(i);
+    memo.newlines.set(filePath, starts);
+  }
+  // Count newlines strictly before `offset`.
+  let lo = 0;
+  let hi = starts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid] < offset) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo + 1;
 }
 
 /**
  * Why a requested span was not recorded on an anchor (add-memory-anchor-verdicts):
- * the hint named no symbol that resolved, or the text does not occur exactly once
- * in the symbol's body. The anchor is then recorded without the span, and
+ * the hint named no symbol that resolved, the text does not occur exactly once in
+ * the symbol's body, the source is unreadable, or the file changed since it was
+ * analyzed (its stored offsets no longer locate the symbol). The anchor is then recorded without the span, and
  * `remember` says so.
  */
-export type SpanNotRecordedReason = 'no-symbol' | 'not-found' | 'ambiguous' | 'unreadable';
+export type SpanNotRecordedReason = 'no-symbol' | 'not-found' | 'line-endings' | 'ambiguous' | 'unreadable' | 'index-stale';
 
 /** Hash a node's source span (code-unit offsets) against current file content. */
 function hashNodeSpan(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
@@ -121,6 +189,7 @@ export function makeFreshnessView(
   renameOf?: (nodeId: string) => string | undefined,
 ): GraphFreshnessView {
   const cache = new Map<string, string | null>();
+  const memo = newViewMemo();
   let staleSnapshot: ReturnType<EdgeStore['getStaleRegionSnapshot']> | undefined;
   let staleFiles: Set<string> | undefined;
   const staleRegion = () => {
@@ -159,7 +228,7 @@ export function makeFreshnessView(
     fileInStaleRegion: (filePath: string): boolean => fileIsStale(filePath),
     nodeSource: (nodeId: string) => {
       const node = store.getNode(nodeId);
-      return node ? nodeSource(rootPath, node, cache) : undefined;
+      return node ? nodeSource(store, rootPath, node, cache, memo) : undefined;
     },
     staleRegionComposition: (filePath: string) =>
       fileIsStale(filePath) ? staleRegion().composition : undefined,
@@ -169,6 +238,7 @@ export function makeFreshnessView(
 
 export class AnchorContext {
   private fileCache = new Map<string, string | null>();
+  private viewMemo = newViewMemo();
 
   private constructor(
     private readonly store: EdgeStore,
@@ -226,6 +296,21 @@ export class AnchorContext {
     return out;
   }
 
+  /**
+   * Whether the analysis indexed this file at its current content
+   * (add-memory-anchor-verdicts): `true` when it did, `false` when the file changed
+   * since, or no recorded key can show it did not; `undefined` when the file is
+   * unreadable (a deleted file has no offsets left to be wrong about).
+   */
+  fileIndexedAsOnDisk(filePath: string): boolean | undefined {
+    const content = readFileCached(this.rootPath, filePath, this.fileCache);
+    if (content === null) return undefined;
+    // A file whose symbols were all removed has no node to name its language.
+    const node = this.store.getNodesForFile(filePath).find((n) => !n.isExternal)
+      ?? ({ filePath, language: detectLanguage(filePath) } as FunctionNode);
+    return offsetsCurrent(this.store, node, content, this.viewMemo);
+  }
+
   /** Current whole-file content hash, or undefined when the file is gone. */
   fileContentHash(filePath: string): string | undefined {
     const content = readFileCached(this.rootPath, filePath, this.fileCache);
@@ -267,7 +352,7 @@ export class AnchorContext {
 
   /** Evidence for a span anchor: the lines its unique occurrence covers and the span's hash. */
   private spanCertificate(node: FunctionNode, spanText: string): GroundingCertificate | undefined {
-    const source = nodeSource(this.rootPath, node, this.fileCache);
+    const source = nodeSource(this.store, this.rootPath, node, this.fileCache, this.viewMemo);
     if (!source) return undefined;
     const hits = locateSpan(source.text, spanText, 2);
     if (hits.length !== 1) return undefined;
@@ -380,10 +465,17 @@ export class AnchorContext {
   /** Whether `span` occurs exactly once in the node's current body. */
   private locateHintSpan(nodeId: string, span: string): 'unique' | Exclude<SpanNotRecordedReason, 'no-symbol'> {
     const node = this.store.getNode(nodeId);
-    const source = node ? nodeSource(this.rootPath, node, this.fileCache) : undefined;
-    if (!source) return 'unreadable';
+    if (!node) return 'unreadable';
+    const content = readFileCached(this.rootPath, node.filePath, this.fileCache);
+    if (content === null) return 'unreadable';
+    if (!offsetsCurrent(this.store, node, content, this.viewMemo)) return 'index-stale';
+    const source = nodeSource(this.store, this.rootPath, node, this.fileCache, this.viewMemo)!;
     const hits = locateSpan(source.text, span, 2).length;
-    return hits === 1 ? 'unique' : hits === 0 ? 'not-found' : 'ambiguous';
+    if (hits === 0) {
+      // An LF span against a CRLF file: say so, rather than just "not found".
+      return span.includes('\n') && !span.includes('\r\n') && source.text.includes('\r\n') ? 'line-endings' : 'not-found';
+    }
+    return hits === 1 ? 'unique' : 'ambiguous';
   }
 }
 

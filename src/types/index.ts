@@ -1107,6 +1107,8 @@ export interface AnchorVerdict {
    * occurrences exist. The anchor is never re-attached to one of them by guessing.
    */
   spanCandidates?: { lines: number[]; truncated?: true };
+  /** Set on an orphaned symbol anchor whose file no longer exists (add-memory-anchor-verdicts). */
+  fileMissing?: true;
 }
 
 /** Most candidate lines disclosed for an ambiguous span anchor (add-memory-anchor-verdicts). */

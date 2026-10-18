@@ -33,8 +33,8 @@ import type {
   StructuralAnchor,
   ContinuityProvenance,
 } from '../../types/index.js';
-import { hashSpan } from './anchor.js';
-import { nodeSpanText } from './anchor-adapter.js';
+import { hashSpan, locateSpan, MAX_SPAN_CHARS } from './anchor.js';
+import { nodeSpanText, makeFreshnessView } from './anchor-adapter.js';
 import {
   computeContinuity,
   normalizedBodyHash,
@@ -253,6 +253,42 @@ function buildContinuity(
   return computeContinuity(disappeared, appeared, newNormBodyCount);
 }
 
+/** Key of a span anchor for {@link spanAnchorBaselines}. */
+function spanAnchorKey(a: StructuralAnchor): string {
+  return `${a.nodeId}\0${a.spanText}`;
+}
+
+/**
+ * New whole-symbol baselines for span anchors (add-memory-anchor-verdicts). A span
+ * anchor stays fresh through edits elsewhere in its symbol, so its record-time
+ * whole-symbol hash goes stale, and continuity matches a renamed symbol by that
+ * hash: without this, the next clean rename would find no successor. After an
+ * analysis, every span anchor whose symbol still exists and whose span still occurs
+ * exactly once in it takes the symbol's current hash as its baseline. That stays
+ * sound for a view that can only compare hashes: the span was verified in that body.
+ */
+function spanAnchorBaselines(
+  rootPath: string,
+  store: EdgeStore,
+  memories: ReadonlyArray<{ anchors?: readonly StructuralAnchor[]; invalidatedAt?: string }>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const view = makeFreshnessView(store, rootPath);
+  for (const m of memories) {
+    if (m.invalidatedAt || !Array.isArray(m.anchors)) continue;
+    for (const a of m.anchors) {
+      if (!a?.nodeId || typeof a.spanText !== 'string' || a.spanText.length === 0 || a.spanText.length > MAX_SPAN_CHARS) continue;
+      const key = spanAnchorKey(a);
+      if (out.has(key)) continue;
+      const source = view.nodeSource?.(a.nodeId);
+      if (!source || locateSpan(source.text, a.spanText, 2).length !== 1) continue;
+      const hash = hashSpan(source.text);
+      if (hash !== a.contentHash) out.set(key, hash);
+    }
+  }
+  return out;
+}
+
 /**
  * Carry anchored memory + decisions forward across renames/moves detected between
  * the pre-re-analysis `oldNodes` snapshot and the freshly persisted graph. Safe to
@@ -302,10 +338,28 @@ export async function carryForwardContinuity(
   }
 
   let result: ReturnType<typeof computeContinuity>;
+  let rebaselined: Map<string, string>;
   try {
     result = buildContinuity(rootPath, store, oldNodes, anchoredSymbols);
+    rebaselined = spanAnchorBaselines(rootPath, store, memStore.memories);
   } finally {
     try { store.close(); } catch { /* ignore */ }
+  }
+
+  if (rebaselined.size > 0) {
+    await updateMemoryStore(rootPath, (store_) => ({
+      ...store_,
+      memories: store_.memories.map((m) => {
+        if (!m.anchors?.some((a) => a.nodeId && a.spanText !== undefined && rebaselined.has(spanAnchorKey(a)))) return m;
+        return {
+          ...m,
+          anchors: m.anchors.map((a) => {
+            const next = a.nodeId && a.spanText !== undefined ? rebaselined.get(spanAnchorKey(a)) : undefined;
+            return next !== undefined ? { ...a, contentHash: next } : a;
+          }),
+        };
+      }),
+    }));
   }
 
   if (result.pairs.length === 0 && result.ambiguous.length === 0) return EMPTY_SUMMARY;

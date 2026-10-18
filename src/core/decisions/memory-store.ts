@@ -17,7 +17,7 @@ import {
   OPENLORE_MEMORY_SUBDIR,
   MEMORY_NOTES_FILE,
 } from '../../constants.js';
-import { atomicWriteFile, casUpdate, quarantineCorrupt } from './atomic-store.js';
+import { atomicWriteFile, casUpdate, quarantineCorrupt as quarantineStore } from './atomic-store.js';
 import type { MemoryStore, StructuralAnchor } from '../../types/index.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { hashSpan } from './anchor.js';
@@ -34,9 +34,17 @@ function emptyStore(): MemoryStore {
   return { version: '1', updatedAt: '', sequence: 0, memories: [] };
 }
 
-export async function loadMemoryStore(rootPath: string): Promise<MemoryStore> {
+/**
+ * Load the memory store. A torn or malformed store is quarantined and read as empty.
+ * With `readOnly`, a gate that must not change the working tree, and must not read
+ * a broken store as "no memories", gets an error instead (add-memory-anchor-verdicts).
+ */
+export async function loadMemoryStore(rootPath: string, opts: { readOnly?: boolean } = {}): Promise<MemoryStore> {
   const path = memoryPath(rootPath);
   if (!(await fileExists(path))) return emptyStore();
+  const quarantineCorrupt = opts.readOnly
+    ? async (_path: string, reason: string): Promise<never> => { throw new Error(`memory store is unreadable (${reason})`); }
+    : quarantineStore;
   let raw: string;
   try {
     raw = await readFile(path, 'utf-8');

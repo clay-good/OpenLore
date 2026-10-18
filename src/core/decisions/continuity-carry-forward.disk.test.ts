@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { EdgeStore } from '../services/edge-store.js';
 import { stableSymbolId } from '../scip/moniker.js';
@@ -52,6 +53,46 @@ describe('carryForwardContinuity (disk)', () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+  });
+
+  it('carries a span anchor that stayed fresh through an edit across a later rename (add-memory-anchor-verdicts)', async () => {
+    const file = 'src/tax.ts';
+    const v1 = 'export function computeTax(amount: number) {\n  // rate\n  return amount * 0.2;\n}\n';
+    const v2 = v1.replace('// rate', '// the standard rate');
+    const v3 = v2.replace('computeTax', 'calculateTax');
+    const reindex = async (src: string, name: string): Promise<FunctionNode> => {
+      await writeFile(join(root, file), src);
+      const n = node({ id: `${file}::${name}`, name, filePath: file, signature: `function ${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+      const s = EdgeStore.open(EdgeStore.dbPath(storeDir));
+      s.clearAll();
+      s.insertNodes([n]);
+      s.setFileHash(file, createHash('sha256').update(src).digest('hex'));
+      s.close();
+      return n;
+    };
+    const first = await reindex(v1, 'computeTax');
+    await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [{
+      id: 'mem-span',
+      kind: 'note',
+      content: 'the 20% rate is the standard one',
+      anchors: [{ nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1), spanText: 'return amount * 0.2;' }],
+      recordedAt: new Date(0).toISOString(),
+    }] });
+
+    // Analysis 1: an edit elsewhere in the symbol. The span is still there, so the
+    // anchor's whole-symbol baseline follows the body it was verified in.
+    let oldNodes = snapshotOldNodes(storeDir);
+    await reindex(v2, 'computeTax');
+    await carryForwardContinuity(root, oldNodes, storeDir);
+    expect((await loadMemoryStore(root)).memories[0].anchors[0].contentHash).toBe(hashSpan(v2));
+
+    // Analysis 2: a clean rename now finds its successor.
+    oldNodes = snapshotOldNodes(storeDir);
+    await reindex(v3, 'calculateTax');
+    const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+    expect(summary.carried).toHaveLength(1);
+    const a = (await loadMemoryStore(root)).memories[0].anchors[0];
+    expect(a).toMatchObject({ symbolName: 'calculateTax', spanText: 'return amount * 0.2;', carriedAcross: { reason: 'renamed' } });
   });
 
   it('carries an anchored memory across a pure rename → recalls re-pointed with provenance', async () => {

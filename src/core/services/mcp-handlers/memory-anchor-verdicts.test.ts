@@ -25,6 +25,7 @@ import { makeMemoryId } from '../../decisions/memory-store.js';
 import { reanchorAnchors } from '../../decisions/continuity-carry-forward.js';
 import { collectGovernanceFindings } from '../../../cli/commands/enforce.js';
 import type { ContinuityPair } from '../../analyzer/continuity.js';
+import { factKey } from '../../analyzer/pass1-fact-cache.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
 import type { StructuralAnchor } from '../../../types/index.js';
 
@@ -63,6 +64,8 @@ async function index(src: string | null, extra: FunctionNode[] = []): Promise<vo
   const store = EdgeStore.open(EdgeStore.dbPath(dir));
   store.clearAll();
   store.insertNodes([...(src !== null ? [nodeFor('src/big.ts', 'big', src)] : []), ...extra]);
+  // What a real index records: the content its offsets describe.
+  if (src !== null) store.setFileHash('src/big.ts', createHash('sha256').update(src).digest('hex'));
   store.close();
 }
 
@@ -201,6 +204,143 @@ describe('SubSymbolSpanAnchors', () => {
   });
 });
 
+describe('round-1 review regressions', () => {
+  it('does not report a span fresh when the file changed since analysis (stale offsets)', async () => {
+    await rememberSpan();
+    // The span moves out of big's stored window into code that is not big's: no re-index.
+    const shifted = `// header\n// header\nfunction other() {\n${SPAN}\n}\n${SRC.replace(SPAN, '  noop();')}`;
+    await writeFile(join(root, 'src', 'big.ts'), shifted, 'utf-8');
+    const rec = (await handleRecall(root)) as Recall;
+    expect(rec.authoritative[0].freshness).toBe('drifted');
+    expect(rec.authoritative[0].certificates).toBeUndefined();
+  });
+
+  it('refuses to record a span against stale offsets, and says why', async () => {
+    await writeFile(join(root, 'src', 'big.ts'), `// one more line\n${SRC}`, 'utf-8');
+    const r = await rememberSpan();
+    expect(r.spanNotRecorded).toEqual([{ anchor: 0, reason: 'index-stale' }]);
+  });
+
+  it('trusts offsets from the full-analyze memo key when there is no watcher hash', async () => {
+    await rememberSpan();
+    const edited = SRC.replace('// setup', '// setup, edited');
+    await index(edited);
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    const store = EdgeStore.open(EdgeStore.dbPath(dir));
+    store.deleteFileHash('src/big.ts');
+    store.close();
+    // No key at all: span search is not trusted; the changed whole symbol reads drifted.
+    expect(((await handleRecall(root)) as Recall).authoritative[0].freshness).toBe('drifted');
+    const again = EdgeStore.openForAnalyze(EdgeStore.dbPath(dir));
+    again.putPass1Facts([{ filePath: 'src/big.ts', contentHash: factKey({ path: 'src/big.ts', language: 'typescript', content: edited }), facts: 'null' }], 'stamp');
+    again.close();
+    expect(((await handleRecall(root)) as Recall).authoritative[0].freshness).toBe('fresh');
+  });
+
+  it('reports no findings without a graph', async () => {
+    await handleRemember(root, 'old', [{ symbol: 'big', file: 'src/big.ts' }]);
+    await rm(join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true, force: true });
+    const noGraph = (await handleRecall(root)) as Recall & { graphAvailable: boolean };
+    expect(noGraph.graphAvailable).toBe(false);
+    expect(noGraph.findings).toBeUndefined();
+  });
+
+  it('keeps an advisory incomplete check from failing the gate', async () => {
+    await handleRemember(root, 'x', [{ file: 'src/big.ts' }]);
+    await rm(join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true, force: true });
+    const advisory = await collectGovernanceFindings(root, null, {});
+    expect(advisory.failedCodes.has('memory-anchor-lost')).toBe(false);
+    expect(advisory.caveats.join(' ')).toContain('memory-anchor-lost check incomplete');
+    const blocking = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'blocking' });
+    expect(blocking.failedCodes.has('memory-anchor-lost')).toBe(true);
+  });
+
+  it('says a symbol anchor lost its file, not its successor', async () => {
+    await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }]);
+    await rm(join(root, 'src', 'big.ts'));
+    await index(null, [nodeFor('src/other.ts', 'other', 'x')]);
+    const rec = (await handleRecall(root)) as Recall;
+    expect(rec.needsReanchoring[0].anchors[0]).toMatchObject({ reselectReason: 'file-missing' });
+  });
+
+  it('hints at line endings for an LF span in a CRLF file', async () => {
+    await index(SRC.replace(/\n/g, '\r\n'));
+    const r = await rememberSpan('x', '  const a = 1;\n  if (a > 0)');
+    expect(r.spanNotRecorded).toEqual([{ anchor: 0, reason: 'line-endings' }]);
+    expect(r.message).toMatch(/CRLF/);
+    const ok = await rememberSpan('y', '  const a = 1;\r\n  if (a > 0)');
+    expect(ok.anchors[0].span).toBe(true);
+  });
+
+  it('labels no outcome when there is no graph to check against', async () => {
+    await handleRemember(root, 'x', [{ symbol: 'big', file: 'src/big.ts' }]);
+    await rm(join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true, force: true });
+    const rec = (await handleRecall(root)) as Recall;
+    const all = [...rec.authoritative, ...rec.needsReanchoring].flatMap((m) => m.anchors);
+    expect(all.length).toBeGreaterThan(0);
+    for (const a of all) expect(a.outcome).toBeUndefined();
+  });
+
+  it('treats an anchored file whose content matches the index as current for the gate', async () => {
+    await rememberSpan();
+    const gated = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'blocking' });
+    expect(gated.assessedCodes).toContain('memory-anchor-lost');
+    await writeFile(join(root, 'src', 'big.ts'), `${SRC}// edited\n`, 'utf-8');
+    const stale = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'blocking' });
+    expect(stale.failedCodes).toContain('memory-anchor-lost');
+    expect(stale.caveats.join(' ')).toContain('1 anchored file(s) changed since analysis');
+  });
+
+  it('survives a non-string symbol label in a hostile store', async () => {
+    const r = (await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }])) as { id: string };
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const store = JSON.parse(await readFile(path, 'utf-8'));
+    store.memories[0].anchors[0].symbolName = { length: 999 };
+    await writeFile(path, JSON.stringify(store), 'utf-8');
+    await index(null, [nodeFor('src/other.ts', 'other', 'x')]);
+    const rec = (await handleRecall(root)) as Recall & { error?: string };
+    expect(rec.error).toBeUndefined();
+    expect(rec.findings?.map((f) => f.subject)).toEqual([r.id]);
+    expect((await detectMemoryAnchorLoss(root)).findings).toHaveLength(1);
+  });
+
+  it('treats a torn store as an incomplete check and leaves the file in place', async () => {
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    await mkdir(join(root, OPENLORE_DIR, 'memory'), { recursive: true });
+    await writeFile(path, '{"memories": [ torn', 'utf-8');
+    await expect(detectMemoryAnchorLoss(root)).rejects.toThrow(/unreadable/);
+    expect(await readFile(path, 'utf-8')).toBe('{"memories": [ torn');
+    const gated = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'blocking' });
+    expect(gated.failedCodes).toContain('memory-anchor-lost');
+    expect(gated.assessedCodes).not.toContain('memory-anchor-lost');
+  });
+
+  it('keeps span checks linear in a large file with many span notes', async () => {
+    const pad = '// pad\n'.repeat(200_000);
+    const src = `${pad}${SRC}`;
+    await writeFile(join(root, 'src', 'big.ts'), src, 'utf-8');
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    const store = EdgeStore.open(EdgeStore.dbPath(dir));
+    store.clearAll();
+    store.insertNodes([nodeFor('src/big.ts', 'big', src, pad.length)]);
+    store.setFileHash('src/big.ts', createHash('sha256').update(src).digest('hex'));
+    store.close();
+    for (let i = 0; i < 40; i++) await rememberSpan(`note ${i}`);
+    const started = Date.now();
+    const loss = await detectMemoryAnchorLoss(root);
+    expect(loss.checked).toBe(40);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('does not flag two spans in one symbol as unreconciled', async () => {
+    await rememberSpan('one', SPAN);
+    await rememberSpan('two', '  return a;');
+    const rec = (await handleRecall(root)) as Recall & { unreconciled?: unknown };
+    expect(rec.authoritative).toHaveLength(2);
+    expect(rec.unreconciled).toBeUndefined();
+  });
+});
+
 describe('AnchorLossIsAnActionableWorkItem', () => {
   it('labels a deleted symbol needs-human-reselection with a finding in recall and enforce', async () => {
     const r = (await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }])) as { id: string };
@@ -208,7 +348,7 @@ describe('AnchorLossIsAnActionableWorkItem', () => {
     const rec = (await handleRecall(root)) as Recall;
     expect(rec.needsReanchoring[0].anchors[0]).toMatchObject({ outcome: 'needs-human-reselection', reselectReason: 'no-successor' });
     expect(rec.findings?.[0]).toMatchObject({ code: 'memory-anchor-lost', subject: r.id });
-    expect(rec.findings?.[0].message).toMatch(/adjacent analyses/);
+    expect(rec.findings?.[0].message).toMatch(/several analyses/);
 
     const loss = await detectMemoryAnchorLoss(root);
     expect(loss.unassessedReason).toBeUndefined();
@@ -216,13 +356,13 @@ describe('AnchorLossIsAnActionableWorkItem', () => {
     expect(loss.findings.map((f) => f.subject)).toEqual([r.id]);
   });
 
-  it('is collected by openlore enforce, and an unverifiable index marks it incomplete', async () => {
+  it('is collected by openlore enforce, and an unverifiable index marks a gated code incomplete', async () => {
     const empty = await collectGovernanceFindings(root, null, {});
     expect(empty.assessedCodes).toContain('memory-anchor-lost');
 
     const r = (await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }])) as { id: string };
     await index(null, [nodeFor('src/other.ts', 'other', 'x')]);
-    const collected = await collectGovernanceFindings(root, null, {});
+    const collected = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'frozen' });
     expect(collected.findings.filter((f) => f.code === 'memory-anchor-lost').map((f) => f.subject)).toEqual([r.id]);
     // The fixture is not a git repository, so the index freshness is unknown.
     expect(collected.failedCodes).toContain('memory-anchor-lost');
@@ -235,7 +375,7 @@ describe('AnchorLossIsAnActionableWorkItem', () => {
 
   it('reports no findings for fresh notes and says when there is no analysis', async () => {
     await rememberSpan();
-    expect(await detectMemoryAnchorLoss(root)).toEqual({ findings: [], checked: 1 });
+    expect(await detectMemoryAnchorLoss(root)).toEqual({ findings: [], checked: 1, staleFiles: [] });
     await rm(join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true, force: true });
     const loss = await detectMemoryAnchorLoss(root);
     expect(loss.findings).toEqual([]);

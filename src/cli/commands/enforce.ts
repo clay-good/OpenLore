@@ -338,17 +338,6 @@ function impactCertificateAssessmentComplete(cert: ImpactCertificate): boolean {
     /not computed|not assessed|certificate lists the \d+ shortest/i.test(caveat));
 }
 
-/** True when the analysis is known to match the working tree's graph-source files. */
-async function analysisIsCurrent(cwd: string): Promise<boolean> {
-  const freshness = await assessStalenessForAnalysis(
-    cwd,
-    join(cwd, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
-    Date.now(),
-    false,
-  );
-  return !!freshness.indexCommit && freshness.changedSourceFiles === 0;
-}
-
 /**
  * Collect governance findings from every in-scope source, mapping each native
  * finding onto the unified {@link GovernanceFinding} shape. Source failures are
@@ -373,6 +362,31 @@ export async function collectGovernanceFindings(
   const failedCodes = new Set<string>();
   let decisionConstraints: Pick<DecisionConstraintState, 'ledger' | 'retiredRules'> | undefined;
 
+  // memory-anchor-lost — always (a freshness pass over recorded notes, no diff).
+  // First, and read-only: a later source's store load may quarantine a torn store.
+  // An anchored file that changed since analysis can hide or fake a lost anchor,
+  // so it marks the assessment incomplete; a content-identical commit does not.
+  // Like scenario checkability, an incomplete assessment fails the gate only when
+  // the policy makes this code blocking or frozen: the advisory default must not
+  // turn every other blocking code's gate into "unavailable".
+  {
+    const gated = policy['memory-anchor-lost'] === 'blocking' || policy['memory-anchor-lost'] === 'frozen';
+    const incomplete = (reason: string) => {
+      caveats.push(`memory-anchor-lost check incomplete: ${reason}`);
+      if (gated) failedCodes.add('memory-anchor-lost');
+    };
+    try {
+      const loss = await detectMemoryAnchorLoss(cwd);
+      findings.push(...loss.findings);
+      if (loss.unassessedReason) incomplete(loss.unassessedReason);
+      else if (loss.staleFiles.length > 0) {
+        incomplete(`${loss.staleFiles.length} anchored file(s) changed since analysis; run openlore analyze`);
+      } else assessedCodes.add('memory-anchor-lost');
+    } catch (err) {
+      incomplete(`check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // stale-decision-reference — always (cheap).
   try {
     for (const f of await detectStaleDecisionReferences(cwd)) {
@@ -389,25 +403,6 @@ export async function collectGovernanceFindings(
   } catch (err) {
     caveats.push(`stale-decision-reference check unavailable: ${err instanceof Error ? err.message : String(err)}`);
     failedCodes.add('stale-decision-reference');
-  }
-
-  // memory-anchor-lost — always (a freshness pass over recorded notes, no diff).
-  // A stale index can miss a lost anchor, so it marks the assessment incomplete.
-  try {
-    const loss = await detectMemoryAnchorLoss(cwd);
-    findings.push(...loss.findings);
-    if (loss.unassessedReason) {
-      caveats.push(`memory-anchor-lost check incomplete: ${loss.unassessedReason}`);
-      failedCodes.add('memory-anchor-lost');
-    } else if (loss.checked > 0 && !(await analysisIsCurrent(cwd))) {
-      caveats.push('memory-anchor-lost check incomplete: graph-source files changed since analysis, or its freshness is unknown; run openlore analyze');
-      failedCodes.add('memory-anchor-lost');
-    } else {
-      assessedCodes.add('memory-anchor-lost');
-    }
-  } catch (err) {
-    caveats.push(`memory-anchor-lost check unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    failedCodes.add('memory-anchor-lost');
   }
 
   // Decision-bound constraints — always load the declared eligibility corpus.
@@ -947,8 +942,8 @@ function renderHuman(
       const label = f.enforcementClass === 'frozen'
         ? f.baselineState === 'new' ? 'frozen:new' : f.baselineState === 'frozen' ? 'frozen' : 'frozen:invalid'
         : f.enforcementClass;
-      if (f.remediation) lines.push(`      Action: ${f.remediation}`);
       lines.push(`   ${ICON[f.enforcementClass]} [${label}] ${f.code} (${f.source}): ${f.message}`);
+      if (f.remediation) lines.push(`      Action: ${f.remediation}`);
     }
   }
   if (baseline.initialized.length > 0) {

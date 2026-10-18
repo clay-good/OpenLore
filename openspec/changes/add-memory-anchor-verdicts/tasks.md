@@ -11,6 +11,11 @@
       possiblyMovedTo discipline, types/index.ts:706-714); aggregate rule (:205-215) unchanged
 - [x] `continuity-carry-forward.ts`: after a symbol carry, re-locate the span in the new body by
       the same exact-text rule; ambiguous ⇒ needs-human-reselection, never a guess
+      (done at freshness time, in the carried node's body; analyze also re-baselines a span
+      anchor's whole-symbol hash while its span is verified, so an edit outside the span does
+      not stop the next clean rename from carrying it)
+- [x] Span search runs only where the stored offsets describe the file on disk (the watcher's
+      file hash or the full analyze's Pass-1 key); otherwise the whole-symbol hash decides
 - [x] `memory.ts`: additive `outcome` on `summarizeVerdict` (:567-593) — silently-carried /
       re-pointed-with-provenance / needs-human-reselection — mapped from existing states; no
       change to authoritative filtering (:382)

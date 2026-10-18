@@ -92,8 +92,10 @@ function spanHintError(hints: readonly AnchorHint[]): string | undefined {
 const SPAN_NOT_RECORDED_TEXT: Record<SpanNotRecordedReason, string> = {
   'no-symbol': 'the symbol did not resolve to exactly one analyzed symbol',
   'not-found': 'the text does not occur in the symbol\'s current body',
+  'line-endings': 'the text does not occur, and the file uses CRLF line endings; pass the span with \\r\\n',
   ambiguous: 'the text occurs more than once in the symbol\'s body',
   unreadable: 'the symbol\'s source could not be read',
+  'index-stale': 'the file changed since it was analyzed; run openlore analyze and record it again',
 };
 
 export async function handleRemember(
@@ -442,7 +444,7 @@ export async function handleRecall(
           ...(f.verdicts.find(v => v.staleRegionComposition)?.staleRegionComposition
             ? { staleRegionComposition: f.verdicts.find(v => v.staleRegionComposition)!.staleRegionComposition }
             : {}),
-          anchors: f.verdicts.map(summarizeVerdict),
+          anchors: f.verdicts.map((v) => summarizeVerdict(v, ctx !== null)),
           recordedAt: m.recordedAt,
           match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
           // A stale-decision-reference suppresses the clean `verifiedCurrent` claim: the
@@ -477,7 +479,7 @@ export async function handleRecall(
             ...(f.verdicts.find(v => v.staleRegionComposition)?.staleRegionComposition
               ? { staleRegionComposition: f.verdicts.find(v => v.staleRegionComposition)!.staleRegionComposition }
               : {}),
-            anchors: f.verdicts.map(summarizeVerdict),
+            anchors: f.verdicts.map((v) => summarizeVerdict(v, ctx !== null)),
             recordedAt: d.recordedAt,
             match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
             ...certify(f.freshness, anchors),
@@ -512,9 +514,11 @@ export async function handleRecall(
       const authoritative = filtered.filter((i) => i.freshness !== 'orphaned');
       const needsReanchoring = filtered.filter((i) => i.freshness === 'orphaned');
       // Each returned note with a lost anchor is a trackable work item, not only a
-      // prose note (add-memory-anchor-verdicts). Decisions have their own lifecycle.
+      // prose note (add-memory-anchor-verdicts). Decisions have their own lifecycle;
+      // a superseded note is already retired; and without a graph nothing was
+      // checked, so nothing is reported as lost.
       const findings = needsReanchoring.flatMap((i) => {
-        if (i.kind !== 'note') return [];
+        if (i.kind !== 'note' || i.invalidated || !ctx) return [];
         const f = memoryAnchorLostFinding(i.id, i.anchors);
         return f ? [f] : [];
       });
@@ -718,7 +722,7 @@ const MAX_FINDING_ANCHORS = 3;
 const RESELECTION_REASON_TEXT: Record<ReselectionReason, string> = {
   'span-ambiguous': 'its span text now occurs more than once in the symbol',
   'move-ambiguous': 'the symbol disappeared and more than one symbol could be it',
-  'no-successor': 'the symbol disappeared with no unambiguous successor (renames are followed only between two adjacent analyses)',
+  'no-successor': 'the symbol disappeared with no unambiguous successor (it was deleted, renamed or moved together with other edits, or renamed across several analyses)',
   'file-missing': 'the file no longer exists',
 };
 
@@ -730,9 +734,13 @@ const RESELECTION_REASON_TEXT: Record<ReselectionReason, string> = {
 export function memoryAnchorLostFinding(id: string, anchors: readonly SummarizedVerdict[]): GovernanceFinding | undefined {
   const lost = anchors.filter((a) => a.outcome === 'needs-human-reselection');
   if (lost.length === 0) return undefined;
-  const cut = (t: string) => (t.length > MAX_FINDING_LABEL ? `${t.slice(0, MAX_FINDING_LABEL)}…` : t);
+  // Labels come from notes.json, which is repo content: never assume their type.
+  const cut = (t: unknown) => {
+    const text = typeof t === 'string' ? t : '';
+    return text.length > MAX_FINDING_LABEL ? `${text.slice(0, MAX_FINDING_LABEL)}…` : text;
+  };
   const named = lost.slice(0, MAX_FINDING_ANCHORS).map((a) =>
-    `${cut(a.file)}${a.symbol ? `::${cut(a.symbol)}` : ''} (${RESELECTION_REASON_TEXT[a.reselectReason!]})`);
+    `${cut(a.file)}${cut(a.symbol) ? `::${cut(a.symbol)}` : ''} (${RESELECTION_REASON_TEXT[a.reselectReason!]})`);
   const more = lost.length > MAX_FINDING_ANCHORS ? `, and ${lost.length - MAX_FINDING_ANCHORS} more` : '';
   return {
     code: 'memory-anchor-lost',
@@ -743,7 +751,7 @@ export function memoryAnchorLostFinding(id: string, anchors: readonly Summarized
   };
 }
 
-function summarizeVerdict(v: AnchorVerdict): {
+function summarizeVerdict(v: AnchorVerdict, assessed = true): {
   symbol?: string;
   file: string;
   level: 'symbol' | 'file';
@@ -757,7 +765,8 @@ function summarizeVerdict(v: AnchorVerdict): {
   outcome?: AnchorOutcome;
   reselectReason?: ReselectionReason;
 } {
-  const outcome = anchorOutcome(v);
+  // Without a graph nothing was checked, so no anchor gets a work-item label.
+  const outcome = assessed ? anchorOutcome(v) : undefined;
   return {
     ...summarizeAnchor(v.anchor),
     freshness: v.freshness,
@@ -801,25 +810,32 @@ function estimateItemTokens(i: RecalledMemory): number {
  * The `memory-anchor-lost` source for `openlore enforce` (add-memory-anchor-verdicts):
  * one finding per recorded, non-retired note that has a lost or ambiguous anchor,
  * computed with the same freshness engine recall uses. `checked` counts the
- * anchored notes evaluated; `unassessedReason` is set when anchored notes exist
- * but there is no analysis to check them against.
+ * anchored notes evaluated; `staleFiles` names symbol-anchored files whose content
+ * differs from what the analysis indexed; `unassessedReason` is set when anchored
+ * notes exist but there is no analysis to check them against.
  */
-export async function detectMemoryAnchorLoss(rootPath: string): Promise<{ findings: GovernanceFinding[]; checked: number; unassessedReason?: string }> {
-  const store = await loadMemoryStore(rootPath);
+export async function detectMemoryAnchorLoss(rootPath: string): Promise<{ findings: GovernanceFinding[]; checked: number; staleFiles: string[]; unassessedReason?: string }> {
+  // Read-only: the commit gate must not rename a broken committed store, and must not
+  // read it as "no memories" — a load error makes the check incomplete instead.
+  const store = await loadMemoryStore(rootPath, { readOnly: true });
   const notes = store.memories.filter(isWellFormedMemory).filter((m) => !m.invalidatedAt && m.anchors.length > 0);
-  if (notes.length === 0) return { findings: [], checked: 0 };
+  if (notes.length === 0) return { findings: [], checked: 0, staleFiles: [] };
   const ctx = AnchorContext.open(rootPath);
-  if (!ctx) return { findings: [], checked: 0, unassessedReason: 'no analysis to check memory anchors against; run openlore analyze' };
+  if (!ctx) return { findings: [], checked: 0, staleFiles: [], unassessedReason: 'no analysis to check memory anchors against; run openlore analyze' };
   try {
     const view = ctx.freshnessView();
     const findings: GovernanceFinding[] = [];
     for (const m of notes) {
       const f = memoryFreshness(m.anchors, view);
       if (f.freshness !== 'orphaned') continue;
-      const finding = memoryAnchorLostFinding(m.id, f.verdicts.map(summarizeVerdict));
+      const finding = memoryAnchorLostFinding(m.id, f.verdicts.map((v) => summarizeVerdict(v)));
       if (finding) findings.push(finding);
     }
-    return { findings, checked: notes.length };
+    // A symbol anchor in a file that changed since analysis was checked against
+    // offsets that no longer describe it (file-level anchors check the disk only).
+    const symbolFiles = [...new Set(notes.flatMap((m) => m.anchors.filter((a) => a.nodeId).map((a) => a.filePath)))].sort();
+    const staleFiles = symbolFiles.filter((f) => ctx.fileIndexedAsOnDisk(f) === false);
+    return { findings, checked: notes.length, staleFiles };
   } finally {
     ctx.close();
   }

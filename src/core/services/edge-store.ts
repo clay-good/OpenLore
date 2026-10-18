@@ -1346,6 +1346,19 @@ export class EdgeStore {
   }
 
   /**
+   * The content key the last full analyze extracted this file at, or undefined when no
+   * memo row exists (add-memory-anchor-verdicts). Readers compare it with the current
+   * file to tell whether the stored node offsets still describe that file.
+   */
+  getPass1FactHash(filePath: string): string | undefined {
+    if (!this.hasPass1Facts()) return undefined;
+    const row = this.db
+      .prepare('SELECT content_hash FROM pass1_facts WHERE file_path = ?')
+      .get(filePath) as { content_hash: string } | undefined;
+    return row?.content_hash;
+  }
+
+  /**
    * Persist freshly extracted facts. One row per file (the path is the primary key), so a
    * re-extraction REPLACES the previous content's row rather than accumulating a row per
    * historical revision — the memo tracks the working tree, not its history.

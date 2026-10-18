@@ -119,11 +119,16 @@ export function locateSpan(body: string, span: string, limit: number): number[] 
   return out;
 }
 
-/** 1-based line of `offset` in `text`, given the line `text` starts on. */
-function lineAt(text: string, offset: number, startLine: number): number {
+/** 1-based lines of ascending `offsets` in `text`, given the line `text` starts on: one pass. */
+function linesAt(text: string, offsets: readonly number[], startLine: number): number[] {
+  const out: number[] = [];
   let line = startLine;
-  for (let i = 0; i < offset; i++) if (text.charCodeAt(i) === 10) line++;
-  return line;
+  let i = 0;
+  for (const offset of offsets) {
+    for (; i < offset; i++) if (text.charCodeAt(i) === 10) line++;
+    out.push(line);
+  }
+  return out;
 }
 
 /**
@@ -151,7 +156,7 @@ function locatedFreshness(
   return {
     freshness: 'orphaned',
     spanCandidates: {
-      lines: hits.slice(0, MAX_SPAN_CANDIDATES).map((i) => lineAt(source.text, i, source.startLine)),
+      lines: linesAt(source.text, hits.slice(0, MAX_SPAN_CANDIDATES), source.startLine),
       ...(hits.length > MAX_SPAN_CANDIDATES ? { truncated: true as const } : {}),
     },
   };
@@ -243,9 +248,10 @@ export function anchorFreshness(
     }
     // Last resort — the existing heuristic rename map, then orphaned.
     const relocatedTo = view.renameOf?.(anchor.nodeId);
-    return relocatedTo
-      ? { anchor, freshness: 'drifted', relocatedTo }
-      : { anchor, freshness: 'orphaned' };
+    if (relocatedTo) return { anchor, freshness: 'drifted', relocatedTo };
+    return view.fileExists(anchor.filePath)
+      ? { anchor, freshness: 'orphaned' }
+      : { anchor, freshness: 'orphaned', fileMissing: true };
   }
 
   // File-level anchor.
@@ -300,9 +306,10 @@ export type ReselectionReason =
   /** The symbol disappeared and more than one symbol could be it (see `possiblyMovedTo`). */
   | 'move-ambiguous'
   /**
-   * The symbol disappeared with no unambiguous successor. Continuity only pairs
-   * symbols between two adjacent analyzed states, so a rename made across several
-   * unanalyzed states also lands here.
+   * The symbol disappeared with no unambiguous successor. Continuity pairs only an
+   * exact body (or a body that differs by the name alone) between two adjacent
+   * analyzed states, so a rename made together with other edits, or across
+   * several unanalyzed states, also lands here.
    */
   | 'no-successor'
   /** The anchored file no longer exists. */
@@ -314,7 +321,7 @@ export function anchorOutcome(v: AnchorVerdict): { outcome: AnchorOutcome; reaso
       ? 'span-ambiguous'
       : v.anchor.possiblyMovedTo?.length
         ? 'move-ambiguous'
-        : v.anchor.nodeId ? 'no-successor' : 'file-missing';
+        : v.anchor.nodeId && !v.fileMissing ? 'no-successor' : 'file-missing';
     return { outcome: 'needs-human-reselection', reason };
   }
   if (v.anchor.carriedAcross) return { outcome: 're-pointed-with-provenance' };
@@ -412,7 +419,8 @@ export function findUnreconciled(items: readonly AnchoredItem[]): UnreconciledGr
     if (it.invalidated || it.freshness !== 'fresh') continue;
     for (const a of it.anchors) {
       if (!a.nodeId) continue; // symbol-level only
-      const key = a.stableId ?? a.nodeId;
+      // Two spans in one symbol are about different code (add-memory-anchor-verdicts).
+      const key = `${a.stableId ?? a.nodeId}${a.spanText === undefined ? '' : `#${hashSpan(a.spanText)}`}`;
       const entry = byKey.get(key) ?? { symbolName: a.symbolName, filePath: a.filePath, ids: new Set<string>() };
       entry.ids.add(it.id);
       byKey.set(key, entry);
