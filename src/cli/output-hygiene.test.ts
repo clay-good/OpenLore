@@ -487,8 +487,8 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     '(err as Error).message',
     'NO_AUTO_HEAP_ENV',
     'plan.reason',
+    'err.message',
     'plan.targetMb',
-    'result.error.message',
   ],
   'cli/index.ts': [
     "c.yellow('[warn]')",

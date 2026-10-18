@@ -23,7 +23,7 @@
 import { getHeapStatistics } from 'node:v8';
 import { totalmem } from 'node:os';
 import { readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 const MB = 1024 * 1024;
 
@@ -34,11 +34,12 @@ const MB = 1024 * 1024;
  * so it is NOT re-executed — an extra process spawn on those would be pure latency, exactly the
  * attention this feature removes.
  *
- * The long-lived daemons `mcp` and `serve` are deliberately EXCLUDED. Re-execution here is a
- * blocking `spawnSync` supervisor, which cannot forward a signal to the child while it blocks; a
- * directed `SIGTERM` to the supervisor (how a programmatic MCP host stops a stdio server) would
- * orphan the real server holding the whole graph. A finite batch command's supervisor blocks only
- * for the run and its child dies with the foreground process group, so the hazard is theirs alone.
+ * The long-lived daemons `mcp` and `serve` are deliberately EXCLUDED: a supervisor process in front
+ * of a stdio server is one more process a host must manage, and the supervisor's signal forwarding
+ * (below) covers the batch commands' needs, not a daemon's lifecycle. The supervisor forwards a
+ * directed `SIGTERM`/`SIGHUP` to the child (a blocking `spawnSync` supervisor once could not, so
+ * `kill`/`timeout` orphaned the child at full CPU), and waits out a `SIGINT`, which the foreground
+ * process group already delivered to the child.
  * A daemon on a huge repo can still be given a heap the ordinary way (`--max-old-space-size` /
  * `OPENLORE_HEAP_MB`), which this feature honors.
  *
@@ -328,12 +329,20 @@ export function gatherHeapPlanInputs(): HeapPlanInputs {
   };
 }
 
+/** How long a SIGINT is left to the process group before the supervisor forwards it itself. */
+const SIGINT_FORWARD_GRACE_MS = 3000;
+
+/** Signals the supervisor forwards to the child: a directed signal reaches only the supervisor. */
+const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGHUP'];
+
 /**
  * Size the heap by re-executing once when the plan calls for it, then exit with the child's status.
- * When no re-exec is warranted (the common case) this returns immediately and the CLI runs normally.
+ * When no re-exec is warranted (the common case) this resolves immediately and the CLI runs normally.
+ * When it re-executes, the returned promise never resolves: the process exits with the child, so
+ * control never returns to index.ts (which would run the command a second time at the default heap).
  * Fail-open: any surprise leaves the process running at its current heap rather than aborting.
  */
-export function maybeReexecForHeap(): void {
+export async function maybeReexecForHeap(): Promise<void> {
   // Only the graph-building / graph-holding commands are sized; the query hot paths run at the
   // default heap so they pay no extra process spawn (see HEAP_SIZED_COMMANDS). Checked before any
   // detection so a light command does no work here at all.
@@ -359,28 +368,49 @@ export function maybeReexecForHeap(): void {
       `set ${NO_AUTO_HEAP_ENV}=1 to disable.\n`,
     );
 
-    const result = spawnSync(process.execPath, childArgs, {
+    const child = spawn(process.execPath, childArgs, {
       stdio: 'inherit',
       env: { ...process.env, [HEAP_REEXEC_MARKER_ENV]: '1' },
     });
+    // While the child runs, this process is only its supervisor: a directed signal is passed on.
+    // A terminal Ctrl-C reaches the child itself through the foreground process group, so a SIGINT
+    // is forwarded only if the child is still running after a grace period — a SIGINT sent to the
+    // supervisor alone (`kill -INT`, a host's `child.kill('SIGINT')`) still stops the run.
+    const forward = (signal: NodeJS.Signals) => () => { child.kill(signal); };
+    const handlers = FORWARDED_SIGNALS.map(signal => [signal, forward(signal)] as const);
+    for (const [signal, handler] of handlers) process.on(signal, handler);
+    let interruptTimer: NodeJS.Timeout | undefined;
+    const ignoreInterrupt = (): void => {
+      interruptTimer ??= setTimeout(() => {
+        interruptTimer = undefined;
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGINT');
+      }, SIGINT_FORWARD_GRACE_MS);
+    };
+    process.on('SIGINT', ignoreInterrupt);
 
-    if (result.error) {
+    await new Promise<never>((_, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => {
+        if (interruptTimer) clearTimeout(interruptTimer);
+        for (const [sig, handler] of handlers) process.off(sig, handler);
+        process.off('SIGINT', ignoreInterrupt);
+        // Propagate a signal death faithfully; otherwise exit with the child's status.
+        if (signal) {
+          // Re-raise so the parent dies the same way the child did, then exit as a guaranteed
+          // terminator: signal delivery is not synchronous, and control must NEVER return to index.ts.
+          process.kill(process.pid, signal);
+          process.exit(1);
+        }
+        process.exit(code ?? 0);
+      });
+    }).catch((err: Error) => {
+      if (interruptTimer) clearTimeout(interruptTimer);
+      for (const [sig, handler] of handlers) process.off(sig, handler);
+      process.off('SIGINT', ignoreInterrupt);
       // The re-exec could not be spawned — continue in THIS process at the default heap rather than
       // failing. The user loses the larger heap, not the command.
-      process.stderr.write(
-        `[openlore] heap re-exec failed (${result.error.message}); continuing at the default heap.\n`,
-      );
-      return;
-    }
-    // Propagate a signal death faithfully; otherwise exit with the child's status.
-    if (result.signal) {
-      // Re-raise so the parent dies the same way the child did, then exit as a guaranteed
-      // terminator: signal delivery is not synchronous, and control must NEVER return to index.ts
-      // (which would load commander and run the command a second time at the default heap).
-      process.kill(process.pid, result.signal);
-      process.exit(1);
-    }
-    process.exit(result.status ?? 0);
+      process.stderr.write(`[openlore] heap re-exec failed (${err.message}); continuing at the default heap.\n`);
+    });
   } catch (err) {
     // Any unexpected failure (e.g. process.exit stubbed in a test) must not crash the CLI.
     if (process.env.DEBUG) {
