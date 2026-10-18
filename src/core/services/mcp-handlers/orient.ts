@@ -48,7 +48,7 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, withoutDataFraming, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
+import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, reconcileInjectionNote, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW, type InjectedMemory, type StaleTriggeredMemory } from './memory-triggers.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import type { MemoryFreshness } from '../../../types/index.js';
@@ -1231,9 +1231,14 @@ async function fitOrientToBudget(
     for (const key of ['injectedMemories', 'staleTriggeredMemories'] as const) {
       if (Array.isArray(trimmed[key]) && (trimmed[key] as unknown[]).length === 0) delete trimmed[key];
     }
-    if (trimmed.injectedMemories === undefined && typeof trimmed.injectedMemoriesNote === 'string') {
-      const rest = withoutDataFraming(trimmed.injectedMemoriesNote);
-      if (rest) trimmed.injectedMemoriesNote = rest;
+    // The note's item sentences describe the lists as trimmed, never items that were cut.
+    if (typeof trimmed.injectedMemoriesNote === 'string') {
+      const note = reconcileInjectionNote(
+        trimmed.injectedMemoriesNote,
+        trimmed.injectedMemories as InjectedMemory[] | undefined,
+        trimmed.staleTriggeredMemories as StaleTriggeredMemory[] | undefined,
+      );
+      if (note) trimmed.injectedMemoriesNote = note;
       else delete trimmed.injectedMemoriesNote;
     }
     return finish({

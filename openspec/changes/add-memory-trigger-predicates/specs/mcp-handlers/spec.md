@@ -38,7 +38,7 @@ unbounded or undisclosed section. (Realized by orient's `pendingDecisions` / `st
 ### Requirement: MemoryTriggerPredicates
 
 `remember` SHALL accept one optional trigger — file glob, symbol pattern, spec domain, or
-anchor within N call hops of a touched symbol — and an optional `pinned` flag (always pushed into
+anchor within N call hops of a touched symbol — and an optional `pinned` flag (pushed, within the bound, into
 orient's full briefing). Evaluation SHALL be deterministic set membership and depth-capped
 reachability, with no LLM. A pushed memory SHALL carry its freshness verdict; an orphaned one SHALL
 never be pushed as authoritative. A malformed trigger SHALL be rejected at record time.

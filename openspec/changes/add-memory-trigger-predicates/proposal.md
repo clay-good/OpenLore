@@ -2,7 +2,8 @@
 
 > Status: IMPLEMENTED (2026-10-17; see tasks.md for what was built, which differs from this
 > proposal in places: a dedicated linear glob matcher, one shared forward hop walk rather than
-> select_tests' reachability, and no Pi injection rendering). Proposed 2026-07-03, e2e audit pass 3. Recall is pull-only: a memory helps only if
+> select_tests' reachability, its own bounds — glob work, candidate length, pushed anchors, listed
+> conflicts — and no Pi injection rendering). Proposed 2026-07-03, e2e audit pass 3. Recall is pull-only: a memory helps only if
 > the agent thinks to ask. Let `remember` attach an optional deterministic trigger predicate
 > (file glob, symbol pattern, spec domain, call-hop proximity) and a `pinned` flag; orient /
 > blast_radius / working_set_context evaluate predicates against the task's touched set and PUSH
