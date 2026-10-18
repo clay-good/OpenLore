@@ -106,6 +106,20 @@ describe('chained intra-object receiver resolution', () => {
     expect(result.nodes.get(edge!.calleeId)?.filePath).toBe('repo.ts');
   });
 
+  it('resolves inside an abstract class too', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { Repo } from './repo';
+        export abstract class Service {
+          private repo: Repo = new Repo();
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
   it('resolves through a constructor parameter property', async () => {
     const result = await new CallGraphBuilder().build([
       repo,
