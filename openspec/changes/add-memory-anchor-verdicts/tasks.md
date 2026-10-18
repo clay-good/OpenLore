@@ -11,15 +11,17 @@
       possiblyMovedTo discipline, types/index.ts:706-714); aggregate rule (:205-215) unchanged
 - [x] `continuity-carry-forward.ts`: after a symbol carry, re-locate the span in the new body by
       the same exact-text rule; ambiguous ⇒ needs-human-reselection, never a guess
-      (done at freshness time, in the carried node's body; analyze also re-baselines a span
-      anchor's whole-symbol hash while its span is verified, so an edit outside the span does
-      not stop the next clean rename from carrying it)
+      (done at freshness time, in the carried node's body; analyze also records the symbol's
+      last-analyzed body as `bodyHash` on every live anchor of a span-anchored symbol, so an
+      edit outside the span does not stop the next clean rename from carrying it; the
+      recorded `contentHash` baseline is never rewritten)
 - [x] Span search runs only where the stored offsets describe the file on disk (the watcher's
       file hash or the full analyze's Pass-1 key); otherwise the whole-symbol hash decides
 - [x] CRLF and LF line endings match each other in span text (notes.json is committed and
       checkouts may convert line endings); spans are stored LF
-- [x] Continuity tries every baseline hash recorded for a symbol (anchors on one symbol can
-      hold different bodies), pooling candidates so ambiguity still yields no pair
+- [x] Continuity uses one baseline per symbol: the shared `bodyHash` when a live anchor has
+      one, else the first anchor's recorded hash as before (pooling mixed-age hashes made
+      false carries onto copies of stale bodies)
 - [x] `memory.ts`: additive `outcome` on `summarizeVerdict` (:567-593) — silently-carried /
       re-pointed-with-provenance / needs-human-reselection — mapped from existing states; no
       change to authoritative filtering (:382)

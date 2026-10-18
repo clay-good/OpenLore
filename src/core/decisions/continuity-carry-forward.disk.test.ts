@@ -103,9 +103,11 @@ describe('carryForwardContinuity (disk)', () => {
     await carryForwardContinuity(root, oldNodes, storeDir);
     const afterEdit = await loadMemoryStore(root);
     const byId = (store: typeof afterEdit, id: string) => store.memories.find((m) => m.id === id)!.anchors[0];
-    expect(byId(afterEdit, 'mem-span').contentHash).toBe(hashSpan(v2));
-    expect(byId(afterEdit, 'mem-old').contentHash).toBe(hashSpan(v1));
-    expect(byId(afterEdit, 'mem-plain').contentHash).toBe(hashSpan(v1));
+    // Every live anchor on the symbol shares its last-analyzed body; the recorded
+    // freshness baselines and the superseded note are left as they were.
+    expect(byId(afterEdit, 'mem-span')).toMatchObject({ contentHash: hashSpan(v1), bodyHash: hashSpan(v2) });
+    expect(byId(afterEdit, 'mem-plain')).toMatchObject({ contentHash: hashSpan(v1), bodyHash: hashSpan(v2) });
+    expect(byId(afterEdit, 'mem-old').bodyHash).toBeUndefined();
 
     // Analysis 2: a clean rename now finds its successor.
     oldNodes = snapshotOldNodes(storeDir);
@@ -152,6 +154,42 @@ describe('carryForwardContinuity (disk)', () => {
       expect(kept).toMatchObject({ symbolName: 'calculateTax', carriedAcross: { reason: 'renamed' } });
     });
   }
+
+  it('does not carry onto an unrelated copy of a stale recorded body (add-memory-anchor-verdicts)', async () => {
+    const file = 'src/tax.ts';
+    const legacyFile = 'src/legacy.ts';
+    const v1 = 'computeTax(amount: number) {\n  // keep\n  return amount * 0.2;\n}\n';
+    const v2 = v1.replace('  // keep\n', '');
+    const v3 = v2.replace('computeTax', 'calculateTax');
+    const method = (id: string, name: string, className: string, filePath: string, src: string) =>
+      node({ id, name, className, filePath, signature: `${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+    const write = async (entries: Array<{ n: FunctionNode; src: string }>) => {
+      for (const e of entries) await writeFile(join(root, e.n.filePath), e.src);
+      const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+      st.clearAll();
+      st.insertNodes(entries.map((e) => e.n));
+      for (const e of entries) st.setFileHash(e.n.filePath, createHash('sha256').update(e.src).digest('hex'));
+      st.close();
+    };
+    const first = method(`${file}::Calc.computeTax`, 'computeTax', 'Calc', file, v1);
+    await write([{ n: first, src: v1 }]);
+    const base = { nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1) };
+    await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+      { id: 'mem-plain', kind: 'note', content: 'pure', anchors: [base], recordedAt: new Date(0).toISOString() },
+      { id: 'mem-span', kind: 'note', content: 'rate', anchors: [{ ...base, spanText: 'return amount * 0.2;' }], recordedAt: new Date(0).toISOString() },
+    ] });
+    let oldNodes = snapshotOldNodes(storeDir);
+    await write([{ n: method(first.id, 'computeTax', 'Calc', file, v2), src: v2 }]);
+    await carryForwardContinuity(root, oldNodes, storeDir);
+    // Rename in place, while a legacy class appears holding the OLD v1 body verbatim.
+    oldNodes = snapshotOldNodes(storeDir);
+    await write([
+      { n: method(`${file}::Calc.calculateTax`, 'calculateTax', 'Calc', file, v3), src: v3 },
+      { n: method(`${legacyFile}::LegacyCalc.computeTax`, 'computeTax', 'LegacyCalc', legacyFile, v1), src: v1 },
+    ]);
+    const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+    expect(summary.carried.map((p) => p.to.id)).toEqual([`${file}::Calc.calculateTax`]);
+  });
 
   it('carries an anchored memory across a pure rename → recalls re-pointed with provenance', async () => {
     const oldSrc = 'export function computeTax(amount: number) {\n  return amount * 0.2;\n}\n';

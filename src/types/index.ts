@@ -1029,6 +1029,14 @@ export interface StructuralAnchor {
    * a symbol anchor, and only when the text occurred exactly once at record time.
    */
   spanText?: string;
+  /**
+   * Whole-symbol hash at the last analysis that saw this symbol with current offsets
+   * (add-memory-anchor-verdicts). Written on every live anchor of a symbol that
+   * carries a span anchor, so continuity can follow a rename after edits the span
+   * anchor stayed fresh through. Never read by freshness; `contentHash` stays the
+   * recorded baseline.
+   */
+  bodyHash?: string;
 }
 
 /** How a symbol's identity moved between two indexed states (add-symbol-identity-continuity). */
