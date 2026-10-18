@@ -89,7 +89,7 @@ export function nodeSpanText(rootPath: string, node: FunctionNode, cache: Map<st
 
 /** Per-view memos keyed by file path; a view's file cache holds one content per path. */
 interface ViewMemo {
-  offsetsCurrent: Map<string, boolean>;
+  offsetsCurrent: Map<string, OffsetsState>;
   newlines: Map<string, number[]>;
 }
 
@@ -102,23 +102,27 @@ function newViewMemo(): ViewMemo {
  * (add-memory-anchor-verdicts). Offsets come from the last analysis; after an edit
  * they point at other text, and a span search there could find the span in a
  * neighboring symbol. The watcher records the hash of each file it re-indexed; a
- * full analyze records the content key of each file it extracted. Either must match
- * the current content, or the offsets are not trusted. Memoized per file.
+ * full analyze records the content key of each file it extracted. `current` when
+ * one matches the content on disk; `changed` when a recorded key does not; `unknown`
+ * when the index has no key for the file (an imported bundle carries none). Only
+ * `current` offsets are trusted for a span search. Memoized per file.
  */
-function offsetsCurrent(
+type OffsetsState = 'current' | 'changed' | 'unknown';
+
+function offsetsState(
   store: EdgeStore,
   node: FunctionNode,
   content: string,
   viewMemo: ViewMemo,
-): boolean {
+): OffsetsState {
   const memo = viewMemo.offsetsCurrent;
   const hit = memo.get(node.filePath);
   if (hit !== undefined) return hit;
-  let current: boolean;
+  let state: OffsetsState;
   try {
     const indexed = store.getFileHash(node.filePath);
     if (indexed !== null) {
-      current = indexed === createHash('sha256').update(content).digest('hex');
+      state = indexed === createHash('sha256').update(content).digest('hex') ? 'current' : 'changed';
     } else {
       // The Pass-1 key hashes what the call-graph pass extracted for the FILE: its
       // detected language (JavaScript nodes are labeled TypeScript; a .h file may be C
@@ -133,14 +137,15 @@ function offsetsCurrent(
           .filter((language) => language !== input.language || content !== input.content)
           .map((language) => ({ content, language })),
       ];
-      current = key !== undefined
-        && candidates.some((c) => key === factKey({ path: node.filePath, ...c }));
+      state = key === undefined
+        ? 'unknown'
+        : candidates.some((c) => key === factKey({ path: node.filePath, ...c })) ? 'current' : 'changed';
     }
   } catch {
-    current = false;
+    state = 'unknown';
   }
-  memo.set(node.filePath, current);
-  return current;
+  memo.set(node.filePath, state);
+  return state;
 }
 
 /**
@@ -155,7 +160,7 @@ function nodeSource(
   memo: ViewMemo,
 ): { text: string; startLine: number } | undefined {
   const content = readFileCached(rootPath, node.filePath, cache);
-  if (content === null || !offsetsCurrent(store, node, content, memo)) return undefined;
+  if (content === null || offsetsState(store, node, content, memo) !== 'current') return undefined;
   return { text: sliceNodeSpan(content, node), startLine: lineOf(content, node.startIndex, node.filePath, memo) };
 }
 
@@ -189,7 +194,7 @@ function lineOf(content: string, offset: number, filePath: string, memo: ViewMem
  * analyzed (its stored offsets no longer locate the symbol). The anchor is then recorded without the span, and
  * `remember` says so.
  */
-export type SpanNotRecordedReason = 'no-symbol' | 'not-found' | 'ambiguous' | 'unreadable' | 'index-stale';
+export type SpanNotRecordedReason = 'no-symbol' | 'not-found' | 'ambiguous' | 'unreadable' | 'index-stale' | 'index-unverified';
 
 /** Hash a node's source span (code-unit offsets) against current file content. */
 function hashNodeSpan(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
@@ -320,17 +325,16 @@ export class AnchorContext {
 
   /**
    * Whether the analysis indexed this file at its current content
-   * (add-memory-anchor-verdicts): `true` when it did, `false` when the file changed
-   * since, or no recorded key can show it did not; `undefined` when the file is
-   * unreadable (a deleted file has no offsets left to be wrong about).
+   * (add-memory-anchor-verdicts): see {@link offsetsState}; `undefined` when the file
+   * is unreadable (a deleted file has no offsets left to be wrong about).
    */
-  fileIndexedAsOnDisk(filePath: string): boolean | undefined {
+  fileIndexedAsOnDisk(filePath: string): OffsetsState | undefined {
     const content = readFileCached(this.rootPath, filePath, this.fileCache);
     if (content === null) return undefined;
     // A file whose symbols were all removed has no node; its detected language is a candidate anyway.
     const node = this.store.getNodesForFile(filePath).find((n) => !n.isExternal)
       ?? ({ filePath, language: detectLanguage(filePath) } as FunctionNode);
-    return offsetsCurrent(this.store, node, content, this.viewMemo);
+    return offsetsState(this.store, node, content, this.viewMemo);
   }
 
   /** Current whole-file content hash, or undefined when the file is gone. */
@@ -487,9 +491,11 @@ export class AnchorContext {
   /** Whether `span` occurs exactly once in the node's current body. */
   private locateHintSpan(nodeId: string, span: string): 'unique' | Exclude<SpanNotRecordedReason, 'no-symbol'> {
     const node = this.store.getNode(nodeId);
-    if (!node || readFileCached(this.rootPath, node.filePath, this.fileCache) === null) return 'unreadable';
-    const source = nodeSource(this.store, this.rootPath, node, this.fileCache, this.viewMemo);
-    if (!source) return 'index-stale';
+    const content = node ? readFileCached(this.rootPath, node.filePath, this.fileCache) : null;
+    if (!node || content === null) return 'unreadable';
+    const state = offsetsState(this.store, node, content, this.viewMemo);
+    if (state !== 'current') return state === 'changed' ? 'index-stale' : 'index-unverified';
+    const source = nodeSource(this.store, this.rootPath, node, this.fileCache, this.viewMemo)!;
     const hits = spanLines(source.text, span, 2).length;
     return hits === 1 ? 'unique' : hits === 0 ? 'not-found' : 'ambiguous';
   }

@@ -51,7 +51,7 @@
 - **Honest limits, disclosed:** continuity matches between ADJACENT indexed states
   (`continuity.ts:9-17`) — a rename that happened across multiple unindexed states cannot be
   followed and lands in `needs-human-reselection` with that reason (Swimm's own depth caveat, in
-  our indexing terms). A span anchor on a symbol with no readable body is recorded file-level
+  our indexing terms). A span anchor on a symbol with no readable body is recorded symbol-level
   with disclosure, never silently span-less.
 
 ## Why this is in scope

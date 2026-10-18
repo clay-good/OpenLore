@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../../constants.js';
@@ -24,6 +25,7 @@ import {
 import { makeMemoryId } from '../../decisions/memory-store.js';
 import { reanchorAnchors } from '../../decisions/continuity-carry-forward.js';
 import { collectGovernanceFindings } from '../../../cli/commands/enforce.js';
+import { TOOL_DEFINITIONS } from '../../../cli/commands/mcp.js';
 import type { ContinuityPair } from '../../analyzer/continuity.js';
 import { factKey, pass1InputFor } from '../../analyzer/pass1-fact-cache.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
@@ -429,6 +431,42 @@ describe('round-1 review regressions', () => {
     expect(rec.findings).toBeUndefined();
   });
 
+  it('treats a file with no recorded content key as unverified, not changed', async () => {
+    await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }]);
+    // What an imported bundle looks like: nodes, but no watcher hash and no Pass-1 key.
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    const store = EdgeStore.open(EdgeStore.dbPath(dir));
+    store.deleteFileHash('src/big.ts');
+    store.close();
+    const loss = await detectMemoryAnchorLoss(root);
+    expect(loss.staleFiles).toEqual([]);
+    expect(loss.unverifiedFiles).toEqual(['src/big.ts']);
+    const gated = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'blocking' });
+    expect(gated.assessedCodes).toContain('memory-anchor-lost');
+    expect(gated.caveats.join(' ')).toContain('no recorded content key');
+    const r = await rememberSpan();
+    expect(r.spanNotRecorded).toEqual([{ anchor: 0, reason: 'index-unverified' }]);
+  });
+
+  it('keeps a torn store from failing the advisory stale-decision check', async () => {
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    await mkdir(join(root, OPENLORE_DIR, 'memory'), { recursive: true });
+    await writeFile(path, '{"memories": [', 'utf-8');
+    const advisory = await collectGovernanceFindings(root, null, {});
+    expect(advisory.failedCodes.has('stale-decision-reference')).toBe(false);
+    expect(advisory.failedCodes.has('memory-anchor-lost')).toBe(false);
+    const gated = await collectGovernanceFindings(root, null, { 'stale-decision-reference': 'blocking' });
+    expect(gated.failedCodes.has('stale-decision-reference')).toBe(true);
+  });
+
+  it('states the span bound in both tool schemas', () => {
+    const remember = TOOL_DEFINITIONS.find((t) => t.name === 'remember')!;
+    const items = (remember.inputSchema.properties as unknown as Record<string, { items: { properties: Record<string, { maxLength?: number }> } }>).anchors.items;
+    expect(items.properties.span.maxLength).toBe(MAX_SPAN_CHARS);
+    expect(readFileSync(join(process.cwd(), 'src', 'pi', 'extension.ts'), 'utf-8'))
+      .toContain(`span: Type.Optional(Type.String({ minLength: 1, maxLength: ${MAX_SPAN_CHARS},`);
+  });
+
   it('does not flag two spans in one symbol as unreconciled', async () => {
     await rememberSpan('one', SPAN);
     await rememberSpan('two', '  return a;');
@@ -459,9 +497,13 @@ describe('AnchorLossIsAnActionableWorkItem', () => {
 
     const r = (await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }])) as { id: string };
     await index(null, [nodeFor('src/other.ts', 'other', 'x')]);
+    // A recorded key that no longer matches the file: its offsets cannot be trusted.
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    const st = EdgeStore.open(EdgeStore.dbPath(dir));
+    st.setFileHash('src/big.ts', 'f'.repeat(64));
+    st.close();
     const collected = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'frozen' });
     expect(collected.findings.filter((f) => f.code === 'memory-anchor-lost').map((f) => f.subject)).toEqual([r.id]);
-    // index(null) recorded no hash for src/big.ts, so its offsets cannot be shown current.
     expect(collected.failedCodes).toContain('memory-anchor-lost');
     expect(collected.caveats.join(' ')).toContain('anchored file(s) changed since analysis');
   });
@@ -472,7 +514,7 @@ describe('AnchorLossIsAnActionableWorkItem', () => {
 
   it('reports no findings for fresh notes and says when there is no analysis', async () => {
     await rememberSpan();
-    expect(await detectMemoryAnchorLoss(root)).toEqual({ findings: [], checked: 1, staleFiles: [] });
+    expect(await detectMemoryAnchorLoss(root)).toEqual({ findings: [], checked: 1, staleFiles: [], unverifiedFiles: [] });
     await rm(join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true, force: true });
     const loss = await detectMemoryAnchorLoss(root);
     expect(loss.findings).toEqual([]);

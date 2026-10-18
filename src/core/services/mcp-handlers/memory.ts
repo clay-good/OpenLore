@@ -96,6 +96,7 @@ const SPAN_NOT_RECORDED_TEXT: Record<SpanNotRecordedReason, string> = {
   ambiguous: 'the text occurs more than once in the symbol\'s body',
   unreadable: 'the symbol\'s source could not be read',
   'index-stale': 'the file changed since it was analyzed; run openlore analyze and record it again',
+  'index-unverified': 'the analysis has no record of this file\'s content (for example an imported index bundle), so the span cannot be located safely; run openlore analyze and record it again',
 };
 
 export async function handleRemember(
@@ -811,10 +812,18 @@ function estimateItemTokens(i: RecalledMemory): number {
  * one finding per recorded, non-retired note that has a lost or ambiguous anchor,
  * computed with the same freshness engine recall uses. `checked` counts the
  * anchored notes evaluated; `staleFiles` names symbol-anchored files whose content
- * differs from what the analysis indexed; `unassessedReason` is set when anchored
+ * differs from what the analysis indexed; `unverifiedFiles` names those the index
+ * has no content key for (an imported bundle), which are disclosed, not counted as
+ * changed; `unassessedReason` is set when anchored
  * notes exist but there is no analysis to check them against.
  */
-export async function detectMemoryAnchorLoss(rootPath: string): Promise<{ findings: GovernanceFinding[]; checked: number; staleFiles: string[]; unassessedReason?: string }> {
+export async function detectMemoryAnchorLoss(rootPath: string): Promise<{
+  findings: GovernanceFinding[];
+  checked: number;
+  staleFiles: string[];
+  unverifiedFiles?: string[];
+  unassessedReason?: string;
+}> {
   // Read-only: the commit gate must not rename a broken committed store, and must not
   // read it as "no memories" — a load error makes the check incomplete instead.
   const store = await loadMemoryStore(rootPath, { readOnly: true });
@@ -834,8 +843,13 @@ export async function detectMemoryAnchorLoss(rootPath: string): Promise<{ findin
     // A symbol anchor in a file that changed since analysis was checked against
     // offsets that no longer describe it (file-level anchors check the disk only).
     const symbolFiles = [...new Set(notes.flatMap((m) => m.anchors.filter((a) => a.nodeId).map((a) => a.filePath)))].sort();
-    const staleFiles = symbolFiles.filter((f) => ctx.fileIndexedAsOnDisk(f) === false);
-    return { findings, checked: notes.length, staleFiles };
+    const states = symbolFiles.map((f) => [f, ctx.fileIndexedAsOnDisk(f)] as const);
+    return {
+      findings,
+      checked: notes.length,
+      staleFiles: states.filter(([, s]) => s === 'changed').map(([f]) => f),
+      unverifiedFiles: states.filter(([, s]) => s === 'unknown').map(([f]) => f),
+    };
   } finally {
     ctx.close();
   }

@@ -382,7 +382,14 @@ export async function collectGovernanceFindings(
       if (loss.unassessedReason) incomplete(loss.unassessedReason);
       else if (loss.staleFiles.length > 0) {
         incomplete(`${loss.staleFiles.length} anchored file(s) changed since analysis; run openlore analyze`);
-      } else assessedCodes.add('memory-anchor-lost');
+      } else {
+        // No content key (an imported bundle) proves nothing either way: disclose it,
+        // but do not call it a change or fail the gate on it.
+        if (loss.unverifiedFiles?.length) {
+          caveats.push(`memory-anchor-lost: ${loss.unverifiedFiles.length} anchored file(s) have no recorded content key in the index (for example an imported bundle); run openlore analyze to verify them`);
+        }
+        assessedCodes.add('memory-anchor-lost');
+      }
     } catch (err) {
       incomplete(`check unavailable: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -403,7 +410,12 @@ export async function collectGovernanceFindings(
     assessedCodes.add('stale-decision-reference');
   } catch (err) {
     caveats.push(`stale-decision-reference check unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    failedCodes.add('stale-decision-reference');
+    // Its store load is read-only now, so a torn notes.json throws here instead of
+    // being renamed away. Advisory keeps its fail-soft behavior: only a blocking or
+    // frozen policy fails the gate on an incomplete check (add-memory-anchor-verdicts).
+    if (policy['stale-decision-reference'] === 'blocking' || policy['stale-decision-reference'] === 'frozen') {
+      failedCodes.add('stale-decision-reference');
+    }
   }
 
   // Decision-bound constraints — always load the declared eligibility corpus.
