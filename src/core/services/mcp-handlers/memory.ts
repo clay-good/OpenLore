@@ -549,7 +549,7 @@ export async function handleRecall(
         ? `tokenBudget truncated the tail: ${budget.withheld} additional authoritative fact(s) withheld — raise tokenBudget or omit it to see them.`
         : undefined;
       const reanchorNote = needsReanchoring.length
-        ? 'needsReanchoring entries reference code that no longer exists — do not treat them as authoritative; re-record them against current code.'
+        ? 'needsReanchoring entries have an anchor that is lost or ambiguous (each anchor\'s reselectReason says which) — do not treat them as authoritative; re-record them against current code.'
         : undefined;
       const staleRefCount = authoritativeOut.filter((i) => i.staleDecisionRef?.length).length;
       const staleRefNote = staleRefCount
