@@ -12,6 +12,8 @@ vi.mock('./utils.js', () => ({
   readCachedContext: vi.fn(),
   // The no-index verdict the real diagnosis returns when nothing is on disk.
   diagnoseIndexUnservable: vi.fn(async () => ({ error: 'No analysis found. Run analyze_codebase first.', notReady: true, reason: 'index-absent', remedy: 'openlore analyze' })),
+  loadMappingIndex: vi.fn(async () => null),
+  specsForFile: vi.fn(() => []),
 }));
 
 vi.mock('../../drift/git-diff.js', () => ({
@@ -435,6 +437,39 @@ describe('computeBlastRadius', () => {
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
     expect(b.specs.willGoStale).toBe(0);
     expect(b.caveats.join(' ')).toMatch(/drift could not be evaluated.*git exploded/i);
+  });
+
+  it('pushes notes whose trigger matches the diff, with receipts, and leaves pinned notes to orient (change: add-memory-trigger-predicates)', async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+    const { loadMappingIndex, specsForFile } = await import('./utils.js');
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-blast-trigger-'));
+    try {
+      await mkdir(join(dir, OPENLORE_DIR, 'memory'), { recursive: true });
+      const note = (id: string, extra: Record<string, unknown>) =>
+        ({ id, kind: 'note', content: `content of ${id}`, anchors: [], recordedAt: '2026-01-01T00:00:00Z', ...extra });
+      await writeFile(join(dir, OPENLORE_DIR, 'memory', 'notes.json'), JSON.stringify({
+        version: '1', updatedAt: '', memories: [
+          note('glob0001', { trigger: { fileGlob: 'src/*.ts' } }),
+          note('sym00001', { trigger: { symbolPattern: 'validate*' } }),
+          note('dom00001', { trigger: { specDomain: 'mcp-handlers' } }),
+          note('miss0001', { trigger: { fileGlob: 'docs/**' } }),
+          note('pin00001', { pinned: true }),
+        ],
+      }), 'utf-8');
+      vi.mocked(loadMappingIndex).mockResolvedValueOnce({} as never);
+      vi.mocked(specsForFile).mockReturnValue([{ domain: 'mcp-handlers', specFile: 'x' }] as never);
+      const b = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
+      expect(b.injectedMemories?.map(m => [m.id, m.firedPredicate])).toEqual([
+        ['dom00001', { kind: 'specDomain', domain: 'mcp-handlers' }],
+        ['glob0001', { kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' }],
+        ['sym00001', { kind: 'symbolPattern', pattern: 'validate*', matched: 'validateDirectory' }],
+      ]);
+      expect(b.headline).toMatch(/3 triggered memories to read/);
+      expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
+    } finally {
+      vi.mocked(specsForFile).mockReturnValue([] as never);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

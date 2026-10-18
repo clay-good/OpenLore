@@ -48,6 +48,8 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
+import { injectionFields, makeHopProbe, needsHopProbe, selectInjectedMemories, UNVERIFIABLE_VIEW } from './memory-triggers.js';
+import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import type { MemoryFreshness } from '../../../types/index.js';
 
 import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
@@ -573,6 +575,9 @@ export async function handleOrient(
   // (ReversalAwareness). Read from the bitemporal supersession record + decision
   // supersedes links; never re-served as authoritative current context.
   let reversals: Reversal[] | undefined;
+  // Notes pushed into the briefing by a matching trigger or `pinned`, with their receipts
+  // (change: add-memory-trigger-predicates).
+  let memoryInjection: ReturnType<typeof injectionFields> = {};
   // Ids of decisions superseded by another (shared by every authoritative decision
   // surface below — pendingDecisions and governingDecisions — so a superseded decision
   // is never served as current intent on any of them). Populated in the block below.
@@ -650,6 +655,23 @@ export async function handleOrient(
     }
     const groups = findUnreconciled(contradictionItems);
     if (groups.length > 0) unreconciledMemories = groups;
+
+    // ── Triggered and pinned memories (push, not pull) ───────────────────────
+    // Evaluated against the touched set this briefing already computed. Without a graph the
+    // anchors cannot be verified, so the note is judged exactly as recall would judge it then.
+    const touchedSymbols = topResults.slice(0, relevantFunctions.length).map((r) => ({
+      id: r.record.id,
+      name: r.record.name,
+      ...(r.record.className ? { className: r.record.className } : {}),
+    }));
+    const touched = { files: relevantFiles, symbols: touchedSymbols, domains: specDomains.map((d) => d.domain) };
+    const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
+    const probe = cg && needsHopProbe(memStore.memories)
+      ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols)
+      : undefined;
+    memoryInjection = injectionFields(selectInjectedMemories(
+      memStore.memories, touched, view ?? UNVERIFIABLE_VIEW, { includePinned: true, probe },
+    ));
 
     // ── ReversalAwareness (do-not-repeat) ──────────────────────────────────
     // Reversal scope is the TASK's scope ONLY: files the search surfaced, plus the
@@ -1082,6 +1104,7 @@ export async function handleOrient(
     ...(staleDecisions !== undefined ? { staleDecisions } : {}),
     ...(unreconciledMemories !== undefined ? { unreconciledMemories } : {}),
     ...(reversals !== undefined ? { reversals } : {}),
+    ...memoryInjection,
     ...(governingDecisions !== undefined ? { governingDecisions } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
     ...(changeCoupling !== undefined ? { changeCoupling } : {}),
@@ -1099,13 +1122,14 @@ export async function handleOrient(
 /**
  * Sections trimmed when the top-`limit` answer itself exceeds a `tokenBudget`, most peripheral first;
  * each is drained before the next is touched, always from its lowest-ranked end. A call path is kept
- * exactly when its function is. Never trimmed: governance context (pending, stale, reversed, and
+ * exactly when its function is. Triggered and pinned memories are trimmed from their pinned end, and the
+ * receipt counts them (change: add-memory-trigger-predicates). Never trimmed: governance context (pending, stale, reversed, and
  * governing decisions, unreconciled memories), architecture violations, matching specs (they carry
  * synced decisions), the file scope the answer was computed for, and next steps.
  */
 const ORIENT_BUDGET_TRIM_ORDER = [
   'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
-  'insertionPoints', 'specDomains', 'relevantFunctions',
+  'insertionPoints', 'injectedMemories', 'specDomains', 'relevantFunctions',
 ] as const;
 
 /** Estimated tokens of a payload as it is sent: pretty-printed JSON, as the MCP server and `--json` emit. */

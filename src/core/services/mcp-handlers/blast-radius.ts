@@ -18,7 +18,14 @@
  * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
  */
 
-import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable, loadMappingIndex, specsForFile } from './utils.js';
+import { loadMemoryStore } from '../../decisions/memory-store.js';
+import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
+import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
+import {
+  injectionFields, makeHopProbe, needsHopProbe, selectInjectedMemories, UNVERIFIABLE_VIEW,
+  type InjectedMemory, type StaleTriggeredMemory,
+} from './memory-triggers.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
 import {
   carriedCaveat,
@@ -211,6 +218,13 @@ export interface BlastRadiusBriefing {
    * fix-git-derived-signal-honesty; BriefingCapabilityClaimsAreCurrent)
    */
   federation: { evaluated: false; note: string } | ({ evaluated: true } & Record<string, unknown>);
+  /**
+   * Notes whose trigger matches this diff, pushed with their receipts; orphaned ones are listed
+   * apart, never as content (change: add-memory-trigger-predicates). Absent when none fired.
+   */
+  injectedMemories?: InjectedMemory[];
+  staleTriggeredMemories?: StaleTriggeredMemory[];
+  injectedMemoriesNote?: string;
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -417,6 +431,11 @@ export async function computeBlastRadius(
   const memDrifted = memWillDrift.filter(m => m.kind === 'memory-drifted').length;
   const decisionsOrphaned = decisionItems.filter(d => d.kind === 'adr-orphaned').length;
 
+  // ── 4b. Triggered memories (change: add-memory-trigger-predicates) ──────────
+  // The touched set is the diff: its files, its changed symbols, and the spec domains those files
+  // map to. Pinned notes belong to orient's briefing, not to a diff review.
+  const memoryInjection = await triggeredMemoriesForDiff(absDir, ctx, cg, changedFiles, seeds.filter(s => !narrowed.unchangedSeedIds?.has(s.id)));
+
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
   const caveats: string[] = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
@@ -550,6 +569,7 @@ export async function computeBlastRadius(
       ...(driftUnavailable ? { unavailable: driftUnavailable } : {}),
     },
     federation,
+    ...memoryInjection,
     headline: '',
     posture: 'advisory',
     caveats,
@@ -581,7 +601,38 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
   if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
+  const pushed = b.injectedMemories?.length ?? 0;
+  if (pushed > 0) parts.push(`${pushed} triggered memor${pushed === 1 ? 'y' : 'ies'} to read`);
   return parts.join('; ') + '.';
+}
+
+/**
+ * Evaluate memory triggers against a diff's touched set. Best-effort like the drift pass: a failure
+ * yields no injection rather than aborting the advisory briefing.
+ */
+async function triggeredMemoriesForDiff(
+  absDir: string,
+  ctx: NonNullable<Awaited<ReturnType<typeof readCachedContext>>>,
+  cg: SerializedCallGraph,
+  changedFiles: string[],
+  seeds: Array<{ id: string; name: string; className?: string }>,
+): Promise<ReturnType<typeof injectionFields>> {
+  try {
+    const { memories } = await loadMemoryStore(absDir);
+    if (!memories.some(m => m.trigger !== undefined)) return {};
+    const mapping = await loadMappingIndex(absDir);
+    const domains = mapping
+      ? [...new Set(changedFiles.flatMap(f => specsForFile(mapping, f).map(s => s.domain)))].sort()
+      : [];
+    const symbols = seeds.map(s => ({ id: s.id, name: s.name, ...(s.className ? { className: s.className } : {}) }));
+    const view = ctx.edgeStore ? makeFreshnessView(ctx.edgeStore, absDir) : UNVERIFIABLE_VIEW;
+    const probe = needsHopProbe(memories)
+      ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), symbols)
+      : undefined;
+    return injectionFields(selectInjectedMemories(memories, { files: changedFiles, symbols, domains }, view, { includePinned: false, probe }));
+  } catch {
+    return {};
+  }
 }
 
 /** MCP dispatch entry. Returns the briefing object directly (additive-by-cast). */

@@ -34,8 +34,10 @@ import { findFleetMemory } from '../../federation/fleet-memory.js';
 import { collectReversals, supersededDecisionIds } from './reversals.js';
 import { decisionContentProvenance, type ServedContentProvenance } from '../served-content.js';
 import { buildRetirementGraph, staleRefsInText, type StaleRef } from './stale-decision-reference.js';
+import { validateMemoryTrigger } from './memory-triggers.js';
 import {
   MEMORY_TYPES,
+  type MemoryTrigger,
   type AnchoredMemory,
   type MemoryType,
   type StructuralAnchor,
@@ -76,11 +78,24 @@ export async function handleRemember(
   tags?: string[],
   type?: string,
   supersedes?: string,
+  trigger?: unknown,
+  pinned?: unknown,
 ): Promise<unknown> {
   try {
     if (!content?.trim()) return { error: 'content is required and must not be empty.' };
     const tooLong = queryTooLongError(content, 'content');
     if (tooLong) return tooLong;
+    // A malformed trigger is rejected here, never stored and silently ignored
+    // (change: add-memory-trigger-predicates).
+    let validTrigger: MemoryTrigger | undefined;
+    if (trigger !== undefined && trigger !== null) {
+      const v = validateMemoryTrigger(trigger);
+      if ('error' in v) return { error: v.error };
+      validTrigger = v.trigger;
+    }
+    if (pinned !== undefined && pinned !== null && typeof pinned !== 'boolean') {
+      return { error: 'pinned must be a boolean.' };
+    }
     if (anchorHints && anchorHints.length > MAX_MEMORY_ANCHORS) {
       return { error: `too many anchors: ${anchorHints.length} (max ${MAX_MEMORY_ANCHORS}). Record one memory per region of code.` };
     }
@@ -106,6 +121,14 @@ export async function handleRemember(
       }
     }
 
+    // A call-hop trigger walks from the anchored symbol; with no symbol anchor it could never fire.
+    if (validTrigger && 'withinHops' in validTrigger && !anchors.some((a) => a.nodeId)) {
+      return {
+        error: 'trigger.withinHops needs at least one anchor that resolves to a symbol in the analyzed graph ' +
+          '(pass anchors with a symbol, and run "openlore analyze" first if the repo has no analysis).',
+      };
+    }
+
     // Valid-time marker: the HEAD commit this memory describes (deterministic, no LLM).
     // Undefined in a non-git repo / pre-first-commit — the memory is then always-valid.
     const validFromCommit = await getHeadCommit(rootPath);
@@ -129,6 +152,8 @@ export async function handleRemember(
       type: normalizeMemoryType(type),
       ...(validFromCommit ? { validFromCommit } : {}),
       ...(validSupersede ? { supersedes: validSupersede } : {}),
+      ...(validTrigger ? { trigger: validTrigger } : {}),
+      ...(pinned === true ? { pinned: true } : {}),
     };
 
     // CAS update so concurrent remember calls never lose a write: the id-keyed
@@ -177,6 +202,8 @@ export async function handleRemember(
       anchored: anchors.length > 0,
       validFromCommit: validFromCommit ?? null,
       anchors: anchors.map(summarizeAnchor),
+      ...(memory.trigger ? { trigger: memory.trigger } : {}),
+      ...(memory.pinned ? { pinned: true } : {}),
       message: [
         anchors.length
           ? `Memory recorded with ${anchors.length} structural anchor(s).`

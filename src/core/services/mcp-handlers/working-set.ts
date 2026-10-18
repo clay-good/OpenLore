@@ -32,6 +32,7 @@ import { handleSpecStoreStatus, type SpecStoreStatusReport } from './spec-store.
 import { handleOrient } from './orient.js';
 import { applyTokenBudget, omissionNote } from './progressive.js';
 import type { ServedContentProvenance } from '../served-content.js';
+import type { InjectedMemory, StaleTriggeredMemory } from './memory-triggers.js';
 
 /** Default token budget for the whole merged briefing when none is supplied. */
 const DEFAULT_WORKING_SET_BUDGET = 8_000;
@@ -102,6 +103,13 @@ export interface WorkingSetTargetBrief {
   specDomains: string[];
   /** In-scope anchored decisions/constraints with a freshness verdict. */
   anchoredIntent: AnchoredIntent[];
+  /**
+   * Notes this target's orientation pushed by trigger or `pinned`, with their receipts; orphaned
+   * ones listed apart (change: add-memory-trigger-predicates). Absent when none fired.
+   */
+  injectedMemories?: InjectedMemory[];
+  staleTriggeredMemories?: StaleTriggeredMemory[];
+  injectedMemoriesNote?: string;
 }
 
 export interface WorkingSetContextReport {
@@ -149,6 +157,10 @@ export interface OrientView {
   // it withholds orphaned by construction and flags drifted. (Also includes any
   // `approved`-status decisions orient surfaces for sync-awareness — see briefTargetFromOrient.)
   pendingDecisions?: Array<{ id: string; title: string; status?: string; freshness?: string; verify?: boolean; provenance?: ServedContentProvenance }>;
+  // Orient's triggered/pinned memories, evaluated against this target's touched set.
+  injectedMemories?: InjectedMemory[];
+  staleTriggeredMemories?: StaleTriggeredMemory[];
+  injectedMemoriesNote?: string;
 }
 
 /**
@@ -211,6 +223,9 @@ export function briefTargetFromOrient(
       })),
       specDomains: fnDomains,
       anchoredIntent,
+      ...(orient.injectedMemories?.length ? { injectedMemories: orient.injectedMemories } : {}),
+      ...(orient.staleTriggeredMemories?.length ? { staleTriggeredMemories: orient.staleTriggeredMemories } : {}),
+      ...(orient.injectedMemoriesNote ? { injectedMemoriesNote: orient.injectedMemoriesNote } : {}),
     },
   };
 }

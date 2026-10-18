@@ -1,0 +1,395 @@
+/**
+ * Memory trigger predicates (change: add-memory-trigger-predicates).
+ *
+ * The evaluator runs for real; orient runs for real against a temp repo with a real edge store,
+ * memory store, and anchor engine. Only the vector-index modules are mocked, to choose which
+ * functions the task "touches". Plain .test.ts so CI runs it.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const searchResults = vi.hoisted(() => ({ value: [] as unknown[] }));
+vi.mock('../../analyzer/vector-index.js', () => ({
+  VectorIndex: {
+    exists: vi.fn(() => true),
+    search: vi.fn(async () => searchResults.value),
+    keywordMissDiagnostics: vi.fn(async () => ({ missedTokens: [], nearTokens: [] })),
+  },
+}));
+vi.mock('../../analyzer/embedding-service.js', () => ({
+  EmbeddingService: { fromEnv: vi.fn(() => { throw new Error('no env'); }), fromConfig: vi.fn(() => null) },
+}));
+vi.mock('../../analyzer/spec-vector-index.js', () => ({
+  SpecVectorIndex: { exists: vi.fn(() => false), search: vi.fn(async () => []) },
+}));
+
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { EdgeStore } from '../edge-store.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { handleOrient } from './orient.js';
+import { handleRemember, handleRecall } from './memory.js';
+import { _resetContextCacheForTesting } from './utils.js';
+import { buildTraversalIndex } from '../../analyzer/condensation.js';
+import { briefTargetFromOrient } from './working-set.js';
+import {
+  validateMemoryTrigger,
+  selectInjectedMemories,
+  makeHopProbe,
+  injectionFields,
+  UNVERIFIABLE_VIEW,
+  MAX_INJECTED_MEMORIES,
+  type InjectedMemory,
+  type StaleTriggeredMemory,
+} from './memory-triggers.js';
+import type { FunctionNode, CallEdge, SerializedCallGraph } from '../../analyzer/call-graph.js';
+import type { AnchoredMemory } from '../../../types/index.js';
+
+// ── fixtures ────────────────────────────────────────────────────────────────
+
+let root: string;
+
+/** Four functions in a call chain a → b → c → d, each in its own file. */
+const FILES: Record<string, string> = {
+  'src/routes/a.ts': 'export function handleGet() {\n  return b();\n}\n',
+  'src/b.ts': 'export function b() {\n  return c();\n}\n',
+  'src/c.ts': 'export function c() {\n  return d();\n}\n',
+  'src/store/d.ts': 'export function openStore() {\n  return 1;\n}\n',
+};
+const NAMES: Record<string, string> = {
+  'src/routes/a.ts': 'handleGet', 'src/b.ts': 'b', 'src/c.ts': 'c', 'src/store/d.ts': 'openStore',
+};
+const id = (file: string) => `${file}::${NAMES[file]}`;
+
+function fnNode(file: string): FunctionNode {
+  return {
+    id: id(file), name: NAMES[file], filePath: file, isAsync: false, language: 'typescript',
+    startIndex: 0, endIndex: Buffer.byteLength(FILES[file], 'utf-8'), fanIn: 0, fanOut: 0,
+  };
+}
+function callEdge(from: string, to: string): CallEdge {
+  return { callerId: id(from), calleeId: id(to), calleeName: NAMES[to], confidence: 'import', kind: 'calls' };
+}
+const NODES = Object.keys(FILES).map(fnNode);
+const EDGES = [callEdge('src/routes/a.ts', 'src/b.ts'), callEdge('src/b.ts', 'src/c.ts'), callEdge('src/c.ts', 'src/store/d.ts')];
+function callGraph(): SerializedCallGraph {
+  return {
+    nodes: NODES, edges: EDGES, classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
+    stats: { totalNodes: NODES.length, totalEdges: EDGES.length, avgFanIn: 0, avgFanOut: 0 },
+  };
+}
+
+function touch(...files: string[]): void {
+  searchResults.value = files.map((file, i) => ({
+    score: 0.9 - i * 0.1,
+    matchEvidence: { field: 'symbol', terms: [NAMES[file].toLowerCase()], tier: 1 },
+    record: { id: id(file), name: NAMES[file], filePath: file, language: 'typescript', fanIn: 0, fanOut: 0, isHub: false, isEntryPoint: false },
+  }));
+}
+
+async function analysisDir(): Promise<string> {
+  const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+beforeEach(async () => {
+  vi.clearAllMocks();
+  root = await mkdtemp(join(tmpdir(), 'openlore-mem-trigger-'));
+  for (const [file, src] of Object.entries(FILES)) {
+    await mkdir(join(root, file, '..'), { recursive: true });
+    await writeFile(join(root, file), src, 'utf-8');
+  }
+  const store = EdgeStore.open(EdgeStore.dbPath(await analysisDir()));
+  store.clearAll();
+  store.insertNodes(NODES);
+  store.close();
+  await writeFile(join(await analysisDir(), ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph: callGraph() }), 'utf-8');
+  touch('src/routes/a.ts');
+});
+afterEach(async () => {
+  _resetContextCacheForTesting();
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
+
+interface OrientOut {
+  error?: string;
+  injectedMemories?: InjectedMemory[];
+  staleTriggeredMemories?: StaleTriggeredMemory[];
+  injectedMemoriesNote?: string;
+  budget?: { omitted?: Record<string, number> };
+}
+const orient = async (task = 'work on the route', opts: { tokenBudget?: number; lean?: boolean } = {}) =>
+  (await handleOrient(root, task, 5, opts.tokenBudget, opts.lean ?? false)) as OrientOut;
+
+async function remember(content: string, extra: { anchors?: Array<{ symbol?: string; file?: string }>; trigger?: unknown; pinned?: unknown } = {}) {
+  return handleRemember(root, content, extra.anchors, undefined, 'gotcha', undefined, extra.trigger, extra.pinned) as
+    Promise<{ id?: string; error?: string; trigger?: unknown; pinned?: boolean }>;
+}
+
+// ── validation ──────────────────────────────────────────────────────────────
+
+describe('validateMemoryTrigger', () => {
+  it('accepts exactly one predicate from the closed union', () => {
+    expect(validateMemoryTrigger({ fileGlob: './src/**' })).toEqual({ trigger: { fileGlob: 'src/**' } });
+    expect(validateMemoryTrigger({ symbolPattern: 'handle*' })).toEqual({ trigger: { symbolPattern: 'handle*' } });
+    expect(validateMemoryTrigger({ specDomain: 'analyzer' })).toEqual({ trigger: { specDomain: 'analyzer' } });
+    expect(validateMemoryTrigger({ withinHops: 2 })).toEqual({ trigger: { withinHops: 2 } });
+  });
+
+  it.each([
+    [null], ['src/**'], [[]], [{}], [{ fileGlob: 'a', specDomain: 'b' }], [{ regex: '.*' }],
+    [{ fileGlob: '' }], [{ fileGlob: '   ' }], [{ fileGlob: 3 }], [{ fileGlob: 'a\nb' }], [{ fileGlob: 'x'.repeat(257) }],
+    [{ withinHops: 0 }], [{ withinHops: 21 }], [{ withinHops: 1.5 }], [{ withinHops: '2' }], [{ withinHops: Number.NaN }],
+  ])('rejects malformed trigger %j', (raw) => {
+    expect(validateMemoryTrigger(raw)).toHaveProperty('error');
+  });
+});
+
+describe('remember with a trigger', () => {
+  it('stores a valid trigger and pinned flag and echoes them', async () => {
+    const r = await remember('routes must validate input', { trigger: { fileGlob: 'src/routes/**' }, pinned: true });
+    expect(r.error).toBeUndefined();
+    expect(r.trigger).toEqual({ fileGlob: 'src/routes/**' });
+    expect(r.pinned).toBe(true);
+    const stored = JSON.parse(await readFile(join(root, OPENLORE_DIR, 'memory', 'notes.json'), 'utf-8')) as { memories: AnchoredMemory[] };
+    expect(stored.memories[0]).toMatchObject({ trigger: { fileGlob: 'src/routes/**' }, pinned: true });
+  });
+
+  it('rejects a malformed trigger and stores nothing', async () => {
+    const r = await remember('x', { trigger: { fileGlob: 'a', withinHops: 2 } });
+    expect(r.error).toMatch(/exactly one/);
+    expect((await handleRecall(root) as { total: number }).total).toBe(0);
+  });
+
+  it('rejects a non-boolean pinned', async () => {
+    expect((await remember('x', { pinned: 'yes' })).error).toMatch(/pinned must be a boolean/);
+  });
+
+  it('rejects withinHops without an anchor that resolves to a symbol', async () => {
+    expect((await remember('x', { trigger: { withinHops: 2 } })).error).toMatch(/withinHops needs/);
+    expect((await remember('x', { trigger: { withinHops: 2 }, anchors: [{ file: 'src/b.ts' }] })).error).toMatch(/withinHops needs/);
+    const ok = await remember('x', { trigger: { withinHops: 2 }, anchors: [{ symbol: 'openStore', file: 'src/store/d.ts' }] });
+    expect(ok.error).toBeUndefined();
+  });
+});
+
+// ── orient push ─────────────────────────────────────────────────────────────
+
+describe('orient pushes triggered memories with a receipt', () => {
+  it('fires a fileGlob trigger on a touched file and stays silent otherwise', async () => {
+    const r = await remember('every route handler must call validateInput first', { trigger: { fileGlob: 'src/routes/**' } });
+    const hit = await orient();
+    expect(hit.injectedMemories).toEqual([expect.objectContaining({
+      id: r.id,
+      content: 'every route handler must call validateInput first',
+      firedPredicate: { kind: 'fileGlob', pattern: 'src/routes/**', matched: 'src/routes/a.ts' },
+      freshness: 'fresh',
+      provenance: 'local-unreviewed',
+    })]);
+
+    touch('src/b.ts');
+    _resetContextCacheForTesting();
+    expect((await orient('work on b')).injectedMemories).toBeUndefined();
+  });
+
+  it('fires a symbolPattern trigger on a touched symbol name only', async () => {
+    await remember('handlers log the request id', { trigger: { symbolPattern: 'handle*' } });
+    expect((await orient()).injectedMemories?.[0].firedPredicate).toEqual({ kind: 'symbolPattern', pattern: 'handle*', matched: 'handleGet' });
+    touch('src/c.ts');
+    _resetContextCacheForTesting();
+    expect((await orient('work on c')).injectedMemories).toBeUndefined();
+  });
+
+  it('fires a specDomain trigger only when the task touches that domain', async () => {
+    await mkdir(await analysisDir(), { recursive: true });
+    await writeFile(join(await analysisDir(), 'mapping.json'), JSON.stringify({
+      mappings: [{ requirement: 'R', domain: 'routing', specFile: 'openspec/specs/routing/spec.md', functions: [{ name: 'handleGet', file: 'src/routes/a.ts', line: 1, kind: 'function', confidence: 'name' }] }],
+      orphanFunctions: [],
+    }), 'utf-8');
+    await remember('routing changes need an ADR', { trigger: { specDomain: 'routing' } });
+    await remember('storage is append-only', { trigger: { specDomain: 'storage' } });
+    const r = await orient();
+    expect(r.injectedMemories?.map(m => m.firedPredicate)).toEqual([{ kind: 'specDomain', domain: 'routing' }]);
+  });
+
+  it('pushes a pinned memory for an unrelated task, receipted as pinned', async () => {
+    await remember('the repo uses tabs', { pinned: true });
+    touch('src/c.ts');
+    expect((await orient('anything at all')).injectedMemories).toEqual([
+      expect.objectContaining({ content: 'the repo uses tabs', firedPredicate: { kind: 'pinned' }, anchored: false }),
+    ]);
+  });
+
+  it('does not push in lean mode (navigation core only)', async () => {
+    await remember('the repo uses tabs', { pinned: true });
+    expect((await orient('x', { lean: true })).injectedMemories).toBeUndefined();
+  });
+
+  it('withinHops 2 fires for a caller two hops upstream of the anchor, not at three', async () => {
+    await remember('c must not be called inside a transaction', {
+      anchors: [{ symbol: 'c', file: 'src/c.ts' }], trigger: { withinHops: 2 },
+    });
+    // handleGet → b → c: two hops.
+    const hit = await orient();
+    expect(hit.injectedMemories?.[0].firedPredicate).toEqual({ kind: 'withinHops', hops: 2, matched: 'handleGet', distance: 2 });
+
+    await remember('openStore takes the global lock', {
+      anchors: [{ symbol: 'openStore', file: 'src/store/d.ts' }], trigger: { withinHops: 2 },
+    });
+    // handleGet → b → c → openStore: three hops — silent.
+    _resetContextCacheForTesting();
+    const r = await orient();
+    expect(r.injectedMemories?.map(m => m.content)).toEqual(['c must not be called inside a transaction']);
+  });
+
+  it('never pushes an orphaned memory as content; lists it apart as stale', async () => {
+    const r = await remember('b is the only caller of c', { anchors: [{ symbol: 'b', file: 'src/b.ts' }], trigger: { fileGlob: 'src/routes/**' } });
+    // Delete the anchored code: the anchor is orphaned.
+    await rm(join(root, 'src/b.ts'));
+    const store = EdgeStore.open(EdgeStore.dbPath(await analysisDir()));
+    store.clearAll();
+    store.insertNodes(NODES.filter(n => n.filePath !== 'src/b.ts'));
+    store.close();
+    _resetContextCacheForTesting();
+    const out = await orient();
+    expect(out.injectedMemories).toBeUndefined();
+    expect(out.staleTriggeredMemories).toEqual([{ id: r.id, firedPredicate: expect.objectContaining({ kind: 'fileGlob' }), freshness: 'orphaned' }]);
+    expect(JSON.stringify(out.staleTriggeredMemories)).not.toContain('only caller');
+    expect(out.injectedMemoriesNote).toMatch(/not served as authoritative/);
+  });
+
+  it('pushes a drifted memory flagged verify', async () => {
+    await remember('handleGet returns b()', { anchors: [{ symbol: 'handleGet', file: 'src/routes/a.ts' }], trigger: { fileGlob: 'src/**' } });
+    await writeFile(join(root, 'src/routes/a.ts'), 'export function handleGet() {\n  return b() + 1;\n}\n', 'utf-8');
+    _resetContextCacheForTesting();
+    const m = (await orient()).injectedMemories?.[0];
+    expect(m).toMatchObject({ freshness: 'drifted', verify: true });
+  });
+
+  it('bounds an over-broad trigger and discloses the omitted count', async () => {
+    for (let i = 0; i < MAX_INJECTED_MEMORIES + 3; i++) await remember(`fact ${i}`, { trigger: { fileGlob: '**' } });
+    const r = await orient();
+    expect(r.injectedMemories).toHaveLength(MAX_INJECTED_MEMORIES);
+    expect(r.injectedMemoriesNote).toMatch(/^3 more triggered or pinned memories matched/);
+  });
+
+  it('pinned items ride the token budget: a deterministic subset, the rest counted in the receipt', async () => {
+    for (let i = 0; i < 6; i++) await remember(`pinned convention number ${i} `.repeat(20), { pinned: true });
+    const full = await orient('x');
+    expect(full.injectedMemories).toHaveLength(6);
+    const fullTokens = Math.ceil(JSON.stringify(full, null, 2).length / 4);
+    const tight1 = await orient('x', { tokenBudget: fullTokens - 300 });
+    const tight2 = await orient('x', { tokenBudget: fullTokens - 300 });
+    expect(tight1.injectedMemories!.length).toBeLessThan(6);
+    expect(tight1.budget?.omitted?.injectedMemories).toBe(6 - tight1.injectedMemories!.length);
+    expect(tight1.injectedMemories!.map(m => m.id)).toEqual(tight2.injectedMemories!.map(m => m.id));
+    for (const m of tight1.injectedMemories!) expect(m.firedPredicate).toEqual({ kind: 'pinned' });
+  });
+
+  it('ignores a hand-edited trigger outside the closed union', async () => {
+    const r = await remember('legit', { trigger: { fileGlob: 'nomatch/**' } });
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const store = JSON.parse(await readFile(path, 'utf-8')) as { memories: Array<Record<string, unknown>> };
+    store.memories[0].trigger = { regex: '.*' };
+    store.memories[0].pinned = 'true';
+    await writeFile(path, JSON.stringify(store), 'utf-8');
+    expect((await orient()).injectedMemories).toBeUndefined();
+    expect(r.id).toBeDefined();
+  });
+
+  it('a superseded memory is never pushed', async () => {
+    const old = await remember('old rule', { pinned: true });
+    await handleRemember(root, 'new rule', undefined, undefined, 'gotcha', old.id, undefined, true);
+    expect((await orient('x')).injectedMemories?.map(m => m.content)).toEqual(['new rule']);
+  });
+});
+
+// ── pure evaluator ──────────────────────────────────────────────────────────
+
+describe('selectInjectedMemories', () => {
+  const mem = (over: Partial<AnchoredMemory> & { id: string }): AnchoredMemory => ({
+    kind: 'note', content: over.id, anchors: [], recordedAt: '2026-01-01T00:00:00Z', ...over,
+  });
+  const touched = { files: ['src/routes/a.ts'], symbols: [{ id: id('src/routes/a.ts'), name: 'handleGet', className: 'Router' }], domains: [] };
+
+  it('orders trigger matches before pinned, then newest first, then id', () => {
+    const out = selectInjectedMemories([
+      mem({ id: 'p1', pinned: true, recordedAt: '2026-03-01T00:00:00Z' }),
+      mem({ id: 't-old', trigger: { fileGlob: 'src/**' }, recordedAt: '2026-01-01T00:00:00Z' }),
+      mem({ id: 't-new', trigger: { fileGlob: 'src/**' }, recordedAt: '2026-02-01T00:00:00Z' }),
+    ], touched, UNVERIFIABLE_VIEW, { includePinned: true });
+    expect(out.injected.map(m => m.id)).toEqual(['t-new', 't-old', 'p1']);
+  });
+
+  it('excludes pinned-only notes when includePinned is false (blast_radius)', () => {
+    const out = selectInjectedMemories([mem({ id: 'p', pinned: true })], touched, UNVERIFIABLE_VIEW, { includePinned: false });
+    expect(out.injected).toEqual([]);
+  });
+
+  it('matches a symbolPattern against the qualified Class.method name', () => {
+    const out = selectInjectedMemories([mem({ id: 's', trigger: { symbolPattern: 'Router.*' } })], touched, UNVERIFIABLE_VIEW, { includePinned: false });
+    expect(out.injected[0].firedPredicate).toEqual({ kind: 'symbolPattern', pattern: 'Router.*', matched: 'Router.handleGet' });
+  });
+
+  it('treats braces, extglobs, and leading ! literally (no expansion, no negation)', () => {
+    const out = selectInjectedMemories([
+      mem({ id: 'brace', trigger: { fileGlob: 'src/{routes,x}/a.ts' } }),
+      mem({ id: 'ext', trigger: { fileGlob: 'src/+(routes)/a.ts' } }),
+      mem({ id: 'neg', trigger: { fileGlob: '!nothing' } }),
+    ], touched, UNVERIFIABLE_VIEW, { includePinned: false });
+    expect(out.injected).toEqual([]);
+  });
+
+  it('judges anchored notes as recall does without a graph (orphaned, never content)', () => {
+    const out = selectInjectedMemories([
+      mem({ id: 'a', trigger: { fileGlob: 'src/**' }, anchors: [{ filePath: 'src/routes/a.ts', contentHash: 'h' }] }),
+    ], touched, UNVERIFIABLE_VIEW, { includePinned: false });
+    expect(out.injected).toEqual([]);
+    expect(out.stale).toEqual([{ id: 'a', firedPredicate: { kind: 'fileGlob', pattern: 'src/**', matched: 'src/routes/a.ts' }, freshness: 'orphaned' }]);
+  });
+
+  it('caps the stale list too and counts the rest', () => {
+    const many = Array.from({ length: MAX_INJECTED_MEMORIES + 2 }, (_, i) =>
+      mem({ id: `s${String(i).padStart(2, '0')}`, trigger: { fileGlob: '**' }, anchors: [{ filePath: 'gone.ts', contentHash: 'h' }] }));
+    const out = selectInjectedMemories(many, touched, UNVERIFIABLE_VIEW, { includePinned: false });
+    expect(out.stale).toHaveLength(MAX_INJECTED_MEMORIES);
+    expect(out.staleOmitted).toBe(2);
+    expect(injectionFields(out).injectedMemoriesNote).toMatch(/2 more orphaned triggered memories not listed/);
+  });
+});
+
+describe('makeHopProbe', () => {
+  const traversal = buildTraversalIndex(callGraph());
+  const touchedA = [{ id: id('src/routes/a.ts'), name: 'handleGet' }];
+
+  it('finds the nearest touched caller within the hop bound', () => {
+    const probe = makeHopProbe(traversal, touchedA);
+    expect(probe([id('src/c.ts')], 2)).toEqual({ matched: 'handleGet', distance: 2 });
+    expect(probe([id('src/store/d.ts')], 2)).toBeUndefined();
+    expect(probe([id('src/store/d.ts')], 3)).toEqual({ matched: 'handleGet', distance: 3 });
+  });
+
+  it('counts the anchor itself at distance 0 and ignores unknown anchor ids', () => {
+    const probe = makeHopProbe(traversal, touchedA);
+    expect(probe([id('src/routes/a.ts')], 1)).toEqual({ matched: 'handleGet', distance: 0 });
+    expect(probe(['nope::x'], 5)).toBeUndefined();
+  });
+
+  it('never walks downstream: a callee of the touched symbol does not fire', () => {
+    const probe = makeHopProbe(traversal, [{ id: id('src/store/d.ts'), name: 'openStore' }]);
+    expect(probe([id('src/routes/a.ts')], 5)).toBeUndefined();
+  });
+});
+
+describe('working_set_context carries each target\'s pushed memories', () => {
+  it('passes orient\'s injection through to the target brief', () => {
+    const injected: InjectedMemory = {
+      id: 'm1', type: 'gotcha', content: 'c', firedPredicate: { kind: 'pinned' }, freshness: 'fresh', anchored: false, provenance: 'local-unreviewed',
+    };
+    const { brief } = briefTargetFromOrient('api', { injectedMemories: [injected], injectedMemoriesNote: 'n' });
+    expect(brief.injectedMemories).toEqual([injected]);
+    expect(brief.injectedMemoriesNote).toBe('n');
+    expect(briefTargetFromOrient('api', {}).brief.injectedMemories).toBeUndefined();
+  });
+});
