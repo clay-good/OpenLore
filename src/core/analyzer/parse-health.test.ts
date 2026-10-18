@@ -329,3 +329,20 @@ describe('analyze renders the skip and exclusion breakdowns', () => {
     expect(analyze).toMatch(/Files skipped:.*skipReasons\.length/);
   });
 });
+
+describe('a wide ERROR node is walked in linear time', () => {
+  it('reads a wide node\'s child array once instead of indexing each child', () => {
+    // The binding answers `child(i)` by scanning from the first child, so indexing every child of a
+    // node with k children is O(k²): a 1 MB binary file's single ERROR node took hours.
+    let indexed = 0;
+    const leaf = (row: number): ParseHealthNode => ({ type: 'ERROR', startPosition: { row }, children: [], childCount: 0, child: () => null });
+    const kids = Array.from({ length: 10_000 }, (_, i) => leaf(i));
+    const root: ParseHealthNode = {
+      type: 'program', startPosition: { row: 0 }, hasError: true, children: kids, childCount: kids.length,
+      child: (i: number) => { indexed++; return kids[i] ?? null; },
+    };
+    const health = tallyParseHealth('TypeScript', root, 'x.ts');
+    expect(health?.errorCount).toBe(10_000);
+    expect(indexed).toBe(0);
+  });
+});

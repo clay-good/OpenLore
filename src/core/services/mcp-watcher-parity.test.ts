@@ -1452,6 +1452,23 @@ describe('adversarial regressions (PR #189 review findings)', () => {
     expect(refusals.every(r => r === 'unresolved-in-file-scope')).toBe(true);
   });
 
+  it('drops a file that turns binary instead of extracting it, as the file walker skips it', async () => {
+    const v1: Files = { 'src/seg.ts': 'export function seg() { return 1; }\n' };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    const segment = Buffer.alloc(188 * 40);
+    for (let i = 0; i < segment.length; i += 188) segment[i] = 0x47;
+    await writeFile(join(root, 'src/seg.ts'), segment);
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    await watcher.handleChange(join(root, 'src/seg.ts'));
+    const s2 = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(s2.getNodesForFile('src/seg.ts')).toEqual([]);
+    s2.close();
+  });
+
   it('deletion clears any stale mark for the removed file (no phantom stale rows)', async () => {
     const v1: Files = { 'src/c.ts': 'export function target() { return 1; }\n' };
     for (let i = 0; i < 5; i++) v1[`src/caller${i}.ts`] = `export function call${i}() { return target(); }\n`;

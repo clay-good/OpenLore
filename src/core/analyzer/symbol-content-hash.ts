@@ -174,8 +174,16 @@ function isDroppedComment(type: string, text: () => string): boolean {
   return !DIRECTIVE_COMMENT.some(rule => rule.test(body));
 }
 
+/**
+ * Child count past which a node's child array is read once instead of indexing each child: the
+ * binding answers `child(i)` by scanning from the first child, so indexing every child of a node
+ * with k children is O(k²) — a binary file's single ERROR node took hours.
+ */
+const WIDE_NODE_CHILDREN = 64;
+
 function childrenOf(n: HashTreeNode): HashTreeNode[] {
-  if (typeof n.childCount === 'number' && typeof n.child === 'function') {
+  if (typeof n.childCount === 'number' && typeof n.child === 'function'
+    && (n.childCount <= WIDE_NODE_CHILDREN || !n.children)) {
     const out: HashTreeNode[] = [];
     for (let i = 0; i < n.childCount; i++) {
       const c = n.child(i);
