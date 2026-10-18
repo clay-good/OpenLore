@@ -3,7 +3,7 @@
  * structural marker counts, never the word "deprecated" in prose. Plain .test.ts so CI runs it.
  */
 import { describe, it, expect } from 'vitest';
-import { extractDeprecation, MAX_DEPRECATION_HINT, DEPRECATION_MARKER_LANGUAGES } from './call-graph-extract.js';
+import { extractDeprecation, extractDocstringBefore, MAX_DEPRECATION_HINT, DEPRECATION_MARKER_LANGUAGES } from './call-graph-extract.js';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
 import { languageSupport, ALL_LANGUAGES } from './language-support.js';
 
@@ -101,5 +101,15 @@ describe('TypeScript declaration prefixes', () => {
     expect(at(src, '() => 1', 'TypeScript')).toEqual({ hint: 'use g' });
     expect(at(src, 'async function h', 'TypeScript')).toEqual({ hint: '' });
     expect(at('/** @deprecated */\nexport const x: Foo<Bar> = () => 1;', '() => 1', 'TypeScript')).toEqual({ hint: '' });
+  });
+});
+
+describe('docstrings use the same declaration-prefix rule', () => {
+  it('keeps the JSDoc line of exported and const-bound functions', () => {
+    const src = '/** Adds one. */\nexport function inc(x) { return x + 1; }\n/** Doubles. */\nexport const dbl = (x) => x * 2;\n/** Plain. */\nfunction p() {}\n';
+    expect(extractDocstringBefore(src, src.indexOf('function inc'), 'TypeScript')).toBe('Adds one.');
+    expect(extractDocstringBefore(src, src.indexOf('(x) => x * 2'), 'TypeScript')).toBe('Doubles.');
+    expect(extractDocstringBefore(src, src.indexOf('function p'), 'JavaScript')).toBe('Plain.');
+    expect(extractDocstringBefore('const y = 1;\nexport function q() {}', 'const y = 1;\nexport '.length, 'TypeScript')).toBeUndefined();
   });
 });
