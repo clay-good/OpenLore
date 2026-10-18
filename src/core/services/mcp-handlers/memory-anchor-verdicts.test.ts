@@ -5,7 +5,7 @@
  * Guards the mcp-handlers requirements SubSymbolSpanAnchors and
  * AnchorLossIsAnActionableWorkItem. Plain .test.ts so CI runs it.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -319,7 +319,7 @@ describe('round-1 review regressions', () => {
     expect(gated.assessedCodes).not.toContain('memory-anchor-lost');
   });
 
-  it('keeps span checks linear in a large file with many span notes', async () => {
+  it('checks a large file once for many span notes', async () => {
     const pad = '// pad\n'.repeat(200_000);
     const src = `${pad}${SRC}`;
     await writeFile(join(root, 'src', 'big.ts'), src, 'utf-8');
@@ -333,16 +333,20 @@ describe('round-1 review regressions', () => {
     const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
     const seeded = JSON.parse(await readFile(path, 'utf-8'));
     const anchor = seeded.memories.find((m: { id: string }) => m.id === one.id).anchors[0];
-    // 1,000 span notes on one 1.4 MB file. Unmemoized, each would re-hash the file and
-    // re-scan it for line numbers (~1.4 GB of work); memoized, both happen once.
+    // 1,000 span notes on one 1.4 MB file. Unmemoized, each note would look the file's
+    // key up and re-hash the whole file; memoized, that happens once per file.
     seeded.memories = Array.from({ length: 1000 }, (_, i) => ({
       id: `n${i}`, kind: 'note', content: `note ${i}`, anchors: [anchor], recordedAt: new Date(0).toISOString(),
     }));
     await writeFile(path, JSON.stringify(seeded), 'utf-8');
-    const started = Date.now();
-    const loss = await detectMemoryAnchorLoss(root);
-    expect(loss.findings).toEqual([]);
-    expect(Date.now() - started).toBeLessThan(3000);
+    const lookups = vi.spyOn(EdgeStore.prototype, 'getFileHash');
+    try {
+      const loss = await detectMemoryAnchorLoss(root);
+      expect(loss.findings).toEqual([]);
+      expect(lookups.mock.calls.length).toBeLessThanOrEqual(1);
+    } finally {
+      lookups.mockRestore();
+    }
   });
 
   it('trusts the Pass-1 key of a JavaScript file whose nodes are labeled TypeScript', async () => {
