@@ -681,6 +681,31 @@ describe('loadMappingIndex', () => {
     expect(result!.byFile.has('src/auth.ts')).toBe(true);
   });
 
+  it('indexes the current spec link index shape (links): exact functions are coverage, footprint files only map file → domain', async () => {
+    const dir = join(tmpDir, '.openlore', 'analysis');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'mapping.json'), JSON.stringify({
+      version: 8,
+      links: [
+        {
+          requirement: 'User auth', domain: 'auth', specFile: 'openspec/specs/auth/spec.md', state: 'linked', anchors: [],
+          functions: [{ name: 'login', file: 'src/auth.ts', line: 10, kind: 'function' }],
+          footprintFiles: ['src/session.ts'],
+        },
+        { requirement: 'Ambiguous', domain: 'auth', specFile: 'openspec/specs/auth/spec.md', state: 'ambiguous', anchors: [], functions: [], footprintFiles: [] },
+        { requirement: 'Junk', domain: 7, functions: 'nope' },
+      ],
+      orphanFunctions: [],
+    }), 'utf-8');
+
+    const result = await loadMappingIndex(tmpDir);
+    expect(result).not.toBeNull();
+    expect(specsForFile(result!, 'src/auth.ts').map(s => s.domain)).toEqual(['auth']);
+    expect(specsForFile(result!, 'src/session.ts').map(s => s.domain)).toEqual(['auth']);
+    // A footprint file is never function coverage.
+    expect(functionsForDomain(result!, 'auth').map(f => `${f.name}::${f.file}`)).toEqual(['login::src/auth.ts']);
+  });
+
   it('returns null when mapping.json is malformed JSON', async () => {
     const dir = join(tmpDir, '.openlore', 'analysis');
     await mkdir(dir, { recursive: true });
