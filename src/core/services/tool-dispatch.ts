@@ -18,6 +18,7 @@
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import type { DecisionScope } from '../../types/index.js';
 import { resolveCanonicalToolName, enforceConclusionContract } from './mcp-handlers/tool-contract.js';
+import { withFollowupHints } from './mcp-handlers/followup-hints.js';
 import { withPartialReceiptScope, partialReceiptForThisRequest } from './mcp-handlers/partial-request.js';
 import {
   PARTIAL_INDEX_ABSENT_FACTS,
@@ -157,7 +158,9 @@ export async function dispatchTool(
   return withPartialReceiptScope(async () => {
     const result = await dispatchToolImpl(canonical, args, directory, signal);
     const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
-    return withPartialIndexReceipt(await redactSourceToolResult(canonical, checked, directory), directory);
+    // Data-dependent next-call receipts (change: add-conclusion-followup-hints).
+    const hinted = withFollowupHints(canonical, checked);
+    return withPartialIndexReceipt(await redactSourceToolResult(canonical, hinted, directory), directory);
   });
 }
 
