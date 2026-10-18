@@ -54,6 +54,24 @@ bodies); a linear (KMP) matcher; non-blocking, regular-file-only anchored reads;
 loads in the gate (a torn `notes.json` is no longer renamed away, and corpus integrity now blocks on
 it); and bounded automatic store writes.
 
+Shipped and archived since: `add-conclusion-followup-hints` (2026-10-18) — a closed rule table
+(`FOLLOWUP_HINT_RULES`) attaches at most two `followUp` receipts (`{ tool, trigger: { field, value
+}, message }`) at dispatch: a hub top hit in `search_code` → `analyze_impact`, low-confidence
+`find_dead_code` candidates → `verify_claim`, specs that may go stale in `blast_radius` →
+`check_spec_drift`. Rules read fields already in the payload and add no threshold; a CI test pins
+every rule to registered tools.
+
+Shipped and archived since: `add-complexity-trend-signal` (2026-10-18) — `get_health_map` carries
+`complexityTrend`: each hotspot (complexity at or above the high-complexity threshold, in a churned
+file; at most 10 files) is re-parsed at its last 4 non-merge, non-bulk commits and labeled
+`rising` / `falling` / `flat` / `mixed` from the samples alone, withheld below 3 samples. A rising,
+high function is an advisory `declining-health` finding.
+
+Evidence check, not built: `adopt-spec-link-status-vocabulary` part (c), shallow-vs-deep coverage,
+already exists as the audit's `scenarioVerification` (`verification-path-exists` vs
+`no-reaching-test` per linked requirement). Parts (a) "unwanted" and (b) "predated" stay open: a
+decision id is a content hash with no revision order, so (b) needs a revision cursor first.
+
 Shipped and archived since: `add-deprecation-propagation` (2026-10-18, narrowed) — the walk records
 each declaration's standard deprecation marker (JSDoc `@deprecated` past `export`/modifiers and a
 `const x =` binding, Go `Deprecated:` paragraph, Python PEP 702 decorators) as `deprecation` on the

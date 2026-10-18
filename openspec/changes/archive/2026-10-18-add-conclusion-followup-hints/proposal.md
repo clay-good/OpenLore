@@ -1,6 +1,6 @@
 # Data-dependent follow-up hints: a conclusion that warrants a next check says so, with a receipt
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). Conclusion payloads already contain the fields
+> Status: SHIPPED (2026-10-18). Proposed 2026-07-03 (e2e audit pass 3). Conclusion payloads already contain the fields
 > that make a specific next tool call warranted — a search hit that is a hub, a dead-code
 > candidate at low confidence, a blast radius naming specs that will go stale — but the agent has
 > to know the tool catalog cold to act on them. Add a CLOSED, source-declared rule table that

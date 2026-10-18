@@ -10,7 +10,8 @@ response's payload. Each hint SHALL name the suggested tool and cite the trigger
 value (a receipt, not advice). Rules SHALL reference existing classifier outputs and constants
 only — a rule SHALL NOT introduce a new threshold or re-test an existing one downstream of the
 classifier that computed it. The rule table SHALL be guarded in CI so that a rule naming an
-unknown tool or a field absent from the target payload shape fails the build. Hints are the
+unregistered tool, on either side, fails the build. Hints SHALL be attached at dispatch, as a
+`followUp` array, and never to an error response. Hints are the
 data-dependent complement to the static NoRedundantConclusions sibling cross-references in tool
 descriptions; they are advisory payload content and SHALL never gate or block. Hint emission
 SHALL be deterministic: the same payload yields the same hints.

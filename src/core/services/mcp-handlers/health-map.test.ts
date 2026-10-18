@@ -11,7 +11,8 @@ vi.mock('./utils.js', () => ({
   diagnoseIndexUnservable: vi.fn(async () => ({ error: 'No analysis found. Run analyze_codebase first.', notReady: true, reason: 'index-absent', remedy: 'openlore analyze' })),
 }));
 
-vi.mock('../../provenance/change-coupling.js', () => ({
+vi.mock('../../provenance/change-coupling.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../provenance/change-coupling.js')>()),
   volatilityLevel: vi.fn((churn: number) => (churn >= 12 ? 'high' : churn >= 5 ? 'medium' : 'low')),
 }));
 
@@ -114,6 +115,7 @@ describe('handleGetHealthMap — empty graph', () => {
       volatileFileCount: 0,
       bridgeCount: 0,
       untestedHotspotCount: 0,
+      decliningHealthCount: 0,
       betweennessApprox: false,
       betweennessSourceCount: 0,
     });

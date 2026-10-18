@@ -317,6 +317,13 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'footprint-escape',
     description: 'A write declared `append` at plan time actually modified existing code (refuting the plan-time shared-append optimism).',
   },
+  // ── complexity trend (add-complexity-trend-signal) ──
+  'declining-health': {
+    defaultClass: 'advisory',
+    source: 'health-map',
+    description: 'A high-complexity function in a churned file never got simpler and ended more complex over its sampled recent commits (rising) and is at or above the high-complexity threshold.',
+    remediation: 'Rising complexity: {subject}; split or simplify it before adding more branches.',
+  },
   // ── deprecation propagation (add-deprecation-propagation) ──
   'deprecated-symbol-use': {
     defaultClass: 'advisory',
