@@ -1,6 +1,6 @@
 # Complexity trend over git history — a rising/flat/falling label on the churn+complexity OpenLore already mines
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 4, enhancement). OpenLore already computes
+> Status: SHIPPED (2026-10-18). Proposed 2026-07-03 (e2e audit pass 4, enhancement). OpenLore already computes
 > per-function cyclomatic complexity (the CFG-overlay walk, `call-graph-complexity.ts`) and
 > per-file churn/volatility (`get_change_coupling`, the `volatilityLevel` classifier). It only ever
 > reports *current* complexity, so it can't answer the question hotspot analysis actually turns on:

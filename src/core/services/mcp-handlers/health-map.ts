@@ -1,6 +1,9 @@
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 import { volatilityLevel } from '../../provenance/change-coupling.js';
+import { computeComplexityTrends, decliningHealthFindings } from './complexity-trend.js';
+import { classifyFindings, effectivePolicy } from './enforcement-policy.js';
+import { readOpenLoreConfig } from '../config-manager.js';
 
 const HUB_MIN_FAN_IN = 5;
 const GOD_MIN_FAN_OUT = 8;
@@ -136,6 +139,16 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
   const volatileFileList = allVolatileFiles.slice(0, limit);
   const volatileFileSet = new Set(allVolatileFiles.map(v => v.file));
 
+  // --- Complexity trend of high-complexity functions in churned files (add-complexity-trend-signal) ---
+  // Needs churn to pick hotspots; without it the trend is withheld, not reported as flat.
+  const trend = volatileFileSet.size > 0
+    ? await computeComplexityTrends(absDir, codeNodes, volatileFileSet, limit)
+    : undefined;
+  const trendFindings = trend ? decliningHealthFindings(trend) : [];
+  const trendGate = trendFindings.length
+    ? classifyFindings(trendFindings, effectivePolicy(await readOpenLoreConfig(absDir)))
+    : undefined;
+
   // --- Bridge nodes (sampled betweenness centrality on the call graph) ---
   // Compute the FULL ranking, then slice for display — the same shape the volatility
   // block above uses, and for the same reason: `summary.bridgeCount` sits beside the
@@ -202,6 +215,7 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
       volatileFileCount: allVolatileFiles.length,
       bridgeCount,
       untestedHotspotCount: allUntestedHotspots.length,
+      decliningHealthCount: trendFindings.length,
       betweennessApprox: codeNodes.length > MAX_BETWEENNESS_SOURCES,
       betweennessSourceCount,
     },
@@ -215,6 +229,14 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
       ? { indexIntegrity: { verdict: ctx.integrity.verdict, detail: ctx.integrity.detail } }
       : {}),
     topRisks,
+    complexityTrend: trend
+      ? {
+          hotspots: trend.hotspots,
+          ...(trend.notSampled ? { notSampled: trend.notSampled } : {}),
+          ...(trendGate ? { findings: trendGate.classified, gated: trendGate.gated } : {}),
+          caveats: trend.caveats,
+        }
+      : { withheld: 'No change-coupling (churn) data in the index, so hotspots for a complexity trend cannot be chosen. Run openlore analyze in a git repository.' },
     hotspots: {
       hubs: hubNodes.slice(0, Math.min(limit, 5)).map(n => ({
         name: n.name,
