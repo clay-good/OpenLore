@@ -13,7 +13,7 @@
  * edge store (e.g. orient) can reuse it instead of opening a second handle.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import {
@@ -54,13 +54,45 @@ function readFileCached(rootPath: string, filePath: string, cache: Map<string, s
     cache.set(filePath, null);
     return null;
   }
-  try {
-    content = readFileSync(abs, 'utf-8');
-  } catch {
-    content = null;
-  }
+  content = readRegularFileSync(abs);
   cache.set(filePath, content);
   return content;
+}
+
+/**
+ * Largest anchored file read (add-memory-anchor-verdicts). Far above any file the
+ * analyzer indexes, so it never hides a real anchor; it bounds a hostile one.
+ */
+const MAX_ANCHORED_FILE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Read a regular file, or null (add-memory-anchor-verdicts). The commit gate reads
+ * anchored files on every run, and a cloned repository chooses what they are: a FIFO
+ * would block an ordinary open and a symlink to a device would never end. The open
+ * does not block (`O_NONBLOCK`; absent on Windows), the open handle must be a regular
+ * file within the cap, and exactly the measured size is read.
+ */
+function readRegularFileSync(abs: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(abs, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > MAX_ANCHORED_FILE_BYTES) return null;
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return buf.subarray(0, read).toString('utf-8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* nothing useful to do */ }
+    }
+  }
 }
 
 /**

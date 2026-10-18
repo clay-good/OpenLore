@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -154,6 +154,27 @@ describe('carryForwardContinuity (disk)', () => {
       expect(kept).toMatchObject({ symbolName: 'calculateTax', carriedAcross: { reason: 'renamed' } });
     });
   }
+
+  it('does not let the automatic baseline write blow up a hostile store (add-memory-anchor-verdicts)', async () => {
+    const file = 'src/tax.ts';
+    const v1 = 'export function computeTax(amount: number) {\n  return amount * 0.2;\n}\n';
+    await writeFile(join(root, file), v1);
+    const n = node({ id: `${file}::computeTax`, name: 'computeTax', filePath: file, signature: 'function computeTax(amount: number)', startIndex: 0, endIndex: v1.length });
+    const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+    st.insertNodes([n]);
+    st.setFileHash(file, createHash('sha256').update(v1).digest('hex'));
+    st.close();
+    // 4,000-deep nesting: compact it is ~8 KB; pretty-printed it is ~16 MB.
+    const pad = JSON.parse('['.repeat(4000) + ']'.repeat(4000));
+    const notesPath = join(root, OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR, 'notes.json');
+    await writeFile(notesPath, JSON.stringify({ version: '1', updatedAt: '', sequence: 0, memories: [{
+      id: 'mem-span', kind: 'note', content: 'rate', recordedAt: new Date(0).toISOString(), pad,
+      anchors: [{ nodeId: n.id, stableId: n.stableId, symbolName: 'computeTax', filePath: file, contentHash: 'deadbeef', spanText: 'return amount * 0.2;' }],
+    }] }));
+    const before = (await readFile(notesPath, 'utf-8')).length;
+    await carryForwardContinuity(root, snapshotOldNodes(storeDir), storeDir);
+    expect((await readFile(notesPath, 'utf-8')).length).toBe(before);
+  });
 
   it('does not carry onto an unrelated copy of a stale recorded body (add-memory-anchor-verdicts)', async () => {
     const file = 'src/tax.ts';

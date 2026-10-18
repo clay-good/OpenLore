@@ -27,11 +27,13 @@
  */
 
 import { join } from 'node:path';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
+import { stat } from 'node:fs/promises';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, MEMORY_NOTES_FILE } from '../../constants.js';
 import { EdgeStore } from '../services/edge-store.js';
 import type {
   StructuralAnchor,
   ContinuityProvenance,
+  MemoryStore,
 } from '../../types/index.js';
 import { hashSpan, spanTextOf } from './anchor.js';
 import { nodeSpanText, makeFreshnessView } from './anchor-adapter.js';
@@ -44,7 +46,7 @@ import {
   type ContinuityPair,
   type AmbiguousContinuity,
 } from '../analyzer/continuity.js';
-import { loadMemoryStore, updateMemoryStore } from './memory-store.js';
+import { loadMemoryStore, updateMemoryStore, memoryDir } from './memory-store.js';
 import { loadDecisionStore, updateDecisionStore } from './store.js';
 import { getHeadCommit } from './git-time.js';
 
@@ -253,6 +255,9 @@ function buildContinuity(
   return computeContinuity(disappeared, appeared, newNormBodyCount);
 }
 
+/** Most a `bodyHash` write may grow notes.json beyond twice its size (add-memory-anchor-verdicts). */
+const MAX_BASELINE_WRITE_GROWTH = 1024 * 1024;
+
 /** A well-formed recorded body hash (`hashSpan` output), or undefined. */
 function bodyHashOf(a: StructuralAnchor): string | undefined {
   const h: unknown = a.bodyHash;
@@ -359,16 +364,25 @@ export async function carryForwardContinuity(
   }
 
   if (rebaselined.size > 0) {
-    const stale = (a: StructuralAnchor) => !!a?.nodeId && rebaselined.has(a.nodeId) && bodyHashOf(a) !== rebaselined.get(a.nodeId);
-    if (memStore.memories.some((m) => !m.invalidatedAt && Array.isArray(m.anchors) && m.anchors.some(stale))) {
-      await updateMemoryStore(rootPath, (store_) => ({
-        ...store_,
-        memories: store_.memories.map((m) => {
-          // A superseded note is history: it is left as it was recorded.
-          if (m.invalidatedAt || !Array.isArray(m.anchors) || !m.anchors.some(stale)) return m;
-          return { ...m, anchors: m.anchors.map((a) => (stale(a) ? { ...a, bodyHash: rebaselined.get(a.nodeId!)! } : a)) };
-        }),
-      }));
+    // Best effort and bounded: this write is automatic, and notes.json is repo content.
+    // It must never stop the carries below, and it must not turn a small hostile store
+    // into a huge one by re-serializing it (deep nesting pretty-prints quadratically).
+    try {
+      const stale = (a: StructuralAnchor) => !!a?.nodeId && rebaselined.has(a.nodeId) && bodyHashOf(a) !== rebaselined.get(a.nodeId);
+      const rebase = (memories: MemoryStore['memories']) => memories.map((m) => {
+        // A superseded note is history: it is left as it was recorded.
+        if (m.invalidatedAt || !Array.isArray(m.anchors) || !m.anchors.some(stale)) return m;
+        return { ...m, anchors: m.anchors.map((a) => (stale(a) ? { ...a, bodyHash: rebaselined.get(a.nodeId!)! } : a)) };
+      });
+      if (memStore.memories.some((m) => !m.invalidatedAt && Array.isArray(m.anchors) && m.anchors.some(stale))) {
+        const before = await stat(join(memoryDir(rootPath), MEMORY_NOTES_FILE)).then((s) => s.size, () => 0);
+        const after = JSON.stringify({ ...memStore, memories: rebase(memStore.memories) }, null, 2).length;
+        if (after <= Math.max(before * 2, before + MAX_BASELINE_WRITE_GROWTH)) {
+          await updateMemoryStore(rootPath, (store_) => ({ ...store_, memories: rebase(store_.memories) }));
+        }
+      }
+    } catch {
+      // A baseline left unwritten costs the next clean rename its carry, never a wrong answer.
     }
   }
 

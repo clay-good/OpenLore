@@ -137,18 +137,36 @@ export function normalizeLineEndings(text: string): string {
  * The 1-based lines where `span` starts in `body`, overlapping occurrences
  * included, at most `limit` of them; `startLine` is the line `body` starts on
  * (add-memory-anchor-verdicts). Exact text only, CRLF read as LF — no similarity.
- * The cap keeps a short span in a large body from costing one search per character.
+ * Knuth–Morris–Pratt, so the cost is linear in body + span whatever the text: the
+ * span is repo content, and `indexOf` turns superlinear on crafted patterns (a
+ * 2,000-character span measured 18 s on a 50 MB body).
  */
 export function spanLines(body: string, span: string, limit: number, startLine = 1): number[] {
   const text = normalizeLineEndings(body);
   const needle = normalizeLineEndings(span);
   const out: number[] = [];
-  if (needle.length === 0) return out;
+  const m = needle.length;
+  if (m === 0 || limit <= 0) return out;
+  // failure[i]: length of the longest proper prefix of needle[0..i] that is also its suffix.
+  const failure = new Int32Array(m);
+  for (let i = 1, k = 0; i < m; i++) {
+    while (k > 0 && needle.charCodeAt(i) !== needle.charCodeAt(k)) k = failure[k - 1];
+    if (needle.charCodeAt(i) === needle.charCodeAt(k)) k++;
+    failure[i] = k;
+  }
   let line = startLine;
   let scanned = 0;
-  for (let i = text.indexOf(needle); i !== -1 && out.length < limit; i = text.indexOf(needle, i + 1)) {
-    for (; scanned < i; scanned++) if (text.charCodeAt(scanned) === 10) line++;
-    out.push(line);
+  for (let i = 0, k = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    while (k > 0 && c !== needle.charCodeAt(k)) k = failure[k - 1];
+    if (c === needle.charCodeAt(k)) k++;
+    if (k === m) {
+      const start = i - m + 1;
+      for (; scanned < start; scanned++) if (text.charCodeAt(scanned) === 10) line++;
+      out.push(line);
+      if (out.length >= limit) break;
+      k = failure[k - 1]; // keep overlapping occurrences
+    }
   }
   return out;
 }

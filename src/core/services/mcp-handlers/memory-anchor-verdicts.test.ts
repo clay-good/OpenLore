@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../../constants.js';
@@ -464,6 +465,27 @@ describe('round-1 review regressions', () => {
     expect(gated.failedCodes.has('memory-anchor-lost')).toBe(true);
   });
 
+  it.skipIf(process.platform === 'win32')('does not block on an anchored file replaced by a FIFO', async () => {
+    await rememberSpan();
+    await rm(join(root, 'src', 'big.ts'));
+    execFileSync('mkfifo', [join(root, 'src', 'big.ts')]);
+    const started = Date.now();
+    const loss = await detectMemoryAnchorLoss(root);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(loss.findings).toHaveLength(1);
+  });
+
+  it('keeps a torn store in place when the blast-radius source also runs', async () => {
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    await mkdir(join(root, OPENLORE_DIR, 'memory'), { recursive: true });
+    await writeFile(path, '{"memories": [', 'utf-8');
+    for (let run = 0; run < 2; run++) {
+      const gated = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'blocking', 'orphans-anchored-memory': 'blocking' });
+      expect(gated.failedCodes.has('memory-anchor-lost')).toBe(true);
+    }
+    expect(await readFile(path, 'utf-8')).toBe('{"memories": [');
+  });
+
   it('treats a file with no recorded content key as unverified, not changed', async () => {
     await handleRemember(root, 'big must retry', [{ symbol: 'big', file: 'src/big.ts' }]);
     // What an imported bundle looks like: nodes, but no watcher hash and no Pass-1 key.
@@ -634,6 +656,12 @@ describe('span freshness (pure)', () => {
     expect(spanLines('abc', '', 10)).toEqual([]);
     expect(spanLines('x\r\ny\r\nx\r\ny', 'x\ny', 10, 5)).toEqual([5, 7]);
     expect(spanLines('x\ny', 'x\r\ny', 10)).toEqual([1]);
+    // Linear on a pattern that makes a naive or indexOf search superlinear.
+    const hostile = `${'a'.repeat(999)}b${'a'.repeat(1000)}`;
+    const started = Date.now();
+    expect(spanLines('a'.repeat(10_000_000), hostile, 10)).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(spanLines('xaab aab', 'aab', 10)).toEqual([1, 1]);
     // Idempotent: a stored, already-normalized span reads back the same.
     expect(normalizeLineEndings(normalizeLineEndings('x\r\r\ny'))).toBe(normalizeLineEndings('x\r\r\ny'));
   });

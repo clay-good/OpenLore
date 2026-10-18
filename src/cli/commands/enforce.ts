@@ -51,6 +51,7 @@ import {
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
 import { detectMemoryAnchorLoss } from '../../core/services/mcp-handlers/memory.js';
+import { loadMemoryStore } from '../../core/decisions/memory-store.js';
 import {
   CORPUS_FINDING_CODES,
   detectCorpusIntegrity,
@@ -567,6 +568,10 @@ export async function collectGovernanceFindings(
   // blast-radius orphan patterns — only when configured (diff-heavy).
   if (blastRadiusInUse(config, policy)) {
     try {
+      // The briefing loads the memory store for writing, which renames a torn store:
+      // check it read-only first, so a torn store stays in place and keeps every
+      // memory-dependent check incomplete on every run (add-memory-anchor-verdicts).
+      await loadMemoryStore(cwd, { readOnly: true });
       const b = await computeBlastRadius({ directory: cwd, baseRef });
       if (!('error' in b)) {
         findings.push(...blastRadiusFindings(b));
