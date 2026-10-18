@@ -45,7 +45,6 @@ function analysisDir(rootPath: string): string {
 function readFileCached(rootPath: string, filePath: string, cache: Map<string, string | null>): string | null {
   const hit = cache.get(filePath);
   if (hit !== undefined) return hit;
-  let content: string | null;
   // filePath originates from decision anchors / affectedFiles (tool-arg or
   // stored-artifact controlled). Confine the read to the project root so a "../"
   // path can't read out-of-root content for freshness verdicts (mcp-security).
@@ -54,7 +53,7 @@ function readFileCached(rootPath: string, filePath: string, cache: Map<string, s
     cache.set(filePath, null);
     return null;
   }
-  content = readRegularFileSync(abs);
+  const content = readRegularFileSync(abs);
   cache.set(filePath, content);
   return content;
 }
