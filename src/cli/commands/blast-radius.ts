@@ -169,14 +169,21 @@ function renderHuman(b: BlastRadiusBriefing): string {
   if (memTotal > b.memory.willDrift.length) lines.push(`   … and ${memTotal - b.memory.willDrift.length} more anchored memor${memTotal - b.memory.willDrift.length === 1 ? 'y' : 'ies'}`);
   // Notes pushed by a matching trigger: one line each, terminal-safe and cut short — the JSON carries
   // the full content (change: add-memory-trigger-predicates).
+  const oneLine = (value: string) => sanitizeForTerminal(value.replace(/\s+/g, ' ')).trim();
   for (const m of b.injectedMemories ?? []) {
-    const text = sanitizeForTerminal(m.content).replace(/\s+/g, ' ').trim();
-    const shown = text.length > 160 ? `${text.slice(0, 159)}…` : text;
-    lines.push(`   📌 memory ${m.id} [${m.provenance}] via ${m.firedPredicate.kind}${m.verify ? ' (verify)' : ''}: ${shown}`);
+    const text = oneLine(m.content);
+    const shown = text.length > 160 ? `${text.slice(0, 159).replace(/[\uD800-\uDBFF]$/, '')}…` : text;
+    const flags = [
+      ...(m.staleDecisionRef ? ['cites a superseded decision'] : []),
+      ...(m.unreconciledWith ? ['conflicts with another memory'] : []),
+      ...(m.verify && !m.staleDecisionRef && !m.unreconciledWith ? ['verify'] : []),
+    ];
+    lines.push(`   📌 memory ${oneLine(m.id)} [${m.provenance}] via ${m.firedPredicate.kind}${flags.length ? ` (${flags.join('; ')})` : ''}: ${shown}`);
   }
   if (b.staleTriggeredMemories?.length) {
-    lines.push(`   ⚠ ${b.staleTriggeredMemories.length} triggered memor${b.staleTriggeredMemories.length === 1 ? 'y references' : 'ies reference'} code that no longer exists (not shown as authoritative).`);
+    lines.push(`   ⚠ ${b.staleTriggeredMemories.length} triggered memor${b.staleTriggeredMemories.length === 1 ? 'y is' : 'ies are'} not shown: anchored code could not be found or verified.`);
   }
+  if (b.injectedMemoriesNote) lines.push(`   ⚠ ${oneLine(b.injectedMemoriesNote)}`);
   for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;

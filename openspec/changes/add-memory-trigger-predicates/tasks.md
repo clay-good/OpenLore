@@ -3,21 +3,25 @@
 ## Implementation
 - [x] `types/index.ts`: additive `trigger` (closed union: fileGlob | symbolPattern | specDomain |
       withinHops) and `pinned` on `AnchoredMemory`; old records unaffected
-- [x] `memory.ts` `handleRemember` (:58) + `mcp.ts:1992` schema: accept/validate `trigger` and
-      `pinned`; an unknown predicate shape is rejected with a message, never stored
-- [x] Shared predicate evaluator (one dependency-light module): touched files/symbols/domains in,
-      matching memory ids + fired predicate out; `withinHops` via the existing backward
-      reachability (select_tests precedent, test-impact.ts:150), depth-capped like its caller
-- [x] `orient.ts`: evaluate against relevant files/symbols/domains (touched-set already computed,
-      :496-511 vicinity); inject matched + pinned memory content; emit
-      `injectedMemories: [{ id, firedPredicate, freshness }]`; orphaned never injected as
-      authoritative (memory.ts:382 rule), drifted flagged verify
-- [x] `blast-radius.ts` / `working-set.ts`: same evaluator over their touched sets, same receipt
-- [x] Pinned items participate in orient's budget per the sibling
-      refine-orient-context-budgeting; until then, ride the existing bounded briefing with the
-      existing omission disclosure — no new budgeting here
-- [x] Pi parity: the skip is stated — the Pi `before_agent_start` block and the Claude Code prompt hook
-      run orient in lean mode (navigation core only), which does not push memories; the Pi
+- [x] `memory.ts` `handleRemember` + the `remember` schema in `mcp.ts` and the Pi extension:
+      accept/validate `trigger` and `pinned`; a malformed or unsupported trigger is rejected with a
+      message, never stored; an in-place update that drops a trigger or pin says so
+- [x] Shared evaluator `memory-triggers.ts`: touched files/symbols/domains in, pushed notes with
+      receipts out; a linear `* ? **` glob matcher (no regex backtracking on repo-supplied
+      patterns); `withinHops` via ONE depth-capped forward walk from the touched symbols over the
+      message-free traversal index, shared by every note
+- [x] `orient.ts`: evaluate against the touched set (the whole candidate pool under a
+      `tokenBudget`); push matched + pinned notes as `injectedMemories`; orphaned matches go to
+      `staleTriggeredMemories` (receipt + anchors, no content); drifted, superseded-decision and
+      conflicting notes are flagged `verify`; malformed store entries are skipped
+- [x] `blast-radius.ts`: same evaluator over the diff (paths re-framed to the analyzed root);
+      pinned notes stay with orient; the human CLI briefing lists pushed notes
+- [x] `working-set.ts`: carries each target's pushed notes inside the working-set token budget
+- [x] Budget: `injectedMemories` is a trimmable `tokenBudget` section counted in the receipt; at
+      most 10 notes are pushed, ranked withinHops (nearer first) > symbolPattern > fileGlob >
+      specDomain > pinned, then newest; the rest are counted
+- [x] Pi parity: the skip is stated — the Pi `before_agent_start` block and the Claude Code prompt
+      hook run orient in lean mode (navigation core only), which does not push memories; the Pi
       `remember` tool schema carries `trigger`/`pinned` (parity guard). Rendering pushed memories
       in the lean injection block is a follow-up.
 
@@ -30,7 +34,8 @@
       injected flagged `verify`
 - [x] Over-broad trigger: injection bounded, omitted count disclosed, never silent truncation
 - [x] Substrate/default tools/list prefix byte-identical (orient input schema unchanged); full
-      ceiling re-measured (88,000 B, mcp-presets.test.ts:581); full suite green
+      ceiling re-measured (97,800 → 98,500 B; memory preset re-baselined 1,216 → 1,357 tokens);
+      full suite green
 
 ## Spec
 - [x] `mcp-handlers` delta: MODIFY ProactiveIntentBriefing, ADD MemoryTriggerPredicates

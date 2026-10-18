@@ -25,7 +25,7 @@ import { buildRetirementGraph } from './stale-decision-reference.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import {
-  injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
+  hasPushableMemory, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
   type InjectedMemory, type StaleTriggeredMemory,
 } from './memory-triggers.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
@@ -621,7 +621,7 @@ async function triggeredMemoriesForDiff(
 ): Promise<ReturnType<typeof injectionFields>> {
   try {
     const { memories } = await loadMemoryStore(absDir);
-    if (!memories.some(m => m !== null && typeof m === 'object' && m.trigger !== undefined)) return {};
+    if (!hasPushableMemory(memories)) return {};
     // git names files from the repository root; globs, anchors and the mapping index are framed
     // on the analyzed root. Re-frame (a no-op at the root) and drop files outside the analyzed tree.
     const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
@@ -636,7 +636,7 @@ async function triggeredMemoriesForDiff(
       ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), symbols, hops)
       : undefined;
     return injectionFields(selectInjectedMemories(memories, { files, symbols, domains }, view, {
-      includePinned: false, probe, retirement: buildRetirementGraph(decisions),
+      includePinned: false, probe, retirement: buildRetirementGraph(decisions), graphUnavailable: !ctx.edgeStore, decisions,
     }));
   } catch (err) {
     return { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };

@@ -32,6 +32,7 @@ import { handleRemember, handleRecall } from './memory.js';
 import { _resetContextCacheForTesting } from './utils.js';
 import { buildTraversalIndex } from '../../analyzer/condensation.js';
 import { estimateTokens } from '../llm-service.js';
+import { TOOL_DEFINITIONS } from '../../../cli/commands/mcp.js';
 import { briefTargetFromOrient, budgetInjectedMemories, type WorkingSetTargetBrief } from './working-set.js';
 import {
   validateMemoryTrigger,
@@ -42,11 +43,13 @@ import {
   injectionFields,
   UNVERIFIABLE_VIEW,
   MAX_INJECTED_MEMORIES,
+  MAX_TRIGGER_HOPS,
+  MAX_TRIGGER_TEXT_LENGTH,
   type InjectedMemory,
   type StaleTriggeredMemory,
 } from './memory-triggers.js';
 import type { FunctionNode, CallEdge, SerializedCallGraph } from '../../analyzer/call-graph.js';
-import type { AnchoredMemory } from '../../../types/index.js';
+import type { AnchoredMemory, PendingDecision } from '../../../types/index.js';
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -144,8 +147,18 @@ describe('validateMemoryTrigger', () => {
     [null], ['src/**'], [[]], [{}], [{ fileGlob: 'a', specDomain: 'b' }], [{ regex: '.*' }],
     [{ fileGlob: '' }], [{ fileGlob: '   ' }], [{ fileGlob: 3 }], [{ fileGlob: 'a\nb' }], [{ fileGlob: 'x'.repeat(257) }],
     [{ withinHops: 0 }], [{ withinHops: 21 }], [{ withinHops: 1.5 }], [{ withinHops: '2' }], [{ withinHops: Number.NaN }],
+    [{ fileGlob: 'src/{a,b}/*.ts' }], [{ fileGlob: 'src/[ab].ts' }], [{ symbolPattern: '!handle' }],
   ])('rejects malformed trigger %j', (raw) => {
     expect(validateMemoryTrigger(raw)).toHaveProperty('error');
+  });
+});
+
+describe('the advertised remember schema matches the validator bounds', () => {
+  it('ties maxLength / maximum to the evaluator constants', () => {
+    const remember = TOOL_DEFINITIONS.find(t => t.name === 'remember')!;
+    const trigger = (remember.inputSchema as unknown as { properties: Record<string, { properties: Record<string, { maxLength?: number; maximum?: number }> }> }).properties.trigger;
+    for (const key of ['fileGlob', 'symbolPattern', 'specDomain']) expect(trigger.properties[key].maxLength).toBe(MAX_TRIGGER_TEXT_LENGTH);
+    expect(trigger.properties.withinHops.maximum).toBe(MAX_TRIGGER_HOPS);
   });
 });
 
@@ -281,7 +294,10 @@ describe('orient pushes triggered memories with a receipt', () => {
     _resetContextCacheForTesting();
     const out = await orient();
     expect(out.injectedMemories).toBeUndefined();
-    expect(out.staleTriggeredMemories).toEqual([{ id: r.id, firedPredicate: expect.objectContaining({ kind: 'fileGlob' }), freshness: 'orphaned' }]);
+    expect(out.staleTriggeredMemories).toEqual([{
+      id: r.id, firedPredicate: expect.objectContaining({ kind: 'fileGlob' }), freshness: 'orphaned',
+      anchors: [{ symbol: 'b', file: 'src/b.ts', freshness: 'orphaned' }],
+    }]);
     expect(JSON.stringify(out.staleTriggeredMemories)).not.toContain('only caller');
     expect(out.injectedMemoriesNote).toMatch(/not served as authoritative/);
   });
@@ -425,7 +441,11 @@ describe('selectInjectedMemories', () => {
       mem({ id: 'a', trigger: { fileGlob: 'src/**' }, anchors: [{ filePath: 'src/routes/a.ts', contentHash: 'h' }] }),
     ], touched, UNVERIFIABLE_VIEW, { includePinned: false });
     expect(out.injected).toEqual([]);
-    expect(out.stale).toEqual([{ id: 'a', firedPredicate: { kind: 'fileGlob', pattern: 'src/**', matched: 'src/routes/a.ts' }, freshness: 'orphaned' }]);
+    expect(out.stale).toEqual([{
+      id: 'a', firedPredicate: { kind: 'fileGlob', pattern: 'src/**', matched: 'src/routes/a.ts' }, freshness: 'orphaned',
+      anchors: [{ file: 'src/routes/a.ts', freshness: 'orphaned' }],
+    }]);
+    expect(injectionFields({ ...out, graphUnavailable: true }).injectedMemoriesNote).toMatch(/could not be verified: no graph index/);
   });
 
   it('caps the stale list too and counts the rest', () => {
@@ -455,7 +475,7 @@ describe('makeHopProbe', () => {
     expect(probe(['nope::x'], 5)).toBeUndefined();
   });
 
-  it('never walks downstream: a callee of the touched symbol does not fire', () => {
+  it('never walks upstream: a caller of the touched symbol does not fire', () => {
     const probe = makeHopProbe(traversal, [{ id: id('src/store/d.ts'), name: 'openStore' }]);
     expect(probe([id('src/routes/a.ts')], 5)).toBeUndefined();
   });
@@ -464,7 +484,7 @@ describe('makeHopProbe', () => {
 describe('working_set_context carries each target\'s pushed memories', () => {
   it('passes orient\'s injection through to the target brief', () => {
     const injected: InjectedMemory = {
-      id: 'm1', type: 'gotcha', content: 'c', firedPredicate: { kind: 'pinned' }, freshness: 'fresh', anchored: false, provenance: 'local-unreviewed',
+      id: 'm1', type: 'gotcha', content: 'c', firedPredicate: { kind: 'pinned' }, freshness: 'fresh', anchored: false, anchors: [], provenance: 'local-unreviewed',
     };
     const { brief } = briefTargetFromOrient('api', { injectedMemories: [injected], injectedMemoriesNote: 'n' });
     expect(brief.injectedMemories).toEqual([injected]);
@@ -537,6 +557,63 @@ describe('hostile store entries degrade, never throw', () => {
   });
 });
 
+describe('contradictions and anchor provenance, as recall serves them', () => {
+  it('flags a pushed note that contradicts a note that did not fire', async () => {
+    const pushed = await remember('openStore never blocks', { anchors: [{ symbol: 'openStore', file: 'src/store/d.ts' }], pinned: true });
+    const silent = await remember('openStore always blocks', { anchors: [{ symbol: 'openStore', file: 'src/store/d.ts' }] });
+    touch('src/c.ts');
+    const out = await orient('work on c') as OrientOut & { unreconciledMemories?: Array<{ memberIds: string[] }> };
+    expect(out.injectedMemories?.[0]).toMatchObject({ id: pushed.id, verify: true, unreconciledWith: [silent.id] });
+    expect(out.unreconciledMemories?.some(g => g.memberIds.includes(pushed.id!) && g.memberIds.includes(silent.id!))).toBe(true);
+  });
+
+  it('flags a pushed note that shares its symbol with an active decision; ignores a superseded one', () => {
+    const anchor = { nodeId: 'f::x', symbolName: 'x', filePath: 'f', contentHash: 'h' };
+    const elsewhere = { nodeId: 'f::y', symbolName: 'y', filePath: 'f', contentHash: 'h' };
+    const note: AnchoredMemory = { id: 'n1', kind: 'note', content: 'c', anchors: [anchor], recordedAt: '', pinned: true };
+    const view = { nodeHash: () => 'h', fileExists: () => true, fileHash: () => 'h' };
+    const decision = (id: string, extra: Record<string, unknown> = {}) => ({ id, status: 'approved', anchors: [anchor], affectedFiles: ['f'], ...extra }) as unknown as PendingDecision;
+    const touched = { files: [], symbols: [], domains: [] };
+    const live = selectInjectedMemories([note], touched, view, { includePinned: true, decisions: [decision('d1')] });
+    expect(live.injected[0]).toMatchObject({ verify: true, unreconciledWith: ['d1'] });
+    const retired = selectInjectedMemories([note], touched, view, {
+      includePinned: true, decisions: [decision('d1'), decision('d2', { supersedes: 'd1', anchors: [elsewhere] })],
+    });
+    expect(retired.injected[0].unreconciledWith).toBeUndefined();
+    const rejected = selectInjectedMemories([note], touched, view, { includePinned: true, decisions: [decision('d1', { status: 'rejected' })] });
+    expect(rejected.injected[0].unreconciledWith).toBeUndefined();
+  });
+
+  it('skips entries OpenLore could not have written: null anchors, odd ids', () => {
+    const hostile = [
+      { id: 'nullanchor', content: 'c', anchors: [null], pinned: true },
+      { id: 'x'.repeat(65), content: 'c', anchors: [], pinned: true },
+      { id: 'new\nline', content: 'c', anchors: [], pinned: true },
+    ] as unknown as AnchoredMemory[];
+    const out = selectInjectedMemories(hostile, { files: [], symbols: [], domains: [] }, UNVERIFIABLE_VIEW, { includePinned: true });
+    expect(out.injected).toEqual([]);
+  });
+
+  it('never ends cut content on half a surrogate pair', () => {
+    const content = 'x'.repeat(999) + '😀' + 'y'.repeat(10);
+    const out = selectInjectedMemories([{ id: 'e', kind: 'note', content, anchors: [], recordedAt: '', pinned: true }], { files: [], symbols: [], domains: [] }, UNVERIFIABLE_VIEW, { includePinned: true });
+    expect(out.injected[0].content).toBe('x'.repeat(999));
+  });
+
+  it('a malformed entry with no anchors array does not erase reversals in orient', async () => {
+    const old = await remember('old rule', { anchors: [{ symbol: 'handleGet', file: 'src/routes/a.ts' }] });
+    await handleRemember(root, 'new rule', [{ symbol: 'handleGet', file: 'src/routes/a.ts' }], undefined, 'gotcha', old.id);
+    await remember('legit pinned', { pinned: true });
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const store = JSON.parse(await readFile(path, 'utf-8')) as { memories: unknown[] };
+    store.memories.unshift(null, { id: 'noanchors', content: 'x', pinned: true });
+    await writeFile(path, JSON.stringify(store), 'utf-8');
+    const out = await orient() as OrientOut & { reversals?: unknown[] };
+    expect(out.reversals?.length).toBeGreaterThan(0);
+    expect(out.injectedMemories?.map(m => m.content)).toContain('legit pinned');
+  });
+});
+
 describe('one shared hop walk', () => {
   it('ties at equal distance go to the smallest touched name, whatever the walk order', () => {
     // x → t and y → t: both one hop from t.
@@ -557,7 +634,7 @@ describe('one shared hop walk', () => {
 
 describe('working_set_context budgets pushed memories', () => {
   it('keeps what fits in target order and counts the rest per target', () => {
-    const m = (mid: string): InjectedMemory => ({ id: mid, type: 'note', content: 'x'.repeat(400), firedPredicate: { kind: 'pinned' }, freshness: 'fresh', anchored: false, provenance: 'local-unreviewed' });
+    const m = (mid: string): InjectedMemory => ({ id: mid, type: 'note', content: 'x'.repeat(400), firedPredicate: { kind: 'pinned' }, freshness: 'fresh', anchored: false, anchors: [], provenance: 'local-unreviewed' });
     const brief = (target: string, ids: string[]): WorkingSetTargetBrief => ({ target, briefed: true, insertionPoints: [], specDomains: [], anchoredIntent: [], injectedMemories: ids.map(m) });
     const targets = [brief('a', ['a1', 'a2']), brief('b', ['b1'])];
     const cost = estimateTokens(JSON.stringify(m('a1')));

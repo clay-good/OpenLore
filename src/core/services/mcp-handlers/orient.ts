@@ -48,7 +48,7 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import { injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
+import { hasPushableMemory, isWellFormedMemory, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import type { MemoryFreshness } from '../../../types/index.js';
@@ -645,7 +645,10 @@ export async function handleOrient(
     const scopeFiles = new Set<string>(relevantFileSet);
     for (const d of active) for (const f of d.affectedFiles) scopeFiles.add(f);
     // Loaded once and reused for both the contradiction fold and the reversal scan.
+    // notes.json is committed repo content: an entry OpenLore could not have written is skipped
+    // here, once, so no section below can throw on it.
     const memStore = await loadMemoryStore(absDir);
+    memStore.memories = memStore.memories.filter(isWellFormedMemory);
     if (view && scopeFiles.size > 0) {
       for (const m of memStore.memories) {
         if (m.invalidatedAt) continue;
@@ -659,8 +662,9 @@ export async function handleOrient(
     // Evaluated against the touched set this briefing computed — under a tokenBudget the whole
     // candidate pool, since the budget may add those functions back. Without a graph the anchors
     // cannot be verified, so a note is judged exactly as recall would judge it then. Its own
-    // try/catch: a failure here must not take the decision and reversal sections with it.
-    try {
+    // try/catch: a failure here must not take the decision and reversal sections with it. Skipped
+    // outright when no live note has a trigger or a pin, so a repo without them pays nothing.
+    if (hasPushableMemory(memStore.memories)) try {
       const touchedResults = tokenBudget ? topResults : topResults.slice(0, relevantFunctions.length);
       const touchedSymbols = touchedResults.map((r) => ({
         id: r.record.id,
@@ -679,18 +683,18 @@ export async function handleOrient(
         ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols, hops)
         : undefined;
       const injection = selectInjectedMemories(memStore.memories, touched, view ?? UNVERIFIABLE_VIEW, {
-        includePinned: true, probe, retirement: buildRetirementGraph(store.decisions),
+        includePinned: true, probe, retirement: buildRetirementGraph(store.decisions), graphUnavailable: !view, decisions: store.decisions,
       });
       // A pushed note joins the contradiction check, wherever it is anchored.
       if (view) contradictionItems.push(...injection.authoritative);
       memoryInjection = injectionFields(injection);
-    } catch {
-      // non-fatal — the briefing is served without pushed memories
+    } catch (err) {
+      // Non-fatal: the briefing is served without pushed memories, and says so.
+      memoryInjection = { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
     }
 
     const groups = findUnreconciled(contradictionItems);
     if (groups.length > 0) unreconciledMemories = groups;
-
 
     // ── ReversalAwareness (do-not-repeat) ──────────────────────────────────
     // Reversal scope is the TASK's scope ONLY: files the search surfaced, plus the
