@@ -48,8 +48,9 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import { injectionFields, makeHopProbe, needsHopProbe, selectInjectedMemories, UNVERIFIABLE_VIEW } from './memory-triggers.js';
+import { injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, UNVERIFIABLE_VIEW } from './memory-triggers.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
+import { buildRetirementGraph } from './stale-decision-reference.js';
 import type { MemoryFreshness } from '../../../types/index.js';
 
 import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
@@ -653,25 +654,39 @@ export async function handleOrient(
         contradictionItems.push({ id: m.id, anchors: m.anchors, freshness: f.freshness, invalidated: false });
       }
     }
+
+    // ── Triggered and pinned memories (push, not pull) ───────────────────────
+    // Evaluated against the touched set this briefing computed — under a tokenBudget the whole
+    // candidate pool, since the budget may add those functions back. Without a graph the anchors
+    // cannot be verified, so a note is judged exactly as recall would judge it then. Its own
+    // try/catch: a failure here must not take the decision and reversal sections with it.
+    try {
+      const touchedResults = tokenBudget ? topResults : topResults.slice(0, relevantFunctions.length);
+      const touchedSymbols = touchedResults.map((r) => ({
+        id: r.record.id,
+        name: r.record.name,
+        ...(r.record.className ? { className: r.record.className } : {}),
+      }));
+      const touchedFiles = [...new Set(touchedResults.map((r) => r.record.filePath))];
+      const touched = { files: touchedFiles, symbols: touchedSymbols, domains: specDomains.map((d) => d.domain) };
+      const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
+      const hops = maxTriggerHops(memStore.memories);
+      const probe = cg && hops > 0
+        ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols, hops)
+        : undefined;
+      const injection = selectInjectedMemories(memStore.memories, touched, view ?? UNVERIFIABLE_VIEW, {
+        includePinned: true, probe, retirement: buildRetirementGraph(store.decisions),
+      });
+      // A pushed note joins the contradiction check, wherever it is anchored.
+      if (view) contradictionItems.push(...injection.authoritative);
+      memoryInjection = injectionFields(injection);
+    } catch {
+      // non-fatal — the briefing is served without pushed memories
+    }
+
     const groups = findUnreconciled(contradictionItems);
     if (groups.length > 0) unreconciledMemories = groups;
 
-    // ── Triggered and pinned memories (push, not pull) ───────────────────────
-    // Evaluated against the touched set this briefing already computed. Without a graph the
-    // anchors cannot be verified, so the note is judged exactly as recall would judge it then.
-    const touchedSymbols = topResults.slice(0, relevantFunctions.length).map((r) => ({
-      id: r.record.id,
-      name: r.record.name,
-      ...(r.record.className ? { className: r.record.className } : {}),
-    }));
-    const touched = { files: relevantFiles, symbols: touchedSymbols, domains: specDomains.map((d) => d.domain) };
-    const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
-    const probe = cg && needsHopProbe(memStore.memories)
-      ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols)
-      : undefined;
-    memoryInjection = injectionFields(selectInjectedMemories(
-      memStore.memories, touched, view ?? UNVERIFIABLE_VIEW, { includePinned: true, probe },
-    ));
 
     // ── ReversalAwareness (do-not-repeat) ──────────────────────────────────
     // Reversal scope is the TASK's scope ONLY: files the search surfaced, plus the

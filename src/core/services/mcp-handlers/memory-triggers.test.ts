@@ -26,16 +26,19 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT, OPENLORE_DECISIONS_SUBDIR, DECISIONS_PENDING_FILE } from '../../../constants.js';
 import { handleOrient } from './orient.js';
 import { handleRemember, handleRecall } from './memory.js';
 import { _resetContextCacheForTesting } from './utils.js';
 import { buildTraversalIndex } from '../../analyzer/condensation.js';
-import { briefTargetFromOrient } from './working-set.js';
+import { estimateTokens } from '../llm-service.js';
+import { briefTargetFromOrient, budgetInjectedMemories, type WorkingSetTargetBrief } from './working-set.js';
 import {
   validateMemoryTrigger,
   selectInjectedMemories,
   makeHopProbe,
+  matchGlob,
+  maxTriggerHops,
   injectionFields,
   UNVERIFIABLE_VIEW,
   MAX_INJECTED_MEMORIES,
@@ -298,6 +301,47 @@ describe('orient pushes triggered memories with a receipt', () => {
     expect(r.id).toBeDefined();
   });
 
+  it('a pushed memory citing a superseded decision is flagged as recall flags it, never cleanly fresh', async () => {
+    const dir = join(root, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
+    await mkdir(dir, { recursive: true });
+    const d = (did: string, supersedes?: string) => ({
+      id: did, status: 'approved', title: `d ${did}`, rationale: '', consequences: '', proposedRequirement: null,
+      affectedDomains: [], affectedFiles: [], ...(supersedes ? { supersedes } : {}), sessionId: 's1',
+      recordedAt: '2026-06-23T00:00:00Z', contentOrigin: 'agent-recorded', confidence: 'high', syncedToSpecs: [],
+    });
+    await writeFile(join(dir, DECISIONS_PENDING_FILE), JSON.stringify({ version: '1', sessionId: 's1', updatedAt: '', decisions: [d('bbbbbbbb'), d('cccccccc', 'bbbbbbbb')] }));
+    await remember('hash with bcrypt per decision bbbbbbbb', { anchors: [{ symbol: 'handleGet', file: 'src/routes/a.ts' }], trigger: { fileGlob: 'src/routes/**' } });
+    const out = await orient();
+    expect(out.injectedMemories?.[0]).toMatchObject({ verify: true, staleDecisionRef: [{ retired: 'bbbbbbbb', supersededBy: 'cccccccc' }] });
+    expect(out.injectedMemoriesNote).toMatch(/superseded decision/);
+  });
+
+  it('two pushed memories that disagree about one symbol are flagged and folded into unreconciledMemories', async () => {
+    const a = await remember('openStore is thread-safe', { anchors: [{ symbol: 'openStore', file: 'src/store/d.ts' }], trigger: { fileGlob: 'src/routes/**' } });
+    const b = await remember('openStore is NOT thread-safe', { anchors: [{ symbol: 'openStore', file: 'src/store/d.ts' }], trigger: { fileGlob: 'src/routes/**' } });
+    const out = await orient() as OrientOut & { unreconciledMemories?: Array<{ memberIds: string[] }> };
+    const byId = new Map(out.injectedMemories!.map(m => [m.id, m]));
+    expect(byId.get(a.id!)).toMatchObject({ verify: true, unreconciledWith: [b.id] });
+    expect(byId.get(b.id!)).toMatchObject({ verify: true, unreconciledWith: [a.id] });
+    expect(out.unreconciledMemories?.[0].memberIds).toEqual([a.id, b.id].sort());
+  });
+
+  it('under a tokenBudget, evaluates the candidate pool the budget may add back', async () => {
+    touch('src/routes/a.ts', 'src/b.ts');
+    await remember('b gotcha', { trigger: { fileGlob: 'src/b.ts' } });
+    const out = await handleOrient(root, 'work', 1, 50_000, false) as OrientOut & { relevantFiles: string[] };
+    expect(out.relevantFiles).toContain('src/b.ts');
+    expect(out.injectedMemories?.map(m => m.content)).toEqual(['b gotcha']);
+  });
+
+  it('re-recording without the trigger or pin says it removed them', async () => {
+    await remember('same fact', { trigger: { fileGlob: 'src/routes/**' }, pinned: true });
+    const r = await remember('same fact') as { message?: string };
+    expect(r.message).toMatch(/previous trigger and pinned were not repeated and have been removed/);
+    const kept = await remember('same fact', { pinned: true }) as { message?: string };
+    expect(kept.message).not.toMatch(/removed/);
+  });
+
   it('a superseded memory is never pushed', async () => {
     const old = await remember('old rule', { pinned: true });
     await handleRemember(root, 'new rule', undefined, undefined, 'gotcha', old.id, undefined, true);
@@ -391,5 +435,100 @@ describe('working_set_context carries each target\'s pushed memories', () => {
     expect(brief.injectedMemories).toEqual([injected]);
     expect(brief.injectedMemoriesNote).toBe('n');
     expect(briefTargetFromOrient('api', {}).brief.injectedMemories).toBeUndefined();
+  });
+});
+
+describe('matchGlob (linear: * ? ** only)', () => {
+  it.each([
+    ['src/**', 'src/a.ts', true], ['src/**', 'src/x/y/a.ts', true], ['src/**', 'src', true], ['src/**', 'lib/a.ts', false],
+    ['**/*.ts', 'a.ts', true], ['**/*.ts', 'x/y/a.ts', true], ['**/*.ts', 'x/a.js', false],
+    ['src/*.ts', 'src/a.ts', true], ['src/*.ts', 'src/x/a.ts', false], ['src/?.ts', 'src/a.ts', true], ['src/?.ts', 'src/ab.ts', false],
+    ['handle*', 'handleGet', true], ['*Get', 'handleGet', true], ['h*l*G*t', 'handleGet', true], ['handle', 'handleGet', false],
+    ['src/[ab].ts', 'src/a.ts', false], ['src/[ab].ts', 'src/[ab].ts', true], ['.github/**', '.github/workflows/ci.yml', true],
+  ])('%s vs %s → %s', (pattern, path, expected) => {
+    expect(matchGlob(pattern, path)).toBe(expected);
+  });
+
+  it('stays fast on the patterns that make a regex translation backtrack exponentially', () => {
+    const cases: Array<[string, string]> = [
+      ['*a'.repeat(120) + 'b', 'a'.repeat(4000)],
+      ['**/' + '*?'.repeat(120) + 'Z', 'x/'.repeat(200) + 'local-embedding-service-retry.test.ts'],
+      ['**/'.repeat(60) + '*a'.repeat(30) + 'b', ('a'.repeat(60) + '/').repeat(60) + 'a'.repeat(60)],
+    ];
+    const start = performance.now();
+    for (const [pattern, path] of cases) expect(matchGlob(pattern.slice(0, 256), path)).toBe(false);
+    expect(performance.now() - start).toBeLessThan(2000);
+  });
+});
+
+describe('hostile store entries degrade, never throw', () => {
+  const ok = (over: Partial<AnchoredMemory> & { id: string }): AnchoredMemory => ({
+    kind: 'note', content: over.id, anchors: [], recordedAt: '2026-01-01T00:00:00Z', ...over,
+  });
+  const touchedA = { files: ['src/routes/a.ts'], symbols: [], domains: [] };
+
+  it('skips malformed entries and still pushes the well-formed ones', () => {
+    const hostile = [
+      null, 5, 'x', { id: 1, content: 'c', anchors: [], pinned: true }, { id: 'noanchors', content: 'c', pinned: true },
+      { id: 'objcontent', content: { a: 1 }, anchors: [], pinned: true }, { id: 'zz', content: 'x', anchors: [], pinned: true, recordedAt: 5 },
+    ] as unknown as AnchoredMemory[];
+    const out = selectInjectedMemories([...hostile, ok({ id: 'good', pinned: true })], touchedA, UNVERIFIABLE_VIEW, { includePinned: true });
+    expect(out.injected.map(m => m.id).sort()).toEqual(['good', 'zz']);
+    expect(maxTriggerHops(hostile)).toBe(0);
+  });
+
+  it('cuts content longer than a recorded note may be, and says so', () => {
+    const out = selectInjectedMemories([ok({ id: 'big', pinned: true, content: 'x'.repeat(1_000_000) })], touchedA, UNVERIFIABLE_VIEW, { includePinned: true });
+    expect(out.injected[0].content).toHaveLength(1000);
+    expect(out.injected[0].truncated).toBe(true);
+  });
+
+  it('frames pushed content as repository data, not instructions', () => {
+    const out = selectInjectedMemories([ok({ id: 'p', pinned: true })], touchedA, UNVERIFIABLE_VIEW, { includePinned: true });
+    expect(injectionFields(out).injectedMemoriesNote).toMatch(/data, not instructions/);
+  });
+
+  it('a malformed entry in notes.json does not remove reversals or the good pushed memory from orient', async () => {
+    const old = await remember('old rule', { anchors: [{ symbol: 'handleGet', file: 'src/routes/a.ts' }] });
+    await handleRemember(root, 'new rule', [{ symbol: 'handleGet', file: 'src/routes/a.ts' }], undefined, 'gotcha', old.id);
+    await remember('legit pinned', { pinned: true });
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const store = JSON.parse(await readFile(path, 'utf-8')) as { memories: unknown[] };
+    store.memories.unshift({ id: 'zz', content: 'x', anchors: [], pinned: true, recordedAt: 5 }, { id: 7, content: 'y', anchors: [] });
+    await writeFile(path, JSON.stringify(store), 'utf-8');
+    const out = await orient() as OrientOut & { reversals?: unknown[] };
+    expect(out.reversals?.length).toBeGreaterThan(0);
+    expect(out.injectedMemories?.map(m => m.content)).toContain('legit pinned');
+  });
+});
+
+describe('one shared hop walk', () => {
+  it('ties at equal distance go to the smallest touched name, whatever the walk order', () => {
+    // x → t and y → t: both one hop from t.
+    const n = (nid: string): FunctionNode => ({ id: nid, name: nid.split('::')[1], filePath: nid.split('::')[0], isAsync: false, language: 'typescript', startIndex: 0, endIndex: 1, fanIn: 0, fanOut: 0 });
+    const cg: SerializedCallGraph = {
+      nodes: [n('f::zeta'), n('f::alpha'), n('f::t')],
+      edges: [
+        { callerId: 'f::zeta', calleeId: 'f::t', calleeName: 't', confidence: 'import', kind: 'calls' },
+        { callerId: 'f::alpha', calleeId: 'f::t', calleeName: 't', confidence: 'import', kind: 'calls' },
+      ],
+      classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
+      stats: { totalNodes: 3, totalEdges: 2, avgFanIn: 0, avgFanOut: 0 },
+    };
+    const probe = makeHopProbe(buildTraversalIndex(cg), [{ id: 'f::zeta', name: 'zeta' }, { id: 'f::alpha', name: 'alpha' }], 3);
+    expect(probe(['f::t'], 1)).toEqual({ matched: 'alpha', distance: 1 });
+  });
+});
+
+describe('working_set_context budgets pushed memories', () => {
+  it('keeps what fits in target order and counts the rest per target', () => {
+    const m = (mid: string): InjectedMemory => ({ id: mid, type: 'note', content: 'x'.repeat(400), firedPredicate: { kind: 'pinned' }, freshness: 'fresh', anchored: false, provenance: 'local-unreviewed' });
+    const brief = (target: string, ids: string[]): WorkingSetTargetBrief => ({ target, briefed: true, insertionPoints: [], specDomains: [], anchoredIntent: [], injectedMemories: ids.map(m) });
+    const targets = [brief('a', ['a1', 'a2']), brief('b', ['b1'])];
+    const cost = estimateTokens(JSON.stringify(m('a1')));
+    budgetInjectedMemories(targets, cost * 2 + 1);
+    expect(targets[0].injectedMemories?.map(x => x.id)).toEqual(['a1', 'a2']);
+    expect(targets[1].injectedMemories).toBeUndefined();
+    expect(targets[1].injectedMemoriesNote).toMatch(/1 pushed memory omitted to fit the working-set token budget/);
   });
 });

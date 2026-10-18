@@ -20,10 +20,12 @@
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable, loadMappingIndex, specsForFile } from './utils.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
+import { loadDecisionStore } from '../../decisions/store.js';
+import { buildRetirementGraph } from './stale-decision-reference.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import {
-  injectionFields, makeHopProbe, needsHopProbe, selectInjectedMemories, UNVERIFIABLE_VIEW,
+  injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, UNVERIFIABLE_VIEW,
   type InjectedMemory, type StaleTriggeredMemory,
 } from './memory-triggers.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
@@ -619,19 +621,28 @@ async function triggeredMemoriesForDiff(
 ): Promise<ReturnType<typeof injectionFields>> {
   try {
     const { memories } = await loadMemoryStore(absDir);
-    if (!memories.some(m => m.trigger !== undefined)) return {};
+    if (!memories.some(m => m !== null && typeof m === 'object' && m.trigger !== undefined)) return {};
+    // git names files from the repository root; globs, anchors and the mapping index are framed
+    // on the analyzed root. Re-frame (a no-op at the root) and drop files outside the analyzed tree.
+    const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const prefix = (await getRepoPrefix(absDir)) ?? '';
+    const files = changedFiles.map(f => reframeRepoPath(f, prefix)).filter((f): f is string => f !== null);
     const mapping = await loadMappingIndex(absDir);
     const domains = mapping
-      ? [...new Set(changedFiles.flatMap(f => specsForFile(mapping, f).map(s => s.domain)))].sort()
+      ? [...new Set(files.flatMap(f => specsForFile(mapping, f).map(s => s.domain)))].sort()
       : [];
+    const { decisions } = await loadDecisionStore(absDir);
     const symbols = seeds.map(s => ({ id: s.id, name: s.name, ...(s.className ? { className: s.className } : {}) }));
     const view = ctx.edgeStore ? makeFreshnessView(ctx.edgeStore, absDir) : UNVERIFIABLE_VIEW;
-    const probe = needsHopProbe(memories)
-      ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), symbols)
+    const hops = maxTriggerHops(memories);
+    const probe = hops > 0
+      ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), symbols, hops)
       : undefined;
-    return injectionFields(selectInjectedMemories(memories, { files: changedFiles, symbols, domains }, view, { includePinned: false, probe }));
-  } catch {
-    return {};
+    return injectionFields(selectInjectedMemories(memories, { files, symbols, domains }, view, {
+      includePinned: false, probe, retirement: buildRetirementGraph(decisions),
+    }));
+  } catch (err) {
+    return { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 

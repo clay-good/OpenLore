@@ -25,6 +25,8 @@ vi.mock('../../drift/git-diff.js', () => ({
     resolved: !requested || requested === 'auto' ? 'HEAD' : requested,
     fellBack: false,
   })),
+  getRepoPrefix: vi.fn(async () => ''),
+  reframeRepoPath: (p: string, prefix: string) => (!prefix ? p : p.startsWith(prefix) ? p.slice(prefix.length) || null : null),
 }));
 
 // Partial mock: stub handleAnalyzeImpact but keep buildAdjacency real (select_tests needs it).
@@ -465,9 +467,20 @@ describe('computeBlastRadius', () => {
         ['sym00001', { kind: 'symbolPattern', pattern: 'validate*', matched: 'validateDirectory' }],
       ]);
       expect(b.headline).toMatch(/3 triggered memories to read/);
+
+      // Analyzed below the repository root: git's repo-root paths are re-framed before matching.
+      const { getChangedFiles, getRepoPrefix } = await import('../../drift/git-diff.js');
+      vi.mocked(getRepoPrefix).mockResolvedValue('pkg/');
+      vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [{ path: 'pkg/src/utils.ts' }, { path: 'other/x.ts' }] } as never);
+      vi.mocked(loadMappingIndex).mockResolvedValueOnce({} as never);
+      const sub = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
+      expect(sub.injectedMemories?.find(m => m.id === 'glob0001')?.firedPredicate)
+        .toEqual({ kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' });
       expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
     } finally {
       vi.mocked(specsForFile).mockReturnValue([] as never);
+      const { getRepoPrefix } = await import('../../drift/git-diff.js');
+      vi.mocked(getRepoPrefix).mockResolvedValue('');
       await rm(dir, { recursive: true, force: true });
     }
   });

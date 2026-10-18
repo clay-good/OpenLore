@@ -59,12 +59,12 @@ live registry.
 |---|---:|---:|---:|
 | `minimal` | 6 | 2,818 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
-| `memory` | 3 | 1,331 | 1,430 |
+| `memory` | 3 | 1,357 | 1,450 |
 | `verify` | 3 | 1,345 | 1,350 |
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 5 | 2,499 | 2,650 |
 | `substrate` | 15 | 5,247 | 5,500 |
-| `full` | 76 | 24,545 | 25,500 |
+| `full` | 76 | 24,571 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line

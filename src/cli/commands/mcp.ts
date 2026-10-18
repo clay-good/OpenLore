@@ -2271,12 +2271,13 @@ export const TOOL_DEFINITIONS = [
         trigger: {
           type: 'object',
           additionalProperties: false,
-          description: 'Push into orient/blast_radius when this one predicate matches what they touch.',
+          maxProperties: 1,
+          description: 'One predicate; pushed into orient/blast_radius on a match. Globs: * ? **.',
           properties: {
-            fileGlob: { type: 'string' },
-            symbolPattern: { type: 'string' },
-            specDomain: { type: 'string' },
-            withinHops: { type: 'number', description: 'Max call hops from a touched symbol to the anchor (1-20).' },
+            fileGlob: { type: 'string', minLength: 1, maxLength: 256 },
+            symbolPattern: { type: 'string', minLength: 1, maxLength: 256 },
+            specDomain: { type: 'string', minLength: 1, maxLength: 256 },
+            withinHops: { type: 'integer', minimum: 1, maximum: 20, description: 'Call hops from a touched symbol.' },
           },
         },
         pinned: { type: 'boolean', description: 'Always push into orient.' },
@@ -2513,7 +2514,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
 }> = {
   minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
-  memory: { baselineTokens: 1_331, maxTokens: 1_430, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), plus 7.4% headroom.' },
+  memory: { baselineTokens: 1_357, maxTokens: 1_450, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), plus 6.9% headroom.' },
   verify: { baselineTokens: 1_262, maxTokens: 1_350, rationale: 'Exact v1 wire baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
   coordination: { baselineTokens: 2_487, maxTokens: 2_650, rationale: 'Exact v1 wire baseline plus 6.6% headroom.' },

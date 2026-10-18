@@ -31,6 +31,7 @@ import { validateDirectory, safeJoin } from './utils.js';
 import { handleSpecStoreStatus, type SpecStoreStatusReport } from './spec-store.js';
 import { handleOrient } from './orient.js';
 import { applyTokenBudget, omissionNote } from './progressive.js';
+import { estimateTokens } from '../llm-service.js';
 import type { ServedContentProvenance } from '../served-content.js';
 import type { InjectedMemory, StaleTriggeredMemory } from './memory-triggers.js';
 
@@ -244,6 +245,31 @@ export function rankAndBudget(items: WorkingSetItem[], budget: number): { kept: 
     a.name.localeCompare(b.name) ||
     a.filePath.localeCompare(b.filePath));
   return applyTokenBudget(sorted, budget);
+}
+
+/**
+ * Bound the targets' pushed memories by `remaining` tokens, in target order, so the merged briefing
+ * keeps one budget (change: add-memory-trigger-predicates). A dropped memory is counted in its
+ * target's `injectedMemoriesNote`, never silently removed.
+ */
+export function budgetInjectedMemories(targets: WorkingSetTargetBrief[], remaining: number): void {
+  let left = remaining;
+  for (const t of targets) {
+    if (!t.injectedMemories?.length) continue;
+    const kept: InjectedMemory[] = [];
+    for (const m of t.injectedMemories) {
+      const cost = estimateTokens(JSON.stringify(m));
+      if (cost > left) break;
+      kept.push(m);
+      left -= cost;
+    }
+    const dropped = t.injectedMemories.length - kept.length;
+    if (dropped === 0) continue;
+    const note = `${dropped} pushed memor${dropped === 1 ? 'y' : 'ies'} omitted to fit the working-set token budget — raise tokenBudget or call recall in ${t.target}.`;
+    t.injectedMemoriesNote = t.injectedMemoriesNote ? `${t.injectedMemoriesNote} ${note}` : note;
+    if (kept.length > 0) t.injectedMemories = kept;
+    else delete t.injectedMemories;
+  }
 }
 
 /** Canonicalize a path for presence checks, resolved relative to the home repo. */
@@ -477,6 +503,8 @@ export async function handleWorkingSetContext(
 
   // Rank the merged briefing by structural relevance, then bound it to budget.
   const { kept, omitted } = rankAndBudget(allItems, budget);
+  // Pushed memories share the same budget: what the ranked items left over, spent in target order.
+  budgetInjectedMemories(targets, budget - estimateTokens(JSON.stringify(kept)));
 
   const briefedCount = targets.filter(t => t.briefed).length;
   if (briefedCount === 0) {

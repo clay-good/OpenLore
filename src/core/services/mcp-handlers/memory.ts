@@ -160,7 +160,15 @@ export async function handleRemember(
     // upsert is re-applied to the latest store on a write conflict. When `supersedes`
     // names a prior memory, mark it invalidated (it leaves the authoritative set per
     // the memory-integrity invariant, but stays queryable via `asOf` for history).
+    // Set inside the CAS callback when the in-place update removes a trigger or pin the caller did
+    // not repeat; re-assigned on every execution so it reflects the write that committed.
+    let droppedPush: string[] = [];
     const finalStore = await updateMemoryStore(rootPath, (store) => {
+      const prior = store.memories.find((m) => makeMemoryId(m.content, m.anchors) === memory.id && !m.invalidatedAt);
+      droppedPush = [
+        ...(prior?.trigger !== undefined && memory.trigger === undefined ? ['trigger'] : []),
+        ...(prior?.pinned === true && memory.pinned !== true ? ['pinned'] : []),
+      ];
       const memories = store.memories.map((m) => {
         if (validSupersede && m.id === validSupersede && !m.invalidatedAt) {
           return {
@@ -209,6 +217,9 @@ export async function handleRemember(
           ? `Memory recorded with ${anchors.length} structural anchor(s).`
           : 'Memory recorded (unanchored — recall will not be able to verify it against code).',
         supersedeNote,
+        droppedPush.length
+          ? `Updated in place: the previous ${droppedPush.join(' and ')} ${droppedPush.length === 1 ? 'was' : 'were'} not repeated and ${droppedPush.length === 1 ? 'has' : 'have'} been removed.`
+          : undefined,
       ].filter(Boolean).join(' '),
     };
   } catch (err) {
