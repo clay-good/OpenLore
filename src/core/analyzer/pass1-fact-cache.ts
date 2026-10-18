@@ -139,9 +139,11 @@ export function factKey(file: ExtractionInput): string {
 }
 
 /**
- * What the call-graph pass extracts for one file: its detected language and content,
- * with an HTML file's inline scripts blanked into JavaScript. The Pass-1 memo keys on
- * exactly this, so a reader that recomputes the key must derive it the same way.
+ * What the call-graph pass extracts for one file by extension: its detected language
+ * and content, with an HTML file's inline scripts blanked into JavaScript. A shard
+ * analysis keys the Pass-1 memo on exactly this; a full analyze may classify a file
+ * further (headers, IaC YAML), so a reader recomputing a key treats this as one
+ * candidate among others.
  */
 export function pass1InputFor(path: string, original: string): { content: string; language: string } {
   const language = detectLanguage(path);

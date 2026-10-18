@@ -116,6 +116,43 @@ describe('carryForwardContinuity (disk)', () => {
     expect(a).toMatchObject({ symbolName: 'calculateTax', spanText: 'return amount * 0.2;', carriedAcross: { reason: 'renamed' } });
   });
 
+  for (const order of ['drifted-first', 'drifted-last'] as const) {
+    it(`carries a symbol whose anchors hold different baselines, in any store order (${order})`, async () => {
+      // Two span anchors on one symbol: an edit removes the second span's text, so only
+      // the first is re-baselined. A later clean rename must still carry the symbol,
+      // whichever hash sorts first (add-memory-anchor-verdicts).
+      const file = 'src/tax.ts';
+      const v1 = 'export function computeTax(amount: number) {\n  // keep\n  return amount * 0.2;\n}\n';
+      const v2 = v1.replace('  // keep\n', '');
+      const v3 = v2.replace('computeTax', 'calculateTax');
+      const reindex = async (src: string, name: string): Promise<FunctionNode> => {
+        await writeFile(join(root, file), src);
+        const n = node({ id: `${file}::${name}`, name, filePath: file, signature: `function ${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+        const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+        st.clearAll();
+        st.insertNodes([n]);
+        st.setFileHash(file, createHash('sha256').update(src).digest('hex'));
+        st.close();
+        return n;
+      };
+      const first = await reindex(v1, 'computeTax');
+      const base = { nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1) };
+      const keep = { id: 'mem-keep', kind: 'note' as const, content: 'rate', anchors: [{ ...base, spanText: 'return amount * 0.2;' }], recordedAt: new Date(0).toISOString() };
+      const gone = { id: 'mem-gone', kind: 'note' as const, content: 'keep', anchors: [{ ...base, spanText: '// keep' }], recordedAt: new Date(0).toISOString() };
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: order === 'drifted-first' ? [gone, keep] : [keep, gone] });
+
+      let oldNodes = snapshotOldNodes(storeDir);
+      await reindex(v2, 'computeTax');
+      await carryForwardContinuity(root, oldNodes, storeDir);
+      oldNodes = snapshotOldNodes(storeDir);
+      await reindex(v3, 'calculateTax');
+      const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+      expect(summary.carried).toHaveLength(1);
+      const kept = (await loadMemoryStore(root)).memories.find((m) => m.id === 'mem-keep')!.anchors[0];
+      expect(kept).toMatchObject({ symbolName: 'calculateTax', carriedAcross: { reason: 'renamed' } });
+    });
+  }
+
   it('carries an anchored memory across a pure rename → recalls re-pointed with provenance', async () => {
     const oldSrc = 'export function computeTax(amount: number) {\n  return amount * 0.2;\n}\n';
     const newSrc = 'export function calculateTax(amount: number) {\n  return amount * 0.2;\n}\n';

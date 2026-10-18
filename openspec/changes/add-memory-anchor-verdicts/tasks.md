@@ -16,6 +16,10 @@
       not stop the next clean rename from carrying it)
 - [x] Span search runs only where the stored offsets describe the file on disk (the watcher's
       file hash or the full analyze's Pass-1 key); otherwise the whole-symbol hash decides
+- [x] CRLF and LF line endings match each other in span text (notes.json is committed and
+      checkouts may convert line endings); spans are stored LF
+- [x] Continuity tries every baseline hash recorded for a symbol (anchors on one symbol can
+      hold different bodies), pooling candidates so ambiguity still yields no pair
 - [x] `memory.ts`: additive `outcome` on `summarizeVerdict` (:567-593) — silently-carried /
       re-pointed-with-provenance / needs-human-reselection — mapped from existing states; no
       change to authoritative filtering (:382)
@@ -32,7 +36,7 @@
 - [x] Multi-state gap (symbol renamed while unindexed, no continuity pair) ⇒
       needs-human-reselection with the adjacency-limit reason disclosed
 - [x] `openlore enforce` lists `memory-anchor-lost` findings; advisory by default; blocking only
-      via `enforcement.policy`; enforcement-policy.test.ts covers the new code
+      via `enforcement.policy`; the registry-shape tests in enforcement-policy.test.ts cover the new code; memory-anchor-verdicts.test.ts covers its behavior
 - [x] Old stores load unchanged (no span ⇒ byte-identical verdict behavior)
 - [x] tools/list full ceiling re-measured (88,000 B, mcp-presets.test.ts:581); substrate default
       prefix byte-identical; full suite green

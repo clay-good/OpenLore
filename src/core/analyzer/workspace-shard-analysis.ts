@@ -18,9 +18,8 @@ import {
   type WorkspaceShardReport,
 } from './workspace-shards.js';
 import { INCREMENTAL_CLOSURE_BUDGET } from '../../constants.js';
-import { pass1InputFor } from './pass1-fact-cache.js';
 import { readSourceCapped } from './bounded-file-scan.js';
-import { factKey } from './pass1-fact-cache.js';
+import { factKey, pass1InputFor } from './pass1-fact-cache.js';
 
 export const ARTIFACT_WORKSPACE_SHARDS = 'workspace-shards.json';
 const MAX_RECEIPT_SHARDS = MAX_WORKSPACE_SHARDS + 1; // detected/configured shards plus implicit root

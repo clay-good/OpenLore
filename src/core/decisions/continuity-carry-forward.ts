@@ -33,12 +33,13 @@ import type {
   StructuralAnchor,
   ContinuityProvenance,
 } from '../../types/index.js';
-import { hashSpan, locateSpan, spanTextOf } from './anchor.js';
+import { hashSpan, spanLines, spanTextOf } from './anchor.js';
 import { nodeSpanText, makeFreshnessView } from './anchor-adapter.js';
 import {
   computeContinuity,
   normalizedBodyHash,
   bodyMatchesModuloName,
+  baselineHashes,
   type DisappearedSymbol,
   type AppearedSymbol,
   type ContinuityPair,
@@ -181,7 +182,7 @@ function buildContinuity(
   rootPath: string,
   store: EdgeStore,
   oldNodes: readonly OldNodeSnapshot[],
-  anchoredSymbols: ReadonlyMap<string, { nodeId: string; stableId?: string; contentHash?: string }>,
+  anchoredSymbols: ReadonlyMap<string, { nodeId: string; stableId?: string; contentHashes: readonly string[] }>,
 ): ReturnType<typeof computeContinuity> {
   const cache = new Map<string, string | null>();
   const oldById = new Map(oldNodes.map((n) => [n.id, n]));
@@ -202,7 +203,14 @@ function buildContinuity(
       ...(sym.stableId ? { stableId: sym.stableId } : {}),
       name: old.name,
       filePath: old.filePath,
-      ...(sym.contentHash ? { contentHash: sym.contentHash } : {}),
+      // Sorted, so the primary hash never depends on store order.
+      ...(() => {
+        const [primary, ...alternates] = [...sym.contentHashes].sort();
+        return {
+          ...(primary ? { contentHash: primary } : {}),
+          ...(alternates.length ? { alternateHashes: alternates } : {}),
+        };
+      })(),
     });
   }
   if (disappeared.length === 0) return { pairs: [], ambiguous: [] };
@@ -234,12 +242,12 @@ function buildContinuity(
   // Computing it requires normalizing EVERY new node's body — expensive on a large
   // graph — so do it ONLY when such a candidate actually exists (a real rename),
   // never on the common no-rename / move-only / delete-only path.
-  const needsFullCount = disappeared.some(
-    (d) =>
-      d.contentHash !== undefined &&
-      !appeared.some((a) => a.contentHash === d.contentHash) && // no exact-body match
-      appeared.some((a) => bodyMatchesModuloName(a.spanText, a.name, d.name, d.contentHash!)),
-  );
+  const needsFullCount = disappeared.some((d) => {
+    const hashes = baselineHashes(d);
+    return hashes.length > 0 &&
+      !appeared.some((a) => hashes.includes(a.contentHash)) && // no exact-body match
+      appeared.some((a) => hashes.some((h) => bodyMatchesModuloName(a.spanText, a.name, d.name, h)));
+  });
   const newNormBodyCount = new Map<string, number>();
   if (needsFullCount) {
     for (const node of allNew) {
@@ -255,7 +263,7 @@ function buildContinuity(
 
 /** Key of a span anchor for {@link spanAnchorBaselines}. */
 function spanAnchorKey(a: StructuralAnchor): string {
-  return `${a.nodeId}\0${a.spanText}`;
+  return `${a.nodeId}\0${spanTextOf(a)}`;
 }
 
 /**
@@ -282,7 +290,7 @@ function spanAnchorBaselines(
       const key = spanAnchorKey(a);
       if (out.has(key)) continue;
       const source = view.nodeSource?.(a.nodeId!);
-      if (!source || locateSpan(source.text, span, 2).length !== 1) continue;
+      if (!source || spanLines(source.text, span, 2).length !== 1) continue;
       const hash = hashSpan(source.text);
       if (hash !== a.contentHash) out.set(key, hash);
     }
@@ -311,29 +319,19 @@ export async function carryForwardContinuity(
 
   // Collect the distinct symbol-level anchors across both stores. (File-level
   // anchors have no symbol identity to carry.)
-  const anchoredSymbols = new Map<string, { nodeId: string; stableId?: string; contentHash?: string }>();
-  // One baseline per symbol: continuity requires a one-to-one match, so a symbol
-  // must not enter twice. When anchors on it disagree, a span anchor's hash wins (an
-  // analysis re-baselines it to the last body its span was verified in, while a plain
-  // anchor keeps its record-time body), and a live record beats a superseded one;
-  // then the smallest hash — never store order (add-memory-anchor-verdicts).
-  const preferred = new Map<string, { anchor: StructuralAnchor; rank: number }>();
-  const collect = (anchors: readonly StructuralAnchor[] | undefined, retired = false): void => {
+  const anchoredSymbols = new Map<string, { nodeId: string; stableId?: string; contentHashes: string[] }>();
+  // Every distinct baseline per symbol: anchors on one symbol can hold different
+  // bodies (a span anchor is re-baselined at each analysis, a plain one keeps its
+  // record-time body), and continuity tries each (add-memory-anchor-verdicts).
+  const collect = (anchors: readonly StructuralAnchor[] | undefined): void => {
     for (const a of anchors ?? []) {
       if (!a.nodeId) continue;
-      const rank = (retired ? 2 : 0) + (spanTextOf(a) !== undefined ? 0 : 1);
-      const prior = preferred.get(a.nodeId);
-      const better = !prior
-        || rank < prior.rank
-        || (rank === prior.rank && (a.contentHash ?? '') !== ''
-          && ((prior.anchor.contentHash ?? '') === '' || a.contentHash! < prior.anchor.contentHash!));
-      if (better) {
-        preferred.set(a.nodeId, { anchor: a, rank });
-        anchoredSymbols.set(a.nodeId, { nodeId: a.nodeId, stableId: a.stableId, contentHash: a.contentHash });
-      }
+      const entry = anchoredSymbols.get(a.nodeId) ?? { nodeId: a.nodeId, stableId: a.stableId, contentHashes: [] };
+      if (a.contentHash && !entry.contentHashes.includes(a.contentHash)) entry.contentHashes.push(a.contentHash);
+      anchoredSymbols.set(a.nodeId, entry);
     }
   };
-  for (const m of memStore.memories) collect(m.anchors, !!m.invalidatedAt);
+  for (const m of memStore.memories) collect(m.anchors);
   for (const d of decisionStore.decisions) collect(d.anchors);
   if (anchoredSymbols.size === 0) return EMPTY_SUMMARY;
 

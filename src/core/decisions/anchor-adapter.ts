@@ -29,8 +29,10 @@ import {
   hashSpan,
   resolveSymbolAnchors,
   fileAnchor,
-  locateSpan,
+  spanLines,
   spanTextOf,
+  symbolAnchorKey,
+  normalizeLineEndings,
   type AnchorNode,
   type GraphFreshnessView,
 } from './anchor.js';
@@ -85,14 +87,6 @@ export function nodeSpanText(rootPath: string, node: FunctionNode, cache: Map<st
   return sliceNodeSpan(content, node);
 }
 
-/**
- * Whether the stored offsets of `node` still describe the file on disk
- * (add-memory-anchor-verdicts). Offsets come from the last analysis; after an edit
- * they point at other text, and a span search there could find the span in a
- * neighboring symbol. The watcher records the hash of each file it re-indexed; a
- * full analyze records the content key of each file it extracted. Either must match
- * the current content, or the offsets are not trusted. Memoized per file.
- */
 /** Per-view memos keyed by file path; a view's file cache holds one content per path. */
 interface ViewMemo {
   offsetsCurrent: Map<string, boolean>;
@@ -103,6 +97,14 @@ function newViewMemo(): ViewMemo {
   return { offsetsCurrent: new Map(), newlines: new Map() };
 }
 
+/**
+ * Whether the stored offsets of `node` still describe the file on disk
+ * (add-memory-anchor-verdicts). Offsets come from the last analysis; after an edit
+ * they point at other text, and a span search there could find the span in a
+ * neighboring symbol. The watcher records the hash of each file it re-indexed; a
+ * full analyze records the content key of each file it extracted. Either must match
+ * the current content, or the offsets are not trusted. Memoized per file.
+ */
 function offsetsCurrent(
   store: EdgeStore,
   node: FunctionNode,
@@ -127,7 +129,9 @@ function offsetsCurrent(
       const input = pass1InputFor(node.filePath, content);
       const candidates = [
         input,
-        ...[node.language, ...(/\.h$/i.test(node.filePath) ? ['C', 'C++'] : [])].map((language) => ({ content, language })),
+        ...[node.language, ...(/\.h$/i.test(node.filePath) ? ['C', 'C++'] : [])]
+          .filter((language) => language !== input.language || content !== input.content)
+          .map((language) => ({ content, language })),
       ];
       current = key !== undefined
         && candidates.some((c) => key === factKey({ path: node.filePath, ...c }));
@@ -185,7 +189,7 @@ function lineOf(content: string, offset: number, filePath: string, memo: ViewMem
  * analyzed (its stored offsets no longer locate the symbol). The anchor is then recorded without the span, and
  * `remember` says so.
  */
-export type SpanNotRecordedReason = 'no-symbol' | 'not-found' | 'line-endings' | 'ambiguous' | 'unreadable' | 'index-stale';
+export type SpanNotRecordedReason = 'no-symbol' | 'not-found' | 'ambiguous' | 'unreadable' | 'index-stale';
 
 /** Hash a node's source span (code-unit offsets) against current file content. */
 function hashNodeSpan(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
@@ -202,9 +206,12 @@ export function makeFreshnessView(
   store: EdgeStore,
   rootPath: string,
   renameOf?: (nodeId: string) => string | undefined,
+  shared?: { cache: Map<string, string | null>; memo: ViewMemo },
 ): GraphFreshnessView {
-  const cache = new Map<string, string | null>();
-  const memo = newViewMemo();
+  // An AnchorContext shares its caches, so its certificates and file checks reuse
+  // the reads and hashes its freshness checks already did.
+  const cache = shared?.cache ?? new Map<string, string | null>();
+  const memo = shared?.memo ?? newViewMemo();
   let staleSnapshot: ReturnType<EdgeStore['getStaleRegionSnapshot']> | undefined;
   let staleFiles: Set<string> | undefined;
   const staleRegion = () => {
@@ -334,7 +341,7 @@ export class AnchorContext {
 
   /** A {@link GraphFreshnessView} backed by this adapter's edge store + disk. */
   freshnessView(): GraphFreshnessView {
-    return makeFreshnessView(this.store, this.rootPath);
+    return makeFreshnessView(this.store, this.rootPath, undefined, { cache: this.fileCache, memo: this.viewMemo });
   }
 
   /**
@@ -370,13 +377,11 @@ export class AnchorContext {
   private spanCertificate(node: FunctionNode, spanText: string): GroundingCertificate | undefined {
     const source = nodeSource(this.store, this.rootPath, node, this.fileCache, this.viewMemo);
     if (!source) return undefined;
-    const hits = locateSpan(source.text, spanText, 2);
+    const hits = spanLines(source.text, spanText, 2, source.startLine);
     if (hits.length !== 1) return undefined;
-    const before = source.text.slice(0, hits[0]);
-    const start = source.startLine + (before.match(/\n/g) ?? []).length;
     const newlines = (spanText.match(/\n/g) ?? []).length;
-    const end = start + newlines - (spanText.endsWith('\n') ? 1 : 0);
-    return { symbol: node.name, filePath: node.filePath, lineSpan: { start, end: Math.max(start, end) }, contentHash: hashSpan(spanText) };
+    const end = hits[0] + newlines - (spanText.endsWith('\n') ? 1 : 0);
+    return { symbol: node.name, filePath: node.filePath, lineSpan: { start: hits[0], end: Math.max(hits[0], end) }, contentHash: hashSpan(spanText) };
   }
 
   /**
@@ -454,11 +459,12 @@ export class AnchorContext {
           let anchor = resolved[0];
           if (hint.span !== undefined) {
             const located = this.locateHintSpan(anchor.nodeId!, hint.span);
-            if (located === 'unique') anchor = { ...anchor, spanText: hint.span };
+            // Stored CRLF-free, so the recorded text matches on any checkout.
+            if (located === 'unique') anchor = { ...anchor, spanText: normalizeLineEndings(hint.span) };
             else spanNotRecorded?.(index, located);
           }
           // The same symbol with a different span is a different anchor.
-          const key = anchor.spanText === undefined ? anchor.nodeId! : `${anchor.nodeId!}#${hashSpan(anchor.spanText)}`;
+          const key = symbolAnchorKey({ ...anchor, stableId: undefined });
           if (!seen.has(key)) {
             seen.add(key);
             out.push(anchor);
@@ -481,17 +487,11 @@ export class AnchorContext {
   /** Whether `span` occurs exactly once in the node's current body. */
   private locateHintSpan(nodeId: string, span: string): 'unique' | Exclude<SpanNotRecordedReason, 'no-symbol'> {
     const node = this.store.getNode(nodeId);
-    if (!node) return 'unreadable';
-    const content = readFileCached(this.rootPath, node.filePath, this.fileCache);
-    if (content === null) return 'unreadable';
-    if (!offsetsCurrent(this.store, node, content, this.viewMemo)) return 'index-stale';
-    const source = nodeSource(this.store, this.rootPath, node, this.fileCache, this.viewMemo)!;
-    const hits = locateSpan(source.text, span, 2).length;
-    if (hits === 0) {
-      // An LF span against a CRLF file: say so, rather than just "not found".
-      return span.includes('\n') && !span.includes('\r\n') && source.text.includes('\r\n') ? 'line-endings' : 'not-found';
-    }
-    return hits === 1 ? 'unique' : 'ambiguous';
+    if (!node || readFileCached(this.rootPath, node.filePath, this.fileCache) === null) return 'unreadable';
+    const source = nodeSource(this.store, this.rootPath, node, this.fileCache, this.viewMemo);
+    if (!source) return 'index-stale';
+    const hits = spanLines(source.text, span, 2).length;
+    return hits === 1 ? 'unique' : hits === 0 ? 'not-found' : 'ambiguous';
   }
 }
 

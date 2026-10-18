@@ -17,7 +17,7 @@ import { FINDING_CODE_REGISTRY } from './enforcement-policy.js';
 import {
   anchorFreshness,
   anchorOutcome,
-  locateSpan,
+  spanLines,
   MAX_SPAN_CHARS,
   type GraphFreshnessView,
 } from '../../decisions/anchor.js';
@@ -263,13 +263,17 @@ describe('round-1 review regressions', () => {
     expect(rec.needsReanchoring[0].anchors[0]).toMatchObject({ reselectReason: 'file-missing' });
   });
 
-  it('hints at line endings for an LF span in a CRLF file', async () => {
+  it('matches a span across CRLF and LF checkouts of the same file', async () => {
     await index(SRC.replace(/\n/g, '\r\n'));
-    const r = await rememberSpan('x', '  const a = 1;\n  if (a > 0)');
-    expect(r.spanNotRecorded).toEqual([{ anchor: 0, reason: 'line-endings' }]);
-    expect(r.message).toMatch(/CRLF/);
-    const ok = await rememberSpan('y', '  const a = 1;\r\n  if (a > 0)');
-    expect(ok.anchors[0].span).toBe(true);
+    const lf = await rememberSpan('x', '  const a = 1;\n  if (a > 0)');
+    expect(lf.anchors[0].span).toBe(true);
+    const crlf = await rememberSpan('y', '  const a = 1;\r\n  if (a > 0)');
+    expect(crlf.anchors[0].span).toBe(true);
+    // The same file checked out with LF: both still recall fresh, at the same lines.
+    await index(SRC);
+    const rec = (await handleRecall(root)) as Recall;
+    expect(rec.authoritative.map((m) => m.freshness)).toEqual(['fresh', 'fresh']);
+    for (const m of rec.authoritative) expect(m.certificates?.[0].lineSpan).toEqual({ start: 3, end: 4 });
   });
 
   it('labels no outcome when there is no graph to check against', async () => {
@@ -325,11 +329,20 @@ describe('round-1 review regressions', () => {
     store.insertNodes([nodeFor('src/big.ts', 'big', src, pad.length)]);
     store.setFileHash('src/big.ts', createHash('sha256').update(src).digest('hex'));
     store.close();
-    for (let i = 0; i < 40; i++) await rememberSpan(`note ${i}`);
+    const one = await rememberSpan('seed');
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const seeded = JSON.parse(await readFile(path, 'utf-8'));
+    const anchor = seeded.memories.find((m: { id: string }) => m.id === one.id).anchors[0];
+    // 1,000 span notes on one 1.4 MB file. Unmemoized, each would re-hash the file and
+    // re-scan it for line numbers (~1.4 GB of work); memoized, both happen once.
+    seeded.memories = Array.from({ length: 1000 }, (_, i) => ({
+      id: `n${i}`, kind: 'note', content: `note ${i}`, anchors: [anchor], recordedAt: new Date(0).toISOString(),
+    }));
+    await writeFile(path, JSON.stringify(seeded), 'utf-8');
     const started = Date.now();
     const loss = await detectMemoryAnchorLoss(root);
-    expect(loss.checked).toBe(40);
-    expect(Date.now() - started).toBeLessThan(2000);
+    expect(loss.findings).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(3000);
   });
 
   it('trusts the Pass-1 key of a JavaScript file whose nodes are labeled TypeScript', async () => {
@@ -387,6 +400,31 @@ describe('round-1 review regressions', () => {
     expect(((await handleRecall(root)) as Recall & { error?: string }).error).toBeUndefined();
   });
 
+  it('cites every line of a multi-line span', async () => {
+    await rememberSpan('two lines', '  const a = 1;\n  if (a > 0) retry();');
+    await rememberSpan('trailing newline', '  return a;\n');
+    const rec = (await handleRecall(root)) as Recall;
+    const lines = rec.authoritative.map((m) => m.certificates?.[0].lineSpan).sort((x, y) => x!.start - y!.start);
+    expect(lines).toEqual([{ start: 3, end: 4 }, { start: 5, end: 5 }]);
+  });
+
+  it('emits no finding for an orphaned decision', async () => {
+    const decisions = join(root, OPENLORE_DIR, 'decisions');
+    await mkdir(decisions, { recursive: true });
+    await writeFile(join(decisions, 'pending.json'), JSON.stringify({
+      version: '1', updatedAt: '', sequence: 0, decisions: [{
+        id: 'd1234567', status: 'approved', title: 'big retries', rationale: 'r', consequences: '', proposedRequirement: null,
+        affectedDomains: [], affectedFiles: ['src/big.ts'], sessionId: 's', recordedAt: new Date(0).toISOString(),
+        contentOrigin: 'agent-recorded', confidence: 'high', syncedToSpecs: [],
+        anchors: [{ nodeId: 'src/big.ts::big', symbolName: 'big', filePath: 'src/big.ts', contentHash: 'h' }],
+      }],
+    }), 'utf-8');
+    await index(null, [nodeFor('src/other.ts', 'other', 'x')]);
+    const rec = (await handleRecall(root)) as Recall;
+    expect(rec.needsReanchoring.some((m) => m.id === 'd1234567')).toBe(true);
+    expect(rec.findings).toBeUndefined();
+  });
+
   it('does not flag two spans in one symbol as unreconciled', async () => {
     await rememberSpan('one', SPAN);
     await rememberSpan('two', '  return a;');
@@ -419,9 +457,9 @@ describe('AnchorLossIsAnActionableWorkItem', () => {
     await index(null, [nodeFor('src/other.ts', 'other', 'x')]);
     const collected = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'frozen' });
     expect(collected.findings.filter((f) => f.code === 'memory-anchor-lost').map((f) => f.subject)).toEqual([r.id]);
-    // The fixture is not a git repository, so the index freshness is unknown.
+    // index(null) recorded no hash for src/big.ts, so its offsets cannot be shown current.
     expect(collected.failedCodes).toContain('memory-anchor-lost');
-    expect(collected.caveats.join(' ')).toContain('memory-anchor-lost check incomplete');
+    expect(collected.caveats.join(' ')).toContain('anchored file(s) changed since analysis');
   });
 
   it('registers the code as advisory by default', () => {
@@ -511,9 +549,11 @@ describe('span freshness (pure)', () => {
     expect(anchorFreshness(carried, view({ 'f::h': 'h\nY' })).freshness).toBe('drifted');
   });
 
-  it('locateSpan counts overlapping occurrences up to the limit', () => {
-    expect(locateSpan('aaaa', 'aa', 10)).toEqual([0, 1, 2]);
-    expect(locateSpan('aaaa', 'aa', 2)).toEqual([0, 1]);
-    expect(locateSpan('abc', '', 10)).toEqual([]);
+  it('spanLines counts overlapping occurrences up to the limit, CRLF read as LF', () => {
+    expect(spanLines('aaaa', 'aa', 10)).toEqual([1, 1, 1]);
+    expect(spanLines('aaaa', 'aa', 2)).toEqual([1, 1]);
+    expect(spanLines('abc', '', 10)).toEqual([]);
+    expect(spanLines('x\r\ny\r\nx\r\ny', 'x\ny', 10, 5)).toEqual([5, 7]);
+    expect(spanLines('x\ny', 'x\r\ny', 10)).toEqual([1]);
   });
 });

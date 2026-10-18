@@ -93,7 +93,6 @@ function spanHintError(hints: readonly AnchorHint[]): string | undefined {
 const SPAN_NOT_RECORDED_TEXT: Record<SpanNotRecordedReason, string> = {
   'no-symbol': 'the symbol did not resolve to exactly one analyzed symbol',
   'not-found': 'the text does not occur in the symbol\'s current body',
-  'line-endings': 'the text does not occur, and the file uses CRLF line endings; pass the span with \\r\\n',
   ambiguous: 'the text occurs more than once in the symbol\'s body',
   unreadable: 'the symbol\'s source could not be read',
   'index-stale': 'the file changed since it was analyzed; run openlore analyze and record it again',

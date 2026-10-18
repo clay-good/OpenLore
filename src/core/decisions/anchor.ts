@@ -40,7 +40,13 @@ export const MAX_SPAN_CHARS = 2000;
  */
 export function spanTextOf(anchor: Pick<StructuralAnchor, 'spanText'>): string | undefined {
   const t: unknown = anchor.spanText;
-  return typeof t === 'string' && t.length > 0 && t.length <= MAX_SPAN_CHARS ? t : undefined;
+  return typeof t === 'string' && t.length > 0 && t.length <= MAX_SPAN_CHARS ? normalizeLineEndings(t) : undefined;
+}
+
+/** The identity key of a symbol anchor: a span anchor is distinct from its symbol and from other spans. */
+export function symbolAnchorKey(anchor: Pick<StructuralAnchor, 'nodeId' | 'stableId' | 'spanText'>): string {
+  const span = spanTextOf(anchor);
+  return `${anchor.stableId ?? anchor.nodeId}${span === undefined ? '' : `#${hashSpan(span)}`}`;
 }
 
 /** Stable, reproducible hash of a source span (or whole file). Unnormalized. */
@@ -118,24 +124,29 @@ export interface GraphFreshnessView {
 }
 
 /**
- * Offsets where `span` occurs in `body`, overlapping occurrences included, at most
- * `limit` of them (add-memory-anchor-verdicts). Exact text only — no similarity.
- * The cap keeps a short span in a large body from costing one search per character.
+ * CRLF read as LF (add-memory-anchor-verdicts). notes.json is committed, and a
+ * checkout may convert line endings, so a span recorded on one platform must match
+ * on another. Line numbers are unchanged: only `\r` before `\n` is dropped.
  */
-export function locateSpan(body: string, span: string, limit: number): number[] {
-  const out: number[] = [];
-  if (span.length === 0) return out;
-  for (let i = body.indexOf(span); i !== -1 && out.length < limit; i = body.indexOf(span, i + 1)) out.push(i);
-  return out;
+export function normalizeLineEndings(text: string): string {
+  return text.includes('\r\n') ? text.replace(/\r\n/g, '\n') : text;
 }
 
-/** 1-based lines of ascending `offsets` in `text`, given the line `text` starts on: one pass. */
-function linesAt(text: string, offsets: readonly number[], startLine: number): number[] {
+/**
+ * The 1-based lines where `span` starts in `body`, overlapping occurrences
+ * included, at most `limit` of them; `startLine` is the line `body` starts on
+ * (add-memory-anchor-verdicts). Exact text only, CRLF read as LF — no similarity.
+ * The cap keeps a short span in a large body from costing one search per character.
+ */
+export function spanLines(body: string, span: string, limit: number, startLine = 1): number[] {
+  const text = normalizeLineEndings(body);
+  const needle = normalizeLineEndings(span);
   const out: number[] = [];
+  if (needle.length === 0) return out;
   let line = startLine;
-  let i = 0;
-  for (const offset of offsets) {
-    for (; i < offset; i++) if (text.charCodeAt(i) === 10) line++;
+  let scanned = 0;
+  for (let i = text.indexOf(needle); i !== -1 && out.length < limit; i = text.indexOf(needle, i + 1)) {
+    for (; scanned < i; scanned++) if (text.charCodeAt(scanned) === 10) line++;
     out.push(line);
   }
   return out;
@@ -161,13 +172,13 @@ function locatedFreshness(
   // Without the body text, an unchanged whole symbol still proves the span is
   // unchanged (it occurred once at record time); a changed one cannot be checked.
   if (!source) return byHash;
-  const hits = locateSpan(source.text, spanText, MAX_SPAN_CANDIDATES + 1);
+  const hits = spanLines(source.text, spanText, MAX_SPAN_CANDIDATES + 1, source.startLine);
   if (hits.length === 0) return { freshness: 'drifted' };
   if (hits.length === 1) return { freshness: 'fresh' };
   return {
     freshness: 'orphaned',
     spanCandidates: {
-      lines: linesAt(source.text, hits.slice(0, MAX_SPAN_CANDIDATES), source.startLine),
+      lines: hits.slice(0, MAX_SPAN_CANDIDATES),
       ...(hits.length > MAX_SPAN_CANDIDATES ? { truncated: true as const } : {}),
     },
   };
@@ -431,8 +442,7 @@ export function findUnreconciled(items: readonly AnchoredItem[]): UnreconciledGr
     for (const a of it.anchors) {
       if (!a.nodeId) continue; // symbol-level only
       // Two spans in one symbol are about different code (add-memory-anchor-verdicts).
-      const span = spanTextOf(a);
-      const key = `${a.stableId ?? a.nodeId}${span === undefined ? '' : `#${hashSpan(span)}`}`;
+      const key = symbolAnchorKey(a);
       const entry = byKey.get(key) ?? { symbolName: a.symbolName, filePath: a.filePath, ids: new Set<string>() };
       entry.ids.add(it.id);
       byKey.set(key, entry);

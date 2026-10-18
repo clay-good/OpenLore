@@ -17,10 +17,10 @@ import {
   OPENLORE_MEMORY_SUBDIR,
   MEMORY_NOTES_FILE,
 } from '../../constants.js';
-import { atomicWriteFile, casUpdate, quarantineCorrupt as quarantineStore } from './atomic-store.js';
+import { atomicWriteFile, casUpdate, quarantineCorrupt } from './atomic-store.js';
 import type { MemoryStore, StructuralAnchor } from '../../types/index.js';
 import { safeJoin } from '../../utils/path-confinement.js';
-import { hashSpan, spanTextOf } from './anchor.js';
+import { symbolAnchorKey } from './anchor.js';
 
 export function memoryDir(rootPath: string): string {
   return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR));
@@ -42,9 +42,11 @@ function emptyStore(): MemoryStore {
 export async function loadMemoryStore(rootPath: string, opts: { readOnly?: boolean } = {}): Promise<MemoryStore> {
   const path = memoryPath(rootPath);
   if (!(await fileExists(path))) return emptyStore();
-  const quarantineCorrupt = opts.readOnly
-    ? async (_path: string, reason: string): Promise<never> => { throw new Error(`memory store is unreadable (${reason})`); }
-    : quarantineStore;
+  const corrupt = async (reason: string): Promise<MemoryStore> => {
+    if (opts.readOnly) throw new Error(`memory store is unreadable (${reason})`);
+    await quarantineCorrupt(path, reason);
+    return emptyStore();
+  };
   let raw: string;
   try {
     raw = await readFile(path, 'utf-8');
@@ -52,8 +54,7 @@ export async function loadMemoryStore(rootPath: string, opts: { readOnly?: boole
     // A read error that is not "missing file" is an I/O fault, not corruption —
     // do not quarantine (the bytes may be fine); degrade to empty loudly.
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return emptyStore();
-    await quarantineCorrupt(path, `read failed: ${(err as Error).message}`);
-    return emptyStore();
+    return corrupt(`read failed: ${(err as Error).message}`);
   }
   let parsed: Partial<MemoryStore> | null;
   try {
@@ -61,12 +62,10 @@ export async function loadMemoryStore(rootPath: string, opts: { readOnly?: boole
   } catch (err) {
     // Torn / hand-corrupted JSON: quarantine, never silently empty (a torn store
     // presented as empty is absence-as-current-fact). (harden-memory-integrity-invariant)
-    await quarantineCorrupt(path, `invalid JSON: ${(err as Error).message}`);
-    return emptyStore();
+    return corrupt(`invalid JSON: ${(err as Error).message}`);
   }
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.memories)) {
-    await quarantineCorrupt(path, 'invalid shape (missing memories array)');
-    return emptyStore();
+    return corrupt('invalid shape (missing memories array)');
   }
   return {
     version: '1',
@@ -113,7 +112,7 @@ function anchorIdentity(anchors: readonly StructuralAnchor[]): string {
     .map((a) => (a.nodeId
       // A span anchor is a different anchor from its whole symbol, or from another
       // span in it; plain anchors keep their pre-span key (add-memory-anchor-verdicts).
-      ? `sym:${a.stableId ?? a.nodeId}${spanTextOf(a) === undefined ? '' : `#${hashSpan(spanTextOf(a)!)}`}`
+      ? `sym:${symbolAnchorKey(a)}`
       : `file:${a.filePath}`))
     .sort()
     .join('|');

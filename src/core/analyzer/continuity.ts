@@ -111,6 +111,19 @@ export interface DisappearedSymbol {
   filePath: string;
   /** The anchor's recorded baseline span hash (the old body). Required to match. */
   contentHash?: string;
+  /**
+   * Other baselines recorded for the same symbol by other anchors (add-memory-anchor-
+   * verdicts): anchors on one symbol can hold different bodies (a span anchor is
+   * re-baselined at each analysis, a plain one keeps its record-time body). A match
+   * on any of them is evidence; candidates found through different hashes are pooled,
+   * so more than one still yields no pair.
+   */
+  alternateHashes?: string[];
+}
+
+/** Every baseline hash recorded for a disappeared symbol, primary first. */
+export function baselineHashes(from: DisappearedSymbol): string[] {
+  return [...new Set([from.contentHash, ...(from.alternateHashes ?? [])].filter((h): h is string => !!h))];
 }
 
 /** A symbol present in the new state that did not exist in the old state. */
@@ -180,15 +193,16 @@ function candidacyFor(
   newNormBodyCount: ReadonlyMap<string, number>,
 ): Candidacy {
   // Without a recorded baseline body hash there is no evidence to match on.
-  if (!from.contentHash) return { from, basis: 'exact-signature', candidates: [] };
+  const hashes = baselineHashes(from);
+  if (hashes.length === 0) return { from, basis: 'exact-signature', candidates: [] };
 
   // exact-body — byte-identical span (a pure move; the name did not change).
-  const body = appeared.filter((a) => a.contentHash === from.contentHash);
+  const body = appeared.filter((a) => hashes.includes(a.contentHash));
   if (body.length > 0) return { from, basis: 'exact-body', candidates: body };
 
   // exact-signature — same body, only the symbol's own name changed (a rename),
   // verified by name substitution (NOT a mere parameter-shape match).
-  const sig = appeared.filter((a) => bodyMatchesModuloName(a.spanText, a.name, from.name, from.contentHash!));
+  const sig = appeared.filter((a) => hashes.some((h) => bodyMatchesModuloName(a.spanText, a.name, from.name, h)));
   if (sig.length === 0) return { from, basis: 'exact-signature', candidates: [] };
 
   // Uniqueness guard: every matching candidate shares one normalized body. If that
