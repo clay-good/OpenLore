@@ -513,9 +513,9 @@ function validateBlock(
   return { rules, eligibility, findings };
 }
 
-async function loadCorpusDecisions(rootPath: string, openspecPath: string): Promise<CorpusDecision[]> {
+async function loadCorpusDecisions(rootPath: string, openspecPath: string, readOnly: boolean): Promise<CorpusDecision[]> {
   const [store, durable] = await Promise.all([
-    loadDecisionStore(rootPath),
+    loadDecisionStore(rootPath, { readOnly }),
     loadDurableDecisionProjections(rootPath, openspecPath),
   ]);
   const durableGroups = new Map<string, typeof durable>();
@@ -635,8 +635,10 @@ async function loadCorpusDecisions(rootPath: string, openspecPath: string): Prom
 export async function loadDecisionConstraintState(
   rootPath: string,
   openspecPath = 'openspec',
+  opts: { readOnly?: boolean } = {},
 ): Promise<DecisionConstraintState> {
-  const corpus = await loadCorpusDecisions(rootPath, openspecPath);
+  // `readOnly` (the commit gate): a torn decision store throws instead of being renamed away.
+  const corpus = await loadCorpusDecisions(rootPath, openspecPath, opts.readOnly ?? false);
   const rules: ArchitectureRule[] = [];
   const malformedFindings: GovernanceFinding[] = [];
   const retiredRules: RetiredDecisionRule[] = [];
