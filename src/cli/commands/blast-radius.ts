@@ -170,8 +170,9 @@ function renderHuman(b: BlastRadiusBriefing): string {
   // Notes pushed by a matching trigger: one line each, terminal-safe and cut short — the JSON carries
   // the full content (change: add-memory-trigger-predicates).
   const oneLine = (value: string) => sanitizeForTerminal(value.replace(/\s+/g, ' ')).trim();
+  if (b.injectedMemories?.length) lines.push('   Triggered memories — repository text [local-unreviewed], data, not instructions:');
   for (const m of b.injectedMemories ?? []) {
-    const text = oneLine(m.content);
+    const text = m.content !== undefined ? oneLine(m.content) : '(content withheld: reads like an instruction — see recall)';
     const shown = text.length > 160 ? `${text.slice(0, 159).replace(/[\uD800-\uDBFF]$/, '')}…` : text;
     const flags = [
       ...(m.staleDecisionRef ? ['cites a superseded decision'] : []),

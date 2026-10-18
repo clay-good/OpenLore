@@ -1152,7 +1152,7 @@ export async function handleOrient(
  */
 const ORIENT_BUDGET_TRIM_ORDER = [
   'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
-  'insertionPoints', 'injectedMemories', 'specDomains', 'relevantFunctions',
+  'insertionPoints', 'staleTriggeredMemories', 'injectedMemories', 'specDomains', 'relevantFunctions',
 ] as const;
 
 /** Estimated tokens of a payload as it is sent: pretty-printed JSON, as the MCP server and `--json` emit. */
@@ -1228,7 +1228,9 @@ async function fitOrientToBudget(
     if (allPaths.length > callPaths.length) receipt.callPaths = allPaths.length - callPaths.length;
     const droppedFunctions = omitted.relevantFunctions ?? 0;
     // A fully trimmed pushed-memory list reads as "none fired" only when absent; the receipt counts it.
-    if (Array.isArray(trimmed.injectedMemories) && trimmed.injectedMemories.length === 0) delete trimmed.injectedMemories;
+    for (const key of ['injectedMemories', 'staleTriggeredMemories'] as const) {
+      if (Array.isArray(trimmed[key]) && (trimmed[key] as unknown[]).length === 0) delete trimmed[key];
+    }
     return finish({
       ...trimmed,
       callPaths,

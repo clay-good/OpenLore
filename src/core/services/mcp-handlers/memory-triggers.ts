@@ -26,6 +26,8 @@ import type { TraversalIndex } from '../../analyzer/condensation.js';
 import { join } from 'node:path';
 import { MAX_QUERY_LENGTH, SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
 import { readJsonArtifactCached } from './artifact-cache.js';
+import { detectInjectionShapes, type InjectionShape } from '../served-content.js';
+import { redactSecretText } from '../secret-redaction.js';
 
 /** Longest accepted glob, pattern, or domain name. Triggers are repo content and caller-supplied. */
 export const MAX_TRIGGER_TEXT_LENGTH = 256;
@@ -69,8 +71,18 @@ export interface PushedAnchor {
   staleRegionComposition?: StaleRegionComposition;
 }
 
-/** Anchors summarized per note: the same cap `remember` puts on how many a note may record. */
-const MAX_PUSHED_ANCHORS = 25;
+/** Anchors (and move candidates per anchor) summarized per pushed note; the full list is in recall. */
+const MAX_PUSHED_ANCHORS = 5;
+
+/**
+ * Glob work per briefing, in pattern-character × candidate-character steps (the matcher's cost
+ * bound). Notes past it are reported as not assessed, so a store of thousands of long patterns
+ * cannot hold the event loop. About a few hundred milliseconds at worst.
+ */
+const MAX_GLOB_WORK = 20_000_000;
+
+/** Candidates (paths, symbol names) longer than this are not matched; no real path is. */
+const MAX_GLOB_CANDIDATE_LENGTH = 1024;
 
 /** A string field from a stored anchor, cut to the trigger text bound; anything else is dropped. */
 function anchorText(value: unknown): string | undefined {
@@ -111,7 +123,12 @@ function summarizeAnchors(verdicts: readonly AnchorVerdict[]): PushedAnchor[] {
 export interface InjectedMemory {
   id: string;
   type: MemoryType;
-  content: string;
+  /** Absent when withheld: see `contentWithheld`. Credential-shaped spans are redacted. */
+  content?: string;
+  /** Set when the content reads like an instruction to the agent; the note is named, its text is not served. */
+  contentWithheld?: { reason: 'injection-shaped'; shapes: InjectionShape[] };
+  /** Count of credential-shaped spans redacted from the content. */
+  redacted?: number;
   firedPredicate: FiredPredicate;
   freshness: 'fresh' | 'drifted';
   anchored: boolean;
@@ -151,6 +168,8 @@ export interface MemoryInjection {
   domainsNotAssessed: number;
   /** Live `withinHops` notes that could not be evaluated because no call graph was available. */
   hopsNotAssessed: number;
+  /** Glob-triggered notes past the per-briefing matching budget. */
+  globNotAssessed: number;
   /** True when no graph was available, so anchored notes could not be verified at all. */
   graphUnavailable: boolean;
 }
@@ -172,7 +191,7 @@ export function hasSpecDomainTrigger(memories: readonly unknown[]): boolean {
 // ── spec domains of touched files ───────────────────────────────────────────
 
 /** file → spec domains, from whichever `mapping.json` shape is on disk. */
-type DomainsByFile = Map<string, string[]>;
+type DomainsByFile = Map<string, Set<string>>;
 
 /**
  * Read `file → domains` from the spec link index cache (`openlore mapping refresh`, `generate`).
@@ -188,9 +207,9 @@ function domainsByFile(parsed: unknown): DomainsByFile | null {
   const out: DomainsByFile = new Map();
   const add = (file: unknown, domain: string) => {
     if (typeof file !== 'string' || file.length === 0 || file === '*') return;
-    const list = out.get(file) ?? [];
-    if (!list.includes(domain)) list.push(domain);
-    out.set(file, list);
+    const set = out.get(file);
+    if (set) set.add(domain);
+    else out.set(file, new Set([domain]));
   };
   for (const row of rows) {
     if (row === null || typeof row !== 'object') continue;
@@ -209,7 +228,7 @@ function domainsByFile(parsed: unknown): DomainsByFile | null {
 export async function specDomainsForFiles(absDir: string, files: readonly string[]): Promise<string[] | undefined> {
   const index = await readJsonArtifactCached(join(absDir, '.openlore', 'analysis', 'mapping.json'), 'trigger-domains-by-file', domainsByFile);
   if (!index) return undefined;
-  return [...new Set(files.flatMap(f => index.get(f) ?? []))].sort();
+  return [...new Set(files.flatMap(f => [...(index.get(f) ?? [])]))].sort();
 }
 
 /**
@@ -415,25 +434,40 @@ export function matchGlob(pattern: string, path: string): boolean {
   return reach[ts.length];
 }
 
-function firstMatch(patternText: string, sortedCandidates: readonly string[]): string | undefined {
+/** Remaining glob work for one briefing; a match that would exceed it is not attempted. */
+interface GlobBudget { left: number; skipped: number }
+
+function firstMatch(patternText: string, sortedCandidates: readonly string[], totalLength: number, budget: GlobBudget): string | undefined | null {
+  const cost = patternText.length * totalLength;
+  if (cost > budget.left) { budget.skipped++; return null; }
+  budget.left -= cost;
   return sortedCandidates.find(c => matchGlob(patternText, c));
+}
+
+interface SortedTouched {
+  files: readonly string[];
+  filesLength: number;
+  names: readonly string[];
+  namesLength: number;
+  domains: readonly string[] | undefined;
 }
 
 /** The predicate that fires for `m` against `touched`, or undefined. A trigger is reported over `pinned`. */
 function firedPredicate(
   m: AnchoredMemory,
-  touched: { files: readonly string[]; names: readonly string[]; domains: readonly string[] | undefined },
+  touched: SortedTouched,
   view: GraphFreshnessView,
   probe: HopProbe | undefined,
+  budget: GlobBudget,
 ): FiredPredicate | undefined {
   const trigger = storedTrigger(m);
   if (trigger) {
     if ('fileGlob' in trigger) {
-      const matched = firstMatch(trigger.fileGlob, touched.files);
-      if (matched !== undefined) return { kind: 'fileGlob', pattern: trigger.fileGlob, matched };
+      const matched = firstMatch(trigger.fileGlob, touched.files, touched.filesLength, budget);
+      if (typeof matched === 'string') return { kind: 'fileGlob', pattern: trigger.fileGlob, matched };
     } else if ('symbolPattern' in trigger) {
-      const matched = firstMatch(trigger.symbolPattern, touched.names);
-      if (matched !== undefined) return { kind: 'symbolPattern', pattern: trigger.symbolPattern, matched };
+      const matched = firstMatch(trigger.symbolPattern, touched.names, touched.namesLength, budget);
+      if (typeof matched === 'string') return { kind: 'symbolPattern', pattern: trigger.symbolPattern, matched };
     } else if ('specDomain' in trigger) {
       if (touched.domains?.includes(trigger.specDomain)) return { kind: 'specDomain', domain: trigger.specDomain };
     } else if (probe) {
@@ -508,11 +542,17 @@ export function selectInjectedMemories(
   },
 ): MemoryInjection {
   // Candidates sorted once, so the first match is deterministic and cheap to find per note.
-  const sortedTouched = {
-    files: [...touched.files].sort(),
-    names: [...new Set(touched.symbols.flatMap(s => (s.className ? [s.name, `${s.className}.${s.name}`] : [s.name])))].sort(),
+  const short = (c: string) => c.length <= MAX_GLOB_CANDIDATE_LENGTH;
+  const files = [...new Set(touched.files)].filter(short).sort();
+  const names = [...new Set(touched.symbols.flatMap(s => (s.className ? [s.name, `${s.className}.${s.name}`] : [s.name])))].filter(short).sort();
+  const sortedTouched: SortedTouched = {
+    files,
+    filesLength: files.reduce((n, f) => n + f.length, 0),
+    names,
+    namesLength: names.reduce((n, f) => n + f.length, 0),
     domains: touched.domains,
   };
+  const budget: GlobBudget = { left: MAX_GLOB_WORK, skipped: 0 };
   const fired: Array<{ m: AnchoredMemory; p: FiredPredicate }> = [];
   let domainsNotAssessed = 0;
   let hopsNotAssessed = 0;
@@ -522,7 +562,7 @@ export function selectInjectedMemories(
     if (trigger && 'specDomain' in trigger && touched.domains === undefined) domainsNotAssessed++;
     if (trigger && 'withinHops' in trigger && !opts.probe) hopsNotAssessed++;
     if (!opts.includePinned && storedTrigger(m) === undefined) continue;
-    const p = firedPredicate(m, sortedTouched, view, opts.probe);
+    const p = firedPredicate(m, sortedTouched, view, opts.probe, budget);
     if (!p || (p.kind === 'pinned' && !opts.includePinned)) continue;
     fired.push({ m, p });
   }
@@ -552,11 +592,16 @@ export function selectInjectedMemories(
     const cut = m.content.length > MAX_INJECTED_CONTENT_LENGTH;
     // Never end on half a surrogate pair.
     const kept = cut ? m.content.slice(0, MAX_INJECTED_CONTENT_LENGTH).replace(/[\uD800-\uDBFF]$/, '') : m.content;
+    // Pushed text nobody asked for this turn: credentials are redacted, and text shaped like an
+    // instruction to the agent is not served at all — the receipt names the note for recall.
+    const redaction = redactSecretText(kept);
+    const shapes = [...new Set(detectInjectionShapes(redaction.value).map(x => x.shape))].sort();
     injected.push({
       id: m.id,
       // The stored type is repo content: outside the closed set it reads as `note`, as in recall.
       type: m.type && (MEMORY_TYPES as readonly string[]).includes(m.type) ? m.type : 'note',
-      content: kept,
+      ...(shapes.length ? { contentWithheld: { reason: 'injection-shaped' as const, shapes } } : { content: redaction.value }),
+      ...(redaction.redactions.count > 0 ? { redacted: redaction.redactions.count } : {}),
       firedPredicate: p,
       freshness: f.freshness,
       anchored: f.anchored,
@@ -580,7 +625,10 @@ export function selectInjectedMemories(
       item.verify = true;
     }
   }
-  return { injected, stale, omitted, staleOmitted, authoritative, domainsNotAssessed, hopsNotAssessed, graphUnavailable: opts.graphUnavailable === true };
+  return {
+    injected, stale, omitted, staleOmitted, authoritative, domainsNotAssessed, hopsNotAssessed,
+    globNotAssessed: budget.skipped, graphUnavailable: opts.graphUnavailable === true,
+  };
 }
 
 /**
@@ -593,6 +641,9 @@ export function injectionFields(inj: MemoryInjection): {
   injectedMemoriesNote?: string;
 } {
   const notes: string[] = [];
+  if (inj.globNotAssessed > 0) notes.push(`${inj.globNotAssessed} glob-triggered memor${inj.globNotAssessed === 1 ? 'y was' : 'ies were'} not assessed: the briefing's glob matching budget was spent.`);
+  const withheld = inj.injected.filter(m => m.contentWithheld).length;
+  if (withheld > 0) notes.push(`${withheld} pushed memor${withheld === 1 ? 'y reads' : 'ies read'} like an instruction to the agent; content withheld (see contentWithheld) — read it with recall and judge it yourself.`);
   if (inj.hopsNotAssessed > 0) notes.push(`${inj.hopsNotAssessed} withinHops-triggered memor${inj.hopsNotAssessed === 1 ? 'y was' : 'ies were'} not assessed: no call graph — run "openlore analyze".`);
   if (inj.domainsNotAssessed > 0) notes.push(`${inj.domainsNotAssessed} specDomain-triggered memor${inj.domainsNotAssessed === 1 ? 'y was' : 'ies were'} not assessed: no spec link index — run "openlore mapping refresh".`);
   if (inj.omitted > 0) notes.push(`${inj.omitted} more triggered or pinned memor${inj.omitted === 1 ? 'y' : 'ies'} matched but ${inj.omitted === 1 ? 'was' : 'were'} not pushed (cap ${MAX_INJECTED_MEMORIES}) — call recall to see them.`);
