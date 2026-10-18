@@ -155,6 +155,73 @@ describe('carryForwardContinuity (disk)', () => {
     });
   }
 
+  describe('one baseline per symbol (add-memory-anchor-verdicts)', () => {
+    const file = 'src/tax.ts';
+    const v1 = 'export function computeTax(amount: number) {\n  return amount * 0.2;\n}\n';
+    const v2 = v1.replace('return', '// edited\n  return');
+    const reindex = async (src: string, name: string): Promise<FunctionNode> => {
+      await writeFile(join(root, file), src);
+      const n = node({ id: `${file}::${name}`, name, filePath: file, signature: `function ${name}(amount: number)`, startIndex: 0, endIndex: src.length });
+      const st = EdgeStore.open(EdgeStore.dbPath(storeDir));
+      st.clearAll();
+      st.insertNodes([n]);
+      st.setFileHash(file, createHash('sha256').update(src).digest('hex'));
+      st.close();
+      return n;
+    };
+    const anchorFor = (n: FunctionNode, body: string, spanText?: string) => ({
+      nodeId: n.id, stableId: n.stableId, symbolName: n.name, filePath: file, contentHash: hashSpan(body), ...(spanText ? { spanText } : {}),
+    });
+
+    it('ignores a leftover bodyHash once no live span anchor remains', async () => {
+      const n1 = await reindex(v1, 'computeTax');
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+        { id: 'plain', kind: 'note', content: 'pure', anchors: [anchorFor(n1, v1)], recordedAt: new Date(0).toISOString() },
+        { id: 'span', kind: 'note', content: 'rate', anchors: [anchorFor(n1, v1, 'return amount * 0.2;')], recordedAt: new Date(0).toISOString() },
+      ] });
+      let old = snapshotOldNodes(storeDir);
+      await reindex(v2, 'computeTax');
+      await carryForwardContinuity(root, old, storeDir); // both anchors get bodyHash v2
+      const s = await loadMemoryStore(root);
+      s.memories = s.memories.map((m) => (m.id === 'span' ? { ...m, invalidatedAt: new Date(1).toISOString() } : m));
+      await saveMemoryStore(root, s);
+      old = snapshotOldNodes(storeDir);
+      await reindex(v1, 'computeTax'); // reverted: the plain anchor's recorded body is current again
+      await carryForwardContinuity(root, old, storeDir);
+      old = snapshotOldNodes(storeDir);
+      await reindex(v1.replace('computeTax', 'calculateTax'), 'calculateTax');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+    });
+
+    it('carries a span-anchored symbol through two renames in consecutive analyses', async () => {
+      const n1 = await reindex(v1, 'computeTax');
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+        { id: 'span', kind: 'note', content: 'rate', anchors: [anchorFor(n1, v1, 'return amount * 0.2;')], recordedAt: new Date(0).toISOString() },
+      ] });
+      let old = snapshotOldNodes(storeDir);
+      await reindex(v1.replace('computeTax', 'calculateTax'), 'calculateTax');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+      old = snapshotOldNodes(storeDir);
+      await reindex(v1.replace('computeTax', 'taxFor'), 'taxFor');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+      expect((await loadMemoryStore(root)).memories[0].anchors[0]).toMatchObject({ symbolName: 'taxFor' });
+    });
+
+    it('uses a span anchor recorded after an edit before any analysis wrote a bodyHash', async () => {
+      const n1 = await reindex(v1, 'computeTax');
+      await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [
+        { id: 'plain', kind: 'note', content: 'pure', anchors: [anchorFor(n1, v1)], recordedAt: new Date(0).toISOString() },
+      ] });
+      const n2 = await reindex(v2, 'computeTax');
+      const s = await loadMemoryStore(root);
+      s.memories.push({ id: 'span', kind: 'note', content: 'rate', anchors: [anchorFor(n2, v2, 'return amount * 0.2;')], recordedAt: new Date(5).toISOString() });
+      await saveMemoryStore(root, s);
+      const old = snapshotOldNodes(storeDir);
+      await reindex(v2.replace('computeTax', 'calculateTax'), 'calculateTax');
+      expect((await carryForwardContinuity(root, old, storeDir)).carried).toHaveLength(1);
+    });
+  });
+
   it('does not let the automatic baseline write blow up a hostile store (add-memory-anchor-verdicts)', async () => {
     const file = 'src/tax.ts';
     const v1 = 'export function computeTax(amount: number) {\n  return amount * 0.2;\n}\n';

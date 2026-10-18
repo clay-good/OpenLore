@@ -44,6 +44,7 @@ import {
   unknownPolicyCodes,
   classifyFindings,
   resolveEnforcementClass,
+  type EnforcementPolicy,
   type GovernanceFinding,
   CORPUS_INTENT_FINDING_CODES,
   ARCHITECTURE_FINDING_CODES,
@@ -372,7 +373,8 @@ export async function collectGovernanceFindings(
   // the policy makes this code blocking or frozen: the advisory default must not
   // turn every other blocking code's gate into "unavailable".
   {
-    const gated = policy['memory-anchor-lost'] === 'blocking' || policy['memory-anchor-lost'] === 'frozen';
+    const gatedClass = resolveEnforcementClass('memory-anchor-lost', policy as EnforcementPolicy);
+    const gated = gatedClass === 'blocking' || gatedClass === 'frozen';
     const incomplete = (reason: string) => {
       caveats.push(`memory-anchor-lost check incomplete: ${reason}`);
       if (gated) failedCodes.add('memory-anchor-lost');
@@ -387,7 +389,7 @@ export async function collectGovernanceFindings(
         // No content key (an imported bundle) proves nothing either way: disclose it,
         // but do not call it a change or fail the gate on it.
         if (loss.unverifiedFiles?.length) {
-          caveats.push(`memory-anchor-lost: ${loss.unverifiedFiles.length} anchored file(s) have no recorded content key in the index (for example an imported bundle); run openlore analyze to verify them`);
+          caveats.push(`memory-anchor-lost: ${loss.unverifiedFiles.length} anchored file(s) have no recorded content key in the index (for example an imported bundle); run openlore analyze --reanalyze to verify them`);
         }
         assessedCodes.add('memory-anchor-lost');
       }
@@ -414,7 +416,8 @@ export async function collectGovernanceFindings(
     // Its store load is read-only now, so a torn notes.json throws here instead of
     // being renamed away. Advisory keeps its fail-soft behavior: only a blocking or
     // frozen policy fails the gate on an incomplete check (add-memory-anchor-verdicts).
-    if (policy['stale-decision-reference'] === 'blocking' || policy['stale-decision-reference'] === 'frozen') {
+    const staleClass = resolveEnforcementClass('stale-decision-reference', policy as EnforcementPolicy);
+    if (staleClass === 'blocking' || staleClass === 'frozen') {
       failedCodes.add('stale-decision-reference');
     }
   }

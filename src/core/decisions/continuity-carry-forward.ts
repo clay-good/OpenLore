@@ -279,18 +279,22 @@ function symbolBodyBaselines(
   rootPath: string,
   store: EdgeStore,
   memories: ReadonlyArray<{ anchors?: readonly StructuralAnchor[]; invalidatedAt?: string }>,
+  pairByFrom: ReadonlyMap<string, ContinuityPair>,
 ): Map<string, string> {
   const out = new Map<string, string>();
   const view = makeFreshnessView(store, rootPath);
+  const reads = new Map<string, string | null>();
   for (const m of memories) {
     if (m.invalidatedAt || !Array.isArray(m.anchors)) continue;
     for (const a of m.anchors) {
-      if (!a?.nodeId || out.has(a.nodeId) || spanTextOf(a) === undefined) continue;
+      if (!a?.nodeId || spanTextOf(a) === undefined) continue;
+      const nodeId = pairByFrom.get(fromKey(a.nodeId))?.to.id ?? a.nodeId;
+      if (out.has(nodeId)) continue;
       // Offsets must describe the file; the hash is of the raw span, as continuity hashes.
-      if (!view.nodeSource?.(a.nodeId)) continue;
-      const node = store.getNode(a.nodeId);
-      const raw = node ? nodeSpanText(rootPath, node, new Map()) : undefined;
-      if (raw !== undefined) out.set(a.nodeId, hashSpan(raw));
+      if (!view.nodeSource?.(nodeId)) continue;
+      const node = store.getNode(nodeId);
+      const raw = node ? nodeSpanText(rootPath, node, reads) : undefined;
+      if (raw !== undefined) out.set(nodeId, hashSpan(raw));
     }
   }
   return out;
@@ -328,15 +332,31 @@ export async function carryForwardContinuity(
   };
   for (const m of memStore.memories) collect(m.anchors);
   for (const d of decisionStore.decisions) collect(d.anchors);
-  // A live anchor's last-analyzed body (see symbolBodyBaselines) is the one baseline
-  // a symbol's anchors share, so it decides over any one anchor's recorded body.
+  // A symbol with a live span anchor uses the body its anchors share (see
+  // symbolBodyBaselines); before any analysis wrote one, the most recently recorded
+  // live span anchor's own baseline, which a span anchor recorded after an edit has
+  // and an older plain anchor does not. Without a live span anchor `bodyHash` is not
+  // read at all, so a leftover one never overrides the baseline main would use.
+  const spanBaseline = new Map<string, { body?: string; recorded?: { at: string; hash: string } }>();
   for (const m of memStore.memories) {
     if (m.invalidatedAt || !Array.isArray(m.anchors)) continue;
     for (const a of m.anchors) {
-      const body = a?.nodeId ? bodyHashOf(a) : undefined;
-      const entry = body ? anchoredSymbols.get(a.nodeId!) : undefined;
-      if (entry && body) entry.contentHash = body;
+      if (!a?.nodeId || spanTextOf(a) === undefined) continue;
+      const entry = spanBaseline.get(a.nodeId) ?? {};
+      const body = bodyHashOf(a);
+      if (body && (!entry.body || body < entry.body)) entry.body = body;
+      const at = typeof m.recordedAt === 'string' ? m.recordedAt : '';
+      if (a.contentHash && (!entry.recorded || at > entry.recorded.at
+        || (at === entry.recorded.at && a.contentHash < entry.recorded.hash))) {
+        entry.recorded = { at, hash: a.contentHash };
+      }
+      spanBaseline.set(a.nodeId, entry);
     }
+  }
+  for (const [nodeId, b] of spanBaseline) {
+    const entry = anchoredSymbols.get(nodeId);
+    const hash = b.body ?? b.recorded?.hash;
+    if (entry && hash) entry.contentHash = hash;
   }
   if (anchoredSymbols.size === 0) return EMPTY_SUMMARY;
 
@@ -356,17 +376,55 @@ export async function carryForwardContinuity(
 
   let result: ReturnType<typeof computeContinuity>;
   let rebaselined: Map<string, string>;
+  let pairByFrom: Map<string, ContinuityPair>;
+  let ambiguousByFrom: Map<string, AmbiguousContinuity>;
   try {
     result = buildContinuity(rootPath, store, oldNodes, anchoredSymbols);
-    rebaselined = symbolBodyBaselines(rootPath, store, memStore.memories);
+    pairByFrom = new Map(result.pairs.map((p) => [fromKey(p.from.nodeId), p]));
+    ambiguousByFrom = new Map(result.ambiguous.map((a) => [fromKey(a.from.nodeId), a]));
+    // Baselines for the symbols the anchors will name AFTER this run's carries, so a
+    // symbol renamed now is ready for its next rename.
+    rebaselined = symbolBodyBaselines(rootPath, store, memStore.memories, pairByFrom);
   } finally {
     try { store.close(); } catch { /* ignore */ }
   }
 
+  let memoriesUpdated = 0;
+  let decisionsUpdated = 0;
+  if (result.pairs.length > 0 || result.ambiguous.length > 0) {
+    const atCommit = await getHeadCommit(rootPath);
+
+    // Persist memory re-anchors.
+    if (memStore.memories.some((m) => m.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
+      await updateMemoryStore(rootPath, (store_) => ({
+        ...store_,
+        memories: store_.memories.map((m) => {
+          const { anchors, changed } = reanchorAnchors(m.anchors, pairByFrom, ambiguousByFrom, atCommit);
+          if (changed) memoriesUpdated++;
+          return changed ? { ...m, anchors } : m;
+        }),
+      }));
+    }
+
+    // Persist decision re-anchors (only decisions that carry explicit anchors).
+    if (decisionStore.decisions.some((d) => d.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
+      await updateDecisionStore(rootPath, (store_) => ({
+        ...store_,
+        decisions: store_.decisions.map((d) => {
+          if (!d.anchors?.length) return d;
+          const { anchors, changed } = reanchorAnchors(d.anchors, pairByFrom, ambiguousByFrom, atCommit);
+          if (changed) decisionsUpdated++;
+          return changed ? { ...d, anchors } : d;
+        }),
+      }));
+    }
+  }
+
   if (rebaselined.size > 0) {
     // Best effort and bounded: this write is automatic, and notes.json is repo content.
-    // It must never stop the carries below, and it must not turn a small hostile store
-    // into a huge one by re-serializing it (deep nesting pretty-prints quadratically).
+    // It runs after the carries and must never undo them, and it must not turn a small
+    // hostile store into a huge one by re-serializing it (deep nesting pretty-prints
+    // quadratically).
     try {
       const stale = (a: StructuralAnchor) => !!a?.nodeId && rebaselined.has(a.nodeId) && bodyHashOf(a) !== rebaselined.get(a.nodeId);
       const rebase = (memories: MemoryStore['memories']) => memories.map((m) => {
@@ -374,9 +432,11 @@ export async function carryForwardContinuity(
         if (m.invalidatedAt || !Array.isArray(m.anchors) || !m.anchors.some(stale)) return m;
         return { ...m, anchors: m.anchors.map((a) => (stale(a) ? { ...a, bodyHash: rebaselined.get(a.nodeId!)! } : a)) };
       });
-      if (memStore.memories.some((m) => !m.invalidatedAt && Array.isArray(m.anchors) && m.anchors.some(stale))) {
+      // Read after the carries above, so the anchors already name their carried symbols.
+      const current = await loadMemoryStore(rootPath);
+      if (current.memories.some((m) => !m.invalidatedAt && Array.isArray(m.anchors) && m.anchors.some(stale))) {
         const before = await stat(join(memoryDir(rootPath), MEMORY_NOTES_FILE)).then((s) => s.size, () => 0);
-        const after = JSON.stringify({ ...memStore, memories: rebase(memStore.memories) }, null, 2).length;
+        const after = JSON.stringify({ ...current, memories: rebase(current.memories) }, null, 2).length;
         if (after <= Math.max(before * 2, before + MAX_BASELINE_WRITE_GROWTH)) {
           await updateMemoryStore(rootPath, (store_) => ({ ...store_, memories: rebase(store_.memories) }));
         }
@@ -387,38 +447,5 @@ export async function carryForwardContinuity(
   }
 
   if (result.pairs.length === 0 && result.ambiguous.length === 0) return EMPTY_SUMMARY;
-
-  const pairByFrom = new Map(result.pairs.map((p) => [fromKey(p.from.nodeId), p]));
-  const ambiguousByFrom = new Map(result.ambiguous.map((a) => [fromKey(a.from.nodeId), a]));
-  const atCommit = await getHeadCommit(rootPath);
-
-  let memoriesUpdated = 0;
-  let decisionsUpdated = 0;
-
-  // Persist memory re-anchors.
-  if (memStore.memories.some((m) => m.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
-    await updateMemoryStore(rootPath, (store_) => ({
-      ...store_,
-      memories: store_.memories.map((m) => {
-        const { anchors, changed } = reanchorAnchors(m.anchors, pairByFrom, ambiguousByFrom, atCommit);
-        if (changed) memoriesUpdated++;
-        return changed ? { ...m, anchors } : m;
-      }),
-    }));
-  }
-
-  // Persist decision re-anchors (only decisions that carry explicit anchors).
-  if (decisionStore.decisions.some((d) => d.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
-    await updateDecisionStore(rootPath, (store_) => ({
-      ...store_,
-      decisions: store_.decisions.map((d) => {
-        if (!d.anchors?.length) return d;
-        const { anchors, changed } = reanchorAnchors(d.anchors, pairByFrom, ambiguousByFrom, atCommit);
-        if (changed) decisionsUpdated++;
-        return changed ? { ...d, anchors } : d;
-      }),
-    }));
-  }
-
   return { carried: result.pairs, ambiguous: result.ambiguous, memoriesUpdated, decisionsUpdated };
 }

@@ -182,7 +182,8 @@ function offsetsState(
         : candidates.some((c) => key === factKey({ path: node.filePath, ...c })) ? 'current' : 'changed';
     }
   } catch {
-    state = 'unknown';
+    // A store that cannot be read proves nothing current: fail toward distrust.
+    state = 'changed';
   }
   memo.set(node.filePath, state);
   return state;

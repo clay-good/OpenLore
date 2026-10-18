@@ -96,7 +96,7 @@ const SPAN_NOT_RECORDED_TEXT: Record<SpanNotRecordedReason, string> = {
   ambiguous: 'the text occurs more than once in the symbol\'s body',
   unreadable: 'the symbol\'s source could not be read',
   'index-stale': 'the file changed since it was analyzed; run openlore analyze and record it again',
-  'index-unverified': 'the analysis has no record of this file\'s content (for example an imported index bundle), so the span cannot be located safely; run openlore analyze and record it again',
+  'index-unverified': 'the analysis has no record of this file\'s content (for example an imported index bundle), so the span cannot be located safely; run openlore analyze --reanalyze and record it again',
 };
 
 export async function handleRemember(
