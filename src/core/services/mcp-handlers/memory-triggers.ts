@@ -141,8 +141,10 @@ export interface InjectedMemory {
   staleRegion?: true;
   /** The note cites a superseded decision: its stated basis is stale, so it is not cleanly fresh (as in recall). */
   staleDecisionRef?: StaleRef[];
-  /** Other pushed notes that make an authoritative claim about the same symbol — reconcile before relying on either. */
+  /** Other notes or decisions that make an authoritative claim about the same symbol — reconcile before relying on either (first 10). */
   unreconciledWith?: string[];
+  /** Total conflicting records, when more than `unreconciledWith` lists. */
+  unreconciledWithTotal?: number;
   /** The stored content was longer than a recorded note may be and was cut; call recall for the record. */
   truncated?: true;
 }
@@ -512,6 +514,32 @@ function contradictionPartners(
   return out;
 }
 
+/** Partner ids listed per pushed note; the total is reported beside them. */
+const MAX_UNRECONCILED_LISTED = 10;
+
+/**
+ * The view with its per-symbol lookups memoized for one briefing: many notes share anchors, and each
+ * lookup is a statement against the edge store, so this keeps the cost proportional to the distinct
+ * anchors rather than the notes.
+ */
+function memoizedView(view: GraphFreshnessView): GraphFreshnessView {
+  const hashes = new Map<string, string | undefined>();
+  const relocations = new Map<string, { nodeId: string; contentHash: string } | undefined>();
+  const out: GraphFreshnessView = Object.assign(Object.create(Object.getPrototypeOf(view)) as GraphFreshnessView, view, {
+    nodeHash: (nodeId: string) => {
+      if (!hashes.has(nodeId)) hashes.set(nodeId, view.nodeHash(nodeId));
+      return hashes.get(nodeId);
+    },
+  });
+  if (view.resolveStableId) {
+    out.resolveStableId = (stableId: string) => {
+      if (!relocations.has(stableId)) relocations.set(stableId, view.resolveStableId!(stableId));
+      return relocations.get(stableId);
+    };
+  }
+  return out;
+}
+
 /** Code-unit order: locale-independent, so the push order is the same on every machine. */
 function compareText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -558,6 +586,7 @@ export function selectInjectedMemories(
     decisions?: readonly PendingDecision[];
   },
 ): MemoryInjection {
+  view = memoizedView(view);
   // Candidates sorted once, so the first match is deterministic and cheap to find per note.
   const short = (c: string) => c.length <= MAX_GLOB_CANDIDATE_LENGTH;
   const files = [...new Set(touched.files)].filter(short).sort();
@@ -634,13 +663,22 @@ export function selectInjectedMemories(
   // recall applies. The pool is every note that fired (so a capped one still flags its partner) plus
   // every live note and active decision sharing a symbol with one — whether or not it fired.
   authoritative.push(...contradictionPartners(memories, opts.decisions ?? [], authoritative, view));
+  const partners = new Map<string, Set<string>>();
   for (const group of findUnreconciled(authoritative)) {
     for (const item of injected) {
       if (!group.memberIds.includes(item.id)) continue;
       const others = group.memberIds.filter(id => id !== item.id);
-      item.unreconciledWith = [...new Set([...(item.unreconciledWith ?? []), ...others])].sort();
+      partners.set(item.id, new Set([...(partners.get(item.id) ?? []), ...others]));
       item.verify = true;
     }
+  }
+  // Bounded: a store of thousands of notes on one symbol must not inflate every pushed receipt.
+  for (const item of injected) {
+    const ids = partners.get(item.id);
+    if (!ids) continue;
+    const sorted = [...ids].sort(compareText);
+    item.unreconciledWith = sorted.slice(0, MAX_UNRECONCILED_LISTED);
+    if (sorted.length > MAX_UNRECONCILED_LISTED) item.unreconciledWithTotal = sorted.length;
   }
   return {
     injected, stale, omitted, staleOmitted, authoritative, domainsNotAssessed, hopsNotAssessed,

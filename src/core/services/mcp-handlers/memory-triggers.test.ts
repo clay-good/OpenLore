@@ -599,6 +599,17 @@ describe('contradictions and anchor provenance, as recall serves them', () => {
     expect(rejected.injected[0].unreconciledWith).toBeUndefined();
   });
 
+  it('bounds unreconciledWith and reports the total; looks up each shared anchor once', () => {
+    const anchor = { nodeId: 'f::x', symbolName: 'x', filePath: 'f', contentHash: 'h' };
+    let lookups = 0;
+    const view = { nodeHash: () => { lookups++; return 'h'; }, fileExists: () => true, fileHash: () => 'h' };
+    const notes = Array.from({ length: 50 }, (_, i) => ({ id: `n${String(i).padStart(2, '0')}`, kind: 'note', content: 'c', anchors: [anchor], recordedAt: '', pinned: true }) as AnchoredMemory);
+    const out = selectInjectedMemories(notes, { files: [], symbols: [], domains: [] }, view, { includePinned: true });
+    expect(out.injected[0].unreconciledWith).toHaveLength(10);
+    expect(out.injected[0].unreconciledWithTotal).toBe(49);
+    expect(lookups).toBe(1);
+  });
+
   it('skips entries OpenLore could not have written: null anchors, odd ids', () => {
     const hostile = [
       { id: 'nullanchor', content: 'c', anchors: [null], pinned: true },
