@@ -54,6 +54,16 @@ bodies); a linear (KMP) matcher; non-blocking, regular-file-only anchored reads;
 loads in the gate (a torn `notes.json` is no longer renamed away, and corpus integrity now blocks on
 it); and bounded automatic store writes.
 
+Shipped and archived since: `add-deprecation-propagation` (2026-10-18, narrowed) — the walk records
+each declaration's standard deprecation marker (JSDoc `@deprecated` past `export`/modifiers and a
+`const x =` binding, Go `Deprecated:` paragraph, Python PEP 702 decorators) as `deprecation` on the
+node, persisted in the edge store (schema v13), and `get_language_support` derives a
+`deprecationMarkers` capability from the same set. `structural_diff` lists calls the diff adds into
+marked symbols (`deprecatedCalls`), resolving targets only in the changed files, through the
+index's own edge, or by a unique name for a plain call, and each is an advisory
+`deprecated-symbol-use` finding. Deferred: the `blast_radius` field, migration-hint resolution,
+Java/Kotlin annotations, and Python's `.. deprecated::` directive.
+
 Shipped and archived since: `add-memory-claim-verdicts` (2026-10-18) — `remember` takes optional
 `claims` in `verify_claim`'s grammar (at most 10); each must be confirmed now or nothing is stored
 and every verdict is returned. `recall` checks a returned note's claims again with the same

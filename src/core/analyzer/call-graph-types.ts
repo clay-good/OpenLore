@@ -153,6 +153,11 @@ export interface FunctionNode {
   fanOut: number;
   /** First meaningful line of the doc comment / docstring, extracted from AST positions */
   docstring?: string;
+  /**
+   * Set when the declaration carries its language's standard deprecation marker (change:
+   * add-deprecation-propagation): the marker's replacement hint, `''` when it gives none.
+   */
+  deprecation?: string;
   /** Declaration line(s) up to opening brace/colon, whitespace-normalized */
   signature?: string;
   /** True for synthetic nodes representing unresolved external/stdlib calls (e.g. fetch, https.request) */

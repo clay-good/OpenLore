@@ -139,7 +139,7 @@ import { classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.j
 
 // Docstring/declaration extraction helpers — extracted to ./call-graph-extract.ts
 // (internal, not re-exported; see the banner at the original section site below).
-import { extractDocstringBefore, extractDeclaration } from './call-graph-extract.js';
+import { extractDocstringBefore, extractDeclaration, deprecationOf } from './call-graph-extract.js';
 
 // External-node helper — extracted to ./call-graph-external.ts (internal, not
 // re-exported; classifyExternal + the EXTERNAL_* tables stay private to that module).
@@ -1365,6 +1365,7 @@ async function extractTSGraph(
       fanIn: 0,
       fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'TypeScript'),
+      ...deprecationOf(content, fnNode.startIndex, language),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'TypeScript'),
       ...(language === 'TypeScript'
         ? { callArity: declarationCallArity(valueNode ?? nameCapture.node.parent ?? fnNode, 'TypeScript') }
@@ -1559,6 +1560,7 @@ async function extractPyGraph(
       fanIn: 0,
       fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Python'),
+      ...deprecationOf(content, fnNode.startIndex, 'Python'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Python'),
       callArity: declarationCallArity(nameCapture.node.parent ?? fnNode, 'Python', className !== undefined),
     });
@@ -1742,6 +1744,7 @@ async function extractGoGraph(
       endIndex: fnNode.endIndex,
       fanIn: 0, fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Go'),
+      ...deprecationOf(content, fnNode.startIndex, 'Go'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Go'),
     });
 
