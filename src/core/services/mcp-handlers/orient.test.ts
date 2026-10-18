@@ -684,6 +684,27 @@ describe('handleOrient', () => {
     expect(fooPath!.callees.length).toBeGreaterThan(0);
   });
 
+  it('labels a call-path neighbour only a synthesized edge links, and lists it once (change: label-synthesized-hops)', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult({ id: 'src/foo.ts::doFoo', name: 'doFoo', filePath: 'src/foo.ts' })]);
+    const node = (id: string) => ({ id, name: id.split('::')[1], filePath: id.split('::')[0], fanIn: 0, fanOut: 0, isAsync: false, language: 'TypeScript', startIndex: 0, endIndex: 50 });
+    const msg = { callerId: 'src/foo.ts::doFoo', calleeId: 'src/srv.ts::onMsg', calleeName: 'onMsg', confidence: 'synthesized', synthesizedBy: 'message-topology', line: 3 };
+    const direct = { callerId: 'src/foo.ts::doFoo', calleeId: 'src/bar.ts::doBar', calleeName: 'doBar', confidence: 'import', line: 2 };
+    const synthDup = { ...direct, confidence: 'synthesized', synthesizedBy: 'event-channel', line: 4 };
+    vi.mocked(readCachedContext).mockResolvedValue({
+      edgeStore: {
+        getCallers: () => [],
+        getCallees: (id: string) => (id === 'src/foo.ts::doFoo' ? [direct, msg, synthDup] : []),
+        getNode: (id: string) => (id.includes('::') ? node(id) : null),
+        getDecisionsForFiles: () => [],
+        getProvenanceForFiles: () => [],
+      },
+    } as never);
+    const result = await handleOrient('/tmp/proj', 'foo task') as { callPaths: Array<{ function: string; callees: Array<{ name: string; via?: string }> }> };
+    const callees = result.callPaths.find(p => p.function === 'doFoo')!.callees;
+    expect(callees.map(c => [c.name, c.via])).toEqual([['doBar', undefined], ['onMsg', 'message-topology']]);
+  });
+
   it('surfaces local provenance (last author + PR) for relevant files (spec-18)', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     vi.mocked(VectorIndex.search).mockResolvedValue([

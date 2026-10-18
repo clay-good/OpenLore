@@ -113,6 +113,7 @@ function enclosingClassName(node: RegistryNode | null, language: string): string
     }
     if (
       cur.type === 'class_declaration' ||
+      cur.type === 'abstract_class_declaration' ||
       cur.type === 'class_definition' ||
       cur.type === 'class'
     ) {

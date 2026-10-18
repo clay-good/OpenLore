@@ -197,6 +197,15 @@ describe('handleFindPath', () => {
     expect(r.path.chain[1].via).toBe('synthesized');
   });
 
+  it('hopVia names a synthesized hop and never a direct one (change: label-synthesized-hops)', async () => {
+    const { hopVia } = await import('./confidence-boundary.js');
+    expect(hopVia(undefined)).toBeUndefined();
+    expect(hopVia({ confidence: 'import' })).toBeUndefined();
+    expect(hopVia({ confidence: 'synthesized', synthesizedBy: 'event-channel' })).toBe('event-channel');
+    expect(hopVia({ confidence: 'synthesized' })).toBe('synthesized');
+    expect(hopVia({ confidence: 'synthesized', synthesizedBy: 'Bad Rule' })).toBe('synthesized');
+  });
+
   it('attaches a confidenceBoundary on the no-path answer', async () => {
     mockCtx.mockResolvedValue({ callGraph: graph([entry, writer], [], { entryPoints: [entry] }) } as never);
     const r = await handleFindPath('/p', 'role:entrypoint', 'file:db/writer.ts') as { path: null; confidenceBoundary: { complete: boolean } };

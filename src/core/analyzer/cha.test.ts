@@ -480,3 +480,49 @@ describe('arityFromSignature', () => {
     expect(overrides.has('server.go::Base.Ready->server.go::Derived.Ready')).toBe(true);
   });
 });
+
+// `abstract class` is its own tree-sitter-typescript node type. Missing it, an abstract class's
+// methods lost their class (two such classes' same-named methods collapsed into one node, keeping
+// the second span) and its inheritance went unrecorded (found dogfooding socket.io's
+// cluster-adapter.ts, whose two adapters are both abstract).
+describe('TypeScript abstract classes', () => {
+  it('qualifies abstract-class methods so same-named methods in one file stay distinct', async () => {
+    const b = await build(`
+      export abstract class ClusterAdapter { onMessage(m: unknown) { return 1; } }
+      export abstract class ClusterAdapterWithHeartbeat extends ClusterAdapter { onMessage(m: unknown) { return 2; } }
+      export function onMessage() { return 3; }
+    `);
+    const ids = [...b.nodes.values()].filter(n => n.name === 'onMessage').map(n => [n.id, n.className]).sort();
+    expect(ids).toEqual([
+      ['src/shapes.ts::ClusterAdapter.onMessage', 'ClusterAdapter'],
+      ['src/shapes.ts::ClusterAdapterWithHeartbeat.onMessage', 'ClusterAdapterWithHeartbeat'],
+      ['src/shapes.ts::onMessage', undefined],
+    ]);
+  });
+
+  it('dispatches through an abstract method signature like an interface method', async () => {
+    const b = await build(`
+      abstract class Sh { abstract area(): number; }
+      class Sq extends Sh { area() { return 1; } }
+      function tot(s: Sh) { return s.area(); }
+    `);
+    expect(methodId(b, 'Sh', 'area')).toBe('src/shapes.ts::Sh.area');
+    expect(b.inheritanceEdges.some(e => e.parentId.endsWith('::Sh') && e.childId.endsWith('::Sq'))).toBe(true);
+    expect(synthEdges(b).some(e => e.callerId === methodId(b, 'Sh', 'area') && e.calleeId === methodId(b, 'Sq', 'area'))).toBe(true);
+  });
+
+  it('records an abstract class\'s extends and implements', async () => {
+    const b = await build(`
+      interface Handler { handle(): number; }
+      abstract class Base implements Handler { handle() { return 1; } }
+      abstract class Mid extends Base { handle() { return 2; } }
+      class Leaf extends Mid { handle() { return 3; } }
+      function run(h: Base) { return h.handle(); }
+    `);
+    const has = (parent: string, child: string): boolean =>
+      b.inheritanceEdges.some(e => e.parentId.endsWith(`::${parent}`) && e.childId.endsWith(`::${child}`));
+    expect(has('Base', 'Mid')).toBe(true);
+    expect(has('Mid', 'Leaf')).toBe(true);
+    expect(has('Handler', 'Base')).toBe(true);
+  });
+});
