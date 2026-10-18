@@ -216,6 +216,30 @@ describe('orient pushes triggered memories with a receipt', () => {
     expect(r.injectedMemories?.map(m => m.firedPredicate)).toEqual([{ kind: 'specDomain', domain: 'routing' }]);
   });
 
+  it('fires a specDomain trigger from the current spec link index shape (links + footprintFiles)', async () => {
+    await writeFile(join(await analysisDir(), 'mapping.json'), JSON.stringify({
+      version: 8,
+      links: [{ requirement: 'R', domain: 'routing', specFile: 'openspec/specs/routing/spec.md', state: 'unmapped', anchors: [], functions: [], footprintFiles: ['src/routes/a.ts'] }],
+      orphanFunctions: [],
+    }), 'utf-8');
+    await remember('routing changes need an ADR', { trigger: { specDomain: 'routing' } });
+    expect((await orient()).injectedMemories?.map(m => m.firedPredicate)).toEqual([{ kind: 'specDomain', domain: 'routing' }]);
+  });
+
+  it('says a specDomain trigger was not assessed when there is no spec link index', async () => {
+    await remember('routing changes need an ADR', { trigger: { specDomain: 'routing' } });
+    const r = await orient();
+    expect(r.injectedMemories).toBeUndefined();
+    expect(r.injectedMemoriesNote).toMatch(/1 specDomain-triggered memory was not assessed: no spec link index/);
+  });
+
+  it('a fully trimmed pushed list is absent, not an empty array; the receipt counts it', async () => {
+    await remember('pinned convention '.repeat(50), { pinned: true });
+    const r = await orient('x', { tokenBudget: 1 });
+    expect(r.injectedMemories).toBeUndefined();
+    expect(r.budget?.omitted?.injectedMemories).toBe(1);
+  });
+
   it('pushes a pinned memory for an unrelated task, receipted as pinned', async () => {
     await remember('the repo uses tabs', { pinned: true });
     touch('src/c.ts');
@@ -364,6 +388,17 @@ describe('selectInjectedMemories', () => {
       mem({ id: 't-new', trigger: { fileGlob: 'src/**' }, recordedAt: '2026-02-01T00:00:00Z' }),
     ], touched, UNVERIFIABLE_VIEW, { includePinned: true });
     expect(out.injected.map(m => m.id)).toEqual(['t-new', 't-old', 'p1']);
+  });
+
+  it('ranks by specificity so a broad glob cannot crowd out a precise hit', () => {
+    const probe = () => ({ matched: 'handleGet', distance: 1 });
+    const out = selectInjectedMemories([
+      mem({ id: 'glob', trigger: { fileGlob: '**' }, recordedAt: '2026-09-01T00:00:00Z' }),
+      mem({ id: 'sym', trigger: { symbolPattern: 'handle*' }, recordedAt: '2026-01-01T00:00:00Z' }),
+      mem({ id: 'hops', trigger: { withinHops: 3 }, anchors: [], recordedAt: '2026-01-01T00:00:00Z' }),
+      mem({ id: 'pin', pinned: true, recordedAt: '2026-12-01T00:00:00Z' }),
+    ], { ...touched, domains: [] }, UNVERIFIABLE_VIEW, { includePinned: true, probe });
+    expect(out.injected.map(m => m.id)).toEqual(['hops', 'sym', 'glob', 'pin']);
   });
 
   it('excludes pinned-only notes when includePinned is false (blast_radius)', () => {

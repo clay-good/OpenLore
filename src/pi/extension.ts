@@ -1368,7 +1368,7 @@ export const NAV_TOOLS: NavToolSpec[] = [
         specDomain: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'A spec domain the task touches.' })),
         withinHops: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Anchor is within N call hops of a touched symbol.' })),
       }, { additionalProperties: false, maxProperties: 1, description: 'Optional: give exactly one predicate; the memory is pushed into orient/blast_radius briefings when it matches what they touch.' })),
-      pinned: Type.Optional(Type.Boolean({ description: 'Always push this memory into orient briefings.' })),
+      pinned: Type.Optional(Type.Boolean({ description: 'Push this memory into every orient briefing (at most 10 notes are pushed; the rest are counted).' })),
     }),
   },
   {

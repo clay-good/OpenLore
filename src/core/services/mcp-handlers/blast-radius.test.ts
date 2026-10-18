@@ -12,8 +12,6 @@ vi.mock('./utils.js', () => ({
   readCachedContext: vi.fn(),
   // The no-index verdict the real diagnosis returns when nothing is on disk.
   diagnoseIndexUnservable: vi.fn(async () => ({ error: 'No analysis found. Run analyze_codebase first.', notReady: true, reason: 'index-absent', remedy: 'openlore analyze' })),
-  loadMappingIndex: vi.fn(async () => null),
-  specsForFile: vi.fn(() => []),
 }));
 
 vi.mock('../../drift/git-diff.js', () => ({
@@ -443,7 +441,6 @@ describe('computeBlastRadius', () => {
 
   it('pushes notes whose trigger matches the diff, with receipts, and leaves pinned notes to orient (change: add-memory-trigger-predicates)', async () => {
     const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
-    const { loadMappingIndex, specsForFile } = await import('./utils.js');
     const dir = await mkdtemp(join(tmpdir(), 'openlore-blast-trigger-'));
     try {
       await mkdir(join(dir, OPENLORE_DIR, 'memory'), { recursive: true });
@@ -458,13 +455,16 @@ describe('computeBlastRadius', () => {
           note('pin00001', { pinned: true }),
         ],
       }), 'utf-8');
-      vi.mocked(loadMappingIndex).mockResolvedValueOnce({} as never);
-      vi.mocked(specsForFile).mockReturnValue([{ domain: 'mcp-handlers', specFile: 'x' }] as never);
+      // The current spec link index shape: a file-only anchor is domain evidence.
+      await mkdir(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true });
+      await writeFile(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, 'mapping.json'), JSON.stringify({
+        version: 8, links: [{ requirement: 'R', domain: 'mcp-handlers', specFile: 's', state: 'unmapped', anchors: [], functions: [], footprintFiles: ['src/utils.ts'] }],
+      }), 'utf-8');
       const b = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
       expect(b.injectedMemories?.map(m => [m.id, m.firedPredicate])).toEqual([
-        ['dom00001', { kind: 'specDomain', domain: 'mcp-handlers' }],
-        ['glob0001', { kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' }],
         ['sym00001', { kind: 'symbolPattern', pattern: 'validate*', matched: 'validateDirectory' }],
+        ['glob0001', { kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' }],
+        ['dom00001', { kind: 'specDomain', domain: 'mcp-handlers' }],
       ]);
       expect(b.headline).toMatch(/3 triggered memories to read/);
 
@@ -472,13 +472,11 @@ describe('computeBlastRadius', () => {
       const { getChangedFiles, getRepoPrefix } = await import('../../drift/git-diff.js');
       vi.mocked(getRepoPrefix).mockResolvedValue('pkg/');
       vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [{ path: 'pkg/src/utils.ts' }, { path: 'other/x.ts' }] } as never);
-      vi.mocked(loadMappingIndex).mockResolvedValueOnce({} as never);
       const sub = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
       expect(sub.injectedMemories?.find(m => m.id === 'glob0001')?.firedPredicate)
         .toEqual({ kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' });
       expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
     } finally {
-      vi.mocked(specsForFile).mockReturnValue([] as never);
       const { getRepoPrefix } = await import('../../drift/git-diff.js');
       vi.mocked(getRepoPrefix).mockResolvedValue('');
       await rm(dir, { recursive: true, force: true });

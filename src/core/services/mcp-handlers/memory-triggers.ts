@@ -18,7 +18,9 @@ import { memoryFreshness, isStaleRegionOnly, findUnreconciled, type AnchoredItem
 import { staleRefsInText, type RetirementGraph, type StaleRef } from './stale-decision-reference.js';
 import { MEMORY_TYPES, type AnchoredMemory, type MemoryTrigger, type MemoryType } from '../../../types/index.js';
 import type { TraversalIndex } from '../../analyzer/condensation.js';
+import { join } from 'node:path';
 import { MAX_QUERY_LENGTH, SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
+import { readJsonArtifactCached } from './artifact-cache.js';
 
 /** Longest accepted glob, pattern, or domain name. Triggers are repo content and caller-supplied. */
 const MAX_TRIGGER_TEXT_LENGTH = 256;
@@ -46,7 +48,8 @@ export type FiredPredicate =
 export interface TouchedSet {
   files: readonly string[];
   symbols: ReadonlyArray<{ id?: string; name: string; className?: string }>;
-  domains: readonly string[];
+  /** Spec domains of the touched files; `undefined` when no spec link index exists to say. */
+  domains: readonly string[] | undefined;
 }
 
 /** A note pushed into a briefing: its content plus the receipt (id, fired predicate, verdict). */
@@ -85,6 +88,51 @@ export interface MemoryInjection {
   staleOmitted: number;
   /** Every authoritative (non-orphaned) note that fired, before the cap — for a caller's contradiction check. */
   authoritative: AnchoredItem[];
+  /** Live `specDomain` notes that could not be evaluated because no spec link index exists. */
+  domainsNotAssessed: number;
+}
+
+// ── spec domains of touched files ───────────────────────────────────────────
+
+/** file → spec domains, from whichever `mapping.json` shape is on disk. */
+type DomainsByFile = Map<string, string[]>;
+
+/**
+ * Read `file → domains` from the spec link index cache (`openlore mapping refresh`, `generate`).
+ * Both shapes are read: the current one (`links`, with exact `functions` and file-only
+ * `footprintFiles` — a file anchor is domain evidence, which is all a domain trigger asks) and the
+ * legacy one (`mappings`). The artifact is untrusted: anything not of those shapes is skipped.
+ */
+function domainsByFile(parsed: unknown): DomainsByFile | null {
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const r = parsed as Record<string, unknown>;
+  const rows = Array.isArray(r.links) ? r.links : Array.isArray(r.mappings) ? r.mappings : null;
+  if (!rows) return null;
+  const out: DomainsByFile = new Map();
+  const add = (file: unknown, domain: string) => {
+    if (typeof file !== 'string' || file.length === 0 || file === '*') return;
+    const list = out.get(file) ?? [];
+    if (!list.includes(domain)) list.push(domain);
+    out.set(file, list);
+  };
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object') continue;
+    const { domain, functions, footprintFiles } = row as Record<string, unknown>;
+    if (typeof domain !== 'string' || domain.length === 0) continue;
+    if (Array.isArray(functions)) for (const fn of functions) if (fn && typeof fn === 'object') add((fn as Record<string, unknown>).file, domain);
+    if (Array.isArray(footprintFiles)) for (const file of footprintFiles) add(file, domain);
+  }
+  return out;
+}
+
+/**
+ * The spec domains covering `files`, sorted; `undefined` when the repository has no spec link index
+ * (domain triggers are then reported as not assessed, never as "no match").
+ */
+export async function specDomainsForFiles(absDir: string, files: readonly string[]): Promise<string[] | undefined> {
+  const index = await readJsonArtifactCached(join(absDir, '.openlore', 'analysis', 'mapping.json'), 'trigger-domains-by-file', domainsByFile);
+  if (!index) return undefined;
+  return [...new Set(files.flatMap(f => index.get(f) ?? []))].sort();
 }
 
 /**
@@ -287,7 +335,7 @@ function firstMatch(patternText: string, sortedCandidates: readonly string[]): s
 /** The predicate that fires for `m` against `touched`, or undefined. A trigger is reported over `pinned`. */
 function firedPredicate(
   m: AnchoredMemory,
-  touched: { files: readonly string[]; names: readonly string[]; domains: readonly string[] },
+  touched: { files: readonly string[]; names: readonly string[]; domains: readonly string[] | undefined },
   view: GraphFreshnessView,
   probe: HopProbe | undefined,
 ): FiredPredicate | undefined {
@@ -300,7 +348,7 @@ function firedPredicate(
       const matched = firstMatch(trigger.symbolPattern, touched.names);
       if (matched !== undefined) return { kind: 'symbolPattern', pattern: trigger.symbolPattern, matched };
     } else if ('specDomain' in trigger) {
-      if (touched.domains.includes(trigger.specDomain)) return { kind: 'specDomain', domain: trigger.specDomain };
+      if (touched.domains?.includes(trigger.specDomain)) return { kind: 'specDomain', domain: trigger.specDomain };
     } else if (probe) {
       const hit = probe(anchorNodeIds(m, view), trigger.withinHops);
       if (hit) return { kind: 'withinHops', hops: trigger.withinHops, matched: hit.matched, distance: hit.distance };
@@ -309,11 +357,15 @@ function firedPredicate(
   return m.pinned === true ? { kind: 'pinned' } : undefined;
 }
 
+const PREDICATE_RANK: Record<FiredPredicate['kind'], number> = {
+  withinHops: 0, symbolPattern: 1, fileGlob: 2, specDomain: 3, pinned: 4,
+};
+
 /**
  * Select the notes a briefing pushes: every live note whose trigger matches `touched`, plus every
  * pinned note when `includePinned`. Each carries its freshness verdict; an orphaned note goes to
- * `stale` (receipt only, no content). The order is deterministic — trigger matches before pinned,
- * then newest first, then id — and both lists are bounded by {@link MAX_INJECTED_MEMORIES} with the
+ * `stale` (receipt only, no content). The order is deterministic — by predicate specificity, then
+ * newest first, then id — and both lists are bounded by {@link MAX_INJECTED_MEMORIES} with the
  * remainder counted.
  */
 export function selectInjectedMemories(
@@ -329,15 +381,23 @@ export function selectInjectedMemories(
     domains: touched.domains,
   };
   const fired: Array<{ m: AnchoredMemory; p: FiredPredicate }> = [];
+  let domainsNotAssessed = 0;
   for (const m of memories) {
     if (!isWellFormed(m) || m.invalidatedAt) continue;
+    if (touched.domains === undefined) {
+      const trigger = storedTrigger(m);
+      if (trigger && 'specDomain' in trigger) domainsNotAssessed++;
+    }
     if (!opts.includePinned && storedTrigger(m) === undefined) continue;
     const p = firedPredicate(m, sortedTouched, view, opts.probe);
     if (!p || (p.kind === 'pinned' && !opts.includePinned)) continue;
     fired.push({ m, p });
   }
+  // Most specific evidence first: a call-hop hit (nearer first), then a symbol, a file, a domain,
+  // and pinned last — so a broad glob cannot crowd a precise hit out of the cap.
   fired.sort((a, b) =>
-    Number(a.p.kind === 'pinned') - Number(b.p.kind === 'pinned') ||
+    PREDICATE_RANK[a.p.kind] - PREDICATE_RANK[b.p.kind] ||
+    (a.p.kind === 'withinHops' && b.p.kind === 'withinHops' ? a.p.distance - b.p.distance : 0) ||
     String(b.m.recordedAt ?? '').localeCompare(String(a.m.recordedAt ?? '')) ||
     a.m.id.localeCompare(b.m.id));
 
@@ -382,7 +442,7 @@ export function selectInjectedMemories(
       item.verify = true;
     }
   }
-  return { injected, stale, omitted, staleOmitted, authoritative };
+  return { injected, stale, omitted, staleOmitted, authoritative, domainsNotAssessed };
 }
 
 /**
@@ -395,6 +455,7 @@ export function injectionFields(inj: MemoryInjection): {
   injectedMemoriesNote?: string;
 } {
   const notes: string[] = [];
+  if (inj.domainsNotAssessed > 0) notes.push(`${inj.domainsNotAssessed} specDomain-triggered memor${inj.domainsNotAssessed === 1 ? 'y was' : 'ies were'} not assessed: no spec link index — run "openlore mapping refresh".`);
   if (inj.omitted > 0) notes.push(`${inj.omitted} more triggered or pinned memor${inj.omitted === 1 ? 'y' : 'ies'} matched but ${inj.omitted === 1 ? 'was' : 'were'} not pushed (cap ${MAX_INJECTED_MEMORIES}) — call recall to see them.`);
   if (inj.staleOmitted > 0) notes.push(`${inj.staleOmitted} more orphaned triggered memor${inj.staleOmitted === 1 ? 'y' : 'ies'} not listed (cap ${MAX_INJECTED_MEMORIES}).`);
   // Pushed content is repository text nobody asked for in this turn: say what it is.

@@ -48,7 +48,7 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import { injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, UNVERIFIABLE_VIEW } from './memory-triggers.js';
+import { injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import type { MemoryFreshness } from '../../../types/index.js';
@@ -668,7 +668,11 @@ export async function handleOrient(
         ...(r.record.className ? { className: r.record.className } : {}),
       }));
       const touchedFiles = [...new Set(touchedResults.map((r) => r.record.filePath))];
-      const touched = { files: touchedFiles, symbols: touchedSymbols, domains: specDomains.map((d) => d.domain) };
+      const fileDomains = await specDomainsForFiles(absDir, touchedFiles);
+      const domains = fileDomains === undefined
+        ? (specDomains.length > 0 ? specDomains.map((d) => d.domain) : undefined)
+        : [...new Set([...fileDomains, ...specDomains.map((d) => d.domain)])].sort();
+      const touched = { files: touchedFiles, symbols: touchedSymbols, domains };
       const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
       const hops = maxTriggerHops(memStore.memories);
       const probe = cg && hops > 0
@@ -1219,6 +1223,8 @@ async function fitOrientToBudget(
     const callPaths = allPaths.slice(0, kept);
     if (allPaths.length > callPaths.length) receipt.callPaths = allPaths.length - callPaths.length;
     const droppedFunctions = omitted.relevantFunctions ?? 0;
+    // A fully trimmed pushed-memory list reads as "none fired" only when absent; the receipt counts it.
+    if (Array.isArray(trimmed.injectedMemories) && trimmed.injectedMemories.length === 0) delete trimmed.injectedMemories;
     return finish({
       ...trimmed,
       callPaths,

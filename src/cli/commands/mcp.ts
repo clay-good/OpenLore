@@ -2280,7 +2280,7 @@ export const TOOL_DEFINITIONS = [
             withinHops: { type: 'integer', minimum: 1, maximum: 20, description: 'Call hops from a touched symbol.' },
           },
         },
-        pinned: { type: 'boolean', description: 'Always push into orient.' },
+        pinned: { type: 'boolean', description: 'Push into every orient briefing (cap 10).' },
       },
       required: ['content'],
     },

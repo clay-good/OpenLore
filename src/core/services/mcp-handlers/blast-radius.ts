@@ -18,14 +18,14 @@
  * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
  */
 
-import { validateDirectory, readCachedContext, diagnoseIndexUnservable, loadMappingIndex, specsForFile } from './utils.js';
+import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
 import { loadDecisionStore } from '../../decisions/store.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import {
-  injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, UNVERIFIABLE_VIEW,
+  injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
   type InjectedMemory, type StaleTriggeredMemory,
 } from './memory-triggers.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
@@ -627,10 +627,7 @@ async function triggeredMemoriesForDiff(
     const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
     const prefix = (await getRepoPrefix(absDir)) ?? '';
     const files = changedFiles.map(f => reframeRepoPath(f, prefix)).filter((f): f is string => f !== null);
-    const mapping = await loadMappingIndex(absDir);
-    const domains = mapping
-      ? [...new Set(files.flatMap(f => specsForFile(mapping, f).map(s => s.domain)))].sort()
-      : [];
+    const domains = await specDomainsForFiles(absDir, files);
     const { decisions } = await loadDecisionStore(absDir);
     const symbols = seeds.map(s => ({ id: s.id, name: s.name, ...(s.className ? { className: s.className } : {}) }));
     const view = ctx.edgeStore ? makeFreshnessView(ctx.edgeStore, absDir) : UNVERIFIABLE_VIEW;

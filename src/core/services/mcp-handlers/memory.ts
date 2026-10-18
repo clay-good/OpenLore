@@ -124,8 +124,8 @@ export async function handleRemember(
     // A call-hop trigger walks from the anchored symbol; with no symbol anchor it could never fire.
     if (validTrigger && 'withinHops' in validTrigger && !anchors.some((a) => a.nodeId)) {
       return {
-        error: 'trigger.withinHops needs at least one anchor that resolves to a symbol in the analyzed graph ' +
-          '(pass anchors with a symbol, and run "openlore analyze" first if the repo has no analysis).',
+        error: 'trigger.withinHops needs at least one anchor that resolves to exactly one symbol in the analyzed graph. ' +
+          'Pass anchors with a symbol — add its file when the name exists in several files — and run "openlore analyze" first if the repo has no analysis.',
       };
     }
 
