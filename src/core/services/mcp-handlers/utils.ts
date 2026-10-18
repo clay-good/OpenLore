@@ -1140,19 +1140,37 @@ export interface MappingIndex {
 
 /**
  * Build the bidirectional index for one parsed `mapping.json`, or null when the
- * artifact is not the shape this reads.
+ * artifact is not a shape this reads.
  *
- * Untrusted artifact: the top-level shape is validated before use. A malformed
- * mapping (non-object, or no `mappings` array) fails closed.
+ * Two shapes: the current spec link index (`links`, written by `openlore mapping refresh` and
+ * `generate`) and the legacy `mappings`. In the current shape only `functions` — uniquely
+ * resolved anchors — are function coverage; a file-only anchor (`footprintFiles`) says the file
+ * belongs to the requirement, so it maps file → requirement for domain lookups but adds no
+ * function. Untrusted artifact: rows that are not that shape are skipped, and a file with neither
+ * array fails closed.
  */
 function buildMappingIndex(parsed: unknown): MappingIndex | null {
-  if (parsed === null || typeof parsed !== 'object' || !Array.isArray((parsed as { mappings?: unknown }).mappings)) {
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const raw = parsed as { links?: unknown; mappings?: unknown };
+  let entries: MappingEntry[];
+  let footprint: Array<{ entry: MappingEntry; files: string[] }> = [];
+  if (Array.isArray(raw.links)) {
+    ({ entries, footprint } = entriesFromLinks(raw.links));
+  } else if (Array.isArray(raw.mappings)) {
+    entries = raw.mappings as MappingEntry[];
+  } else {
     return null;
   }
-  const entries = (parsed as { mappings: MappingEntry[] }).mappings ?? [];
 
   const byFile = new Map<string, MappingEntry[]>();
   const byDomain = new Map<string, MappingEntry[]>();
+  const addFile = (file: string, entry: MappingEntry) => {
+    if (!file || file === '*') return;
+    const fileList = byFile.get(file) ?? [];
+    // avoid duplicates (same requirement may appear multiple times per file)
+    if (!fileList.includes(entry)) fileList.push(entry);
+    byFile.set(file, fileList);
+  };
 
   for (const entry of entries) {
     // index by domain
@@ -1161,16 +1179,38 @@ function buildMappingIndex(parsed: unknown): MappingIndex | null {
     byDomain.set(entry.domain, domainList);
 
     // index by each referenced file
-    for (const fn of entry.functions) {
-      if (!fn.file || fn.file === '*') continue;
-      const fileList = byFile.get(fn.file) ?? [];
-      // avoid duplicates (same requirement may appear multiple times per file)
-      if (!fileList.includes(entry)) fileList.push(entry);
-      byFile.set(fn.file, fileList);
-    }
+    for (const fn of entry.functions) addFile(fn.file, entry);
   }
+  for (const { entry, files } of footprint) for (const file of files) addFile(file, entry);
 
   return { byFile, byDomain, entries };
+}
+
+/** Rows of the current spec link index as mapping entries, plus each row's file-only anchors. */
+function entriesFromLinks(links: unknown[]): { entries: MappingEntry[]; footprint: Array<{ entry: MappingEntry; files: string[] }> } {
+  const entries: MappingEntry[] = [];
+  const footprint: Array<{ entry: MappingEntry; files: string[] }> = [];
+  const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+  for (const row of links) {
+    if (row === null || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    if (!text(r.domain) || !text(r.requirement)) continue;
+    const functions = (Array.isArray(r.functions) ? r.functions : [])
+      .filter((f): f is Record<string, unknown> => f !== null && typeof f === 'object' && text((f as Record<string, unknown>).name) && text((f as Record<string, unknown>).file))
+      .map(f => ({
+        name: f.name as string,
+        file: f.file as string,
+        line: typeof f.line === 'number' ? f.line : 0,
+        kind: typeof f.kind === 'string' ? f.kind : 'function',
+        // Every linked function is an exactly, uniquely resolved anchor.
+        confidence: 'exact',
+      }));
+    const entry: MappingEntry = { requirement: r.requirement, service: '', domain: r.domain, specFile: text(r.specFile) ? r.specFile : '', functions };
+    entries.push(entry);
+    const files = (Array.isArray(r.footprintFiles) ? r.footprintFiles : []).filter(text);
+    if (files.length) footprint.push({ entry, files });
+  }
+  return { entries, footprint };
 }
 
 /**
