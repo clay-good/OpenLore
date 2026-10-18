@@ -334,7 +334,7 @@ A **spec-store binding** declares the code repositories an external spec reposit
 | `target-unresolved` | error | a declared target name is not registered in the federation registry |
 | `target-missing` | error | a resolved target's registered path no longer exists |
 | `index-missing` | warn | a resolved target has no built `.openlore` index |
-| `index-stale` | warn | a resolved target's index is stale vs its working tree |
+| `index-stale` | warn | a resolved target's index changed since its registry baseline (re-baseline with `openlore federation add`) |
 | `reference-missing` | warn | a declared reference is unresolved or its path is gone |
 
 The report is `sound` when it carries no error-severity finding. Every finding includes a pasteable `remediation`. Exposed only under `openlore mcp --preset federation`.

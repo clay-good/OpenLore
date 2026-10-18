@@ -52,7 +52,7 @@ export type RepoIndexState =
    * reported as a freshness-checked `indexed`.
    */
   | 'unbaselined'
-  /** Index present but its live fingerprint differs from the registry (rebuild it). */
+  /** Index present but its fingerprint differs from the registry baseline (re-register to re-baseline). */
   | 'stale'
   /** No `.openlore/` index found at the repo path (run `openlore analyze`). */
   | 'unindexed'

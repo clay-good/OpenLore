@@ -34,7 +34,7 @@ export type SpecStoreFindingCode =
   | 'target-missing'      // a resolved target's registered path no longer exists
   | 'index-missing'       // a resolved target has no built `.openlore` index
   | 'index-unbaselined'   // a resolved target has an index but no fingerprint baseline (staleness unassessable)
-  | 'index-stale'         // a resolved target's index is stale vs its working tree
+  | 'index-stale'         // a resolved target's index changed since its registry baseline
   | 'reference-missing'   // a declared reference is unresolved or its path is gone
   | 'certificate-stale';  // a target has a persisted impact certificate whose anchored symbols moved
 
@@ -232,8 +232,11 @@ function resolveTarget(
   if (state === 'stale') {
     return { status, finding: {
       code: 'index-stale', severity: 'warn', subject: name,
-      message: `Target "${name}" index is stale relative to its working tree.`,
-      remediation: `Refresh it: (cd ${entry.path} && openlore analyze)`,
+      // The registry stores the index fingerprint it saw at registration; a different live one means
+      // the target was re-analyzed since. Re-analyzing again cannot clear that — re-registering
+      // (which refreshes the entry in place) is what records the new baseline.
+      message: `Target "${name}" index changed since it was registered (its fingerprint no longer matches the registry baseline).`,
+      remediation: `If the target's current index is the one to use, re-baseline it: openlore federation add ${entry.path} --name ${name}`,
     } };
   }
   return { status };
