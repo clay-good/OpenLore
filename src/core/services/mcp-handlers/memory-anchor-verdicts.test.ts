@@ -25,7 +25,7 @@ import { makeMemoryId } from '../../decisions/memory-store.js';
 import { reanchorAnchors } from '../../decisions/continuity-carry-forward.js';
 import { collectGovernanceFindings } from '../../../cli/commands/enforce.js';
 import type { ContinuityPair } from '../../analyzer/continuity.js';
-import { factKey } from '../../analyzer/pass1-fact-cache.js';
+import { factKey, pass1InputFor } from '../../analyzer/pass1-fact-cache.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
 import type { StructuralAnchor } from '../../../types/index.js';
 
@@ -330,6 +330,61 @@ describe('round-1 review regressions', () => {
     const loss = await detectMemoryAnchorLoss(root);
     expect(loss.checked).toBe(40);
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('trusts the Pass-1 key of a JavaScript file whose nodes are labeled TypeScript', async () => {
+    const js = 'function big() {\n  if (a > 0) retry();\n}\n';
+    await writeFile(join(root, 'src', 'big.js'), js, 'utf-8');
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    const store = EdgeStore.openForAnalyze(EdgeStore.dbPath(dir));
+    store.clearAll();
+    store.insertNodes([{ ...nodeFor('src/big.js', 'big', js), language: 'TypeScript' }]);
+    store.putPass1Facts([{ filePath: 'src/big.js', contentHash: factKey({ path: 'src/big.js', language: 'JavaScript', content: js }), facts: 'null' }], 'stamp');
+    store.close();
+    const r = (await handleRemember(root, 'retry rule', [{ symbol: 'big', file: 'src/big.js', span: 'if (a > 0) retry();' }])) as { anchors: Array<{ span?: boolean }>; spanNotRecorded?: unknown };
+    expect(r.spanNotRecorded).toBeUndefined();
+    expect(r.anchors[0].span).toBe(true);
+    expect((await detectMemoryAnchorLoss(root)).staleFiles).toEqual([]);
+  });
+
+  it('trusts the Pass-1 key of an HTML file, taken over its blanked scripts', async () => {
+    const html = '<html><script>\nfunction big() {\n  if (a > 0) retry();\n}\n</script></html>\n';
+    await writeFile(join(root, 'src', 'page.html'), html, 'utf-8');
+    const input = pass1InputFor('src/page.html', html);
+    expect(input.language).toBe('JavaScript');
+    const start = html.indexOf('function big');
+    const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    const store = EdgeStore.openForAnalyze(EdgeStore.dbPath(dir));
+    store.clearAll();
+    store.insertNodes([{ ...nodeFor('src/page.html', 'big', html, start, html.indexOf('</script>')), language: 'TypeScript' }]);
+    store.putPass1Facts([{ filePath: 'src/page.html', contentHash: factKey({ path: 'src/page.html', ...input }), facts: 'null' }], 'stamp');
+    store.close();
+    const r = (await handleRemember(root, 'retry rule', [{ symbol: 'big', file: 'src/page.html', span: 'if (a > 0) retry();' }])) as { anchors: Array<{ span?: boolean }>; spanNotRecorded?: unknown };
+    expect(r.spanNotRecorded).toBeUndefined();
+    expect(r.anchors[0].span).toBe(true);
+  });
+
+  it('keeps a torn store incomplete on every gate run and never renames it', async () => {
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    await mkdir(join(root, OPENLORE_DIR, 'memory'), { recursive: true });
+    await writeFile(path, '{"memories": [', 'utf-8');
+    for (let run = 0; run < 2; run++) {
+      const gated = await collectGovernanceFindings(root, null, { 'memory-anchor-lost': 'frozen' });
+      expect(gated.failedCodes).toContain('memory-anchor-lost');
+    }
+    expect(await readFile(path, 'utf-8')).toBe('{"memories": [');
+  });
+
+  it('ignores a non-string span in a hostile store instead of failing remember', async () => {
+    await handleRemember(root, 'first', [{ symbol: 'big', file: 'src/big.ts' }]);
+    const path = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const store = JSON.parse(await readFile(path, 'utf-8'));
+    store.memories[0].anchors[0].spanText = 123;
+    await writeFile(path, JSON.stringify(store), 'utf-8');
+    const r = (await handleRemember(root, 'unrelated', [{ file: 'src/big.ts' }])) as { error?: string; id?: string };
+    expect(r.error).toBeUndefined();
+    expect(r.id).toBeTruthy();
+    expect(((await handleRecall(root)) as Recall & { error?: string }).error).toBeUndefined();
   });
 
   it('does not flag two spans in one symbol as unreconciled', async () => {

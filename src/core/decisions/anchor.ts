@@ -33,6 +33,16 @@ import { MAX_SPAN_CANDIDATES } from '../../types/index.js';
  */
 export const MAX_SPAN_CHARS = 2000;
 
+/**
+ * The anchor's span text when it is usable: a non-empty string within
+ * {@link MAX_SPAN_CHARS}. Stores are repo content, so a span of any other shape is
+ * treated as absent (a plain symbol anchor), never hashed or searched.
+ */
+export function spanTextOf(anchor: Pick<StructuralAnchor, 'spanText'>): string | undefined {
+  const t: unknown = anchor.spanText;
+  return typeof t === 'string' && t.length > 0 && t.length <= MAX_SPAN_CHARS ? t : undefined;
+}
+
 /** Stable, reproducible hash of a source span (or whole file). Unnormalized. */
 export function hashSpan(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -145,12 +155,13 @@ function locatedFreshness(
   view: GraphFreshnessView,
 ): Pick<AnchorVerdict, 'freshness' | 'spanCandidates'> {
   const byHash = { freshness: currentHash === anchor.contentHash ? 'fresh' : 'drifted' } as const;
-  if (anchor.spanText === undefined) return byHash;
+  const spanText = spanTextOf(anchor);
+  if (spanText === undefined) return byHash;
   const source = view.nodeSource?.(nodeId);
   // Without the body text, an unchanged whole symbol still proves the span is
   // unchanged (it occurred once at record time); a changed one cannot be checked.
   if (!source) return byHash;
-  const hits = locateSpan(source.text, anchor.spanText, MAX_SPAN_CANDIDATES + 1);
+  const hits = locateSpan(source.text, spanText, MAX_SPAN_CANDIDATES + 1);
   if (hits.length === 0) return { freshness: 'drifted' };
   if (hits.length === 1) return { freshness: 'fresh' };
   return {
@@ -420,7 +431,8 @@ export function findUnreconciled(items: readonly AnchoredItem[]): UnreconciledGr
     for (const a of it.anchors) {
       if (!a.nodeId) continue; // symbol-level only
       // Two spans in one symbol are about different code (add-memory-anchor-verdicts).
-      const key = `${a.stableId ?? a.nodeId}${a.spanText === undefined ? '' : `#${hashSpan(a.spanText)}`}`;
+      const span = spanTextOf(a);
+      const key = `${a.stableId ?? a.nodeId}${span === undefined ? '' : `#${hashSpan(span)}`}`;
       const entry = byKey.get(key) ?? { symbolName: a.symbolName, filePath: a.filePath, ids: new Set<string>() };
       entry.ids.add(it.id);
       byKey.set(key, entry);

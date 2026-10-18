@@ -33,7 +33,7 @@ import type {
   StructuralAnchor,
   ContinuityProvenance,
 } from '../../types/index.js';
-import { hashSpan, locateSpan, MAX_SPAN_CHARS } from './anchor.js';
+import { hashSpan, locateSpan, spanTextOf } from './anchor.js';
 import { nodeSpanText, makeFreshnessView } from './anchor-adapter.js';
 import {
   computeContinuity,
@@ -277,11 +277,12 @@ function spanAnchorBaselines(
   for (const m of memories) {
     if (m.invalidatedAt || !Array.isArray(m.anchors)) continue;
     for (const a of m.anchors) {
-      if (!a?.nodeId || typeof a.spanText !== 'string' || a.spanText.length === 0 || a.spanText.length > MAX_SPAN_CHARS) continue;
+      const span = a?.nodeId ? spanTextOf(a) : undefined;
+      if (span === undefined) continue;
       const key = spanAnchorKey(a);
       if (out.has(key)) continue;
-      const source = view.nodeSource?.(a.nodeId);
-      if (!source || locateSpan(source.text, a.spanText, 2).length !== 1) continue;
+      const source = view.nodeSource?.(a.nodeId!);
+      if (!source || locateSpan(source.text, span, 2).length !== 1) continue;
       const hash = hashSpan(source.text);
       if (hash !== a.contentHash) out.set(key, hash);
     }
@@ -311,15 +312,28 @@ export async function carryForwardContinuity(
   // Collect the distinct symbol-level anchors across both stores. (File-level
   // anchors have no symbol identity to carry.)
   const anchoredSymbols = new Map<string, { nodeId: string; stableId?: string; contentHash?: string }>();
-  const collect = (anchors: readonly StructuralAnchor[] | undefined): void => {
+  // One baseline per symbol: continuity requires a one-to-one match, so a symbol
+  // must not enter twice. When anchors on it disagree, a span anchor's hash wins (an
+  // analysis re-baselines it to the last body its span was verified in, while a plain
+  // anchor keeps its record-time body), and a live record beats a superseded one;
+  // then the smallest hash — never store order (add-memory-anchor-verdicts).
+  const preferred = new Map<string, { anchor: StructuralAnchor; rank: number }>();
+  const collect = (anchors: readonly StructuralAnchor[] | undefined, retired = false): void => {
     for (const a of anchors ?? []) {
       if (!a.nodeId) continue;
-      if (!anchoredSymbols.has(a.nodeId)) {
+      const rank = (retired ? 2 : 0) + (spanTextOf(a) !== undefined ? 0 : 1);
+      const prior = preferred.get(a.nodeId);
+      const better = !prior
+        || rank < prior.rank
+        || (rank === prior.rank && (a.contentHash ?? '') !== ''
+          && ((prior.anchor.contentHash ?? '') === '' || a.contentHash! < prior.anchor.contentHash!));
+      if (better) {
+        preferred.set(a.nodeId, { anchor: a, rank });
         anchoredSymbols.set(a.nodeId, { nodeId: a.nodeId, stableId: a.stableId, contentHash: a.contentHash });
       }
     }
   };
-  for (const m of memStore.memories) collect(m.anchors);
+  for (const m of memStore.memories) collect(m.anchors, !!m.invalidatedAt);
   for (const d of decisionStore.decisions) collect(d.anchors);
   if (anchoredSymbols.size === 0) return EMPTY_SUMMARY;
 
@@ -350,11 +364,13 @@ export async function carryForwardContinuity(
     await updateMemoryStore(rootPath, (store_) => ({
       ...store_,
       memories: store_.memories.map((m) => {
-        if (!m.anchors?.some((a) => a.nodeId && a.spanText !== undefined && rebaselined.has(spanAnchorKey(a)))) return m;
+        // A superseded note is history: its recorded baseline is left as it was.
+        if (m.invalidatedAt || !Array.isArray(m.anchors)) return m;
+        if (!m.anchors.some((a) => a?.nodeId && spanTextOf(a) !== undefined && rebaselined.has(spanAnchorKey(a)))) return m;
         return {
           ...m,
           anchors: m.anchors.map((a) => {
-            const next = a.nodeId && a.spanText !== undefined ? rebaselined.get(spanAnchorKey(a)) : undefined;
+            const next = a.nodeId && spanTextOf(a) !== undefined ? rebaselined.get(spanAnchorKey(a)) : undefined;
             return next !== undefined ? { ...a, contentHash: next } : a;
           }),
         };

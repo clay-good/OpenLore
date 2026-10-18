@@ -363,7 +363,8 @@ export async function collectGovernanceFindings(
   let decisionConstraints: Pick<DecisionConstraintState, 'ledger' | 'retiredRules'> | undefined;
 
   // memory-anchor-lost — always (a freshness pass over recorded notes, no diff).
-  // First, and read-only: a later source's store load may quarantine a torn store.
+  // Read-only, like every store load in the gate: a torn store stays in place and
+  // keeps the check incomplete on every run until it is repaired.
   // An anchored file that changed since analysis can hide or fake a lost anchor,
   // so it marks the assessment incomplete; a content-identical commit does not.
   // Like scenario checkability, an incomplete assessment fails the gate only when
@@ -389,7 +390,7 @@ export async function collectGovernanceFindings(
 
   // stale-decision-reference — always (cheap).
   try {
-    for (const f of await detectStaleDecisionReferences(cwd)) {
+    for (const f of await detectStaleDecisionReferences(cwd, { readOnly: true })) {
       findings.push({
         code: f.code,
         severity: f.severity,

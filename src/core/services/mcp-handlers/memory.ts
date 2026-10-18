@@ -24,6 +24,7 @@ import {
   findUnreconciled,
   isStaleRegionOnly,
   anchorOutcome,
+  spanTextOf,
   MAX_SPAN_CHARS,
   type AnchorOutcome,
   type ReselectionReason,
@@ -708,7 +709,7 @@ function summarizeAnchor(a: StructuralAnchor): { symbol?: string; file: string; 
     file: a.filePath,
     level: a.nodeId ? 'symbol' : 'file',
     // The anchor covers one exact text span inside the symbol (add-memory-anchor-verdicts).
-    ...(a.nodeId && a.spanText !== undefined ? { span: true as const } : {}),
+    ...(a.nodeId && spanTextOf(a) !== undefined ? { span: true as const } : {}),
   };
 }
 

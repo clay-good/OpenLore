@@ -71,7 +71,24 @@ describe('carryForwardContinuity (disk)', () => {
       return n;
     };
     const first = await reindex(v1, 'computeTax');
+    const plain = { nodeId: first.id, stableId: first.stableId, symbolName: 'computeTax', filePath: file, contentHash: hashSpan(v1) };
+    const span = { ...plain, spanText: 'return amount * 0.2;' };
     await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [{
+      // A plain memory first, and a superseded copy of the span memory: neither may
+      // decide the symbol's baseline, whatever their order.
+      id: 'mem-plain',
+      kind: 'note',
+      content: 'computeTax is pure',
+      anchors: [plain],
+      recordedAt: new Date(0).toISOString(),
+    }, {
+      id: 'mem-old',
+      kind: 'note',
+      content: 'old wording',
+      anchors: [span],
+      recordedAt: new Date(0).toISOString(),
+      invalidatedAt: new Date(1).toISOString(),
+    }, {
       id: 'mem-span',
       kind: 'note',
       content: 'the 20% rate is the standard one',
@@ -84,14 +101,18 @@ describe('carryForwardContinuity (disk)', () => {
     let oldNodes = snapshotOldNodes(storeDir);
     await reindex(v2, 'computeTax');
     await carryForwardContinuity(root, oldNodes, storeDir);
-    expect((await loadMemoryStore(root)).memories[0].anchors[0].contentHash).toBe(hashSpan(v2));
+    const afterEdit = await loadMemoryStore(root);
+    const byId = (store: typeof afterEdit, id: string) => store.memories.find((m) => m.id === id)!.anchors[0];
+    expect(byId(afterEdit, 'mem-span').contentHash).toBe(hashSpan(v2));
+    expect(byId(afterEdit, 'mem-old').contentHash).toBe(hashSpan(v1));
+    expect(byId(afterEdit, 'mem-plain').contentHash).toBe(hashSpan(v1));
 
     // Analysis 2: a clean rename now finds its successor.
     oldNodes = snapshotOldNodes(storeDir);
     await reindex(v3, 'calculateTax');
     const summary = await carryForwardContinuity(root, oldNodes, storeDir);
     expect(summary.carried).toHaveLength(1);
-    const a = (await loadMemoryStore(root)).memories[0].anchors[0];
+    const a = (await loadMemoryStore(root)).memories.find((m) => m.id === 'mem-span')!.anchors[0];
     expect(a).toMatchObject({ symbolName: 'calculateTax', spanText: 'return amount * 0.2;', carriedAcross: { reason: 'renamed' } });
   });
 

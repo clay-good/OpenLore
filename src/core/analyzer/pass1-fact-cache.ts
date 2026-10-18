@@ -50,6 +50,9 @@ import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FileExtractResult } from './call-graph-types.js';
 import type { FunctionCfg } from './cfg.js';
+import { MAX_HTML_INLINE_SCRIPT_CHARS } from '../../constants.js';
+import { extractHtmlScripts } from './html-script-extractor.js';
+import { detectLanguage } from './language-detection.js';
 
 /** Set to `1`/`true` to bypass the fact cache for reads (the non-CLI escape hatch). */
 const NO_FACT_CACHE_ENV = 'OPENLORE_NO_FACT_CACHE';
@@ -133,6 +136,20 @@ export interface Pass1CacheDisclosure {
  */
 export function factKey(file: ExtractionInput): string {
   return createHash('sha256').update(file.language).update('\0').update(file.content).digest('hex');
+}
+
+/**
+ * What the call-graph pass extracts for one file: its detected language and content,
+ * with an HTML file's inline scripts blanked into JavaScript. The Pass-1 memo keys on
+ * exactly this, so a reader that recomputes the key must derive it the same way.
+ */
+export function pass1InputFor(path: string, original: string): { content: string; language: string } {
+  const language = detectLanguage(path);
+  if (language === 'unknown' && /\.html?$/i.test(path)) {
+    const blanked = original.length <= MAX_HTML_INLINE_SCRIPT_CHARS ? extractHtmlScripts(original) : null;
+    if (blanked) return { content: blanked, language: 'JavaScript' };
+  }
+  return { content: original, language };
 }
 
 // ── Serialization ────────────────────────────────────────────────────────────

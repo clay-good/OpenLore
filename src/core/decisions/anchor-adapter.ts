@@ -22,7 +22,7 @@ import {
 } from '../../constants.js';
 import { EdgeStore } from '../services/edge-store.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
-import { factKey } from '../analyzer/pass1-fact-cache.js';
+import { factKey, pass1InputFor } from '../analyzer/pass1-fact-cache.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import type { StructuralAnchor, GroundingCertificate } from '../../types/index.js';
 import {
@@ -30,6 +30,7 @@ import {
   resolveSymbolAnchors,
   fileAnchor,
   locateSpan,
+  spanTextOf,
   type AnchorNode,
   type GraphFreshnessView,
 } from './anchor.js';
@@ -114,9 +115,23 @@ function offsetsCurrent(
   let current: boolean;
   try {
     const indexed = store.getFileHash(node.filePath);
-    current = indexed !== null
-      ? indexed === createHash('sha256').update(content).digest('hex')
-      : store.getPass1FactHash(node.filePath) === factKey({ path: node.filePath, language: node.language, content });
+    if (indexed !== null) {
+      current = indexed === createHash('sha256').update(content).digest('hex');
+    } else {
+      // The Pass-1 key hashes what the call-graph pass extracted for the FILE: its
+      // detected language (JavaScript nodes are labeled TypeScript; a .h file may be C
+      // or C++) and its content (an HTML file's scripts are blanked first; blanking
+      // keeps offsets). The key hashes the content, so a match under any candidate
+      // proves the analysis saw exactly this file.
+      const key = store.getPass1FactHash(node.filePath);
+      const input = pass1InputFor(node.filePath, content);
+      const candidates = [
+        input,
+        ...[node.language, ...(/\.h$/i.test(node.filePath) ? ['C', 'C++'] : [])].map((language) => ({ content, language })),
+      ];
+      current = key !== undefined
+        && candidates.some((c) => key === factKey({ path: node.filePath, ...c }));
+    }
   } catch {
     current = false;
   }
@@ -305,7 +320,7 @@ export class AnchorContext {
   fileIndexedAsOnDisk(filePath: string): boolean | undefined {
     const content = readFileCached(this.rootPath, filePath, this.fileCache);
     if (content === null) return undefined;
-    // A file whose symbols were all removed has no node to name its language.
+    // A file whose symbols were all removed has no node; its detected language is a candidate anyway.
     const node = this.store.getNodesForFile(filePath).find((n) => !n.isExternal)
       ?? ({ filePath, language: detectLanguage(filePath) } as FunctionNode);
     return offsetsCurrent(this.store, node, content, this.viewMemo);
@@ -339,7 +354,8 @@ export class AnchorContext {
       if (!node) return undefined;
       // A span anchor was verified by re-locating its text, so its evidence is that
       // text's lines and hash, not the whole symbol's (add-memory-anchor-verdicts).
-      if (anchor.spanText !== undefined) return this.spanCertificate(node, anchor.spanText);
+      const span = spanTextOf(anchor);
+      if (span !== undefined) return this.spanCertificate(node, span);
       const info = this.nodeSpanInfo(node);
       if (!info) return undefined;
       return { symbol: node.name, filePath: node.filePath, lineSpan: info.lineSpan, contentHash: info.contentHash };

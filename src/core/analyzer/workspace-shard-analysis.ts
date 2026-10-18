@@ -17,8 +17,8 @@ import {
   MAX_WORKSPACE_SHARDS,
   type WorkspaceShardReport,
 } from './workspace-shards.js';
-import { INCREMENTAL_CLOSURE_BUDGET, MAX_HTML_INLINE_SCRIPT_CHARS } from '../../constants.js';
-import { extractHtmlScripts } from './html-script-extractor.js';
+import { INCREMENTAL_CLOSURE_BUDGET } from '../../constants.js';
+import { pass1InputFor } from './pass1-fact-cache.js';
 import { readSourceCapped } from './bounded-file-scan.js';
 import { factKey } from './pass1-fact-cache.js';
 
@@ -289,12 +289,7 @@ async function graphInput(rootPath: string, files: readonly string[]): Promise<{
         continue;
       }
       hashes.set(path, createHash('sha256').update(original).digest('hex'));
-      let content = original;
-      let language = detectLanguage(path);
-      if (language === 'unknown' && /\.html?$/i.test(path)) {
-        const blanked = original.length <= MAX_HTML_INLINE_SCRIPT_CHARS ? extractHtmlScripts(original) : null;
-        if (blanked) { content = blanked; language = 'JavaScript'; }
-      }
+      const { content, language } = pass1InputFor(path, original);
       input.push({ path, content, language });
       factKeys.set(path, factKey({ path, content, language }));
     } catch {
