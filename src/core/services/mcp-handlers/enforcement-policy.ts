@@ -317,6 +317,13 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'footprint-escape',
     description: 'A write declared `append` at plan time actually modified existing code (refuting the plan-time shared-append optimism).',
   },
+  // ── deprecation propagation (add-deprecation-propagation) ──
+  'deprecated-symbol-use': {
+    defaultClass: 'advisory',
+    source: 'structural-diff',
+    description: 'A diff adds a call into a symbol marked deprecated by its language\'s standard marker (JSDoc @deprecated, Go "Deprecated:", Python @deprecated). Calls that were already there do not fire it.',
+    remediation: 'New call into deprecated {subject}; follow its replacement hint, or record why the call is needed.',
+  },
   // ── plan_parallel_work (add-parallel-work-plan) ──
   'parallel-work-conflict': {
     defaultClass: 'advisory',

@@ -37,7 +37,8 @@ import {
   type EditNature,
   type DeclaredFootprintInput,
 } from './footprint-escape.js';
-import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
+import { findDeprecatedCalls, deprecatedCallFindings, DEPRECATED_CALLS_CAVEAT } from './deprecated-calls.js';
+import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
 
@@ -336,7 +337,8 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
   const edgeKey = (e: { callerId: string; calleeName: string }) => `${e.callerId}\0${e.calleeName}`;
   const oldEdges = new Map(oldGraph.edges.filter(isCallEdge).map(e => [edgeKey(e), e]));
   const newEdges = new Map(newGraph.edges.filter(isCallEdge).map(e => [edgeKey(e), e]));
-  const addedEdges = [...newEdges].filter(([k]) => !oldEdges.has(k)).map(([, e]) => edgePair(e, newGraph));
+  const addedEdgesRaw: CallEdge[] = [...newEdges].filter(([k]) => !oldEdges.has(k)).map(([, e]) => e);
+  const addedEdges = addedEdgesRaw.map(e => edgePair(e, newGraph));
   const removedEdges = [...oldEdges].filter(([k]) => !newEdges.has(k)).map(([, e]) => edgePair(e, oldGraph));
 
   // ── Stale callers — callers (in the canonical graph) of a node whose signature
@@ -385,6 +387,13 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     escapeBlock = await buildEscapeBlock(absDir, input, modifiedSymbols, limit);
   }
 
+  // ── New calls into deprecated code (add-deprecation-propagation) ─────────────
+  // Advisory by default; an operator can make `deprecated-symbol-use` blocking in enforcement.policy.
+  const deprecatedCalls = findDeprecatedCalls(addedEdgesRaw, newGraph, ctx?.edgeStore);
+  const deprecatedGate = deprecatedCalls.length
+    ? classifyFindings(deprecatedCallFindings(deprecatedCalls), effectivePolicy(await readOpenLoreConfig(absDir)))
+    : undefined;
+
   return {
     base: resolvedBase,
     head: input.headRef ?? 'working tree',
@@ -397,6 +406,7 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
       removedEdges: removedEdges.length,
       staleCallers: totalStale,
       renameCandidates: renameCandidates.length,
+      deprecatedCallsAdded: deprecatedCalls.length,
     },
     added: added.map(nodeRef).sort(byFileName).slice(0, limit),
     removed: removedOut.slice(0, limit),
@@ -405,6 +415,15 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     edges: { added: addedEdges.slice(0, limit), removed: removedEdges.slice(0, limit) },
     ...(staleCallerNote ? { note: staleCallerNote } : {}),
     ...(escapeBlock ? { escapeAnalysis: escapeBlock } : {}),
+    ...(deprecatedGate ? {
+      deprecatedCalls: {
+        added: deprecatedCalls.slice(0, limit),
+        // Blocking findings are always kept, so a gated result shows why.
+        findings: [...deprecatedGate.blocking, ...deprecatedGate.classified.filter(f => f.enforcementClass !== 'blocking')]
+          .slice(0, Math.max(limit, deprecatedGate.blocking.length)),
+        gated: deprecatedGate.gated,
+      },
+    } : {}),
     soundness: diffSoundness(false, failedSnapshots),
   };
 }
@@ -565,13 +584,14 @@ function emptyGraph(): SerializedCallGraph {
     stats: { totalNodes: 0, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 } };
 }
 function emptySummary() {
-  return { addedFunctions: 0, removedFunctions: 0, signatureChanges: 0, addedEdges: 0, removedEdges: 0, staleCallers: 0, renameCandidates: 0 };
+  return { addedFunctions: 0, removedFunctions: 0, signatureChanges: 0, addedEdges: 0, removedEdges: 0, staleCallers: 0, renameCandidates: 0, deprecatedCallsAdded: 0 };
 }
 function diffSoundness(empty: boolean, failedSnapshots?: string[]): { posture: string; caveats: string[] } {
   const caveats = [
 'A cross-file pair sharing a content-addressed stable id (name + parameter shape) is reported as a move with confidence "stable-id" — a strong signal, but NOT proof: a symbol that was deleted and independently replaced by a same-name/same-shape homonym is indistinguishable, so verify rather than assume "same symbol". The stable id is matched only when unique within the changed-file set (a same-shape symbol in an unchanged file is not considered). Identifier renames and symbols without a stable id (anonymous/synthetic) stay heuristic — paired by signature shape and reported separately.',
     'Signature-change detection is limited to what the analyzer extracts per language; cross-language signature notions differ.',
     'Edge deltas cover calls among/out of the changed files; calls into unchanged files resolve against the canonical graph for stale callers only.',
+    DEPRECATED_CALLS_CAVEAT,
     'Old file content is read at the merge-base of the base ref and the new state (the same point the changed-file list is scoped to), so a base branch that advanced past the branch point does not have its own edits attributed to this change.',
   ];
   if (empty) caveats.push('No code files changed — the structural delta is empty.');

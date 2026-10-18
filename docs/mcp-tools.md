@@ -64,7 +64,7 @@ live registry.
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 5 | 2,499 | 2,650 |
 | `substrate` | 15 | 5,247 | 5,500 |
-| `full` | 76 | 24,725 | 25,500 |
+| `full` | 76 | 24,730 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
@@ -258,7 +258,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 | `blast_radius` | Pre-flight structural blast-radius briefing for the current staged/working diff (advisory). Pure orchestration of existing analyses — no LLM: affected callers/layers and hubs (`analyze_impact`) of the symbols the diff actually changed (normalized per-symbol hashes; formatting and comments are not changes, and any file kept whole is named with its reason in `changeGranularity`), tests to run (`select_tests`), and the anchored memories/decisions the diff will drift/orphan plus specs it will make stale (`check_spec_drift`). One conclusion-shaped briefing, never a graph. CLI: `openlore blast-radius` (+ `--install-hook` for an advisory pre-commit hook). | Yes |
 | `get_low_risk_refactor_candidates` | Safest functions to refactor first: low fan-in, low fan-out, not a hub, no cyclic involvement. Best starting point for incremental, low-risk sessions. | Yes |
 | `get_leaf_functions` | Functions that make no internal calls (leaves of the call graph). Zero downstream blast radius. Sorted by fan-in by default -- most-called leaves have the best unit-test ROI. | Yes |
-| `structural_diff` | A graph diff (complement to `git diff`) between two states (working tree vs a ref, or two refs): what changed structurally and whose callers are now stale. | Yes |
+| `structural_diff` | A graph diff (complement to `git diff`) between two states (working tree vs a ref, or two refs): what changed structurally and whose callers are now stale. Calls the diff adds into a symbol marked deprecated (JSDoc `@deprecated`, Go `Deprecated:`, Python `@deprecated`) are listed in `deprecatedCalls` with the target's replacement hint and how the target was resolved (`changed-files`, `index-edge`, or `unique-name`; nothing is guessed), each an advisory `deprecated-symbol-use` finding. | Yes |
 | `detect_changes` | Detect recently changed functions (git diff vs a base ref) and rank them by blast radius (fan-in + transitive reach). | Yes |
 | `get_change_coupling` | Co-change coupling mined from git history (not the call graph): what changes together with a file, and the most volatile code. | Yes |
 | `get_health_map` | One-call structural health dashboard: hubs, god functions, layer violations, and volatile files, ranked by severity. A good starting point on an unfamiliar repo. Surfaces an `indexIntegrity` block when the on-disk index did not reconcile against its build-time attestation (`degraded` / `mismatched`), so the health signals are not presented as complete over a broken index. | Yes |

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
 import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
+import { MAX_DEPRECATION_HINT } from '../analyzer/call-graph-extract.js';
 import { recordPerfWork } from '../analyzer/perf-counters.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
 import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js';
@@ -194,8 +195,11 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
  * `.olbundle` import would recompute its digest through the same dropping reader and reject a
  * perfectly valid bundle as TAMPERED. A version bump turns both into the honest
  * `schema-mismatch` + rebuild path this store already documents.
+ *
+ * v13 adds `nodes.deprecation` (change: add-deprecation-propagation): a v12 store has no marker
+ * column, so serving it would report no deprecated symbols rather than "not extracted".
  */
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 /**
  * Bound on the number of bound parameters in one generated `IN (…)` list.
@@ -374,7 +378,10 @@ export class EdgeStore {
         -- Content-addressed location-independent identity (add-content-addressed-stable-symbol-ids).
         -- Nullable: anonymous/synthetic symbols and pre-bump stores carry none. Additive: id stays PK.
         stable_id     TEXT,
-        call_arity    TEXT
+        call_arity    TEXT,
+        -- Deprecation marker's replacement hint ('' = marked, no hint); NULL = not marked
+        -- (add-deprecation-propagation).
+        deprecation   TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_node_file ON nodes(file_path);
       CREATE INDEX IF NOT EXISTS idx_node_name ON nodes(name);
@@ -954,10 +961,10 @@ export class EdgeStore {
     const stmt: StatementSync = this.db.prepare(`
       INSERT OR REPLACE INTO nodes
         (id, name, file_path, class_name, is_async, language, start_index, end_index,
-         fan_in, fan_out, docstring, signature, is_external, external_kind, is_hub, is_entry_point, stable_id, call_arity)
+         fan_in, fan_out, docstring, signature, is_external, external_kind, is_hub, is_entry_point, stable_id, call_arity, deprecation)
       VALUES
         (@id, @name, @filePath, @className, @isAsync, @language, @startIndex, @endIndex,
-         @fanIn, @fanOut, @docstring, @signature, @isExternal, @externalKind, @isHub, @isEntryPoint, @stableId, @callArity)
+         @fanIn, @fanOut, @docstring, @signature, @isExternal, @externalKind, @isHub, @isEntryPoint, @stableId, @callArity, @deprecation)
     `);
     const ftsStmt: StatementSync = this.db.prepare('INSERT OR REPLACE INTO nodes_fts (node_id, name) VALUES (?, ?)');
     runTransaction(this.db, () => {
@@ -981,6 +988,7 @@ export class EdgeStore {
           '@isEntryPoint': entryIds ? (entryIds.has(n.id) ? 1 : 0) : 0,
           '@stableId':     n.stableId ?? null,
           '@callArity':    n.callArity ? JSON.stringify(n.callArity) : null,
+          '@deprecation':  typeof n.deprecation === 'string' ? n.deprecation.slice(0, MAX_DEPRECATION_HINT) : null,
         });
         if (!n.isExternal) ftsStmt.run(n.id, n.name);
       }
@@ -1715,6 +1723,7 @@ interface RawNode {
   is_entry_point: number;
   stable_id:      string | null;
   call_arity:     unknown;
+  deprecation?:   unknown;
 }
 
 interface RawClass {
@@ -1972,6 +1981,8 @@ function rawToFunctionNode(r: RawNode): FunctionNode {
     ...(r.external_kind && { externalKind: r.external_kind as FunctionNode['externalKind'] }),
     ...(r.stable_id    && { stableId:     r.stable_id }),
     ...(callArity && { callArity }),
+    // The store is repository-controlled (bundles, a committed .openlore): only a bounded string is a marker.
+    ...(typeof r.deprecation === 'string' && r.deprecation.length <= MAX_DEPRECATION_HINT && { deprecation: r.deprecation }),
   };
 }
 

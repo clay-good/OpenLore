@@ -1,6 +1,6 @@
 # Add deprecation propagation: extract the deprecated bit in the existing walk, surface it as a finding
 
-> Status: PROPOSED (2026-07-08, e2e audit fifth pass — fifth research sweep). Prior art:
+> Status: SHIPPED, narrowed (2026-10-18). Proposed 2026-07-08 (e2e audit fifth pass — fifth research sweep). Prior art:
 > staticcheck's SA1019 (https://staticcheck.dev/changes/2017.2,
 > https://github.com/dominikh/go-tools/issues/317) — an entire, widely-trusted check built on
 > nothing but Go's `// Deprecated:` doc-comment convention; eslint-plugin-deprecation — the same
