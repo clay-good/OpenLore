@@ -57,6 +57,7 @@ import {
   computeStaleness,
   edgeBasis,
   edgeBasisForChains,
+  hopVia,
   repairDisclosure,
   type BoundaryEdge,
 } from './confidence-boundary.js';
@@ -1650,16 +1651,22 @@ export async function handleTraceExecutionPath(
       const callsNext = edgeReceipt
         ? callSiteEvidence(edgeReceipt.edges, callerId => nodeMap.get(callerId) ?? null, directResolvedOnly, edgeReceipt.truncated)
         : undefined;
-      const base = node
-        ? { name: node.name, file: node.filePath, className: node.className ?? null }
-        : { name: id, file: '', className: null };
+      // The step a synthesized edge reaches names its rule, so a message or event hop never reads as
+      // a call (change: label-synthesized-hops).
+      const via = index > 0 ? hopVia(pairIndex.get(pathIds[index - 1] + '\x00' + id)) : undefined;
+      const base = {
+        ...(node
+          ? { name: node.name, file: node.filePath, className: node.className ?? null }
+          : { name: id, file: '', className: null }),
+        ...(via ? { via } : {}),
+      };
       if (!callsNext || callsNext.items.length === 0) return base;
       const { items, ...receipt } = callsNext;
       return { ...base, callsNext: items, callsNextReceipt: receipt };
     });
     return {
       hops: pathIds.length - 1,
-      chain: steps.map(s => s.name).join(' → '),
+      chain: steps.map(s => ('via' in s && s.via ? `${s.name} [via ${s.via}]` : s.name)).join(' → '),
       steps,
     };
   });

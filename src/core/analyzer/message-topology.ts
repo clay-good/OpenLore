@@ -247,7 +247,7 @@ function scopeNames(a: Parser.SyntaxNode, env: CollectorState): ReadonlySet<stri
     for (const stmt of a.namedChildren) {
       if (stmt.type === 'lexical_declaration' || stmt.type === 'variable_declaration') {
         for (const d of stmt.namedChildren) if (d.type === 'variable_declarator') patternNames(d.childForFieldName('name'), names);
-      } else if (stmt.type === 'function_declaration' || stmt.type === 'class_declaration') {
+      } else if (stmt.type === 'function_declaration' || stmt.type === 'class_declaration' || stmt.type === 'abstract_class_declaration') {
         const name = stmt.childForFieldName('name')?.text;
         if (name) names.add(name);
       }

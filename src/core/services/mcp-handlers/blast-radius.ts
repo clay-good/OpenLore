@@ -31,7 +31,31 @@ import {
 } from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
-import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
+import { assembleBoundary, computeStaleness, crossingsFromBasis, type EdgeBasis } from './confidence-boundary.js';
+
+/**
+ * A basis's per-rule synthesized-edge counts, or undefined when none. A rule name that is not
+ * rule-shaped (the basis comes from a repository-controlled artifact) counts as `synthesized`
+ * rather than vanishing, so a closure that relied on such an edge never reads as complete.
+ */
+function synthesizedByRule(basis: EdgeBasis | undefined): Record<string, number> | undefined {
+  const out: Record<string, number> = {};
+  for (const [rule, n] of Object.entries(basis?.synthesizedByRule ?? {})) {
+    if (!Number.isSafeInteger(n) || n <= 0) continue;
+    const key = /^[a-z][a-z0-9-]{0,63}$/.test(rule) ? rule : 'synthesized';
+    out[key] = (out[key] ?? 0) + n;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * The boundary an ambiguous name's `analyze_impact` envelope carries. It covers EVERY match's
+ * closure, so it can only feed the briefing-level crossings, never one match's label.
+ */
+function envelopeBasis(raw: unknown): EdgeBasis | undefined {
+  if (raw === null || typeof raw !== 'object' || !('matches' in (raw as Record<string, unknown>))) return undefined;
+  return (raw as { confidenceBoundary?: { basis?: EdgeBasis } }).confidenceBoundary?.basis;
+}
 import {
   loadDynamicBoundaryReport,
   dynamicBoundaryCrossing,
@@ -75,6 +99,12 @@ interface SymbolRisk {
   file: string;
   riskLevel: RiskLevel;
   affectedCallers: number;
+  /**
+   * Edges in this symbol's impact closure recovered by a synthesis rule rather than direct
+   * resolution, by rule — a message or event hop counted in `affectedCallers` is not a call
+   * (change: label-synthesized-hops). Absent when the closure is all directly resolved.
+   */
+  synthesizedEdges?: Record<string, number>;
   fanIn: number;
   isHub: boolean;
 }
@@ -96,6 +126,8 @@ interface ImpactResult {
   upstreamChain?: Array<{ file?: string }>;
   downstreamCriticalPath?: Array<{ file?: string }>;
   governingDecisions?: Array<{ id?: string; title: string; affectedDomains?: string[]; provenance?: ServedContentProvenance }>;
+  /** Read for the synthesized-edge basis, which the briefing carries forward. */
+  confidenceBoundary?: { basis?: EdgeBasis };
 }
 
 export interface BlastRadiusBriefing {
@@ -262,6 +294,9 @@ export async function computeBlastRadius(
   // Every file the composed impact analyses traversed — the caller/callee closure, not just the
   // diff. Accumulated as the loop runs so the boundary disclosure covers what the briefing saw.
   const traversedFiles = new Set<string>(changedFiles);
+  // The largest per-symbol count of synthesized edges, by rule, across the composed analyses — a
+  // lower bound on the briefing's reliance on each rule (the closures overlap, so counts are not summed).
+  const synthesizedAcross = new Map<string, number>();
 
   for (const seed of analyzed) {
     // Per-symbol best-effort: one symbol whose impact analysis throws must not
@@ -271,6 +306,9 @@ export async function computeBlastRadius(
       raw = await handleAnalyzeImpact(absDir, seed.name, depth);
     } catch { impactFailures++; continue; }
     const candidates = impactResults(raw);
+    for (const [rule, n] of Object.entries(synthesizedByRule(envelopeBasis(raw)) ?? {})) {
+      synthesizedAcross.set(rule, Math.max(synthesizedAcross.get(rule) ?? 0, n));
+    }
     // Prefer the resolution whose file matches the changed seed (names can collide).
     const r = candidates.find(c => c.file === seed.filePath) ?? candidates[0];
     if (!r) continue;
@@ -278,7 +316,13 @@ export async function computeBlastRadius(
     const risk = (r.riskLevel ?? 'low') as RiskLevel;
     const callers = r.blastRadius?.upstream ?? 0;
     const isHub = r.metrics?.isHub ?? false;
-    topSymbols.push({ symbol: r.symbol, file: r.file, riskLevel: risk, affectedCallers: callers, fanIn: r.metrics?.fanIn ?? 0, isHub });
+    const byRule = synthesizedByRule(r.confidenceBoundary?.basis);
+    for (const [rule, n] of Object.entries(byRule ?? {})) synthesizedAcross.set(rule, Math.max(synthesizedAcross.get(rule) ?? 0, n));
+    topSymbols.push({
+      symbol: r.symbol, file: r.file, riskLevel: risk, affectedCallers: callers,
+      ...(byRule ? { synthesizedEdges: byRule } : {}),
+      fanIn: r.metrics?.fanIn ?? 0, isHub,
+    });
     if (isHub) hubsTouched.push({ symbol: r.symbol, fanIn: r.metrics?.fanIn ?? 0 });
     if (r.file) traversedFiles.add(r.file);
     for (const n of r.upstreamChain ?? []) if (n.file) traversedFiles.add(n.file);
@@ -433,10 +477,18 @@ export async function computeBlastRadius(
     await loadDynamicBoundaryReport(absDir),
     traversedFiles,
   );
+  // The synthesized-dispatch crossings the composed `analyze_impact` calls disclosed, carried
+  // forward rather than dropped (change: label-synthesized-hops).
+  const synthesizedCrossings = crossingsFromBasis({
+    directEdges: 0,
+    synthesizedEdges: [...synthesizedAcross.values()].reduce((a, b) => a + b, 0),
+    ...(synthesizedAcross.size ? { synthesizedByRule: Object.fromEntries([...synthesizedAcross].sort(([a], [b]) => a.localeCompare(b))) } : {}),
+  });
+  const extraCrossings = [...synthesizedCrossings, ...(dynamicCrossing ? [dynamicCrossing] : [])];
   const confidenceBoundary = assembleBoundary({
     staleness,
     integrity: ctx.integrity,
-    ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+    ...(extraCrossings.length ? { extraCrossings } : {}),
   });
 
   // Federation block: forward the composed select_tests result when it ran, otherwise
