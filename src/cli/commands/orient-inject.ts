@@ -131,7 +131,7 @@ export async function buildInjection(
   }
 
   try {
-    const result = (await handleOrient(directory, task, 8, undefined, true)) as LeanOrientResult;
+    const result = (await handleOrient(directory, task, 8, undefined, true, 'distance', { pushMemories: true })) as LeanOrientResult;
     // Suggest only tools the wired MCP surface exposes (default surface when unwired).
     const wired = await resolveWiredPreset(directory);
     const preset = wired.source === 'default' ? (await resolveUserScopePreset()) ?? wired.preset : wired.preset;

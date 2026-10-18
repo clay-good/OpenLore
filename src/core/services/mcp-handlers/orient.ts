@@ -45,13 +45,13 @@ import {
   compositeScore,
   buildReason,
 } from './semantic.js';
-import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
+import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type GraphFreshnessView, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, reconcileInjectionNote, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW, type InjectedMemory, type StaleTriggeredMemory } from './memory-triggers.js';
+import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, reconcileInjectionNote, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW, type InjectedMemory, type MemoryInjection, type StaleTriggeredMemory } from './memory-triggers.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
-import type { MemoryFreshness } from '../../../types/index.js';
+import type { AnchoredMemory, MemoryFreshness, PendingDecision } from '../../../types/index.js';
 
 import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
 import { getSourceRoots, moduleFromPath } from './epistemic-lease.js';
@@ -213,6 +213,11 @@ export async function handleOrient(
   tokenBudget?: number,
   lean = false,
   rankBy: 'distance' | 'pagerank' = 'distance',
+  /**
+   * Lean mode only: also push triggered and pinned memories (the prompt-hook injection path), so
+   * the one briefing an agent gets unasked carries them (change: add-memory-trigger-predicates).
+   */
+  opts: { pushMemories?: boolean } = {},
 ): Promise<unknown> {
   const tooLong = queryTooLongError(task, 'task'); if (tooLong) return tooLong;
   // A JSON `null` budget means no budget, as before.
@@ -666,25 +671,7 @@ export async function handleOrient(
     // outright when no live note has a trigger or a pin, so a repo without them pays nothing.
     if (hasPushableMemory(memStore.memories)) try {
       const touchedResults = tokenBudget ? topResults : topResults.slice(0, relevantFunctions.length);
-      const touchedSymbols = touchedResults.map((r) => ({
-        id: r.record.id,
-        name: r.record.name,
-        ...(r.record.className ? { className: r.record.className } : {}),
-      }));
-      const touchedFiles = [...new Set(touchedResults.map((r) => r.record.filePath))];
-      const fileDomains = hasSpecDomainTrigger(memStore.memories) ? await specDomainsForFiles(absDir, touchedFiles) : [];
-      const domains = fileDomains === undefined
-        ? (specDomains.length > 0 ? specDomains.map((d) => d.domain) : undefined)
-        : [...new Set([...fileDomains, ...specDomains.map((d) => d.domain)])].sort();
-      const touched = { files: touchedFiles, symbols: touchedSymbols, domains };
-      const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
-      const hops = maxTriggerHops(memStore.memories);
-      const probe = cg && hops > 0
-        ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols, hops)
-        : undefined;
-      const injection = selectInjectedMemories(memStore.memories, touched, view ?? UNVERIFIABLE_VIEW, {
-        includePinned: true, probe, retirement: buildRetirementGraph(store.decisions), graphUnavailable: !view, decisions: store.decisions,
-      });
+      const injection = await evaluatePushedMemories(absDir, memStore.memories, store.decisions, touchedResults, specDomains, llmCtx, view);
       // A pushed note joins the contradiction check, wherever it is anchored.
       if (view) contradictionItems.push(...injection.authoritative);
       memoryInjection = injectionFields(injection);
@@ -1109,9 +1096,24 @@ export async function handleOrient(
   // below are pure overhead on a shallow "who calls X" lookup and each is one
   // exact `expand` handle or one dedicated tool call away — so we trim bytes per
   // turn without forcing a follow-up round-trip. The rich default is unchanged.
+  /** Lean mode's opt-in push: the same evaluation as the full briefing, best-effort and disclosed. */
+  async function leanMemoryInjection(): Promise<ReturnType<typeof injectionFields>> {
+    try {
+      const memories = (await loadMemoryStore(absDir)).memories.filter(isWellFormedMemory);
+      if (!hasPushableMemory(memories)) return {};
+      const { loadDecisionStore } = await import('../../decisions/store.js');
+      const { decisions } = await loadDecisionStore(absDir);
+      const es = llmCtx?.edgeStore;
+      const view = es ? makeFreshnessView(es, absDir) : null;
+      return injectionFields(await evaluatePushedMemories(absDir, memories, decisions, topResults.slice(0, relevantFunctions.length), specDomains, llmCtx, view));
+    } catch (err) {
+      return { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
   const extras = extraPairs;
   if (lean) {
-    const leanPayload = { ...core, lean: true };
+    const leanPayload = { ...core, lean: true, ...(opts.pushMemories ? await leanMemoryInjection() : {}) };
     return tokenBudget
       ? fitOrientToBudget(absDir, leanPayload, tokenBudget, extras, llmCtx)
       : withIndexStaleness(absDir, leanPayload, llmCtx);
@@ -1140,6 +1142,41 @@ export async function handleOrient(
   return tokenBudget
     ? fitOrientToBudget(absDir, result, tokenBudget, extras, llmCtx)
     : withIndexStaleness(absDir, result, llmCtx);
+}
+
+/**
+ * Evaluate memory triggers and pins against the functions a briefing touched (change:
+ * add-memory-trigger-predicates). Shared by the full briefing and by lean mode's opt-in push.
+ * Without a graph view the anchors cannot be verified, so a note is judged as recall judges it then.
+ */
+async function evaluatePushedMemories(
+  absDir: string,
+  memories: AnchoredMemory[],
+  decisions: PendingDecision[],
+  touchedResults: Array<{ record: { id: string; name: string; filePath: string; className?: string } }>,
+  specDomains: Array<{ domain: string }>,
+  llmCtx: Awaited<ReturnType<typeof readCachedContext>>,
+  view: GraphFreshnessView | null,
+): Promise<MemoryInjection> {
+  const touchedSymbols = touchedResults.map((r) => ({
+    id: r.record.id,
+    name: r.record.name,
+    ...(r.record.className ? { className: r.record.className } : {}),
+  }));
+  const touchedFiles = [...new Set(touchedResults.map((r) => r.record.filePath))];
+  const fileDomains = hasSpecDomainTrigger(memories) ? await specDomainsForFiles(absDir, touchedFiles) : [];
+  const domains = fileDomains === undefined
+    ? (specDomains.length > 0 ? specDomains.map((d) => d.domain) : undefined)
+    : [...new Set([...fileDomains, ...specDomains.map((d) => d.domain)])].sort();
+  const touched = { files: touchedFiles, symbols: touchedSymbols, domains };
+  const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
+  const hops = maxTriggerHops(memories);
+  const probe = cg && hops > 0
+    ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols, hops)
+    : undefined;
+  return selectInjectedMemories(memories, touched, view ?? UNVERIFIABLE_VIEW, {
+    includePinned: true, probe, retirement: buildRetirementGraph(decisions), graphUnavailable: !view, decisions,
+  });
 }
 
 /**
