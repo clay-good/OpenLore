@@ -1201,6 +1201,9 @@ const TS_FN_QUERY = `
   (method_signature
     name: (property_identifier) @fn.name) @fn.node
 
+  (abstract_method_signature
+    name: (property_identifier) @fn.name) @fn.node
+
   (lexical_declaration
     (variable_declarator
       name: (identifier) @fn.name

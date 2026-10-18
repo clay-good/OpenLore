@@ -500,6 +500,17 @@ describe('TypeScript abstract classes', () => {
     ]);
   });
 
+  it('dispatches through an abstract method signature like an interface method', async () => {
+    const b = await build(`
+      abstract class Sh { abstract area(): number; }
+      class Sq extends Sh { area() { return 1; } }
+      function tot(s: Sh) { return s.area(); }
+    `);
+    expect(methodId(b, 'Sh', 'area')).toBe('src/shapes.ts::Sh.area');
+    expect(b.inheritanceEdges.some(e => e.parentId.endsWith('::Sh') && e.childId.endsWith('::Sq'))).toBe(true);
+    expect(synthEdges(b).some(e => e.callerId === methodId(b, 'Sh', 'area') && e.calleeId === methodId(b, 'Sq', 'area'))).toBe(true);
+  });
+
   it('records an abstract class\'s extends and implements', async () => {
     const b = await build(`
       interface Handler { handle(): number; }
