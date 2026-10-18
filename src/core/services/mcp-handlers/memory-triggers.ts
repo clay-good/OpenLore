@@ -357,8 +357,10 @@ export function makeHopProbe(
 /** The deepest `withinHops` among live notes, or 0 when none could fire — so the walk is only paid when needed. */
 export function maxTriggerHops(memories: readonly AnchoredMemory[]): number {
   let max = 0;
-  for (const m of memories) {
-    if (!isWellFormedMemory(m) || m.invalidatedAt) continue;
+  // Canonical order (by id), so which notes the glob budget reaches does not depend on store order.
+  const live = memories.filter((m): m is AnchoredMemory => isWellFormedMemory(m) && !m.invalidatedAt)
+    .sort((a, b) => compareText(a.id, b.id));
+  for (const m of live) {
     const trigger = storedTrigger(m);
     if (trigger && 'withinHops' in trigger && trigger.withinHops > max) max = trigger.withinHops;
   }
@@ -602,8 +604,10 @@ export function selectInjectedMemories(
   const fired: Array<{ m: AnchoredMemory; p: FiredPredicate }> = [];
   let domainsNotAssessed = 0;
   let hopsNotAssessed = 0;
-  for (const m of memories) {
-    if (!isWellFormedMemory(m) || m.invalidatedAt) continue;
+  // Canonical order (by id), so which notes the glob budget reaches does not depend on store order.
+  const live = memories.filter((m): m is AnchoredMemory => isWellFormedMemory(m) && !m.invalidatedAt)
+    .sort((a, b) => compareText(a.id, b.id));
+  for (const m of live) {
     const trigger = storedTrigger(m);
     if (trigger && 'specDomain' in trigger && touched.domains === undefined) domainsNotAssessed++;
     if (trigger && 'withinHops' in trigger && !opts.probe) hopsNotAssessed++;

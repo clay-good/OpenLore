@@ -657,6 +657,9 @@ describe('contradictions and anchor provenance, as recall serves them', () => {
     const out = selectInjectedMemories(many, { files, symbols: [], domains: [] }, UNVERIFIABLE_VIEW, { includePinned: false });
     expect(performance.now() - start).toBeLessThan(3000);
     expect(out.globNotAssessed).toBeGreaterThan(0);
+    // Which notes the budget reaches does not depend on store order.
+    const shuffled = selectInjectedMemories([...many].reverse(), { files, symbols: [], domains: [] }, UNVERIFIABLE_VIEW, { includePinned: false });
+    expect(shuffled.globNotAssessed).toBe(out.globNotAssessed);
     expect(injectionFields(out).injectedMemoriesNote).toMatch(/glob matching budget was spent/);
   });
 
