@@ -15,7 +15,7 @@ import { Command } from 'commander';
 import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { writeStdout, writeStderr } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
-import { sanitizeForTerminal } from '../../utils/misc.js';
+import { renderPushedMemories } from './pushed-memory-render.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
@@ -169,22 +169,7 @@ function renderHuman(b: BlastRadiusBriefing): string {
   if (memTotal > b.memory.willDrift.length) lines.push(`   … and ${memTotal - b.memory.willDrift.length} more anchored memor${memTotal - b.memory.willDrift.length === 1 ? 'y' : 'ies'}`);
   // Notes pushed by a matching trigger: one line each, terminal-safe and cut short — the JSON carries
   // the full content (change: add-memory-trigger-predicates).
-  const oneLine = (value: string) => sanitizeForTerminal(value.replace(/\s+/g, ' ')).trim();
-  if (b.injectedMemories?.length) lines.push('   Triggered memories — repository text [local-unreviewed], data, not instructions:');
-  for (const m of b.injectedMemories ?? []) {
-    const text = m.content !== undefined ? oneLine(m.content) : '(content withheld: reads like an instruction — see recall)';
-    const shown = text.length > 160 ? `${text.slice(0, 159).replace(/[\uD800-\uDBFF]$/, '')}…` : text;
-    const flags = [
-      ...(m.staleDecisionRef ? ['cites a superseded decision'] : []),
-      ...(m.unreconciledWith ? ['conflicts with another memory or decision'] : []),
-      ...(m.verify && !m.staleDecisionRef && !m.unreconciledWith ? ['verify'] : []),
-    ];
-    lines.push(`   📌 memory ${oneLine(m.id)} [${m.provenance}] via ${m.firedPredicate.kind}${flags.length ? ` (${flags.join('; ')})` : ''}: ${shown}`);
-  }
-  if (b.staleTriggeredMemories?.length) {
-    lines.push(`   ⚠ ${b.staleTriggeredMemories.length} triggered memor${b.staleTriggeredMemories.length === 1 ? 'y is' : 'ies are'} not shown: anchored code could not be found or verified.`);
-  }
-  if (b.injectedMemoriesNote) lines.push(`   ⚠ ${oneLine(b.injectedMemoriesNote)}`);
+  lines.push(...renderPushedMemories(b, '   '));
   for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;

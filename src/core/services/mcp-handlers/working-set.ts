@@ -33,7 +33,7 @@ import { handleOrient } from './orient.js';
 import { applyTokenBudget, omissionNote } from './progressive.js';
 import { estimateTokens } from '../llm-service.js';
 import type { ServedContentProvenance } from '../served-content.js';
-import type { InjectedMemory, StaleTriggeredMemory } from './memory-triggers.js';
+import { comparePushPriority, withoutDataFraming, type InjectedMemory, type StaleTriggeredMemory } from './memory-triggers.js';
 
 /** Default token budget for the whole merged briefing when none is supplied. */
 const DEFAULT_WORKING_SET_BUDGET = 8_000;
@@ -248,28 +248,37 @@ export function rankAndBudget(items: WorkingSetItem[], budget: number): { kept: 
 }
 
 /**
- * Bound the targets' pushed memories by `remaining` tokens, in target order, so the merged briefing
- * keeps one budget (change: add-memory-trigger-predicates). A dropped memory is counted in its
+ * Bound the targets' pushed memories by `remaining` tokens, so the merged briefing keeps one budget
+ * (change: add-memory-trigger-predicates). Notes compete across targets by the same specificity
+ * order each target ranked them by (ties keep target order), so a broad note in one target cannot
+ * crowd out a precise hit in another. Returns how many were dropped; each drop is counted in its own
  * target's `injectedMemoriesNote`, never silently removed.
  */
-export function budgetInjectedMemories(targets: WorkingSetTargetBrief[], remaining: number): void {
+export function budgetInjectedMemories(targets: WorkingSetTargetBrief[], remaining: number): number {
+  const all = targets.flatMap((t, ti) => (t.injectedMemories ?? []).map((m, mi) => ({ t, ti, mi, m })));
+  all.sort((a, b) => comparePushPriority(a.m, b.m) || a.ti - b.ti || a.mi - b.mi);
+  const keep = new Set<InjectedMemory>();
   let left = remaining;
+  for (const { m } of all) {
+    const cost = estimateTokens(JSON.stringify(m));
+    if (cost > left) continue;
+    keep.add(m);
+    left -= cost;
+  }
+  let droppedTotal = 0;
   for (const t of targets) {
     if (!t.injectedMemories?.length) continue;
-    const kept: InjectedMemory[] = [];
-    for (const m of t.injectedMemories) {
-      const cost = estimateTokens(JSON.stringify(m));
-      if (cost > left) break;
-      kept.push(m);
-      left -= cost;
-    }
+    const kept = t.injectedMemories.filter(m => keep.has(m));
     const dropped = t.injectedMemories.length - kept.length;
     if (dropped === 0) continue;
+    droppedTotal += dropped;
     const note = `${dropped} pushed memor${dropped === 1 ? 'y' : 'ies'} omitted to fit the working-set token budget — raise tokenBudget or call recall in ${t.target}.`;
-    t.injectedMemoriesNote = t.injectedMemoriesNote ? `${t.injectedMemoriesNote} ${note}` : note;
+    const prior = kept.length > 0 ? t.injectedMemoriesNote : withoutDataFraming(t.injectedMemoriesNote);
+    t.injectedMemoriesNote = prior ? `${prior} ${note}` : note;
     if (kept.length > 0) t.injectedMemories = kept;
     else delete t.injectedMemories;
   }
+  return droppedTotal;
 }
 
 /** Canonicalize a path for presence checks, resolved relative to the home repo. */
@@ -504,7 +513,7 @@ export async function handleWorkingSetContext(
   // Rank the merged briefing by structural relevance, then bound it to budget.
   const { kept, omitted } = rankAndBudget(allItems, budget);
   // Pushed memories share the same budget: what the ranked items left over, spent in target order.
-  budgetInjectedMemories(targets, budget - estimateTokens(JSON.stringify(kept)));
+  const droppedMemories = budgetInjectedMemories(targets, budget - estimateTokens(JSON.stringify(kept)));
 
   const briefedCount = targets.filter(t => t.briefed).length;
   if (briefedCount === 0) {
@@ -520,7 +529,8 @@ export async function handleWorkingSetContext(
   const summary = briefedCount > 0
     ? `Working set for change "${id}" on store "${store.name}": ` +
       `${kept.length} item(s) across ${briefedCount}/${status.targets.length} target(s)` +
-      (omitted > 0 ? `, ${omitted} omitted to fit budget` : '') + '.'
+      (omitted > 0 ? `, ${omitted} omitted to fit budget` : '') +
+      (droppedMemories > 0 ? `, ${droppedMemories} pushed memor${droppedMemories === 1 ? 'y' : 'ies'} omitted to fit budget` : '') + '.'
     : `Working set for change "${id}" on store "${store.name}": no briefable targets` +
       (errors ? `, ${errors} blocking issue(s)` : '') + '.';
 

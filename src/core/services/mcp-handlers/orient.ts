@@ -48,7 +48,7 @@ import {
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
+import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, withoutDataFraming, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW } from './memory-triggers.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { buildRetirementGraph } from './stale-decision-reference.js';
 import type { MemoryFreshness } from '../../../types/index.js';
@@ -1230,6 +1230,11 @@ async function fitOrientToBudget(
     // A fully trimmed pushed-memory list reads as "none fired" only when absent; the receipt counts it.
     for (const key of ['injectedMemories', 'staleTriggeredMemories'] as const) {
       if (Array.isArray(trimmed[key]) && (trimmed[key] as unknown[]).length === 0) delete trimmed[key];
+    }
+    if (trimmed.injectedMemories === undefined && typeof trimmed.injectedMemoriesNote === 'string') {
+      const rest = withoutDataFraming(trimmed.injectedMemoriesNote);
+      if (rest) trimmed.injectedMemoriesNote = rest;
+      else delete trimmed.injectedMemoriesNote;
     }
     return finish({
       ...trimmed,
