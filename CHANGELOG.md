@@ -5,6 +5,48 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-10-18
+
+**Memories now speak up when they matter, and check their own facts.**
+
+- **Memories come to you.** `remember` takes an optional `trigger` (`fileGlob`, `symbolPattern`,
+  `specDomain`, or `withinHops`) and `pinned: true`. Matching notes are pushed into `orient`,
+  `blast_radius`, and `working_set_context`, and into the prompt-hook and Pi injection blocks, each
+  with the predicate that fired. A note like "every handler under `src/routes/` validates input"
+  now reaches the agent working there without anyone asking for it. (#585, #586)
+- **Memories that stay true, or say they are not.** An anchor can name a `span`, exact text inside
+  a function, so an edit elsewhere in a 200-line function no longer drifts a note about one line.
+  A note can rest on `claims` in `verify_claim`'s grammar; `recall` checks them again and moves a
+  note whose claim is now false to `evidenceRefuted`. A lost or ambiguous anchor is a
+  `memory-anchor-lost` finding that `openlore enforce` can gate on. (#589, #591)
+- **Messages are hops, not dead ends.** A tagged send such as `send({ type: "restart" })` is paired
+  with the `switch` case or `if` that handles it, so `find_path`, `analyze_impact`, `blast_radius`,
+  and `orient` follow client/server, IPC, and Redux-style flows. A send with no handler becomes a
+  disclosed boundary. `trace_execution_path`, `orient`, `blast_radius`, and `select_tests` now
+  label every hop that a synthesized edge realizes. (#580, #581)
+- **Catch new calls into deprecated code.** OpenLore reads the standard `@deprecated` and Go
+  `Deprecated:` markers, and `structural_diff` lists the calls a diff adds into them. TS/JS
+  functions also keep their JSDoc text now: 505 of 505 documented handlers, up from 215. (#592, #593)
+- **See which way complexity is going.** `get_health_map` labels each hotspot `rising`, `falling`,
+  `flat`, or `mixed` from its git history, and a rising hotspot is an advisory `declining-health`
+  finding. Shallow history is withheld, not guessed. (#594)
+- **Smoother install and upgrade.** One-shot `orient` (the agent hooks, a new worktree) builds a
+  missing index in the background. `openlore update` handles npm-global installs under Homebrew and
+  checks the version on PATH after an upgrade, Homebrew installs survive `brew upgrade`, and
+  `doctor` gains an install-health check. User-wide defaults in `~/.openlore/config.json` are shared
+  by the CLI, MCP, and Pi, and Pi no longer opens a configuration dialog at startup. (#570, #572–#576)
+
+Also hardened git, MCP, commit gates, and path confinement from a two-round audit, including a code
+execution path through partial-clone fetches and a `trace_execution_path` call that could freeze
+the server (#579). Analysis no longer stalls on binary files named like source (#583), TypeScript
+abstract classes are recognized (#582), `analyze` forwards SIGTERM to its re-exec child (#584), and
+`enforce` no longer renames a torn decision store (#590). Applied routine dependency updates.
+
+**Upgrade:** `npm i -g openlore@3.4.0` — or `openlore update`. The index schema changed, so the
+next `openlore analyze` rebuilds the index once.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.3.1...v3.4.0
+
 ## [3.3.1] - 2026-10-10
 
 **Kotlin files now show up on the map.**
