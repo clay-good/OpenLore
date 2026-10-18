@@ -26,6 +26,7 @@ import {
   hashSpan,
   resolveSymbolAnchors,
   fileAnchor,
+  locateSpan,
   type AnchorNode,
   type GraphFreshnessView,
 } from './anchor.js';
@@ -80,6 +81,29 @@ export function nodeSpanText(rootPath: string, node: FunctionNode, cache: Map<st
   return sliceNodeSpan(content, node);
 }
 
+/** A node's current span text and the 1-based file line it starts on, or undefined when unreadable. */
+function nodeSource(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): { text: string; startLine: number } | undefined {
+  const content = readFileCached(rootPath, node.filePath, cache);
+  if (content === null) return undefined;
+  return { text: sliceNodeSpan(content, node), startLine: lineOf(content, node.startIndex) };
+}
+
+/** 1-based line of a code-unit offset in `content`. */
+function lineOf(content: string, offset: number): number {
+  let line = 1;
+  const end = Math.min(offset, content.length);
+  for (let i = 0; i < end; i++) if (content.charCodeAt(i) === 10) line++;
+  return line;
+}
+
+/**
+ * Why a requested span was not recorded on an anchor (add-memory-anchor-verdicts):
+ * the hint named no symbol that resolved, or the text does not occur exactly once
+ * in the symbol's body. The anchor is then recorded without the span, and
+ * `remember` says so.
+ */
+export type SpanNotRecordedReason = 'no-symbol' | 'not-found' | 'ambiguous' | 'unreadable';
+
 /** Hash a node's source span (code-unit offsets) against current file content. */
 function hashNodeSpan(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
   const text = nodeSpanText(rootPath, node, cache);
@@ -133,6 +157,10 @@ export function makeFreshnessView(
       return node ? fileIsStale(node.filePath) : false;
     },
     fileInStaleRegion: (filePath: string): boolean => fileIsStale(filePath),
+    nodeSource: (nodeId: string) => {
+      const node = store.getNode(nodeId);
+      return node ? nodeSource(rootPath, node, cache) : undefined;
+    },
     staleRegionComposition: (filePath: string) =>
       fileIsStale(filePath) ? staleRegion().composition : undefined,
     renameOf,
@@ -224,6 +252,9 @@ export class AnchorContext {
       const node = this.store.getNode(anchor.nodeId)
         ?? (anchor.stableId ? this.store.getNodeByStableId(anchor.stableId) : null);
       if (!node) return undefined;
+      // A span anchor was verified by re-locating its text, so its evidence is that
+      // text's lines and hash, not the whole symbol's (add-memory-anchor-verdicts).
+      if (anchor.spanText !== undefined) return this.spanCertificate(node, anchor.spanText);
       const info = this.nodeSpanInfo(node);
       if (!info) return undefined;
       return { symbol: node.name, filePath: node.filePath, lineSpan: info.lineSpan, contentHash: info.contentHash };
@@ -232,6 +263,19 @@ export class AnchorContext {
     const contentHash = this.fileContentHash(anchor.filePath);
     if (contentHash === undefined) return undefined;
     return { filePath: anchor.filePath, contentHash };
+  }
+
+  /** Evidence for a span anchor: the lines its unique occurrence covers and the span's hash. */
+  private spanCertificate(node: FunctionNode, spanText: string): GroundingCertificate | undefined {
+    const source = nodeSource(this.rootPath, node, this.fileCache);
+    if (!source) return undefined;
+    const hits = locateSpan(source.text, spanText, 2);
+    if (hits.length !== 1) return undefined;
+    const before = source.text.slice(0, hits[0]);
+    const start = source.startLine + (before.match(/\n/g) ?? []).length;
+    const newlines = (spanText.match(/\n/g) ?? []).length;
+    const end = start + newlines - (spanText.endsWith('\n') ? 1 : 0);
+    return { symbol: node.name, filePath: node.filePath, lineSpan: { start, end: Math.max(start, end) }, contentHash: hashSpan(spanText) };
   }
 
   /**
@@ -272,7 +316,8 @@ export class AnchorContext {
    * symbol anchor; otherwise the file (if given) becomes a file anchor.
    */
   resolveInputAnchors(
-    hints: ReadonlyArray<{ symbol?: string; file?: string }>,
+    hints: ReadonlyArray<{ symbol?: string; file?: string; span?: string }>,
+    spanNotRecorded?: (hintIndex: number, reason: SpanNotRecordedReason) => void,
   ): StructuralAnchor[] {
     const files = hints.map((h) => h.file).filter((f): f is string => !!f);
     // Candidate set. With a file hint, the file's nodes; WITHOUT one, only the nodes
@@ -301,17 +346,26 @@ export class AnchorContext {
 
     const out: StructuralAnchor[] = [];
     const seen = new Set<string>();
-    for (const hint of hints) {
+    for (const [index, hint] of hints.entries()) {
       if (hint.symbol) {
         const resolved = resolveSymbolAnchors([hint.symbol], nodes, hint.file ? [hint.file] : undefined);
         if (resolved.length === 1) {
-          if (!seen.has(resolved[0].nodeId!)) {
-            seen.add(resolved[0].nodeId!);
-            out.push(resolved[0]);
+          let anchor = resolved[0];
+          if (hint.span !== undefined) {
+            const located = this.locateHintSpan(anchor.nodeId!, hint.span);
+            if (located === 'unique') anchor = { ...anchor, spanText: hint.span };
+            else spanNotRecorded?.(index, located);
+          }
+          // The same symbol with a different span is a different anchor.
+          const key = anchor.spanText === undefined ? anchor.nodeId! : `${anchor.nodeId!}#${hashSpan(anchor.spanText)}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            out.push(anchor);
           }
           continue;
         }
       }
+      if (hint.span !== undefined) spanNotRecorded?.(index, 'no-symbol');
       if (hint.file) {
         const key = `file:${hint.file}`;
         if (!seen.has(key)) {
@@ -321,6 +375,15 @@ export class AnchorContext {
       }
     }
     return out;
+  }
+
+  /** Whether `span` occurs exactly once in the node's current body. */
+  private locateHintSpan(nodeId: string, span: string): 'unique' | Exclude<SpanNotRecordedReason, 'no-symbol'> {
+    const node = this.store.getNode(nodeId);
+    const source = node ? nodeSource(this.rootPath, node, this.fileCache) : undefined;
+    if (!source) return 'unreadable';
+    const hits = locateSpan(source.text, span, 2).length;
+    return hits === 1 ? 'unique' : hits === 0 ? 'not-found' : 'ambiguous';
   }
 }
 

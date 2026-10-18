@@ -2258,6 +2258,7 @@ export const TOOL_DEFINITIONS = [
             properties: {
               symbol: { type: 'string', description: 'Function/method name (optional)' },
               file: { type: 'string', description: 'Repo-relative file path (optional)' },
+              span: { type: 'string', minLength: 1, maxLength: 2000, description: 'Exact text inside the symbol (optional); only edits to it drift the memory' },
             },
           },
         },

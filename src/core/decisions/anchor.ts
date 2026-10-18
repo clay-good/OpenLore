@@ -23,6 +23,15 @@ import type {
   PendingDecision,
   StaleRegionComposition,
 } from '../../types/index.js';
+import { MAX_SPAN_CANDIDATES } from '../../types/index.js';
+
+/**
+ * Longest span text an anchor may carry (add-memory-anchor-verdicts). A span names
+ * the line or few lines a memory is about; the bound also limits what every later
+ * freshness check searches for, since notes.json is committed repo content. The
+ * `remember` tool schemas state the same number.
+ */
+export const MAX_SPAN_CHARS = 2000;
 
 /** Stable, reproducible hash of a source span (or whole file). Unnormalized. */
 export function hashSpan(text: string): string {
@@ -89,6 +98,63 @@ export interface GraphFreshnessView {
   fileInStaleRegion?(filePath: string): boolean;
   /** Persisted structural context for a stale file's region. */
   staleRegionComposition?(filePath: string): StaleRegionComposition | undefined;
+  /**
+   * Current source text of a node's span and the 1-based file line it starts on —
+   * what a span anchor is re-located in (add-memory-anchor-verdicts). Optional: a
+   * view without it decides a span anchor by the whole-symbol hash, which reports
+   * the span `fresh` only when the whole symbol is unchanged.
+   */
+  nodeSource?(nodeId: string): { text: string; startLine: number } | undefined;
+}
+
+/**
+ * Offsets where `span` occurs in `body`, overlapping occurrences included, at most
+ * `limit` of them (add-memory-anchor-verdicts). Exact text only — no similarity.
+ * The cap keeps a short span in a large body from costing one search per character.
+ */
+export function locateSpan(body: string, span: string, limit: number): number[] {
+  const out: number[] = [];
+  if (span.length === 0) return out;
+  for (let i = body.indexOf(span); i !== -1 && out.length < limit; i = body.indexOf(span, i + 1)) out.push(i);
+  return out;
+}
+
+/** 1-based line of `offset` in `text`, given the line `text` starts on. */
+function lineAt(text: string, offset: number, startLine: number): number {
+  let line = startLine;
+  for (let i = 0; i < offset; i++) if (text.charCodeAt(i) === 10) line++;
+  return line;
+}
+
+/**
+ * Freshness of a symbol anchor whose node was found (by id or stable id). A plain
+ * symbol anchor compares the whole-span hash. A span anchor re-locates its text in
+ * the current body: one occurrence is `fresh` wherever it now sits, none is
+ * `drifted`, and several are `orphaned` with the candidate lines disclosed — never
+ * a guess between them (add-memory-anchor-verdicts).
+ */
+function locatedFreshness(
+  anchor: StructuralAnchor,
+  nodeId: string,
+  currentHash: string,
+  view: GraphFreshnessView,
+): Pick<AnchorVerdict, 'freshness' | 'spanCandidates'> {
+  const byHash = { freshness: currentHash === anchor.contentHash ? 'fresh' : 'drifted' } as const;
+  if (anchor.spanText === undefined) return byHash;
+  const source = view.nodeSource?.(nodeId);
+  // Without the body text, an unchanged whole symbol still proves the span is
+  // unchanged (it occurred once at record time); a changed one cannot be checked.
+  if (!source) return byHash;
+  const hits = locateSpan(source.text, anchor.spanText, MAX_SPAN_CANDIDATES + 1);
+  if (hits.length === 0) return { freshness: 'drifted' };
+  if (hits.length === 1) return { freshness: 'fresh' };
+  return {
+    freshness: 'orphaned',
+    spanCandidates: {
+      lines: hits.slice(0, MAX_SPAN_CANDIDATES).map((i) => lineAt(source.text, i, source.startLine)),
+      ...(hits.length > MAX_SPAN_CANDIDATES ? { truncated: true as const } : {}),
+    },
+  };
 }
 
 /**
@@ -151,7 +217,8 @@ export function anchorFreshness(
       // surrounding topology was not recomputed — do NOT report `fresh`; downgrade
       // to `drifted` so it is never served as authoritative
       // (fix-transitive-incremental-staleness, FreshnessVerdictsHonorTheStaleRegion).
-      if (current === anchor.contentHash && view.inStaleRegion?.(anchor.nodeId)) {
+      const located = locatedFreshness(anchor, anchor.nodeId, current, view);
+      if (located.freshness === 'fresh' && view.inStaleRegion?.(anchor.nodeId)) {
         return {
           anchor,
           freshness: 'drifted',
@@ -159,7 +226,7 @@ export function anchorFreshness(
           staleRegionComposition: view.staleRegionComposition?.(anchor.filePath),
         };
       }
-      return { anchor, freshness: current === anchor.contentHash ? 'fresh' : 'drifted' };
+      return { anchor, ...located };
     }
     // nodeId miss — the symbol may have moved/renamed-file. Re-resolve by its
     // content-addressed stable id: a relocated-but-unchanged symbol is `fresh`,
@@ -169,7 +236,7 @@ export function anchorFreshness(
       if (relocated) {
         return {
           anchor,
-          freshness: relocated.contentHash === anchor.contentHash ? 'fresh' : 'drifted',
+          ...locatedFreshness(anchor, relocated.nodeId, relocated.contentHash, view),
           relocatedTo: relocated.nodeId,
         };
       }
@@ -210,6 +277,49 @@ export function anchorFreshness(
     } : { anchor, freshness: 'fresh' };
   }
   return { anchor, freshness: 'drifted' };
+}
+
+/**
+ * What happened to an anchor between recording and now, in the terms an operator
+ * acts on (add-memory-anchor-verdicts). Mapped from the existing verdict, never a
+ * new judgment:
+ *  - `silently-carried` — the anchored code is still where it resolves, unchanged
+ *    (byte-identical, or an exact span re-located inside the symbol);
+ *  - `re-pointed-with-provenance` — carried across a rename/move, `carriedAcross`
+ *    says from where;
+ *  - `needs-human-reselection` — the anchor is lost or ambiguous (orphaned).
+ * A `drifted` anchor that was not carried has no outcome: it still resolves, and
+ * its content change is what `freshness` already says.
+ */
+export type AnchorOutcome = 'silently-carried' | 're-pointed-with-provenance' | 'needs-human-reselection';
+
+/** Why an anchor needs a human to reselect it. */
+export type ReselectionReason =
+  /** The span text now occurs more than once in the symbol (see `spanCandidates`). */
+  | 'span-ambiguous'
+  /** The symbol disappeared and more than one symbol could be it (see `possiblyMovedTo`). */
+  | 'move-ambiguous'
+  /**
+   * The symbol disappeared with no unambiguous successor. Continuity only pairs
+   * symbols between two adjacent analyzed states, so a rename made across several
+   * unanalyzed states also lands here.
+   */
+  | 'no-successor'
+  /** The anchored file no longer exists. */
+  | 'file-missing';
+
+export function anchorOutcome(v: AnchorVerdict): { outcome: AnchorOutcome; reason?: ReselectionReason } | undefined {
+  if (v.freshness === 'orphaned') {
+    const reason: ReselectionReason = v.spanCandidates
+      ? 'span-ambiguous'
+      : v.anchor.possiblyMovedTo?.length
+        ? 'move-ambiguous'
+        : v.anchor.nodeId ? 'no-successor' : 'file-missing';
+    return { outcome: 'needs-human-reselection', reason };
+  }
+  if (v.anchor.carriedAcross) return { outcome: 're-pointed-with-provenance' };
+  if (v.freshness === 'fresh') return { outcome: 'silently-carried' };
+  return undefined;
 }
 
 const FRESHNESS_RANK: Record<MemoryFreshness, number> = {

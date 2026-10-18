@@ -20,6 +20,7 @@ import {
 import { atomicWriteFile, casUpdate, quarantineCorrupt } from './atomic-store.js';
 import type { MemoryStore, StructuralAnchor } from '../../types/index.js';
 import { safeJoin } from '../../utils/path-confinement.js';
+import { hashSpan } from './anchor.js';
 
 export function memoryDir(rootPath: string): string {
   return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR));
@@ -101,7 +102,11 @@ export async function updateMemoryStore(
  */
 function anchorIdentity(anchors: readonly StructuralAnchor[]): string {
   return [...anchors]
-    .map((a) => (a.nodeId ? `sym:${a.stableId ?? a.nodeId}` : `file:${a.filePath}`))
+    .map((a) => (a.nodeId
+      // A span anchor is a different anchor from its whole symbol, or from another
+      // span in it; plain anchors keep their pre-span key (add-memory-anchor-verdicts).
+      ? `sym:${a.stableId ?? a.nodeId}${a.spanText === undefined ? '' : `#${hashSpan(a.spanText)}`}`
+      : `file:${a.filePath}`))
     .sort()
     .join('|');
 }

@@ -1356,6 +1356,7 @@ export const NAV_TOOLS: NavToolSpec[] = [
         Type.Object({
           symbol: Type.Optional(Type.String({ description: 'Function/method name (optional).' })),
           file: Type.Optional(Type.String({ description: 'Repo-relative file path (optional).' })),
+          span: Type.Optional(Type.String({ minLength: 1, maxLength: 2000, description: 'Exact text inside the symbol (optional); only edits to it drift the memory.' })),
         }),
         { description: 'Code this memory is about; each anchor names a symbol and/or file so the memory self-invalidates when that code changes.' },
       )),

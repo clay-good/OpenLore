@@ -242,6 +242,13 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'The change orphans one or more code-anchored memories (their anchor symbols are removed).',
     remediation: 'Orphaned memory: {subject}; re-anchor or supersede the affected memory before continuing.',
   },
+  // ── memory anchor loss (add-memory-anchor-verdicts) ──
+  'memory-anchor-lost': {
+    defaultClass: 'advisory',
+    source: 'memory-freshness',
+    description: 'A recorded memory has an anchor that is lost or ambiguous (needs-human-reselection), so recall withholds it from the authoritative set.',
+    remediation: 'Lost memory anchor: {subject}; re-record the memory against current code with `remember` and `supersedes` set to its id.',
+  },
   'orphans-anchored-decision': {
     defaultClass: 'advisory',
     source: 'blast-radius',

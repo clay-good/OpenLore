@@ -13,6 +13,8 @@
  * Sources:
  *   - stale-decision-reference — always (cheap: a pure walk of the decision graph
  *     + anchored references).
+ *   - memory-anchor-lost — always (a freshness pass over recorded notes; a note
+ *     with a lost or ambiguous anchor is one finding).
  *   - blast-radius orphan patterns — collected only when the repo configured the
  *     blast-radius guard (`blastRadius.block`) or named an orphan code in the policy,
  *     because the briefing is diff-heavy.
@@ -48,6 +50,7 @@ import {
 } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
+import { detectMemoryAnchorLoss } from '../../core/services/mcp-handlers/memory.js';
 import {
   CORPUS_FINDING_CODES,
   detectCorpusIntegrity,
@@ -335,6 +338,17 @@ function impactCertificateAssessmentComplete(cert: ImpactCertificate): boolean {
     /not computed|not assessed|certificate lists the \d+ shortest/i.test(caveat));
 }
 
+/** True when the analysis is known to match the working tree's graph-source files. */
+async function analysisIsCurrent(cwd: string): Promise<boolean> {
+  const freshness = await assessStalenessForAnalysis(
+    cwd,
+    join(cwd, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
+    Date.now(),
+    false,
+  );
+  return !!freshness.indexCommit && freshness.changedSourceFiles === 0;
+}
+
 /**
  * Collect governance findings from every in-scope source, mapping each native
  * finding onto the unified {@link GovernanceFinding} shape. Source failures are
@@ -375,6 +389,25 @@ export async function collectGovernanceFindings(
   } catch (err) {
     caveats.push(`stale-decision-reference check unavailable: ${err instanceof Error ? err.message : String(err)}`);
     failedCodes.add('stale-decision-reference');
+  }
+
+  // memory-anchor-lost — always (a freshness pass over recorded notes, no diff).
+  // A stale index can miss a lost anchor, so it marks the assessment incomplete.
+  try {
+    const loss = await detectMemoryAnchorLoss(cwd);
+    findings.push(...loss.findings);
+    if (loss.unassessedReason) {
+      caveats.push(`memory-anchor-lost check incomplete: ${loss.unassessedReason}`);
+      failedCodes.add('memory-anchor-lost');
+    } else if (loss.checked > 0 && !(await analysisIsCurrent(cwd))) {
+      caveats.push('memory-anchor-lost check incomplete: graph-source files changed since analysis, or its freshness is unknown; run openlore analyze');
+      failedCodes.add('memory-anchor-lost');
+    } else {
+      assessedCodes.add('memory-anchor-lost');
+    }
+  } catch (err) {
+    caveats.push(`memory-anchor-lost check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    failedCodes.add('memory-anchor-lost');
   }
 
   // Decision-bound constraints — always load the declared eligibility corpus.

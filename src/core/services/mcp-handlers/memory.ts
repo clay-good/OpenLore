@@ -17,15 +17,20 @@
 import { validateDirectory, sanitizeMcpError, queryTooLongError } from './utils.js';
 import { loadDecisionStore, INACTIVE_STATUSES } from '../../decisions/store.js';
 import { loadMemoryStore, updateMemoryStore, makeMemoryId } from '../../decisions/memory-store.js';
-import { AnchorContext } from '../../decisions/anchor-adapter.js';
+import { AnchorContext, type SpanNotRecordedReason } from '../../decisions/anchor-adapter.js';
 import {
   memoryFreshness,
   decisionAnchors,
   findUnreconciled,
   isStaleRegionOnly,
+  anchorOutcome,
+  MAX_SPAN_CHARS,
+  type AnchorOutcome,
+  type ReselectionReason,
   type GraphFreshnessView,
   type AnchoredItem,
 } from '../../decisions/anchor.js';
+import type { GovernanceFinding } from './enforcement-policy.js';
 import { getHeadCommit, resolveCommitSha, isAncestor } from '../../decisions/git-time.js';
 import { queryTerms, scoreMemory, type RankFields } from './memory-ranking.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -69,7 +74,27 @@ const MAX_MEMORY_TAGS = 25;
 export interface AnchorHint {
   symbol?: string;
   file?: string;
+  /** Exact text inside the symbol the memory is about (add-memory-anchor-verdicts). */
+  span?: string;
 }
+
+/** A malformed span hint, or undefined when every hint's span is usable. */
+function spanHintError(hints: readonly AnchorHint[]): string | undefined {
+  for (const [i, h] of hints.entries()) {
+    if (h?.span === undefined) continue;
+    if (typeof h.span !== 'string' || h.span.trim() === '') return `anchors[${i}].span must be non-empty text.`;
+    if (h.span.length > MAX_SPAN_CHARS) return `anchors[${i}].span is ${h.span.length} characters (max ${MAX_SPAN_CHARS}). Anchor to the line or few lines the memory is about.`;
+    if (!h.symbol) return `anchors[${i}].span needs anchors[${i}].symbol: a span is located inside one symbol's body.`;
+  }
+  return undefined;
+}
+
+const SPAN_NOT_RECORDED_TEXT: Record<SpanNotRecordedReason, string> = {
+  'no-symbol': 'the symbol did not resolve to exactly one analyzed symbol',
+  'not-found': 'the text does not occur in the symbol\'s current body',
+  ambiguous: 'the text occurs more than once in the symbol\'s body',
+  unreadable: 'the symbol\'s source could not be read',
+};
 
 export async function handleRemember(
   directory: string,
@@ -102,14 +127,19 @@ export async function handleRemember(
     if (tags && tags.length > MAX_MEMORY_TAGS) {
       return { error: `too many tags: ${tags.length} (max ${MAX_MEMORY_TAGS}).` };
     }
+    const spanError = anchorHints ? spanHintError(anchorHints) : undefined;
+    if (spanError) return { error: spanError };
     const rootPath = await validateDirectory(directory);
 
     let anchors: StructuralAnchor[] = [];
+    // A span that could not be located is never stored and silently ignored: the
+    // anchor is recorded without it and the result says why (add-memory-anchor-verdicts).
+    const spanNotRecorded: Array<{ anchor: number; reason: SpanNotRecordedReason }> = [];
     if (anchorHints?.length) {
       const ctx = AnchorContext.open(rootPath);
       if (ctx) {
         try {
-          anchors = ctx.resolveInputAnchors(anchorHints);
+          anchors = ctx.resolveInputAnchors(anchorHints, (anchor, reason) => spanNotRecorded.push({ anchor, reason }));
         } finally {
           ctx.close();
         }
@@ -118,6 +148,9 @@ export async function handleRemember(
         anchors = anchorHints
           .filter((h) => h.file)
           .map((h) => ({ filePath: h.file! }));
+        for (const [anchor, h] of anchorHints.entries()) {
+          if (h.span !== undefined) spanNotRecorded.push({ anchor, reason: 'no-symbol' });
+        }
       }
     }
 
@@ -212,10 +245,13 @@ export async function handleRemember(
       anchors: anchors.map(summarizeAnchor),
       ...(memory.trigger ? { trigger: memory.trigger } : {}),
       ...(memory.pinned ? { pinned: true } : {}),
+      ...(spanNotRecorded.length ? { spanNotRecorded } : {}),
       message: [
         anchors.length
           ? `Memory recorded with ${anchors.length} structural anchor(s).`
           : 'Memory recorded (unanchored — recall will not be able to verify it against code).',
+        ...spanNotRecorded.map(({ anchor, reason }) =>
+          `anchors[${anchor}].span was not recorded (${SPAN_NOT_RECORDED_TEXT[reason]}); the anchor covers the whole ${reason === 'no-symbol' ? 'file, if one was given' : 'symbol'}.`),
         supersedeNote,
         droppedPush.length
           ? `Updated in place: the previous ${droppedPush.join(' and ')} ${droppedPush.length === 1 ? 'was' : 'were'} not repeated and ${droppedPush.length === 1 ? 'has' : 'have'} been removed.`
@@ -475,6 +511,13 @@ export async function handleRecall(
       // The bullet-proof guarantee: orphaned memories never sit in `authoritative`.
       const authoritative = filtered.filter((i) => i.freshness !== 'orphaned');
       const needsReanchoring = filtered.filter((i) => i.freshness === 'orphaned');
+      // Each returned note with a lost anchor is a trackable work item, not only a
+      // prose note (add-memory-anchor-verdicts). Decisions have their own lifecycle.
+      const findings = needsReanchoring.flatMap((i) => {
+        if (i.kind !== 'note') return [];
+        const f = memoryAnchorLostFinding(i.id, i.anchors);
+        return f ? [f] : [];
+      });
 
       // Budget-aware tiering: with a tokenBudget, return the highest grounding-
       // density facts first (verified-current core), then the tail as budget
@@ -566,6 +609,7 @@ export async function handleRecall(
         authoritative: authoritativeOut.map(stripScore),
         needsReanchoring: needsReanchoring.map(stripScore),
         unreconciled: unreconciled.length ? unreconciled : undefined,
+        ...(findings.length ? { findings } : {}),
         ...(reversals !== undefined ? { reversals } : {}),
         ...(fleetMemory !== undefined ? { fleetMemory } : {}),
         budget,
@@ -654,8 +698,49 @@ function decisionFields(d: PendingDecision, anchors: StructuralAnchor[]): RankFi
   };
 }
 
-function summarizeAnchor(a: StructuralAnchor): { symbol?: string; file: string; level: 'symbol' | 'file' } {
-  return { symbol: a.symbolName, file: a.filePath, level: a.nodeId ? 'symbol' : 'file' };
+function summarizeAnchor(a: StructuralAnchor): { symbol?: string; file: string; level: 'symbol' | 'file'; span?: true } {
+  return {
+    symbol: a.symbolName,
+    file: a.filePath,
+    level: a.nodeId ? 'symbol' : 'file',
+    // The anchor covers one exact text span inside the symbol (add-memory-anchor-verdicts).
+    ...(a.nodeId && a.spanText !== undefined ? { span: true as const } : {}),
+  };
+}
+
+type SummarizedVerdict = ReturnType<typeof summarizeVerdict>;
+
+/** Longest symbol or file label a finding message repeats from notes.json. */
+const MAX_FINDING_LABEL = 200;
+/** Most lost anchors one finding message names. */
+const MAX_FINDING_ANCHORS = 3;
+
+const RESELECTION_REASON_TEXT: Record<ReselectionReason, string> = {
+  'span-ambiguous': 'its span text now occurs more than once in the symbol',
+  'move-ambiguous': 'the symbol disappeared and more than one symbol could be it',
+  'no-successor': 'the symbol disappeared with no unambiguous successor (renames are followed only between two adjacent analyses)',
+  'file-missing': 'the file no longer exists',
+};
+
+/**
+ * The `memory-anchor-lost` finding for one memory, or undefined when none of its
+ * anchors needs reselection (add-memory-anchor-verdicts). One finding per memory,
+ * with the memory id as subject, so a policy or frozen baseline tracks it by memory.
+ */
+export function memoryAnchorLostFinding(id: string, anchors: readonly SummarizedVerdict[]): GovernanceFinding | undefined {
+  const lost = anchors.filter((a) => a.outcome === 'needs-human-reselection');
+  if (lost.length === 0) return undefined;
+  const cut = (t: string) => (t.length > MAX_FINDING_LABEL ? `${t.slice(0, MAX_FINDING_LABEL)}…` : t);
+  const named = lost.slice(0, MAX_FINDING_ANCHORS).map((a) =>
+    `${cut(a.file)}${a.symbol ? `::${cut(a.symbol)}` : ''} (${RESELECTION_REASON_TEXT[a.reselectReason!]})`);
+  const more = lost.length > MAX_FINDING_ANCHORS ? `, and ${lost.length - MAX_FINDING_ANCHORS} more` : '';
+  return {
+    code: 'memory-anchor-lost',
+    severity: 'warning',
+    source: 'memory-freshness',
+    subject: id,
+    message: `Memory ${id} has ${lost.length} anchor(s) that need reselection: ${named.join('; ')}${more}. Recall withholds it from the authoritative set.`,
+  };
 }
 
 function summarizeVerdict(v: AnchorVerdict): {
@@ -668,7 +753,11 @@ function summarizeVerdict(v: AnchorVerdict): {
   staleRegionComposition?: import('../../../types/index.js').StaleRegionComposition;
   carriedAcross?: StructuralAnchor['carriedAcross'];
   possiblyMovedTo?: string[];
+  spanCandidates?: AnchorVerdict['spanCandidates'];
+  outcome?: AnchorOutcome;
+  reselectReason?: ReselectionReason;
 } {
+  const outcome = anchorOutcome(v);
   return {
     ...summarizeAnchor(v.anchor),
     freshness: v.freshness,
@@ -685,6 +774,11 @@ function summarizeVerdict(v: AnchorVerdict): {
     // while the anchor is still orphaned; once it resolves (carried, or the symbol came
     // back), a previously-stored hint is stale and is not surfaced.
     ...(v.freshness === 'orphaned' && v.anchor.possiblyMovedTo?.length ? { possiblyMovedTo: v.anchor.possiblyMovedTo } : {}),
+    // A span that now occurs several times: where, so a human can reselect it.
+    ...(v.spanCandidates ? { spanCandidates: v.spanCandidates } : {}),
+    // What happened to the anchor, in work-item terms (add-memory-anchor-verdicts).
+    ...(outcome ? { outcome: outcome.outcome } : {}),
+    ...(outcome?.reason ? { reselectReason: outcome.reason } : {}),
   };
 }
 
@@ -701,4 +795,32 @@ function stripScore(i: RecalledMemory): Omit<RecalledMemory, 'score'> {
  */
 function estimateItemTokens(i: RecalledMemory): number {
   return Math.ceil(JSON.stringify(stripScore(i)).length / 4);
+}
+
+/**
+ * The `memory-anchor-lost` source for `openlore enforce` (add-memory-anchor-verdicts):
+ * one finding per recorded, non-retired note that has a lost or ambiguous anchor,
+ * computed with the same freshness engine recall uses. `checked` counts the
+ * anchored notes evaluated; `unassessedReason` is set when anchored notes exist
+ * but there is no analysis to check them against.
+ */
+export async function detectMemoryAnchorLoss(rootPath: string): Promise<{ findings: GovernanceFinding[]; checked: number; unassessedReason?: string }> {
+  const store = await loadMemoryStore(rootPath);
+  const notes = store.memories.filter(isWellFormedMemory).filter((m) => !m.invalidatedAt && m.anchors.length > 0);
+  if (notes.length === 0) return { findings: [], checked: 0 };
+  const ctx = AnchorContext.open(rootPath);
+  if (!ctx) return { findings: [], checked: 0, unassessedReason: 'no analysis to check memory anchors against; run openlore analyze' };
+  try {
+    const view = ctx.freshnessView();
+    const findings: GovernanceFinding[] = [];
+    for (const m of notes) {
+      const f = memoryFreshness(m.anchors, view);
+      if (f.freshness !== 'orphaned') continue;
+      const finding = memoryAnchorLostFinding(m.id, f.verdicts.map(summarizeVerdict));
+      if (finding) findings.push(finding);
+    }
+    return { findings, checked: notes.length };
+  } finally {
+    ctx.close();
+  }
 }

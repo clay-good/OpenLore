@@ -14,7 +14,7 @@
  * exactly as `recall` segregates it.
  */
 
-import { memoryFreshness, isStaleRegionOnly, findUnreconciled, decisionAnchors, type AnchoredItem, type GraphFreshnessView } from '../../decisions/anchor.js';
+import { memoryFreshness, isStaleRegionOnly, findUnreconciled, decisionAnchors, MAX_SPAN_CHARS, type AnchoredItem, type GraphFreshnessView } from '../../decisions/anchor.js';
 import { INACTIVE_STATUSES } from '../../decisions/store.js';
 import { supersededDecisionIds } from './reversals.js';
 import { staleRefsInText, type RetirementGraph, type StaleRef } from './stale-decision-reference.js';
@@ -405,7 +405,10 @@ export function isWellFormedMemory(m: unknown): m is AnchoredMemory {
       const anchor = a as Record<string, unknown>;
       return typeof anchor.filePath === 'string' &&
         (anchor.nodeId === undefined || typeof anchor.nodeId === 'string') &&
-        (anchor.stableId === undefined || typeof anchor.stableId === 'string');
+        (anchor.stableId === undefined || typeof anchor.stableId === 'string') &&
+        // Bounded like a recorded span: every freshness check searches for it.
+        (anchor.spanText === undefined ||
+          (typeof anchor.spanText === 'string' && anchor.spanText.length > 0 && anchor.spanText.length <= MAX_SPAN_CHARS));
     });
 }
 

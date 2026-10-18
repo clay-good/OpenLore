@@ -285,6 +285,7 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 |------|--------|---------|---------|
 | `stale-decision-reference` | stale-decision-reference | advisory | A live, authoritative artifact (approved decision, non-orphaned anchored memory, or spec requirement) references a decision that has since been superseded. |
 | `orphans-anchored-memory` | blast-radius | advisory | The change orphans one or more code-anchored memories. |
+| `memory-anchor-lost` | memory-freshness | advisory | A recorded memory has an anchor that is lost or ambiguous (`needs-human-reselection`), so `recall` withholds it. One finding per memory, with the memory id as subject; `openlore enforce` always collects it, and `recall` also returns it in `findings`. |
 | `orphans-anchored-decision` | blast-radius | advisory | The change orphans one or more anchored architectural decisions. |
 | `surface-info` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `info`. |
 | `surface-warn` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `warn`. |

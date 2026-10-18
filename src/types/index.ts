@@ -1021,6 +1021,14 @@ export interface StructuralAnchor {
    * ambiguous move was detected for this anchor.
    */
   possiblyMovedTo?: string[];
+  /**
+   * Exact text inside the anchored symbol's body that the memory is about
+   * (add-memory-anchor-verdicts). When set, freshness re-locates this text in the
+   * symbol's current body by exact match instead of comparing the whole-symbol
+   * hash, so an edit elsewhere in the symbol does not drift the memory. Only set on
+   * a symbol anchor, and only when the text occurred exactly once at record time.
+   */
+  spanText?: string;
 }
 
 /** How a symbol's identity moved between two indexed states (add-symbol-identity-continuity). */
@@ -1092,7 +1100,17 @@ export interface AnchorVerdict {
   staleRegion?: boolean;
   /** Structural context for the stale region; never changes the drifted verdict. */
   staleRegionComposition?: StaleRegionComposition;
+  /**
+   * Set on an orphaned span anchor whose text now occurs more than once in the
+   * symbol's body (add-memory-anchor-verdicts): the 1-based file lines where each
+   * occurrence starts, at most {@link MAX_SPAN_CANDIDATES}; `truncated` says more
+   * occurrences exist. The anchor is never re-attached to one of them by guessing.
+   */
+  spanCandidates?: { lines: number[]; truncated?: true };
 }
+
+/** Most candidate lines disclosed for an ambiguous span anchor (add-memory-anchor-verdicts). */
+export const MAX_SPAN_CANDIDATES = 10;
 
 /**
  * Evidence behind a `fresh` verdict (add-trust-calibrated-context-economy). The
