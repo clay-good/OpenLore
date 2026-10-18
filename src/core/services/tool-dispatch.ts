@@ -497,9 +497,9 @@ async function dispatchToolImpl(
     const { directory, dryRun = false, id } = args as { directory: string; dryRun?: boolean; id?: string };
     return handleSyncDecisions(directory, dryRun, id);
   } else if (name === 'remember') {
-    const { directory, content, anchors, tags, type, supersedes, trigger, pinned } =
-      args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[]; type?: string; supersedes?: string; trigger?: unknown; pinned?: unknown };
-    return handleRemember(directory, content, anchors, tags, type, supersedes, trigger, pinned);
+    const { directory, content, anchors, tags, type, supersedes, trigger, pinned, claims } =
+      args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[]; type?: string; supersedes?: string; trigger?: unknown; pinned?: unknown; claims?: unknown };
+    return handleRemember(directory, content, anchors, tags, type, supersedes, trigger, pinned, claims);
   } else if (name === 'recall') {
     const { directory, task, limit = 10, tokenBudget, asOf, changedSince, type, federation, federationRepos } =
       args as { directory: string; task?: string; limit?: number; tokenBudget?: number; asOf?: string; changedSince?: string; type?: string; federation?: boolean; federationRepos?: string[] };

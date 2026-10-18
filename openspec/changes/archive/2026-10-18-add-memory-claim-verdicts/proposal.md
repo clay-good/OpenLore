@@ -1,6 +1,6 @@
 # Add memory claim verdicts: a memory's evidence is re-verified at every recall
 
-> Status: PROPOSED (2026-07-27, ecosystem research sweep). A memory can carry machine-checkable
+> Status: SHIPPED (2026-10-18). Proposed 2026-07-27 (ecosystem research sweep). A memory can carry machine-checkable
 > structural claims; `recall` re-verifies them against the current graph and serves a per-claim
 > verdict. Closes the gap where the anchor stays fresh but the *fact* rots. Prior art: a major
 > production agentic-memory system verifies stored citations just-in-time before use

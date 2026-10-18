@@ -28,6 +28,7 @@ import { MAX_QUERY_LENGTH, SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.j
 import { readJsonArtifactCached } from './artifact-cache.js';
 import { detectInjectionShapes, type InjectionShape } from '../served-content.js';
 import { redactSecretText } from '../secret-redaction.js';
+import { isWellFormedClaim, MAX_MEMORY_CLAIMS } from './memory-claims.js';
 
 /** Longest accepted glob, pattern, or domain name. Triggers are repo content and caller-supplied. */
 export const MAX_TRIGGER_TEXT_LENGTH = 256;
@@ -408,7 +409,9 @@ export function isWellFormedMemory(m: unknown): m is AnchoredMemory {
         (anchor.stableId === undefined || typeof anchor.stableId === 'string') &&
         // Bounded like a recorded span: every freshness check searches for it.
         (anchor.spanText === undefined || spanTextOf(anchor as { spanText?: string }) !== undefined);
-    });
+    }) &&
+    (r.claims === undefined ||
+      (Array.isArray(r.claims) && r.claims.length <= MAX_MEMORY_CLAIMS && r.claims.every(isWellFormedClaim)));
 }
 
 // ── glob matching ───────────────────────────────────────────────────────────

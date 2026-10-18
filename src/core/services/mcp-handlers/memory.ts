@@ -41,9 +41,11 @@ import { collectReversals, supersededDecisionIds } from './reversals.js';
 import { decisionContentProvenance, type ServedContentProvenance } from '../served-content.js';
 import { buildRetirementGraph, staleRefsInText, type StaleRef } from './stale-decision-reference.js';
 import { isWellFormedMemory, validateMemoryTrigger } from './memory-triggers.js';
+import { parseClaims, checkClaims, receiptIndexCommit, type ClaimCheck } from './memory-claims.js';
 import {
   MEMORY_TYPES,
   type MemoryTrigger,
+  type MemoryClaim,
   type AnchoredMemory,
   type MemoryType,
   type StructuralAnchor,
@@ -108,6 +110,7 @@ export async function handleRemember(
   supersedes?: string,
   trigger?: unknown,
   pinned?: unknown,
+  claims?: unknown,
 ): Promise<unknown> {
   try {
     if (!content?.trim()) return { error: 'content is required and must not be empty.' };
@@ -132,7 +135,32 @@ export async function handleRemember(
     }
     const spanError = anchorHints ? spanHintError(anchorHints) : undefined;
     if (spanError) return { error: spanError };
+    let claimInput: MemoryClaim[] = [];
+    if (claims !== undefined && claims !== null) {
+      const parsed = parseClaims(claims);
+      if ('error' in parsed) return { error: parsed.error };
+      claimInput = parsed.claims;
+    }
     const rootPath = await validateDirectory(directory);
+
+    // Evidence that is already false cannot be stored: every claim must be confirmed now, and
+    // the caller gets the same verdicts verify_claim would return (add-memory-claim-verdicts).
+    let storedClaims: MemoryClaim[] = [];
+    if (claimInput.length) {
+      const checks = await checkClaims(rootPath, claimInput);
+      const failed = checks.filter((c) => c.verdict !== 'evidence-holds');
+      if (failed.length) {
+        return {
+          error: `Memory not recorded: ${failed.length} of ${checks.length} claim(s) do not hold against the current graph. ` +
+            'Store only claims verify_claim confirms; see claimVerdicts.',
+          claimVerdicts: checks,
+        };
+      }
+      storedClaims = claimInput.map((c, i) => {
+        const commit = receiptIndexCommit(checks[i]);
+        return commit ? { ...c, recordedIndexCommit: commit } : c;
+      });
+    }
 
     let anchors: StructuralAnchor[] = [];
     // A span that could not be located is never stored and silently ignored: the
@@ -190,6 +218,7 @@ export async function handleRemember(
       ...(validSupersede ? { supersedes: validSupersede } : {}),
       ...(validTrigger ? { trigger: validTrigger } : {}),
       ...(pinned === true ? { pinned: true } : {}),
+      ...(storedClaims.length ? { claims: storedClaims } : {}),
     };
 
     // CAS update so concurrent remember calls never lose a write: the id-keyed
@@ -204,6 +233,7 @@ export async function handleRemember(
       droppedPush = [
         ...(prior?.trigger !== undefined && memory.trigger === undefined ? ['trigger'] : []),
         ...(prior?.pinned === true && memory.pinned !== true ? ['pinned'] : []),
+        ...(prior?.claims?.length && !memory.claims ? ['claim list'] : []),
       ];
       const memories = store.memories.map((m) => {
         if (validSupersede && m.id === validSupersede && !m.invalidatedAt) {
@@ -248,11 +278,13 @@ export async function handleRemember(
       anchors: anchors.map(summarizeAnchor),
       ...(memory.trigger ? { trigger: memory.trigger } : {}),
       ...(memory.pinned ? { pinned: true } : {}),
+      ...(storedClaims.length ? { claims: storedClaims } : {}),
       ...(spanNotRecorded.length ? { spanNotRecorded } : {}),
       message: [
         anchors.length
           ? `Memory recorded with ${anchors.length} structural anchor(s).`
           : 'Memory recorded (unanchored — recall will not be able to verify it against code).',
+        storedClaims.length ? `${storedClaims.length} claim(s) confirmed; recall checks them again.` : undefined,
         ...spanNotRecorded.map(({ anchor, reason }) =>
           `anchors[${anchor}].span was not recorded (${SPAN_NOT_RECORDED_TEXT[reason]}); the anchor covers the whole ${reason === 'no-symbol' ? 'file, if one was given' : 'symbol'}.`),
         supersedeNote,
@@ -323,6 +355,8 @@ interface RecalledMemory {
   contentOrigin?: PendingDecision['contentOrigin'];
   verificationEvidence?: PendingDecision['verificationEvidence'];
   authorStatement?: AuthorStatement;
+  /** Each stored claim checked against the current graph (notes only; add-memory-claim-verdicts). */
+  claims?: ClaimCheck[];
   score: number;
 }
 
@@ -408,6 +442,7 @@ export async function handleRecall(
       // stale-decision-reference signal: an authoritative memory whose content cites a
       // retired decision is not presented as cleanly fresh. (add-finding-enforcement-policy)
       const retirement = buildRetirementGraph(decisionStore.decisions);
+      const claimsById = new Map<string, MemoryClaim[]>();
 
       for (const m of memStore.memories) {
         if (!noteInScope.has(m.id)) continue;           // out of temporal scope / invalidated
@@ -454,6 +489,7 @@ export async function handleRecall(
           score: r.score,
         });
         contradictionItems.push({ id: m.id, anchors: m.anchors, freshness: f.freshness, invalidated });
+        if (m.claims?.length) claimsById.set(m.id, m.claims);
       }
 
       // Decisions are outside the bitemporal model — skip them when a temporal filter
@@ -511,8 +547,36 @@ export async function handleRecall(
         .sort((a, b) => b.score - a.score || (b.recordedAt ?? '').localeCompare(a.recordedAt ?? ''))
         .slice(0, Math.max(1, limit));
 
-      // The bullet-proof guarantee: orphaned memories never sit in `authoritative`.
-      const authoritative = filtered.filter((i) => i.freshness !== 'orphaned');
+      // Claim verdicts (add-memory-claim-verdicts): a returned, current note's stored claims are
+      // checked against the graph as it is now. Orphaned notes are already non-authoritative, and
+      // a temporal query asks about the past, which the current graph cannot answer.
+      let claimsSkipped = false;
+      const claimMemo = new Map<string, Promise<ClaimCheck>>();
+      for (const i of filtered) {
+        const stored = i.kind === 'note' ? claimsById.get(i.id) : undefined;
+        if (!stored) continue;
+        if (temporal || i.invalidated || i.freshness === 'orphaned') {
+          claimsSkipped ||= temporal;
+          continue;
+        }
+        i.claims = await checkClaims(rootPath, stored, claimMemo);
+        if (i.claims.some((c) => c.verdict !== 'evidence-holds')) {
+          // A fact whose evidence does not hold is never presented as verified-current.
+          delete i.verifiedCurrent;
+          delete i.certificates;
+        }
+      }
+      const claimLane = (i: RecalledMemory): 'holds' | 'refuted' | 'unverifiable' =>
+        i.claims?.some((c) => c.verdict === 'evidence-refuted') ? 'refuted'
+          : i.claims?.some((c) => c.verdict === 'evidence-unverifiable') ? 'unverifiable'
+            : 'holds';
+
+      // The bullet-proof guarantee: orphaned memories never sit in `authoritative`, and neither
+      // does a memory whose stored evidence is refuted or can no longer be checked.
+      const live = filtered.filter((i) => i.freshness !== 'orphaned');
+      const authoritative = live.filter((i) => claimLane(i) === 'holds');
+      const evidenceRefuted = live.filter((i) => claimLane(i) === 'refuted');
+      const evidenceUnverifiable = live.filter((i) => claimLane(i) === 'unverifiable');
       const needsReanchoring = filtered.filter((i) => i.freshness === 'orphaned');
       // Each returned note with a lost anchor is a trackable work item, not only a
       // prose note (add-memory-anchor-verdicts). Decisions have their own lifecycle;
@@ -554,6 +618,14 @@ export async function handleRecall(
       const staleRefCount = authoritativeOut.filter((i) => i.staleDecisionRef?.length).length;
       const staleRefNote = staleRefCount
         ? `${staleRefCount} authoritative memor${staleRefCount === 1 ? 'y references a' : 'ies reference a'} superseded decision (see staleDecisionRef) — verify the basis before relying on it.`
+        : undefined;
+      const evidenceNote = evidenceRefuted.length || evidenceUnverifiable.length
+        ? `${evidenceRefuted.length + evidenceUnverifiable.length} memor${evidenceRefuted.length + evidenceUnverifiable.length === 1 ? 'y rests' : 'ies rest'} on a claim that ` +
+          'no longer holds (evidenceRefuted) or can no longer be checked (evidenceUnverifiable) — not authoritative; ' +
+          'check the claim receipts, then supersede or re-record the memory.'
+        : undefined;
+      const claimsSkippedNote = claimsSkipped
+        ? 'Stored claims were not checked: asOf/changedSince ask about the past, and claims are checked only against the current graph.'
         : undefined;
       const unreconciledNote = unreconciled.length
         ? `${unreconciled.length} symbol(s) have two or more authoritative memories — reconcile or supersede one (see unreconciled).`
@@ -610,15 +682,19 @@ export async function handleRecall(
           fresh: filtered.filter((i) => i.freshness === 'fresh').length,
           drifted: filtered.filter((i) => i.freshness === 'drifted').length,
           orphaned: needsReanchoring.length,
+          ...(evidenceRefuted.length ? { evidenceRefuted: evidenceRefuted.length } : {}),
+          ...(evidenceUnverifiable.length ? { evidenceUnverifiable: evidenceUnverifiable.length } : {}),
         },
         authoritative: authoritativeOut.map(stripScore),
         needsReanchoring: needsReanchoring.map(stripScore),
+        ...(evidenceRefuted.length ? { evidenceRefuted: evidenceRefuted.map(stripScore) } : {}),
+        ...(evidenceUnverifiable.length ? { evidenceUnverifiable: evidenceUnverifiable.map(stripScore) } : {}),
         unreconciled: unreconciled.length ? unreconciled : undefined,
         ...(findings.length ? { findings } : {}),
         ...(reversals !== undefined ? { reversals } : {}),
         ...(fleetMemory !== undefined ? { fleetMemory } : {}),
         budget,
-        note: [budgetNote, reanchorNote, staleRefNote, unreconciledNote, ...warnings].filter(Boolean).join(' ') || undefined,
+        note: [budgetNote, reanchorNote, evidenceNote, claimsSkippedNote, staleRefNote, unreconciledNote, ...warnings].filter(Boolean).join(' ') || undefined,
         // Recall does no graph traversal — its boundary is the freshness of the
         // index the anchors were checked against (per-memory verdicts cover the
         // rest). (spec: add-confidence-boundary-disclosure)
