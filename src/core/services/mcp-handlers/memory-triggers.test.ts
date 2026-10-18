@@ -277,9 +277,12 @@ describe('orient pushes triggered memories with a receipt', () => {
     ]);
   });
 
-  it('does not push in lean mode (navigation core only)', async () => {
+  it('does not push in lean mode (navigation core only) unless the caller opts in', async () => {
     await remember('the repo uses tabs', { pinned: true });
+    await remember('every route handler validates input', { trigger: { fileGlob: 'src/routes/**' } });
     expect((await orient('x', { lean: true })).injectedMemories).toBeUndefined();
+    const pushed = await handleOrient(root, 'work on the route', 5, undefined, true, 'distance', { pushMemories: true }) as OrientOut;
+    expect(pushed.injectedMemories?.map(m => m.firedPredicate.kind)).toEqual(['fileGlob', 'pinned']);
   });
 
   it('withinHops 2 fires for a caller two hops upstream of the anchor, not at three', async () => {

@@ -35,7 +35,8 @@ backtracked exponentially on repo-supplied patterns, made `specDomain` read the 
 index shape (it never fired before), and hardened the push against a hostile committed
 `notes.json`: malformed entries, unbounded fields, credentials (redacted), instruction-shaped text
 (withheld), conflicting notes and superseded-decision citations (flagged), and store-order
-dependence. Rendering pushed notes in the lean prompt-hook / Pi injection block is deferred.
+dependence. The prompt-hook and Pi injection blocks render pushed notes as short, budget-gated lines
+(lean `orient` takes an opt-in `pushMemories` for the hook; Pi already received them from full `orient`).
 
 ## State as of 2026-07-27 (spec-backlog repair pass)
 
