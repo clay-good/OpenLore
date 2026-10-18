@@ -728,10 +728,11 @@ path, not only the CLI. The check SHALL compose existing analyses only, with no 
 
 #### Scenario: A stale target index is surfaced
 
-- **GIVEN** a binding whose target index is older than that target's working tree
+- **GIVEN** a binding whose target's index fingerprint differs from the baseline recorded when it was
+  registered
 - **WHEN** the health check runs
-- **THEN** it returns exactly one finding with the stable code `index-stale` and a remediation, and does
-  not block
+- **THEN** it returns exactly one finding with the stable code `index-stale` and a remediation that
+  clears it (re-registering the target, which records the new baseline), and does not block
 
 #### Scenario: A corrupt federation registry degrades to a finding, never a throw
 
