@@ -34,7 +34,7 @@ import { findFleetMemory } from '../../federation/fleet-memory.js';
 import { collectReversals, supersededDecisionIds } from './reversals.js';
 import { decisionContentProvenance, type ServedContentProvenance } from '../served-content.js';
 import { buildRetirementGraph, staleRefsInText, type StaleRef } from './stale-decision-reference.js';
-import { validateMemoryTrigger } from './memory-triggers.js';
+import { isWellFormedMemory, validateMemoryTrigger } from './memory-triggers.js';
 import {
   MEMORY_TYPES,
   type MemoryTrigger,
@@ -305,6 +305,9 @@ export async function handleRecall(
       loadMemoryStore(rootPath),
       loadDecisionStore(rootPath),
     ]);
+    // notes.json is committed repo content: an entry OpenLore could not have written is skipped
+    // rather than allowed to throw and fail the whole recall.
+    memStore.memories = memStore.memories.filter(isWellFormedMemory);
 
     // ── Bitemporal scoping (add-bitemporal-typed-memory-operations) ────────────
     // `asOf` / `changedSince` resolve a commit-ish to a SHA and compare each note's

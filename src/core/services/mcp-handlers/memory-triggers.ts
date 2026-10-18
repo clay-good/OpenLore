@@ -84,12 +84,20 @@ const MAX_PUSHED_ANCHORS = 5;
  */
 const MAX_GLOB_WORK = 20_000_000;
 
+/** Serialized size of the pushed and stale lists together; stored fields are repo content. */
+const MAX_INJECTION_BYTES = 64 * 1024;
+
 /** Candidates (paths, symbol names) longer than this are not matched; no real path is. */
 const MAX_GLOB_CANDIDATE_LENGTH = 1024;
 
-/** A string field from a stored anchor, cut to the trigger text bound; anything else is dropped. */
+/**
+ * A string field from a stored anchor: bounded, credential-redacted, and replaced by a placeholder
+ * when it reads like an instruction — anchor text is repository content too. Anything else is dropped.
+ */
 function anchorText(value: unknown): string | undefined {
-  return typeof value === 'string' ? value.slice(0, MAX_TRIGGER_TEXT_LENGTH) : undefined;
+  if (typeof value !== 'string') return undefined;
+  const text = redactSecretText(value.slice(0, REDACTION_WINDOW)).value.slice(0, MAX_TRIGGER_TEXT_LENGTH).replace(/[\uD800-\uDBFF]$/, '');
+  return detectInjectionShapes(text).length ? '[withheld: reads like an instruction]' : text;
 }
 
 /** Only the known fields of a carry receipt, each bounded — the store is repo content. */
@@ -360,10 +368,8 @@ export function makeHopProbe(
 /** The deepest `withinHops` among live notes, or 0 when none could fire — so the walk is only paid when needed. */
 export function maxTriggerHops(memories: readonly AnchoredMemory[]): number {
   let max = 0;
-  // Canonical order (by id), so which notes the glob budget reaches does not depend on store order.
-  const live = memories.filter((m): m is AnchoredMemory => isWellFormedMemory(m) && !m.invalidatedAt)
-    .sort((a, b) => compareText(a.id, b.id));
-  for (const m of live) {
+  for (const m of memories) {
+    if (!isWellFormedMemory(m) || m.invalidatedAt) continue;
     const trigger = storedTrigger(m);
     if (trigger && 'withinHops' in trigger && trigger.withinHops > max) max = trigger.withinHops;
   }
@@ -394,7 +400,13 @@ export function isWellFormedMemory(m: unknown): m is AnchoredMemory {
   return typeof r.id === 'string' && /^[\w-]{1,64}$/.test(r.id) &&
     typeof r.content === 'string' &&
     Array.isArray(r.anchors) &&
-    r.anchors.every(a => a !== null && typeof a === 'object' && typeof (a as Record<string, unknown>).filePath === 'string');
+    r.anchors.every(a => {
+      if (a === null || typeof a !== 'object') return false;
+      const anchor = a as Record<string, unknown>;
+      return typeof anchor.filePath === 'string' &&
+        (anchor.nodeId === undefined || typeof anchor.nodeId === 'string') &&
+        (anchor.stableId === undefined || typeof anchor.stableId === 'string');
+    });
 }
 
 // ── glob matching ───────────────────────────────────────────────────────────
@@ -412,8 +424,9 @@ function matchSegment(pattern: string, text: string): boolean {
   let star = -1;
   let resume = 0;
   while (t < text.length) {
-    if (p < pattern.length && (pattern[p] === '?' || pattern[p] === text[t])) { p++; t++; }
-    else if (p < pattern.length && pattern[p] === '*') { star = p++; resume = t; }
+    // `*` first: a literal `*` in the text must still leave a backtrack point.
+    if (p < pattern.length && pattern[p] === '*') { star = p++; resume = t; }
+    else if (p < pattern.length && (pattern[p] === '?' || pattern[p] === text[t])) { p++; t++; }
     else if (star !== -1) { p = star + 1; t = ++resume; }
     else return false;
   }
@@ -602,9 +615,11 @@ export function selectInjectedMemories(
   const fired: Array<{ m: AnchoredMemory; p: FiredPredicate }> = [];
   let domainsNotAssessed = 0;
   let hopsNotAssessed = 0;
-  // Canonical order (by id), so which notes the glob budget reaches does not depend on store order.
+  // Canonical order (by id), so which notes the glob budget reaches does not depend on store order;
+  // a duplicated id (a hand edit, a bad merge) keeps one record, chosen by content, never by position.
   const live = memories.filter((m): m is AnchoredMemory => isWellFormedMemory(m) && !m.invalidatedAt)
-    .sort((a, b) => compareText(a.id, b.id));
+    .sort((a, b) => compareText(a.id, b.id) || compareText(a.content, b.content))
+    .filter((m, i, all) => i === 0 || all[i - 1].id !== m.id);
   for (const m of live) {
     const trigger = storedTrigger(m);
     if (trigger && 'specDomain' in trigger && touched.domains === undefined) domainsNotAssessed++;
@@ -618,7 +633,7 @@ export function selectInjectedMemories(
   // and pinned last — so a broad glob cannot crowd a precise hit out of the cap.
   fired.sort((a, b) =>
     comparePushPriority(a.p, b.p) ||
-    compareText(String(b.m.recordedAt ?? ''), String(a.m.recordedAt ?? '')) ||
+    compareText(typeof b.m.recordedAt === 'string' ? b.m.recordedAt : '', typeof a.m.recordedAt === 'string' ? a.m.recordedAt : '') ||
     compareText(a.m.id, b.m.id));
 
   const injected: InjectedMemory[] = [];
@@ -744,10 +759,21 @@ export function injectionFields(inj: MemoryInjection): {
   if (inj.domainsNotAssessed > 0) notes.push(`${inj.domainsNotAssessed} specDomain-triggered memor${inj.domainsNotAssessed === 1 ? 'y was' : 'ies were'} not assessed: no spec link index — run "openlore mapping refresh".`);
   if (inj.omitted > 0) notes.push(`${inj.omitted} more triggered or pinned memor${inj.omitted === 1 ? 'y' : 'ies'} matched but ${inj.omitted === 1 ? 'was' : 'were'} not pushed (cap ${MAX_INJECTED_MEMORIES}) — call recall to see them.`);
   if (inj.staleOmitted > 0) notes.push(`${inj.staleOmitted} more orphaned triggered memor${inj.staleOmitted === 1 ? 'y' : 'ies'} not listed (cap ${MAX_INJECTED_MEMORIES}).`);
-  notes.push(...itemSentences(inj.injected, inj.stale, inj.graphUnavailable));
+  // One byte bound over the pushed lists, whatever the stored fields hold: drop from the least
+  // important end (stale receipts, then the lowest-ranked pushed note) and count what was dropped.
+  const injected = [...inj.injected];
+  const stale = [...inj.stale];
+  let dropped = 0;
+  while ((injected.length || stale.length) && JSON.stringify({ injected, stale }).length > MAX_INJECTION_BYTES) {
+    if (stale.length) stale.pop();
+    else injected.pop();
+    dropped++;
+  }
+  if (dropped > 0) notes.push(`${dropped} pushed or stale memor${dropped === 1 ? 'y' : 'ies'} dropped to keep the receipts under ${MAX_INJECTION_BYTES} bytes — call recall to see them.`);
+  notes.push(...itemSentences(injected, stale, inj.graphUnavailable));
   return {
-    ...(inj.injected.length > 0 ? { injectedMemories: inj.injected } : {}),
-    ...(inj.stale.length > 0 ? { staleTriggeredMemories: inj.stale } : {}),
+    ...(injected.length > 0 ? { injectedMemories: injected } : {}),
+    ...(stale.length > 0 ? { staleTriggeredMemories: stale } : {}),
     ...(notes.length > 0 ? { injectedMemoriesNote: notes.join(' ') } : {}),
   };
 }
