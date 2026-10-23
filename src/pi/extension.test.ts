@@ -10,7 +10,6 @@ import type { HealthResult } from '../api/health.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
-import { pointerLineFor } from '../cli/commands/orient-inject-render.js';
 
 type PiEventHandler = (...args: unknown[]) => unknown;
 
@@ -121,14 +120,14 @@ describe('Pi opt-in configuration onboarding', () => {
   });
 });
 
-function registerPiHandlers(orientTimeoutMs?: number): Map<string, PiEventHandler> {
+function registerPiHandlers(): Map<string, PiEventHandler> {
   const handlers = new Map<string, PiEventHandler>();
   const pi = {
     registerTool: vi.fn(),
     registerCommand: vi.fn(),
     on: vi.fn((event: string, handler: PiEventHandler) => { handlers.set(event, handler); }),
   } as unknown as ExtensionAPI;
-  (orientTimeoutMs === undefined ? openloreExtension : createPiExtension({ orientTimeoutMs }))(pi);
+  openloreExtension(pi);
   return handlers;
 }
 
@@ -420,17 +419,6 @@ it('frames every Pi before-agent corpus block with the shared provenance boundar
     .split('\r\n').join('\n');
   expect(source).toContain("frameServedContent(\n      '# Codebase architecture");
   expect(source).toContain('frameServedContent(specIndex, specProvenance');
-  expect(source).toContain('renderInjectionBlock(result, cfg)');
-});
-
-it('applies the Pi intent gate before daemon work and discloses every withheld path', async () => {
-  const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
-  const hook = source.slice(source.indexOf("pi.on('before_agent_start'"));
-  expect(hook.indexOf('classifyTurnIntent(prompt)')).toBeLessThan(hook.indexOf('getDaemon(ctx.cwd)'));
-  expect(hook).toContain('runtime.orientTimeoutMs ?? PI_ORIENT_TIMEOUT_MS');
-  expect(hook).toContain("pointerLineFor('empty-prompt')");
-  expect(hook).toContain("pointerLineFor('management-intent')");
-  expect(hook).toContain("pointerLineFor('error')");
 });
 
 it('refuses a pre-existing narrow daemon with actionable remediation', async () => {
@@ -1093,98 +1081,40 @@ it('bounds and sorts the Pi spec-domain index with an explicit overflow receipt'
   }
 });
 
-it('degrades the real before-agent hook to its pointer line when orient wedges', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-hook-timeout-'));
+it('never orients on the user\'s behalf and re-attaches the digest on every turn', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-no-auto-orient-'));
+  const requests: string[] = [];
   const server = createServer((req, res) => {
-    if (req.url === '/health') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        ok: true,
-        presetDispatchEnforced: true,
-        root: dir,
-        pid: process.pid,
-        preset: 'full',
-        tools: NAV_TOOLS.map((tool) => tool.name),
-        tokenProtected: false,
-        tokenAuthenticated: true,
-        draining: false,
-      }));
-    }
-    // `/tool/orient` deliberately never responds; the hook owns the deadline.
+    requests.push(req.url ?? '');
+    res.writeHead(500);
+    res.end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('hook-timeout server did not bind');
+  if (!address || typeof address === 'string') throw new Error('no-auto-orient server did not bind');
   try {
-    await mkdir(join(dir, '.openlore'), { recursive: true });
-    await writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
-      port: address.port,
-      pid: process.pid,
-      host: '127.0.0.1',
-      startedAt: new Date().toISOString(),
-      version: 'test',
-    }));
-    const timeoutMs = 50;
-    const handlers = registerPiHandlers(timeoutMs);
-    const beforeAgentStart = handlers.get('before_agent_start');
-    const ctx = {
-      cwd: dir, mode: 'tui', hasUI: false,
-      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
-    } as unknown as ExtensionContext;
-    const startedAt = Date.now();
-
-    const result = await beforeAgentStart?.({ prompt: 'inspect the parser', systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
-
-    expect(Date.now() - startedAt).toBeLessThan(timeoutMs + 500);
-    expect(result?.systemPrompt).toContain(pointerLineFor('error'));
-  } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(dir, { recursive: true, force: true });
-  }
-}, 2_000);
-
-it('applies the same first-turn deadline while daemon discovery is wedged', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-discovery-timeout-'));
-  const server = createServer((_req, res) => {
-    setTimeout(() => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        ok: true, presetDispatchEnforced: true, root: dir, pid: process.pid,
-        preset: 'full', tools: NAV_TOOLS.map((tool) => tool.name),
-        tokenProtected: false, tokenAuthenticated: true, draining: false,
-      }));
-    }, 200);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('discovery-timeout server did not bind');
-  try {
-    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await mkdir(join(dir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'analysis', 'CODEBASE.md'), 'EVERY TURN DIGEST');
     await writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
       port: address.port, pid: process.pid, host: '127.0.0.1', startedAt: '', version: 'test',
     }));
-    const timeoutMs = 50;
-    const beforeAgentStart = registerPiHandlers(timeoutMs).get('before_agent_start');
+    const beforeAgentStart = registerPiHandlers().get('before_agent_start');
     const ctx = {
       cwd: dir, mode: 'tui', hasUI: false,
       ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
     } as unknown as ExtensionContext;
-    const startedAt = Date.now();
 
-    const result = await beforeAgentStart?.({ prompt: 'inspect the parser', systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
-
-    expect(Date.now() - startedAt).toBeLessThan(timeoutMs + 500);
-    expect(result?.systemPrompt).toContain(pointerLineFor('error'));
-    // Discovery is intentionally allowed to warm the daemon after the first-turn
-    // deadline; let that useful background work settle before removing its root.
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    for (const prompt of ['salut !', 'inspect the parser']) {
+      const result = await beforeAgentStart?.({ prompt, systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
+      expect(result?.systemPrompt).toContain('EVERY TURN DIGEST');
+    }
+    expect(requests).toEqual([]);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
   }
-}, 2_000);
+});
 
 /** The single text block a composite result carries. */
 function compositeText(result: ReturnType<typeof compositeToolResult>): string {

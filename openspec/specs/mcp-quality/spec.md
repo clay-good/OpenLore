@@ -968,20 +968,20 @@ to overwrite an existing malformed or non-object config.
 
 ### Requirement: PiDaemonFailuresAreBoundedAndHonest
 
-The Pi extension SHALL bound the best-effort context-injection orient call with a timeout and
-degrade to its pointer-line fallback on expiry, so daemon discovery plus orient share one bounded
-first-turn deadline. The extension SHALL launch the package's own CLI with the current Node runtime,
+The Pi extension SHALL NOT call orient on the user's behalf before a turn: the prompt may be a
+greeting rather than a task, so no daemon round-trip is spent before the agent decides to orient.
+The extension SHALL launch the package's own CLI with the current Node runtime,
 without PATH lookup or a shell, and SHALL distinguish launch failure, startup preparation failure,
 early exit, draining, and health timeout rather than uniformly advising the user to run
 `openlore analyze`. Draining and health-timeout outcomes SHALL remain immediately retryable. A daemon
 that becomes reachable after session start SHALL have its keepalive armed so it is not reaped
 mid-session.
 
-#### Scenario: An upgrade rebuild does not hang the first prompt
+#### Scenario: A greeting does not trigger orientation
 
-- **GIVEN** a schema-version bump that makes the daemon rebuild on first request
-- **WHEN** the extension injects context before the first turn
-- **THEN** the orient call times out to the pointer-line fallback and the turn proceeds
+- **GIVEN** a Pi session whose first prompt is a greeting
+- **WHEN** the extension injects context before the turn
+- **THEN** no orient call reaches the daemon and the turn proceeds with the digest and spec index only
 
 #### Scenario: A packaged daemon exits before health
 
@@ -999,7 +999,8 @@ mid-session.
 ### Requirement: PiInjectedContextIsBoundedAndCurrent
 
 The Pi extension SHALL build before-agent context from the current event's `cwd` and `mode`, not
-state captured at session start. Its specification index SHALL contain at most 50 sorted domain
+state captured at session start, and SHALL attach it on every turn, because Pi restores its base
+system prompt for a turn whose hook returns none. Its specification index SHALL contain at most 50 sorted domain
 entries and SHALL disclose the number of omitted domains when the repository contains more.
 
 #### Scenario: The active root changes after session start
