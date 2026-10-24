@@ -1078,6 +1078,15 @@ export const NAV_TOOLS: NavToolSpec[] = [
     }),
   },
   {
+    name: 'verify_change',
+    label: 'openlore verify_change',
+    description: 'Before landing a change, get ONE severity-ranked checklist of what it breaks and what to re-run: each item names its subject, the check that found it, a severity, and the single next action, plus the tests to run. Composes blast_radius and structural_diff; advisory, runs nothing and edits nothing.',
+    guideline: 'Right before you commit or finish a change, call openlore_verify_change to get a single ordered action list — the breaks to fix and the tests to run — distilled from the diff. With no arguments it uses your uncommitted changes (diff vs HEAD). It is a grader, not an author: act on the list; it runs and edits nothing. Its sibling blast_radius returns the fuller structured briefing.',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Optional — defaults to HEAD (uncommitted changes).' })),
+    }),
+  },
+  {
     name: 'structural_diff',
     label: 'openlore structural_diff',
     description: 'Show what changed structurally between two states (working tree vs a ref, or two refs): functions and call edges added/removed, signature changes, and the existing callers left STALE by a moved signature.',
@@ -1449,6 +1458,7 @@ export const PI_TOOL_SNIPPETS: Record<string, string> = {
   select_tests: 'Tests to run for given functions or your uncommitted changes.',
   get_test_coverage: 'Which code has tests and which does not.',
   blast_radius: 'Pre-commit briefing: callers, tests to run, specs and decisions at risk.',
+  verify_change: 'Pre-commit checklist: what the diff breaks and the tests to run, severity-ranked.',
   structural_diff: 'Functions, edges, and signatures changed between two states, plus stale callers.',
   verify_claim: 'Check a structural fact or a decision citation before you state it.',
   suggest_insertion_points: 'Ranked places to add new code.',
@@ -1503,7 +1513,7 @@ export const PI_LEAN_TOOLS: readonly string[] = [
 export const PI_TOOL_GROUPS: Record<string, readonly string[]> = {
   specs: ['search_specs', 'get_spec', 'list_spec_domains', 'search_unified', 'check_spec_drift', 'audit_spec_coverage'],
   memory: ['remember', 'record_decision', 'list_decisions', 'approve_decision', 'reject_decision', 'sync_decisions'],
-  review: ['structural_diff', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
+  review: ['structural_diff', 'verify_change', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
   quality: [
     'get_refactor_report', 'get_health_map', 'get_critical_hubs', 'get_god_functions',
     'get_architecture_overview', 'get_surprising_connections', 'find_clones', 'get_style_fingerprint',
@@ -1602,7 +1612,7 @@ export function piActivatorDescription(): string {
  */
 export const PI_STANDING_CONTEXT_BUDGETS: Record<PiToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
   lean: { baselineTokens: 3_089, maxTokens: 3_300, rationale: 'Measured baseline plus 6.8% headroom.' },
-  all: { baselineTokens: 7_445, maxTokens: 7_950, rationale: 'Measured baseline plus 6.8% headroom.' },
+  all: { baselineTokens: 8_139, maxTokens: 8_700, rationale: 'Grew with verify_change (add-verification-feedback-loop); measured baseline plus 6.9% headroom.' },
 };
 
 /** Deterministic estimate (characters / 4) of what the given registered tools add to the prompt. */
