@@ -6,8 +6,10 @@
  *
  * Two halves:
  *   C — context injection (before_agent_start): model starts grounded with the
- *       architecture digest + spec index + task-grounded orient call, so weak
- *       tool-callers benefit even without calling a tool.
+ *       architecture digest + spec index. No orient call is made on the user's
+ *       behalf: the first prompt may be a greeting, not a task, and no prompt
+ *       heuristic tells them apart reliably. The agent calls openlore_orient
+ *       itself once it has a task.
  *   B — native tools (registerTool): the substrate surface for on-demand structural
  *       queries — NAV_TOOLS spans navigate + change + remember + verify + governance,
  *       each round-tripping to the warm daemon via fetch. Every tool is registered, but a
@@ -48,18 +50,6 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-// Task-scoped injection gate + render. This module is intentionally
-// dependency-light (pure tokenization, framing, and token estimation) so importing it
-// here does NOT drag the analyzer into the Pi host — orientation still comes
-// from the warm daemon over RPC (decision abee8e3e).
-import {
-  resolveInjectionConfig,
-  evaluateRelevanceGate,
-  renderInjectionBlock,
-  classifyTurnIntent,
-  pointerLineFor,
-  type LeanOrientResult,
-} from '../cli/commands/orient-inject-render.js';
 // The shared serve.json validator. Dependency-light (node builtins + the loopback
 // predicate) so it does not drag the analyzer into the Pi host, and it guarantees
 // Pi trusts the untrusted descriptor exactly as the CLI and MCP server do
@@ -147,22 +137,6 @@ export async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
 }
 
 /**
- * Read just the `contextInjection` block, independent of `isUsableConfig`.
- * The injection opt-out (including user defaults) must work even before an LLM provider is configured —
- * `readConfig` returns null until `generation.provider` is set (a headless/rpc
- * session may never run the wizard), which would silently drop `mode: "off"`.
- * Mirrors the CLI path, which reads config unconditionally.
- */
-export async function readContextInjection(cwd: string): Promise<ContextInjectionConfig | undefined> {
-  try {
-    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
-    return raw && typeof raw === 'object'
-      ? (raw as { contextInjection?: ContextInjectionConfig }).contextInjection
-      : undefined;
-  } catch { return undefined; }
-}
-
-/**
  * Environment override for daemon spawn authority (change: extend-api-for-supervising-hosts).
  * Set by a supervising host that already runs one daemon per working tree, so an
  * extension-initiated spawn would produce a second, unsupervised process outliving the session.
@@ -172,7 +146,7 @@ const PI_NO_SPAWN_ENV = 'OPENLORE_PI_NO_SPAWN';
 /**
  * May this extension spawn a daemon of its own?
  *
- * Read like `readContextInjection` and NOT through `readConfig`: the opt-out must work before an
+ * Read directly and NOT through `readConfig`: the opt-out must work before an
  * LLM provider is configured, and `readConfig` returns null until `generation.provider` is set —
  * which would silently restore spawn authority the operator revoked. The environment variable wins
  * over the config key, because it is the host's per-process statement about who owns the process.
@@ -592,7 +566,6 @@ interface DaemonProbe {
 
 const HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
-export const PI_ORIENT_TIMEOUT_MS = 4_000;
 export const PI_SPEC_INDEX_MAX_DOMAINS = 50;
 // Generous per-probe timeout: a cold Node HTTP server on Windows can be slow to
 // answer the first /health. Too short a timeout misreads a live daemon as dead,
@@ -890,19 +863,6 @@ export class PiDaemonConnectionError extends Error {
     super(message);
     this.name = 'PiDaemonConnectionError';
   }
-}
-
-/** Bound a best-effort Pi operation without abandoning useful background work. */
-export async function awaitWithSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  return await new Promise<T>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    void work.then(
-      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
-      (error) => { signal.removeEventListener('abort', abort); reject(error); },
-    );
-  });
 }
 
 export function isUsableDaemon(daemon: Daemon): boolean {
@@ -1936,7 +1896,6 @@ export function formatToolResult(result: unknown, toolName?: string): string {
 
 /** Bounded runtime overrides for the extension. @internal */
 export interface PiExtensionRuntime {
-  orientTimeoutMs?: number;
   /** Replaces the functional-readiness read behind the footer status. */
   readHealth?: PiHealthReader;
   /** Replaces the watcher-only probe used on a cached health read. */
@@ -1962,7 +1921,6 @@ function registerOpenlore(
   // repo that simply isn't analyzed yet. Transient failures recover after TTL.
   const failedUntil = new Map<string, number>();
   const DAEMON_RETRY_COOLDOWN_MS = 30_000;
-  const primed = new Set<string>();
   const configHinted = new Set<string>();
   // Footer status state (spec: PiStatusReportsFunctionalReadiness). Keyed by cwd like the daemon
   // cache. No ExtensionContext is ever stored: each update uses the ctx of the event it handles.
@@ -2346,11 +2304,11 @@ function registerOpenlore(
     if (ctx) setPiStatus(ctx, undefined);
   });
 
-  // ── C: context injection on the first turn ──
+  // ── C: context injection on every turn ──
+  // Pi restores its base system prompt for any turn whose hook returns nothing,
+  // so the digest is re-attached each turn rather than only on the first.
   pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
     if (ctx.mode === 'json' || ctx.mode === 'print') return;
-    if (primed.has(ctx.cwd)) return;
-    primed.add(ctx.cwd);
 
     const blocks: string[] = [];
     const [analysisProvenance, specProvenance] = await Promise.all([
@@ -2365,57 +2323,6 @@ function registerOpenlore(
     ));
     const specIndex = await readSpecIndex(ctx.cwd);
     if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
-
-    // Task-scoped orientation: gate + token-budgeted render, the same pipeline
-    // `openlore orient --inject` uses for the Claude Code hook (change
-    // add-task-scoped-context-injection). The daemon does the orientation; the
-    // host only gates and renders. `mode: "off"` opts out (digest/spec index,
-    // Pi's own baseline grounding, are unaffected); a weak/absent match degrades
-    // to the single ignorable pointer line instead of dumping raw orient JSON.
-    const cfg = resolveInjectionConfig(await readContextInjection(ctx.cwd));
-    // Turn-intent gate, ahead of the daemon round-trip: a repository-management
-    // turn (push, open/merge a PR, cut a release) gets the reason-bearing
-    // pointer line and no orientation at all — same classifier, same wording as
-    // the CLI hook (change scope-advisory-noise-to-touched-code).
-    const prompt = event.prompt?.trim() ?? '';
-    if (cfg.mode !== 'off') {
-      if (!prompt) {
-        blocks.push(pointerLineFor('empty-prompt'));
-      } else if (cfg.intentGate && classifyTurnIntent(prompt) === 'repository-management') {
-        blocks.push(pointerLineFor('management-intent'));
-      } else {
-        // Resolve/contact the daemon only after the intent gate has admitted the
-        // turn. Every failure remains visible as a reason-bearing pointer; a
-        // digest already in `blocks` must not accidentally hide orientation loss.
-        const injectionSignal = AbortSignal.timeout(runtime.orientTimeoutMs ?? PI_ORIENT_TIMEOUT_MS);
-        try {
-          const daemon = await awaitWithSignal(getDaemon(ctx.cwd), injectionSignal);
-          if (!daemon) {
-            blocks.push(pointerLineFor('error'));
-          } else {
-            const oriented = await callTool(
-              daemon,
-              'orient',
-              { task: prompt },
-              ctx.cwd,
-              injectionSignal,
-            );
-            const result = oriented && typeof oriented === 'object'
-              ? (oriented as LeanOrientResult)
-              : { error: 'invalid orient response' };
-            const evaluation = evaluateRelevanceGate(result, cfg);
-            blocks.push(evaluation.passes
-              ? renderInjectionBlock(result, cfg)
-              : pointerLineFor(evaluation.reason ?? 'weak-relevance'));
-          }
-        } catch {
-          // A first-turn deadline is not evidence that the daemon is unhealthy.
-          // Discovery continues in the background and may warm the next call.
-          if (!injectionSignal.aborted) dropDaemon(ctx.cwd);
-          blocks.push(pointerLineFor('error'));
-        }
-      }
-    }
 
     const suffix = blocks.length > 0
       ? blocks.join('\n\n')
