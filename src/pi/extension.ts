@@ -1087,6 +1087,28 @@ export const NAV_TOOLS: NavToolSpec[] = [
     }),
   },
   {
+    name: 'certify_provenance',
+    label: 'openlore certify_provenance',
+    description: 'Emit a reproducible, content-addressed record of what a change does (blast radius, paths newly opened into a declared surface, drifted specs, tests to run, structural delta), for attachment to SLSA/in-toto provenance. OpenLore emits, it does not sign.',
+    guideline: 'When a change needs a verifiable provenance record (a CI attestation or audit trail), call openlore_certify_provenance to emit a content-addressed certificate of what the change does — as an in-toto predicate (format "in-toto") or JSON. Any consumer recomputes it to verify the digest. A bad base is fatal; it signs nothing.',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Git ref to diff against (default HEAD).' })),
+      change: Type.Optional(Type.String({ description: 'Change id recorded on the certificate (default "working-tree").' })),
+      format: Type.Optional(Type.String({ description: 'Output shape: "in-toto" predicate or "json" (default json).' })),
+    }),
+  },
+  {
+    name: 'certify_merge',
+    label: 'openlore certify_merge',
+    description: 'Before landing two branches that merge cleanly, check whether one side breaks what the other calls: build the call graph at the merge-base and each side, and report where one adds a call into a symbol the other changed incompatibly or removed. Advisory, a sound lower bound (never "safe").',
+    guideline: 'Before merging two branches (or landing a PR onto its base), call openlore_certify_merge with `ours` and `theirs` (git refs) to catch the "merges cleanly but the combination is broken" failure textual merge misses. Verdicts are incompatible / potentially-incompatible, never "safe".',
+    parameters: Type.Object({
+      ours: Type.String({ description: 'One side to merge (a git ref).' }),
+      theirs: Type.String({ description: 'The other side to merge (a git ref).' }),
+      base: Type.Optional(Type.String({ description: 'Merge base (default: the git merge-base of ours and theirs).' })),
+    }),
+  },
+  {
     name: 'structural_diff',
     label: 'openlore structural_diff',
     description: 'Show what changed structurally between two states (working tree vs a ref, or two refs): functions and call edges added/removed, signature changes, and the existing callers left STALE by a moved signature.',
@@ -1459,6 +1481,8 @@ export const PI_TOOL_SNIPPETS: Record<string, string> = {
   get_test_coverage: 'Which code has tests and which does not.',
   blast_radius: 'Pre-commit briefing: callers, tests to run, specs and decisions at risk.',
   verify_change: 'Pre-commit checklist: what the diff breaks and the tests to run, severity-ranked.',
+  certify_provenance: 'Reproducible, content-addressed record of what a change does, for SLSA/in-toto.',
+  certify_merge: 'Two branches merge cleanly but break in combination — the semantic conflict check.',
   structural_diff: 'Functions, edges, and signatures changed between two states, plus stale callers.',
   verify_claim: 'Check a structural fact or a decision citation before you state it.',
   suggest_insertion_points: 'Ranked places to add new code.',
@@ -1521,7 +1545,7 @@ export const PI_TOOL_GROUPS: Record<string, readonly string[]> = {
     ...PI_ON_DEMAND_SUBSTRATE_TOOLS,
   ],
   memory: ['remember', 'record_decision', 'list_decisions', 'approve_decision', 'reject_decision', 'sync_decisions'],
-  review: ['structural_diff', 'verify_change', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
+  review: ['structural_diff', 'verify_change', 'certify_provenance', 'certify_merge', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
   quality: [
     'get_refactor_report', 'get_health_map', 'get_critical_hubs', 'get_god_functions',
     'get_architecture_overview', 'get_surprising_connections', 'find_clones', 'get_style_fingerprint',

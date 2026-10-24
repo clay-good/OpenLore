@@ -213,7 +213,9 @@ const TOOL_WEIGHTS: Record<string, number> = {
   report_coverage_gaps: 5,     // ← analyze_impact (5) — whole-graph reachability (inverse of select_tests)
   find_dead_code: 5,           // ← analyze_impact (5) — whole-graph reachability sweep
   change_impact_certificate: 5,// ← generate_change_proposal (5) — diff-scoped multi-source certificate
+  certify_provenance: 5,       // ← change_impact_certificate (5) — reproducible provenance over the same diff
   plan_parallel_work: 5,       // ← analyze_impact (5) — footprint + hazard graph over task seeds
+  certify_merge: 5,            // ← plan_parallel_work (5) — cross-branch graph join at landing
   map_in_flight_conflicts: 5,  // ← plan_parallel_work (5) — same hazard classifier, harvested inputs
 
   // Deep architectural tracing
