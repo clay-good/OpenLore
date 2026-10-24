@@ -5598,6 +5598,23 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
 }
 
 /** Construction-time options for {@link CallGraphBuilder}. */
+/**
+ * Resolution-mechanism toggles. TEST / CALIBRATION SURFACE ONLY — production passes nothing, so
+ * every mechanism is on and behaviour is byte-for-byte unchanged. The soundness-calibration
+ * checker (change: add-callgraph-soundness-calibration) drives the builder with a mechanism
+ * disabled to assert the precision-order (monotone-refinement) invariant: disabling a refining
+ * mechanism must only make a call site fall through to a more conservative tier, never change what
+ * the full ladder resolves. A field left undefined means on.
+ */
+export interface CallGraphResolutionToggles {
+  /** Strategy 2: receiver type inference (produces `type_inference` edges). */
+  typeInference?: boolean;
+  /** Strategy 3: resolution through a re-export / barrel chain (produces `re_export` edges). */
+  reExport?: boolean;
+  /** Pass 7b: class-hierarchy (CHA) polymorphic-dispatch `overrides` edges. */
+  cha?: boolean;
+}
+
 export interface CallGraphBuilderOptions {
   /**
    * Controls for the Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
@@ -5624,6 +5641,11 @@ export interface CallGraphBuilderOptions {
   cfgSpill?: CfgSpill;
   /** Test-only oracle: run the pre-optimization late parsers for byte-equivalence checks. */
   legacyLatePassesForTesting?: boolean;
+  /**
+   * Resolution-mechanism toggles for the soundness-calibration checker (test surface only; a
+   * field left undefined is on, so production is unchanged).
+   */
+  resolution?: CallGraphResolutionToggles;
 }
 
 export class CallGraphBuilder {
@@ -5631,12 +5653,19 @@ export class CallGraphBuilder {
   private readonly pass1Cache: Pass1FactCache | undefined;
   private readonly cfgSpill: CfgSpill | undefined;
   private readonly legacyLatePassesForTesting: boolean;
+  /** Every mechanism on unless a test/calibration caller explicitly turned one off. */
+  private readonly resolution: Required<CallGraphResolutionToggles>;
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
     this.pass1Cache = options.pass1Cache;
     this.cfgSpill = options.cfgSpill;
     this.legacyLatePassesForTesting = options.legacyLatePassesForTesting === true;
+    this.resolution = {
+      typeInference: options.resolution?.typeInference !== false,
+      reExport: options.resolution?.reExport !== false,
+      cha: options.resolution?.cha !== false,
+    };
   }
 
   /**
@@ -6287,7 +6316,7 @@ export class CallGraphBuilder {
       }
 
       // Strategy 2 — type inference on receiver variable
-      if (!calleeNode && raw.calleeObject) {
+      if (!calleeNode && raw.calleeObject && this.resolution.typeInference) {
         const fileContent = fileContents.get(callerNode.filePath);
         if (fileContent) {
           const bodySlice = fileContent.slice(callerNode.startIndex, callerNode.endIndex);
@@ -6376,10 +6405,14 @@ export class CallGraphBuilder {
           );
           const requiresUniqueTarget = UNIQUE_IMPORT_BINDING_LANGUAGES.has(callerNode.language);
           if (candidates.length > 0 && (!requiresUniqueTarget || candidates.length === 1)) {
-            calleeNode = candidates[0];
-            confidence = (viaName && reExportedNames.has(`${callerNode.filePath}\0${raw.calleeName}`))
-              ? 're_export'
-              : 'import';
+            const viaReExport = Boolean(viaName) &&
+              reExportedNames.has(`${callerNode.filePath}\0${raw.calleeName}`);
+            // Calibration: with re-export resolution off, a barrel-hop binding falls through to the
+            // more conservative tiers below instead of binding here. A direct import is unaffected.
+            if (!(viaReExport && !this.resolution.reExport)) {
+              calleeNode = candidates[0];
+              confidence = viaReExport ? 're_export' : 'import';
+            }
           }
         }
       }
@@ -6886,15 +6919,19 @@ export class CallGraphBuilder {
       }
       const hierarchyNodes = new Map((resolutionNodes ?? []).map(node => [node.id, node]));
       for (const [id, node] of allNodes) hierarchyNodes.set(id, node);
-      edges.push(...synthesizeTypeHierarchyEdges({
-        nodes: hierarchyNodes,
-        classes,
-        inheritanceEdges,
-        rawMethodCalls,
-        fileContents,
-        directCalleeIdsByCaller,
-        importMap: callImportMap,
-      }));
+      // Calibration: CHA is the over-approximating mechanism — with it off, no `overrides`
+      // edges are synthesized and every other edge is left exactly as it was.
+      if (this.resolution.cha) {
+        edges.push(...synthesizeTypeHierarchyEdges({
+          nodes: hierarchyNodes,
+          classes,
+          inheritanceEdges,
+          rawMethodCalls,
+          fileContents,
+          directCalleeIdsByCaller,
+          importMap: callImportMap,
+        }));
+      }
     } catch {
       // CHA is best-effort; a failure must never abort the build.
     }

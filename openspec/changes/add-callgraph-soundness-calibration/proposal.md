@@ -33,9 +33,12 @@ runtime in the product:
 1. **Precision-order consistency self-check (CI/dogfood, ground-truth-free).** An invariant
    checker that runs the existing builder under progressively more conservative resolution
    configurations (e.g. with type-inference/CHA/re-export resolution disabled stepwise) and
-   asserts the monotonicity invariant: enabling a more precise mechanism refines or removes
-   edges, never introduces an edge the conservative pass lacked (synthesized-provenance edges
-   compared within their own class). Runs over the OpenLore self-index plus the existing fixture
+   asserts the monotone-refinement invariant (reframed 2026-10-24 — the paper's "more precise
+   adds no edge" form is for pointer analyses where precision shrinks edges; OpenLore's ladder
+   grows resolved edges, so the meaningful check is the other direction): the full build never
+   DROPS a resolution a conservative (mechanism-off) build made (a refining mechanism may only
+   refine or add), and the over-approximating CHA pass only ADDS `overrides` edges, leaving every
+   non-`overrides` edge unchanged. Runs over the OpenLore self-index plus the existing fixture
    repos. Violations are emitted as a registered governance finding — a new
    `callgraph-precision-order-violation` code in `FINDING_CODE_REGISTRY`
    (`src/core/services/mcp-handlers/enforcement-policy.ts:81`), default class advisory per the
