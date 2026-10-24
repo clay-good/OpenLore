@@ -52,7 +52,7 @@ const MCP_ONLY_REASON_GROUPS: ReadonlyArray<{ reason: string; tools: readonly st
       'audit_spec_coverage', 'generate_tests', 'get_test_coverage',
       'get_minimal_context', 'get_cluster', 'get_landmarks', 'get_map', 'find_path',
       'detect_changes', 'get_health_map', 'get_surprising_connections',
-      'get_language_support',
+      'get_language_support', 'verify_change',
     ],
   },
   {
