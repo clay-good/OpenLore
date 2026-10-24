@@ -1,0 +1,177 @@
+/**
+ * verify_change — the deterministic verification feedback loop (change: add-verification-feedback-loop).
+ *
+ * Composes the existing diff-based conclusions into ONE ordered, actionable receipt: what the
+ * change breaks, who it affects, and which tests to run — each item with its subject, the check
+ * that produced it, a severity, and a single next action. It performs no new analysis and invents
+ * no finding codes; it projects the signals its component conclusions already compute.
+ *
+ * Today it composes `blast_radius` — which itself already composes `select_tests` (tests to run)
+ * and the spec/memory/decision drift passes — plus `structural_diff` (removed / re-signed functions
+ * and new calls into deprecated code). It is advisory, read-only, offline, and grader-not-author:
+ * it names the tests to run and the breaks to fix; it never runs the tests or edits a file.
+ *
+ * NoRedundantConclusions: each component still answers its own question. verify_change only
+ * assembles their answers for one diff into one next-action list.
+ */
+
+import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js';
+import { handleStructuralDiff } from './structural-diff.js';
+
+type Severity = 'critical' | 'error' | 'warning' | 'info';
+const SEVERITY_RANK: Record<Severity, number> = { critical: 0, error: 1, warning: 2, info: 3 };
+const RISK_TO_SEVERITY: Record<string, Severity> = {
+  critical: 'critical', high: 'error', medium: 'warning', low: 'info', none: 'info',
+};
+
+/** One actionable line of the receipt. */
+export interface ReceiptItem {
+  subject: string;
+  /** The component check that produced this item. */
+  check: string;
+  severity: Severity;
+  /** The single next action for the agent or human. */
+  nextAction: string;
+}
+
+export interface VerifyChangeInput {
+  directory: string;
+  baseRef?: string;
+}
+
+const DEFAULT_ITEM_CAP = 25;
+
+interface StructuralDiffShape {
+  summary?: { removedFunctions?: number; signatureChanges?: number; deprecatedCallsAdded?: number };
+  removed?: Array<{ name?: string; file?: string }>;
+  signatureChanged?: Array<{ name?: string; file?: string }>;
+  deprecatedCalls?: { added?: Array<{ callerName?: string; calleeName?: string; file?: string }> };
+  error?: string;
+}
+
+/**
+ * Project a blast-radius briefing and a structural diff into the ordered, severity-ranked receipt.
+ * Pure (no I/O) so the projection is tested with synthetic inputs, not only via a real diff.
+ */
+export function projectVerifyReceipt(
+  b: BlastRadiusBriefing,
+  sd: StructuralDiffShape,
+): Record<string, unknown> {
+  const items: ReceiptItem[] = [];
+  const boundaries: string[] = [...b.caveats];
+
+  // ── Affected / risk (blast_radius) ──
+  if (b.impact.highestRiskLevel !== 'none' && b.impact.maxAffectedCallers > 0) {
+    items.push({
+      subject: `${b.changed.symbols} changed symbol(s), up to ${b.impact.maxAffectedCallers} affected caller(s)`,
+      check: 'blast_radius',
+      severity: RISK_TO_SEVERITY[b.impact.highestRiskLevel] ?? 'warning',
+      nextAction: b.impact.layersCrossed.length
+        ? `Review callers across layers: ${b.impact.layersCrossed.join(', ')}.`
+        : 'Review the affected callers before landing.',
+    });
+  }
+  for (const hub of b.impact.hubsTouched.slice(0, 5)) {
+    items.push({
+      subject: `hub ${hub.symbol} (fan-in ${hub.fanIn})`,
+      check: 'blast_radius',
+      severity: 'warning',
+      nextAction: 'A high-fan-in hub changed; re-check its dependants.',
+    });
+  }
+
+  // ── Structural delta (structural_diff): removed / re-signed functions, deprecated calls ──
+  if (sd.error) {
+    boundaries.push(`structural_diff unavailable: ${sd.error}`);
+  } else {
+    for (const r of sd.removed ?? []) {
+      items.push({
+        subject: `removed ${r.name ?? '?'}${r.file ? ` (${r.file})` : ''}`,
+        check: 'structural_diff',
+        severity: 'error',
+        nextAction: 'A function was removed; confirm no caller still references it.',
+      });
+    }
+    for (const s of sd.signatureChanged ?? []) {
+      items.push({
+        subject: `signature changed: ${s.name ?? '?'}${s.file ? ` (${s.file})` : ''}`,
+        check: 'structural_diff',
+        severity: 'warning',
+        nextAction: 'A signature changed; re-check every call site.',
+      });
+    }
+    for (const d of sd.deprecatedCalls?.added ?? []) {
+      items.push({
+        subject: `new call into deprecated ${d.calleeName ?? '?'} from ${d.callerName ?? '?'}`,
+        check: 'structural_diff',
+        severity: 'info',
+        nextAction: 'Avoid adding calls into deprecated code; use the documented replacement.',
+      });
+    }
+  }
+
+  // ── Spec drift (composed inside blast_radius) ──
+  for (const s of b.specs.items.slice(0, 10)) {
+    items.push({
+      subject: s.domain ? `${s.domain}: ${s.message}` : s.message,
+      check: 'check_spec_drift',
+      severity: 'warning',
+      nextAction: 'A requirement may go stale; update the spec or re-check drift.',
+    });
+  }
+
+  // ── Ordering + budget ──
+  items.sort((a, z) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[z.severity]);
+  const kept = items.slice(0, DEFAULT_ITEM_CAP);
+  const omitted = items.length - kept.length;
+
+  // ── Tests to run (select_tests, composed inside blast_radius) ──
+  const testsToRun = b.tests.unavailable
+    ? { unavailable: b.tests.unavailable }
+    : { count: b.tests.count, toRun: b.tests.toRun };
+
+  if (b.baseRefFallback) {
+    boundaries.push(`base ref '${b.baseRefFallback.requested}' did not resolve; diffed against '${b.baseRefFallback.resolved}'.`);
+  }
+  if (b.confidenceBoundary) {
+    boundaries.push('The index is behind the working tree; this receipt is a lower bound until re-analyze.');
+  }
+
+  const highest = kept[0]?.severity ?? 'info';
+  return {
+    tool: 'verify_change',
+    posture: 'advisory',
+    baseRef: b.baseRef,
+    resolvedBaseRef: b.resolvedBaseRef,
+    summary: {
+      changedFiles: b.changed.files,
+      changedSymbols: b.changed.symbols,
+      actionItems: items.length,
+      highestSeverity: highest,
+      removedFunctions: sd.summary?.removedFunctions ?? 0,
+      signatureChanges: sd.summary?.signatureChanges ?? 0,
+      deprecatedCallsAdded: sd.summary?.deprecatedCallsAdded ?? 0,
+    },
+    items: kept,
+    ...(omitted > 0 ? { truncated: { omitted, note: 'Lower-severity items omitted; raise the cap to see them.' } } : {}),
+    testsToRun,
+    boundaries,
+    // Grader, not author: these are actions for the caller to take — nothing was run or written.
+    note: 'Advisory receipt. verify_change names the tests to run and the breaks to fix; it runs no tests and edits no files.',
+  };
+}
+
+/**
+ * Build the ordered verification receipt for a diff. Returns a conclusion-shaped object; a failed
+ * blast-radius computation (e.g. an unresolvable base) is returned as an error, not a partial pass.
+ */
+export async function handleVerifyChange(
+  input: VerifyChangeInput,
+): Promise<Record<string, unknown>> {
+  const briefing = await computeBlastRadius({ directory: input.directory, baseRef: input.baseRef });
+  if ('error' in briefing) {
+    return { tool: 'verify_change', posture: 'advisory', error: briefing.error };
+  }
+  const sd = (await handleStructuralDiff({ directory: input.directory, baseRef: input.baseRef })) as StructuralDiffShape;
+  return projectVerifyReceipt(briefing as BlastRadiusBriefing, sd);
+}

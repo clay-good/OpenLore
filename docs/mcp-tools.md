@@ -34,13 +34,13 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **76 tools / ~96 KB / ~24k tokens** (estimated) of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **77 tools / ~96 KB / ~24k tokens** (estimated) of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **The default surface is the `substrate` preset (the navigation core plus governance and spec-workflow reads)**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`substrate`** preset — 15 tools: the navigation graph-traversal core, the three highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and `prepare_spec_generation` / `prepare_spec_repair`. An out-of-box capable MCP agent can therefore obtain a bounded evidence bundle and author specs with its native editor; OpenLore performs no internal LLM call in these composites. The lean navigate-only **`navigation`** preset (10 tools) stays a one-flag escape (`--preset navigation`); the full surface is one explicit opt-in away (`--preset full` / `--all-tools`). When the default surface is active, the server advertises breadth once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
 
 **Spec 28 measured how far the *server* can shrink that prefix, honestly:** MCP has no server-driven lazy-schema mechanism (`tools/list` always returns full schemas), and the lossless server-side byte-lever is only ~2% — the payload is dominated by irreducible per-tool schema structure plus the selection text an agent needs to pick a tool. So the real lever is the *client* (deferred schemas, below) and *tool count* (`--preset`), not byte-shaving. The surface has been trimmed losslessly anyway (shared param descriptions, no boilerplate) and is now **bounded by a regression guard** so it can't silently bloat. Two ways to get the lean surface, in order of preference:
 
-1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 76 tools without paying their schema cost up front.
+1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 77 tools without paying their schema cost up front.
 2. **`--preset navigation` (server-side, navigation-only — the lean escape below the default).** A bare `openlore mcp` / `openlore install` wires the wider `substrate` default (see below); `--preset navigation` is the one-flag way down to the navigate-only core: a graph-traversal surface of 10 tools (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). It is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories, and the `substrate` default's governance reads), so if you use the decision gate or architecture checks during a session, prefer option 1 (deferred schemas) or wire a governance-bearing preset (`--minimal`, or the full surface with `--preset full`).
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
@@ -60,11 +60,11 @@ live registry.
 | `minimal` | 6 | 2,818 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
 | `memory` | 3 | 1,510 | 1,610 |
-| `verify` | 3 | 1,345 | 1,350 |
+| `verify` | 4 | 1,662 | 1,760 |
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 5 | 2,499 | 2,650 |
 | `substrate` | 15 | 5,247 | 5,500 |
-| `full` | 76 | 24,730 | 25,500 |
+| `full` | 77 | 25,046 | 25,500 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
@@ -259,6 +259,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 | `get_low_risk_refactor_candidates` | Safest functions to refactor first: low fan-in, low fan-out, not a hub, no cyclic involvement. Best starting point for incremental, low-risk sessions. | Yes |
 | `get_leaf_functions` | Functions that make no internal calls (leaves of the call graph). Zero downstream blast radius. Sorted by fan-in by default -- most-called leaves have the best unit-test ROI. | Yes |
 | _(all)_ | A response may carry `followUp`: at most two receipts `{ tool, trigger: { field, value }, message }` naming the next tool a field in this response warrants — `search_code` with a hub top hit → `analyze_impact`, `find_dead_code` with low-confidence candidates → `verify_claim`, `blast_radius` with specs that may go stale → `check_spec_drift`. Advisory, never on an error. | — |
+| `verify_change` | The pre-commit **action receipt**: flattens the diff-based signals into one severity-ranked checklist — each item names its subject, the producing check, a severity, and the single next action — plus the tests to run. Composes `blast_radius` (which already folds in `select_tests` + spec/memory/decision drift) and `structural_diff` (removed/re-signed functions, new calls into deprecated code); no LLM, no new analysis. Advisory and grader-not-author: it names what to fix and run, but runs and edits nothing. Its sibling `blast_radius` returns the full structured briefing; this is the flattened next-action list for a propose-verify-correct loop. Opt-in `--preset verify`. CLI dispatch via the MCP tool. | Yes |
 | `structural_diff` | A graph diff (complement to `git diff`) between two states (working tree vs a ref, or two refs): what changed structurally and whose callers are now stale. Calls the diff adds into a symbol marked deprecated (JSDoc `@deprecated`, Go `Deprecated:`, Python `@deprecated`) are listed in `deprecatedCalls` with the target's replacement hint and how the target was resolved (`changed-files`, `index-edge`, or `unique-name`; nothing is guessed), each an advisory `deprecated-symbol-use` finding. | Yes |
 | `detect_changes` | Detect recently changed functions (git diff vs a base ref) and rank them by blast radius (fan-in + transitive reach). | Yes |
 | `get_change_coupling` | Co-change coupling mined from git history (not the call graph): what changes together with a file, and the most volatile code. | Yes |

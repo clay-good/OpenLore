@@ -207,6 +207,8 @@ const TOOL_WEIGHTS: Record<string, number> = {
   generate_tests: 4,
   get_low_risk_refactor_candidates: 4,
   blast_radius: 5,              // ← analyze_impact (5) — callers/layers/tests briefing over the graph
+  verify_change: 5,            // ← blast_radius (5) — diff-scoped composed verification receipt
+
   select_tests: 5,             // ← analyze_impact (5) — backward reachability over the graph
   report_coverage_gaps: 5,     // ← analyze_impact (5) — whole-graph reachability (inverse of select_tests)
   find_dead_code: 5,           // ← analyze_impact (5) — whole-graph reachability sweep

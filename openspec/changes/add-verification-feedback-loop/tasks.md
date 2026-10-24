@@ -1,31 +1,43 @@
 # Tasks — add verification feedback loop
 
+> Composition note (as built): `blast_radius` already composes `select_tests` (tests to run) and
+> the spec/memory/decision drift passes, so `verify_change` reaches those transitively through one
+> `blast_radius` call, then adds `structural_diff` (removed/re-signed functions, deprecated calls).
+> `certify_public_surface` is the one named conclusion not yet folded in — a remaining task; the
+> change stays open until it lands.
+
 ## Implementation
-- [ ] Diff resolution: working-tree or `--staged` against a base from `resolveBaseRefDisclosed`;
-      fatal on a bad base
-- [ ] Composition layer: run `blast_radius`, `select_tests`, `check_spec_drift`,
-      `certify_public_surface`, and `structural_diff` (deprecatedCalls + footprint escapes) over
-      the diff's changed/reachable symbols; map each result into a common receipt item
-      `{ subject, producingCheck, severity, nextAction }`
-- [ ] Ordering + budget: severity-rank items, apply the whole-response budget, disclose the
-      truncated count; never drop a higher severity for a lower one
-- [ ] Versioned receipt schema (documented) so a hook/CI/agent can consume it mechanically
-- [ ] Reuse the finding codes the component checks already register; invent none; advisory by
-      default, gateable via `enforcement.policy`
-- [ ] `verify_change` MCP handler (`verify` preset; family `verify`; class `conclusion`; sibling
-      cross-reference to each composed tool) + `openlore verify-change [--base <ref>] [--staged]
-      [--json]` + an opt-in pre-landing gate hook
+- [x] Diff resolution: via `blast_radius`/`structural_diff`, base resolved through
+      `resolveBaseRefDisclosed`; an unresolvable base returns an error, never a partial pass
+- [x] Composition layer: `blast_radius` (affected callers/layers/hubs + tests to run + spec drift,
+      transitively `select_tests` + `check_spec_drift`) and `structural_diff` (removed/re-signed
+      functions, `deprecatedCalls`) → common receipt item `{ subject, check, severity, nextAction }`
+      (`verify-change.ts`, pure `projectVerifyReceipt`)
+- [x] Ordering + budget: severity-rank items, cap with a disclosed `truncated` count; never drop a
+      higher severity for a lower one
+- [x] Documented receipt shape so a hook/CI/agent can consume it mechanically
+- [x] Reuses the component checks' signals; invents no finding code; advisory (grader-not-author:
+      runs no tests, edits no files)
+- [x] `verify_change` MCP tool + dispatch wiring; `verify` preset membership + token budget
+      re-baselined; `change` family + `conclusion` class + epistemic-lease weight; full-surface
+      tool-count docs updated
+- [ ] Fold in `certify_public_surface` (explicit breaking-export verdicts with affected consumers)
+- [ ] `openlore verify-change [--base <ref>] [--staged] [--json]` CLI + opt-in pre-landing gate hook
+      (today the capability ships as the MCP tool; the CLI + `--staged` are the remaining surface)
 
 ## Verification
-- [ ] Fixture: surface narrowing + deprecated call + spec drift → one receipt, surface break
-      ranked first, each item carries subject/check/severity/next-action, tests-to-run named
-- [ ] Oversized diff → budgeted receipt with disclosed omitted count; no higher severity dropped
-      for a lower one
-- [ ] Unresolvable `--base` → fatal verification with disclosed reason, not a fallback verify
-- [ ] Clean diff → empty receipt that still discloses what it could not assess (unindexed files,
-      dynamic-dispatch boundaries inherited from the component tools)
-- [ ] The tool runs no tests and writes no files (grader-not-author guarantee)
-- [ ] tools/list payload budget re-asserted or bumped with rationale
+- [x] Projection test: risk + removed fn + spec drift + deprecated call → one severity-ranked
+      receipt, each item carries subject/check/severity/next-action, tests-to-run named
+      (`verify-change.test.ts`)
+- [x] structural_diff failure → disclosed boundary, no crash
+- [x] tests-unavailable surfaced honestly (not conflated with "no tests")
+- [x] base-ref fallback + index staleness disclosed as boundaries
+- [x] item cap holds
+- [x] tool-registration guards green (tool-contract, honesty-contract budget, doc-claim-sync,
+      mcp-tool-count-doc, epistemic-lease)
+- [ ] CLI + gate-hook tests (with the remaining CLI surface)
 
 ## Spec
-- [ ] `mcp-handlers` delta: ADD ChangeVerificationReceiptIsComposedAndActionable
+- [x] `mcp-handlers` delta: ADD ChangeVerificationReceiptIsComposedAndActionable (MCP tool;
+      `certify_public_surface` fold-in and the CLI/`--staged` surface remain, so the change stays
+      open until they land)

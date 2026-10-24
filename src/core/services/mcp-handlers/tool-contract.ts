@@ -73,6 +73,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_god_functions: 'conclusion',
   check_spec_drift: 'conclusion',
   blast_radius: 'conclusion',
+  verify_change: 'conclusion',
   search_code: 'conclusion',
   suggest_insertion_points: 'conclusion',
   search_specs: 'conclusion',
@@ -246,6 +247,7 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   // --- change: reason about a specific diff or change set ---
   structural_diff: 'change',
   blast_radius: 'change',
+  verify_change: 'change',
   change_impact_certificate: 'change',
   certify_public_surface: 'change',
   briefing_since: 'change',

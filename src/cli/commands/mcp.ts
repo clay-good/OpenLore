@@ -642,6 +642,27 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'verify_change',
+    description:
+      'USE THIS WHEN: you just made a change and want ONE actionable checklist before landing — ' +
+      '"what did I break and what must I re-run?". Flattens the diff-based signals into one ' +
+      'severity-ranked receipt — each item names its subject, the check that produced it, a ' +
+      'severity, and the single next action — plus the tests to run. Composes blast_radius (which ' +
+      'already folds in select_tests and spec/memory/decision drift) and structural_diff ' +
+      '(removed/re-signed functions, new calls into deprecated code); no LLM, no new analysis. ' +
+      'Advisory and grader-not-author: it names what to fix and run, but runs and edits nothing. ' +
+      'Its sibling blast_radius returns the full structured briefing; this is the flattened ' +
+      'next-action list for a propose-verify-correct loop. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Default HEAD (uncommitted changes).' },
+      },
+    },
+  },
+  {
     name: 'find_dead_code',
     description:
       'USE THIS WHEN: "what code is unreachable / dead?", "is anything calling X?", or ' +
@@ -2343,7 +2364,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW | t
   prepare_spec_generation: _RO, prepare_spec_repair: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
-  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, blast_radius: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
+  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, blast_radius: _RO, verify_change: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
   get_low_risk_refactor_candidates: _RO, get_leaf_functions: _RO,
   get_critical_hubs: _RO, get_function_skeleton: _RO, get_god_functions: _RO,
   suggest_insertion_points: _RO, search_code: _RO, list_spec_domains: _RO,
@@ -2470,7 +2491,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // Deliberately NOT in the default or `minimal` surface (mcp-quality: minimize the
   // tools an agent must consider). search_code helps the agent name the subject precisely.
   verify: new Set([
-    'orient', 'search_code', 'verify_claim',
+    'orient', 'search_code', 'verify_claim', 'verify_change',
   ]),
   // Multi-repo federation (opt-in): the cross-repo conclusion tools plus the
   // registry status tool. `federation_status` exists ONLY here — the default and
@@ -2531,7 +2552,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
   memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },
-  verify: { baselineTokens: 1_262, maxTokens: 1_350, rationale: 'Exact v1 wire baseline plus 7.0% headroom.' },
+  verify: { baselineTokens: 1_645, maxTokens: 1_760, rationale: 'Baseline grew with verify_change (add-verification-feedback-loop); exact measured baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
   coordination: { baselineTokens: 2_487, maxTokens: 2_650, rationale: 'Exact v1 wire baseline plus 6.6% headroom.' },
   substrate: { baselineTokens: 5_131, maxTokens: 5_500, rationale: 'Exact v1 wire baseline plus 7.2% headroom.' },

@@ -108,6 +108,7 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   find_dead_code: { kind: 'read', buildArgs: dirOnly },
   select_tests: { kind: 'read', buildArgs: dirOnly },
   blast_radius: { kind: 'read', buildArgs: dirOnly },
+  verify_change: { kind: 'read', buildArgs: dirOnly },
 
   // ── function/symbol tools ────────────────────────────────────────────────
   get_subgraph: {

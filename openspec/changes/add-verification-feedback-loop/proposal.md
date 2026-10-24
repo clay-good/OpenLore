@@ -60,7 +60,9 @@ for one diff into one next-action list.
 
 - New: `verify_change` handler composing `blast_radius` / `select_tests` / `check_spec_drift` /
   `certify_public_surface` / `structural_diff`; a versioned receipt schema; `openlore verify-change`
-  CLI + an opt-in gate hook. Registered in `TOOL_CAPABILITY_FAMILY` (`verify`), classified
+  CLI + an opt-in gate hook. Registered in `TOOL_CAPABILITY_FAMILY` (`change` — it reasons about a
+  diff, like its sibling `blast_radius`; the `verify` label is the opt-in preset it ships in, not
+  its capability family), classified
   `conclusion` in `tool-contract.ts`, cross-referencing each composed sibling; tools/list payload
   budget re-asserted or consciously bumped.
 - Specs: `mcp-handlers` — 1 ADDED requirement.

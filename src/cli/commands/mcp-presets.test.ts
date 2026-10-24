@@ -355,7 +355,7 @@ describe('MCP tool presets', () => {
   // substrate default (both-faces reads), but NOT the lean navigate-only `navigation` preset.
   it('verify_claim is in the verify preset and the substrate default, but not the lean navigation preset', () => {
     const verify = selectActiveTools(TOOL_DEFINITIONS, { preset: 'verify' }).map(t => t.name);
-    expect(new Set(verify)).toEqual(new Set(['orient', 'search_code', 'verify_claim']));
+    expect(new Set(verify)).toEqual(new Set(['orient', 'search_code', 'verify_claim', 'verify_change']));
     expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'navigation' }).map(t => t.name)).not.toContain('verify_claim');
     // The default surface is now substrate, which DOES include verify_claim.
     expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).toContain('verify_claim');
@@ -679,7 +679,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // (measured 98,283 B; change: add-memory-trigger-predicates). Their descriptions were trimmed first.
     // remember's optional claims input (closed kind enum, bounded terms): 98,500 → 99,200 B
     // (measured 98,897 B; change: add-memory-claim-verdicts). Its description was trimmed first.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(99_200);
+    // verify_change adds one conclusion tool (its schema + description): 99,200 → 100,700 B
+    // (measured 100,184 B; change: add-verification-feedback-loop).
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(100_700);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
