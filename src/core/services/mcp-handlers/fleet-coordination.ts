@@ -131,8 +131,8 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
   let view: Parameters<typeof memoryFreshness>[1] | null = null;
   try {
     const ctx = AnchorContext.open(absDir);
-    view = ctx ? ctx.freshnessView() : null;
-  } catch { view = null; }
+    if (ctx) view = ctx.freshnessView();
+  } catch { /* no graph available — view stays null, so every record is needs-reverification */ }
 
   const classified = classifyRecords(records, view);
   const counts = classified.reduce<Record<RecordState, number>>((acc, c) => {
