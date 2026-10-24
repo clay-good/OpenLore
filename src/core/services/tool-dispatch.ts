@@ -53,6 +53,7 @@ import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
 import type { ClaimKind } from './mcp-handlers/claim-verification.js';
 import { handleStructuralDiff } from './mcp-handlers/structural-diff.js';
+import { handleVerifyChange } from './mcp-handlers/verify-change.js';
 import { handleGetChangeCoupling } from './mcp-handlers/change-coupling.js';
 import { handleGetHealthMap } from './mcp-handlers/health-map.js';
 import { handleGetSurprisingConnections } from './mcp-handlers/surprising-connections.js';
@@ -322,6 +323,9 @@ async function dispatchToolImpl(
         declaredFootprint?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput;
         peerFootprints?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput[] };
     return handleStructuralDiff({ directory, baseRef, headRef, maxResults, files, declaredFootprint, peerFootprints });
+  } else if (name === 'verify_change') {
+    const { directory, baseRef } = args as { directory: string; baseRef?: string };
+    return handleVerifyChange({ directory, baseRef });
   } else if (name === 'get_change_coupling') {
     const { directory, file, limit } = args as { directory: string; file?: string; limit?: number };
     return handleGetChangeCoupling({ directory, file, limit });
