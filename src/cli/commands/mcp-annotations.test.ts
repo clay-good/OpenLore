@@ -55,6 +55,7 @@ const READ_ONLY_TOOL_MAY_WRITE: Record<string, string> = {
   'writeSpecLinkIndex@src/core/generator/spec-link-service.ts': 'mapping.json cache, only when persist is true',
   'audit@src/api/audit.ts': 'audit report, only when save is true',
   'generate@src/core/analyzer/spec-snapshot-generator.ts': 'spec snapshot, only when persist is true',
+  'persistCertificate@src/core/services/mcp-handlers/impact-certificate.ts': 'impact certificate, only when persist is true (certify_provenance passes persist:false)',
 };
 
 interface ToolReach { names: string[]; resolved: number; writes: Map<string, string[]> }

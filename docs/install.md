@@ -93,7 +93,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 | Flag | Effect |
 |------|--------|
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `pi`, `agents-md`. |
-| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 77 tools. |
+| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 78 tools. |
 | `--repo-only` | Wire this repository only — write no user-scope entries. |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
@@ -102,7 +102,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 > **Default tool surface.** A plain `openlore install` wires the read-only **`substrate`** preset:
 > 15 tools comprising the navigation core, the highest-value governance reads, and the 2 spec
 > preparation composites. Use `--preset navigation` for the lean 10-tool escape or `--preset full`
-> for all 77 tools. The decision-write and commit-gate tools remain opt-in through a preset that
+> for all 78 tools. The decision-write and commit-gate tools remain opt-in through a preset that
 > includes them.
 
 ## What it actually writes

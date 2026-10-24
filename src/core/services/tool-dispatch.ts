@@ -64,6 +64,7 @@ import { handleFederationStatus } from './mcp-handlers/federation.js';
 import { handleSpecStoreStatus } from './mcp-handlers/spec-store.js';
 import { handleWorkingSetContext } from './mcp-handlers/working-set.js';
 import { computeImpactCertificate } from './mcp-handlers/impact-certificate.js';
+import { handleCertifyProvenance } from './mcp-handlers/change-provenance.js';
 import { handleCheckArchitecture } from './mcp-handlers/architecture.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from './mcp-handlers/change.js';
 import {
@@ -478,6 +479,9 @@ async function dispatchToolImpl(
   } else if (name === 'change_impact_certificate') {
     const { directory, baseRef, change, persist, allowBaseFallback } = args as { directory: string; baseRef?: string; change?: string; persist?: boolean; allowBaseFallback?: boolean };
     return computeImpactCertificate({ directory, baseRef, change, persist, allowBaseFallback });
+  } else if (name === 'certify_provenance') {
+    const { directory, baseRef, change, allowBaseFallback, format } = args as { directory: string; baseRef?: string; change?: string; allowBaseFallback?: boolean; format?: 'in-toto' | 'json' };
+    return handleCertifyProvenance({ directory, baseRef, change, allowBaseFallback, format });
   } else if (name === 'detect_changes') {
     const { directory, base } = args as { directory: string; base?: string };
     return handleDetectChanges(directory, base);
