@@ -64,7 +64,7 @@ const MCP_ONLY_REASON_GROUPS: ReadonlyArray<{ reason: string; tools: readonly st
   },
   {
     reason: 'This interactive coordination or federation conclusion has no CLI command with the same request and response contract.',
-    tools: ['federation_status', 'plan_parallel_work', 'map_in_flight_conflicts'],
+    tools: ['federation_status', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge'],
   },
 ];
 

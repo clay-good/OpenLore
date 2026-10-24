@@ -75,6 +75,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   blast_radius: 'conclusion',
   verify_change: 'conclusion',
   certify_provenance: 'conclusion',
+  certify_merge: 'conclusion',
   search_code: 'conclusion',
   suggest_insertion_points: 'conclusion',
   search_specs: 'conclusion',
@@ -270,6 +271,7 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   // --- coordinate: schedule / deconflict parallel work ---
   plan_parallel_work: 'coordinate',
   map_in_flight_conflicts: 'coordinate',
+  certify_merge: 'coordinate',
 
   // --- federate: cross-repo / spec-store conclusions ---
   federation_status: 'federate',

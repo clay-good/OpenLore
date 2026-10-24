@@ -110,6 +110,7 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   blast_radius: { kind: 'read', buildArgs: dirOnly },
   verify_change: { kind: 'read', buildArgs: dirOnly },
   certify_provenance: { kind: 'read', buildArgs: dirOnly },
+  certify_merge: { kind: 'read', buildArgs: (f) => ({ directory: f.directory, ours: 'HEAD', theirs: 'HEAD' }) },
 
   // ── function/symbol tools ────────────────────────────────────────────────
   get_subgraph: {
