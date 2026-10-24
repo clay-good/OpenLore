@@ -612,8 +612,11 @@ stated in source.
 ### Requirement: PiDefaultToolSurfaceIsLean
 
 When a Pi session starts with the default configuration, the Pi extension SHALL activate only its
-lean surface: the Pi tools that correspond to the MCP `substrate` preset, the configuration tool,
-and the tool-group activator. All other OpenLore tools SHALL stay registered and inactive. The
+lean surface: the Pi tools that correspond to the MCP `substrate` preset, except the spec-authoring
+composites (`prepare_spec_generation`, `prepare_spec_repair`), plus the configuration tool and the
+tool-group activator. The spec-authoring composites SHALL belong to the `specs` tool group, and the
+activator description SHALL name that group for creating or repairing a spec. All other OpenLore
+tools SHALL stay registered and inactive. The
 extension SHALL NOT change the active state of any tool that OpenLore does not register. The lean
 surface SHALL apply in every Pi session mode.
 
@@ -621,8 +624,8 @@ surface SHALL apply in every Pi session mode.
 
 - **GIVEN** a repository whose `.openlore/config.json` has no `pi.toolSurface` key
 - **WHEN** a Pi session starts
-- **THEN** the active OpenLore tools are exactly the Pi tools of the `substrate` preset, the
-  configuration tool, and the activator
+- **THEN** the active OpenLore tools are exactly the Pi tools of the `substrate` preset other than
+  the spec-authoring composites, the configuration tool, and the activator
 - **AND** every other OpenLore tool is registered but inactive
 
 #### Scenario: Host tools are not changed
@@ -636,6 +639,12 @@ surface SHALL apply in every Pi session mode.
 - **GIVEN** a change that adds a tool to, or removes a tool from, the MCP `substrate` preset
 - **WHEN** the Pi lean surface does not match the Pi-registered tools of that preset
 - **THEN** a CI test fails, naming the tools that differ
+
+#### Scenario: Spec-authoring composites are activated on demand
+
+- **GIVEN** a default Pi session
+- **WHEN** the agent calls the activator with the `specs` group
+- **THEN** `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` become active
 
 ### Requirement: PiToolGroupsAreActivatable
 

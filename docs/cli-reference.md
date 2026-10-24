@@ -754,9 +754,10 @@ field in openlore's `package.json`) and `openlore setup --tools pi --global`
 serve daemon, injecting structural context and exposing Pi's curated tool surface.
 Pi starts a full-preset backing daemon and curates the model-visible tools itself;
 if an existing narrow daemon owns the repository, stop it before starting Pi.
-A session starts with the `substrate` tools (the MCP default), `openlore_configure`,
-and `openlore_activate_tools`, which turns on the `specs`, `memory`, `review`,
-`quality`, or `inspect` group. `"pi": { "toolSurface": "all" }` in
+A session starts with the `substrate` tools (the MCP default) except the two
+spec-authoring tools, `openlore_configure`, and `openlore_activate_tools`, which
+turns on the `specs` (including spec authoring), `memory`, `review`, `quality`,
+or `inspect` group. `"pi": { "toolSurface": "all" }` in
 `.openlore/config.json` keeps every tool active.
 Its `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` tools
 compose the same deterministic daemon evidence used by MCP hosts; Pi writes or
