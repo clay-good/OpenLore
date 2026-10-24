@@ -151,10 +151,11 @@ The extension registers the navigation tools (`openlore_orient`, `openlore_searc
 caches. Requires Pi ≥ 0.78.1 and one `openlore analyze` beforehand. Full detail in
 [`examples/pi/README.md`](../examples/pi/README.md).
 
-A Pi session starts with the same lean tool set Claude Code gets by default (the `substrate`
-preset), plus `openlore_configure` and `openlore_activate_tools`. The agent calls
-`openlore_activate_tools` to turn on the `specs`, `memory`, `review`, `quality`, or `inspect`
-group. To keep every tool active from the start, set:
+A Pi session starts with the lean tool set Claude Code gets by default (the `substrate`
+preset), plus `openlore_configure` and `openlore_activate_tools`. The two spec-authoring tools
+(`openlore_prepare_spec_generation`, `openlore_prepare_spec_repair`) wait in the `specs` group.
+The agent calls `openlore_activate_tools` to turn on the `specs`, `memory`, `review`, `quality`,
+or `inspect` group. To keep every tool active from the start, set:
 
 ```json
 { "pi": { "toolSurface": "all" } }

@@ -1520,22 +1520,30 @@ export const PI_TOOL_SNIPPETS: Record<string, string> = {
 
 // Tools active when a Pi session starts (names without the `openlore_` prefix):
 // the MCP `substrate` preset — the default `openlore install` wires for Claude
-// Code — plus the two Pi-only utilities. extension.test.ts derives this set from
-// TOOL_PRESETS.substrate so the two surfaces cannot drift.
+// Code — minus PI_ON_DEMAND_SUBSTRATE_TOOLS, plus the two Pi-only utilities.
+// extension.test.ts derives this set from TOOL_PRESETS.substrate so the two
+// surfaces cannot drift.
 export const PI_LEAN_TOOLS: readonly string[] = [
   'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
   'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
   'get_landmarks', 'get_map', 'find_path',
   'recall', 'verify_claim', 'blast_radius',
-  'prepare_spec_generation', 'prepare_spec_repair',
   'configure', 'activate_tools',
 ];
+
+// Substrate tools Pi keeps out of the lean set: an MCP host cannot turn a tool on
+// mid-session, but Pi can, so task-specific spec authoring waits in the `specs`
+// group instead of adding its descriptions to every prompt.
+export const PI_ON_DEMAND_SUBSTRATE_TOOLS: readonly string[] = ['prepare_spec_generation', 'prepare_spec_repair'];
 
 // Task groups openlore_activate_tools turns on. Every registered tool outside
 // PI_LEAN_TOOLS belongs to exactly one group (guarded in extension.test.ts).
 // Groups are task-shaped, not capability families: `navigate` alone holds most tools.
 export const PI_TOOL_GROUPS: Record<string, readonly string[]> = {
-  specs: ['search_specs', 'get_spec', 'list_spec_domains', 'search_unified', 'check_spec_drift', 'audit_spec_coverage'],
+  specs: [
+    'search_specs', 'get_spec', 'list_spec_domains', 'search_unified', 'check_spec_drift', 'audit_spec_coverage',
+    ...PI_ON_DEMAND_SUBSTRATE_TOOLS,
+  ],
   memory: ['remember', 'record_decision', 'list_decisions', 'approve_decision', 'reject_decision', 'sync_decisions'],
   review: ['structural_diff', 'verify_change', 'certify_provenance', 'certify_merge', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
   quality: [
@@ -1625,6 +1633,7 @@ export function piActivatorDescription(): string {
     .map(([group, tools]) => `- ${group}: ${tools.map((name) => PI_TOOL_PREFIX + name).join(', ')}`);
   return [
     'Turn on more openlore tools for the rest of this session. Pass group names, or the name of any tool below.',
+    'To create a spec from code or repair an existing spec, turn on the specs group.',
     ...lines,
   ].join('\n');
 }
@@ -1635,7 +1644,7 @@ export function piActivatorDescription(): string {
  * raising a budget changes both a number and its rationale (the STANDING_CONTEXT_BUDGETS pattern).
  */
 export const PI_STANDING_CONTEXT_BUDGETS: Record<PiToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
-  lean: { baselineTokens: 3_089, maxTokens: 3_300, rationale: 'Measured baseline plus 6.8% headroom.' },
+  lean: { baselineTokens: 2_789, maxTokens: 2_980, rationale: 'Shrank when spec authoring moved to the specs group; measured baseline plus 6.8% headroom.' },
   all: { baselineTokens: 8_139, maxTokens: 8_700, rationale: 'Grew with verify_change (add-verification-feedback-loop); measured baseline plus 6.9% headroom.' },
 };
 
