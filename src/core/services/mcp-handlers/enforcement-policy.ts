@@ -119,6 +119,12 @@ export const ARCHITECTURE_FINDING_CODES = [
 ] as const;
 
 export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
+  // ── merge semantic certificate (change: add-merge-semantic-certificate) ──
+  'merge-semantic-conflict': {
+    defaultClass: 'advisory', source: 'merge-semantic-certificate',
+    description: 'Two branches merge cleanly textually but one side adds a call into a symbol the other side changed incompatibly or removed — a semantic merge conflict the textual merge cannot see.',
+    remediation: 'Semantic merge conflict: {subject}; reconcile the added call against the other branch\'s change before landing, or land the two branches in sequence.',
+  },
   // ── call-graph soundness calibration (change: add-callgraph-soundness-calibration) ──
   'callgraph-precision-order-violation': {
     defaultClass: 'advisory', source: 'callgraph-soundness',
