@@ -119,6 +119,12 @@ export const ARCHITECTURE_FINDING_CODES = [
 ] as const;
 
 export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
+  // ── call-graph soundness calibration (change: add-callgraph-soundness-calibration) ──
+  'callgraph-precision-order-violation': {
+    defaultClass: 'advisory', source: 'callgraph-soundness',
+    description: 'Disabling a refining resolution mechanism changed what the full ladder resolved (an edge was dropped or re-targeted down the confidence ladder), or enabling the over-approximating CHA pass changed a non-overrides edge — a precision-order (monotone-refinement) violation detected without ground truth.',
+    remediation: 'Precision-order violation: {subject}; the resolution ladder is not monotone here — a more precise mechanism must only refine or add edges, never drop or down-rank one the conservative build resolved.',
+  },
   'scenario-unverifiable-shape': {
     defaultClass: 'advisory', source: 'scenario-checkability',
     description: 'A scenario lacks a checkable condition or observable outcome; a verification path existing means a test reaches the anchored code, never that the test asserts the scenario\'s behavior.',
