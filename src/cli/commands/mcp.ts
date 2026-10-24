@@ -1748,6 +1748,25 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'fleet_status',
+    description:
+      'USE THIS WHEN: coordinating parallel agents/branches off a moving base — "which of my recorded ' +
+      'verdicts still hold, and what is the coordination picture?". Re-checks each recorded ' +
+      'coordination verdict (a clean blast radius, a stable public surface, a passed certify_merge) ' +
+      'against the current graph via the freshness lease: still-valid / carried / invalidated / ' +
+      'needs-reverification — a verdict is never served fresh once its base moved without the check. ' +
+      'Composes the coordination arc (plan_parallel_work → map_in_flight_conflicts → certify_merge), ' +
+      'referencing each tool rather than re-deriving it. Advisory, read-only, no LLM.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        branches: { type: 'array', items: { type: 'string' }, description: 'In-flight branches to compose the arc for (attribution + the tools to run per branch).' },
+      },
+    },
+  },
+  {
     name: 'plan_parallel_work',
     description:
       'USE THIS WHEN: before fanning N tasks out across agents/worktrees — "which of these tasks are ' +
@@ -2432,7 +2451,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW | t
   spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RWI, federation_status: _RWI,
   certify_provenance: _RO,
   get_landmarks: _RO, get_map: _RO, find_path: _RO,
-  plan_parallel_work: _RO, map_in_flight_conflicts: _RO, certify_merge: _RO, get_language_support: _RO,
+  plan_parallel_work: _RO, map_in_flight_conflicts: _RO, certify_merge: _RO, fleet_status: _RO, get_language_support: _RO,
   report_coverage_gaps: _RO,
   certify_public_surface: _RO,
   get_style_fingerprint: _RO,
@@ -2559,7 +2578,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // (mcp-quality: minimize the tools an agent must consider; changes: add-parallel-work-plan,
   // add-cross-actor-interference-map).
   coordination: new Set([
-    'orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'analyze_impact', 'find_path',
+    'orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status', 'analyze_impact', 'find_path',
   ]),
   // The navigation core plus governance reads (change: unify-navigation-and-governance-substrate;
   // architecture: UnifiedStructuralSubstrate). The `navigation` graph-traversal core
@@ -2604,7 +2623,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },
   verify: { baselineTokens: 2_075, maxTokens: 2_220, rationale: 'Grew with verify_change then certify_provenance (add-verification-feedback-loop, add-change-provenance-certificate); exact measured baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
-  coordination: { baselineTokens: 2_887, maxTokens: 3_100, rationale: 'Grew with certify_merge (add-merge-semantic-certificate); exact measured baseline plus 7.4% headroom.' },
+  coordination: { baselineTokens: 3_171, maxTokens: 3_400, rationale: 'Grew with certify_merge then fleet_status (add-merge-semantic-certificate, add-fleet-coordination-arc); exact measured baseline plus 7.2% headroom.' },
   substrate: { baselineTokens: 5_131, maxTokens: 5_500, rationale: 'Exact v1 wire baseline plus 7.2% headroom.' },
   full: { baselineTokens: 25_848, maxTokens: 27_000, rationale: 'Grew with verify_change, certify_provenance, and certify_merge; exact measured baseline plus 4.5% headroom.' },
 };

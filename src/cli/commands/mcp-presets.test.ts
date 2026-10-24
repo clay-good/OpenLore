@@ -108,7 +108,7 @@ describe('MCP tool presets', () => {
   // preset only; it must NOT leak into the lean/minimal/memory surfaces.
   it('coordination preset exposes plan_parallel_work; lean/minimal/memory do not', () => {
     const coord = selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name);
-    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'analyze_impact', 'find_path']));
+    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status', 'analyze_impact', 'find_path']));
     for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }] as const) {
       expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('plan_parallel_work');
     }
@@ -685,7 +685,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // (measured 101,838 B; change: add-change-provenance-certificate).
     // certify_merge adds one conclusion tool: 102,400 → 104,000 B
     // (measured 103,392 B; change: add-merge-semantic-certificate).
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(104_000);
+    // fleet_status adds one conclusion tool: 104,000 → 105,200 B
+    // (measured 104,526 B; change: add-fleet-coordination-arc).
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(105_200);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
