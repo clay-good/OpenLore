@@ -1109,6 +1109,15 @@ export const NAV_TOOLS: NavToolSpec[] = [
     }),
   },
   {
+    name: 'fleet_status',
+    label: 'openlore fleet_status',
+    description: 'Coordinating parallel branches off a moving base: re-check each recorded coordination verdict (a clean blast radius, a stable surface, a passed merge check) against the current graph — still-valid / carried / invalidated / needs-reverification — and surface the coordination arc. A verdict is never served fresh once its base moved.',
+    guideline: 'When coordinating several in-flight branches, call openlore_fleet_status to see which recorded verdicts still hold after the base moved, and the overall coordination picture (dispatch → in-flight → landing). Read-only and advisory.',
+    parameters: Type.Object({
+      branches: Type.Optional(Type.Array(Type.String(), { description: 'In-flight branches to compose the arc for.' })),
+    }),
+  },
+  {
     name: 'structural_diff',
     label: 'openlore structural_diff',
     description: 'Show what changed structurally between two states (working tree vs a ref, or two refs): functions and call edges added/removed, signature changes, and the existing callers left STALE by a moved signature.',
@@ -1483,6 +1492,7 @@ export const PI_TOOL_SNIPPETS: Record<string, string> = {
   verify_change: 'Pre-commit checklist: what the diff breaks and the tests to run, severity-ranked.',
   certify_provenance: 'Reproducible, content-addressed record of what a change does, for SLSA/in-toto.',
   certify_merge: 'Two branches merge cleanly but break in combination — the semantic conflict check.',
+  fleet_status: 'Which recorded coordination verdicts still hold after the base moved, plus the arc.',
   structural_diff: 'Functions, edges, and signatures changed between two states, plus stale callers.',
   verify_claim: 'Check a structural fact or a decision citation before you state it.',
   suggest_insertion_points: 'Ranked places to add new code.',
@@ -1545,7 +1555,7 @@ export const PI_TOOL_GROUPS: Record<string, readonly string[]> = {
     ...PI_ON_DEMAND_SUBSTRATE_TOOLS,
   ],
   memory: ['remember', 'record_decision', 'list_decisions', 'approve_decision', 'reject_decision', 'sync_decisions'],
-  review: ['structural_diff', 'verify_change', 'certify_provenance', 'certify_merge', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
+  review: ['structural_diff', 'verify_change', 'certify_provenance', 'certify_merge', 'fleet_status', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
   quality: [
     'get_refactor_report', 'get_health_map', 'get_critical_hubs', 'get_god_functions',
     'get_architecture_overview', 'get_surprising_connections', 'find_clones', 'get_style_fingerprint',
@@ -1645,7 +1655,7 @@ export function piActivatorDescription(): string {
  */
 export const PI_STANDING_CONTEXT_BUDGETS: Record<PiToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
   lean: { baselineTokens: 2_789, maxTokens: 2_980, rationale: 'Shrank when spec authoring moved to the specs group; measured baseline plus 6.8% headroom.' },
-  all: { baselineTokens: 8_139, maxTokens: 8_700, rationale: 'Grew with verify_change (add-verification-feedback-loop); measured baseline plus 6.9% headroom.' },
+  all: { baselineTokens: 8_825, maxTokens: 9_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, and fleet_status (the moat/interop features); measured baseline plus 6.5% headroom.' },
 };
 
 /** Deterministic estimate (characters / 4) of what the given registered tools add to the prompt. */

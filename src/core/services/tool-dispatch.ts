@@ -66,6 +66,7 @@ import { handleWorkingSetContext } from './mcp-handlers/working-set.js';
 import { computeImpactCertificate } from './mcp-handlers/impact-certificate.js';
 import { handleCertifyProvenance } from './mcp-handlers/change-provenance.js';
 import { handleCertifyMerge } from './mcp-handlers/merge-semantic-certificate.js';
+import { handleFleetStatus } from './mcp-handlers/fleet-coordination.js';
 import { handleCheckArchitecture } from './mcp-handlers/architecture.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from './mcp-handlers/change.js';
 import {
@@ -486,6 +487,9 @@ async function dispatchToolImpl(
   } else if (name === 'certify_merge') {
     const { directory, ours, theirs, base, maxFindings } = args as { directory: string; ours: string; theirs: string; base?: string; maxFindings?: number };
     return handleCertifyMerge({ directory, ours, theirs, base, maxFindings });
+  } else if (name === 'fleet_status') {
+    const { directory, branches } = args as { directory: string; branches?: string[] };
+    return handleFleetStatus({ directory, branches });
   } else if (name === 'detect_changes') {
     const { directory, base } = args as { directory: string; base?: string };
     return handleDetectChanges(directory, base);
