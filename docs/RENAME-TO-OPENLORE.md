@@ -157,7 +157,6 @@ Rename files and update internal `name:`/`description:` frontmatter and any slas
 - [ ] [docs/REFACTORING-WORKFLOW.md](../docs/REFACTORING-WORKFLOW.md)
 - [ ] [docs/AGENT-ADOPTION.md](../docs/AGENT-ADOPTION.md)
 - [ ] [docs/pipeline.md](../docs/pipeline.md)
-- [ ] [docs/plan-rag-improvements.md](../docs/plan-rag-improvements.md)
 
 ### 7. Tests
 

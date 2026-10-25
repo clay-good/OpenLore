@@ -78,7 +78,6 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 
 Maintainer- or history-facing notes, kept for the record (not part of the user happy path):
 [publishing.md](publishing.md) · [AGENT-BENCHMARKS.md](AGENT-BENCHMARKS.md) ·
-[AGENT-ADOPTION.md](AGENT-ADOPTION.md) · [RIG-IMPROVEMENTS.md](RIG-IMPROVEMENTS.md) ·
-[plan-rag-improvements.md](plan-rag-improvements.md) · [RENAME-TO-OPENLORE.md](RENAME-TO-OPENLORE.md)
+[AGENT-ADOPTION.md](AGENT-ADOPTION.md) · [RENAME-TO-OPENLORE.md](RENAME-TO-OPENLORE.md)
 
 Generation/Repair architecture history: [resume point and companion documents](specs/generation-repair/openlore-resume-point.md).
