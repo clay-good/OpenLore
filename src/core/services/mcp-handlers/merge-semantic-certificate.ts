@@ -25,6 +25,7 @@ import { execFileGit, spawnGit } from '../../../utils/git-exec.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { CallGraphBuilder } from '../../analyzer/call-graph.js';
 import type { CallEdge, FunctionNode } from '../../analyzer/call-graph-types.js';
+import { BufferedPass1FactCache, computeExtractorStamp, type Pass1FactCache, type Pass1FactStorage } from '../../analyzer/pass1-fact-cache.js';
 import { classifySignatureChange, type ChangeClass } from '../../analyzer/public-surface.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
 import { validateDirectory } from './utils.js';
@@ -236,10 +237,35 @@ async function readBlobsPerFile(absDir: string, ref: string, paths: readonly str
   return out;
 }
 
-async function graphAtRef(absDir: string, ref: string): Promise<Graph> {
+async function graphAtRef(absDir: string, ref: string, pass1Cache?: Pass1FactCache): Promise<Graph> {
   const files = await filesAtRef(absDir, ref);
-  const result = await new CallGraphBuilder().build(files);
+  const result = await new CallGraphBuilder({ pass1Cache }).build(files);
   return { nodes: result.nodes, edges: result.edges };
+}
+
+/**
+ * An in-process Pass-1 fact memo shared across the base/ours/theirs builds.
+ *
+ * The three refs differ only in the files that changed between them, so ~95% of the per-file
+ * tree-sitter parse is identical work done three times. This reuses it. It keys rows on exactly
+ * what the on-disk store keys on — `(filePath, contentHash, stamp)` — and serializes on write /
+ * deserializes on read through the same `serializeFacts`/`deserializeFacts` path the EdgeStore
+ * cache uses. That identical round-trip is what makes the optimization verdict-equivalent: a
+ * reused file reaches the merge loop as a fresh, snapshotted object, never a live reference the
+ * builder's post-record relabeling could mutate across refs. Facts are held only for the lifetime
+ * of one `certify_merge` call.
+ */
+class InMemoryPass1FactStorage implements Pass1FactStorage {
+  private readonly rows = new Map<string, string>();
+  private key(filePath: string, contentHash: string, stamp: string): string {
+    return `${filePath}\u0000${contentHash}\u0000${stamp}`;
+  }
+  getPass1Facts(filePath: string, contentHash: string, stamp: string): string | undefined {
+    return this.rows.get(this.key(filePath, contentHash, stamp));
+  }
+  put(filePath: string, contentHash: string, stamp: string, facts: string): void {
+    this.rows.set(this.key(filePath, contentHash, stamp), facts);
+  }
 }
 
 /** Resolve the base: the explicit `base`, else `git merge-base ours theirs`. */
@@ -266,10 +292,24 @@ export async function handleCertifyMerge(input: CertifyMergeInput): Promise<Reco
 
   let baseG: Graph, oursG: Graph, theirsG: Graph;
   try {
-    [baseG, oursG, theirsG] = await Promise.all([
-      graphAtRef(absDir, base),
-      graphAtRef(absDir, input.ours),
-      graphAtRef(absDir, input.theirs),
+    // One in-process Pass-1 memo, shared across all three builds. The base is built and awaited
+    // first so its parsed facts are warm before ours/theirs run; each unchanged file then hits
+    // the cache instead of being re-parsed. `BufferedPass1FactCache` buffers its writes rather
+    // than writing them through, so the base build's rows are drained with `take()` and loaded
+    // into the shared storage before the two sides read them. The full file set is still built
+    // at every ref — only the per-file parse is reused — so every `calleeId`, and therefore
+    // every finding, is byte-identical to the uncached path.
+    const storage = new InMemoryPass1FactStorage();
+    const cache = new BufferedPass1FactCache(storage, computeExtractorStamp());
+    baseG = await graphAtRef(absDir, base, cache);
+    const { stamp, rows } = cache.take();
+    for (const row of rows) storage.put(row.filePath, row.contentHash, stamp, row.facts);
+    // ours and theirs read the now-warm cache concurrently. Reads are pure; the only shared
+    // mutable state is the cache's write buffer, and concurrent `record` pushes (a changed file
+    // re-extracted by both) are harmless — those writes are never drained, just duplicate work.
+    [oursG, theirsG] = await Promise.all([
+      graphAtRef(absDir, input.ours, cache),
+      graphAtRef(absDir, input.theirs, cache),
     ]);
   } catch (e) {
     return { tool: 'certify_merge', posture: 'advisory', error: `cannot build a branch graph: ${e instanceof Error ? e.message : String(e)}` };
