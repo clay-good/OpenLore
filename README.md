@@ -20,10 +20,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-demo.gif" alt="A real, unedited terminal recording: openlore install wires the agent and indexes a fresh clone of ripgrep in 14 seconds with no API key, orient returns the functions a task touches, and review catches a signature change that left 39 callers stale" width="100%">
+  <code>install</code> wires your agent and indexes the repo → <code>orient</code> returns the code a task touches → <code>review</code> catches the change that breaks a contract. All local, no API key.
 </p>
-
-<p align="center"><em>Real, unedited — the published <code>openlore</code> on a fresh clone of <a href="https://github.com/BurntSushi/ripgrep">ripgrep</a>: <strong>install</strong> wires your agent and indexes the repo in <strong>14s</strong> with no API key → <strong>orient</strong> returns the code a task touches → <strong>review</strong> catches a signature change that left <strong>39 callers</strong> stale.</em></p>
 
 <p align="center">
   <strong><a href="#install-once-then-forget-it">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
@@ -167,9 +165,7 @@ Measured on a fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep) wi
 
 Large monorepos take minutes rather than seconds, stated plainly in [Known limitations](#known-limitations). Platform: Linux and Windows are exercised in CI; macOS is supported.
 
-> **Privacy & telemetry.** Your source never leaves the machine. Telemetry is opt-in (`OPENLORE_TELEMETRY=1`) and records tool calls, agent identity, latency, error messages, decision titles, and lease events into the gitignored `.openlore/telemetry/` directory — never transmitted. LLM diagnostics are opt-in (`OPENLORE_LLM_LOGS=1`) and store prompts and responses, after secret redaction, in the gitignored `.openlore/logs/` directory. → [docs/configuration.md](docs/configuration.md)
-
-> Migrating from `spec-gen`? The package is now [`openlore`](https://www.npmjs.com/package/openlore) — see [docs/RENAME-TO-OPENLORE.md](docs/RENAME-TO-OPENLORE.md).
+> **Fully local — nothing phones home.** No account, no network call; your source, the index, and every query stay on your machine. The only diagnostics that exist are **opt-in and local-only**, off by default and never transmitted: `OPENLORE_TELEMETRY=1` records tool calls, agent identity, latency, error messages, decision titles, and lease events to the gitignored `.openlore/telemetry/` directory, and `OPENLORE_LLM_LOGS=1` stores prompts and responses (after secret redaction) in the gitignored `.openlore/logs/` directory. → [docs/configuration.md](docs/configuration.md)
 
 ---
 

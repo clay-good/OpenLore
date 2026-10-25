@@ -55,6 +55,7 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 |------------|----------------|
 | Learn the OpenSpec file format | [OPENSPEC-FORMAT.md](OPENSPEC-FORMAT.md) |
 | Integrate OpenSpec into a workflow | [OPENSPEC-INTEGRATION.md](OPENSPEC-INTEGRATION.md) |
+| See which requirements link to code (spec link index) | [spec-link-index.md](spec-link-index.md) |
 
 ## Reference & internals
 
@@ -78,6 +79,6 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 
 Maintainer- or history-facing notes, kept for the record (not part of the user happy path):
 [publishing.md](publishing.md) · [AGENT-BENCHMARKS.md](AGENT-BENCHMARKS.md) ·
-[AGENT-ADOPTION.md](AGENT-ADOPTION.md) · [RENAME-TO-OPENLORE.md](RENAME-TO-OPENLORE.md)
+[AGENT-ADOPTION.md](AGENT-ADOPTION.md)
 
 Generation/Repair architecture history: [resume point and companion documents](specs/generation-repair/openlore-resume-point.md).
