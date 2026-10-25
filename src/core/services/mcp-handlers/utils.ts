@@ -786,6 +786,16 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
             ? ctx.callGraph.nodes.filter(n => !n.isExternal && !n.isTest).length
             : 0;
           if (es.countNodes() === 0 && jsonProdNodes > 0) {
+            // A store that opens cleanly but holds zero nodes while the JSON graph still
+            // has production nodes is the signature of a version-upgrade schema RESET:
+            // EdgeStore empties itself on a schema change (see the SCHEMA_VERSION reset
+            // above), so the two end up out of sync. This is just as repair-worthy as the
+            // `notReady` schema MISMATCH branch — flag it so maybeTriggerBackgroundRepair
+            // below heals it in the background. Without this, the empty graph was detected
+            // and disclosed ("run analyze_codebase") but NEVER self-healed, so `orient`
+            // degraded to search-only on every turn until a manual analyze — and agents
+            // fell back to grepping (change: self-heal-empty-graph-index).
+            schemaFault = true;
             es.close();
           } else {
             ctx.edgeStore = es;
