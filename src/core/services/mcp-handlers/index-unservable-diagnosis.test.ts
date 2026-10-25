@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnoseIndexUnservable, _resetContextCacheForTesting, clearMappingCache } from './utils.js';
+import { registerRepairBuilder, _resetRepairServiceForTesting } from '../cold-start-bootstrap.js';
 import { handleGetArchitectureOverview, handleGetRefactorReport, handleGetSignatures } from './analysis.js';
 import { handleGetSubgraph, handleGetCallGraph } from './graph.js';
 import { handleGetSurprisingConnections } from './surprising-connections.js';
@@ -147,6 +148,39 @@ describe('diagnoseIndexUnservable', () => {
     const { reason } = await diagnoseIndexUnservable(root);
 
     expect(reason).toBe('index-unreadable');
+  });
+});
+
+// Regression (change: self-heal-unservable-artifact). The repair trigger lives at the TAIL
+// of readCachedContext's success path, so every early `return null` for a present-but-
+// unservable artifact (a lost publish, a version-upgrade manifest invalidation, a corrupt
+// context) was disclosed on every call but never rebuilt — the structural sibling of the
+// empty-graph bug. diagnoseIndexUnservable now kicks the shared background rebuild for the
+// PERSISTENT verdicts, while leaving the transient/absent ones to their own owners.
+describe('diagnoseIndexUnservable — self-heals a persistent unservable artifact', () => {
+  beforeEach(() => _resetRepairServiceForTesting());
+  afterEach(() => _resetRepairServiceForTesting());
+
+  it('a generation mismatch (lost publish / upgrade manifest invalidation) triggers a rebuild', async () => {
+    const repaired: string[] = [];
+    registerRepairBuilder(async (dir) => { repaired.push(dir); });
+    await publish(JSON.stringify({ signatures: [], callGraph: null }));
+    await rewriteWithoutRepublishing();
+
+    const result = await diagnoseIndexUnservable(root);
+    expect(result.reason).toBe('index-generation-mismatch');
+    await new Promise((r) => setImmediate(r)); // let the non-blocking repair microtask run
+    expect(repaired).toHaveLength(1);
+  });
+
+  it('a genuinely absent index does NOT trigger an artifact-unservable rebuild (bootstrap owns that)', async () => {
+    const repaired: string[] = [];
+    registerRepairBuilder(async (dir) => { repaired.push(dir); });
+
+    const result = await diagnoseIndexUnservable(root);
+    expect(result.reason).toBe('index-absent');
+    await new Promise((r) => setImmediate(r));
+    expect(repaired).toHaveLength(0);
   });
 });
 

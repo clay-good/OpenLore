@@ -33,6 +33,7 @@ import {
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
 import { isInsideGitWorkTree } from '../../core/services/cold-start-bootstrap.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
 
 interface OrientCliOptions {
   task?: string;
@@ -113,6 +114,31 @@ function reportMetrics(startNs: bigint, result: Record<string, unknown>): void {
 /** True once `openlore analyze` has produced an llm-context artifact. */
 function hasAnalysis(directory: string): boolean {
   return existsSync(join(directory, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'));
+}
+
+/**
+ * True when analysis exists but its call graph is UNUSABLE — the edge store is
+ * absent, or (the common field case) a version-upgrade schema reset left it
+ * open-but-empty, since EdgeStore empties itself on a schema change. This is the
+ * same state `readCachedContext`'s empty-store guard detects; it is re-checked
+ * here, cheaply and SYNCHRONOUSLY, because a one-shot `orient` (the install
+ * hooks) `process.exit(0)`s before any deferred read-path repair microtask could
+ * spawn — so the rebuild has to be kicked inline or the graph never self-heals
+ * and `orient` degrades to search-only every turn (change: self-heal-empty-graph-index).
+ */
+function graphIndexUnusable(root: string): boolean {
+  const analysisDir = join(root, OPENLORE_ANALYSIS_REL_PATH);
+  try {
+    if (!EdgeStore.exists(analysisDir)) return true;
+    const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+    try {
+      return es.notReady != null || es.countNodes() === 0;
+    } finally {
+      es.close();
+    }
+  } catch {
+    return false; // can't tell → never force a rebuild on a guess
+  }
 }
 
 /**
@@ -253,7 +279,19 @@ prints a short session-start primer (used by the install SessionStart hook).
     // detached build for an absent index, and let the read path's staleness signals
     // start the same build. Neither waits.
     const root = resolve(directory);
-    let build: OneShotBuild | undefined = hasAnalysis(root) ? undefined : startDetachedIndexBuild(root, 'index-absent');
+    // Self-bootstrap an ABSENT index, and — crucially for the install hooks — ALSO kick a
+    // rebuild when the index is present but its call graph is unusable (a version-upgrade
+    // schema reset empties the store). Both spawn SYNCHRONOUSLY: a one-shot orient
+    // process.exit(0)s before any deferred read-path repair microtask could run, so the
+    // async self-heal the long-running MCP server relies on never fires here — the exact
+    // reason orient stayed degraded every turn and agents fell back to grep
+    // (change: self-heal-empty-graph-index).
+    let build: OneShotBuild | undefined;
+    if (!hasAnalysis(root)) {
+      build = startDetachedIndexBuild(root, 'index-absent');
+    } else if (graphIndexUnusable(root)) {
+      build = startDetachedIndexBuild(root, 'stale-region');
+    }
     registerOneShotRepair(root);
     const buildNote = (): string | undefined => build && oneShotBuildNote(build);
 
