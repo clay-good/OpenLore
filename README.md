@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Deterministic, local-first memory and guardrails for AI coding agents — no LLM in the hot path.</strong><br>
-  One call tells your agent the code a task touches. One gate tells it what's unsafe to change.<br>
+  Install once. From then on it runs in the background, keeping your agent oriented and its changes safe.<br>
   No API key. Same answer every time.
 </p>
 
@@ -26,28 +26,31 @@
 <p align="center"><em>Real, unedited — the published <code>openlore</code> on a fresh clone of <a href="https://github.com/BurntSushi/ripgrep">ripgrep</a>: <strong>install</strong> wires your agent and indexes the repo in <strong>14s</strong> with no API key → <strong>orient</strong> returns the code a task touches → <strong>review</strong> catches a signature change that left <strong>39 callers</strong> stale.</em></p>
 
 <p align="center">
-  <strong><a href="#install">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#agent-cheat-sheet">Tools</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
+  <strong><a href="#install-once-then-forget-it">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
 </p>
 
 ---
 
 AI coding agents are **amnesiac and ungoverned**. Every task restarts by re-reading the same files, long sessions drift onto stale assumptions, and nothing warns the agent when a change is about to break a contract or cross a boundary.
 
-OpenLore fixes both halves. A **one-time static analysis** builds a live knowledge graph of your repo — call structure, types, tests, decisions, IaC. Your agent queries it to **start every task already oriented** and to **certify a change before it lands**. It's **deterministic and local-first** — no LLM in the hot path — so the same question returns the same grounded answer, and the agent is *told when a fact goes stale* instead of served a confident guess.
+OpenLore fixes both halves, and then gets out of your way. A **one-time static analysis** builds a live knowledge graph of your repo — call structure, types, tests, decisions, IaC. From then on your agent is **already oriented at the start of every task** and its changes are **certified before they land** — automatically, deterministically, with **no LLM in the hot path**, so the same question returns the same grounded answer and the agent is *told when a fact goes stale* instead of served a confident guess.
 
-## Install
+## Install once, then forget it
 
 ```bash
 npm install -g openlore && openlore install
 ```
 
-That one command **auto-detects your agent** (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md), **wires it to call `orient()` automatically**, **registers the MCP server**, and **builds the index** — no API key, no config, no prompts. Then ask your agent:
+That is the only command most people ever run. It **auto-detects your agent** (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md), wires it, registers the MCP server, and builds the index — no API key, no config, no prompts. After that, **it's on in the background and you don't think about it:**
 
-> **`orient("add a payment method")`**
+- 🔄 **Every task starts oriented, automatically** — a compact architecture digest is injected into your agent's context at the start of each session, and your agent calls `orient()` and the other tools itself over MCP. You don't type anything.
+- 🌱 **Every repo, not just this one** — `install` wires your user account too, so each new git repo you open indexes itself in the background on first touch. "Install once" is literal.
+- 🩹 **Always fresh** — a file watcher re-indexes as you edit and converges to a full analysis; anything it can't recompute in time is marked explicitly stale, never silently wrong.
+- 🛡️ **Changes get checked before they land** — the governance tools (and `openlore review` on a PR) run deterministically with no API key.
 
-…and it begins already knowing the relevant functions, their callers, matching specs, tests, and the risk of changing each — in one call.
+The CLI below exists for humans and CI — `prove`, `review`, `doctor`, `features`. The everyday path is: install, then let your agent use it.
 
-> **Zero config.** Core value needs no keys. Run **`openlore features`** to see every opt-in capability (embeddings, the commit gate, the spec store…), whether it's on, and the one command to enable it.
+> **Zero config.** Run **`openlore features`** to see every opt-in capability (embeddings, the commit gate, the spec store…), whether it's on, and the one command to enable it. `openlore doctor` verifies the wiring.
 
 ---
 
@@ -55,12 +58,12 @@ That one command **auto-detects your agent** (Claude Code, Cursor, Cline, Contin
 
 Two things, both deterministic and local:
 
-**🧠 Memory — start every task already oriented**
+**🧠 Memory — your agent starts every task already oriented**
 
 - **Orient in one call** — `orient(task)` returns the relevant functions, callers, specs, tests, and insertion points (**~430µs p50** on a 15k-node graph) instead of a dozen exploratory file reads.
 - **Survives refactors** — anchored notes and decisions carry forward when a symbol is renamed or moved, instead of orphaning.
 - **One graph for everything** — application code, Infrastructure-as-Code, and architectural decisions share one graph, so a single query spans all three.
-- **Told when a fact is stale** — every MCP response carries a brief, **factual freshness note** (the Epistemic Lease) once a cached fact has aged or the repo moved, so a long session can't drift onto a confident guess.
+- **Told when a fact is stale** — every response carries a brief, **factual freshness note** (the Epistemic Lease) once a cached fact has aged or the repo moved, so a long session can't drift onto a confident guess.
 
 **🛡️ Governance — guardrails on what the agent changes**
 
@@ -108,54 +111,23 @@ The win scales with codebase size (round-trips without → with):
 
 ---
 
-## Quickstart & what it costs
+## What your agent reaches for (you rarely type these)
 
-```bash
-npm install -g openlore
-cd /path/to/your-project
-openlore install          # wire your agent + build the index
-openlore install --dry-run   # preview every change without writing
-openlore doctor              # verify config, index, MCP wiring, embeddings
-openlore update              # upgrade (detects npm / Homebrew / npx)
-```
+Once wired, your agent calls these over MCP on its own. The default surface is the **`substrate`** preset — **15 tools**: the navigation core, the highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and the spec composites. The lean **`navigation`** preset (10 tools) and the full **80 tools** (`--preset full`) are one flag away.
 
-The MCP server keeps the index fresh as you edit (file watcher on by default). Nothing prompts you; nothing runs on `npm install`. See [docs/install.md](docs/install.md).
-
-Measured on a fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep) with published `openlore@2.1.6`:
-
-| What it costs | On ripgrep (232 files) |
-|---|---|
-| **One-time index build** | **13.6 s**, entirely local — no API key, no network |
-| **Disk** | **27 MB** under `.openlore/` (gitignorable; rebuildable from source) |
-| **Per-query latency** | **~430 µs p50** in-process via the MCP server |
-| **Your source code** | never leaves the machine — no account, no telemetry (opt-in only) |
-| **Lock-in** | none — delete `.openlore/` and nothing about your repo has changed |
-
-Large monorepos take minutes rather than seconds, stated plainly in [Known limitations](#known-limitations). Platform: Linux and Windows are exercised in CI; macOS is supported.
-
-> **Privacy & telemetry.** Your source never leaves the machine. Telemetry is opt-in (`OPENLORE_TELEMETRY=1`) and records tool calls, agent identity, latency, error messages, decision titles, and lease events into the gitignored `.openlore/telemetry/` directory — never transmitted. LLM diagnostics are opt-in (`OPENLORE_LLM_LOGS=1`) and store prompts and responses, after secret redaction, in the gitignored `.openlore/logs/` directory. → [docs/configuration.md](docs/configuration.md)
-
-> Migrating from `spec-gen`? The package is now [`openlore`](https://www.npmjs.com/package/openlore) — see [docs/RENAME-TO-OPENLORE.md](docs/RENAME-TO-OPENLORE.md).
-
----
-
-## Agent cheat sheet
-
-The default MCP surface is the **`substrate`** preset — **15 tools**: the navigation core, the highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and the spec composites. The lean **`navigation`** preset (10 tools) and the full **80 tools** (`--preset full`) are one flag away.
-
-| Situation | Tool |
+| When the agent needs to… | Tool |
 |-----------|------|
-| Starting any task | `orient(task)` — functions, callers, specs, insertion points in one call |
-| "Which file/function handles X?" | `search_code` |
-| "What's the blast radius if I change this?" | `analyze_impact` — risk + up/downstream chain + governing decisions |
-| "How does request X reach function Y?" | `trace_execution_path` |
-| "I changed X — which tests should I run?" | `select_tests` — backward reachability to the reaching tests |
-| "What's dead / what dies if I delete X?" | `find_dead_code` — cross-language reachability |
-| "Blast radius of my whole diff before I commit?" | `blast_radius` — callers, tests, specs that drift |
-| "Does my diff open a path into a sensitive boundary?" | `change_impact_certificate` |
-| "Did I break a consumer's public API?" | `certify_public_surface` — verdict, consumers named |
-| About to assert a fact / cite a decision | `verify_claim` — deterministic verdict + citation |
-| Recording an architectural choice | `record_decision` **before** writing the code |
+| Start any task | `orient(task)` — functions, callers, specs, insertion points in one call |
+| Find which file/function handles X | `search_code` |
+| Know the blast radius of a change | `analyze_impact` — risk + up/downstream chain + governing decisions |
+| Trace how request X reaches function Y | `trace_execution_path` |
+| Pick the tests a change should run | `select_tests` — backward reachability to the reaching tests |
+| Find dead code / what dies if X is deleted | `find_dead_code` — cross-language reachability |
+| Check a whole diff before commit | `blast_radius` — callers, tests, specs that drift |
+| Tell if a diff opens a sensitive boundary | `change_impact_certificate` |
+| Tell if a change breaks a consumer's API | `certify_public_surface` — verdict, consumers named |
+| Verify a fact before asserting it | `verify_claim` — deterministic verdict + citation |
+| Record an architectural choice | `record_decision` **before** writing the code |
 
 Full reference — all 80 tools: [docs/mcp-tools.md](docs/mcp-tools.md). Ships as a Claude Code [Skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/openlore-orient/`](skills/openlore-orient/).
 
@@ -181,19 +153,23 @@ Everyone in this category answers the same first question: **how does the agent 
 
 ---
 
-## How it works
+## What it costs
 
-Three layers, each usable independently — all static analysis, no LLM in the hot path:
+Measured on a fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep) with published `openlore@2.1.6`:
 
-| Layer | What it does | API key? |
-|-------|-------------|----------|
-| **1. Static Analysis** | Call graph, clusters, complexity, IaC, external deps → a ~600-token `CODEBASE.md` digest | No |
-| **2. Spec & Governance** | Living specs, ADRs, drift detection, change certificates, decision & finding gates | No (standalone `generate` needs provider access) |
-| **3. Agent Runtime** | 80 MCP tools — `orient()`, graph traversal, semantic search, verdicts & gates | No |
+| What it costs | On ripgrep (232 files) |
+|---|---|
+| **One-time index build** | **13.6 s**, entirely local — no API key, no network |
+| **Disk** | **27 MB** under `.openlore/` (gitignorable; rebuildable from source) |
+| **Per-query latency** | **~430 µs p50** in-process via the MCP server |
+| **Your source code** | never leaves the machine — no account, no telemetry (opt-in only) |
+| **Lock-in** | none — delete `.openlore/` and nothing about your repo has changed |
 
-Application code, Infrastructure-as-Code, and architectural **decisions** project onto one shared set of node/edge primitives, so a single traversal answers questions spanning all three and impact analysis returns governance as a graph neighbor. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Large monorepos take minutes rather than seconds, stated plainly in [Known limitations](#known-limitations). Platform: Linux and Windows are exercised in CI; macOS is supported.
 
-**No agent required:** `openlore review --base main` composes the structural delta and blast radius into one Markdown briefing, and the bundled GitHub Action posts it as a single sticky PR comment — read-only and advisory by default.
+> **Privacy & telemetry.** Your source never leaves the machine. Telemetry is opt-in (`OPENLORE_TELEMETRY=1`) and records tool calls, agent identity, latency, error messages, decision titles, and lease events into the gitignored `.openlore/telemetry/` directory — never transmitted. LLM diagnostics are opt-in (`OPENLORE_LLM_LOGS=1`) and store prompts and responses, after secret redaction, in the gitignored `.openlore/logs/` directory. → [docs/configuration.md](docs/configuration.md)
+
+> Migrating from `spec-gen`? The package is now [`openlore`](https://www.npmjs.com/package/openlore) — see [docs/RENAME-TO-OPENLORE.md](docs/RENAME-TO-OPENLORE.md).
 
 ---
 
@@ -219,17 +195,29 @@ We'd rather you know these up front.
 
 ## Documentation
 
-**Start here:** the [documentation index](docs/README.md) maps what you want to do to the one page that answers it.
+**Start here:** the [documentation index](docs/README.md) maps every task to the one canonical page that answers it. The essentials:
 
-| Topic | Doc |
-|-------|-----|
-| MCP tools reference (80 tools + parameters) | [docs/mcp-tools.md](docs/mcp-tools.md) |
-| `openlore install` — auto-configure agent surfaces | [docs/install.md](docs/install.md) |
-| Agent setup (Claude Code, Cline, OpenCode…) | [docs/agent-setup.md](docs/agent-setup.md) |
-| Agent benchmarks (methodology + per-task numbers) | [docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md) |
-| Configuration (incl. `enforcement.policy`) | [docs/configuration.md](docs/configuration.md) |
-| CLI command reference | [docs/cli-reference.md](docs/cli-reference.md) |
-| Architecture · Algorithms · Philosophy | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/ALGORITHMS.md](docs/ALGORITHMS.md) · [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) |
+| I want to… | Doc |
+|------------|-----|
+| **Install & wire my agent** (one command) | [install.md](docs/install.md) |
+| Understand *why* wiring an agent helps | [agent-setup.md](docs/agent-setup.md) |
+| See all **80 MCP tools** + parameters | [mcp-tools.md](docs/mcp-tools.md) |
+| Run the full **CLI reference** | [cli-reference.md](docs/cli-reference.md) |
+| Configure `.openlore/config.json` (incl. `enforcement.policy`) | [configuration.md](docs/configuration.md) |
+| Choose / configure an LLM provider (optional) | [providers.md](docs/providers.md) |
+| Fix a setup problem | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
+| Read the **benchmark methodology** + per-task numbers | [AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md) |
+| Search code by meaning (semantic / GraphRAG) | [semantic-search.md](docs/semantic-search.md) |
+| Pick the tests a change should run | [test-impact-selection.md](docs/test-impact-selection.md) |
+| Find dead code / coverage gaps | [reachability-dead-code.md](docs/reachability-dead-code.md) · [coverage-gaps.md](docs/coverage-gaps.md) |
+| Detect spec ↔ code drift | [drift-detection.md](docs/drift-detection.md) |
+| Enforce architecture / import rules | [architecture-invariants.md](docs/architecture-invariants.md) |
+| Gate commits / wire CI & PR review | [ci-cd.md](docs/ci-cd.md) · [preflight.md](docs/preflight.md) |
+| Understand IaC & cross-domain impact | [iac.md](docs/iac.md) · [cross-domain-impact.md](docs/cross-domain-impact.md) |
+| Query across repos (federation) | [federation.md](docs/federation.md) |
+| Share the index as a bundle | [shareable-bundle.md](docs/shareable-bundle.md) |
+| Export to Sourcegraph / SCIP tools | [scip-export.md](docs/scip-export.md) |
+| Read the internals | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [ALGORITHMS.md](docs/ALGORITHMS.md) · [PHILOSOPHY.md](docs/PHILOSOPHY.md) |
 
 ---
 
