@@ -158,6 +158,6 @@ export async function handleCertifyProvenance(
     predicateType: PROVENANCE_PREDICATE_TYPE,
     digest,
     predicate,
-    note: 'Reproducible semantic change provenance. Recompute over the same base to verify the digest. OpenLore emits but does not sign; attach via your existing SLSA/in-toto flow with --format in-toto.',
+    note: 'Reproducible semantic change provenance. The digest is the content address of the semantic footprint (blast radius + structural delta), not of the diff text, so two edits with the same footprint share a digest. Recompute over the same base to verify. OpenLore emits but does not sign; attach via your existing SLSA/in-toto flow with --format in-toto.',
   };
 }
