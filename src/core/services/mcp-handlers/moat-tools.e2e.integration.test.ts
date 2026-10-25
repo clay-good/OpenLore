@@ -162,6 +162,57 @@ describe('certify_provenance on a real repo', () => {
   });
 });
 
+describe('boundary and error paths (safe-for-users robustness)', () => {
+  it('certify_merge returns a clean error, not a throw, for an unresolvable ref', async () => {
+    const root = await newRepo();
+    const res = await call('certify_merge', root, { ours: 'main', theirs: 'no-such-branch' }) as {
+      tool: string; error?: string; verdict?: string;
+    };
+    expect(res.error).toBeTruthy();
+    expect(res.verdict).toBeUndefined();
+  });
+
+  it('certify_merge returns an error for two branches with no merge-base', async () => {
+    const root = await newRepo();
+    // An orphan branch shares no history with main → no merge-base.
+    git(root, ['checkout', '-q', '--orphan', 'island']);
+    await write(root, 'src/island.ts', 'export function alone(): void {}\n');
+    git(root, ['add', '.']);
+    git(root, ['commit', '-qm', 'orphan root', '--no-gpg-sign']);
+    const res = await call('certify_merge', root, { ours: 'main', theirs: 'island' }) as { error?: string };
+    expect(res.error).toMatch(/merge-base|resolve/i);
+  });
+
+  it('certify_provenance refuses to certify against an unresolvable base (fatal, no fallback)', async () => {
+    const root = await newRepo();
+    await analyze(root);
+    const res = await call('certify_provenance', root, { baseRef: 'does-not-exist' }) as {
+      tool: string; error?: string; digest?: string;
+    };
+    expect(res.error).toBeTruthy();
+    expect(res.digest).toBeUndefined();
+  });
+
+  it('fleet_status never serves a recorded verdict as fresh when there is no graph to check it against', async () => {
+    const root = await newRepo();
+    // Deliberately NO analyze: there is no index to re-check the verdict against.
+    await recordVerification(root, {
+      id: 'v-nograph',
+      verdict: 'merge-compatible',
+      branch: 'feat/y',
+      baseCommit: git(root, ['rev-parse', 'HEAD']).trim(),
+      producedBy: 'certify_merge',
+      anchors: [{ nodeId: 'src/lib.ts::parseConfig', symbolName: 'parseConfig', filePath: 'src/lib.ts', contentHash: 'deadbeef' }],
+    });
+
+    const res = await call('fleet_status', root) as {
+      verificationMemory: { records: Array<{ id: string; state: string }>; note: string };
+    };
+    expect(res.verificationMemory.records.find(r => r.id === 'v-nograph')?.state).toBe('needs-reverification');
+    expect(res.verificationMemory.note).toMatch(/No graph available|needs-reverification|not silently fresh/i);
+  });
+});
+
 describe('fleet_status on a real repo', () => {
   it('invalidates a recorded verdict once a proven symbol actually drifts', async () => {
     const root = await newRepo();
