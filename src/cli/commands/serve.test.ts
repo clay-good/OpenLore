@@ -56,6 +56,23 @@ describe('host-scoped cold-read repair', () => {
     expect(requestRepairFromHost(root, ['src/payments.ts'])).toBe(false);
   });
 
+  it('registers a read-path repair builder so a stale/empty graph self-heals in the daemon', async () => {
+    // Regression (change: self-heal-serve-daemon): the daemon registered only a repair HOST
+    // (the cited-stale-file path) and NEVER a repair builder, so readCachedContext's
+    // maybeTriggerBackgroundRepair was a no-op in-process — an empty/reset/degraded/unservable
+    // graph was disclosed but never rebuilt. Pi, whose sole backend is this daemon, inherited
+    // the gap. A read-path repair reason must now drive the daemon's rebuild coordinator.
+    const analyze = vi.spyOn(analyzeApi, 'openloreAnalyze').mockResolvedValue({} as never);
+    await boot();
+    const { repairInBackground } = await import('../../core/services/cold-start-bootstrap.js');
+    // 'schema-reset' is the reason an empty/version-reset graph produces on the read path.
+    // Before the fix this returned null (no builder registered); now it drives triggerRebuild.
+    const inFlight = repairInBackground(root, 'schema-reset');
+    expect(inFlight).not.toBeNull();
+    await inFlight;
+    expect(analyze).toHaveBeenCalledWith(expect.objectContaining({ rootPath: root, force: true }));
+  });
+
   it('closes and evicts the served root cache during teardown', async () => {
     const h = await boot();
     const analysisDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);

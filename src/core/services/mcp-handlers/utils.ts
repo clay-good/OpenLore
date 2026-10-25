@@ -157,6 +157,12 @@ export function computeRepairReason(
   now: number = Date.now(),
 ): RepairReason | undefined {
   if (integrityVerdict === 'mismatched') return 'integrity-mismatched';
+  // A `degraded` store is materially smaller than the build committed — a partial or
+  // truncated persist, needing a rebuild just as much as a mismatch. (It is NOT a
+  // transient WAL-lag artifact: computeIndexIntegrity checkpoints the WAL and recounts
+  // before the verdict is set, so a surviving `degraded` is a genuine shortfall, and it
+  // otherwise re-discloses "re-run analyze --force" on every call while never self-healing.)
+  if (integrityVerdict === 'degraded') return 'integrity-degraded';
   // A read-path schema mismatch or a quarantined (corrupt) store both need a rebuild.
   if (schemaFault) return 'schema-reset';
   if (staleCount >= STALE_REGION_REPAIR_THRESHOLD) return 'stale-region';
@@ -466,6 +472,21 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
   const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   const contextPath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
 
+  // Detection-without-repair closure (change: self-heal-unservable-artifact). An artifact
+  // that is PRESENT but unservable — a corrupt llm-context, or a lost/refused generation
+  // publish (e.g. a version upgrade bumped the generation manifest version) — is disclosed
+  // on every call but never reached the read-path self-heal, because that trigger lives at
+  // the TAIL of readCachedContext's success path and every early `return null` bypasses it.
+  // Kick the shared at-most-once background rebuild for the PERSISTENT verdicts here; the
+  // transient ones (a publish in progress) self-resolve and must NOT be rebuilt over.
+  const PERSISTENT_UNSERVABLE = new Set(['index-unreadable', 'index-generation-unavailable', 'index-generation-mismatch']);
+  const heal = (r: NotReadyResult): NotReadyResult => {
+    if (r.reason && PERSISTENT_UNSERVABLE.has(r.reason)) {
+      try { repairInBackground(directory, 'artifact-unservable'); } catch { /* fail-soft: never perturb the diagnosis */ }
+    }
+    return r;
+  };
+
   try {
     // `lstat`, not `stat`. The production reader opens `O_NOFOLLOW` and verifies the
     // descriptor against the path entry, so it refuses a SYMLINK outright
@@ -477,11 +498,11 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
     // the reader's `O_NONBLOCK` does not arise here.)
     const entry = await lstat(contextPath);
     if (!entry.isFile()) {
-      return notReadyResult(
+      return heal(notReadyResult(
         `The analysis artifact at ${ARTIFACT_LLM_CONTEXT} is not a regular file `
         + `(it is a ${describeEntryKind(entry)}) and was refused. Run analyze to rebuild it.`,
         'index-unreadable',
-      );
+      ));
     }
   } catch {
     return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
@@ -505,7 +526,7 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
 
   const manifest = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
   if (!manifest) {
-    return notReadyResult(
+    return heal(notReadyResult(
       // Deliberately NOT "missing": an absent manifest is a legitimate legacy analysis and is
       // synthesized, so it never reaches here. Nor "in progress": the sentinel is answered
       // above. Reaching here means the manifest is PRESENT, is not the sentinel, and was
@@ -516,7 +537,7 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
       + 'separately), so the artifacts cannot be vouched for and are not served. Re-run '
       + 'analyze to republish.',
       'index-generation-unavailable',
-    );
+    ));
   }
 
   if (!await artifactMatchesGeneration(analysisDir, manifest, ARTIFACT_LLM_CONTEXT)) {
@@ -535,21 +556,21 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
         'retry shortly',
       );
     }
-    return notReadyResult(
+    return heal(notReadyResult(
       'An analysis exists but does NOT match its published generation '
       + `(${manifest.generationId}): the artifacts were rewritten and the manifest was not `
       + 'republished, so serving them would serve unverified bytes. No writer holds the '
       + 'analysis lock, so this is not an ordinary mid-write window — a publish was lost. '
       + 'Re-run analyze to republish, and a recurrence without a crash is worth reporting.',
       'index-generation-mismatch',
-    );
+    ));
   }
 
-  return notReadyResult(
+  return heal(notReadyResult(
     'An analysis exists and matches its generation, but could not be read into a usable '
     + 'context. Re-run analyze; if it recurs, the artifact is likely malformed.',
     'index-unreadable',
-  );
+  ));
 }
 
 /** Name the entry kind a refused artifact actually is, without guessing beyond what stat saw. */

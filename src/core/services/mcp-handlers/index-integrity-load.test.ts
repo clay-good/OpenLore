@@ -149,6 +149,26 @@ describe('index integrity — load-path reconciliation', () => {
       _resetRepairServiceForTesting();
     }
   });
+
+  it('a degraded (materially-smaller) store triggers the background self-heal', async () => {
+    // Regression (change: self-heal-degraded-index): a partial/truncated persist reconciles
+    // as `degraded` and re-disclosed "re-run analyze --force" on every call but never
+    // rebuilt — computeRepairReason mapped only `mismatched`. It now maps `degraded` too.
+    _resetRepairServiceForTesting();
+    const repaired: string[] = [];
+    registerRepairBuilder(async (dir) => { repaired.push(resolve(dir)); });
+    try {
+      // Only 5 of 40 committed nodes landed → verdict `degraded` (store ready, countNodes>0).
+      const dir = await track(layIndex({ committed: TOTAL, storedNodeCount: 5 }));
+      const ctx = await readCachedContext(dir);
+      expect(ctx?.integrity?.verdict).toBe('degraded');
+      await new Promise((r) => setImmediate(r));
+      expect(repaired).toContain(resolve(dir));
+      ctx?.edgeStore?.close();
+    } finally {
+      _resetRepairServiceForTesting();
+    }
+  });
 });
 
 describe('index integrity — surfaced to agents end-to-end', () => {
