@@ -5,6 +5,35 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-10-25
+
+**The index heals itself, and every change comes with a receipt.**
+
+- **An always-on, self-healing index.** A call-graph index that is stale, empty, reset by a
+  version upgrade, truncated, or otherwise unservable now rebuilds itself automatically in the
+  background — on a new or upgraded install, a new or an old repo, and across every surface:
+  the Claude Code hooks, the MCP server, and the Pi `serve` daemon. Agents are served accurate
+  structure instead of silently falling back to grep, with no manual `openlore analyze`. This
+  closes a family of "detected but never repaired" gaps where the problem was disclosed every
+  turn but never fixed. (#616, #614, #609, #600)
+- **`verify_change`** — one actionable receipt for a working-tree diff, composing blast radius,
+  the tests to run, and spec drift into a single verdict. (#605)
+- **`certify_provenance`** — a reproducible, content-addressed, in-toto-attachable record of what
+  a change did *semantically*, not just which bytes moved. (#608)
+- **`certify_merge`** — a semantic merge-conflict certificate: what a merge actually changes,
+  beyond a textual three-way. (#610)
+- **`fleet_status`** — drift-aware verification memory across a fleet of repositories, completing
+  the coordination arc. (#611)
+- **Precision-order soundness calibration** for the call graph — a monotone-refinement checker and
+  builder resolution toggles that keep structural conclusions an honest lower bound. (#604)
+- **Docs:** the README is rewritten shorter and evergreen, and the documentation set curated. (#615)
+- Internal hardening: backlog and roadmap consolidation, end-to-end tests for the new tools on real
+  graphs, a `certify_merge` performance pass, and routine dependency updates.
+
+The new verification and coordination tools (`verify_change`, `certify_provenance`,
+`certify_merge`, `fleet_status`) ship in the opt-in `verify` / `coordination` presets. No breaking
+changes.
+
 ## [3.4.0] - 2026-10-18
 
 **Memories now speak up when they matter, and check their own facts.**
