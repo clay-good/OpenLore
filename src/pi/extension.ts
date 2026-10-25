@@ -527,11 +527,14 @@ export async function runConfigWizard(
       const [exitCode, errText] = await new Promise<[number, string]>((resolve) => {
         const trySpawn = (cmd: string, args: string[]) => new Promise<[number, string] | null>((res) => {
           const chunks: Buffer[] = [];
+          // Pass env explicitly so the child honors the process's CURRENT environment
+          // (e.g. a PATH the host adjusted) rather than a stale snapshot — identical to the
+          // default inherited env in normal use, but it keeps resolution deterministic.
           const proc = process.platform === 'win32'
-            ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+            ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: ctx.cwd, env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
             // windowsHide is a documented no-op off Windows; set here too so the invariant is
             // uniform across both branches rather than a carve-out the guard has to know about.
-            : spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+            : spawn(cmd, args, { cwd: ctx.cwd, env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
           proc.stderr?.on('data', (d: Buffer) => chunks.push(d));
           proc.on('close', (code) => res([code ?? 1, Buffer.concat(chunks).toString().trim()]));
           proc.on('error', () => res(null));
