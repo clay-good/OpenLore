@@ -88,6 +88,28 @@ describe('certify_merge on a real repo', () => {
     expect(res.findings[0].message).toMatch(/parseConfig/);
   });
 
+  it('reads blobs correctly when a tracked path contains a space (batched -z read)', async () => {
+    // A filename with a space broke the old newline-split ls-tree parse and a naive cat-file feed.
+    // The batched reader uses `ls-tree -z`, so the conflict is still detected through such a path.
+    const root = await newRepo();
+    await write(root, 'src/lib with space.ts', 'export function parseConfig(raw: string): object {\n  return JSON.parse(raw);\n}\n');
+    git(root, ['rm', '-q', 'src/lib.ts']);
+    await write(root, 'src/app.ts', 'import { parseConfig } from "./lib with space";\nexport function start(): void {}\n');
+    git(root, ['add', '.']);
+    git(root, ['commit', '-qm', 'baseline with spaced path', '--no-gpg-sign']);
+
+    git(root, ['checkout', '-q', '-b', 'ours']);
+    await write(root, 'src/app.ts', 'import { parseConfig } from "./lib with space";\nexport function start(): void {\n  parseConfig("{}");\n}\n');
+    git(root, ['commit', '-qam', 'ours: call parseConfig', '--no-gpg-sign']);
+    git(root, ['checkout', '-q', 'main']);
+    git(root, ['checkout', '-q', '-b', 'theirs']);
+    await write(root, 'src/lib with space.ts', 'export function somethingElse(): void {}\n');
+    git(root, ['commit', '-qam', 'theirs: remove parseConfig', '--no-gpg-sign']);
+
+    const res = await call('certify_merge', root, { ours: 'ours', theirs: 'theirs' }) as { verdict: string };
+    expect(res.verdict).toBe('incompatible');
+  });
+
   it('clears two genuinely disjoint branches as no-detected-conflict', async () => {
     const root = await newRepo();
     git(root, ['checkout', '-q', '-b', 'ours']);
