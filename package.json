@@ -184,7 +184,7 @@
     "@inquirer/prompts": "^8.7.1",
     "@repomix/tree-sitter-wasms": "0.1.17",
     "chalk": "^6.0.0",
-    "chokidar": "^5.0.0",
+    "chokidar": "^6.0.0",
     "commander": "^15.0.0",
     "glob": "^13.0.6",
     "ignore": "^7.0.8",
