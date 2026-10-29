@@ -6,6 +6,8 @@
  */
 
 import { Command } from 'commander';
+import { colorForCapturedStdout } from '../../utils/colors.js';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { collectIndexStatus, type IndexStatus } from './status.js';
 
 type StatusColor = 'green' | 'yellow' | 'red';
@@ -22,14 +24,6 @@ function statusLabel(status: IndexStatus): { color: StatusColor; text: string } 
     return { color: 'yellow', text: `OpenLore: index stale (${count})` };
   }
   return { color: 'green', text: 'OpenLore: index ready' };
-}
-
-function ansiColor(color: StatusColor): string {
-  switch (color) {
-    case 'green': return '\u001b[32m';
-    case 'yellow': return '\u001b[33m';
-    case 'red': return '\u001b[31m';
-  }
 }
 
 async function workingDirectoryFromStdin(): Promise<string> {
@@ -55,15 +49,15 @@ export const statuslineCommand = new Command('statusline')
     try {
       const status = await collectIndexStatus(await workingDirectoryFromStdin());
       const { color, text } = statusLabel(status);
-      const rendered = process.env.NO_COLOR === undefined
-        ? `${ansiColor(color)}${text}\u001b[0m`
-        : text;
-      process.stdout.write(`${rendered}\n`);
+      const c = colorForCapturedStdout();
+      const safeText = safe(text);
+      const rendered = color === 'green' ? c.green(safeText)
+        : color === 'yellow' ? c.yellow(safeText)
+          : c.red(safeText);
+      process.stdout.write(rendered + '\n');
     } catch {
       // A status-line command must fail soft: Claude Code hides output from commands
       // that exit non-zero, while a yellow unknown state is still useful and honest.
-      process.stdout.write(`${process.env.NO_COLOR === undefined ? `${ansiColor('yellow')}` : ''}`
-        + 'OpenLore: status unknown'
-        + `${process.env.NO_COLOR === undefined ? '\u001b[0m' : ''}\n`);
+      process.stdout.write(colorForCapturedStdout().yellow('OpenLore: status unknown') + '\n');
     }
   });
