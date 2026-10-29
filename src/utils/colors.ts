@@ -32,6 +32,17 @@ export function colorForStderr(): ChalkInstance {
 }
 
 /**
+ * Color output captured by a host that understands ANSI (for example Claude
+ * Code's status line). stdout is a pipe in that case, so the regular Chalk
+ * instance would disable color even though its consumer renders ANSI styles.
+ */
+export function colorForCapturedStdout(): ChalkInstance {
+  return logger.getOptions().noColor || process.env.NO_COLOR !== undefined
+    ? plain
+    : new Chalk({ level: 1 });
+}
+
+/**
  * Pick between the live chalk instance and a plain one from a caller-computed
  * decision (e.g. a command that also disables color in `--json` mode).
  */
