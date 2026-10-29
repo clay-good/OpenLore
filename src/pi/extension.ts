@@ -63,6 +63,7 @@ import {
   type ServeDescriptor,
   type ServeHealth,
 } from '../cli/commands/serve-descriptor.js';
+import { OPENLORE_PACKAGE_VERSION } from '../core/runtime/package-versions.js';
 import type { ContextInjectionConfig } from '../types/index.js';
 import {
   refuseRepoConfiguredEndpoint,
@@ -562,6 +563,10 @@ interface Daemon {
   baseUrl: string;
   token?: string;
   incompatibility?: string;
+  /** A repository-bound health response found a version mismatch or missing Pi tools. */
+  autoRecoverable?: boolean;
+  /** Preset reported by the authenticated daemon, reused for automatic recovery. */
+  restartPreset?: string;
 }
 
 interface DaemonProbe {
@@ -690,18 +695,61 @@ function incompatibleDaemon(desc: ServeDescriptor): Daemon {
   };
 }
 
+/** Return true only when a parseable release version is strictly older. */
+function isOlderPackageVersion(candidate: string, current: string): boolean {
+  const parse = (value: string) => {
+    const match = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+    const prerelease = match?.[4]?.split('.');
+    if (prerelease?.some((part) => /^\d+$/.test(part) && part.length > 1 && part.startsWith('0'))) return null;
+    return match
+      ? { core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])], prerelease }
+      : null;
+  };
+  const a = parse(candidate);
+  const b = parse(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < a.core.length; i++) {
+    if (a.core[i] !== b.core[i]) return a.core[i] < b.core[i];
+  }
+  if (!a.prerelease) return false;
+  if (!b.prerelease) return true;
+  for (let i = 0; i < Math.max(a.prerelease.length, b.prerelease.length); i++) {
+    const left = a.prerelease[i];
+    const right = b.prerelease[i];
+    if (left === undefined) return true;
+    if (right === undefined) return false;
+    if (left === right) continue;
+    const leftNumeric = /^\d+$/.test(left);
+    const rightNumeric = /^\d+$/.test(right);
+    if (leftNumeric && rightNumeric) return left.length === right.length ? left < right : left.length < right.length;
+    if (leftNumeric !== rightNumeric) return leftNumeric;
+    return left < right;
+  }
+  return false;
+}
+
 function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   const missing = missingDaemonTools(health.tools, NAV_TOOLS.map((tool) => tool.name));
+  const olderVersion = health.version !== undefined && isOlderPackageVersion(health.version, OPENLORE_PACKAGE_VERSION);
+  const incompatible = missing.length > 0 || olderVersion;
+  const autoRecoverable = olderVersion;
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
-    ...(missing.length > 0
+    ...(incompatible
       ? {
           incompatibility:
-            `The running openlore daemon does not expose ${missing.length} Pi tool(s), including ` +
-            `${missing.slice(0, 3).join(', ')}. Run /openlore restart in Pi to restart it ` +
-            'from the installed extension (no global OpenLore CLI required). ' +
+            (olderVersion
+              ? `The running daemon version ${health.version} is older than the installed extension version ${OPENLORE_PACKAGE_VERSION}. `
+              : '') +
+            (missing.length > 0
+              ? `It also does not expose ${missing.length} Pi tool(s), including ${missing.slice(0, 3).join(', ')}. `
+              : '') +
+            (autoRecoverable
+              ? 'Automatic recovery could not replace it; run /openlore restart in Pi to retry. '
+              : 'The current preset omits Pi tools; run /openlore restart in Pi to switch to the full preset. ') +
             'If externally supervised, restart it through the supervising host instead.',
+          ...(autoRecoverable ? { autoRecoverable: true, restartPreset: health.preset } : {}),
         }
       : {}),
   };
@@ -848,6 +896,7 @@ export async function restartPiDaemon(
     stop?: { command: string; args: string[] };
     launch?: { command: string; args: string[] };
     timeoutMs?: number;
+    preset?: string;
   } = {},
 ): Promise<EnsureDaemonResult> {
   if (!(await piMaySpawnDaemon(cwd))) {
@@ -884,7 +933,11 @@ export async function restartPiDaemon(
         'A legacy or unverified daemon must be stopped by its owner; see .openlore/serve.log.',
     };
   }
-  return ensureDaemonResult(cwd, options);
+  const launch = options.launch ?? {
+    command: packaged.command,
+    args: [packaged.args[0], 'serve', '--directory', cwd, '--preset', options.preset ?? PI_DAEMON_PRESET],
+  };
+  return ensureDaemonResult(cwd, { launch, timeoutMs: options.timeoutMs });
 }
 
 export async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
@@ -2012,7 +2065,7 @@ export interface PiExtensionRuntime {
   /** Replaces daemon discovery/spawn. */
   resolveDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
   /** Replaces explicit daemon restart. */
-  restartDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
+  restartDaemon?: (cwd: string, preset?: string) => Promise<EnsureDaemonResult>;
 }
 
 function registerOpenlore(
@@ -2040,7 +2093,7 @@ function registerOpenlore(
   const readHealth = runtime.readHealth ?? defaultHealthReader;
   const readWatcher = runtime.readWatcher ?? readWatcherState;
   const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
-  const restartDaemon = runtime.restartDaemon ?? restartPiDaemon;
+  const restartDaemon = runtime.restartDaemon ?? ((cwd: string, preset?: string) => restartPiDaemon(cwd, { preset }));
   // Background work may outlive the event that started it. A generation makes those continuations
   // harmless after shutdown or session replacement without retaining an ExtensionContext globally.
   let sessionGeneration = 0;
@@ -2071,6 +2124,8 @@ function registerOpenlore(
   // One in-flight resolution per cwd: the session-start warmup and any tool call that arrives
   // meanwhile share it instead of each spawning or probing the daemon.
   const pendingDaemons = new Map<string, Promise<Daemon | null>>();
+  const automaticRecoveryAttempts = new Set<string>();
+  const automaticRecoveryFailures = new Set<string>();
   async function getDaemon(cwd: string): Promise<Daemon | null> {
     const pending = pendingDaemons.get(cwd);
     if (pending) return pending;
@@ -2083,6 +2138,16 @@ function registerOpenlore(
   }
   async function resolveAndRecordDaemon(cwd: string): Promise<Daemon | null> {
     const result = await resolveDaemon(cwd);
+    if (result.daemon?.autoRecoverable && !automaticRecoveryAttempts.has(cwd)) {
+      // A valid, repository-bound health response proves the daemon is older.
+      // Replace it on first use after an update; the CLI still refuses
+      // unverified listeners and host-supervised daemons.
+      automaticRecoveryAttempts.add(cwd);
+      const recovered = await restartDaemon(cwd, result.daemon.restartPreset);
+      if (recovered.daemon) automaticRecoveryFailures.delete(cwd);
+      else automaticRecoveryFailures.add(cwd);
+      return recordDaemonResult(cwd, recovered);
+    }
     return recordDaemonResult(cwd, result);
   }
   function recordDaemonResult(cwd: string, result: EnsureDaemonResult): Daemon | null {
@@ -2368,6 +2433,8 @@ function registerOpenlore(
         dropDaemon(cwd);
         failedUntil.delete(cwd);
         healthCache.delete(cwd);
+        automaticRecoveryAttempts.delete(cwd);
+        automaticRecoveryFailures.delete(cwd);
         setPiStatus(ctx, formatPiStatus({ daemon: 'connecting' }));
         ctx.ui.notify('Restarting the OpenLore daemon for this project…', 'info');
         const restarting = restartDaemon(cwd)
@@ -2431,6 +2498,9 @@ function registerOpenlore(
     const daemon = await getDaemon(ctx.cwd).catch(() => null);
     if (!sessionActive || generation !== sessionGeneration) return;
     if (ctx.hasUI && daemon?.incompatibility) ctx.ui.notify(daemon.incompatibility, 'warning');
+    if (ctx.hasUI && automaticRecoveryFailures.delete(ctx.cwd)) {
+      ctx.ui.notify(daemonFailures.get(ctx.cwd) ?? 'Automatic OpenLore daemon recovery failed.', 'warning');
+    }
     startKeepalive();
     await refreshStatus(ctx);
   }

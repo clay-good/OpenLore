@@ -1007,35 +1007,53 @@ mid-session.
 
 ### Requirement: PiDaemonUpgradeRecovery
 
-The Pi extension SHALL expose `/openlore restart` in interactive TUI and RPC hosts so a user
-can recover from a daemon surviving an extension update without a globally installed CLI.
-Incompatible discovery SHALL expose its reason as a UI warning, including missing tools when
-known. Discovery SHALL NOT automatically replace a shared daemon.
+The Pi extension SHALL automatically recover from a detached daemon that survives an extension
+update when an authenticated health response proves the daemon belongs to this repository and its
+reported version is older than the installed extension. Recovery SHALL happen when Pi next opens
+the project, without requiring a globally
+installed CLI or a user command, regardless of the daemon's current preset. The replacement SHALL
+reuse the preset reported by the authenticated daemon health response, so the installed release
+applies its current definition of that preset. Discovery SHALL NOT replace a daemon whose identity
+and repository cannot be verified.
 
-On explicit restart, the extension SHALL invoke its packaged CLI with the current Node runtime
-and no shell. It SHALL reuse the authenticated repository/PID/protocol proof and graceful stop
-path, wait for the announcement to be removed, and start the installed extension's full-preset
-daemon only after successful stop. A refused or incomplete stop SHALL NOT launch a replacement.
-The restart SHALL respect the host's spawn opt-out before stopping or starting anything,
-refuse while the current agent turn is running, and serialize daemon acquisition with restart.
+Recovery SHALL invoke the packaged CLI with the current Node runtime and no shell. It SHALL reuse
+the authenticated repository/PID/protocol proof and graceful stop path, wait for the announcement
+to be removed, and start the daemon with the preset captured from its authenticated health response
+only after successful stop. A refused or incomplete stop SHALL NOT launch a replacement. Recovery
+SHALL respect the host's spawn opt-out before stopping or starting anything and serialize daemon
+acquisition with restart. Pi MAY also expose `/openlore restart` for an explicit full-preset retry
+while the agent is idle.
 
 #### Scenario: An old daemon survives the host restart after a package update
 
-- **GIVEN** a daemon exposing the 3.4.0 tool surface and an extension requiring the 3.5.0 tools
-- **WHEN** discovery reports the missing tools and the user runs `/openlore restart`
+- **GIVEN** a full-preset daemon exposing a prior version or tool surface and an extension from a newer release
+- **WHEN** Pi opens the project and discovers the missing tools
 - **THEN** the authenticated old daemon is gracefully stopped and replaced by a daemon exposing
-  the installed extension's required tools, without a PATH lookup or a manual process kill
+  the installed extension's required tools, without a user command, PATH lookup, or manual process kill
 
 #### Scenario: A supervising host owns the daemon lifecycle
 
 - **GIVEN** the host has disabled extension daemon spawning
-- **WHEN** the user runs `/openlore restart`
+- **WHEN** Pi opens the project and attempts automatic recovery
 - **THEN** the extension stops and starts no process and directs the user to the supervising host
+
+#### Scenario: An older daemon uses an intentionally narrower preset
+
+- **GIVEN** a repository-bound daemon with an older version and a narrower preset
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** it replaces the daemon using the same preset and the installed release's current tool definition
+- **AND** it reports any Pi tools that remain unavailable from that preset
+
+#### Scenario: A current-version preset omits Pi tools
+
+- **GIVEN** a repository-bound daemon at the installed extension version with a narrower preset
+- **WHEN** Pi opens the project and discovers missing Pi tools
+- **THEN** it preserves the daemon and reports the explicit `/openlore restart` command to switch to Pi's full preset
 
 #### Scenario: The announced listener cannot be authenticated for this repository
 
 - **GIVEN** a listener whose health does not prove the descriptor's identity and repository
-- **WHEN** the user runs `/openlore restart`
+- **WHEN** Pi opens the project and attempts automatic recovery
 - **THEN** shutdown is refused, no replacement starts, and the UI explains that the owner must stop it
 
 ### Requirement: PiInjectedContextIsBoundedAndCurrent

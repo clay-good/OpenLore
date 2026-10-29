@@ -134,7 +134,7 @@ shutdown. Print (`-p`) and JSON modes show no status.
 | `openlore: no index (run openlore analyze)` | The repository has no analysis yet. |
 | `openlore: analyzing…` | An analysis owns the repository and no usable index exists yet. |
 | `openlore: index degraded` | An analysis artifact is missing or corrupt. Run `openlore analyze`. |
-| `openlore: daemon incompatible` | A daemon from an older or different release runs for this tree. Run `/openlore restart` in Pi; no global CLI is needed. An externally supervised daemon must be restarted through its host. |
+| `openlore: daemon incompatible` | A daemon from an older release or with an outdated tool surface runs for this tree. Pi automatically replaces a verified older-version daemon when the project is opened, reusing its preset. A current-version preset missing Pi tools remains in place and shows an explicit full-preset recovery command. |
 | `openlore: daemon not started (spawn disabled)` | `OPENLORE_PI_NO_SPAWN` or `"pi": { "spawnDaemon": false }` is set and no daemon is running. |
 | `openlore: daemon unavailable` | The daemon could not start or stopped answering. See `.openlore/serve.log`. |
 | `openlore: status unknown` | The readiness read failed. Tools still report their own errors. |
@@ -153,22 +153,25 @@ The daemon:
 - re-analyzes the call graph (debounced) after each edit burst — so what the
   model sees never silently diverges from the code.
 
-The extension never automatically replaces a running daemon; it may be serving
-other clients (another Pi session, an editor). After an update, a detached daemon
-from the previous release can survive restarting Pi or pi-outpost. If it lacks
-tools required by the new extension, Pi shows a warning with the missing tools.
+After an update, detached daemons from the previous release can survive
+restarting Pi or pi-outpost. When a project is opened, Pi automatically replaces
+an authenticated daemon whose reported version is older than the installed extension,
+reusing the preset reported by its authenticated health response. The newly installed
+release applies that preset's updated tool definition. If a current-version preset still
+lacks tools Pi needs, Pi reports the incompatibility without repeatedly restarting it;
+`/openlore restart` explicitly switches to Pi's full preset. The
+stop uses the packaged CLI, so `openlore` need not be installed globally or on
+`PATH`. It verifies the daemon's repository,
+PID, protocol, and authentication and waits for graceful teardown; it never sends
+a signal to a PID from `serve.json`. If shutdown is refused or incomplete, no
+replacement is launched. An unverified or legacy daemon must be stopped by its owner.
 
-Run **`/openlore restart`** in Pi or pi-outpost while the agent is idle to stop
-the project's daemon and start the installed extension's full-preset daemon.
-This explicit action also interrupts other clients sharing that daemon. It uses
-the packaged CLI, so `openlore` need not be installed globally or on `PATH`.
-The stop verifies the daemon's repository, PID, protocol, and authentication and
-waits for graceful teardown; it never sends a signal to a PID from `serve.json`.
-If shutdown is refused or incomplete, no replacement is launched. An unverified
-or legacy daemon must be stopped by its owner.
+For an explicit retry, run **`/openlore restart`** in Pi or pi-outpost while the
+agent is idle. This can interrupt other clients sharing the project daemon.
 
-When `OPENLORE_PI_NO_SPAWN` or `pi.spawnDaemon: false` is set, this command refuses
-both stopping and starting: use the supervising host's restart mechanism instead.
+When `OPENLORE_PI_NO_SPAWN` or `pi.spawnDaemon: false` is set, automatic recovery
+and the explicit restart command refuse both stopping and starting: use the
+supervising host's restart mechanism instead.
 
 ## Verify
 
