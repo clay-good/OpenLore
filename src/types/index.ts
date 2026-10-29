@@ -136,8 +136,9 @@ export interface PiConfig {
   /**
    * Which OpenLore tools are active when a Pi session starts. Default `'lean'`: the tools of the
    * MCP `substrate` preset plus `openlore_configure` and `openlore_activate_tools`, which turns on
-   * the other tool groups on demand. `'all'` activates every OpenLore tool at session start
-   * (change: add-pi-lean-tool-surface).
+   * the other tool groups on demand. If the user has Pi's native `tool_search` active, OpenLore
+   * instead keeps only `orient` and `search_code` directly visible and defers specialist tools
+   * to search. `'all'` activates every OpenLore tool at session start (change: add-pi-lean-tool-surface).
    */
   toolSurface?: 'lean' | 'all';
 }

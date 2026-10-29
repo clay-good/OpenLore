@@ -21,7 +21,10 @@ fresh while you edit.
   it: `specs` (including `openlore_prepare_spec_generation` and
   `openlore_prepare_spec_repair`), `memory`, `review`, `quality`, or `inspect`. Set
   `"pi": { "toolSurface": "all" }` in `.openlore/config.json` to keep every tool
-  active.
+  active. If Pi's native `tool_search` is enabled before OpenLore loads, OpenLore
+  automatically keeps only `openlore_orient` and `openlore_search_code` visible;
+  use Pi's `tool_search` to discover and load specialist tools. OpenLore does not
+  enable or modify `tool_search` settings. `toolSurface: "all"` still takes precedence.
 - **Config wizard**: opt-in setup via `/openlore configure`
   slash command or `openlore_configure` tool.
 - **Footer status**: an `openlore:` entry in Pi's status bar says whether the
@@ -102,7 +105,7 @@ For example, a global file can contain:
 ```json
 {
   "generation": { "provider": "openai", "model": "your-model" },
-  "pi": { "toolSurface": "lean", "contextMode": "on-demand" },
+  "pi": { "contextMode": "on-demand" },
   "contextInjection": { "mode": "task-scoped" }
 }
 ```

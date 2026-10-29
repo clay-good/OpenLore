@@ -167,10 +167,12 @@ agent calls `openlore_orient` when it has a task. Set `"pi": { "contextMode": "f
 [`examples/pi/README.md`](../examples/pi/README.md).
 
 A Pi session starts with the lean tool set Claude Code gets by default (the `substrate`
-preset), plus `openlore_configure` and `openlore_activate_tools`. The two spec-authoring tools
-(`openlore_prepare_spec_generation`, `openlore_prepare_spec_repair`) wait in the `specs` group.
-The agent calls `openlore_activate_tools` to turn on the `specs`, `memory`, `review`, `quality`,
-or `inspect` group. To keep every tool active from the start, set:
+preset), plus `openlore_configure` and `openlore_activate_tools`. When Pi's native `tool_search`
+is already enabled by the user, OpenLore keeps only `openlore_orient` and `openlore_search_code`
+directly visible and exposes specialist tools through Pi's deferred tool search. Enable it in Pi
+yourself (for example, add `"+tool_search"` to `defaultTools` in `~/.pi/agent/settings.json`);
+OpenLore does not change Pi settings. Without `tool_search`, the existing lean surface and
+`openlore_activate_tools` groups remain in use. To keep every tool active from the start, set:
 
 ```json
 { "pi": { "toolSurface": "all" } }
