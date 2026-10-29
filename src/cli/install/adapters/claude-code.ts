@@ -25,6 +25,24 @@ const MD_FILE = 'CLAUDE.md';
 const SETTINGS_PATH = '.claude/settings.json';
 const SETTINGS_LOCAL_PATH = '.claude/settings.local.json';
 const MCP_PATH = '.mcp.json';
+const STATUSLINE_COMMAND = 'openlore statusline --installed-by-openlore';
+
+/** The compact command OpenLore owns in Claude Code's single custom status-line slot. */
+function isOpenLoreStatusLine(value: unknown, command = STATUSLINE_COMMAND): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && (value as Record<string, unknown>).type === 'command'
+    && (value as Record<string, unknown>).command === command;
+}
+
+function managedStatusLineCommand(
+  platform: NodeJS.Platform,
+  runtime: ApplyContext['platformCommandRuntime'],
+): string {
+  return formatPlatformCommand(
+    resolveOpenloreCommand(['statusline', '--installed-by-openlore'], platform, runtime),
+    platform,
+  );
+}
 
 /**
  * The repo-scope grant: the whole `openlore` command family, in ONE repository the
@@ -684,6 +702,10 @@ export const claudeCodeAdapter: Adapter = {
     // is never read for MCP), and set each marker-identified hook group. Everything else in the
     // user's settings.json is preserved byte-for-byte.
     const settingsEdits: JsonPathEdit[] = [];
+    const commandHazard = hookCommandHazard(ctx.platform, ctx.platformCommandRuntime);
+    const statuslineCommand = commandHazard
+      ? null
+      : managedStatusLineCommand(ctx.platform, ctx.platformCommandRuntime);
     if ('_openlore' in existing) settingsEdits.push({ path: ['_openlore'], value: undefined });
     const legacyMcp = existing.mcpServers as Record<string, unknown> | undefined;
     if (legacyMcp && 'openlore' in legacyMcp) {
@@ -693,6 +715,23 @@ export const claudeCodeAdapter: Adapter = {
           : { path: ['mcpServers', 'openlore'], value: undefined },
       );
     }
+    // Claude Code has one custom status-line command. Install the OpenLore health
+    // indicator only into an empty slot; never replace a status line the user chose.
+    if (statuslineCommand && next.statusLine === undefined) {
+      next.statusLine = { type: 'command', command: statuslineCommand };
+      settingsEdits.push({ path: ['statusLine'], value: next.statusLine });
+    } else if (statuslineCommand && !isOpenLoreStatusLine(next.statusLine, statuslineCommand)) {
+      mdResult.warnings.push(
+        `${layout.settings} already has a custom statusLine, so OpenLore left it unchanged. `
+        + `To include index readiness manually, use ${statuslineCommand} in that status line.`,
+      );
+    } else if (!statuslineCommand) {
+      mdResult.warnings.push(
+        `OpenLore could not add the Claude Code status line, because ${commandHazard}.`,
+      );
+    }
+    const includesOpenLoreStatusLine = statuslineCommand !== null
+      && isOpenLoreStatusLine(next.statusLine, statuslineCommand);
     // A host whose own paths cannot be quoted for a shell (see `windowsCommandHazard`) has NO
     // correct hook command available. That is a property of the host, not a conflict with the
     // user's file, so it does NOT refuse the write: the MCP entry is an argv, the permission is
@@ -703,7 +742,6 @@ export const claudeCodeAdapter: Adapter = {
     // — #483's own `Cannot find module`, once per turn, forever. A hook that cannot work is
     // worse than no hook, and silently leaving it while reporting a refusal is worse still
     // (change: harden-windows-hook-quoting).
-    const commandHazard = hookCommandHazard(ctx.platform, ctx.platformCommandRuntime);
     if (commandHazard) {
       for (const { key } of MANAGED_HOOKS) {
         const original = (base.hooks as Record<string, unknown>)?.[key];
@@ -758,10 +796,10 @@ export const claudeCodeAdapter: Adapter = {
         // Never claim the hooks: on this host they are the one thing that was not written.
         ? `${layout.settings}: OpenLore hooks not wired — ${commandHazard}`
         : !had
-          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
+          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
           : !changed
             ? `${layout.settings}: already up to date`
-            : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
+            : `update SessionStart + UserPromptSubmit hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
       preview: !had
         ? previewCreate(settingsPath, after)
         : !changed
@@ -906,6 +944,17 @@ export const claudeCodeAdapter: Adapter = {
     // so the user's other settings stay byte-identical.
     let changed = false;
     const removalEdits: JsonPathEdit[] = [];
+    let statuslineCommand: string | null = null;
+    try {
+      if (!hookCommandHazard(ctx.platform, ctx.platformCommandRuntime)) {
+        statuslineCommand = managedStatusLineCommand(ctx.platform, ctx.platformCommandRuntime);
+      }
+    } catch { /* a command that cannot be represented cannot be safely identified for removal */ }
+    if (statuslineCommand && isOpenLoreStatusLine(parsed.statusLine, statuslineCommand)) {
+      changed = true;
+      removalEdits.push({ path: ['statusLine'], value: undefined });
+      delete parsed.statusLine;
+    }
     const hooksObj = parsed.hooks as Record<string, unknown> | undefined;
     if (hooksObj) {
       for (const { key } of MANAGED_HOOKS) {
