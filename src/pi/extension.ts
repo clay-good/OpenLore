@@ -43,12 +43,13 @@ import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { Markdown, Text } from '@earendil-works/pi-tui';
 import { Type, type TObject, type TSchema } from 'typebox';
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 // The shared serve.json validator. Dependency-light (node builtins + the loopback
 // predicate) so it does not drag the analyzer into the Pi host, and it guarantees
@@ -56,6 +57,7 @@ import { fileURLToPath } from 'node:url';
 // (mcp-security: ServeDescriptorValidatedAtEveryReader).
 import {
   readServeDescriptor,
+  readServeDescriptorState,
   serveHttpBaseUrl,
   validateServeHealth,
   type ServeDescriptor,
@@ -574,6 +576,9 @@ export const PI_SPEC_INDEX_MAX_DOMAINS = 50;
 // answer the first /health. Too short a timeout misreads a live daemon as dead,
 // so we spawn a fresh one and orphan the previous — orphans pile up in RAM.
 const HEALTH_PROBE_TIMEOUT_MS = 2500;
+// The CLI serializes stop behind startup (30s) and drains rebuilds (up to 65s).
+const DAEMON_STOP_TIMEOUT_MS = 120_000;
+const execFileAsync = promisify(execFile);
 // Keepalive: while a session is open, ping the daemon's /health on this interval
 // so the in-use daemon never hits the serve idle-shutdown (default 15 min) mid-
 // session. Must stay well below that window — at ~1/3 of it, two pings can be
@@ -694,8 +699,9 @@ function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
       ? {
           incompatibility:
             `The running openlore daemon does not expose ${missing.length} Pi tool(s), including ` +
-            `${missing.slice(0, 3).join(', ')}. Run \`openlore serve --stop\`, then retry so Pi ` +
-            'can start its required full-preset daemon.',
+            `${missing.slice(0, 3).join(', ')}. Run /openlore restart in Pi to restart it ` +
+            'from the installed extension (no global OpenLore CLI required). ' +
+            'If externally supervised, restart it through the supervising host instead.',
         }
       : {}),
   };
@@ -706,7 +712,7 @@ export type EnsureDaemonResult =
   | {
       daemon: null;
       failure: string;
-      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout' | 'spawn-disabled';
+      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout' | 'spawn-disabled' | 'stop';
     };
 
 export function shouldNegativeCacheDaemonFailure(
@@ -832,6 +838,53 @@ export async function ensureDaemonResult(
 
 export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   return (await ensureDaemonResult(cwd)).daemon;
+}
+
+/** Explicit user recovery, never automatic takeover of a shared daemon. */
+export async function restartPiDaemon(
+  cwd: string,
+  options: {
+    /** Internal test seams; production always uses this package's CLI. */
+    stop?: { command: string; args: string[] };
+    launch?: { command: string; args: string[] };
+    timeoutMs?: number;
+  } = {},
+): Promise<EnsureDaemonResult> {
+  if (!(await piMaySpawnDaemon(cwd))) {
+    return {
+      daemon: null,
+      failureKind: 'spawn-disabled',
+      failure: 'OpenLore daemon restart is disabled by the host or pi.spawnDaemon. ' +
+        'Restart or upgrade the daemon through the supervising host instead.',
+    };
+  }
+  const packaged = piDaemonSpawnCommand(cwd);
+  const stop = options.stop ?? {
+    command: packaged.command,
+    args: [packaged.args[0], 'serve', '--directory', cwd, '--stop'],
+  };
+  try {
+    // Reuse the CLI's startup lock, authenticated root/PID health proof, graceful
+    // shutdown, and bounded drain. Never signal the repo-writable descriptor PID.
+    await execFileAsync(stop.command, stop.args, {
+      timeout: DAEMON_STOP_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    // Some CLI refusal paths log a warning without a nonzero exit. A draining
+    // or still-announced instance must never be followed by a replacement spawn.
+    const remaining = await readServeDescriptorState(
+      safeJoin(cwd, join(OPENLORE_DIR, 'serve.json')), { includeDraining: true },
+    );
+    if (remaining.kind !== 'absent') throw new Error('daemon is still announced');
+  } catch {
+    return {
+      daemon: null,
+      failureKind: 'stop',
+      failure: 'OpenLore could not safely stop the announced daemon. No replacement was started. ' +
+        'A legacy or unverified daemon must be stopped by its owner; see .openlore/serve.log.',
+    };
+  }
+  return ensureDaemonResult(cwd, options);
 }
 
 export async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
@@ -1958,6 +2011,8 @@ export interface PiExtensionRuntime {
   readWatcher?: PiWatcherReader;
   /** Replaces daemon discovery/spawn. */
   resolveDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
+  /** Replaces explicit daemon restart. */
+  restartDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
 }
 
 function registerOpenlore(
@@ -1985,6 +2040,7 @@ function registerOpenlore(
   const readHealth = runtime.readHealth ?? defaultHealthReader;
   const readWatcher = runtime.readWatcher ?? readWatcherState;
   const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
+  const restartDaemon = runtime.restartDaemon ?? restartPiDaemon;
   // Background work may outlive the event that started it. A generation makes those continuations
   // harmless after shutdown or session replacement without retaining an ExtensionContext globally.
   let sessionGeneration = 0;
@@ -2016,17 +2072,20 @@ function registerOpenlore(
   // meanwhile share it instead of each spawning or probing the daemon.
   const pendingDaemons = new Map<string, Promise<Daemon | null>>();
   async function getDaemon(cwd: string): Promise<Daemon | null> {
+    const pending = pendingDaemons.get(cwd);
+    if (pending) return pending;
     const cached = daemons.get(cwd);
     if (cached) return cached;
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
-    const pending = pendingDaemons.get(cwd);
-    if (pending) return pending;
     const resolving = resolveAndRecordDaemon(cwd).finally(() => pendingDaemons.delete(cwd));
     pendingDaemons.set(cwd, resolving);
     return resolving;
   }
   async function resolveAndRecordDaemon(cwd: string): Promise<Daemon | null> {
     const result = await resolveDaemon(cwd);
+    return recordDaemonResult(cwd, result);
+  }
+  function recordDaemonResult(cwd: string, result: EnsureDaemonResult): Daemon | null {
     daemonViews.set(cwd, piDaemonView(result));
     const d = result.daemon;
     if (d) {
@@ -2290,15 +2349,46 @@ function registerOpenlore(
 
   // ── /configure slash command ──
   pi.registerCommand('openlore', {
-    description: 'Configure OpenLore for this project, or use configure --global for user-wide defaults',
+    description: 'Configure OpenLore (configure [--global]) or restart its daemon (restart)',
     async handler(args, ctx) {
       if (!ctx.hasUI) {
         ctx.ui.notify('Config wizard requires an interactive session.', 'error');
         return;
       }
+      if (args.trim() === 'restart') {
+        if (!ctx.isIdle()) {
+          ctx.ui.notify('Wait for the current agent turn to finish before restarting OpenLore.', 'warning');
+          return;
+        }
+        const cwd = ctx.cwd;
+        if (pendingDaemons.has(cwd)) {
+          ctx.ui.notify('OpenLore daemon startup or restart is already in progress; retry shortly.', 'info');
+          return;
+        }
+        dropDaemon(cwd);
+        failedUntil.delete(cwd);
+        healthCache.delete(cwd);
+        setPiStatus(ctx, formatPiStatus({ daemon: 'connecting' }));
+        ctx.ui.notify('Restarting the OpenLore daemon for this project…', 'info');
+        const restarting = restartDaemon(cwd)
+          .then((result) => recordDaemonResult(cwd, result))
+          .finally(() => pendingDaemons.delete(cwd));
+        pendingDaemons.set(cwd, restarting);
+        try {
+          const daemon = await restarting;
+          ctx.ui.notify(
+            daemon?.incompatibility ?? (daemon ? 'OpenLore daemon restarted.' : daemonUnavailable(cwd)),
+            daemon && isUsableDaemon(daemon) ? 'info' : 'error',
+          );
+        } catch {
+          ctx.ui.notify('OpenLore daemon restart failed; inspect .openlore/serve.log and retry.', 'error');
+        }
+        await refreshStatus(ctx);
+        return;
+      }
       const global = args.trim() === 'configure --global';
       if (args.trim() && args.trim() !== 'configure' && !global) {
-        ctx.ui.notify('Usage: /openlore configure [--global]', 'error');
+        ctx.ui.notify('Usage: /openlore configure [--global] | /openlore restart', 'error');
         return;
       }
       const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
@@ -2338,8 +2428,9 @@ function registerOpenlore(
   // Session-start daemon warmup, run off the session_start handler. Resolution failures surface
   // through the status and tool results, so nothing rejects here.
   async function warmDaemon(ctx: ExtensionContext, generation: number): Promise<void> {
-    await getDaemon(ctx.cwd).catch(() => null);
+    const daemon = await getDaemon(ctx.cwd).catch(() => null);
     if (!sessionActive || generation !== sessionGeneration) return;
+    if (ctx.hasUI && daemon?.incompatibility) ctx.ui.notify(daemon.incompatibility, 'warning');
     startKeepalive();
     await refreshStatus(ctx);
   }
