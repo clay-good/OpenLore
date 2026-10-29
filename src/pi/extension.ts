@@ -1052,7 +1052,22 @@ type PiWatcherReader = (cwd: string) => Promise<HealthResult['watcher']>;
 /** Set the status only where the host has a UI; a failing host call never escapes. */
 function setPiStatus(ctx: ExtensionContext, text: string | undefined): void {
   try {
-    if (ctx.hasUI && typeof ctx.ui?.setStatus === 'function') ctx.ui.setStatus(PI_STATUS_KEY, text);
+    if (!ctx.hasUI || typeof ctx.ui?.setStatus !== 'function') return;
+    const label = text?.slice(`${PI_STATUS_KEY}: `.length);
+    const color = label === 'ready'
+      ? 'success'
+      : label === 'connecting…' || label === 'analyzing…'
+        ? 'accent'
+        : label === 'index degraded' || label === 'daemon incompatible' || label === 'daemon unavailable'
+          ? 'error'
+          : label === 'ready (watcher stopped)' || label === 'no index (run openlore analyze)' ||
+              label === 'daemon not started (spawn disabled)' || label === 'status unknown'
+            ? 'warning'
+            : undefined;
+    const rendered = text && color && typeof ctx.ui.theme?.fg === 'function'
+      ? ctx.ui.theme.fg(color, text)
+      : text;
+    ctx.ui.setStatus(PI_STATUS_KEY, rendered);
   } catch {
     // Advisory only (spec: PiStatusFollowsTheSessionLifecycle).
   }

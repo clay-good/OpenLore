@@ -1086,6 +1086,8 @@ usable daemon. The status SHALL report a stopped watcher only when the daemon re
 unknown watcher state SHALL NOT be shown as stopped. Each non-ready state SHALL name its condition
 (for example, no index, analysis running, index degraded, daemon incompatible, daemon spawning
 disabled), and it SHALL NOT use a generic failure label.
+The extension SHALL color ready status with the success theme color, in-progress status with the
+accent color, warning conditions with the warning color, and error conditions with the error color.
 
 #### Scenario: Ready repository with a usable daemon
 

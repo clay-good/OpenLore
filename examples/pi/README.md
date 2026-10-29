@@ -25,7 +25,8 @@ fresh while you edit.
 - **Config wizard**: opt-in setup via `/openlore configure`
   slash command or `openlore_configure` tool.
 - **Footer status**: an `openlore:` entry in Pi's status bar says whether the
-  tools can work right now. See [Status line](#status-line).
+  tools can work right now. It uses Pi's theme colors to distinguish ready,
+  in-progress, warning, and error states. See [Status line](#status-line).
 
 ## Prerequisites
 
