@@ -22,6 +22,7 @@ import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { presetToolNames, resolveUserScopePreset, resolveWiredPreset } from '../../core/services/wired-preset.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { emit } from '../../core/services/telemetry.js';
+import { proposalContextForPrompt } from './proposal-context.js';
 import {
   INJECTION_DEFAULTS,
   classifyTurnIntent,
@@ -110,6 +111,9 @@ export async function buildInjection(
   }
 
   if (cfg.mode === 'off') return '';
+
+  const proposalContext = proposalContextForPrompt(prompt);
+  if (proposalContext) return proposalContext;
 
   const withhold = (reason: WithholdReason, failedCriteria: string[]): string => {
     const evaluation: RelevanceGateEvaluation = { passes: false, passedCriteria: [], failedCriteria, reason };

@@ -21,6 +21,7 @@ import { cursorAdapter } from './adapters/cursor.js';
 import { clineAdapter } from './adapters/cline.js';
 import { continueAdapter } from './adapters/continue.js';
 import { piAdapter } from './adapters/pi.js';
+import { codexAdapter } from './adapters/codex.js';
 import type { ProveEligibility } from '../../core/agent-eval/tasks.js';
 
 const ADAPTERS: Record<AgentName, Adapter> = {
@@ -30,6 +31,7 @@ const ADAPTERS: Record<AgentName, Adapter> = {
   cline: clineAdapter,
   continue: continueAdapter,
   pi: piAdapter,
+  codex: codexAdapter,
 };
 
 async function loadTemplate(): Promise<string> {
@@ -441,6 +443,7 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   const contextFor = (root: string, scope: InstallScope): ApplyContext => ({
     root,
     scope,
+    userScopeRoot: home || undefined,
     platform: process.platform,
     platformCommandRuntime: {
       nodeExecutable: process.execPath,
@@ -745,10 +748,10 @@ export function formatProveGuidance(eligibility: ProveEligibility): { title: str
 
 export const installCommand = new Command('install')
   .description(
-    'One-command setup: configure agent surfaces (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md) ' +
+    'One-command setup: configure agent surfaces (Claude Code, Cursor, Cline, Continue, Pi, Codex, AGENTS.md) ' +
     'to call orient(), then build the index so orient works on your first session.'
   )
-  .option('--agent <name>', 'Install only for a specific surface (claude-code, cursor, cline, continue, pi, agents-md)')
+  .option('--agent <name>', 'Install only for a specific surface (claude-code, cursor, cline, continue, pi, codex, agents-md)')
   .option('--preset <name>', `Wire the registered MCP server to a tool preset (navigation, substrate, minimal, memory, verify, federation, coordination, or full). Default (no preset) wires the "${LEAN_DEFAULT_PRESET}" surface — the navigation core, prepare_spec_generation + prepare_spec_repair, and the governance reads recall + verify_claim + blast_radius; "navigation" is the lean navigate-only escape; pass "full" to wire the full surface (the prior default).`)
   .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)

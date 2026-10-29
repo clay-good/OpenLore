@@ -35,6 +35,8 @@ export type InstallScope = 'repo' | 'user';
 
 export interface ApplyContext {
   root: string;
+  /** User-scope root, when the install command is wiring both scopes. */
+  userScopeRoot?: string;
   /** Configuration scope this apply targets. Absent = `repo` (the historical default). */
   scope?: InstallScope;
   /** Platform on which generated launch commands will execute. */

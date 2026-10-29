@@ -417,7 +417,7 @@ it('frames every Pi before-agent corpus block with the shared provenance boundar
   // is which call wraps the block, not how the file is stored.
   const source = (await readFile(new URL('./extension.ts', import.meta.url), 'utf8'))
     .split('\r\n').join('\n');
-  expect(source).toContain("frameServedContent(\n      '# Codebase architecture");
+  expect(source).toContain("frameServedContent(\n        '# Codebase architecture");
   expect(source).toContain('frameServedContent(specIndex, specProvenance');
 });
 
@@ -1033,7 +1033,7 @@ it('uses the current before-agent context root instead of the session-start root
     await mkdir(join(first, '.openlore'), { recursive: true });
     await writeFile(join(first, '.openlore', 'config.json'), JSON.stringify({ contextInjection: { mode: 'off' } }));
     await mkdir(join(current, '.openlore', 'analysis'), { recursive: true });
-    await writeFile(join(current, '.openlore', 'config.json'), JSON.stringify({ contextInjection: { mode: 'off' } }));
+    await writeFile(join(current, '.openlore', 'config.json'), JSON.stringify({ pi: { contextMode: 'full' } }));
     await writeFile(join(current, '.openlore', 'analysis', 'CODEBASE.md'), 'CURRENT ROOT DIGEST');
     const handlers = registerPiHandlers();
     const sessionStart = handlers.get('session_start');
@@ -1081,7 +1081,7 @@ it('bounds and sorts the Pi spec-domain index with an explicit overflow receipt'
   }
 });
 
-it('never orients on the user\'s behalf and re-attaches the digest on every turn', async () => {
+it('omits standing repository context by default and does not orient on the user\'s behalf', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-no-auto-orient-'));
   const requests: string[] = [];
   const server = createServer((req, res) => {
@@ -1105,13 +1105,36 @@ it('never orients on the user\'s behalf and re-attaches the digest on every turn
     } as unknown as ExtensionContext;
 
     for (const prompt of ['salut !', 'inspect the parser']) {
-      const result = await beforeAgentStart?.({ prompt, systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
-      expect(result?.systemPrompt).toContain('EVERY TURN DIGEST');
+      const result = await beforeAgentStart?.({ messageType: 'user', prompt, systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
+      expect(result).toBeUndefined();
     }
     expect(requests).toEqual([]);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('injects only the proposal instruction for a proposal invocation in default mode', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-proposal-context-'));
+  try {
+    await mkdir(join(dir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'analysis', 'CODEBASE.md'), 'STANDING DIGEST');
+    const beforeAgentStart = registerPiHandlers().get('before_agent_start');
+    const ctx = {
+      cwd: dir, mode: 'tui', hasUI: false,
+      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+
+    const result = await beforeAgentStart?.({
+      messageType: 'user', prompt: '/opsx:propose', systemPrompt: 'base',
+    }, ctx) as { systemPrompt?: string } | undefined;
+
+    expect(result?.systemPrompt).toContain('[OpenLore proposal preparation]');
+    expect(result?.systemPrompt).toContain('call openlore_orient with the brief');
+    expect(result?.systemPrompt).not.toContain('STANDING DIGEST');
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });

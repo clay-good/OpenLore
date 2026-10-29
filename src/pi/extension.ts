@@ -5,11 +5,10 @@
  * `pi install npm:openlore` drops it into the Pi extension registry automatically.
  *
  * Two halves:
- *   C — context injection (before_agent_start): model starts grounded with the
- *       architecture digest + spec index. No orient call is made on the user's
- *       behalf: the first prompt may be a greeting, not a task, and no prompt
- *       heuristic tells them apart reliably. The agent calls openlore_orient
- *       itself once it has a task.
+ *   C — context injection (before_agent_start): repository-wide architecture/spec context is
+ *       opt-in (`pi.contextMode: "full"`). The default is on-demand; the agent calls
+ *       openlore_orient when it has a task. Recognized OpenSpec proposal invocations receive a
+ *       concise instruction to synthesize intent before orienting.
  *   B — native tools (registerTool): the substrate surface for on-demand structural
  *       queries — NAV_TOOLS spans navigate + change + remember + verify + governance,
  *       each round-tripping to the warm daemon via fetch. Every tool is registered, but a
@@ -83,6 +82,7 @@ import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig } from '.
 // importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
 import { openloreHealth, readWatcherState, type HealthResult } from '../api/health.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
+import { proposalContextForPrompt } from '../cli/commands/proposal-context.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { runtimeDirOf } from '../core/runtime/analysis-ownership.js';
 import { OWNERSHIP_LOCK_FILE } from '../core/runtime/advisory-lock.js';
@@ -112,6 +112,7 @@ interface OpenLoreConfig {
   } | null;
   /** Task-scoped context injection settings (gate + token budget + opt-out). */
   contextInjection?: ContextInjectionConfig;
+  pi?: { contextMode?: PiContextMode; toolSurface?: PiToolSurface; spawnDaemon?: boolean };
   createdAt: string;
   lastRun: string | null;
 }
@@ -165,6 +166,19 @@ export async function piMaySpawnDaemon(cwd: string): Promise<boolean> {
 }
 
 export type PiToolSurface = 'lean' | 'all';
+
+export type PiContextMode = 'on-demand' | 'full';
+
+/** Default Pi context mode avoids repeating repository-wide summaries on every turn. */
+export async function piContextMode(cwd: string): Promise<PiContextMode> {
+  try {
+    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
+    const pi = raw && typeof raw === 'object' ? (raw as { pi?: { contextMode?: unknown } | null }).pi : undefined;
+    return pi?.contextMode === 'full' ? 'full' : 'on-demand';
+  } catch {
+    return 'on-demand';
+  }
+}
 
 /**
  * Which OpenLore tools a Pi session starts with. Read like `piMaySpawnDaemon`, so it works before
@@ -2360,31 +2374,38 @@ function registerOpenlore(
     if (ctx) setPiStatus(ctx, undefined);
   });
 
-  // ── C: context injection on every turn ──
-  // Pi restores its base system prompt for any turn whose hook returns nothing,
-  // so the digest is re-attached each turn rather than only on the first.
+  // ── C: context injection ──
+  // Keep the repository-wide digest opt-in: it is repeated standing context, while the orient tool
+  // provides task-specific evidence on demand. Proposal prompts get only a compact instruction.
   pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
     if (ctx.mode === 'json' || ctx.mode === 'print') return;
 
     const blocks: string[] = [];
-    const [analysisProvenance, specProvenance] = await Promise.all([
-      readAnalysisContentProvenance(ctx.cwd),
-      reviewedFileContentProvenance(ctx.cwd, 'openspec'),
-    ]);
-    const digest = await readDigest(ctx.cwd);
-    if (digest) blocks.push(frameServedContent(
-      '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
-      analysisProvenance,
-      'codebase architecture digest',
-    ));
-    const specIndex = await readSpecIndex(ctx.cwd);
-    if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
+    if (await piContextMode(ctx.cwd) === 'full') {
+      const [analysisProvenance, specProvenance] = await Promise.all([
+        readAnalysisContentProvenance(ctx.cwd),
+        reviewedFileContentProvenance(ctx.cwd, 'openspec'),
+      ]);
+      const digest = await readDigest(ctx.cwd);
+      if (digest) blocks.push(frameServedContent(
+        '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
+        analysisProvenance,
+        'codebase architecture digest',
+      ));
+      const specIndex = await readSpecIndex(ctx.cwd);
+      if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
+      if (blocks.length === 0) {
+        blocks.push('[openlore: no analysis found — run `openlore analyze` to enable structural context.]');
+      }
+    }
 
-    const suffix = blocks.length > 0
-      ? blocks.join('\n\n')
-      : '[openlore: no analysis found — run `openlore analyze` to enable structural context.]';
+    const proposalPrompt = event.messageType === 'user' ? event.prompt : '';
+    const proposalContext = proposalContextForPrompt(proposalPrompt);
+    if (proposalContext) blocks.push(proposalContext);
 
-    return { systemPrompt: event.systemPrompt + '\n\n' + suffix };
+    if (blocks.length === 0) return;
+
+    return { systemPrompt: event.systemPrompt + '\n\n' + blocks.join('\n\n') };
   });
 }
 

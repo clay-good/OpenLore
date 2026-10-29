@@ -455,6 +455,17 @@ describe('buildInjection (fail-open integration)', () => {
     );
     expect(await buildInjection(dir, 'some real task')).toBe('');
   });
+
+  it('keeps the explicit opt-out for proposal prompts', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+      contextInjection: { mode: 'off' },
+    }));
+    expect(await buildInjection(dir, '/opsx:propose')).toBe('');
+  });
 });
 
 // ============================================================================

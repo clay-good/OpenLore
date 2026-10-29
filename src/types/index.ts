@@ -123,6 +123,8 @@ export interface OpenLoreConfig {
 }
 
 export interface PiConfig {
+  /** Repository-wide architecture/spec context injection. Default `'on-demand'`; `'full'` restores every-turn injection. */
+  contextMode?: 'on-demand' | 'full';
   /**
    * Whether the Pi extension may spawn its own daemon when none is discovered. Default `true`.
    * Set to `false` when a supervising host already runs one daemon per working tree: an

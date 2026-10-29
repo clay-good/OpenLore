@@ -277,7 +277,11 @@ const workspaceRule: ConfigRule = {
 const piRule: ConfigRule = {
   kind: 'object',
   strict: true,
-  fields: fieldsFor<PiConfig>({ spawnDaemon: booleanRule, toolSurface: { kind: 'enum', values: ['lean', 'all'] } }),
+  fields: fieldsFor<PiConfig>({
+    contextMode: { kind: 'enum', values: ['on-demand', 'full'] },
+    spawnDaemon: booleanRule,
+    toolSurface: { kind: 'enum', values: ['lean', 'all'] },
+  }),
   required: requiredFor<PiConfig>({}),
 };
 

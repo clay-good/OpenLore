@@ -15,6 +15,7 @@
 | `openlore embed --off` | Revert to the first-class keyword (BM25) default and rebuild | No |
 | `openlore orient` | Relevant functions, callers, specs, and insertion points for a task (the flagship) | No |
 | `openlore orient --inject` | Emit a bounded, ignorable task-scoped orientation block for a pre-turn hook | No |
+| `openlore orient --proposal-only` | Emit the concise OpenSpec proposal instruction only for recognized proposal invocations | No |
 | `openlore search <query>` | Search indexed code or specs; optionally explain one named target | No |
 | `openlore generate` | Generate specs from analysis | Yes |
 | `openlore generate --adr` | Also generate Architecture Decision Records | Yes |

@@ -46,7 +46,7 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
   secretRedaction: {},
   bundle: {},
   workspace: { shards: [{ name: 'api', root: 'packages/api' }] },
-  pi: { spawnDaemon: false },
+  pi: { contextMode: 'full', spawnDaemon: false },
 };
 
 describe('config-schema — type-completeness bind', () => {

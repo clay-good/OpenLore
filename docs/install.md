@@ -11,7 +11,7 @@ openlore install
 ```
 
 Once, ever. That auto-detects which agent surfaces are present (Claude Code, Cursor, Cline,
-Continue, Pi, plus the universal `AGENTS.md` fallback) and writes the minimal config needed for
+Continue, Pi, Codex, plus the universal `AGENTS.md` fallback) and writes the minimal config needed for
 each agent to call `orient()` before reading source files — **for this repository and for your
 user account**. Every git repository you open afterwards with a user-scope-wired agent reaches
 the OpenLore MCP server and builds its own index in the background, with no further command.
@@ -28,9 +28,9 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 
 ## Scopes: user and repository
 
-| Scope | Files (Claude Code) | Effect |
+| Scope | Files (Claude Code, Codex) | Effect |
 |-------|---------------------|--------|
-| **user** (default) | `~/.claude.json` (`mcpServers.openlore`), `~/.claude/settings.json` (hooks + `Bash(openlore:*)`), `~/.claude/CLAUDE.md` | every repository you open reaches OpenLore |
+| **user** (default) | Claude: `~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md`; Codex: `~/.codex/config.toml`, `~/.codex/hooks.json` | every repository you open reaches OpenLore |
 
 The user scope is written for every adapter that *has* one, not only for adapters detected in the
 current directory — that is what makes "install once" true in a repository whose markers belong to
@@ -39,7 +39,7 @@ you do not use Claude Code. `--repo-only`, or `--agent <name>`, avoids that.
 
 `OPENLORE_HOME` and `OPENLORE_SETTINGS_RUNTIME_DIR` relocate the user scope and its lock/journal
 directory respectively.
-| **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
+| **repo** (always, when you run install inside one) | Claude: `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, `CLAUDE.md`; Codex: `.codex/config.toml`, `.codex/hooks.json` | this repository, wired and indexed immediately |
 
 Adapters with no user-scope surface (`cursor`, `cline`, `continue`, `pi`, `agents-md`) are wired
 per repository and named as such in the summary — an honest note, never a failure.
@@ -126,13 +126,26 @@ the block we refuse to overwrite unless you pass `--force`.
 | `cursor` | `.cursor/` or `.cursorrules` | append block to `.cursorrules`; write `.cursor/rules/openlore.mdc`; `mcpServers.openlore` in `.cursor/mcp.json` |
 | `cline` | `.clinerules` or `.vscode/settings.json` (`cline.*`) | append block to `.clinerules` |
 | `continue` | `.continue/` | add `/orient` entry to `.continue/config.json` (MCP server registration is TODO — see below) |
-| `pi` | `.pi/` (or `~/.pi/` when the tree has no marker at all) | write `.pi/extensions/openlore.js` — a fingerprinted re-export shim pointing at the extension inside the openlore package. No markdown block, no MCP entry: Pi does not consume MCP; the extension starts `openlore serve` on demand and injects the digest itself. See [Pi](#pi-pidev). |
+| `pi` | `.pi/` (or `~/.pi/` when the tree has no marker at all) | write `.pi/extensions/openlore.js` — a fingerprinted re-export shim pointing at the extension inside the openlore package. No markdown block or MCP entry; the extension starts `openlore serve` on demand. See [Pi](#pi-pidev). |
+| `codex` | `.codex/` | add OpenLore MCP server to `.codex/config.toml` and proposal hook to `.codex/hooks.json` (or `config.toml` when it already defines hooks); user scope uses `~/.codex/`. See [Codex](#codex). |
 | `agents-md` | always applies | append block to `AGENTS.md` (creates if absent) |
 
 Plus, in any git repository, `openlore install` writes `.git/hooks/pre-commit` (the decisions gate,
 non-blocking — see below) and `.git/hooks/post-commit` (its `--no-verify` bypass detector). Both are
 marker-delimited blocks appended to whatever is already there, and `--uninstall` removes exactly
 those blocks.
+
+## Codex
+
+`openlore install --agent codex` adds the OpenLore MCP server to Codex's `config.toml` and a
+proposal-preparation command hook to its hooks configuration. The hook emits context only for a
+recognized OpenSpec `propose` invocation; it does not parse the conversation or run structural
+analysis. Codex's `UserPromptSubmit` matcher is currently ignored, so the lightweight command is
+invoked on each submitted prompt and emits nothing for unrelated prompts. The agent then summarizes
+the conversation and calls `openlore_orient` with that brief.
+
+Codex requires users to review and trust non-managed hooks before they run. Project-level hooks also
+require the repository's `.codex/` layer to be trusted. See [Codex hooks](https://learn.chatgpt.com/docs/hooks).
 
 ## Pi (pi.dev)
 
@@ -146,9 +159,11 @@ openlore setup --tools pi --global   # ~/.pi/agent/extensions/openlore.js (every
 ```
 
 The extension registers the navigation tools (`openlore_orient`, `openlore_search_code`,
-`openlore_get_subgraph`, …), injects `CODEBASE.md` plus a task-specific `orient` on
-`session_start`, and talks to a warm `openlore serve` daemon over loopback so calls hit warm
-caches. Requires Pi ≥ 0.78.1 and one `openlore analyze` beforehand. Full detail in
+`openlore_get_subgraph`, …) and talks to a warm `openlore serve` daemon over loopback so calls hit
+warm caches. By default it does not repeat the repository digest and spec index in each turn; the
+agent calls `openlore_orient` when it has a task. Set `"pi": { "contextMode": "full" }` in
+`.openlore/config.json` to restore the standing digest and index. Requires Pi ≥ 0.78.1 and one
+`openlore analyze` beforehand. Full detail in
 [`examples/pi/README.md`](../examples/pi/README.md).
 
 A Pi session starts with the lean tool set Claude Code gets by default (the `substrate`
