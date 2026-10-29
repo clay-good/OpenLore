@@ -44,7 +44,7 @@ import { Markdown, Text } from '@earendil-works/pi-tui';
 import { Type, type TObject, type TSchema } from 'typebox';
 
 import { spawn } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
+import { openSync, closeSync, readFileSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -206,6 +206,79 @@ function piToolSurfaceAtLoad(cwd: string): PiToolSurface {
   } catch {
     return 'lean';
   }
+}
+
+/** Resolve Pi's configured tool_search without calling runtime actions during extension loading. */
+function piToolSearchEnabledAtLoad(cwd: string): boolean {
+  const defaultTools = ['read', 'bash', 'edit', 'write'];
+  let entries: string[] | undefined;
+  const readDefaultTools = (path: string): string[] | undefined => {
+    try {
+      const settings = JSON.parse(readFileSync(path, 'utf-8')) as { defaultTools?: unknown };
+      return Array.isArray(settings.defaultTools) && settings.defaultTools.every((entry) => typeof entry === 'string')
+        ? settings.defaultTools
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const merge = (base: string[] | undefined, overrides: string[] | undefined): string[] | undefined => {
+    if (!overrides) return base;
+    return overrides.every((entry) => /^[+-][^*]+$/.test(entry))
+      ? [...(base ?? []), ...overrides]
+      : overrides;
+  };
+  const agentDir = process.env.PI_CODING_AGENT_DIR
+    ? process.env.PI_CODING_AGENT_DIR.replace(/^~/, homedir())
+    : join(homedir(), '.pi', 'agent');
+  entries = merge(entries, readDefaultTools(join(agentDir, 'settings.json')));
+  entries = merge(entries, readDefaultTools(safeJoin(cwd, join('.pi', 'settings.json'))));
+
+  const args = process.argv;
+  const noTools = args.some((arg) => arg === '--no-tools' || arg === '-nt' || arg === '--no-builtin-tools' || arg === '-nbt');
+  const resolved = noTools ? [] : (() => {
+    const configured = entries ?? defaultTools;
+    const plain = configured.filter((entry) => !/^[+-][^*]+$/.test(entry));
+    const selected = plain.length > 0 || configured.length === 0 ? plain : defaultTools;
+    for (const entry of configured) {
+      if (entry.startsWith('+') && !selected.includes(entry.slice(1))) selected.push(entry.slice(1));
+      if (entry.startsWith('-')) {
+        const index = selected.indexOf(entry.slice(1));
+        if (index >= 0) selected.splice(index, 1);
+      }
+    }
+    return selected;
+  })();
+  const readCliList = (flags: readonly string[]): string[] | undefined => {
+    for (let i = 0; i < args.length; i += 1) {
+      if (!flags.includes(args[i]) || !args[i + 1]) continue;
+      return args[i + 1].split(',').map((name) => name.trim()).filter(Boolean);
+    }
+    return undefined;
+  };
+  const cliTools = readCliList(['--tools', '-t']);
+  let selected = resolved;
+  if (cliTools) {
+    selected = cliTools.some((entry) => entry.startsWith('+') || entry.startsWith('-'))
+      ? (() => {
+          const next = [...resolved];
+          for (const entry of cliTools) {
+            const name = entry.slice(1);
+            const index = next.indexOf(name);
+            if (entry.startsWith('+') && index < 0) next.push(name);
+            if (entry.startsWith('-') && index >= 0) next.splice(index, 1);
+          }
+          return next;
+        })()
+      : cliTools;
+  }
+
+  const matches = (pattern: string): boolean => {
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`).test('tool_search');
+  };
+  const excluded = readCliList(['--exclude-tools', '-xt']) ?? [];
+  return selected.some(matches) && !excluded.some(matches);
 }
 
 async function writeConfig(cwd: string, config: OpenLoreConfig, global = false): Promise<void> {
@@ -2028,9 +2101,9 @@ function registerOpenlore(
   let suppressed = new Set<string>();
   const hostSupportsActiveTools = (): boolean =>
     typeof pi.getActiveTools === 'function' && typeof pi.setActiveTools === 'function';
-  // Pi's tool_search is user-enabled. When it is already active as extensions load,
-  // register specialist tools as deferred so their schemas do not enter the initial prompt.
-  const nativeToolSearchEnabled = hostSupportsActiveTools() && pi.getActiveTools().includes('tool_search');
+  // Pi's tool_search is user-enabled. Read its settings/CLI selection here: runtime actions such
+  // as getActiveTools() are unavailable while extensions load.
+  const nativeToolSearchEnabled = hostSupportsActiveTools() && piToolSearchEnabledAtLoad(process.cwd());
   const deferSpecialistTools = nativeToolSearchEnabled && piToolSurfaceAtLoad(process.cwd()) !== 'all';
   const toolExposure = (name: string): 'direct' | 'deferred' =>
     deferSpecialistTools && !PI_SEARCH_TOOLS.includes(name) ? 'deferred' : 'direct';

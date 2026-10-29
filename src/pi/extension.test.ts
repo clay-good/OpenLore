@@ -1476,24 +1476,40 @@ describe('Pi lean tool surface', () => {
 
   // A host double with Pi's active-tool semantics: direct extension tools start active;
   // a user-enabled native tool_search is already active before OpenLore loads.
-  function registerPiSurface(initialActive?: (registered: string[]) => string[], nativeToolSearch = false) {
+  function registerPiSurface(
+    initialActive?: (registered: string[]) => string[],
+    nativeToolSearch = false,
+    cliArgs: string[] = [],
+  ) {
     const handlers = new Map<string, PiEventHandler>();
     const tools = new Map<string, RegisteredTool>();
     let active: string[] = nativeToolSearch ? ['tool_search'] : [];
     const setActiveTools = vi.fn((names: string[]) => { active = [...names]; });
+    const getActiveTools = vi.fn(() => [...active]);
     const pi = {
       registerTool: vi.fn((tool: RegisteredTool) => { tools.set(tool.name, tool); }),
       registerCommand: vi.fn(),
       on: vi.fn((event: string, handler: PiEventHandler) => { handlers.set(event, handler); }),
-      getActiveTools: () => [...active],
+      getActiveTools,
       setActiveTools,
     } as unknown as ExtensionAPI;
     const previousCwd = process.cwd();
+    const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+    const previousOpenLoreConfig = process.env.OPENLORE_GLOBAL_CONFIG;
+    const previousArgv = process.argv;
+    process.env.PI_CODING_AGENT_DIR = join(dir, '.pi-agent');
+    process.env.OPENLORE_GLOBAL_CONFIG = join(dir, '.openlore-global-config.json');
+    process.argv = [...previousArgv, ...cliArgs];
     process.chdir(dir);
     try {
       openloreExtension(pi);
     } finally {
       process.chdir(previousCwd);
+      if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
+      if (previousOpenLoreConfig === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
+      else process.env.OPENLORE_GLOBAL_CONFIG = previousOpenLoreConfig;
+      process.argv = previousArgv;
     }
     const registered = [...tools.keys()];
     active = initialActive
@@ -1507,6 +1523,7 @@ describe('Pi lean tool surface', () => {
     } as unknown as ExtensionContext;
     return {
       tools,
+      getActiveTools,
       setActiveTools,
       active: () => active,
       activeOpenlore: () => sorted(active.filter((name) => name.startsWith('openlore_'))),
@@ -1518,6 +1535,11 @@ describe('Pi lean tool surface', () => {
   async function writePiConfig(pi: unknown): Promise<void> {
     await mkdir(join(dir, '.openlore'), { recursive: true });
     await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ pi }));
+  }
+
+  async function enablePiToolSearch(): Promise<void> {
+    await mkdir(join(dir, '.pi'), { recursive: true });
+    await writeFile(join(dir, '.pi', 'settings.json'), JSON.stringify({ defaultTools: ['+tool_search'] }));
   }
 
   describe('pi.toolSurface config', () => {
@@ -1604,7 +1626,9 @@ describe('Pi lean tool surface', () => {
 
     it('keeps every tool active except the activator for "all", with no provider configured', async () => {
       await writePiConfig({ toolSurface: 'all' });
+      await enablePiToolSearch();
       const surface = registerPiSurface(undefined, true);
+      expect(surface.getActiveTools).not.toHaveBeenCalled();
       await surface.startSession();
       expect(surface.activeOpenlore()).toEqual(sorted(piRegisteredToolNames().filter((name) => name !== PI_ACTIVATOR_TOOL)));
       expect(surface.active()).toContain('tool_search');
@@ -1612,7 +1636,9 @@ describe('Pi lean tool surface', () => {
     });
 
     it('uses Pi native tool_search for a compact surface when the user already enabled it', async () => {
+      await enablePiToolSearch();
       const surface = registerPiSurface(undefined, true);
+      expect(surface.getActiveTools).not.toHaveBeenCalled();
       await surface.startSession();
 
       expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_SEARCH_TOOLS)));
@@ -1623,6 +1649,31 @@ describe('Pi lean tool surface', () => {
       const activated = await surface.activate(['review']);
       expect(activated.details).toMatchObject({ activated: prefixed(PI_TOOL_GROUPS.review) });
       expect(surface.active()).toEqual(expect.arrayContaining(prefixed(PI_TOOL_GROUPS.review)));
+    });
+
+    it('keeps specialist tools direct when the Pi CLI excludes tool_search', async () => {
+      await enablePiToolSearch();
+      const surface = registerPiSurface(undefined, true, ['--exclude-tools', 'tool_search']);
+      await surface.startSession();
+
+      expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_LEAN_TOOLS)));
+      expect(surface.tools.get('openlore_get_subgraph')?.exposure).toBe('direct');
+    });
+
+    it('recognizes tool_search selected with the Pi --tools flag', async () => {
+      const surface = registerPiSurface(undefined, true, ['--tools', '+tool_search']);
+      await surface.startSession();
+
+      expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_SEARCH_TOOLS)));
+      expect(surface.tools.get('openlore_get_subgraph')?.exposure).toBe('deferred');
+    });
+
+    it('recognizes tool_search explicitly enabled alongside --no-builtin-tools', async () => {
+      const surface = registerPiSurface(undefined, true, ['--no-builtin-tools', '--tools', '+tool_search']);
+      await surface.startSession();
+
+      expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_SEARCH_TOOLS)));
+      expect(surface.tools.get('openlore_get_subgraph')?.exposure).toBe('deferred');
     });
 
     it('falls back to the lean surface for a malformed value', async () => {
