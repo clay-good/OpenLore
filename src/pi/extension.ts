@@ -2511,7 +2511,7 @@ function registerOpenlore(
     }
 
     const proposalPrompt = event.messageType === 'user' ? event.prompt : '';
-    const proposalContext = proposalContextForPrompt(proposalPrompt);
+    const proposalContext = proposalContextForPrompt(proposalPrompt, 'pi');
     if (proposalContext) blocks.push(proposalContext);
 
     if (blocks.length === 0) return;

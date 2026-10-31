@@ -117,6 +117,20 @@ export async function buildInjection(
   prompt: string,
   onGateEvaluation?: (evaluation: RelevanceGateEvaluation) => void,
 ): Promise<string> {
+  // A propose prompt keeps its normal task orientation; the proposal instruction is appended.
+  const [task, proposal] = await Promise.all([
+    buildTaskInjection(directory, prompt, onGateEvaluation),
+    buildProposalOnlyInjection(directory, prompt),
+  ]);
+  if (!proposal) return task;
+  return task ? `${task}\n\n${proposal}` : proposal;
+}
+
+async function buildTaskInjection(
+  directory: string,
+  prompt: string,
+  onGateEvaluation?: (evaluation: RelevanceGateEvaluation) => void,
+): Promise<string> {
   let cfg: ReturnType<typeof resolveInjectionConfig>;
   try {
     const loaded = await readOpenLoreConfig(directory);
@@ -126,9 +140,6 @@ export async function buildInjection(
   }
 
   if (cfg.mode === 'off') return '';
-
-  const proposalContext = proposalContextForPrompt(prompt);
-  if (proposalContext) return proposalContext;
 
   const withhold = (reason: WithholdReason, failedCriteria: string[]): string => {
     const evaluation: RelevanceGateEvaluation = { passes: false, passedCriteria: [], failedCriteria, reason };

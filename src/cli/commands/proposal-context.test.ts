@@ -25,4 +25,10 @@ describe('OpenSpec proposal prompt detection', () => {
     expect(isOpenSpecProposalInvocation(prompt)).toBe(false);
     expect(proposalContextForPrompt(prompt)).toBeUndefined();
   });
+
+  it('names the orient tool the host actually exposes', () => {
+    expect(proposalContextForPrompt('/opsx:propose', 'pi')).toContain('call openlore_orient with');
+    expect(proposalContextForPrompt('/opsx:propose', 'mcp')).toContain('call the OpenLore MCP orient tool with');
+    expect(proposalContextForPrompt('/opsx:propose')).not.toContain('openlore_orient');
+  });
 });

@@ -457,6 +457,14 @@ describe('buildInjection (fail-open integration)', () => {
     expect(await buildInjection(dir, 'some real task')).toBe('');
   });
 
+  it('appends the proposal instruction to the normal task orientation instead of replacing it', async () => {
+    const out = await buildInjection(dir, '/opsx:propose add rate limiting to the analyze cache');
+    expect(out.startsWith(pointerLineFor('no-graph'))).toBe(true);
+    expect(out).toContain('[OpenLore proposal preparation]');
+    expect(out).toContain('the OpenLore MCP orient tool');
+    expect(out).not.toContain('openlore_orient');
+  });
+
   it('keeps the explicit opt-out for proposal prompts', async () => {
     await mkdir(join(dir, '.openlore'), { recursive: true });
     await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({

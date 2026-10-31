@@ -90,9 +90,16 @@ async function runInject(
     } : undefined));
     // Outside any git work tree (e.g. $HOME) with no index, say nothing: "run openlore
     // analyze" on every prompt there invites an agent to index the whole directory.
-    if (block === pointerLineFor('no-graph') && silentWithoutIndex) return;
     // With a build in flight, "run openlore analyze" is the wrong remedy: say what is happening.
-    if (block) console.log(buildNote && block === pointerLineFor('no-graph') ? `[OpenLore] ${safe(buildNote)}` : block);
+    // A propose prompt may carry the proposal instruction after the pointer line; keep it.
+    let out = block;
+    const noGraph = pointerLineFor('no-graph');
+    if (out.startsWith(noGraph)) {
+      const rest = out.slice(noGraph.length).trim();
+      if (silentWithoutIndex) out = rest;
+      else if (buildNote) out = [`[OpenLore] ${safe(buildNote)}`, rest].filter(Boolean).join('\n\n');
+    }
+    if (out) console.log(out);
   } catch {
     // buildInjection is fail-open, but guard the print path too: never throw.
   }
