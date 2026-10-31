@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { collectIndexStatus, statusCommand } from './status.js';
+import { collectIndexStatus, collectWiringScope, statusCommand } from './status.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
@@ -158,6 +158,37 @@ describe('openlore status — what the index is', () => {
     });
     expect(typeof parsed.retrievalMode).toBe('string');
     expect(Array.isArray(parsed.staleFiles)).toBe(true);
+  });
+
+  it('reports the wiring scope, in text and through --json', async () => {
+    const home = join(root, 'home');
+    await mkdir(home);
+    expect(await collectWiringScope(root, home)).toBe('none');
+    await writeFile(join(root, '.mcp.json'), JSON.stringify({
+      mcpServers: { openlore: { command: 'npx', args: ['--yes', 'openlore', 'mcp'] } },
+      _openlore: { managed: true, version: 1, paths: ['mcpServers.openlore'] },
+    }));
+    expect(await collectWiringScope(root, home)).toBe('repo only');
+
+    const savedHome = process.env.OPENLORE_HOME;
+    process.env.OPENLORE_HOME = home;
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore', '--json']);
+      expect((JSON.parse(lines.join('\n')) as Record<string, unknown>).wiringScope).toBe('repo only');
+      await writeFile(join(home, '.claude.json'), JSON.stringify({ mcpServers: { openlore: { command: 'npx', args: [] } } }));
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore']);
+      expect(lines.join('\n')).toMatch(/Wiring scope\s+user \+ repo/);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+      if (savedHome === undefined) delete process.env.OPENLORE_HOME; else process.env.OPENLORE_HOME = savedHome;
+    }
   });
 
   it('reports unknown freshness when git is unavailable rather than claiming current', async () => {

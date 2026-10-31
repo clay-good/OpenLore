@@ -188,6 +188,9 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     'OPENLORE_DIR',
     'OPENLORE_ANALYSIS_SUBDIR',
     'c.dim(\'\u2192 Run "openlore analyze" to build one\')',
+    "label('Wiring scope')",
+    // A fixed WiringScope literal, never repository text.
+    'wiringText',
     "label('Retrieval mode')",
     "cause ? c.dim(` \u2014 ${cause}`) : ''",
     "label('Configured provider')",

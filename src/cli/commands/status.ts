@@ -14,6 +14,7 @@
 import { Command } from 'commander';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
@@ -32,6 +33,7 @@ import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { execFileGit } from '../../utils/git-exec.js';
+import { assessWiring, type WiringScope } from '../install/wiring-scope.js';
 
 
 /** Bound on the working-tree comparison: a status command must stay instant. */
@@ -65,6 +67,11 @@ export interface IndexStatus {
   degraded: Array<{ index: string; reason: string }>;
   /** Present when the configuration could not be read at all. */
   configUnreadable?: true;
+  /**
+   * Where OpenLore is wired: the user scope (every repository), this repository only, or
+   * nowhere. Set by `openlore status` only, so the status line never reads `~/.claude.json`.
+   */
+  wiringScope?: WiringScope;
 }
 
 interface IndexMetaShape {
@@ -196,6 +203,11 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   };
 }
 
+/** The wiring scope `openlore status` reports (change: upgrade-repo-only-wiring). Read-only. */
+export async function collectWiringScope(rootPath: string, home = process.env.OPENLORE_HOME || homedir()): Promise<WiringScope> {
+  return (await assessWiring(rootPath, home)).scope;
+}
+
 function describeKeywordCause(cause: KeywordCause): string {
   if (cause === 'configured-provider-unrealized') {
     return 'a semantic provider is configured, but this index carries no vectors';
@@ -221,7 +233,10 @@ Read-only: this never builds, rebuilds, or locks the index.
   )
   .action(async (options: { json?: boolean }) => {
     const rootPath = process.cwd();
-    const status = await collectIndexStatus(rootPath);
+    const status: IndexStatus = {
+      ...await collectIndexStatus(rootPath),
+      wiringScope: await collectWiringScope(rootPath),
+    };
 
     if (options.json) {
       console.log(JSON.stringify(status, null, 2));
@@ -229,8 +244,14 @@ Read-only: this never builds, rebuilds, or locks the index.
     }
 
     const c = palette(Boolean(process.stdout.isTTY));
+    const label = (text: string): string => text.padEnd(20);
     logger.section('openlore status');
     console.log('');
+    const scope = status.wiringScope ?? 'none';
+    const wiringText = scope === 'user + repo'
+      ? c.green(scope)
+      : c.yellow(`${scope} — run "openlore ${scope === 'none' ? 'install' : 'doctor --fix'}"`);
+    console.log(`  ${label('Wiring scope')} ${wiringText}`);
 
     // Everything printed below that came from the repository — its config, its index
     // sidecar, its receipt, its file names — is sanitized: a repository must not be able
@@ -243,7 +264,6 @@ Read-only: this never builds, rebuilds, or locks the index.
     }
 
     const cause = describeKeywordCause(status.keywordCause);
-    const label = (text: string): string => text.padEnd(20);
     console.log(`  ${label('Retrieval mode')} ${c.bold(safe(status.retrievalMode ?? 'unknown'))}${cause ? c.dim(` — ${cause}`) : ''}`);
     if (status.configuredProvider) {
       console.log(`  ${label('Configured provider')} ${safe(status.configuredProvider)}`);
