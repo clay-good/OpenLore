@@ -23,8 +23,7 @@ import { withQuietStdout } from '../../utils/quiet-stdout.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
-import { buildInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
-import { proposalContextForPrompt } from './proposal-context.js';
+import { buildInjection, buildProposalOnlyInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
 import {
   oneShotBuildNote,
   registerOneShotRepair,
@@ -100,13 +99,13 @@ async function runInject(
 }
 
 /** Emit only the short OpenSpec proposal instruction; Codex gates the full task in its hook. */
-async function runProposalOnly(taskOpt: string | undefined): Promise<void> {
+async function runProposalOnly(directory: string, taskOpt: string | undefined): Promise<void> {
   let prompt = taskOpt ?? '';
   if (!prompt) {
     try { prompt = extractPrompt(await readStdin()); }
     catch { prompt = ''; }
   }
-  const context = proposalContextForPrompt(prompt);
+  const context = await withQuietStdout(() => buildProposalOnlyInjection(directory, prompt));
   if (context) console.log(context);
 }
 
@@ -292,7 +291,7 @@ prints a short session-start primer (used by the install SessionStart hook).
     // Lightweight proposal trigger for hosts such as Codex whose prompt-submit hook matcher is
     // ignored. It does no structural lookup and emits nothing for unrelated prompts.
     if (opts.proposalOnly) {
-      await runProposalOnly(task);
+      await runProposalOnly(directory, task);
       return;
     }
 

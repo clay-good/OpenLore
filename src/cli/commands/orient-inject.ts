@@ -82,6 +82,21 @@ export function extractPrompt(stdin: string): string {
 }
 
 /**
+ * `orient --proposal-only` (the Codex prompt hook): the proposal instruction for a recognized
+ * OpenSpec propose prompt, or ''. Honors the same `contextInjection.mode: "off"` opt-out as
+ * `buildInjection`. Never throws.
+ */
+export async function buildProposalOnlyInjection(directory: string, prompt: string): Promise<string> {
+  try {
+    const loaded = await readOpenLoreConfig(directory);
+    if (resolveInjectionConfig(loaded?.contextInjection).mode === 'off') return '';
+  } catch {
+    // An unreadable config falls back to the defaults, as buildInjection does.
+  }
+  return proposalContextForPrompt(prompt) ?? '';
+}
+
+/**
  * Top-level injection builder. Returns the string to emit on stdout:
  *   - '' when injection is disabled (`mode: "off"`) — the caller emits nothing,
  *   - the full block when both gates pass,

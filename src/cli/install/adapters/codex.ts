@@ -65,8 +65,9 @@ function nextHooksDocument(doc: Record<string, unknown>, groups: CodexHookGroup[
   return next;
 }
 
+/** A TOML basic string. JSON escapes are valid TOML except that TOML also forbids a raw DEL. */
 function tomlString(value: string): string {
-  return JSON.stringify(value);
+  return JSON.stringify(value).replace(/\x7f/g, '\\u007F');
 }
 
 function replaceManagedBlock(raw: string, start: string, end: string, block: string): ManagedTextResult {
@@ -119,12 +120,63 @@ function isManagedText(raw: string, start: string, end: string): boolean {
   return raw.includes(start) && raw.includes(end);
 }
 
+interface TomlDefinition {
+  /** Full dotted key path, quotes removed. */
+  path: string[];
+  kind: 'table' | 'array-table' | 'key';
+}
+
+function tomlKeySegments(key: string): string[] {
+  return (key.match(/"[^"]*"|'[^']*'|[^.]+/g) ?? [])
+    .map((segment) => segment.trim().replace(/^(["'])(.*)\1$/, '$2'))
+    .filter((segment) => segment.length > 0);
+}
+
+/**
+ * Line-based scan of the tables and keys a TOML document defines. Not a parser: it only has
+ * to recognize every spelling of a definition OpenLore's appended block would collide with
+ * (quoted keys, dotted keys, inline tables under a parent table), so a false positive costs
+ * only a warning while a miss would make Codex reject the whole file.
+ */
+function tomlDefinitions(raw: string): TomlDefinition[] {
+  const definitions: TomlDefinition[] = [];
+  let table: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const header = /^\s*(\[\[?)\s*([^\]#]+?)\s*\]\]?\s*(?:#.*)?$/.exec(line);
+    if (header) {
+      table = tomlKeySegments(header[2]);
+      definitions.push({ path: table, kind: header[1] === '[[' ? 'array-table' : 'table' });
+      continue;
+    }
+    const key = /^\s*((?:"[^"]*"|'[^']*'|[A-Za-z0-9_\-.\s])+?)\s*=/.exec(line);
+    if (key) definitions.push({ path: [...table, ...tomlKeySegments(key[1])], kind: 'key' });
+  }
+  return definitions;
+}
+
+function startsWithPath(path: string[], prefix: string[]): boolean {
+  return prefix.every((segment, index) => path[index] === segment);
+}
+
 function hasTomlHooks(raw: string): boolean {
-  return /^\s*\[\[?hooks(?:\.|\])/m.test(raw);
+  return tomlDefinitions(raw).some((definition) => startsWithPath(definition.path, ['hooks']));
+}
+
+/**
+ * Whether the document defines `hooks` or `hooks.UserPromptSubmit` in a form an appended
+ * `[[hooks.UserPromptSubmit]]` cannot extend (an inline table/array or a plain table): appending
+ * there would be a TOML redefinition error.
+ */
+function hasUnextendableTomlHookEvent(raw: string): boolean {
+  return tomlDefinitions(raw).some(({ path, kind }) =>
+    (kind === 'key' && (
+      (path.length === 1 && path[0] === 'hooks')
+      || (path.length === 2 && path[0] === 'hooks' && path[1] === EVENT)))
+    || (kind === 'table' && path.length === 2 && path[0] === 'hooks' && path[1] === EVENT));
 }
 
 function hasTomlOpenLoreServer(raw: string): boolean {
-  return /^\s*\[\[?mcp_servers\.openlore(?:\.|\])[^\n]*$/m.test(raw);
+  return tomlDefinitions(raw).some((definition) => startsWithPath(definition.path, ['mcp_servers', 'openlore']));
 }
 
 async function writeManagedText(
@@ -191,6 +243,11 @@ async function apply(ctx: ApplyContext): Promise<ApplyResult> {
   }
 
   let tomlHookHandled = false;
+  if (command && !skipProjectHook && hasTomlHooks(toml) && !isManagedText(toml, HOOK_START, HOOK_END)
+    && hasUnextendableTomlHookEvent(toml)) {
+    warnings.push(`codex: ${CONFIG_REL} defines hooks.${EVENT} inline; OpenLore preserved it and did not add the proposal hook.`);
+    command = '';
+  }
   if (command && !skipProjectHook && hasTomlHooks(toml)) {
     const hookBlock = renderTomlHookBlock(command);
     const result = replaceManagedBlock(toml, HOOK_START, HOOK_END, hookBlock);
@@ -214,6 +271,18 @@ async function apply(ctx: ApplyContext): Promise<ApplyResult> {
 
   if (toml !== originalToml) {
     await writeManagedText(ctx, tomlPath, originalToml, toml, `${CONFIG_REL} — OpenLore MCP and hook configuration`, changes);
+  }
+
+  // The hook moved into config.toml (the user added TOML hooks after an earlier install wrote
+  // hooks.json): drop the earlier managed copy so the proposal hook does not fire twice.
+  if (tomlHookHandled) {
+    const staleRaw = await readIfExists(hooksPath);
+    const stale = staleRaw === null ? null : parseHooks(staleRaw);
+    const kept = stale?.groups.filter((group) => asObject(group)?.matcher !== MANAGED_MATCHER);
+    if (stale && kept && kept.length !== stale.groups.length) {
+      const serialized = JSON.stringify(nextHooksDocument(stale.doc, kept), null, 2) + '\n';
+      await writeManagedText(ctx, hooksPath, staleRaw, serialized, `${HOOKS_REL} — moved OpenLore proposal hook to ${CONFIG_REL}`, changes);
+    }
   }
 
   if (command && !tomlHookHandled && !skipProjectHook) {

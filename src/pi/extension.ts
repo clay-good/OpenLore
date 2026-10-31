@@ -273,8 +273,10 @@ function piToolSearchEnabledAtLoad(cwd: string): boolean {
       : cliTools;
   }
 
+  // Escape every regex metacharacter but `*` (a glob wildcard): an unescaped `?` in a
+  // user-supplied pattern made `new RegExp` throw and took the whole extension load down.
   const matches = (pattern: string): boolean => {
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
     return new RegExp(`^${escaped}$`).test('tool_search');
   };
   const excluded = readCliList(['--exclude-tools', '-xt']) ?? [];

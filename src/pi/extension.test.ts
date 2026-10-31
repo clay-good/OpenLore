@@ -1660,6 +1660,14 @@ describe('Pi lean tool surface', () => {
       expect(surface.tools.get('openlore_get_subgraph')?.exposure).toBe('direct');
     });
 
+    it('loads when a Pi tool pattern contains a regex metacharacter such as ?', async () => {
+      await enablePiToolSearch();
+      const surface = registerPiSurface(undefined, true, ['--exclude-tools', '?oops']);
+      await surface.startSession();
+
+      expect(surface.activeOpenlore()).toEqual(sorted(prefixed(PI_SEARCH_TOOLS)));
+    });
+
     it('recognizes tool_search selected with the Pi --tools flag', async () => {
       const surface = registerPiSurface(undefined, true, ['--tools', '+tool_search']);
       await surface.startSession();

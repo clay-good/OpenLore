@@ -102,4 +102,53 @@ describe('Codex install adapter', () => {
     expect(config).toContain('[mcp_servers.openlore]');
     await expect(readFile(join(project, '.codex', 'hooks.json'), 'utf8')).rejects.toThrow();
   });
+
+  it.each([
+    ['an inline table under [mcp_servers]', '[mcp_servers]\nopenlore = { command = "mine" }\n'],
+    ['a quoted table key', '[mcp_servers."openlore"]\ncommand = "mine"\n'],
+    ['a root dotted key', 'mcp_servers.openlore.command = "mine"\n'],
+  ])('preserves a user-defined openlore server written as %s instead of appending a duplicate table', async (_label, original) => {
+    const ctx = await context();
+    await mkdir(join(ctx.root, '.codex'), { recursive: true });
+    await writeFile(join(ctx.root, '.codex', 'config.toml'), original);
+
+    const result = await codexAdapter.apply(ctx);
+
+    const config = await readFile(join(ctx.root, '.codex', 'config.toml'), 'utf8');
+    expect(config).toBe(original);
+    expect(result.warnings.join('\n')).toContain('already defines mcp_servers.openlore');
+  });
+
+  it('does not append an array-of-tables hook over an inline hooks.UserPromptSubmit array', async () => {
+    const ctx = await context();
+    await mkdir(join(ctx.root, '.codex'), { recursive: true });
+    const original = '[hooks]\nUserPromptSubmit = [{ matcher = "mine", hooks = [] }]\n';
+    await writeFile(join(ctx.root, '.codex', 'config.toml'), original);
+
+    const result = await codexAdapter.apply(ctx);
+
+    const config = await readFile(join(ctx.root, '.codex', 'config.toml'), 'utf8');
+    expect(config.startsWith(original)).toBe(true);
+    expect(config).not.toContain('[[hooks.UserPromptSubmit]]');
+    expect(config).toContain('[mcp_servers.openlore]');
+    expect(result.warnings.join('\n')).toContain('defines hooks.UserPromptSubmit inline');
+    await expect(readFile(join(ctx.root, '.codex', 'hooks.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('moves the managed hook out of hooks.json when config.toml gains hooks, so it fires once', async () => {
+    const ctx = await context();
+    await codexAdapter.apply(ctx);
+    const configPath = join(ctx.root, '.codex', 'config.toml');
+    const userHook = '[[hooks.UserPromptSubmit]]\nmatcher = "mine"\n';
+    await writeFile(configPath, `${await readFile(configPath, 'utf8')}\n${userHook}`);
+
+    await codexAdapter.apply(ctx);
+    const second = await codexAdapter.apply(ctx);
+
+    const config = await readFile(configPath, 'utf8');
+    const hooks = JSON.parse(await readFile(join(ctx.root, '.codex', 'hooks.json'), 'utf8'));
+    expect(config).toContain('openlore-proposal-context-v1');
+    expect(JSON.stringify(hooks)).not.toContain('openlore-proposal-context-v1');
+    expect(second.changes.every((change) => change.kind === 'noop')).toBe(true);
+  });
 });

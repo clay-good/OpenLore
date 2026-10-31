@@ -17,6 +17,7 @@ import {
   renderInjectionBlock,
   extractPrompt,
   buildInjection,
+  buildProposalOnlyInjection,
   classifyTurnIntent,
   pointerLineFor,
   type ResolvedInjectionConfig,
@@ -465,6 +466,18 @@ describe('buildInjection (fail-open integration)', () => {
       contextInjection: { mode: 'off' },
     }));
     expect(await buildInjection(dir, '/opsx:propose')).toBe('');
+  });
+
+  it('keeps the explicit opt-out for the proposal-only (Codex) hook', async () => {
+    expect(await buildProposalOnlyInjection(dir, '/opsx:propose')).toContain('[OpenLore proposal preparation]');
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+      contextInjection: { mode: 'off' },
+    }));
+    expect(await buildProposalOnlyInjection(dir, '/opsx:propose')).toBe('');
   });
 });
 
