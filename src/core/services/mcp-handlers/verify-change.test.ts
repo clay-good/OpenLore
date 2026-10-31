@@ -139,6 +139,21 @@ describe('projectVerifyReceipt — generated-file guard (add-generated-file-guar
     expect(r.boundaries.filter(b => b === note)).toHaveLength(1);
   });
 
+  it('names the regenerate command when the source is unknown, and flags a header source that is not in the repo', () => {
+    const unknownSrc = {
+      facts: [{ ...guard.facts[0], generatedFrom: 'unknown' as const, regenerateWith: 'npm run gen' }],
+      findings: guard.findings, boundaries: [],
+    };
+    const a = projectVerifyReceipt(briefing({}), {}, unknownSrc) as unknown as Receipt;
+    expect(a.items.find(i => i.check === 'generated_file_guard')!.nextAction).toContain('`npm run gen`');
+    const notFound = {
+      facts: [{ ...guard.facts[0], generatedFrom: ['order.proto'], sourceNotFound: ['order.proto'] }],
+      findings: guard.findings, boundaries: [],
+    };
+    const b = projectVerifyReceipt(briefing({}), {}, notFound) as unknown as Receipt;
+    expect(b.items.find(i => i.check === 'generated_file_guard')!.nextAction).toContain('not at that path');
+  });
+
   it('a failed guard is a boundary, not a failed receipt', () => {
     const r = projectVerifyReceipt(briefing({}), {}, { error: 'boom' }) as unknown as Receipt & { findings?: unknown };
     expect(r.boundaries.some(b => b.includes('generated-file guard unavailable: boom'))).toBe(true);

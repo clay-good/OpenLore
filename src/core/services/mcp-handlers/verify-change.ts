@@ -134,9 +134,13 @@ export function projectVerifyReceipt(
       severity: f.severity,
       nextAction: fact?.kind === 'lockfile'
         ? 'A lockfile changed without its manifest; confirm the change came from the package manager.'
-        : sources.length
+        : sources.length && fact?.sourceNotFound?.length !== sources.length
           ? `Edit ${sources.join(', ')}${regen ? ` and regenerate with \`${regen}\`` : ' and regenerate'}; a hand edit here is lost on the next generator run.`
-          : 'The source is unknown; confirm the hand edit survives the next generator run.',
+          : sources.length
+            ? `The header names ${sources.join(', ')}, which is not at that path; find that source, edit it, and regenerate${regen ? ` with \`${regen}\`` : ''}.`
+            : regen
+              ? `The source is unknown; regenerate with \`${regen}\` instead of editing by hand, or confirm the hand edit survives it.`
+              : 'The source is unknown; confirm the hand edit survives the next generator run.',
     });
   }
 
@@ -202,7 +206,9 @@ export function projectVerifyReceipt(
 export async function handleVerifyChange(
   input: VerifyChangeInput,
 ): Promise<Record<string, unknown>> {
-  const briefing = await computeBlastRadius({ directory: input.directory, baseRef: input.baseRef });
+  // The guard runs inside blast_radius on the same diff read; its result is reused, not recomputed.
+  let shared: DiffGuardResult | undefined;
+  const briefing = await computeBlastRadius({ directory: input.directory, baseRef: input.baseRef }, { guard: g => { shared = g; } });
   if ('error' in briefing) {
     return { tool: 'verify_change', posture: 'advisory', error: briefing.error };
   }
@@ -211,7 +217,7 @@ export async function handleVerifyChange(
   // Best-effort like the other components: a failed guard is a boundary, never a failed receipt.
   let guard: DiffGuardResult | { error: string };
   try {
-    guard = await guardDiff(await validateDirectory(input.directory), b.resolvedBaseRef);
+    guard = shared ?? await guardDiff(await validateDirectory(input.directory), b.resolvedBaseRef);
   } catch (err) {
     guard = { error: err instanceof Error ? err.message : String(err) };
   }

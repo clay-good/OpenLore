@@ -18,7 +18,8 @@
  * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
  */
 
-import { guardDiff, type GeneratedFileFact } from '../generated-file-guard.js';
+import type { ChangedFile } from '../../../types/index.js';
+import { guardDiff, type DiffGuardResult, type GeneratedFileFact } from '../generated-file-guard.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
 import { loadDecisionStore } from '../../decisions/store.js';
@@ -265,6 +266,8 @@ const DECISION_KINDS = new Set<DriftIssue['kind']>(['adr-gap', 'adr-orphaned']);
  */
 export async function computeBlastRadius(
   input: BlastRadiusInput,
+  /** Internal: receives the generated-file guard result, so verify_change reuses it. */
+  hooks: { guard?: (guard: DiffGuardResult) => void } = {},
 ): Promise<BlastRadiusBriefing | { error: string }> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
@@ -279,6 +282,7 @@ export async function computeBlastRadius(
   // ── 1. Resolve the diff → changed files → seed production symbols ───────────
   let changedFiles: string[];
   let diffEntries: DiffEntry[];
+  let allDiffEntries: ChangedFile[];
   // Resolve-or-disclose through the one shared helper (fix-cli-conclusion-honesty):
   // an explicit ref that git can't resolve falls back (main → master → HEAD~1) and is
   // disclosed, so the advisory briefing never misrepresents the base it diffed against.
@@ -289,9 +293,12 @@ export async function computeBlastRadius(
     const base = await resolveBaseRefDisclosed(absDir, baseRef);
     resolvedBaseRef = base.resolved;
     baseFellBack = base.fellBack;
-    const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBaseRef, includeUnstaged: true });
-    changedFiles = diff.files.map(f => f.path);
-    diffEntries = diff.files;
+    // Lockfiles are read too (for the generated-file guard), then left out of the code diff as before.
+    const { isSkippableFile } = await import('../../drift/git-diff.js');
+    const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBaseRef, includeUnstaged: true, includeSkippable: true });
+    allDiffEntries = diff.files;
+    diffEntries = diff.files.filter(f => !isSkippableFile(f.path));
+    changedFiles = diffEntries.map(f => f.path);
   } catch (err) {
     return { error: `git diff failed (base ${baseRef}): ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -450,7 +457,8 @@ export async function computeBlastRadius(
   let generatedNote: string | null = null;
   try {
     // Its own diff read with lockfiles kept: the main diff above skips them by design.
-    const guard = await guardDiff(absDir, resolvedBaseRef);
+    const guard = await guardDiff(absDir, resolvedBaseRef, allDiffEntries);
+    hooks.guard?.(guard);
     generated = guard.facts;
     if (guard.boundaries.length) generatedNote = guard.boundaries.join(' ');
   } catch (err) {
@@ -603,7 +611,13 @@ export async function computeBlastRadius(
 
 /** One-line conclusion summarizing the briefing. */
 function renderHeadline(b: BlastRadiusBriefing): string {
-  if (b.changed.files === 0) return 'No changes vs ' + b.resolvedBaseRef + ' — nothing to brief.';
+  const gen = b.generated?.length ?? 0;
+  if (b.changed.files === 0) {
+    // A lockfile-only diff has no code change, but it is not "no change".
+    return gen > 0
+      ? `No code changes vs ${b.resolvedBaseRef}; ${gen} generated, vendored, or lockfile file${gen === 1 ? '' : 's'} changed.`
+      : 'No changes vs ' + b.resolvedBaseRef + ' — nothing to brief.';
+  }
   const parts: string[] = [
     `${b.changed.files} file${b.changed.files === 1 ? '' : 's'} / ${b.changed.symbols} symbol${b.changed.symbols === 1 ? '' : 's'} changed`,
   ];
@@ -624,7 +638,6 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
   if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
-  const gen = b.generated?.length ?? 0;
   if (gen > 0) parts.push(`${gen} generated or vendored file${gen === 1 ? '' : 's'} changed`);
   const pushed = b.injectedMemories?.length ?? 0;
   if (pushed > 0) parts.push(`${pushed} triggered memor${pushed === 1 ? 'y' : 'ies'} to read`);

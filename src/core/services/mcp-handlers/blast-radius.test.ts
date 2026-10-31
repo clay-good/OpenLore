@@ -24,6 +24,8 @@ vi.mock('../../drift/git-diff.js', () => ({
     fellBack: false,
   })),
   getRepoPrefix: vi.fn(async () => ''),
+  // The diff is read with lockfiles kept (generated-file guard); none of these fixtures is one.
+  isSkippableFile: () => false,
   reframeRepoPath: (p: string, prefix: string) => (!prefix ? p : p.startsWith(prefix) ? p.slice(prefix.length) || null : null),
 }));
 

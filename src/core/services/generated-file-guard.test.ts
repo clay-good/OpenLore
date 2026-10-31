@@ -288,12 +288,18 @@ describe('generatedFileEditedFindings', () => {
     expect(out[1].message).toContain('path pattern only');
   });
 
-  it('matches an unresolved header literal against a changed path by suffix', () => {
-    const lit = fact({ file: 'gen/x.go', generatedFrom: ['x.proto'] });
+  it('matches an unresolved header literal with a directory against a changed path by suffix', () => {
+    const lit = fact({ file: 'gen/v1/x.pb.go', generatedFrom: ['v1/x.proto'], sourceNotFound: ['v1/x.proto'] });
     expect(generatedFileEditedFindings(
-      [{ path: 'gen/x.go', status: 'modified' }, { path: 'proto/x.proto', status: 'modified' }],
+      [{ path: 'gen/v1/x.pb.go', status: 'modified' }, { path: 'proto/v1/x.proto', status: 'modified' }],
       new Map([[lit.file, lit]]),
     )).toEqual([]);
+    // A resolved source is a real path and must match exactly.
+    const resolved = fact({ file: 'gen/x.go', generatedFrom: ['x.proto'] });
+    expect(generatedFileEditedFindings(
+      [{ path: 'gen/x.go', status: 'modified' }, { path: 'proto/x.proto', status: 'modified' }],
+      new Map([[resolved.file, resolved]]),
+    )).toHaveLength(1);
   });
 
   it('fires for a lockfile changed without a manifest at or below its directory', () => {
@@ -558,5 +564,42 @@ describe('round-2 review regressions', () => {
     const { makefileRecipes } = await import('./generated-file-guard.js');
     expect(makefileRecipes('X ::= 1\ngen:\nifeq ($(A),1)\n\tprotoc --go_out=gen a.proto\nendif\n').map(r => [r.target, r.command]))
       .toEqual([['gen', 'protoc --go_out=gen a.proto']]);
+  });
+});
+
+describe('end-to-end review regressions', () => {
+  it('an unresolved header source is not matched by a same-named file in another top-level directory', async () => {
+    const header = [GO_HEADER, '// source: query.sql', 'package db', ''].join('\n');
+    const base = { 'svc_a/db/query.sql.go': header, 'svc_b/query.sql': 'select 1;\n', 'svc_a/sql/query.sql': 'select 2;\n' };
+    const other = repo(base, { 'svc_a/db/query.sql.go': header + '// edit\n', 'svc_b/query.sql': 'select 3;\n' });
+    const r = await guardDiff(other, 'HEAD');
+    expect(r.findings.map(f => f.subject)).toEqual(['svc_a/db/query.sql.go']);
+    expect(r.findings[0].message).toContain('not at that path');
+    expect(r.facts[0].sourceNotFound).toEqual(['query.sql']);
+    // The same name in the generated file's own top-level directory still counts as its source.
+    const same = repo(base, { 'svc_a/db/query.sql.go': header + '// regen\n', 'svc_a/sql/query.sql': 'select 4;\n' });
+    expect((await guardDiff(same, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('guardDiff over a prefetched diff equals its own read', async () => {
+    const d = repo({ 'gen/a.go': PB_GO, 'package.json': '{}', 'package-lock.json': '{}' }, { 'gen/a.go': PB_GO + '//x\n', 'package-lock.json': '{"a":1}' });
+    const { getChangedFiles } = await import('../drift/git-diff.js');
+    const files = (await getChangedFiles({ rootPath: d, baseRef: 'HEAD', includeUnstaged: true, includeSkippable: true })).files;
+    expect(await guardDiff(d, 'HEAD', files)).toEqual(await guardDiff(d, 'HEAD'));
+  });
+});
+
+describe('config edits', () => {
+  const pkg = (deps: Record<string, string>, gen: string) => JSON.stringify({ scripts: { gen }, dependencies: deps }, null, 2);
+  const base = { 'package.json': pkg({ a: '1' }, 'tool -i spec.yaml -o gen'), 'spec.yaml': 'x: 1\n', 'gen/a.ts': AT_GENERATED };
+
+  it('a dependency bump in package.json does not hide a hand edit to generated output', async () => {
+    const d = repo(base, { 'package.json': pkg({ a: '2' }, 'tool -i spec.yaml -o gen'), 'gen/a.ts': AT_GENERATED + '// edit\n' });
+    expect((await guardDiff(d, 'HEAD')).findings.map(f => f.subject)).toEqual(['gen/a.ts']);
+  });
+
+  it('a change to the regenerate command counts as changing the source side', async () => {
+    const d = repo(base, { 'package.json': pkg({ a: '1' }, 'tool --strict -i spec.yaml -o gen'), 'gen/a.ts': AT_GENERATED + '// regen\n' });
+    expect((await guardDiff(d, 'HEAD')).findings).toEqual([]);
   });
 });

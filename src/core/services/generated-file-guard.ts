@@ -28,6 +28,7 @@ import { isExcludedPath } from './mcp-handlers/code-node.js';
 import { redactSecretText } from './secret-redaction.js';
 import { detectInjectionShapes } from './served-content.js';
 import type { GovernanceFinding } from './mcp-handlers/enforcement-policy.js';
+import type { ChangedFile } from '../../types/index.js';
 
 // ============================================================================
 // PUBLISHED RULES (docs/generated-files.md lists these; keep the two in step)
@@ -135,6 +136,8 @@ export interface GeneratedFileFact {
   evidence?: string[];
   /** The config file holding `regenerateWith` (editing it counts as editing the source side). */
   configFile?: string;
+  /** Header-named sources that were reported as written because no repository file is at that path. */
+  sourceNotFound?: string[];
   /** A path-pattern match is weaker evidence than a marker, attribute, or lockfile name. */
   certainty: 'declared' | 'path-pattern';
 }
@@ -173,6 +176,7 @@ function emittedFact(f: GeneratedFileFact): GeneratedFileFact {
     regenerateWith: f.regenerateWith === 'unknown' ? 'unknown' : emittedText(f.regenerateWith),
     ...(f.evidence ? { evidence: f.evidence.map(emittedText) } : {}),
     ...(f.configFile ? { configFile: emittedText(f.configFile) } : {}),
+    ...(f.sourceNotFound ? { sourceNotFound: f.sourceNotFound.map(emittedText) } : {}),
   };
 }
 
@@ -584,12 +588,14 @@ class SourceResolver {
     const generatedFrom = resolvedSources.length ? resolvedSources
       : match && match.inputs.length ? match.inputs
       : unresolvedSources;
+    const notFound = generatedFrom === unresolvedSources ? unresolvedSources : [];
 
     return {
       generatedFrom: generatedFrom.length ? generatedFrom : 'unknown',
       regenerateWith,
       ...(evidence.length ? { evidence } : {}),
       ...(configFile ? { configFile } : {}),
+      ...(notFound.length ? { sourceNotFound: notFound } : {}),
     };
   }
 
@@ -789,9 +795,19 @@ export interface ChangedPath {
 
 const SOURCE = 'generated-file-guard';
 
-function inChanged(changed: ReadonlySet<string>, literal: string): boolean {
-  if (changed.has(literal)) return true;
-  for (const c of changed) if (c.endsWith('/' + literal)) return true;
+/**
+ * Whether a source changed. A resolved source is a repository path and must match exactly. A literal
+ * that resolved nowhere (protoc writes `source:` relative to its import path) matches a changed path
+ * ending in it. A bare file name (`query.sql`) is weak evidence, so it matches only within the
+ * generated file's own top-level directory: an unrelated file of that name elsewhere in a monorepo
+ * does not hide the edit. A literal with a directory (`users/v1/users.proto`) matches anywhere.
+ */
+function sourceChanged(changed: ReadonlySet<string>, source: string, notFound: boolean, file: string): boolean {
+  if (changed.has(source)) return true;
+  if (!notFound) return false;
+  const top = (p: string) => (p.includes('/') ? p.slice(0, p.indexOf('/')) : '');
+  const bare = !source.includes('/');
+  for (const c of changed) if (c.endsWith('/' + source) && (!bare || top(c) === top(file))) return true;
   return false;
 }
 
@@ -808,6 +824,8 @@ function inChanged(changed: ReadonlySet<string>, literal: string): boolean {
 export function generatedFileEditedFindings(
   changed: readonly ChangedPath[],
   facts: ReadonlyMap<string, GeneratedFileFact>,
+  /** Generated files whose regenerate command changed in the diff; absent: any edit to the config file counts. */
+  commandChanged?: ReadonlySet<string>,
 ): GovernanceFinding[] {
   const changedSet = new Set(changed.map(c => c.path));
   const findings: GovernanceFinding[] = [];
@@ -834,14 +852,16 @@ export function generatedFileEditedFindings(
     }
 
     const rawSources = raw.generatedFrom === 'unknown' ? [] : raw.generatedFrom;
-    const sourceChanged = rawSources.some(s => inChanged(changedSet, s))
-      || (raw.configFile !== undefined && changedSet.has(raw.configFile));
-    if (sourceChanged) continue;
+    const edited = rawSources.some(s => sourceChanged(changedSet, s, raw.sourceNotFound?.includes(s) ?? false, raw.file))
+      || (raw.configFile !== undefined && changedSet.has(raw.configFile) && (commandChanged?.has(raw.file) ?? true));
+    if (edited) continue;
     const sources = fact.generatedFrom === 'unknown' ? [] : fact.generatedFrom;
 
     const what = fact.kind === 'vendored' ? 'vendored' : 'generated';
     const by = `${fact.rule}: ${fact.matched}`;
-    const from = sources.length ? `its source ${sources.join(', ')} is not in the diff` : 'its source is unknown';
+    const from = !sources.length ? 'its source is unknown'
+      : fact.sourceNotFound?.length === sources.length ? `its header names ${sources.join(', ')}, which is not at that path in the repository`
+      : `its source ${sources.join(', ')} is not in the diff`;
     const regen = fact.regenerateWith !== 'unknown' ? `; regenerate with \`${fact.regenerateWith}\`` : '';
     findings.push({
       code: 'generated-file-edited',
@@ -853,6 +873,16 @@ export function generatedFileEditedFindings(
     });
   }
   return findings;
+}
+
+/** A file's content at a ref (path from the repository root); null when it did not exist there. */
+async function readAtRef(root: string, ref: string, repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileGit('git', ['show', `${ref}:${repoPath}`], { cwd: root, maxBuffer: MAX_CONFIG_BYTES * 4 });
+    return stdout;
+  } catch {
+    return null;
+  }
 }
 
 export interface DiffGuardResult {
@@ -867,21 +897,34 @@ export interface DiffGuardResult {
  * findings. Paths are re-framed from the repository root onto `root`; files outside `root` are
  * out of scope.
  */
-export async function guardDiff(root: string, baseRef: string): Promise<DiffGuardResult> {
+export async function guardDiff(root: string, baseRef: string, prefetched?: readonly ChangedFile[]): Promise<DiffGuardResult> {
   const { getChangedFiles, getRepoPrefix, reframeRepoPath } = await import('../drift/git-diff.js');
-  const diff = await getChangedFiles({ rootPath: root, baseRef, includeUnstaged: true, includeSkippable: true });
+  // `prefetched`: the same diff, already read with lockfiles kept (blast_radius shares its read).
+  const files = prefetched ?? (await getChangedFiles({ rootPath: root, baseRef, includeUnstaged: true, includeSkippable: true })).files;
   const prefix = (await getRepoPrefix(root)) ?? '';
   const changed: ChangedPath[] = [];
-  for (const f of diff.files) {
+  for (const f of files) {
     const path = reframeRepoPath(f.path, prefix);
     if (path !== null) changed.push({ path, status: f.status, ...(f.status === 'renamed' ? { contentChanged: f.additions + f.deletions > 0 } : {}) });
   }
   // Findings match the diff against the raw facts (redaction must not rewrite a path it compares);
   // only screened facts leave this function.
   const { facts, boundaries } = await classifyGeneratedFiles(root, changed.filter(c => c.status !== 'deleted').map(c => c.path), { raw: true });
+  // A config file edit counts as editing the source side only when the regenerate command itself
+  // changed: a dependency bump in package.json must not hide a hand edit to generated output.
+  const changedSet = new Set(changed.map(c => c.path));
+  const commandChanged = new Set<string>();
+  const baseText = new Map<string, string | null>();
+  for (const f of facts.values()) {
+    if (!f.configFile || f.regenerateWith === 'unknown' || !changedSet.has(f.configFile)) continue;
+    if (!baseText.has(f.configFile)) baseText.set(f.configFile, await readAtRef(root, baseRef, prefix + f.configFile));
+    const before = baseText.get(f.configFile);
+    const cmd = f.regenerateWith;
+    if (before === null || before === undefined || !(before.includes(cmd) || before.includes(JSON.stringify(cmd).slice(1, -1)))) commandChanged.add(f.file);
+  }
   return {
     facts: [...facts.values()].map(emittedFact),
-    findings: generatedFileEditedFindings(changed, facts),
+    findings: generatedFileEditedFindings(changed, facts, commandChanged),
     boundaries,
   };
 }

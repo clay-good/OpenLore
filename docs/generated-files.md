@@ -11,7 +11,8 @@ literally. It never runs a generator and never blocks an edit.
 | `blast_radius` | `generated`: the same marks for the files the diff changed |
 | `verify_change` | the `generated-file-edited` finding, one receipt item per file, and `findings[]` classified by `enforcement.policy` (with `gated`) |
 
-Each mark is `{ file, rule, matched, kind, generatedFrom, regenerateWith, evidence?, configFile?, certainty }`.
+Each mark is `{ file, rule, matched, kind, generatedFrom, regenerateWith, evidence?, configFile?, sourceNotFound?, certainty }`.
+`openlore blast-radius` without `--json` lists the marked files with their source and command.
 
 ## Detection: closed rules, first match wins
 
@@ -101,9 +102,20 @@ Advisory by default. `verify_change` classifies it with [`enforcement.policy`](c
 
 | Diff | Finding |
 |------|---------|
-| A generated or vendored file is modified, and neither its known source nor the config file holding its command changed | `warning` (`info` for a `path-pattern` match). The message names the source and command, or says the source is unknown. |
+| A generated or vendored file is modified, its known source did not change, and its regenerate command did not change | `warning` (`info` for a `path-pattern` match). The message names the source and command, or says the source is unknown. |
 | A lockfile is modified, and no manifest of its ecosystem at or below its directory changed | `info` |
 | A generated file is added, deleted, or only renamed (no lines changed) | none: a generator run adds files, and a move is not an edit |
+
+How "its source changed" is decided:
+
+| Source | Counts as changed when |
+|--------|------------------------|
+| A repository path (resolved) | that exact path is in the diff |
+| A header literal that is not at that path (`sourceNotFound`) | a changed path ends with it; a bare file name (`query.sql`) must be in the same top-level directory as the generated file |
+| The config file holding the command | the command text itself changed since the base, not just the file (a dependency bump does not count) |
+
+A diff that changes only lockfiles has no code change; `blast_radius` says so in its headline and
+still lists the lockfiles in `generated`.
 
 ## Not built
 
