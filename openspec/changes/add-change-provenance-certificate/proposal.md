@@ -50,6 +50,26 @@ Deliberately NOT borrowed: identity attestation, the signing/transparency-log in
 SBOM generation — those stay with SLSA / in-toto / Sigstore. OpenLore contributes only the semantic
 predicate those formats have nowhere to source today.
 
+## Addendum (2026-10-31): the certificate is the session's closing receipt
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. The design note asked for an
+`attest_session_delta` that compares the start and end graph of an agent session and yields a
+tamper-evident receipt. That is this certificate over the range from the merge-base, so no second
+tool. To cover what the note listed, the certificate also folds in, as each ships:
+
+- contract verdicts and parity (`add-service-contract-certification`): changed operations, breaking
+  elements, and the parity state after the change;
+- architecture-rule violations and import cycles the change introduces, and check-weakening,
+  phantom-reference, generated-file, and `secret-added` findings (the `verify_change` 2026-10-31
+  addenda);
+- decisions anchored to changed or removed symbols, with their freshness verdict (from
+  `blast_radius`), so "no ADR was broken or orphaned" is a checked fact, not a claim;
+- the session counts from `add-session-structural-ledger`, when a ledger exists for the range.
+
+"Tamper-proof" stays as designed above: the certificate is reproducible and content-addressed, so any
+consumer can recompute it and compare digests. A signature, when wanted, is the existing in-toto /
+Sigstore layer.
+
 ## Why this is in scope
 
 It composes shipped deterministic conclusions into a reproducible, verifiable document — no LLM, no

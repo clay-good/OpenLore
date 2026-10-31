@@ -53,6 +53,16 @@ Deliberately NOT borrowed: the orchestrator itself — dispatching agents, order
 and landing branches stay with the forge or the fleet tool. OpenLore provides the shared, drift-
 aware verification memory and the readiness view they consult; it does not run the fleet.
 
+## Addendum (2026-10-31): share the records across worktrees
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. The verification-record store
+(`.openlore/coordination/verification-records.json`) is per worktree, so a verdict proved in one
+worktree is invisible to its siblings — the exact parallel setup this arc targets.
+`add-peer-footprint-board` moves the store to the clone's git common directory (shared by every
+worktree, still local), reads the old path once, and lists live peer footprints in `fleet_status`.
+The deferred "expire records when a branch lands/closes" task uses the same branch-merged/deleted
+rule the board uses for its entries.
+
 ## Why this is in scope
 
 It is built entirely on shipped primitives — the anchored-memory store, the freshness lease, and

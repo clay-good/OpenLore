@@ -47,6 +47,66 @@ Deliberately NOT borrowed: no LLM judgment of the diff, no auto-fix, and no runn
 `verify_change` *names* the tests to run and the breaks to fix; the harness runs and fixes. It is
 the grader, not the author.
 
+## Addendum (2026-10-31): check a proposed patch before it is written
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. Today `verify_change` grades only a diff that is
+already on disk. An agent that wants to know "what does this edit break?" must write the file first,
+then call the tool, then undo the edit if it was wrong — a broken intermediate state that a parallel
+agent, a watcher, or a hook can observe. The research notes call this a speculative "simulate the
+impact" step; we fold it into `verify_change` instead of adding a sibling tool, because the receipt
+it returns is the same conclusion (`NoRedundantConclusions`).
+
+- **New optional input `patch`**: a unified diff (text) over files in the working tree. The tool
+  applies it **in memory** to the current file contents, never to disk, and grades the result as if
+  it were the working-tree diff.
+- **Mechanism**: `CallGraphBuilder` already builds from an in-memory file list (`certify_merge`
+  does this for each git ref). Here the list is the working tree with the patched files replaced,
+  and the build goes through the on-disk hash-keyed Pass-1 fact cache, so unchanged files are cache
+  hits and only patched files are re-parsed. (`graphAtRef` itself reads every file at a git ref with a
+  fresh cache, so it is the pattern, not the function, that is reused.) Nothing is persisted.
+- **Same receipt, plus a `speculative: true` marker** and the list of patched files. Every composed
+  check runs over the overlay, so the contract verdicts and parity from
+  `add-service-contract-certification` are included once that change ships.
+- **Honesty**: a hunk that does not apply cleanly is fatal to the verification (the reason names the
+  file and hunk) — never a partial grade. A patch may create new files inside the analyzed
+  corpus's include patterns. A patch touching paths outside them, or exceeding the patched-file cap,
+  is refused with the reason. Index staleness relative to
+  the working tree is disclosed as today.
+- **Not built**: applying the patch, a persistent "branch" of the index, multi-step speculative
+  sessions. The agent writes the file itself when it is satisfied.
+
+## Addendum (2026-10-31): the receipt is the one place every diff check lands
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. Several new changes add finding families
+that are facts about a diff. Rather than one tool each, they all land in this receipt (and so in the
+before-stop and after-tools hook receipts of `add-agent-loop-hook-surfaces`):
+
+| Family | Change |
+|---|---|
+| contract breaks and parity | `add-service-contract-certification` |
+| check weakening | `add-check-weakening-findings` |
+| phantom references | `add-phantom-reference-findings` |
+| generated-file edits | `add-generated-file-guard` |
+| IaC sites still setting a renamed env key | `add-iac-code-binding` (via `blast_radius`) |
+
+Two more come from code that already exists and need no new change:
+
+- **Architecture rules, new violations only.** `check_architecture` (`architecture.ts`) already
+  evaluates author-declared rules over the dependency graph. The receipt includes only violations
+  whose import or call edge the diff adds, so a repo with existing violations is not flooded and the
+  rules can be tightened over time.
+- **Secrets on added lines.** The existing credential patterns (`secret-redaction.ts`) run over the
+  diff's added lines only; a match is a `secret-added` finding (registered, advisory) naming the file,
+  line, and pattern class, never the value. This is a safety net, not a scanner: gitleaks and
+  trufflehog stay the real tools.
+
+- **New import cycles.** The file-level dependency cycles that `detectDependencyCycles`
+  (`dependency-graph.ts`) already finds are computed for the base and for the patched or written
+  tree; a cycle present only after the change is a `cycle-introduced` finding (registered, advisory)
+  that names the files in the cycle in order. Cycles that already existed are not reported.
+
+Each family ships with its own change; this addendum only fixes where they appear.
+
 ## Why this is in scope
 
 Pure composition of shipped, deterministic conclusions into one conclusion-shaped receipt — no new
@@ -65,7 +125,7 @@ for one diff into one next-action list.
   its capability family), classified
   `conclusion` in `tool-contract.ts`, cross-referencing each composed sibling; tools/list payload
   budget re-asserted or consciously bumped.
-- Specs: `mcp-handlers` — 1 ADDED requirement.
+- Specs: `mcp-handlers` — 3 ADDED requirements (receipt; speculative patch input; diff-scoped architecture + secret findings).
 - Risk: cost of running several conclusions at once (mitigated: scope is the diff's reachable set,
   not the repo; hash-keyed Pass-1 memo means re-parse touches only changed files). Receipt bloat
   (mitigated: severity-ranked, budgeted, truncation disclosed). No new behavior in the composed

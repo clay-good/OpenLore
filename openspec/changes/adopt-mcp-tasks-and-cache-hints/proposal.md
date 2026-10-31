@@ -65,6 +65,27 @@ still refused, per the audit set's out-of-scope list), remote/HTTP transports (l
 speculative task-ification of ordinary conclusion tools (a deterministic answer that computes in
 milliseconds gains nothing from a handle).
 
+## Addendum (2026-10-31): the revision is published; correct the cache-hint scope
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. The 2026-07-28 revision is published at
+https://modelcontextprotocol.io/specification/2026-07-28/changelog. Stage 0's gate is now "the
+TypeScript SDK supports it", not "the RC goes final". Corrections from the published text:
+
+- **`ttlMs`/`cacheScope` are required on `tools/list`, `prompts/list`, `resources/list`,
+  `resources/read`, `resources/templates/list`** (`CacheableResult`, SEP-2549) — not on tool-call
+  results. Stage 1 therefore has two parts: (a) required: hints on `tools/list` (a long TTL, `private`
+  scope; the preset decides the list), (b) optional, as already designed: the lease-derived hint on
+  conclusion results, carried in `_meta` and never more permissive than the lease.
+- **`tools/list` SHOULD be deterministically ordered** (prompt-cache hit rate). OpenLore's registry
+  order is already fixed; add a guard test that pins it.
+- **`subscriptions/listen` replaces `resources/subscribe`.** If OpenLore exposes the lease or the
+  session ledger as a resource, `resourceSubscriptions` is the protocol-native push for "a symbol you
+  read changed" — the same fact the loop hooks deliver (`add-agent-loop-hook-surfaces`). Hooks stay
+  the primary carrier because not every client listens.
+- **Tasks extension redesign:** polling via `tasks/get`, input via `tasks/update`, no `tasks/list`;
+  servers may return task handles unsolicited. Stage 2 follows the redesigned shape.
+- **Sampling, Roots, and Logging are deprecated** — consistent with OpenLore never using sampling.
+
 ## Why this is in scope
 
 Pure protocol conformance on an existing surface, continuing the sibling's line: no new

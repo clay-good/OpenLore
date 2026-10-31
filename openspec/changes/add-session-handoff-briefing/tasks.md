@@ -15,14 +15,19 @@
 - [ ] Wiring checklist: conclusion classification (family `change`), `full` preset, Pi
       surfaced-or-excluded, lease weights, docs table row, adjacent cross-references
 
+- [ ] Addendum 2026-10-31: after-compact hook prints the briefing (opt-out); ledger edited set +
+      open ledger facts as inputs when present; declared footprint when the board is present
+
 ## Verification
 - [ ] Fixture: mid-change repo (edited hub + memory + drifted spec + open change dir) →
       briefing contains all five sections with correct receipts
 - [ ] Byte-identical on repeated invocation at fixed state
 - [ ] Clean tree → explicit nothing-in-flight, never `{}`
 - [ ] Budget truncation emits omission receipts and keeps re-fetch identifiers
+- [ ] Compaction fixture: committed-then-compacted edits still appear via the ledger
 - [ ] Full suite green
 
 ## Spec
 - [ ] `cli` delta: ADD HandoffBriefingIsDeterministicAndReplayable
 - [ ] `mcp-handlers` delta: ADD HandoffBriefingComposesExistingConclusions
+- [ ] `mcp-handlers` delta: ADD HandoffBriefingSurvivesCompaction

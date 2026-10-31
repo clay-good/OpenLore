@@ -17,6 +17,9 @@
 - [ ] Stage 4: retire the custom initialize handler (`mcp.ts:2402-2423`); re-home the breadth
       pointer, version report, and client-identity capture on the final spec's carriers, keeping
       the old path for pre-RC protocol versions the SDK still pins
+- [ ] Addendum 2026-10-31: gate on SDK support; required `ttlMs`/`cacheScope` on `tools/list`
+      (+ resources if served); guard test pinning deterministic `tools/list` order; tasks follow the
+      redesigned extension (`tasks/get`/`tasks/update`)
 
 ## Verification
 - [ ] Conformance test: every emitted cache hint is ≤ the lease's own validity for the same
