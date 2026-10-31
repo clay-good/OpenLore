@@ -16,6 +16,7 @@ import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { writeStdout, writeStderr } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { renderPushedMemories } from './pushed-memory-render.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
@@ -170,6 +171,15 @@ function renderHuman(b: BlastRadiusBriefing): string {
   // Notes pushed by a matching trigger: one line each, terminal-safe and cut short — the JSON carries
   // the full content (change: add-memory-trigger-predicates).
   lines.push(...renderPushedMemories(b, '   '));
+  // Generated files the diff changed, with their source and regenerate command (add-generated-file-guard).
+  const GENERATED_SHOWN = 5;
+  for (const g of (b.generated ?? []).slice(0, GENERATED_SHOWN)) {
+    const from = g.generatedFrom === 'unknown' ? 'source unknown'
+      : `from ${g.generatedFrom.map(s => (g.sourceNotFound?.includes(s) ? `${s} (not at that path)` : s)).join(', ')}`;
+    const regen = g.regenerateWith === 'unknown' ? '' : `; regenerate: ${g.regenerateWith}`;
+    lines.push(sanitizeForTerminal(`   ⚠ ${g.kind} ${g.file} (${g.rule}: ${g.matched}) — ${from}${regen}`));
+  }
+  if ((b.generated?.length ?? 0) > GENERATED_SHOWN) lines.push(`   … and ${b.generated!.length - GENERATED_SHOWN} more generated file(s)`);
   for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;

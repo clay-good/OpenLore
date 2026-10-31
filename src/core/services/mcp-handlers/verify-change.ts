@@ -8,7 +8,8 @@
  *
  * Today it composes `blast_radius` — which itself already composes `select_tests` (tests to run)
  * and the spec/memory/decision drift passes — plus `structural_diff` (removed / re-signed functions
- * and new calls into deprecated code). It is advisory, read-only, offline, and grader-not-author:
+ * and new calls into deprecated code) and the generated-file guard (`generated-file-edited`: a
+ * generated file or lockfile edited without its source; change: add-generated-file-guard). It is advisory, read-only, offline, and grader-not-author:
  * it names the tests to run and the breaks to fix; it never runs the tests or edits a file.
  *
  * NoRedundantConclusions: each component still answers its own question. verify_change only
@@ -17,6 +18,10 @@
 
 import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js';
 import { handleStructuralDiff } from './structural-diff.js';
+import { validateDirectory } from './utils.js';
+import { guardDiff, type DiffGuardResult } from '../generated-file-guard.js';
+import { readOpenLoreConfig } from '../config-manager.js';
+import { classifyFindings, effectivePolicy, type ClassifiedFinding, type EnforcementPolicy } from './enforcement-policy.js';
 
 type Severity = 'critical' | 'error' | 'warning' | 'info';
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, error: 1, warning: 2, info: 3 };
@@ -56,6 +61,8 @@ interface StructuralDiffShape {
 export function projectVerifyReceipt(
   b: BlastRadiusBriefing,
   sd: StructuralDiffShape,
+  guard?: DiffGuardResult | { error: string },
+  policy?: EnforcementPolicy,
 ): Record<string, unknown> {
   const items: ReceiptItem[] = [];
   const boundaries: string[] = [...b.caveats];
@@ -110,6 +117,33 @@ export function projectVerifyReceipt(
     }
   }
 
+  // ── Generated files edited by hand (generated-file guard) ──
+  // Classified by the operator's enforcement.policy; a code set to `off` is dropped entirely.
+  const guardGate = guard && !('error' in guard) && guard.findings.length ? classifyFindings(guard.findings, policy) : undefined;
+  const guardFindings: ClassifiedFinding[] = guardGate ? guardGate.classified.filter(f => f.enforcementClass !== 'off') : [];
+  if (guard && 'error' in guard) boundaries.push(`generated-file guard unavailable: ${guard.error}`);
+  else if (guard) boundaries.push(...guard.boundaries);
+  const factsByFile = new Map((guard && !('error' in guard) ? guard.facts : []).map(f => [f.file, f]));
+  for (const f of guardFindings) {
+    const fact = factsByFile.get(f.subject);
+    const sources = fact && fact.generatedFrom !== 'unknown' ? fact.generatedFrom : [];
+    const regen = fact && fact.regenerateWith !== 'unknown' ? fact.regenerateWith : null;
+    items.push({
+      subject: f.message,
+      check: 'generated_file_guard',
+      severity: f.severity,
+      nextAction: fact?.kind === 'lockfile'
+        ? 'A lockfile changed without its manifest; confirm the change came from the package manager.'
+        : sources.length && fact?.sourceNotFound?.length !== sources.length
+          ? `Edit ${sources.join(', ')}${regen ? ` and regenerate with \`${regen}\`` : ' and regenerate'}; a hand edit here is lost on the next generator run.`
+          : sources.length
+            ? `The header names ${sources.join(', ')}, which is not at that path; find that source, edit it, and regenerate${regen ? ` with \`${regen}\`` : ''}.`
+            : regen
+              ? `The source is unknown; regenerate with \`${regen}\` instead of editing by hand, or confirm the hand edit survives it.`
+              : 'The source is unknown; confirm the hand edit survives the next generator run.',
+    });
+  }
+
   // ── Spec drift (composed inside blast_radius) ──
   for (const s of b.specs.items.slice(0, 10)) {
     items.push({
@@ -151,11 +185,15 @@ export function projectVerifyReceipt(
       removedFunctions: sd.summary?.removedFunctions ?? 0,
       signatureChanges: sd.summary?.signatureChanges ?? 0,
       deprecatedCallsAdded: sd.summary?.deprecatedCallsAdded ?? 0,
+      generatedFilesEdited: guardFindings.length,
     },
     items: kept,
     ...(omitted > 0 ? { truncated: { omitted, note: 'Lower-severity items omitted; raise the cap to see them.' } } : {}),
     testsToRun,
-    boundaries,
+    // Registered governance findings (GovernanceFinding shape) an enforcement policy can name.
+    ...(guardFindings.length ? { findings: guardFindings, gated: guardGate!.gated } : {}),
+    // The guard's disclosures can also reach blast_radius's caveats: say each once.
+    boundaries: [...new Set(boundaries)],
     // Grader, not author: these are actions for the caller to take — nothing was run or written.
     note: 'Advisory receipt. verify_change names the tests to run and the breaks to fix; it runs no tests and edits no files.',
   };
@@ -168,10 +206,26 @@ export function projectVerifyReceipt(
 export async function handleVerifyChange(
   input: VerifyChangeInput,
 ): Promise<Record<string, unknown>> {
-  const briefing = await computeBlastRadius({ directory: input.directory, baseRef: input.baseRef });
+  // The guard runs inside blast_radius on the same diff read; its result is reused, not recomputed.
+  let shared: DiffGuardResult | undefined;
+  const briefing = await computeBlastRadius({ directory: input.directory, baseRef: input.baseRef }, { guard: g => { shared = g; } });
   if ('error' in briefing) {
     return { tool: 'verify_change', posture: 'advisory', error: briefing.error };
   }
+  const b = briefing as BlastRadiusBriefing;
   const sd = (await handleStructuralDiff({ directory: input.directory, baseRef: input.baseRef })) as StructuralDiffShape;
-  return projectVerifyReceipt(briefing as BlastRadiusBriefing, sd);
+  // Best-effort like the other components: a failed guard is a boundary, never a failed receipt.
+  let guard: DiffGuardResult | { error: string };
+  try {
+    guard = shared ?? await guardDiff(await validateDirectory(input.directory), b.resolvedBaseRef);
+  } catch (err) {
+    guard = { error: err instanceof Error ? err.message : String(err) };
+  }
+  let policy: EnforcementPolicy | undefined;
+  try {
+    policy = effectivePolicy(await readOpenLoreConfig(await validateDirectory(input.directory)));
+  } catch {
+    policy = undefined; // an unreadable config is "no policy declared": source defaults apply
+  }
+  return projectVerifyReceipt(b, sd, guard, policy);
 }

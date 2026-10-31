@@ -336,6 +336,14 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A high-complexity function in a churned file never got simpler and ended more complex over its sampled recent commits (rising) and is at or above the high-complexity threshold.',
     remediation: 'Rising complexity: {subject}; split or simplify it before adding more branches.',
   },
+  // ── generated-file guard (add-generated-file-guard) ──
+  // Returned and classified by verify_change; `openlore enforce` does not collect it.
+  'generated-file-edited': {
+    defaultClass: 'advisory',
+    source: 'generated-file-guard',
+    description: 'A diff edits a generated or vendored file (recognized header marker, .gitattributes linguist attribute, or excluded path pattern) without also changing its known source or the config entry that regenerates it, or changes a lockfile without a manifest of its ecosystem. A newly added generated file does not fire it.',
+    remediation: 'Generated file {subject} was edited without its source; edit the source and regenerate, or record why the hand edit is intended.',
+  },
   // ── deprecation propagation (add-deprecation-propagation) ──
   'deprecated-symbol-use': {
     defaultClass: 'advisory',

@@ -25,7 +25,7 @@ groups:
 | IaC resource → the code it runs; IaC sites that set each env var | [add-iac-code-binding](add-iac-code-binding/) | new |
 | Tests deleted, skipped, or emptied; expected values changed; suppressions; swallowed errors; relaxed CI | [add-check-weakening-findings](add-check-weakening-findings/) | new |
 | Imports, exports, and packages that do not exist or are not declared | [add-phantom-reference-findings](add-phantom-reference-findings/) | new |
-| Generated or vendored file edited by hand; name its source and regenerate command | [add-generated-file-guard](add-generated-file-guard/) | new |
+| Generated or vendored file edited by hand; name its source and regenerate command | [add-generated-file-guard](archive/2026-10-31-add-generated-file-guard/) | shipped (#629) |
 | Push receipts after edits, after compaction, before stop, at sub-agent start, at task creation | [add-agent-loop-hook-surfaces](add-agent-loop-hook-surfaces/) | new |
 | Shared footprint board across worktrees; peer read-after-write notices; duplicate intent | [add-peer-footprint-board](add-peer-footprint-board/) | new |
 | Compaction pushes the handoff briefing | [add-session-handoff-briefing](add-session-handoff-briefing/) | existing, addendum |

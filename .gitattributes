@@ -1,0 +1,2 @@
+# Hand-written type declarations, not generated output (docs/generated-files.md).
+src/types/*.d.ts -linguist-generated
