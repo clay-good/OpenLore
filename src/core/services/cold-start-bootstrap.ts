@@ -28,6 +28,7 @@
 
 import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { openloreCliEntry } from '../../utils/platform-command.js';
 import { childEnvWithoutScopedTlsRelaxation } from './tls-scope.js';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep, win32 } from 'node:path';
@@ -539,7 +540,13 @@ export async function buildIndexInChildProcess(
 
   // The PROJECT file decides whether `init` is needed; user-wide defaults do not
   // initialize a repository (and a malformed user file must not abort the build).
-  if (!existsSync(resolveOpenLoreConfigPath(directory))) await run(['init']);
+  if (!existsSync(resolveOpenLoreConfigPath(directory))) {
+    await run(['init']);
+    // Auto-init is the setup a human never ran: record autopilot as its explicit default
+    // (change: default-decision-autopilot-with-visible-trace).
+    const { recordAutoInitAutopilot } = await import('../decisions/autopilot.js');
+    await recordAutoInitAutopilot(directory);
+  }
   await run([
     'analyze',
     ...(opts.repair ? ['--reanalyze'] : []),
@@ -555,19 +562,35 @@ export async function buildIndexInChildProcess(
   // Keyword is published and serving; local vectors follow in a process nobody waits
   // for (change: enable-local-semantic-search-in-background). It decides for itself
   // whether to run — opt-out, package, model — and exits silently when it should not.
-  if (opts.mode !== 'degraded' && !childBuildsStopping) {
-    try {
-      const child = spawnProcess(process.execPath, [cliPath, 'analyze', '--background-vectors'], {
-        cwd: directory,
-        stdio: 'ignore',
-        detached: true,
-        windowsHide: true,
-        env: childEnvWithoutScopedTlsRelaxation(),
-      });
-      child.once('error', () => { /* fail-soft: keyword keeps serving */ });
-      child.unref();
-    } catch { /* fail-soft: keyword keeps serving */ }
-  }
+  if (opts.mode !== 'degraded') startBackgroundVectorPass(directory, { cliPath, spawnProcess });
+}
+
+/**
+ * Start the detached local-vector pass for `directory` after a keyword build published
+ * (change: enable-local-semantic-search-in-background). Nobody waits for it; it decides for
+ * itself whether to run (opt-out, package, model) and exits silently when it should not.
+ * Every builder that publishes a keyword-only index calls it, or the vectors it replaced are
+ * never rebuilt.
+ */
+export function startBackgroundVectorPass(
+  directory: string,
+  opts: { cliPath?: string; spawnProcess?: typeof spawn } = {},
+): void {
+  // This package's own built CLI, never a bare argv[1]: a host that embeds OpenLore (the serve
+  // daemon, a test runner) would otherwise launch some other program with these arguments.
+  const cliPath = opts.cliPath ?? openloreCliEntry();
+  if (!cliPath || childBuildsStopping) return;
+  try {
+    const child = (opts.spawnProcess ?? spawn)(process.execPath, [cliPath, 'analyze', '--background-vectors'], {
+      cwd: directory,
+      stdio: 'ignore',
+      detached: true,
+      windowsHide: true,
+      env: childEnvWithoutScopedTlsRelaxation(),
+    });
+    child.once('error', () => { /* fail-soft: keyword keeps serving */ });
+    child.unref();
+  } catch { /* fail-soft: keyword keeps serving */ }
 }
 
 /**

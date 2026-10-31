@@ -41,7 +41,7 @@ import {
   readCurrentGeneration,
   type GenerationManifest,
 } from './analysis-generation.js';
-import { readAnalysisOwner, runtimeDirOf } from './analysis-ownership.js';
+import { isProcessAlive, readAnalysisOwner, runtimeDirOf } from './analysis-ownership.js';
 
 /** Analysis files a seed carries beside the manifest's own artifact list, when present. */
 const SEED_SIDE_FILES = [
@@ -207,6 +207,23 @@ async function verifyCopy(stagingDir: string, generationId: string): Promise<voi
 }
 
 /** Copy, verify and publish one sibling's index into `targetAnalysis`. */
+const STAGING_PREFIX = '.analysis-seed-';
+
+/**
+ * Remove staging copies whose writer is gone. A seed runs inside a hook or a first tool call,
+ * either of which can be killed mid-copy; its `finally` then never runs, and each retry would
+ * leave another full index copy behind. Only real directories named by a dead pid are removed.
+ */
+async function sweepAbandonedStaging(openloreDir: string): Promise<void> {
+  let entries: Dirent[];
+  try { entries = await readdir(openloreDir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const pid = entry.name.startsWith(STAGING_PREFIX) ? Number.parseInt(entry.name.slice(STAGING_PREFIX.length), 10) : NaN;
+    if (!entry.isDirectory() || Number.isNaN(pid) || isProcessAlive(pid)) continue;
+    await rm(join(openloreDir, entry.name), { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function seedFrom(sourceRoot: string, targetRoot: string): Promise<string> {
   const sourceAnalysis = join(sourceRoot, OPENLORE_ANALYSIS_REL_PATH);
   if (!await isRealDirectory(dirname(sourceAnalysis)) || !await isRealDirectory(sourceAnalysis)) {
@@ -222,9 +239,11 @@ async function seedFrom(sourceRoot: string, targetRoot: string): Promise<string>
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   });
   if (!await isRealDirectory(openloreDir)) refuse('.openlore is not a directory');
+  await sweepAbandonedStaging(openloreDir);
   // A fresh, uniquely named directory: nothing in it can be a planted link, and every copy is
   // exclusive, so a file that appears there anyway fails the copy instead of being followed.
-  const stagingDir = join(openloreDir, `.analysis-seed-${randomUUID()}`);
+  // The writer's pid is in the name, so a copy killed before its cleanup can be swept.
+  const stagingDir = join(openloreDir, `${STAGING_PREFIX}${process.pid}-${randomUUID()}`);
   await mkdir(stagingDir);
   try {
     for (const entry of before) {

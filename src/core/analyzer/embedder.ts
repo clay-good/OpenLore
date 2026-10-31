@@ -101,7 +101,7 @@ export async function resolveEmbedder(
   if (remote) return remote;
   if (outputDir && backgroundSemanticAllowed(cfg) && indexCarriesLocalVectors(outputDir) && localEmbedderInstalled()) {
     const { LocalEmbeddingService } = await import('./local-embedding-service.js');
-    return new LocalEmbeddingService();
+    return LocalEmbeddingService.shared();
   }
   return null;
 }

@@ -8,6 +8,7 @@
  * sync_decisions       — write approved decisions to spec.md files
  */
 
+import { childEnvWithoutScopedTlsRelaxation } from '../tls-scope.js';
 import { spawn } from 'node:child_process';
 import { validateDirectory, sanitizeMcpError, safeOpenspecDir } from './utils.js';
 import { emit } from '../telemetry.js';
@@ -97,7 +98,9 @@ async function spawnConsolidateBackground(
     let child;
     try {
       // windowsHide: detached alone surfaces a console window on Windows.
-      child = spawn(cmd, args, { cwd: rootPath, detached: true, stdio: 'ignore', windowsHide: true });
+      // The env helper drops a TLS relaxation scoped to one request, which a detached child
+      // would otherwise keep for its whole life.
+      child = spawn(cmd, args, { cwd: rootPath, detached: true, stdio: 'ignore', windowsHide: true, env: childEnvWithoutScopedTlsRelaxation() });
     } catch (err) {
       // Synchronous throw (rare — e.g. invalid args) is contained, never rethrown.
       settle({ outcome: 'failed', detail: (err as Error).message });

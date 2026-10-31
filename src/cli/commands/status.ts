@@ -153,9 +153,7 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   try { config = await readOpenLoreConfig(rootPath); } catch { configUnreadable = true; }
 
   const receipt = await readIndexReceipt(analysisDir);
-  const governance = configUnreadable ? undefined : await collectGovernanceStatus(rootPath, config).catch(() => undefined);
   const base = {
-    ...(governance ? { governance } : {}),
     degraded: receipt?.degraded ?? [],
     ...(receipt?.embedFailure ? { embedFailure: receipt.embedFailure } : {}),
     ...(configUnreadable ? { configUnreadable: true as const } : {}),
@@ -256,8 +254,15 @@ Read-only: this never builds, rebuilds, or locks the index.
   )
   .action(async (options: { json?: boolean }) => {
     const rootPath = process.cwd();
+    const index = await collectIndexStatus(rootPath);
+    // Here and not in collectIndexStatus: the status line calls that on every render, and the
+    // governance block resolves the gate (git) and reads the whole ledger.
+    const governance = index.configUnreadable
+      ? undefined
+      : await readOpenLoreConfig(rootPath).then(config => collectGovernanceStatus(rootPath, config)).catch(() => undefined);
     const status: IndexStatus = {
-      ...await collectIndexStatus(rootPath),
+      ...index,
+      ...(governance ? { governance } : {}),
       wiringScope: await collectWiringScope(rootPath),
     };
 

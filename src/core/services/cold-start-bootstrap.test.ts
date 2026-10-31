@@ -21,6 +21,7 @@ import {
   registerRepairBuilder,
   registerRepairHost,
   requestRepairFromHost,
+  startBackgroundVectorPass,
   _resetRepairServiceForTesting,
 } from './cold-start-bootstrap.js';
 import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
@@ -122,6 +123,27 @@ describe('bootstrapAnalysisInBackground', () => {
     const src = readFileSync(fileURLToPath(new URL('./cold-start-bootstrap.ts', import.meta.url)), 'utf8');
     expect(src).not.toMatch(/api\/(analyze|init|run)/);
     expect(src).not.toMatch(/install\/index/);
+  });
+});
+
+describe('startBackgroundVectorPass', () => {
+  it('starts the detached vector pass with the given CLI', () => {
+    const calls: Array<readonly string[]> = [];
+    const spawnProcess = ((_: string, args: readonly string[]) => {
+      calls.push(args);
+      const child = new EventEmitter() as ChildProcess;
+      child.unref = vi.fn();
+      return child;
+    }) as typeof spawn;
+    startBackgroundVectorPass('/repo', { cliPath: '/openlore/dist/cli/index.js', spawnProcess });
+    expect(calls).toEqual([['/openlore/dist/cli/index.js', 'analyze', '--background-vectors']]);
+  });
+
+  it("never launches a host's own argv[1]: with no built OpenLore CLI it starts nothing", () => {
+    // Running from TypeScript source there is no dist/cli/index.js beside the module.
+    const spawnProcess = vi.fn() as unknown as typeof spawn;
+    startBackgroundVectorPass('/repo', { spawnProcess });
+    expect(spawnProcess).not.toHaveBeenCalled();
   });
 });
 

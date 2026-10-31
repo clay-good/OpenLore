@@ -6,7 +6,7 @@
  * is in flight.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -194,6 +194,8 @@ describe('openlore status — what the index is', () => {
   // change: default-decision-autopilot-with-visible-trace
   it('reports the governance block: mode, counts, newest ledger entries, and the review command', async () => {
     await writeConfig(null);
+    const configPath = join(root, '.openlore', 'config.json');
+    await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), governance: { autopilot: true } }));
     await mkdir(join(root, '.openlore', 'decisions'), { recursive: true });
     await writeFile(join(root, '.openlore', 'decisions', 'pending.json'), JSON.stringify({
       decisions: [{ id: 'aaaa1111', status: 'auto-approved' }],
@@ -214,11 +216,12 @@ describe('openlore status — what the index is', () => {
     }
     const text = lines.join('\n');
     expect(text).toContain('Decision autopilot');
-    expect(text).toContain('auto-initialized; set governance.autopilot: false to require review');
+    expect(text).toContain('governance.autopilot is true — set it to false to require review');
     expect(text).toContain('1 auto-accepted, 1 unreviewed');
     expect(text).toContain('[aaaa1111] ∅ → auto-approved by agent');
     expect(text).toContain('openlore decisions review');
-    expect((await collectIndexStatus(root)).governance).toMatchObject({ autopilot: true, autoAccepted: 1, unreviewed: 1 });
+    // The status line's shared collector stays cheap: no governance block there.
+    expect((await collectIndexStatus(root)).governance).toBeUndefined();
   });
 
   it('reports the wiring scope, in text and through --json', async () => {

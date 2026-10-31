@@ -8,6 +8,7 @@ import { Command } from 'commander';
 import { colorForCapturedStdout } from '../../utils/colors.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { collectIndexStatus, type IndexStatus } from './status.js';
+import { countUnreviewedDecisions } from '../../core/decisions/autopilot.js';
 
 type StatusColor = 'green' | 'yellow' | 'red';
 
@@ -17,10 +18,12 @@ type StatusColor = 'green' | 'yellow' | 'red';
  */
 const STDIN_TIMEOUT_MS = 1000;
 
-export function statusLabel(status: IndexStatus): { color: StatusColor; text: string } {
-  const label = indexLabel(status);
+export function statusLabel(
+  status: IndexStatus,
   // Auto-accepted decisions no human has looked at (change: default-decision-autopilot-with-visible-trace).
-  const unreviewed = status.governance?.unreviewed ?? 0;
+  unreviewed = status.governance?.unreviewed ?? 0,
+): { color: StatusColor; text: string } {
+  const label = indexLabel(status);
   return unreviewed > 0 ? { ...label, text: `${label.text} · ${unreviewed} to review` } : label;
 }
 
@@ -74,8 +77,10 @@ async function readStdin(): Promise<string> {
 export async function renderStatusLine(input: string, fallbackCwd: string): Promise<string> {
   const c = colorForCapturedStdout();
   try {
-    const status = await collectIndexStatus(workingDirectoryFromInput(input, fallbackCwd));
-    const { color, text } = statusLabel(status);
+    const directory = workingDirectoryFromInput(input, fallbackCwd);
+    // The count alone: one small file read, no git process, no ledger scan — this renders often.
+    const [status, unreviewed] = await Promise.all([collectIndexStatus(directory), countUnreviewedDecisions(directory)]);
+    const { color, text } = statusLabel(status, unreviewed);
     return c[color](safe(text));
   } catch {
     // Claude Code hides output from commands that exit non-zero, while a yellow

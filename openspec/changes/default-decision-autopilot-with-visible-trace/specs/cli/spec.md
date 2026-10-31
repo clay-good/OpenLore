@@ -4,18 +4,24 @@
 
 ### Requirement: AutopilotIsTheDefaultForAutoInitializedRepositories
 
-In a repository whose OpenLore setup came from background auto-initialization, an absent
-`governance.autopilot` SHALL mean autopilot is on. In a repository where an explicit install wired a
-blocking gate, an absent key SHALL keep meaning blocking review. `governance.autopilot: false` SHALL
-always turn autopilot off. The resolved mode and the reason for it SHALL be reported wherever
-governance state is shown.
+When background auto-initialization creates a repository's configuration, it SHALL record
+`governance.autopilot: true` in it, unless a blocking decisions gate is installed or the directory is
+a linked worktree whose main checkout sets the key. An absent key SHALL keep meaning blocking review,
+so a gate OpenLore cannot see (a CI-only gate, a hook manager, a fresh clone) never turns into
+auto-accept. The resolved mode and its reason SHALL be reported wherever governance state is shown.
 
 #### Scenario: A repository nobody configured runs on autopilot
 
-- **GIVEN** a repository indexed by auto-init, with no `governance` block
+- **GIVEN** a git repository that auto-init indexed, with no prior OpenLore configuration and no gate
 - **WHEN** governance state is reported
-- **THEN** the mode is autopilot, with the reason "auto-initialized; set governance.autopilot:
-  false to require review"
+- **THEN** the configuration carries `governance.autopilot: true`, and the mode is autopilot with the
+  reason "governance.autopilot is true — set it to false to require review"
+
+#### Scenario: An unset key never flips a gate it cannot see
+
+- **GIVEN** a configuration with no `governance.autopilot` and no OpenLore hook in the checkout
+- **WHEN** a decision is recorded
+- **THEN** it stays a draft for review
 
 ### Requirement: AWorktreeFollowsTheMainCheckoutsGovernance
 

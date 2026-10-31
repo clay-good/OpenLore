@@ -134,6 +134,22 @@ describe('seeding a new worktree from a sibling checkout', () => {
     expect(await servingSeededIndex(worktree)).toBe(false);
   }, 60_000);
 
+  it('sweeps a staging copy whose writer died, and leaves a live peer\'s alone', async () => {
+    const worktree = addWorktree();
+    const openlore = join(worktree, '.openlore');
+    mkdirSync(openlore);
+    // A pid far above any real one is a dead writer; this process is a live one.
+    const dead = join(openlore, '.analysis-seed-999999999-abandoned');
+    const live = join(openlore, `.analysis-seed-${process.pid}-in-flight`);
+    mkdirSync(dead);
+    writeFileSync(join(dead, 'llm-context.json'), '{}');
+    mkdirSync(live);
+    expect(await seedFromSiblingCheckout(worktree)).toMatchObject({ state: 'seeded' });
+    expect(existsSync(dead)).toBe(false);
+    expect(existsSync(live)).toBe(true);
+    rmSync(live, { recursive: true, force: true });
+  });
+
   it('never seeds a checkout that already has an index', async () => {
     expect(await seedFromSiblingCheckout(main)).toMatchObject({ state: 'not-seeded' });
   });

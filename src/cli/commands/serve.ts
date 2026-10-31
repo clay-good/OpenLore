@@ -47,7 +47,7 @@ import { releaseContextCache, validateDirectory, waitForGraphRebuild } from '../
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
-import { registerRepairHost, registerRepairBuilder, hasAnalysis, autoInitSuppression, repairInBackground } from '../../core/services/cold-start-bootstrap.js';
+import { registerRepairHost, registerRepairBuilder, hasAnalysis, autoInitSuppression, repairInBackground, startBackgroundVectorPass } from '../../core/services/cold-start-bootstrap.js';
 import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
 import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
 import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
@@ -715,7 +715,11 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
     }
     logger.discovery(`[serve] rebuilding graph index (${directory})`);
     const rebuild = openloreAnalyze({ rootPath: directory, force: true })
-      .then(() => logger.discovery(`[serve] graph index rebuilt (${directory})`))
+      .then(() => {
+        logger.discovery(`[serve] graph index rebuilt (${directory})`);
+        // The forced rebuild publishes keyword-only indexes; put the local vectors back.
+        startBackgroundVectorPass(directory);
+      })
       .catch((err) => logger.warning(`[serve] graph rebuild failed: ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => {
         rebuildPromises.delete(directory);

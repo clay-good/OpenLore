@@ -31,7 +31,9 @@ vi.mock('./embedder.js', () => ({
   backgroundSemanticAllowed, indexCarriesLocalVectors, localEmbedderInstalled: () => true,
 }));
 vi.mock('./local-embedding-service.js', () => ({
-  LocalEmbeddingService: vi.fn(function () { return { modelName: 'local:test-model', embed: localEmbed }; }),
+  LocalEmbeddingService: Object.assign(vi.fn(function () { return { modelName: 'local:test-model', embed: localEmbed }; }), {
+    shared: vi.fn(() => ({ modelName: 'local:test-model', embed: localEmbed })),
+  }),
 }));
 vi.mock('../runtime/analysis-generation.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -363,6 +365,34 @@ describe('background local vectors (change: enable-local-semantic-search-in-back
     localEmbed.mockRejectedValue(new Error('no network'));
     expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
     expect(vectorBuild).not.toHaveBeenCalled();
+  });
+
+  it('stands down while another live pass holds the repository claim', async () => {
+    const runtime = join(root, '.openlore', 'runtime');
+    await mkdir(runtime, { recursive: true });
+    await writeFile(join(runtime, 'background-vectors.lock'), `${process.pid} ${new Date().toISOString()}`);
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
+    expect(vectorBuild).not.toHaveBeenCalled();
+  });
+
+  it('reclaims the claim of a pass that died', async () => {
+    const runtime = join(root, '.openlore', 'runtime');
+    await mkdir(runtime, { recursive: true });
+    await writeFile(join(runtime, 'background-vectors.lock'), `999999999 ${new Date().toISOString()}`);
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('built');
+  });
+
+  it('does not write while a full analysis owns the repository', async () => {
+    const { acquireAnalysisOwnership } = await vi.importActual<typeof import('../runtime/analysis-ownership.js')>('../runtime/analysis-ownership.js');
+    const held = await acquireAnalysisOwnership(root, outputPath);
+    expect(held.state).toBe('owned');
+    try {
+      // This process owns it, but the pass asks as a separate owner and must be refused.
+      expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
+      expect(vectorBuild).toHaveBeenCalledTimes(1); // the scratch build only; the real index untouched
+    } finally {
+      if (held.state === 'owned') await held.release();
+    }
   });
 
   it('leaves the real index alone when a newer generation was published meanwhile', async () => {

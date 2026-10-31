@@ -34,7 +34,7 @@ export interface AutopilotMode {
   autopilot: boolean;
   /** Why, in words a user can act on. */
   reason: string;
-  source: 'config-on' | 'config-off' | 'main-checkout' | 'no-config' | 'blocking-gate' | 'default';
+  source: 'config-on' | 'config-off' | 'main-checkout' | 'no-config' | 'blocking-gate' | 'unset';
 }
 
 /**
@@ -103,7 +103,9 @@ export async function resolveAutopilotMode(
   opts: { gateRunning?: boolean } = {},
 ): Promise<AutopilotMode> {
   const configured = config?.governance?.autopilot;
-  if (configured === true) return { autopilot: true, reason: 'governance.autopilot is true', source: 'config-on' };
+  if (configured === true) {
+    return { autopilot: true, reason: 'governance.autopilot is true — set it to false to require review', source: 'config-on' };
+  }
   if (configured === false) {
     return { autopilot: false, reason: 'governance.autopilot is false — decisions wait for review', source: 'config-off' };
   }
@@ -125,11 +127,35 @@ export async function resolveAutopilotMode(
       source: 'blocking-gate',
     };
   }
+  // Absent means blocking review, as it always has. Auto-init records `true` when it creates a
+  // repository's config (recordAutoInitAutopilot), so the default for a repository nobody
+  // configured is an explicit value, never an inference: a gate OpenLore cannot see (a CI-only
+  // `--gate`, a hook manager, a fresh clone with empty hooks) must not flip to auto-accept.
   return {
-    autopilot: true,
-    reason: 'auto-initialized; set governance.autopilot: false to require review',
-    source: 'default',
+    autopilot: false,
+    reason: 'governance.autopilot is not set — decisions wait for review; set it to true to auto-accept',
+    source: 'unset',
   };
+}
+
+/**
+ * Record autopilot for a repository whose config background auto-init just created, so the
+ * default is an explicit, visible choice. Leaves the config alone when it already chooses, when
+ * this is a linked worktree whose main checkout chooses (it follows that), or when a blocking
+ * decisions gate is installed. Returns whether it wrote. Never throws.
+ */
+export async function recordAutoInitAutopilot(rootPath: string): Promise<boolean> {
+  try {
+    const { readProjectOpenLoreConfig, writeOpenLoreConfig } = await import('../services/config-manager.js');
+    const config = await readProjectOpenLoreConfig(rootPath);
+    if (!config || typeof config.governance?.autopilot === 'boolean') return false;
+    if (await mainCheckoutAutopilot(rootPath)) return false;
+    if (await hasOpenLoreCommitGate(rootPath)) return false;
+    await writeOpenLoreConfig(rootPath, { ...config, governance: { ...config.governance, autopilot: true } });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

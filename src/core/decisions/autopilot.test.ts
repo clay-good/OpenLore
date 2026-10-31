@@ -12,6 +12,7 @@ import {
   DECISIONS_HOOK_MARKER,
   collectGovernanceStatus,
   countUnreviewedDecisions,
+  recordAutoInitAutopilot,
   resolveAutopilotMode,
   takeAutoAcceptsSinceLastSession,
 } from './autopilot.js';
@@ -19,6 +20,13 @@ import { appendLedgerEntries, type LedgerEntry } from './ledger.js';
 
 // A config with no `governance` block, as auto-init writes it.
 const CONFIG: { governance?: { autopilot?: boolean } } = {};
+
+/** The full config `openlore init` writes, which the config reader requires. */
+const FULL_CONFIG = {
+  version: '1.0.0', projectType: 'nodejs', openspecPath: './openspec',
+  analysis: { maxFiles: 500, includePatterns: [], excludePatterns: [] },
+  generation: { model: 'claude-sonnet-5', domains: 'auto' }, createdAt: '2026-10-31T00:00:00.000Z', lastRun: null,
+};
 
 function entry(id: string, to: LedgerEntry['to'], at: string): LedgerEntry {
   return { id, title: `Decision ${id}`, from: null, to, actor: 'agent', at };
@@ -34,10 +42,33 @@ describe('resolveAutopilotMode', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('is on when governance.autopilot is absent and no gate is installed', async () => {
+  it('is off when governance.autopilot is absent: a gate OpenLore cannot see must not flip', async () => {
+    // A CI-only `--gate`, a hook manager, or a fresh clone with empty hooks all look like "no gate".
     const mode = await resolveAutopilotMode(dir, CONFIG);
-    expect(mode).toMatchObject({ autopilot: true, source: 'default' });
-    expect(mode.reason).toBe('auto-initialized; set governance.autopilot: false to require review');
+    expect(mode).toMatchObject({ autopilot: false, source: 'unset' });
+    expect(mode.reason).toContain('set it to true to auto-accept');
+  });
+
+  it('auto-init records autopilot as an explicit choice in the config it created', async () => {
+    await mkdir(join(dir, '.openlore'));
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify(FULL_CONFIG));
+    expect(await recordAutoInitAutopilot(dir)).toBe(true);
+    const written = JSON.parse(await readFile(join(dir, '.openlore', 'config.json'), 'utf8'));
+    expect(written.governance).toEqual({ autopilot: true });
+    expect(written.projectType).toBe('nodejs'); // the rest of the config is kept
+    expect(await resolveAutopilotMode(dir, written)).toMatchObject({ autopilot: true, source: 'config-on' });
+    // A choice already made is never overwritten.
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ ...FULL_CONFIG, governance: { autopilot: false } }));
+    expect(await recordAutoInitAutopilot(dir)).toBe(false);
+  });
+
+  it('auto-init records nothing where a blocking decisions gate is installed', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    await mkdir(join(dir, '.git', 'hooks'), { recursive: true });
+    await writeFile(join(dir, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n${DECISIONS_HOOK_MARKER}\nopenlore decisions --gate\n`);
+    await mkdir(join(dir, '.openlore'));
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify(FULL_CONFIG));
+    expect(await recordAutoInitAutopilot(dir)).toBe(false);
   });
 
   it('is on for true and off for false, whatever the gate', async () => {
@@ -112,7 +143,7 @@ describe('governance trail readers', () => {
       entry('c', 'draft', '2026-10-03T00:00:00Z'),
       entry('d', 'auto-approved', '2026-10-04T00:00:00Z'),
     ]);
-    const status = await collectGovernanceStatus(dir, CONFIG);
+    const status = await collectGovernanceStatus(dir, { governance: { autopilot: true } });
     expect(status).toMatchObject({ autopilot: true, autoAccepted: 3, unreviewed: 1, review: 'openlore decisions review' });
     expect(status.recent.map((e) => e.id)).toEqual(['d', 'c', 'b']);
   });

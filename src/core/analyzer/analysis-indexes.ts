@@ -25,6 +25,8 @@ import {
   resolveEmbedder,
 } from './embedder.js';
 import { readCurrentGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../runtime/analysis-generation.js';
+import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
+import { acquireAnalysisOwnership, isProcessAlive, runtimeDirOf } from '../runtime/analysis-ownership.js';
 import { mergeAnalysisPatterns } from './analysis-core.js';
 import { FileWalker } from './file-walker.js';
 import { SpecVectorIndex } from './spec-vector-index.js';
@@ -512,8 +514,30 @@ export async function buildBackgroundLocalVectors(
 ): Promise<'built' | 'skipped'> {
   if (!backgroundSemanticAllowed(config) || !localEmbedderInstalled()) return 'skipped';
   if (!VectorIndex.exists(outputPath) || indexCarriesLocalVectors(outputPath)) return 'skipped';
+  // One pass per repository: every session and repair starts one, and each embeds the whole
+  // corpus for minutes. A claim held by a live pass makes the others stand down; a dead one's
+  // is reclaimed.
+  const claim = await acquireLockAt(runtimeDirOf(outputPath), BACKGROUND_VECTORS_CLAIM, {
+    onContended: 'report',
+    isStale: (_mtimeMs, contents) => !isProcessAlive(Number.parseInt(contents, 10)),
+  });
+  if (isLockHeld(claim)) return 'skipped';
+  try {
+    return await buildClaimedLocalVectors(rootPath, outputPath, config);
+  } finally {
+    await claim.release();
+  }
+}
+
+const BACKGROUND_VECTORS_CLAIM = 'background-vectors.lock';
+
+async function buildClaimedLocalVectors(
+  rootPath: string,
+  outputPath: string,
+  config: OpenLoreConfig | null,
+): Promise<'built' | 'skipped'> {
   const { LocalEmbeddingService } = await import('./local-embedding-service.js');
-  const local = new LocalEmbeddingService();
+  const local = LocalEmbeddingService.shared();
   try {
     await local.embed(['openlore']);
   } catch {
@@ -550,10 +574,20 @@ export async function buildBackgroundLocalVectors(
   const scratch = await mkdtemp(join(tmpdir(), 'openlore-vectors-'));
   try {
     await VectorIndex.build(scratch, nodes, signatures, hubs, entries, recorder, fileContents, false, vocabularyExpansion, graph?.edges);
-    const after = await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
-    if (after?.generationId !== before.generationId) return 'skipped';
-    await VectorIndex.build(outputPath, nodes, signatures, hubs, entries, replay, fileContents, false, vocabularyExpansion, graph?.edges);
-    return 'built';
+    // The write, and the generation check it depends on, happen while this process owns the
+    // repository's analysis: a full analyze cannot publish a new graph in between, so the
+    // vectors always describe the graph that is published. A running analysis wins; the next
+    // build starts another pass.
+    const ownership = await acquireAnalysisOwnership(rootPath, outputPath, { stage: 'background-vectors' });
+    if (ownership.state !== 'owned') return 'skipped';
+    try {
+      const after = await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+      if (after?.generationId !== before.generationId) return 'skipped';
+      await VectorIndex.build(outputPath, nodes, signatures, hubs, entries, replay, fileContents, false, vocabularyExpansion, graph?.edges);
+      return 'built';
+    } finally {
+      await ownership.release();
+    }
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

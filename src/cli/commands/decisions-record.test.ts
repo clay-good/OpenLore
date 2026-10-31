@@ -163,7 +163,8 @@ describe('openlore decisions record', () => {
 
   // change: default-decision-autopilot-with-visible-trace
   describe('under decision autopilot (initialized repository, no gate, no API key)', () => {
-    const writeConfig = async (governance?: { autopilot?: boolean }) => {
+    // Auto-init writes `governance.autopilot: true` into the config it creates.
+    const writeConfig = async (governance: { autopilot?: boolean } = { autopilot: true }) => {
       await mkdir(join(dir, '.openlore'), { recursive: true });
       await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({
         version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
