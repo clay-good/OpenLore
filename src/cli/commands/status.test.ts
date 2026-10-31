@@ -82,6 +82,15 @@ describe('openlore status — what the index is', () => {
     expect(status.configuredProvider).toBeNull();
   });
 
+  it('names keyword chosen by configuration apart from the unconfigured default', async () => {
+    await withIndex(false);
+    await writeConfig({ provider: 'none' });
+
+    const status = await collectIndexStatus(root);
+
+    expect(status.keywordCause).toBe('keyword-by-configuration');
+  });
+
   it('reports the semantic mode and no keyword cause when vectors are present', async () => {
     await withIndex(true);
     await writeConfig({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'all-MiniLM-L6-v2' });
@@ -133,6 +142,28 @@ describe('openlore status — what the index is', () => {
     for (const entry of after) {
       expect((await stat(join(analysisDir, entry))).mtimeMs).toBe(before.get(entry));
     }
+  });
+
+  it('offers the optional semantic upgrade to a human, never in --json', async () => {
+    await withIndex(false);
+    await writeConfig(null);
+    const cwd = process.cwd();
+    const run = async (args: string[]): Promise<string> => {
+      const lines: string[] = [];
+      const log = console.log;
+      console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+      try {
+        process.chdir(root);
+        await statusCommand.parseAsync(['node', 'openlore', ...args]);
+      } finally {
+        console.log = log;
+        process.chdir(cwd);
+      }
+      return lines.join('\n');
+    };
+
+    expect(await run([])).toContain('openlore embed --local');
+    expect(await run(['--json'])).not.toContain('openlore embed');
   });
 
   it('emits the same fields through --json', async () => {

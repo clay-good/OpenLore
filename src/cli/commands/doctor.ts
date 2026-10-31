@@ -26,10 +26,13 @@ import { validateOpenLoreConfig } from '../../core/services/config-schema.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import type { Embedder } from '../../core/analyzer/embedding-service.js';
 import {
+  backgroundSemanticAllowed,
   indexCapabilityAgreement,
+  isKeywordRetrievalMode,
   resolveEmbedder,
   semanticProviderConfigured,
   servedRetrievalMode,
+  SEMANTIC_UPGRADE_HINT,
 } from '../../core/analyzer/embedder.js';
 import { readIndexReceipt } from '../../core/analyzer/analysis-indexes.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
@@ -1054,7 +1057,7 @@ export async function checkRetrievalMode(rootPath: string): Promise<CheckResult>
   let embedder: Embedder | null = null;
   // A resolver failure is not this check's verdict to render — the endpoint check owns
   // that — so it simply leaves the keyword default in place.
-  try { embedder = await resolveEmbedder(config); } catch { /* keyword default */ }
+  try { embedder = await resolveEmbedder(config, analysisDir); } catch { /* keyword default */ }
   const mode = servedRetrievalMode(embedder, analysisDir);
 
   if (!agreement.agrees && agreement.mismatch === 'configured-but-unrealized') {
@@ -1067,12 +1070,17 @@ export async function checkRetrievalMode(rootPath: string): Promise<CheckResult>
   }
 
   // A keyword index with nothing configured is the supported default, never a finding.
+  const unconfiguredDetail = !backgroundSemanticAllowed(config)
+    ? `serving ${mode} — keyword only, by configuration`
+    : isKeywordRetrievalMode(mode)
+      ? `serving ${mode} — no embedding provider configured (the first-class default); ${SEMANTIC_UPGRADE_HINT}`
+      : `serving ${mode} — vectors added by a background build; opt out with embedding.provider "none"`;
   return {
     name: 'Retrieval mode',
     status: failure ? 'warn' : 'ok',
     detail: configured
       ? `serving ${mode}${failureDetail}`
-      : `serving ${mode} — no embedding provider configured (the first-class default)${failureDetail}`,
+      : `${unconfiguredDetail}${failureDetail}`,
     ...(failure ? { fix: 'Re-run "openlore analyze" once the embedding provider is reachable' } : {}),
   };
 }

@@ -147,6 +147,8 @@ describe('buildIndexInChildProcess', () => {
     expect(calls.map(call => call.args)).toEqual([
       ['/openlore/dist/cli/index.js', 'init'],
       ['/openlore/dist/cli/index.js', 'analyze', '--embedded', '--partial-serving'],
+      // Local vectors follow the published keyword index, in a process nobody awaits.
+      ['/openlore/dist/cli/index.js', 'analyze', '--background-vectors'],
     ]);
     expect(calls.every(call => call.command === process.execPath)).toBe(true);
     expect(calls.every(call => (call.options as { detached: boolean }).detached)).toBe(true);
@@ -166,7 +168,7 @@ describe('buildIndexInChildProcess', () => {
           cliPath: '/openlore/dist/cli/index.js',
           spawnProcess: spawnHarness(calls),
         });
-        expect(calls.map(call => call.args[1])).toEqual(['init', 'analyze']);
+        expect(calls.map(call => call.args[1])).toEqual(['init', 'analyze', 'analyze']);
       }
     } finally {
       if (prior === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
@@ -188,6 +190,7 @@ describe('buildIndexInChildProcess', () => {
 
     expect(calls.map(call => call.args)).toEqual([
       ['/openlore/dist/cli/index.js', 'analyze', '--reanalyze', '--embedded', '--partial-serving'],
+      ['/openlore/dist/cli/index.js', 'analyze', '--background-vectors'],
     ]);
   });
 

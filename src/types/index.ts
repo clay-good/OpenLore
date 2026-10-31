@@ -288,10 +288,13 @@ export interface EmbeddingConfig {
    *    API key. The model is lazily downloaded and cached on first use. `model`
    *    is optional (defaults to a pinned small model); `baseUrl`/`apiKey` are
    *    ignored.
+   *  - `'none'`: keyword only. Opts out of the local vectors OpenLore otherwise adds in
+   *    the background, and wins over `EMBED_*` environment variables.
    * Omitting `provider` keeps the historical behaviour: a remote endpoint when
-   * `baseUrl` + `model` are present, otherwise no embeddings (keyword default).
+   * `baseUrl` + `model` are present, otherwise the keyword index, to which background
+   * builds add local vectors when the optional package is installed.
    */
-  provider?: 'remote' | 'local';
+  provider?: 'remote' | 'local' | 'none';
   /** Base URL of the OpenAI-compatible embeddings endpoint (remote provider) */
   baseUrl?: string;
   /** Embedding model name (required for remote; optional override for local) */

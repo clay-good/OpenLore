@@ -55,6 +55,7 @@ import {
 } from '../../core/analyzer/analysis-core.js';
 import {
   buildAnalysisIndexes,
+  buildBackgroundLocalVectors,
   buildSpecIndex,
   type IndexReport,
 } from '../../core/analyzer/analysis-indexes.js';
@@ -99,6 +100,11 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
    * single-write build.
    */
   partialServing?: boolean;
+  /**
+   * Internal: add local vectors to the published keyword index, and nothing else. Run
+   * detached by background builds (change: enable-local-semantic-search-in-background).
+   */
+  backgroundVectors?: boolean;
 }
 
 interface AnalysisResult {
@@ -363,6 +369,7 @@ export const analyzeCommand = new Command('analyze')
   // agent wiring itself, so analyze must not also print its agent-onboarding tips.
   .addOption(new Option('--embedded').hideHelp())
   .addOption(new Option('--partial-serving').hideHelp())
+  .addOption(new Option('--background-vectors').hideHelp())
   .addOption(new Option('--fresh-spec-directory').hideHelp())
   .addHelpText(
     'after',
@@ -440,6 +447,14 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       if (!openloreConfig) {
         logger.error('No openlore configuration found. Run "openlore init" first.');
         process.exitCode = 1;
+        return;
+      }
+
+      if (options.backgroundVectors) {
+        // Fail-soft and silent: the keyword index keeps serving whatever happens here.
+        try {
+          await buildBackgroundLocalVectors(rootPath, safeJoin(rootPath, OPENLORE_ANALYSIS_REL_PATH), openloreConfig);
+        } catch { /* keyword index unchanged */ }
         return;
       }
 

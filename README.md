@@ -183,7 +183,7 @@ We'd rather you know these up front.
 
 - **Static analysis only.** Polymorphic dispatch, event channels, and route→handler bindings *are* recovered (provenance-labeled `synthesized`). What isn't: reflective invocation with a non-literal target (`getattr(o, name)()`), `eval`, and DI/plugin registries with no visible binding — silently absent from the graph.
 - **LLM spec quality varies.** Generated spec *prose* reflects the model's understanding — review complex business logic. Structure, format, coverage, and drift are checked deterministically.
-- **Keyword (BM25) search is the default; semantic is an opt-in upgrade.** `orient`/`search_code` work immediately with no key. Add hybrid dense+BM25 with `openlore embed --local` (bundled, CPU-only, ~23 MB).
+- **Keyword (BM25) search answers first; local semantic follows in the background.** `orient`/`search_code` work immediately with no key. Background builds then add on-device vectors (CPU-only, ~23 MB model) when the optional package is installed; opt out with `"embedding": { "provider": "none" }`.
 - **Large monorepos** analyze one package at a time after the first full build (`openlore analyze --shard <name>`); the initial index is still a full analysis.
 - **Incremental updates converge or flag, never silently diverge.** When a change exceeds the per-save budget, the rest is marked explicitly stale and self-heals on later edits or a background re-analyze.
 

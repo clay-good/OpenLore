@@ -31,6 +31,22 @@ Two problems, one about trust and one about recall.
 - If the benchmark does not show a win, the default stays keyword, and the result is recorded in
   `docs/semantic-search.md`.
 
+## Measured (2026-10-31)
+
+`bench/retrieval/` (results: `bench/retrieval/results/2026-10-31.json`), queries asked through
+`orient`:
+
+| Corpus | Queries | recall@5 keyword+vocabulary → local-semantic | MRR | Build |
+|---|---|---|---|---|
+| OpenLore | 26 | 46.2% → 61.5% | 0.369 → 0.467 | 31 s → 438 s |
+| gridprims | 17 | 82.4% → 94.1% | 0.801 → 0.865 | 7 s → 57 s |
+| roughlogic.com | 16 | 43.8% → 50.0% | 0.446 → 0.415 | 19 s → 108 s |
+| All | 59 | 55.9% → 67.8% (+11.9) | 0.514 → 0.567 | |
+
+Recall@5 is up 11.9 points and up on every corpus, so the threshold is met and the background pass
+ships. The gain is on paraphrase queries. On roughlogic.com, MRR fell and one exact-identifier query
+left the top 5. The index is 5–16 MB larger.
+
 ## Capabilities
 
 ### Modified Capabilities

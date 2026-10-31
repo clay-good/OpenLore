@@ -505,11 +505,9 @@ describe('handleSearchSpecs — success path', () => {
     expect(result.error).toBeUndefined();
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.retrievalMode).toBe('keyword');
-    // First-class keyword default: the note states the mode + offers the
-    // semantic upgrade, never a degraded-fallback warning.
-    expect(result.note).toContain('Keyword (BM25)');
-    expect(result.note).toContain('embed --local');
-    expect(result.note).not.toContain('unavailable');
+    // First-class keyword default: the mode is reported with no upgrade advice to the agent.
+    expect(result.note).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('openlore embed');
     expect(result.results[0].scoreKind).toBe('bm25');
     expect(search).toHaveBeenCalledWith(expect.any(String), 'auth', null, expect.anything());
   });
@@ -566,7 +564,7 @@ describe('handleSearchSpecs — success path', () => {
 
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.retrievalMode).toBe('keyword');
-    expect(result.note).toContain('Keyword (BM25)');
+    expect(result.note).toBeUndefined();
   });
 
   it.each(['local-semantic', 'remote-semantic'] as const)(

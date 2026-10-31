@@ -193,6 +193,8 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     'wiringText',
     "label('Retrieval mode')",
     "cause ? c.dim(` \u2014 ${cause}`) : ''",
+    // A module constant naming the optional upgrade; no repository text.
+    'c.dim(SEMANTIC_UPGRADE_HINT)',
     "label('Configured provider')",
     "label('Configuration')",
     'c.yellow(\'unreadable \u2014 run "openlore doctor"\')',

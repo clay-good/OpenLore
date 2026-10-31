@@ -22,10 +22,12 @@ import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import type { Embedder } from '../../core/analyzer/embedding-service.js';
 import {
+  backgroundSemanticAllowed,
   indexCapabilityAgreement,
   resolveEmbedder,
   semanticProviderConfigured,
   servedRetrievalMode,
+  SEMANTIC_UPGRADE_HINT,
   type RetrievalMode,
 } from '../../core/analyzer/embedder.js';
 import { readIndexReceipt, type IndexEmbedFailure } from '../../core/analyzer/analysis-indexes.js';
@@ -45,7 +47,7 @@ const MAX_CHANGED_FILES_INSPECTED = 500;
  * unconfigured keyword index is the first-class default, a configured-but-unrealized one
  * is a finding.
  */
-export type KeywordCause = 'no-provider-configured' | 'configured-provider-unrealized' | null;
+export type KeywordCause = 'no-provider-configured' | 'configured-provider-unrealized' | 'keyword-by-configuration' | null;
 
 export interface IndexStatus {
   indexPresent: boolean;
@@ -176,14 +178,14 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   let embedder: Embedder | null = null;
   // A resolver failure leaves the keyword default in place; `doctor` is where a broken
   // provider is diagnosed, and `status` only reports what is being served.
-  try { embedder = await resolveEmbedder(config); } catch { /* keyword default */ }
+  try { embedder = await resolveEmbedder(config, analysisDir); } catch { /* keyword default */ }
   const retrievalMode = servedRetrievalMode(embedder, analysisDir);
   const configured = !configUnreadable && semanticProviderConfigured(config);
   const agreement = indexCapabilityAgreement(config, analysisDir);
   const keywordCause: KeywordCause = retrievalMode === 'keyword' || retrievalMode === 'keyword+vocabulary'
     ? (!agreement.agrees && agreement.mismatch === 'configured-but-unrealized'
       ? 'configured-provider-unrealized'
-      : 'no-provider-configured')
+      : !configUnreadable && !backgroundSemanticAllowed(config) ? 'keyword-by-configuration' : 'no-provider-configured')
     : null;
 
   const builtAt = meta?.builtAt ?? null;
@@ -220,6 +222,7 @@ function describeKeywordCause(cause: KeywordCause): string {
   if (cause === 'no-provider-configured') {
     return 'no embedding provider configured — the first-class default';
   }
+  if (cause === 'keyword-by-configuration') return 'keyword only, by configuration';
   return '';
 }
 
@@ -286,6 +289,10 @@ Read-only: this never builds, rebuilds, or locks the index.
 
     const cause = describeKeywordCause(status.keywordCause);
     console.log(`  ${label('Retrieval mode')} ${c.bold(safe(status.retrievalMode ?? 'unknown'))}${cause ? c.dim(` — ${cause}`) : ''}`);
+    // Text output only: `--json` is read by agents, and the hint is for a human.
+    if (status.keywordCause === 'no-provider-configured') {
+      console.log(`  ${' '.repeat(20)} ${c.dim(SEMANTIC_UPGRADE_HINT)}`);
+    }
     if (status.configuredProvider) {
       console.log(`  ${label('Configured provider')} ${safe(status.configuredProvider)}`);
     }

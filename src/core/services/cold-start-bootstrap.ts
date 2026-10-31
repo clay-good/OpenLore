@@ -552,6 +552,22 @@ export async function buildIndexInChildProcess(
     // that already has a published generation.
     '--partial-serving',
   ]);
+  // Keyword is published and serving; local vectors follow in a process nobody waits
+  // for (change: enable-local-semantic-search-in-background). It decides for itself
+  // whether to run — opt-out, package, model — and exits silently when it should not.
+  if (opts.mode !== 'degraded' && !childBuildsStopping) {
+    try {
+      const child = spawnProcess(process.execPath, [cliPath, 'analyze', '--background-vectors'], {
+        cwd: directory,
+        stdio: 'ignore',
+        detached: true,
+        windowsHide: true,
+        env: childEnvWithoutScopedTlsRelaxation(),
+      });
+      child.once('error', () => { /* fail-soft: keyword keeps serving */ });
+      child.unref();
+    } catch { /* fail-soft: keyword keeps serving */ }
+  }
 }
 
 /**

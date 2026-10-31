@@ -832,7 +832,7 @@ openlore analyze             # embedding is automatic when configured
 }
 ```
 
-- `provider`: `"local"` (on-device) or `"remote"` (default when `baseUrl`/`model` are set)
+- `provider`: `"local"` (on-device), `"remote"` (default when `baseUrl`/`model` are set), or `"none"` (keyword only: no background vectors, and wins over `EMBED_*`)
 - `batchSize`: Number of texts to embed per API call (default: 64)
 
 See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full retrieval-mode reference. The index is stored in `.openlore/analysis/vector-index/` and is automatically used by the viewer's search bar and the `search_code` / `suggest_insertion_points` MCP tools.
