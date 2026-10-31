@@ -27,6 +27,8 @@ export interface GitDiffOptions {
   baseRef: string;
   pathFilter?: string[];
   includeUnstaged: boolean;
+  /** Keep lockfiles and binaries that are skipped by default (the generated-file guard reads lockfiles). */
+  includeSkippable?: boolean;
 }
 
 export interface GitDiffResult {
@@ -1114,7 +1116,7 @@ export async function getChangedFiles(options: GitDiffOptions): Promise<GitDiffR
   // Build ChangedFile list
   const files: ChangedFile[] = [];
   for (const [path, { status, oldPath }] of fileMap) {
-    if (isSkippableFile(path)) continue;
+    if (!options.includeSkippable && isSkippableFile(path)) continue;
 
     const stats = numstatMap.get(path) ?? { additions: 0, deletions: 0 };
     const classification = classifyFile(path);

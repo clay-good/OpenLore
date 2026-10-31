@@ -14,6 +14,7 @@
  * → suggest_insertion_points manually.
  */
 
+import { classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
@@ -1058,6 +1059,16 @@ export async function handleOrient(
   // letting the agent read the missing symbols as genuinely absent. Absent on a clean repo.
   const parseHealthNote = parseHealthBoundary(await loadParseHealthReport(absDir), relevantFiles);
 
+  // Generated-file guard (change: add-generated-file-guard): mark the files in scope that are
+  // generated or vendored, with the literal source and regenerate command, so an agent edits the
+  // source instead of output the next generator run erases. Best-effort; absent when none are.
+  let generatedFiles: GeneratedFileFact[] = [];
+  try {
+    generatedFiles = [...(await classifyGeneratedFiles(absDir, relevantFiles)).facts.values()];
+  } catch {
+    // additive enrichment — never fail orient over the generated-file marks
+  }
+
   // Minimal-sufficient navigation core — always returned (Spec 27).
   const core = {
     task,
@@ -1078,6 +1089,7 @@ export async function handleOrient(
         } }
       : {}),
     relevantFiles,
+    ...(generatedFiles.length ? { generatedFiles } : {}),
     relevantFunctions,
     coverage,
     ...(emptyResult ? { emptyResult } : {}),

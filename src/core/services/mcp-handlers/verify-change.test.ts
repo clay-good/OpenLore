@@ -96,3 +96,35 @@ describe('projectVerifyReceipt', () => {
     expect(Array.isArray(r.items)).toBe(true);
   });
 });
+
+describe('projectVerifyReceipt — generated-file guard (add-generated-file-guard)', () => {
+  const guard = {
+    facts: [{
+      file: 'gen/order_pb.go', rule: 'header-marker' as const, matched: 'go-code-generated', kind: 'generated' as const,
+      generatedFrom: ['proto/order.proto'], regenerateWith: 'protoc --go_out=gen proto/order.proto', certainty: 'declared' as const,
+    }],
+    findings: [{
+      code: 'generated-file-edited', severity: 'warning' as const, source: 'generated-file-guard', subject: 'gen/order_pb.go',
+      message: 'gen/order_pb.go is generated (header-marker: go-code-generated) and was edited; its source proto/order.proto is not in the diff.',
+      location: { path: 'gen/order_pb.go' },
+    }],
+    boundaries: [],
+  };
+
+  it('projects each finding into an item that names the source and command, and returns the findings', () => {
+    const r = projectVerifyReceipt(briefing({}), {}, guard) as unknown as Receipt & { findings?: Array<{ code: string }> };
+    const item = r.items.find(i => i.check === 'generated_file_guard')!;
+    expect(item.severity).toBe('warning');
+    expect(item.nextAction).toContain('proto/order.proto');
+    expect(item.nextAction).toContain('`protoc --go_out=gen proto/order.proto`');
+    expect(r.summary.generatedFilesEdited).toBe(1);
+    expect(r.findings?.map(f => f.code)).toEqual(['generated-file-edited']);
+  });
+
+  it('a failed guard is a boundary, not a failed receipt', () => {
+    const r = projectVerifyReceipt(briefing({}), {}, { error: 'boom' }) as unknown as Receipt & { findings?: unknown };
+    expect(r.boundaries.some(b => b.includes('generated-file guard unavailable: boom'))).toBe(true);
+    expect(r.findings).toBeUndefined();
+    expect(r.summary.generatedFilesEdited).toBe(0);
+  });
+});

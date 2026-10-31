@@ -18,6 +18,7 @@
  * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
  */
 
+import { classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
 import { loadDecisionStore } from '../../decisions/store.js';
@@ -227,6 +228,11 @@ export interface BlastRadiusBriefing {
   injectedMemories?: InjectedMemory[];
   staleTriggeredMemories?: StaleTriggeredMemory[];
   injectedMemoriesNote?: string;
+  /**
+   * Changed files that are generated or vendored, with the rule that matched, their literal source,
+   * and regenerate command (change: add-generated-file-guard). Absent when none are.
+   */
+  generated?: GeneratedFileFact[];
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -438,6 +444,21 @@ export async function computeBlastRadius(
   // map to. Pinned notes belong to orient's briefing, not to a diff review.
   const memoryInjection = await triggeredMemoriesForDiff(absDir, ctx, cg, changedFiles, seeds.filter(s => !narrowed.unchangedSeedIds?.has(s.id)));
 
+  // ── 4c. Generated files in the diff (change: add-generated-file-guard) ──────
+  // Best-effort: a failed classification is a caveat, never a failed briefing.
+  let generated: GeneratedFileFact[] = [];
+  let generatedNote: string | null = null;
+  try {
+    const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const prefix = (await getRepoPrefix(absDir)) ?? '';
+    const live = diffEntries.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
+    const classified = await classifyGeneratedFiles(absDir, live);
+    generated = [...classified.facts.values()];
+    if (classified.boundaries.length) generatedNote = classified.boundaries.join(' ');
+  } catch (err) {
+    generatedNote = `Generated files could not be classified: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
   const caveats: string[] = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
@@ -464,6 +485,7 @@ export async function computeBlastRadius(
   if (driftUnavailable) {
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
   }
+  if (generatedNote) caveats.push(generatedNote);
   if (driftFilesOmitted > 0) {
     caveats.push(`Spec/memory drift omitted ${driftFilesOmitted} changed file${driftFilesOmitted === 1 ? '' : 's'} after reaching its analysis limit; absence of a finding does not cover those files.`);
   }
@@ -572,6 +594,7 @@ export async function computeBlastRadius(
     },
     federation,
     ...memoryInjection,
+    ...(generated.length ? { generated } : {}),
     headline: '',
     posture: 'advisory',
     caveats,
@@ -603,6 +626,8 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
   if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
+  const gen = b.generated?.length ?? 0;
+  if (gen > 0) parts.push(`${gen} generated or vendored file${gen === 1 ? '' : 's'} changed`);
   const pushed = b.injectedMemories?.length ?? 0;
   if (pushed > 0) parts.push(`${pushed} triggered memor${pushed === 1 ? 'y' : 'ies'} to read`);
   return parts.join('; ') + '.';
