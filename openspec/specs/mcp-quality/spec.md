@@ -1026,8 +1026,8 @@ while the agent is idle.
 
 #### Scenario: An old daemon survives the host restart after a package update
 
-- **GIVEN** a full-preset daemon exposing a prior version or tool surface and an extension from a newer release
-- **WHEN** Pi opens the project and discovers the missing tools
+- **GIVEN** a full-preset daemon whose authenticated health reports a version older than the installed extension
+- **WHEN** Pi opens the project and compares that reported version with its own
 - **THEN** the authenticated old daemon is gracefully stopped and replaced by a daemon exposing
   the installed extension's required tools, without a user command, PATH lookup, or manual process kill
 
@@ -1049,6 +1049,7 @@ while the agent is idle.
 - **GIVEN** a repository-bound daemon at the installed extension version with a narrower preset
 - **WHEN** Pi opens the project and discovers missing Pi tools
 - **THEN** it preserves the daemon and reports the explicit `/openlore restart` command to switch to Pi's full preset
+- **AND** it does not stop or replace the daemon automatically, because missing tools alone never trigger recovery
 
 #### Scenario: The announced listener cannot be authenticated for this repository
 
