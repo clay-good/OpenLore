@@ -22,7 +22,7 @@
     "openlore": "dist/cli/index.js"
   },
   "engines": {
-    "node": "^22.19.0 || >=23.5.0"
+    "node": "^22.22.0 || >=23.5.0"
   },
   "scripts": {
     "dev": "tsx watch src/cli/index.ts",

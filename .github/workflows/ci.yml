@@ -194,7 +194,7 @@ jobs:
         run: npm run test:integration:ci
 
   node-floor:
-    name: Node 22.19 Compatibility
+    name: Node 22.22 Compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -206,7 +206,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.19.0'
+          node-version: '22.22.0'
           cache: 'npm'
 
       - run: npm ci
