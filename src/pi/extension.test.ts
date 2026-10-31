@@ -1937,7 +1937,7 @@ describe('Pi footer status', () => {
     expect(h.last()).toBe('openlore: ready');
   });
 
-  it.each(['spawn-disabled', 'stop'] as const)(
+  it.each(['spawn-disabled', 'stop', 'unknown-preset'] as const)(
     'keeps serving a tool-complete older daemon it could not replace (%s)',
     async (failureKind) => {
       const older = { baseUrl: 'http://127.0.0.1:9', token: 't', autoRecoverable: true, restartPreset: 'full' };

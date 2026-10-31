@@ -1044,6 +1044,12 @@ while the agent is idle.
 - **THEN** it replaces the daemon using the same preset and the installed release's current tool definition
 - **AND** it reports any Pi tools that remain unavailable from that preset
 
+#### Scenario: The older daemon's preset is unknown to the installed release
+
+- **GIVEN** a repository-bound daemon with an older version whose reported preset the installed release does not define
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** it stops and starts no process, keeps using the verified daemon, and warns with the explicit `/openlore restart` command
+
 #### Scenario: A current-version preset omits Pi tools
 
 - **GIVEN** a repository-bound daemon at the installed extension version with a narrower preset

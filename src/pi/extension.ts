@@ -85,7 +85,7 @@ import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig } from '.
 // Functional readiness for the footer status. `health.ts` is kept dependency-light on purpose so
 // importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
 import { openloreHealth, readWatcherState, type HealthResult } from '../api/health.js';
-import { OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
+import { FULL_PRESET, FULL_PRESET_ALIAS, OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { runtimeDirOf } from '../core/runtime/analysis-ownership.js';
 import { OWNERSHIP_LOCK_FILE } from '../core/runtime/advisory-lock.js';
@@ -759,7 +759,7 @@ export type EnsureDaemonResult =
   | {
       daemon: null;
       failure: string;
-      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout' | 'spawn-disabled' | 'stop';
+      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout' | 'spawn-disabled' | 'stop' | 'unknown-preset';
     };
 
 export function shouldNegativeCacheDaemonFailure(
@@ -887,6 +887,14 @@ export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   return (await ensureDaemonResult(cwd)).daemon;
 }
 
+/** Whether the installed `serve` accepts this preset name (same rule as `runServe`). */
+async function isKnownServePreset(preset: string): Promise<boolean> {
+  if (preset === FULL_PRESET || preset === FULL_PRESET_ALIAS) return true;
+  // Lazy: the MCP registry is heavy and only this recovery path needs it.
+  const { TOOL_PRESETS } = await import('../cli/commands/mcp.js');
+  return Object.hasOwn(TOOL_PRESETS, preset);
+}
+
 /** Explicit user recovery, never automatic takeover of a shared daemon. */
 export async function restartPiDaemon(
   cwd: string,
@@ -904,6 +912,16 @@ export async function restartPiDaemon(
       failureKind: 'spawn-disabled',
       failure: 'OpenLore daemon restart is disabled by the host or pi.spawnDaemon. ' +
         'Restart or upgrade the daemon through the supervising host instead.',
+    };
+  }
+  // The reported preset comes from the OLD daemon; this release may have removed or renamed it.
+  // Stopping first would leave no daemon when the replacement then refuses the preset.
+  if (options.preset !== undefined && !(await isKnownServePreset(options.preset))) {
+    return {
+      daemon: null,
+      failureKind: 'unknown-preset',
+      failure: `The running daemon's preset is not known to this OpenLore release, so it was not ` +
+        'replaced automatically. Run /openlore restart in Pi to switch to the full preset.',
     };
   }
   const packaged = piDaemonSpawnCommand(cwd);
@@ -2165,9 +2183,13 @@ function registerOpenlore(
         return recordDaemonResult(cwd, recovered);
       }
       automaticRecoveryFailures.set(cwd, recovered.failure);
-      // Nothing was launched: a spawn opt-out or refused stop leaves the verified daemon in
+      // Nothing was launched: a spawn opt-out, unknown preset, or refused stop leaves the verified daemon in
       // place, so keep serving through it instead of reporting it absent.
-      if (recovered.failureKind === 'spawn-disabled' || recovered.failureKind === 'stop') {
+      if (
+        recovered.failureKind === 'spawn-disabled'
+        || recovered.failureKind === 'stop'
+        || recovered.failureKind === 'unknown-preset'
+      ) {
         return recordDaemonResult(cwd, result);
       }
       return recordDaemonResult(cwd, recovered);

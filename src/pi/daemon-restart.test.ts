@@ -116,6 +116,15 @@ describe('Pi daemon upgrade recovery', () => {
     expect(await readFile(path, 'utf8')).toBe(before);
   });
 
+  it('does not stop the daemon when its reported preset is unknown to this release', async () => {
+    await ensureDaemonResult(root, { launch: launch(root), timeoutMs: 5000 });
+    const path = join(root, '.openlore', 'serve.json');
+    const before = await readFile(path, 'utf8');
+    const result = await restartPiDaemon(root, { stop: stop(root), launch: launch(root), preset: 'removed-preset' });
+    expect(result).toMatchObject({ daemon: null, failureKind: 'unknown-preset' });
+    expect(await readFile(path, 'utf8')).toBe(before);
+  });
+
   it('does not launch a replacement when the stop process fails', async () => {
     const result = await restartPiDaemon(root, {
       stop: { command: process.execPath, args: ['-e', 'process.exit(7)'] },
