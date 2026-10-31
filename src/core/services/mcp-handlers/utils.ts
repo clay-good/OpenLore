@@ -16,11 +16,13 @@ import {
   readCurrentGeneration,
 } from '../../runtime/analysis-generation.js';
 import { isAnalysisLockHeld } from '../../runtime/advisory-lock.js';
+import { runtimeDirOf } from '../../runtime/analysis-ownership.js';
+import { atomicWriteFile } from '../../decisions/atomic-store.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, FINGERPRINT_BUDGET_OFFENDER_MIN_SHARE, FINGERPRINT_BUDGET_TOP_OFFENDERS, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
-import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
+import { canRepairInBackground, repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
 import { sanitizeForTerminal } from '../../../utils/misc.js';
 import { readPartialArtifact, readPartialIndexStamp } from '../../runtime/partial-index.js';
@@ -171,21 +173,81 @@ export function computeRepairReason(
 }
 
 /**
+ * Records the result of checking an aged analysis against its source, so the check runs once
+ * per analysis (when the source changed) or once per age window (when it did not), not on every
+ * read. It names the artifact mtime it is about: the next analyze rewrites the artifact, and the
+ * record then no longer applies.
+ */
+const FRESHNESS_VERIFIED_FILE = 'freshness-verified.json';
+
+interface SourceVerification { current: boolean; verifiedAtMs: number }
+
+/** The recorded check for the analysis whose artifact has this mtime, if any. */
+async function readSourceVerification(analysisDir: string, artifactMtimeMs: number): Promise<SourceVerification | undefined> {
+  try {
+    const read = await readArtifactBytesBounded(join(runtimeDirOf(analysisDir), FRESHNESS_VERIFIED_FILE));
+    if (read.state !== 'ok') return undefined;
+    const marker = JSON.parse(read.bytes.toString('utf8')) as { artifactMtimeMs?: unknown; verifiedAtMs?: unknown; current?: unknown };
+    if (marker.artifactMtimeMs !== artifactMtimeMs || typeof marker.verifiedAtMs !== 'number' || typeof marker.current !== 'boolean') return undefined;
+    // A record dated in the future is not evidence; it would silence the age check for good.
+    return marker.verifiedAtMs <= Date.now() ? { current: marker.current, verifiedAtMs: marker.verifiedAtMs } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record whether the analysis whose artifact has this mtime matched its source just now. */
+async function recordVerifiedCurrent(analysisDir: string, artifactMtimeMs: number, current: boolean): Promise<void> {
+  const marker = JSON.stringify({ artifactMtimeMs, verifiedAtMs: Date.now(), current });
+  await atomicWriteFile(join(runtimeDirOf(analysisDir), FRESHNESS_VERIFIED_FILE), marker).catch(() => {});
+}
+
+/** One content check per analysis at a time: concurrent cold reads share it. */
+const sourceChecks = new Map<string, Promise<boolean>>();
+
+function checkSourceUnchanged(directory: string, artifactMtimeMs: number): Promise<boolean> {
+  const key = JSON.stringify([directory, artifactMtimeMs]);
+  let check = sourceChecks.get(key);
+  if (!check) {
+    check = isCacheFresh(directory).catch(() => false).finally(() => sourceChecks.delete(key));
+    sourceChecks.set(key, check);
+  }
+  return check;
+}
+
+/**
  * Fire the shared at-most-once background repair for the strongest read-path
  * staleness signal, if any. Fires only when a repair builder is registered (the
  * MCP server); a no-op otherwise, so CLI/tests keep today's detection-only
- * behavior. Never throws, never blocks the read.
+ * behavior. Never throws, never blocks on the rebuild.
+ *
+ * Age alone does not make an index stale; a change to the source it describes does. So an
+ * aged analysis is first compared with the source by its content fingerprint (what
+ * `analyze` itself uses to skip an unchanged tree). When the source is unchanged, the index
+ * is current: nothing is rebuilt and no answer is disclosed as served from a stale index.
+ * Before this check, every index older than 24 hours was reported stale and force-rebuilt,
+ * however long the code had been unchanged, and agents that read "Served from a stale index"
+ * fell back to grep. The check runs only where a repair could follow it.
  */
-function maybeTriggerBackgroundRepair(
+async function maybeTriggerBackgroundRepair(
   directory: string,
+  analysisDir: string,
   integrityVerdict: string | undefined,
   schemaFault: boolean,
   staleCount: number,
   artifactMtimeMs: number,
-): void {
-  const reason = computeRepairReason(integrityVerdict, schemaFault, staleCount, artifactMtimeMs);
-  if (!reason) return;
+): Promise<void> {
   try {
+    const verification = await readSourceVerification(analysisDir, artifactMtimeMs);
+    const ageBase = verification?.current ? Math.max(artifactMtimeMs, verification.verifiedAtMs) : artifactMtimeMs;
+    const reason = computeRepairReason(integrityVerdict, schemaFault, staleCount, ageBase);
+    if (!reason) return;
+    // A recorded "source changed" for this analysis goes straight to repair, without re-hashing.
+    if (reason === 'analysis-age' && verification?.current !== false && canRepairInBackground()) {
+      const current = await checkSourceUnchanged(directory, artifactMtimeMs);
+      await recordVerifiedCurrent(analysisDir, artifactMtimeMs, current);
+      if (current) return;
+    }
     repairInBackground(directory, reason);
   } catch {
     // repairInBackground is fail-soft by contract; this guard is belt-and-braces
@@ -841,7 +903,7 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       // finally closes the loop into repair (change: make-index-self-healing). The
       // rebuild never blocks this read; the answer is served now and disclosed as
       // stale-with-refresh-started (see repairStatusFor callers).
-      maybeTriggerBackgroundRepair(directory, ctx.integrity?.verdict, schemaFault, staleCount, mtime);
+      await maybeTriggerBackgroundRepair(directory, analysisDir, ctx.integrity?.verdict, schemaFault, staleCount, mtime);
       // Evict + close the previous entry's EdgeStore — otherwise each cache miss
       // (every `analyze` rewrites llm-context.json's mtime) leaks an open SQLite
       // connection + its WAL fd for the life of a long-lived daemon. The close is
@@ -1141,12 +1203,18 @@ export async function isAnalysisCacheFresh(directory: string, analysisDir: strin
  */
 export async function isCacheFresh(directory: string): Promise<boolean> {
   const config = await import('../config-manager.js').then(module => module.readOpenLoreConfig(directory));
-  const configuration = {
-    includePatterns: [...new Set(config?.analysis?.includePatterns ?? [])],
-    excludePatterns: [...new Set(config?.analysis?.excludePatterns ?? [])],
-    maxFiles: DEFAULT_MAX_FILES,
-  };
-  return isAnalysisCacheFresh(directory, join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), configuration);
+  // The same fingerprint input `analyze` records (src/api/analyze.ts): anything else hashes a
+  // different configuration and can never match, so an unchanged tree would read as changed.
+  const { analysisConfigFingerprintInput, analysisGeneratedExcludes } = await import('../../analyzer/analysis-core.js');
+  const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const configuration = analysisConfigFingerprintInput(
+    config?.analysis,
+    [],
+    [],
+    DEFAULT_MAX_FILES,
+    analysisGeneratedExcludes(directory, analysisDir, config?.openspecPath),
+  );
+  return isAnalysisCacheFresh(directory, analysisDir, configuration);
 }
 
 // ============================================================================
