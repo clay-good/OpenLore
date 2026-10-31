@@ -5,6 +5,16 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- **Behavior change (Pi): the repository digest is now on-demand.** The Pi extension no longer
+  appends the architecture digest and spec-domain index to every turn; the agent calls
+  `openlore_orient` when it has a task. To restore the previous every-turn injection, set
+  `"pi": { "contextMode": "full" }` in `.openlore/config.json`. (#623)
+- **OpenSpec proposals are grounded in repository structure.** A recognized OpenSpec `propose`
+  prompt gets a short instruction to recover the user's decisions and call `orient` before
+  drafting, in Claude Code, Codex, and Pi. (#623)
+- **Codex support in `openlore install`/`connect`:** registers the OpenLore MCP server and a
+  managed proposal hook in `.codex/` (user or project scope). (#623)
+
 ## [3.5.0] - 2026-10-25
 
 **The index heals itself, and every change comes with a receipt.**
