@@ -46,12 +46,12 @@ const EXEMPT: { file: string; line: number; why: string }[] = [
   { file: 'src/cli/commands/serve.ts', line: 409, why: 'loopback http:// authenticated shutdown request' },
   { file: 'src/cli/commands/serve-descriptor.ts', line: 228, why: 'loopback http:// legacy liveness probe' },
   { file: 'src/api/health.ts', line: 115, why: 'loopback http:// watcher-state probe of an announced daemon' },
-  { file: 'src/pi/extension.ts', line: 661, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 988, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 2269, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 763, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 1090, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 2389, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
-    line: 237,
+    line: 339,
     why: 'pre-existing: the Pi host never opts in, so skipSslVerify is not honoured there at all',
   },
 ];

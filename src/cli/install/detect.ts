@@ -10,7 +10,7 @@ import { access, stat, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
-export type AgentName = 'claude-code' | 'cursor' | 'cline' | 'continue' | 'pi' | 'agents-md';
+export type AgentName = 'claude-code' | 'cursor' | 'cline' | 'continue' | 'pi' | 'codex' | 'agents-md';
 
 export const ALL_AGENTS: AgentName[] = [
   'claude-code',
@@ -18,6 +18,7 @@ export const ALL_AGENTS: AgentName[] = [
   'cline',
   'continue',
   'pi',
+  'codex',
   'agents-md',
 ];
 
@@ -101,6 +102,13 @@ async function detectInDir(dir: string): Promise<DetectedSurface[]> {
     if (markers.length) found.push({ agent: 'pi', root: dir, markers });
   }
 
+  // Codex project configuration directory.
+  {
+    const markers: string[] = [];
+    if (await isDir(join(dir, '.codex'))) markers.push('.codex/');
+    if (markers.length) found.push({ agent: 'codex', root: dir, markers });
+  }
+
   return found;
 }
 
@@ -131,6 +139,7 @@ export async function detect(startDir: string): Promise<DetectedSurface[]> {
     const homes: Array<[AgentName, string]> = [
       ['claude-code', '.claude'],
       ['pi', '.pi'],
+      ['codex', '.codex'],
     ];
     for (const [agent, homeDir] of homes) {
       if (await isDir(join(homedir(), homeDir))) {

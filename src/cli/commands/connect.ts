@@ -73,7 +73,7 @@ export const connectCommand = new Command('connect')
     'Connect OpenLore to a coding agent (idempotent): inject guidance, register the MCP server ' +
     'and SessionStart hook, and set the run permission. Omit the agent for an interactive picker.'
   )
-  .argument('[agent]', 'Agent to connect (claude-code, cursor, cline, continue, pi, agents-md)')
+  .argument('[agent]', 'Agent to connect (claude-code, cursor, cline, continue, pi, codex, agents-md)')
   .option('--preset <name>', `Wire the MCP server to a tool preset (navigation, substrate, minimal, memory, verify, federation, coordination, or full). Default (no preset) wires the "${LEAN_DEFAULT_PRESET}" surface — the navigation core, prepare_spec_generation + prepare_spec_repair, and the governance reads recall + verify_claim + blast_radius; "navigation" is the lean navigate-only escape; pass "full" to wire the full surface (the prior default).`)
   .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)

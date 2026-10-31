@@ -10,9 +10,9 @@ fresh while you edit.
 
 ## What you get
 
-- **Context injection** (no tool call needed): each session starts grounded with
-  the architecture digest (`CODEBASE.md`), the spec-domain index, and a
-  task-specific `orient` on your first message.
+- **On-demand structural context**: the default prompt does not repeat the repository
+  architecture digest or spec-domain index. The agent calls `openlore_orient` when it has a task.
+  Set `"pi": { "contextMode": "full" }` to restore the digest and spec index on every turn.
 - **Native tools**: a session starts with the same lean set Claude Code gets
   by default (the `substrate` preset) — `openlore_orient`,
   `openlore_search_code`, `openlore_get_subgraph`, `openlore_analyze_impact`,
@@ -21,7 +21,10 @@ fresh while you edit.
   it: `specs` (including `openlore_prepare_spec_generation` and
   `openlore_prepare_spec_repair`), `memory`, `review`, `quality`, or `inspect`. Set
   `"pi": { "toolSurface": "all" }` in `.openlore/config.json` to keep every tool
-  active.
+  active. If Pi's native `tool_search` is enabled before OpenLore loads, OpenLore
+  automatically keeps only `openlore_orient` and `openlore_search_code` visible;
+  use Pi's `tool_search` to discover and load specialist tools. OpenLore does not
+  enable or modify `tool_search` settings. `toolSurface: "all"` still takes precedence.
 - **Config wizard**: opt-in setup via `/openlore configure`
   slash command or `openlore_configure` tool.
 - **Footer status**: an `openlore:` entry in Pi's status bar says whether the
@@ -103,7 +106,7 @@ For example, a global file can contain:
 ```json
 {
   "generation": { "provider": "openai", "model": "your-model" },
-  "pi": { "toolSurface": "lean" },
+  "pi": { "contextMode": "on-demand" },
   "contextInjection": { "mode": "task-scoped" }
 }
 ```
@@ -191,5 +194,6 @@ curl -XPOST 127.0.0.1:$(jq .port .openlore/serve.json)/tool/orient \
   -d '{"args":{"task":"add rate limiting"}}'
 ```
 
-Then run Pi in the project and confirm the session opens with openlore context
-and that `openlore_orient` is callable.
+Then run Pi in the project and confirm `openlore_orient` is callable. For recognized OpenSpec
+proposal commands, the extension adds a short instruction to summarize the conversation and orient
+on the resulting brief.

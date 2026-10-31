@@ -5,17 +5,17 @@
  * `pi install npm:openlore` drops it into the Pi extension registry automatically.
  *
  * Two halves:
- *   C — context injection (before_agent_start): model starts grounded with the
- *       architecture digest + spec index. No orient call is made on the user's
- *       behalf: the first prompt may be a greeting, not a task, and no prompt
- *       heuristic tells them apart reliably. The agent calls openlore_orient
- *       itself once it has a task.
+ *   C — context injection (before_agent_start): repository-wide architecture/spec context is
+ *       opt-in (`pi.contextMode: "full"`). The default is on-demand; the agent calls
+ *       openlore_orient when it has a task. Recognized OpenSpec proposal invocations receive a
+ *       concise instruction to synthesize intent before orienting.
  *   B — native tools (registerTool): the substrate surface for on-demand structural
  *       queries — NAV_TOOLS spans navigate + change + remember + verify + governance,
  *       each round-tripping to the warm daemon via fetch. Every tool is registered, but a
  *       session starts with only the lean set active (the MCP `substrate` preset, the same
  *       default Claude Code gets); openlore_activate_tools turns on the task groups in
- *       PI_TOOL_GROUPS. `pi.toolSurface: "all"` keeps every tool active.
+ *       PI_TOOL_GROUPS. If the user enables Pi's native `tool_search`, specialist tools become
+ *       deferred and searchable; `pi.toolSurface: "all"` keeps every tool active.
  *       (change: add-pi-lean-tool-surface)
  *
  * Uses ctx.mode (0.78.1+): full injection in tui/rpc (interactive), none in
@@ -44,7 +44,7 @@ import { Markdown, Text } from '@earendil-works/pi-tui';
 import { Type, type TObject, type TSchema } from 'typebox';
 
 import { execFile, spawn } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
+import { openSync, closeSync, readFileSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -81,11 +81,12 @@ import {
   reviewedFileContentProvenance,
 } from '../core/services/served-content.js';
 import { safeJoin } from '../utils/path-confinement.js';
-import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig } from '../utils/config-layers.js';
+import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig, readLayeredConfigSync } from '../utils/config-layers.js';
 // Functional readiness for the footer status. `health.ts` is kept dependency-light on purpose so
 // importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
 import { openloreHealth, readWatcherState, type HealthResult } from '../api/health.js';
 import { FULL_PRESET, FULL_PRESET_ALIAS, OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
+import { proposalContextForPrompt } from '../cli/commands/proposal-context.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { runtimeDirOf } from '../core/runtime/analysis-ownership.js';
 import { OWNERSHIP_LOCK_FILE } from '../core/runtime/advisory-lock.js';
@@ -115,6 +116,7 @@ interface OpenLoreConfig {
   } | null;
   /** Task-scoped context injection settings (gate + token budget + opt-out). */
   contextInjection?: ContextInjectionConfig;
+  pi?: { contextMode?: PiContextMode; toolSurface?: PiToolSurface; spawnDaemon?: boolean };
   createdAt: string;
   lastRun: string | null;
 }
@@ -168,6 +170,20 @@ export async function piMaySpawnDaemon(cwd: string): Promise<boolean> {
 }
 
 export type PiToolSurface = 'lean' | 'all';
+export type PiSessionToolSurface = PiToolSurface | 'search';
+
+export type PiContextMode = 'on-demand' | 'full';
+
+/** Default Pi context mode avoids repeating repository-wide summaries on every turn. */
+export async function piContextMode(cwd: string): Promise<PiContextMode> {
+  try {
+    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
+    const pi = raw && typeof raw === 'object' ? (raw as { pi?: { contextMode?: unknown } | null }).pi : undefined;
+    return pi?.contextMode === 'full' ? 'full' : 'on-demand';
+  } catch {
+    return 'on-demand';
+  }
+}
 
 /**
  * Which OpenLore tools a Pi session starts with. Read like `piMaySpawnDaemon`, so it works before
@@ -182,6 +198,92 @@ export async function piToolSurface(cwd: string): Promise<PiToolSurface> {
   } catch {
     return 'lean';
   }
+}
+
+/** Read the initial surface synchronously so registration-time exposure honors `all`. */
+function piToolSurfaceAtLoad(cwd: string): PiToolSurface {
+  try {
+    const raw = readLayeredConfigSync(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
+    const pi = raw && typeof raw === 'object' ? (raw as { pi?: { toolSurface?: unknown } | null }).pi : undefined;
+    return pi?.toolSurface === 'all' ? 'all' : 'lean';
+  } catch {
+    return 'lean';
+  }
+}
+
+/** Resolve Pi's configured tool_search without calling runtime actions during extension loading. */
+function piToolSearchEnabledAtLoad(cwd: string): boolean {
+  const defaultTools = ['read', 'bash', 'edit', 'write'];
+  let entries: string[] | undefined;
+  const readDefaultTools = (path: string): string[] | undefined => {
+    try {
+      const settings = JSON.parse(readFileSync(path, 'utf-8')) as { defaultTools?: unknown };
+      return Array.isArray(settings.defaultTools) && settings.defaultTools.every((entry) => typeof entry === 'string')
+        ? settings.defaultTools
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const merge = (base: string[] | undefined, overrides: string[] | undefined): string[] | undefined => {
+    if (!overrides) return base;
+    return overrides.every((entry) => /^[+-][^*]+$/.test(entry))
+      ? [...(base ?? []), ...overrides]
+      : overrides;
+  };
+  const agentDir = process.env.PI_CODING_AGENT_DIR
+    ? process.env.PI_CODING_AGENT_DIR.replace(/^~/, homedir())
+    : join(homedir(), '.pi', 'agent');
+  entries = merge(entries, readDefaultTools(join(agentDir, 'settings.json')));
+  entries = merge(entries, readDefaultTools(safeJoin(cwd, join('.pi', 'settings.json'))));
+
+  const args = process.argv;
+  const noTools = args.some((arg) => arg === '--no-tools' || arg === '-nt' || arg === '--no-builtin-tools' || arg === '-nbt');
+  const resolved = noTools ? [] : (() => {
+    const configured = entries ?? defaultTools;
+    const plain = configured.filter((entry) => !/^[+-][^*]+$/.test(entry));
+    const selected = plain.length > 0 || configured.length === 0 ? plain : defaultTools;
+    for (const entry of configured) {
+      if (entry.startsWith('+') && !selected.includes(entry.slice(1))) selected.push(entry.slice(1));
+      if (entry.startsWith('-')) {
+        const index = selected.indexOf(entry.slice(1));
+        if (index >= 0) selected.splice(index, 1);
+      }
+    }
+    return selected;
+  })();
+  const readCliList = (flags: readonly string[]): string[] | undefined => {
+    for (let i = 0; i < args.length; i += 1) {
+      if (!flags.includes(args[i]) || !args[i + 1]) continue;
+      return args[i + 1].split(',').map((name) => name.trim()).filter(Boolean);
+    }
+    return undefined;
+  };
+  const cliTools = readCliList(['--tools', '-t']);
+  let selected = resolved;
+  if (cliTools) {
+    selected = cliTools.some((entry) => entry.startsWith('+') || entry.startsWith('-'))
+      ? (() => {
+          const next = [...resolved];
+          for (const entry of cliTools) {
+            const name = entry.slice(1);
+            const index = next.indexOf(name);
+            if (entry.startsWith('+') && index < 0) next.push(name);
+            if (entry.startsWith('-') && index >= 0) next.splice(index, 1);
+          }
+          return next;
+        })()
+      : cliTools;
+  }
+
+  // Escape every regex metacharacter but `*` (a glob wildcard): an unescaped `?` in a
+  // user-supplied pattern made `new RegExp` throw and took the whole extension load down.
+  const matches = (pattern: string): boolean => {
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`).test('tool_search');
+  };
+  const excluded = readCliList(['--exclude-tools', '-xt']) ?? [];
+  return selected.some(matches) && !excluded.some(matches);
 }
 
 async function writeConfig(cwd: string, config: OpenLoreConfig, global = false): Promise<void> {
@@ -1705,6 +1807,9 @@ export const PI_LEAN_TOOLS: readonly string[] = [
   'configure', 'activate_tools',
 ];
 
+/** Tools that stay directly visible when Pi's native tool_search is active. */
+export const PI_SEARCH_TOOLS: readonly string[] = ['orient', 'search_code'];
+
 // Substrate tools Pi keeps out of the lean set: an MCP host cannot turn a tool on
 // mid-session, but Pi can, so task-specific spec authoring waits in the `specs`
 // group instead of adding its descriptions to every prompt.
@@ -1743,14 +1848,14 @@ export function piRegisteredToolNames(): string[] {
  * tools the host had already turned off (`hostExcluded`) stay off.
  */
 export function piSessionActiveTools(
-  surface: PiToolSurface,
+  surface: PiSessionToolSurface,
   active: readonly string[],
   hostExcluded: ReadonlySet<string>,
 ): string[] {
   const registered = new Set(piRegisteredToolNames());
   const wanted = surface === 'all'
     ? [...registered].filter((name) => name !== PI_ACTIVATOR_TOOL)
-    : PI_LEAN_TOOLS.map((name) => PI_TOOL_PREFIX + name);
+    : (surface === 'search' ? PI_SEARCH_TOOLS : PI_LEAN_TOOLS).map((name) => PI_TOOL_PREFIX + name);
   return [
     ...active.filter((name) => !registered.has(name)),
     ...wanted.filter((name) => !hostExcluded.has(name)),
@@ -1817,8 +1922,9 @@ export function piActivatorDescription(): string {
  * `estimatePiStandingTokens`. Each entry records its measured baseline and bounded headroom, so
  * raising a budget changes both a number and its rationale (the STANDING_CONTEXT_BUDGETS pattern).
  */
-export const PI_STANDING_CONTEXT_BUDGETS: Record<PiToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
+export const PI_STANDING_CONTEXT_BUDGETS: Record<PiSessionToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
   lean: { baselineTokens: 2_789, maxTokens: 2_980, rationale: 'Shrank when spec authoring moved to the specs group; measured baseline plus 6.8% headroom.' },
+  search: { baselineTokens: 240, maxTokens: 300, rationale: 'Measured budget for orient and search_code; Pi tool_search loads specialized tools only when requested.' },
   all: { baselineTokens: 8_825, maxTokens: 9_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, and fleet_status (the moat/interop features); measured baseline plus 6.5% headroom.' },
 };
 
@@ -2167,14 +2273,28 @@ function registerOpenlore(
   let suppressed = new Set<string>();
   const hostSupportsActiveTools = (): boolean =>
     typeof pi.getActiveTools === 'function' && typeof pi.setActiveTools === 'function';
+  // Pi's tool_search is user-enabled. Read its settings/CLI selection here: runtime actions such
+  // as getActiveTools() are unavailable while extensions load.
+  const nativeToolSearchEnabled = hostSupportsActiveTools() && piToolSearchEnabledAtLoad(process.cwd());
+  const deferSpecialistTools = nativeToolSearchEnabled && piToolSurfaceAtLoad(process.cwd()) !== 'all';
+  const toolExposure = (name: string): 'direct' | 'deferred' =>
+    deferSpecialistTools && !PI_SEARCH_TOOLS.includes(name) ? 'deferred' : 'direct';
+  const isDirectOpenLoreTool = (name: string): boolean => {
+    const unprefixed = name.startsWith(PI_TOOL_PREFIX) ? name.slice(PI_TOOL_PREFIX.length) : name;
+    return !deferSpecialistTools || PI_SEARCH_TOOLS.includes(unprefixed);
+  };
   async function applyToolSurface(cwd: string): Promise<void> {
     if (!hostSupportsActiveTools()) return; // older host: every tool stays active
     try {
       const active = pi.getActiveTools();
       const activeSet = new Set(active);
       const registered = piRegisteredToolNames();
-      hostExcluded = new Set(registered.filter((name) => !activeSet.has(name) && !suppressed.has(name)));
-      const next = piSessionActiveTools(await piToolSurface(cwd), active, hostExcluded);
+      hostExcluded = new Set(registered.filter((name) => isDirectOpenLoreTool(name) && !activeSet.has(name) && !suppressed.has(name)));
+      const configuredSurface = await piToolSurface(cwd);
+      const surface: PiSessionToolSurface = nativeToolSearchEnabled && configuredSurface !== 'all'
+        ? 'search'
+        : configuredSurface;
+      const next = piSessionActiveTools(surface, active, hostExcluded);
       const nextSet = new Set(next);
       suppressed = new Set(registered.filter((name) => !nextSet.has(name) && !hostExcluded.has(name)));
       pi.setActiveTools(next);
@@ -2327,6 +2447,7 @@ function registerOpenlore(
       name: `openlore_${tool.name}`,
       label: tool.label,
       description: tool.description,
+      exposure: toolExposure(tool.name),
       promptSnippet: PI_TOOL_SNIPPETS[tool.name],
       promptGuidelines: [tool.guideline],
       parameters: tool.parameters as TSchema,
@@ -2376,6 +2497,7 @@ function registerOpenlore(
   pi.registerTool({
     name: 'openlore_prepare_spec_generation',
     label: 'openlore prepare spec generation',
+    exposure: toolExposure('prepare_spec_generation'),
     description: 'Prepare deterministic, domain-scoped code evidence for writing a new OpenSpec specification.',
     promptSnippet: 'Get deterministic evidence before writing a new specification.',
     promptGuidelines: ['When asked to create specs from existing code, call openlore_prepare_spec_generation first; write the specification yourself from its evidence.'],
@@ -2405,6 +2527,7 @@ function registerOpenlore(
   pi.registerTool({
     name: 'openlore_prepare_spec_repair',
     label: 'openlore prepare spec repair',
+    exposure: toolExposure('prepare_spec_repair'),
     description: 'Prepare evidence for repairing one existing OpenSpec domain: code coverage observations, its spec, mapping provenance, and drift.',
     promptSnippet: 'Get deterministic repair evidence before editing an existing specification.',
     promptGuidelines: ['When asked to repair an existing spec, call openlore_prepare_spec_repair first; interpret observations and edit the specification yourself.'],
@@ -2437,6 +2560,7 @@ function registerOpenlore(
   pi.registerTool({
     name: 'openlore_configure',
     label: 'openlore configure',
+    exposure: toolExposure('configure'),
     description: 'Open the openlore configuration wizard for project settings or user-wide defaults (global: true).',
     promptSnippet: 'Configure openlore settings (provider, model, API key, embedding).',
     promptGuidelines: ['Use openlore_configure to change the LLM provider, model, or embedding settings.'],
@@ -2459,6 +2583,7 @@ function registerOpenlore(
   pi.registerTool({
     name: PI_ACTIVATOR_TOOL,
     label: 'openlore activate tools',
+    exposure: toolExposure('activate_tools'),
     description: piActivatorDescription(),
     promptSnippet: 'Turn on more openlore tools by group or by tool name.',
     promptGuidelines: [
@@ -2598,31 +2723,38 @@ function registerOpenlore(
     if (ctx) setPiStatus(ctx, undefined);
   });
 
-  // ── C: context injection on every turn ──
-  // Pi restores its base system prompt for any turn whose hook returns nothing,
-  // so the digest is re-attached each turn rather than only on the first.
+  // ── C: context injection ──
+  // Keep the repository-wide digest opt-in: it is repeated standing context, while the orient tool
+  // provides task-specific evidence on demand. Proposal prompts get only a compact instruction.
   pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
     if (ctx.mode === 'json' || ctx.mode === 'print') return;
 
     const blocks: string[] = [];
-    const [analysisProvenance, specProvenance] = await Promise.all([
-      readAnalysisContentProvenance(ctx.cwd),
-      reviewedFileContentProvenance(ctx.cwd, 'openspec'),
-    ]);
-    const digest = await readDigest(ctx.cwd);
-    if (digest) blocks.push(frameServedContent(
-      '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
-      analysisProvenance,
-      'codebase architecture digest',
-    ));
-    const specIndex = await readSpecIndex(ctx.cwd);
-    if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
+    if (await piContextMode(ctx.cwd) === 'full') {
+      const [analysisProvenance, specProvenance] = await Promise.all([
+        readAnalysisContentProvenance(ctx.cwd),
+        reviewedFileContentProvenance(ctx.cwd, 'openspec'),
+      ]);
+      const digest = await readDigest(ctx.cwd);
+      if (digest) blocks.push(frameServedContent(
+        '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
+        analysisProvenance,
+        'codebase architecture digest',
+      ));
+      const specIndex = await readSpecIndex(ctx.cwd);
+      if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
+      if (blocks.length === 0) {
+        blocks.push('[openlore: no analysis found — run `openlore analyze` to enable structural context.]');
+      }
+    }
 
-    const suffix = blocks.length > 0
-      ? blocks.join('\n\n')
-      : '[openlore: no analysis found — run `openlore analyze` to enable structural context.]';
+    const proposalPrompt = event.messageType === 'user' ? event.prompt : '';
+    const proposalContext = proposalContextForPrompt(proposalPrompt, 'pi');
+    if (proposalContext) blocks.push(proposalContext);
 
-    return { systemPrompt: event.systemPrompt + '\n\n' + suffix };
+    if (blocks.length === 0) return;
+
+    return { systemPrompt: event.systemPrompt + '\n\n' + blocks.join('\n\n') };
   });
 }
 

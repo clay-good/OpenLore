@@ -23,7 +23,7 @@ import { withQuietStdout } from '../../utils/quiet-stdout.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
-import { buildInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
+import { buildInjection, buildProposalOnlyInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
 import {
   oneShotBuildNote,
   registerOneShotRepair,
@@ -44,6 +44,7 @@ interface OrientCliOptions {
   json?: boolean;
   metrics?: boolean;
   inject?: boolean;
+  proposalOnly?: boolean;
   backgroundBuild?: boolean;
   backgroundRepair?: boolean;
 }
@@ -89,12 +90,30 @@ async function runInject(
     } : undefined));
     // Outside any git work tree (e.g. $HOME) with no index, say nothing: "run openlore
     // analyze" on every prompt there invites an agent to index the whole directory.
-    if (block === pointerLineFor('no-graph') && silentWithoutIndex) return;
     // With a build in flight, "run openlore analyze" is the wrong remedy: say what is happening.
-    if (block) console.log(buildNote && block === pointerLineFor('no-graph') ? `[OpenLore] ${safe(buildNote)}` : block);
+    // A propose prompt may carry the proposal instruction after the pointer line; keep it.
+    let out = block;
+    const noGraph = pointerLineFor('no-graph');
+    if (out.startsWith(noGraph)) {
+      const rest = out.slice(noGraph.length).trim();
+      if (silentWithoutIndex) out = rest;
+      else if (buildNote) out = [`[OpenLore] ${safe(buildNote)}`, rest].filter(Boolean).join('\n\n');
+    }
+    if (out) console.log(out);
   } catch {
     // buildInjection is fail-open, but guard the print path too: never throw.
   }
+}
+
+/** Emit only the short OpenSpec proposal instruction; Codex gates the full task in its hook. */
+async function runProposalOnly(directory: string, taskOpt: string | undefined): Promise<void> {
+  let prompt = taskOpt ?? '';
+  if (!prompt) {
+    try { prompt = extractPrompt(await readStdin()); }
+    catch { prompt = ''; }
+  }
+  const context = await withQuietStdout(() => buildProposalOnlyInjection(directory, prompt));
+  if (context) console.log(context);
 }
 
 /**
@@ -247,6 +266,7 @@ export const orientCommand = new Command('orient')
   .option('--json', 'Emit the full result as JSON instead of a human-readable summary', false)
   .option('--metrics', 'Report wall time and output size to stderr (opt-in; off by default)', false)
   .option('--inject', 'Emit a bounded, ignorable task-scoped orientation block for a pre-turn agent hook (reads the task from --task or stdin); always exits 0', false)
+  .option('--proposal-only', 'Emit the concise OpenSpec proposal instruction only when the submitted prompt invokes propose; always exits 0', false)
   .addOption(new Option('--background-build').hideHelp())
   .addOption(new Option('--background-repair').hideHelp())
   .addHelpText(
@@ -272,6 +292,13 @@ prints a short session-start primer (used by the install SessionStart hook).
     // The detached supervisor a one-shot orient hands the build to (hidden).
     if (opts.backgroundBuild) {
       await runBackgroundIndexBuild(resolve(directory), { repair: opts.backgroundRepair });
+      return;
+    }
+
+    // Lightweight proposal trigger for hosts such as Codex whose prompt-submit hook matcher is
+    // ignored. It does no structural lookup and emits nothing for unrelated prompts.
+    if (opts.proposalOnly) {
+      await runProposalOnly(directory, task);
       return;
     }
 

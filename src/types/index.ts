@@ -123,6 +123,8 @@ export interface OpenLoreConfig {
 }
 
 export interface PiConfig {
+  /** Repository-wide architecture/spec context injection. Default `'on-demand'`; `'full'` restores every-turn injection. */
+  contextMode?: 'on-demand' | 'full';
   /**
    * Whether the Pi extension may spawn its own daemon when none is discovered. Default `true`.
    * Set to `false` when a supervising host already runs one daemon per working tree: an
@@ -134,8 +136,9 @@ export interface PiConfig {
   /**
    * Which OpenLore tools are active when a Pi session starts. Default `'lean'`: the tools of the
    * MCP `substrate` preset plus `openlore_configure` and `openlore_activate_tools`, which turns on
-   * the other tool groups on demand. `'all'` activates every OpenLore tool at session start
-   * (change: add-pi-lean-tool-surface).
+   * the other tool groups on demand. If the user has Pi's native `tool_search` active, OpenLore
+   * instead keeps only `orient` and `search_code` directly visible and defers specialist tools
+   * to search. `'all'` activates every OpenLore tool at session start (change: add-pi-lean-tool-surface).
    */
   toolSurface?: 'lean' | 'all';
 }

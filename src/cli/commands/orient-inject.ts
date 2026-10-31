@@ -22,6 +22,7 @@ import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { presetToolNames, resolveUserScopePreset, resolveWiredPreset } from '../../core/services/wired-preset.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { emit } from '../../core/services/telemetry.js';
+import { proposalContextForPrompt } from './proposal-context.js';
 import {
   INJECTION_DEFAULTS,
   classifyTurnIntent,
@@ -81,6 +82,21 @@ export function extractPrompt(stdin: string): string {
 }
 
 /**
+ * `orient --proposal-only` (the Codex prompt hook): the proposal instruction for a recognized
+ * OpenSpec propose prompt, or ''. Honors the same `contextInjection.mode: "off"` opt-out as
+ * `buildInjection`. Never throws.
+ */
+export async function buildProposalOnlyInjection(directory: string, prompt: string): Promise<string> {
+  try {
+    const loaded = await readOpenLoreConfig(directory);
+    if (resolveInjectionConfig(loaded?.contextInjection).mode === 'off') return '';
+  } catch {
+    // An unreadable config falls back to the defaults, as buildInjection does.
+  }
+  return proposalContextForPrompt(prompt) ?? '';
+}
+
+/**
  * Top-level injection builder. Returns the string to emit on stdout:
  *   - '' when injection is disabled (`mode: "off"`) — the caller emits nothing,
  *   - the full block when both gates pass,
@@ -97,6 +113,20 @@ export function extractPrompt(stdin: string): string {
  * invokes it cannot break the user's turn.
  */
 export async function buildInjection(
+  directory: string,
+  prompt: string,
+  onGateEvaluation?: (evaluation: RelevanceGateEvaluation) => void,
+): Promise<string> {
+  // A propose prompt keeps its normal task orientation; the proposal instruction is appended.
+  const [task, proposal] = await Promise.all([
+    buildTaskInjection(directory, prompt, onGateEvaluation),
+    buildProposalOnlyInjection(directory, prompt),
+  ]);
+  if (!proposal) return task;
+  return task ? `${task}\n\n${proposal}` : proposal;
+}
+
+async function buildTaskInjection(
   directory: string,
   prompt: string,
   onGateEvaluation?: (evaluation: RelevanceGateEvaluation) => void,

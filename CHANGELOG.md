@@ -5,6 +5,15 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- **Behavior change (Pi): the repository digest is now on-demand.** The Pi extension no longer
+  appends the architecture digest and spec-domain index to every turn; the agent calls
+  `openlore_orient` when it has a task. To restore the previous every-turn injection, set
+  `"pi": { "contextMode": "full" }` in `.openlore/config.json`. (#623)
+- **OpenSpec proposals are grounded in repository structure.** A recognized OpenSpec `propose`
+  prompt gets a short instruction to recover the user's decisions and call `orient` before
+  drafting, in Claude Code, Codex, and Pi. (#623)
+- **Codex support in `openlore install`/`connect`:** registers the OpenLore MCP server and a
+  managed proposal hook in `.codex/` (user or project scope). (#623)
 - **The minimum supported Node.js version is now 22.22** (`^22.22.0 || >=23.5.0`), matching
   the file watcher's new floor (chokidar 6). On Node 22.19–22.21 the CLI now exits with code 78
   and asks you to upgrade. (#620)
