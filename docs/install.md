@@ -30,7 +30,8 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 
 | Scope | Files (Claude Code) | Effect |
 |-------|---------------------|--------|
-| **user** (default) | `~/.claude.json` (`mcpServers.openlore`), `~/.claude/settings.json` (hooks + `Bash(openlore:*)`), `~/.claude/CLAUDE.md` | every repository you open reaches OpenLore |
+| **user** (default) | `~/.claude.json` (`mcpServers.openlore`), `~/.claude/settings.json` (hooks + status line + `Bash(openlore:*)`), `~/.claude/CLAUDE.md` | every repository you open reaches OpenLore |
+| **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json` (hooks), `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
 
 The user scope is written for every adapter that *has* one, not only for adapters detected in the
 current directory — that is what makes "install once" true in a repository whose markers belong to
@@ -39,7 +40,6 @@ you do not use Claude Code. `--repo-only`, or `--agent <name>`, avoids that.
 
 `OPENLORE_HOME` and `OPENLORE_SETTINGS_RUNTIME_DIR` relocate the user scope and its lock/journal
 directory respectively.
-| **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
 
 Adapters with no user-scope surface (`cursor`, `cline`, `continue`, `pi`, `agents-md`) are wired
 per repository and named as such in the summary — an honest note, never a failure.
@@ -59,6 +59,24 @@ default** — pass `--user-scope` to remove the machine-wide entries too.
 
 `OPENLORE_HOME` overrides where the user scope is written (sandboxes, CI images, containers whose
 `$HOME` is not the profile you mean to configure).
+
+### Claude Code status line
+
+When `openlore install` wires Claude Code's user scope, it also sets Claude's custom status line
+(`~/.claude/settings.json` `statusLine`) to run `openlore statusline --installed-by-openlore`. The
+command reports the search-index state of the session's project directory: green when current,
+yellow when missing, stale, or unknown, and red when degraded. It is never written to a
+repository's shared `.claude/settings.json`, which would override every teammate's own status line.
+If `statusLine` is already set, install keeps it and prints a hint instead; call the unmarked
+`openlore statusline` from your own status-line script to show both. Re-running install refreshes
+the OpenLore status line, and uninstall removes only that one (identified by
+`--installed-by-openlore`).
+
+Claude Code documents custom shell-command status lines and ANSI color output in its
+[status-line guide](https://code.claude.com/docs/en/statusline). Codex CLI's
+[`/statusline` command](https://learn.chatgpt.com/docs/developer-commands#configure-footer-items-with-statusline)
+currently selects and orders built-in footer fields; it does not expose a custom command or text
+item, so OpenLore cannot add a dynamic readiness indicator there.
 
 ### Background auto-init, and its guardrails
 
