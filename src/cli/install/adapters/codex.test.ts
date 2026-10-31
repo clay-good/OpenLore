@@ -24,7 +24,8 @@ async function context(root?: string): Promise<ApplyContext> {
 }
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  // A root can be pushed twice (by the test and by context()); concurrent rm of one dir is EPERM on Windows.
+  await Promise.all([...new Set(roots.splice(0))].map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe('Codex install adapter', () => {
