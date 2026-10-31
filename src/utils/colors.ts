@@ -37,9 +37,13 @@ export function colorForStderr(): ChalkInstance {
  * instance would disable color even though its consumer renders ANSI styles.
  */
 export function colorForCapturedStdout(): ChalkInstance {
-  return logger.getOptions().noColor || process.env.NO_COLOR !== undefined
-    ? plain
-    : new Chalk({ level: 1 });
+  // no-color.org: NO_COLOR disables color only when set to a non-empty value.
+  // FORCE_COLOR=0 is chalk's own "off" switch, honored here as on the TTY path.
+  const off = logger.getOptions().noColor
+    || !!process.env.NO_COLOR
+    || process.env.FORCE_COLOR === '0'
+    || process.env.FORCE_COLOR === 'false';
+  return off ? plain : new Chalk({ level: 1 });
 }
 
 /**

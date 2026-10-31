@@ -31,7 +31,7 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 | Scope | Files (Claude Code) | Effect |
 |-------|---------------------|--------|
 | **user** (default) | `~/.claude.json` (`mcpServers.openlore`), `~/.claude/settings.json` (hooks + status line + `Bash(openlore:*)`), `~/.claude/CLAUDE.md` | every repository you open reaches OpenLore |
-| **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json` (hooks + status line), `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
+| **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json` (hooks), `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
 
 The user scope is written for every adapter that *has* one, not only for adapters detected in the
 current directory — that is what makes "install once" true in a repository whose markers belong to
@@ -62,13 +62,15 @@ default** — pass `--user-scope` to remove the machine-wide entries too.
 
 ### Claude Code status line
 
-When `openlore install` wires Claude Code, it also configures Claude's custom status line to run
-`openlore statusline --installed-by-openlore`. The command reports the repository's search-index
-state: green when current, yellow when missing, stale, or unknown, and red when degraded. It reads
-Claude's current working directory from the status-line input. If `statusLine` is already
-configured, install preserves it and prints a hint instead of replacing it; combine
-`openlore statusline --installed-by-openlore` with your own status-line script if you want both
-indicators. Uninstall removes only the status line OpenLore installed.
+When `openlore install` wires Claude Code's user scope, it also sets Claude's custom status line
+(`~/.claude/settings.json` `statusLine`) to run `openlore statusline --installed-by-openlore`. The
+command reports the search-index state of the session's project directory: green when current,
+yellow when missing, stale, or unknown, and red when degraded. It is never written to a
+repository's shared `.claude/settings.json`, which would override every teammate's own status line.
+If `statusLine` is already set, install keeps it and prints a hint instead; call the unmarked
+`openlore statusline` from your own status-line script to show both. Re-running install refreshes
+the OpenLore status line, and uninstall removes only that one (identified by
+`--installed-by-openlore`).
 
 Claude Code documents custom shell-command status lines and ANSI color output in its
 [status-line guide](https://code.claude.com/docs/en/statusline). Codex CLI's
