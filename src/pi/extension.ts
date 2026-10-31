@@ -731,25 +731,24 @@ function isOlderPackageVersion(candidate: string, current: string): boolean {
 function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   const missing = missingDaemonTools(health.tools, NAV_TOOLS.map((tool) => tool.name));
   const olderVersion = health.version !== undefined && isOlderPackageVersion(health.version, OPENLORE_PACKAGE_VERSION);
-  const incompatible = missing.length > 0 || olderVersion;
+  // An older version alone is not an incompatibility: a tool-complete daemon stays usable when it
+  // cannot be replaced (spawn opt-out, refused stop) rather than locking Pi out entirely.
   const autoRecoverable = olderVersion;
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
-    ...(incompatible
+    ...(autoRecoverable ? { autoRecoverable: true, restartPreset: health.preset } : {}),
+    ...(missing.length > 0
       ? {
           incompatibility:
             (olderVersion
               ? `The running daemon version ${health.version} is older than the installed extension version ${OPENLORE_PACKAGE_VERSION}. `
               : '') +
-            (missing.length > 0
-              ? `It also does not expose ${missing.length} Pi tool(s), including ${missing.slice(0, 3).join(', ')}. `
-              : '') +
+            `It does not expose ${missing.length} Pi tool(s), including ${missing.slice(0, 3).join(', ')}. ` +
             (autoRecoverable
               ? 'Automatic recovery could not replace it; run /openlore restart in Pi to retry. '
               : 'The current preset omits Pi tools; run /openlore restart in Pi to switch to the full preset. ') +
             'If externally supervised, restart it through the supervising host instead.',
-          ...(autoRecoverable ? { autoRecoverable: true, restartPreset: health.preset } : {}),
         }
       : {}),
   };
@@ -2140,7 +2139,7 @@ function registerOpenlore(
   // meanwhile share it instead of each spawning or probing the daemon.
   const pendingDaemons = new Map<string, Promise<Daemon | null>>();
   const automaticRecoveryAttempts = new Set<string>();
-  const automaticRecoveryFailures = new Set<string>();
+  const automaticRecoveryFailures = new Map<string, string>();
   async function getDaemon(cwd: string): Promise<Daemon | null> {
     const pending = pendingDaemons.get(cwd);
     if (pending) return pending;
@@ -2159,8 +2158,16 @@ function registerOpenlore(
       // unverified listeners and host-supervised daemons.
       automaticRecoveryAttempts.add(cwd);
       const recovered = await restartDaemon(cwd, result.daemon.restartPreset);
-      if (recovered.daemon) automaticRecoveryFailures.delete(cwd);
-      else automaticRecoveryFailures.add(cwd);
+      if (recovered.daemon) {
+        automaticRecoveryFailures.delete(cwd);
+        return recordDaemonResult(cwd, recovered);
+      }
+      automaticRecoveryFailures.set(cwd, recovered.failure);
+      // Nothing was launched: a spawn opt-out or refused stop leaves the verified daemon in
+      // place, so keep serving through it instead of reporting it absent.
+      if (recovered.failureKind === 'spawn-disabled' || recovered.failureKind === 'stop') {
+        return recordDaemonResult(cwd, result);
+      }
       return recordDaemonResult(cwd, recovered);
     }
     return recordDaemonResult(cwd, result);
@@ -2513,8 +2520,10 @@ function registerOpenlore(
     const daemon = await getDaemon(ctx.cwd).catch(() => null);
     if (!sessionActive || generation !== sessionGeneration) return;
     if (ctx.hasUI && daemon?.incompatibility) ctx.ui.notify(daemon.incompatibility, 'warning');
-    if (ctx.hasUI && automaticRecoveryFailures.delete(ctx.cwd)) {
-      ctx.ui.notify(daemonFailures.get(ctx.cwd) ?? 'Automatic OpenLore daemon recovery failed.', 'warning');
+    const recoveryFailure = automaticRecoveryFailures.get(ctx.cwd);
+    if (ctx.hasUI && recoveryFailure !== undefined) {
+      automaticRecoveryFailures.delete(ctx.cwd);
+      ctx.ui.notify(recoveryFailure, 'warning');
     }
     startKeepalive();
     await refreshStatus(ctx);

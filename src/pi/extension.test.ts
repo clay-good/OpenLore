@@ -1926,6 +1926,34 @@ describe('Pi footer status', () => {
     expect(spawnOff.last()).toBe('openlore: daemon not started (spawn disabled)');
   });
 
+  it('replaces an older daemon once, reusing its preset', async () => {
+    const older = { baseUrl: 'http://127.0.0.1:9', token: 't', autoRecoverable: true, restartPreset: 'full' };
+    const resolveDaemon = vi.fn(async () => ({ daemon: older } as Awaited<ReturnType<Resolve>>));
+    const restartDaemon = vi.fn(async () => ({ daemon: { baseUrl: 'http://127.0.0.1:10', token: 't' } }));
+    const h = statusHarness({ readHealth: async () => health('ready', 'healthy'), resolveDaemon, restartDaemon });
+    await h.start();
+    expect(restartDaemon).toHaveBeenCalledTimes(1);
+    expect(restartDaemon).toHaveBeenCalledWith(dir, 'full');
+    expect(h.last()).toBe('openlore: ready');
+  });
+
+  it.each(['spawn-disabled', 'stop'] as const)(
+    'keeps serving a tool-complete older daemon it could not replace (%s)',
+    async (failureKind) => {
+      const older = { baseUrl: 'http://127.0.0.1:9', token: 't', autoRecoverable: true, restartPreset: 'full' };
+      const restartDaemon = vi.fn(async () => ({ daemon: null, failureKind, failure: 'host owns it' }));
+      const h = statusHarness({
+        readHealth: async () => health('ready', 'healthy'),
+        resolveDaemon: async () => ({ daemon: older } as Awaited<ReturnType<Resolve>>),
+        restartDaemon,
+      });
+      await h.start();
+      expect(restartDaemon).toHaveBeenCalledTimes(1);
+      expect(h.last()).toBe('openlore: ready');
+      expect(h.notify).toHaveBeenCalledWith('host owns it', 'warning');
+    },
+  );
+
   it('refreshes after an agent run as readiness changes', async () => {
     let current = health('building');
     const h = statusHarness({ readHealth: async () => current, resolveDaemon: usable });

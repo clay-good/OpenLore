@@ -11,7 +11,7 @@ const fixture = `
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
-const [root, toolsJson, wrongRoot] = process.argv.slice(1);
+const [root, toolsJson, wrongRoot, version] = process.argv.slice(1);
 const tools = JSON.parse(toolsJson);
 const descriptorPath = path.join(root, '.openlore', 'serve.json');
 const token = 'fixture-private-token';
@@ -27,7 +27,8 @@ const server = http.createServer((req, res) => {
   }
   res.end(JSON.stringify({ ok: true, protocolVersion: 1, presetDispatchEnforced: true,
     root: wrongRoot || root, pid: process.pid, preset: 'full', tools,
-    tokenProtected: true, tokenAuthenticated: true, draining: false }));
+    tokenProtected: true, tokenAuthenticated: true, draining: false,
+    ...(version ? { version } : {}) }));
 });
 server.listen(0, '127.0.0.1', () => {
   fs.writeFileSync(descriptorPath, JSON.stringify({ port: server.address().port,
@@ -58,8 +59,8 @@ describe('Pi daemon upgrade recovery', () => {
   });
 
   const tools = NAV_TOOLS.map((tool) => tool.name);
-  const launch = (root: string, available = tools, wrongRoot = '') => ({
-    command: process.execPath, args: ['-e', fixture, root, JSON.stringify(available), wrongRoot],
+  const launch = (root: string, available = tools, wrongRoot = '', version = '') => ({
+    command: process.execPath, args: ['-e', fixture, root, JSON.stringify(available), wrongRoot, version],
   });
   const stop = (root: string) => ({
     command: process.execPath,
@@ -79,6 +80,20 @@ describe('Pi daemon upgrade recovery', () => {
     expect(result.daemon).not.toBeNull();
     expect(isUsableDaemon(result.daemon!)).toBe(true);
     expect(JSON.parse(await readFile(path, 'utf8')).pid).not.toBe(before.pid);
+  });
+
+  it('keeps a tool-complete older daemon usable while marking it for replacement', async () => {
+    const result = await ensureDaemonResult(root, { launch: launch(root, tools, '', '0.0.1'), timeoutMs: 5000 });
+    expect(result.daemon).toMatchObject({ autoRecoverable: true, restartPreset: 'full' });
+    expect(isUsableDaemon(result.daemon!)).toBe(true);
+  });
+
+  it('names the older version when it also lacks Pi tools', async () => {
+    const result = await ensureDaemonResult(root, {
+      launch: launch(root, tools.slice(1), '', '0.0.1'), timeoutMs: 5000,
+    });
+    expect(result.daemon).toMatchObject({ autoRecoverable: true });
+    expect(result.daemon?.incompatibility).toContain('version 0.0.1 is older');
   });
 
   it.each(['environment', 'config'])('does not stop or replace a supervised daemon (%s)', async (source) => {

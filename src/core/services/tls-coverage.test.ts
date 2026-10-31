@@ -47,8 +47,8 @@ const EXEMPT: { file: string; line: number; why: string }[] = [
   { file: 'src/cli/commands/serve-descriptor.ts', line: 228, why: 'loopback http:// legacy liveness probe' },
   { file: 'src/api/health.ts', line: 115, why: 'loopback http:// watcher-state probe of an announced daemon' },
   { file: 'src/pi/extension.ts', line: 659, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 948, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 2209, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 947, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 2216, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
     line: 237,
