@@ -402,7 +402,7 @@ class SourceResolver {
   async isFile(rel: string): Promise<boolean> {
     const cached = this.fileCache.get(rel);
     if (cached !== undefined) return cached;
-    let ok = false;
+    let ok: boolean;
     try {
       const abs = safeJoin(this.root, rel);
       const handle = await open(abs, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -505,7 +505,7 @@ class SourceResolver {
     const entries: ConfigEntry[] = [];
     const join = (name: string) => (dir ? `${dir}/${name}` : name);
 
-    let names: string[] = [];
+    let names: string[];
     try {
       names = (await readdir(safeJoin(this.root, dir || '.'))).sort();
     } catch { names = []; }
@@ -560,7 +560,7 @@ class SourceResolver {
     if (this.workflowEntries) return this.workflowEntries;
     const entries: ConfigEntry[] = [];
     const wfDir = '.github/workflows';
-    let names: string[] = [];
+    let names: string[];
     try { names = (await readdir(safeJoin(this.root, wfDir))).filter(n => /\.ya?ml$/.test(n)).sort(); } catch { names = []; }
     for (const name of names) {
       const rel = `${wfDir}/${name}`;
