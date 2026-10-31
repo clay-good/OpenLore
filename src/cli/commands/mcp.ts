@@ -2984,10 +2984,22 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           // the session warms up on its own. Non-blocking and fail-soft. We inject
           // install's full buildIndex (init + analyze + BM25 search index, no API
           // key) so orient is warmed to full parity, not just the structural graph.
-          const { bootstrapAnalysisInBackground } = await import('../../core/services/cold-start-bootstrap.js');
-          bootstrapAnalysisInBackground(resolve(dir), {
-            analyze: buildIndexInChildProcess,
-          });
+          const { bootstrapAnalysisInBackground, hasAnalysis, repairInBackground } = await import('../../core/services/cold-start-bootstrap.js');
+          // A new worktree first copies a sibling checkout's verified index, awaited so this
+          // very call answers from it; the rebuild then reuses its per-file memo
+          // (change: seed-worktree-index-from-sibling-checkout).
+          const { seedFromSiblingCheckout, servingSeededIndex } = await import('../../core/runtime/seed-from-sibling.js');
+          const root = resolve(dir);
+          if (!hasAnalysis(root) && !autoInitSuppression(root)) await seedFromSiblingCheckout(root);
+          if (await servingSeededIndex(root)) {
+            repairInBackground(root, 'seeded', {
+              analyze: (d, buildOpts) => buildIndexInChildProcess(d, { repair: true, mode: buildOpts?.mode }),
+            });
+          } else {
+            bootstrapAnalysisInBackground(root, {
+              analyze: buildIndexInChildProcess,
+            });
+          }
           const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
           const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
           const watchConfig = await readOpenLoreConfig(resolve(dir));

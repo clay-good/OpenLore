@@ -47,8 +47,9 @@ import { releaseContextCache, validateDirectory, waitForGraphRebuild } from '../
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
-import { registerRepairHost, registerRepairBuilder, hasAnalysis, autoInitSuppression } from '../../core/services/cold-start-bootstrap.js';
+import { registerRepairHost, registerRepairBuilder, hasAnalysis, autoInitSuppression, repairInBackground } from '../../core/services/cold-start-bootstrap.js';
 import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
+import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
 import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
@@ -1035,7 +1036,18 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       // build outlives this daemon's lifetime; it self-suppresses outside a git work tree or
       // when auto-init is opted out. `stale-region` when an analysis exists but its graph store
       // is missing (a partial/interrupted build), `index-absent` for a truly fresh repo.
-      if (!autoInitSuppression(root)) {
+      // A new worktree first copies a sibling checkout's verified index and rebuilds over it
+      // (change: seed-worktree-index-from-sibling-checkout).
+      const autoInitAllowed = !autoInitSuppression(root);
+      if (autoInitAllowed && !hasAnalysis(root)) await seedFromSiblingCheckout(root);
+      if (autoInitAllowed && await servingSeededIndex(root)) {
+        repairInBackground(root, 'seeded', {
+          analyze: async dir => {
+            triggerRebuild(dir);
+            await rebuildPromises.get(dir);
+          },
+        });
+      } else if (autoInitAllowed) {
         const build = startDetachedIndexBuild(root, hasAnalysis(root) ? 'stale-region' : 'index-absent');
         if (build.state === 'started') {
           logger.discovery('[serve] No call-graph index — building it in the background (non-blocking, no API key).');

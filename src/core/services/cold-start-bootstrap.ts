@@ -49,7 +49,8 @@ export type RepairReason =
   | 'stale-region'
   | 'schema-reset'
   | 'analysis-age'
-  | 'artifact-unservable';
+  | 'artifact-unservable'
+  | 'seeded';
 
 /** Human-facing label for each reason, used in the "refresh started" disclosure. */
 export const REPAIR_REASON_DETAIL: Record<RepairReason, string> = {
@@ -60,6 +61,7 @@ export const REPAIR_REASON_DETAIL: Record<RepairReason, string> = {
   'schema-reset': 'the index schema was reset by a version upgrade',
   'analysis-age': 'the analysis is older than the freshness threshold',
   'artifact-unservable': 'an analysis artifact is present but could not be served (corrupt, or a lost/refused generation publish)',
+  'seeded': 'the index was copied from another checkout of this repository',
 };
 
 /** Directories already repaired (or in flight) this process — build at most once each. */
@@ -702,8 +704,30 @@ export function repairDisclosureText(reason: RepairReason): string {
     return 'No index existed for this repository yet; a background build has started and did not block '
       + 'this call. Re-run once it completes for results computed from the full graph.';
   }
+  if (reason === 'seeded') {
+    // A seed is this checkout's FIRST index, so it carries the auto-init opt-outs too.
+    return 'Served from an index copied from another checkout of this repository; files this checkout '
+      + 'changed are reported behind the working tree. A background rebuild has started and did not block '
+      + `this call; it writes to ${OPENLORE_ANALYSIS_REL_PATH}. Opt out with \`"autoInit": false\` in `
+      + '.openlore/config.json, or OPENLORE_NO_AUTO_ANALYZE=1.';
+  }
   return `Served from a stale index (${REPAIR_REASON_DETAIL[reason]}); a background refresh has started `
     + 'and did not block this call. Re-run for fresh results once it completes.';
+}
+
+/**
+ * Record a repair that a DETACHED process runs for `directory`, so this process's answers
+ * disclose it. For a one-shot command, which exits long before the build ends.
+ */
+export function recordDetachedRepair(directory: string, reason: RepairReason): void {
+  if (inFlight.has(directory)) return;
+  inFlight.set(directory, {
+    reason,
+    startedAt: Date.now(),
+    mode: 'full',
+    ceiling: AUTO_INIT_DEGRADED_FILE_CEILING,
+    sizedFiles: 0,
+  });
 }
 
 /**

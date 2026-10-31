@@ -32,7 +32,8 @@ import {
   type OneShotBuild,
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
-import { isInsideGitWorkTree } from '../../core/services/cold-start-bootstrap.js';
+import { autoInitSuppression, isInsideGitWorkTree, recordDetachedRepair } from '../../core/services/cold-start-bootstrap.js';
+import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 
 interface OrientCliOptions {
@@ -314,8 +315,15 @@ prints a short session-start primer (used by the install SessionStart hook).
     // reason orient stayed degraded every turn and agents fell back to grep
     // (change: self-heal-empty-graph-index).
     let build: OneShotBuild | undefined;
+    // A new worktree first copies a sibling checkout's verified index, awaited here because
+    // this process exits as soon as it answers (change: seed-worktree-index-from-sibling-checkout).
+    if (!hasAnalysis(root) && !autoInitSuppression(root)) await seedFromSiblingCheckout(root);
     if (!hasAnalysis(root)) {
       build = startDetachedIndexBuild(root, 'index-absent');
+    } else if (await servingSeededIndex(root)) {
+      // Until the rebuild publishes, every answer is disclosed as served from the seed.
+      build = startDetachedIndexBuild(root, 'seeded');
+      if (build.state === 'started' || build.state === 'running') recordDetachedRepair(root, 'seeded');
     } else if (graphIndexUnusable(root)) {
       build = startDetachedIndexBuild(root, 'stale-region');
     }
