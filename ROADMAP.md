@@ -66,7 +66,7 @@ Work in this order:
 
 | # | Change | What it does for the agent |
 |---|--------|----------------------------|
-| 1 | [`add-generated-file-guard`](openspec/changes/add-generated-file-guard) | "This file is generated from `order.proto`; regenerate with …" |
+| 1 | [`add-generated-file-guard`](openspec/changes/archive/2026-10-31-add-generated-file-guard) — **shipped** (#629, [docs](docs/generated-files.md)) | "This file is generated from `order.proto`; regenerate with …" |
 | 2 | [`add-phantom-reference-findings`](openspec/changes/add-phantom-reference-findings) | Invented imports, exports, and packages caught, before the write through `verify_change`'s `patch` input |
 | 3 | [`add-check-weakening-findings`](openspec/changes/add-check-weakening-findings) | Skipped/deleted tests, removed assertions, suppressions, relaxed CI — joined to the code they guarded |
 | 4 | [`add-session-structural-ledger`](openspec/changes/add-session-structural-ledger) | Names the symbol that changed under the agent; sees modify/revert loops; edits after the last test run |
