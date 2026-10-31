@@ -162,6 +162,21 @@ describe('decision autopilot', () => {
     expect(stderrChunks.join('\n')).toContain('openlore decisions log');
   });
 
+  // change: default-decision-autopilot-with-visible-trace
+  it('--background-sync writes a decision accepted on record to its spec, no gate and no LLM', async () => {
+    await writeConfig();
+    await saveDecisionStore(dir, makeStore([makeDecision({ status: 'auto-approved', approvedBy: 'autopilot' })]));
+
+    await decisionsCommand.parseAsync(['--background-sync'], { from: 'user' });
+
+    const spec = await readFile(join(dir, 'openspec', 'specs', 'cache', 'spec.md'), 'utf-8');
+    expect(spec).toContain('**ID:** aaaabbbb');
+    expect(spec).toContain('**Status:** Auto-accepted (unreviewed)');
+    const d = (await loadDecisionStore(dir)).decisions.find((x) => x.id === 'aaaabbbb')!;
+    expect(d.status).toBe('auto-approved');
+    expect(d.syncedToSpecs.length).toBeGreaterThan(0);
+  });
+
   it('fails open while disclosing unassessed drafts from an empty consolidation', async () => {
     await writeConfig({ autopilot: true });
     const draft = makeDecision({ status: 'draft' });

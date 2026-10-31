@@ -18,6 +18,13 @@ type StatusColor = 'green' | 'yellow' | 'red';
 const STDIN_TIMEOUT_MS = 1000;
 
 export function statusLabel(status: IndexStatus): { color: StatusColor; text: string } {
+  const label = indexLabel(status);
+  // Auto-accepted decisions no human has looked at (change: default-decision-autopilot-with-visible-trace).
+  const unreviewed = status.governance?.unreviewed ?? 0;
+  return unreviewed > 0 ? { ...label, text: `${label.text} · ${unreviewed} to review` } : label;
+}
+
+function indexLabel(status: IndexStatus): { color: StatusColor; text: string } {
   if (!status.indexPresent) return { color: 'yellow', text: 'OpenLore: no index' };
   if (status.degraded.length > 0) return { color: 'red', text: 'OpenLore: index degraded' };
   if (status.configUnreadable || status.embedFailure) {

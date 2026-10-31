@@ -23,6 +23,7 @@ import { withQuietStdout } from '../../utils/quiet-stdout.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
+import { DECISIONS_REVIEW_COMMAND, takeAutoAcceptsSinceLastSession } from '../../core/decisions/autopilot.js';
 import { buildInjection, buildProposalOnlyInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
 import {
   oneShotBuildNote,
@@ -177,7 +178,19 @@ export function implicitOrientRoot(start: string): string {
 }
 
 /** Session-start primer printed when orient is invoked without a task. */
-function printPrimer(directory: string, asJson: boolean, buildNote?: string): void {
+/**
+ * One line naming the decisions autopilot accepted since the previous session, or
+ * undefined (change: default-decision-autopilot-with-visible-trace).
+ */
+export function autoAcceptLine(entries: ReadonlyArray<{ title: string }>): string | undefined {
+  if (entries.length === 0) return undefined;
+  const clip = (t: string) => (t.length > 60 ? `${t.slice(0, 59)}…` : t);
+  const named = entries.slice(0, 3).map((e) => `"${safe(clip(e.title))}"`).join(', ');
+  const more = entries.length > 3 ? ` and ${entries.length - 3} more` : '';
+  return `Decisions auto-accepted since last session (${entries.length}): ${named}${more} — review: ${DECISIONS_REVIEW_COMMAND}`;
+}
+
+function printPrimer(directory: string, asJson: boolean, buildNote?: string, decisionsLine?: string): void {
   const ready = hasAnalysis(directory);
   if (asJson) {
     console.log(
@@ -188,6 +201,7 @@ function printPrimer(directory: string, asJson: boolean, buildNote?: string): vo
             ? 'OpenLore architectural memory is active. Call orient with a task before reading source files.'
             : buildNote ?? 'OpenLore is installed but no analysis was found. Run "openlore analyze" to build the graph.',
           usage: 'openlore orient --json --task "<task description>"',
+          ...(decisionsLine ? { decisions: decisionsLine } : {}),
         },
         null,
         2
@@ -206,6 +220,7 @@ function printPrimer(directory: string, asJson: boolean, buildNote?: string): vo
     console.log('Run "openlore analyze" to build the graph, then:');
     console.log('  openlore orient --task "<task description>"');
   }
+  if (decisionsLine) console.log(decisionsLine);
 }
 
 /** Concise human-readable rendering of a handleOrient result. */
@@ -341,7 +356,7 @@ prints a short session-start primer (used by the install SessionStart hook).
 
     // No task → session-start primer (keeps the install hook from erroring).
     if (!task) {
-      printPrimer(directory, asJson, buildNote());
+      printPrimer(directory, asJson, buildNote(), autoAcceptLine(await takeAutoAcceptsSinceLastSession(root)));
       return;
     }
 

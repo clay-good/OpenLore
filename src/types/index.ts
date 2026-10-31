@@ -72,8 +72,10 @@ export interface OpenLoreConfig {
    * Optional governance behavior (change: add-decision-autopilot). With
    * `autopilot: true`, the decisions commit gate auto-accepts verified decisions
    * (distinct `auto-approved` status, actor recorded on an append-only ledger),
-   * syncs them to specs, and never blocks a commit; blocking human review is the
-   * behavior when absent/false. Autopilot never touches a human-rejected decision.
+   * syncs them to specs, and never blocks a commit; `false` means blocking human
+   * review. Absent means on, unless a blocking decisions gate is installed
+   * (`resolveAutopilotMode`, change: default-decision-autopilot-with-visible-trace).
+   * Autopilot never touches a human-rejected decision.
    */
   governance?: {
     autopilot?: boolean;
@@ -793,6 +795,7 @@ export type DecisionDisposition = 'pending' | 'promoted' | 'merged-into' | 'reje
 export type DecisionDispositionReason =
   | 'promoted-as-recorded'
   | 'promoted-with-rewrite'
+  | 'auto-accepted-on-record'
   | 'merged-into-consolidated'
   | 'superseded-by-later-draft'
   | 'not-in-consolidated-set'

@@ -160,6 +160,36 @@ describe('openlore status — what the index is', () => {
     expect(Array.isArray(parsed.staleFiles)).toBe(true);
   });
 
+  // change: default-decision-autopilot-with-visible-trace
+  it('reports the governance block: mode, counts, newest ledger entries, and the review command', async () => {
+    await writeConfig(null);
+    await mkdir(join(root, '.openlore', 'decisions'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'decisions', 'pending.json'), JSON.stringify({
+      decisions: [{ id: 'aaaa1111', status: 'auto-approved' }],
+    }));
+    await writeFile(join(root, '.openlore', 'decisions', 'ledger.jsonl'), JSON.stringify({
+      id: 'aaaa1111', title: 'Use UUIDs', from: null, to: 'auto-approved', actor: 'agent', at: '2026-10-31T00:00:00.000Z',
+    }) + '\n');
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore']);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+    }
+    const text = lines.join('\n');
+    expect(text).toContain('Decision autopilot');
+    expect(text).toContain('auto-initialized; set governance.autopilot: false to require review');
+    expect(text).toContain('1 auto-accepted, 1 unreviewed');
+    expect(text).toContain('[aaaa1111] ∅ → auto-approved by agent');
+    expect(text).toContain('openlore decisions review');
+    expect((await collectIndexStatus(root)).governance).toMatchObject({ autopilot: true, autoAccepted: 1, unreviewed: 1 });
+  });
+
   it('reports the wiring scope, in text and through --json', async () => {
     const home = join(root, 'home');
     await mkdir(home);

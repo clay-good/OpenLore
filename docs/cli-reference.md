@@ -360,16 +360,19 @@ openlore decisions [options]
   --json                 # Machine-readable output
   --uninstall-hook       # Remove decisions pre-commit hook (install via: openlore setup --tools claude)
 
-# Record a draft decision — the same draft the record_decision MCP tool records, on any wired preset
+# Record a decision — the same handler as the record_decision MCP tool, on any wired preset
 openlore decisions record --title <text> --rationale <text>
   [--consequences <text>] [--files <a.ts,b.ts>] [--supersedes <id>]
   [--scope local|component|cross-domain|system] [--constraints-file <path.json>] [--json]
-                         # Prints the draft id and `openlore decisions status <id>` for its verdict
+                         # Prints the id and `openlore decisions status <id>` for its verdict.
+                         # Under autopilot it is auto-approved at once (anchored files must exist,
+                         # a superseded decision must be live) and synced in background; else a draft
 
-# Decision autopilot (opt-in: { "governance": { "autopilot": true } } in .openlore/config.json):
-# the gate auto-accepts verified decisions (distinct `auto-approved` status), syncs them to
-# specs with an "Auto-accepted (unreviewed)" marker, and never blocks a commit. Every status
-# transition — in every mode — lands on an append-only ledger.
+# Decision autopilot: on when `governance.autopilot` is absent, unless a blocking decisions gate
+# is installed; `false` turns it off, `true` forces it on. `decisions record` and the gate
+# auto-accept (distinct `auto-approved` status), sync to specs with an "Auto-accepted
+# (unreviewed)" marker, and never block a commit. Every status transition — in every mode —
+# lands on an append-only ledger. `openlore status` shows the mode and the trail.
 openlore decisions log [--json] [--since <ref|ISO date>]
                          # Show the transition ledger, newest first
 openlore decisions review [--promote <ids|all>] [--reject <ids|all>] [--note <text>] [--json]

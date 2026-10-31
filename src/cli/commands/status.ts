@@ -34,6 +34,7 @@ import { safeJoin } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { execFileGit } from '../../utils/git-exec.js';
 import { assessWiring, type WiringScope } from '../install/wiring-scope.js';
+import { collectGovernanceStatus, type GovernanceStatus } from '../../core/decisions/autopilot.js';
 
 
 /** Bound on the working-tree comparison: a status command must stay instant. */
@@ -72,6 +73,8 @@ export interface IndexStatus {
    * nowhere. Set by `openlore status` only, so the status line never reads `~/.claude.json`.
    */
   wiringScope?: WiringScope;
+  /** Decision autopilot mode and its trail (change: default-decision-autopilot-with-visible-trace). */
+  governance?: GovernanceStatus;
 }
 
 interface IndexMetaShape {
@@ -148,7 +151,9 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   try { config = await readOpenLoreConfig(rootPath); } catch { configUnreadable = true; }
 
   const receipt = await readIndexReceipt(analysisDir);
+  const governance = configUnreadable ? undefined : await collectGovernanceStatus(rootPath, config).catch(() => undefined);
   const base = {
+    ...(governance ? { governance } : {}),
     degraded: receipt?.degraded ?? [],
     ...(receipt?.embedFailure ? { embedFailure: receipt.embedFailure } : {}),
     ...(configUnreadable ? { configUnreadable: true as const } : {}),
@@ -218,8 +223,23 @@ function describeKeywordCause(cause: KeywordCause): string {
   return '';
 }
 
+/** The governance block: mode, counts, newest ledger entries, and where to review. */
+function printGovernance(governance: GovernanceStatus, c: ReturnType<typeof palette>): void {
+  const label = (text: string): string => text.padEnd(20);
+  console.log(`  ${label('Decision autopilot')} ${governance.autopilot ? c.green('on') : 'off'}${c.dim(` — ${safe(governance.reason)}`)}`);
+  const unreviewed = governance.unreviewed > 0 ? c.yellow(`${governance.unreviewed} unreviewed`) : '0 unreviewed';
+  console.log(`  ${label('Decisions')} ${governance.autoAccepted} auto-accepted, ${unreviewed}`);
+  for (const e of governance.recent) {
+    const commit = e.commit ? ` @${safe(e.commit)}` : '';
+    console.log(`  ${' '.repeat(20)} ${c.dim(`${safe(e.at.slice(0, 19).replace('T', ' '))} [${safe(e.id)}] ${safe(e.from ?? '∅')} → ${safe(e.to)} by ${safe(e.actor)}${commit}`)} ${safe(e.title)}`);
+  }
+  if (governance.autoAccepted > 0 || governance.recent.length > 0) {
+    console.log(`  ${' '.repeat(20)} ${c.dim(`→ Review: ${governance.review} · trail: openlore decisions log`)}`);
+  }
+}
+
 export const statusCommand = new Command('status')
-  .description("Report the search index's own state: retrieval mode served, when it was built, and whether it is behind the working tree")
+  .description("Report the search index's own state (retrieval mode, build time, freshness) and the decision autopilot trail")
   .option('--json', 'Output the status as JSON', false)
   .addHelpText(
     'after',
@@ -259,6 +279,7 @@ Read-only: this never builds, rebuilds, or locks the index.
     if (!status.indexPresent) {
       console.log(`  ${c.yellow('No search index')} in ${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`);
       console.log(`  ${c.dim('→ Run "openlore analyze" to build one')}`);
+      if (status.governance) printGovernance(status.governance, c);
       console.log('');
       return;
     }
@@ -293,6 +314,8 @@ Read-only: this never builds, rebuilds, or locks the index.
     for (const entry of status.degraded) {
       console.log(`  ${label('Degraded')} ${c.yellow(`${safe(entry.index)}: ${safe(entry.reason)}`)}`);
     }
+
+    if (status.governance) printGovernance(status.governance, c);
 
     if (status.keywordCause === 'configured-provider-unrealized') {
       console.log('');

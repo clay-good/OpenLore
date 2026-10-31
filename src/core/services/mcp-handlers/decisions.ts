@@ -33,6 +33,9 @@ import {
   readDisposition,
 } from '../../decisions/disposition.js';
 import { validateDecisionConstraintBlock } from '../../decisions/constraint-ledger.js';
+import { DECISIONS_REVIEW_COMMAND, resolveAutopilotMode } from '../../decisions/autopilot.js';
+import { safeJoin } from '../../../utils/path-confinement.js';
+import { stat } from 'node:fs/promises';
 
 type ConsolidateSpawnOutcome =
   | { outcome: 'started' }
@@ -52,9 +55,14 @@ type ConsolidateSpawnOutcome =
  *     completion, since the child is detached + unref'd) and return the outcome
  *     so the caller can report it honestly.
  */
-async function spawnConsolidateBackground(rootPath: string): Promise<ConsolidateSpawnOutcome> {
+async function spawnConsolidateBackground(
+  rootPath: string,
+  // '--background-sync' writes autopilot-accepted decisions to specs; it needs no coalescing,
+  // since spec writes and the store CAS are idempotent.
+  job: '--consolidate' | '--background-sync' = '--consolidate',
+): Promise<ConsolidateSpawnOutcome> {
   // Coalesce: a run already underway will pick up this freshly-recorded draft.
-  if (await isDecisionsLockHeld(rootPath)) {
+  if (job === '--consolidate' && await isDecisionsLockHeld(rootPath)) {
     return { outcome: 'coalesced' };
   }
 
@@ -74,11 +82,11 @@ async function spawnConsolidateBackground(rootPath: string): Promise<Consolidate
   let cmd: string;
   let args: string[];
   if (existsSync(ownCli)) {
-    cmd = process.execPath; args = [ownCli, 'decisions', '--consolidate'];
+    cmd = process.execPath; args = [ownCli, 'decisions', job];
   } else {
     // Running from TypeScript source (vitest/tsx): no built sibling. PATH resolution is the
     // operator's own environment, still never rootPath's.
-    cmd = 'openlore'; args = ['decisions', '--consolidate'];
+    cmd = 'openlore'; args = ['decisions', job];
   }
 
   return await new Promise<ConsolidateSpawnOutcome>((resolve) => {
@@ -266,16 +274,56 @@ export async function handleRecordDecision(
       syncedToSpecs: [],
     };
 
+    // Decision autopilot accepts on record, with deterministic checks only: no LLM,
+    // no gate (change: default-decision-autopilot-with-visible-trace).
+    const mode = await resolveAutopilotMode(rootPath, await readOpenLoreConfig(rootPath).catch(() => null));
+    const heldBack = mode.autopilot ? await autopilotHoldReason(rootPath, store, affectedFiles, supersedes) : undefined;
+    const acceptPatch: Partial<PendingDecision> | undefined = mode.autopilot && !heldBack
+      ? {
+        status: 'auto-approved',
+        approvedBy: 'autopilot',
+        reviewedAt: decision.recordedAt,
+        disposition: 'promoted',
+        dispositionReason: 'auto-accepted-on-record',
+        dispositionAt: decision.recordedAt,
+      }
+      : undefined;
+
     // CAS upsert so concurrent record_decision calls never lose a draft: the
     // id-keyed merge is re-applied to the latest store on a write conflict.
     // The decision id is derived from the committed store's sessionId (not the
     // separately-loaded one) so repeated records in a session dedupe correctly —
     // a fresh load of an absent store mints a new random sessionId. (harden-memory-integrity-invariant)
     let recordedId = id;
-    await updateDecisionStore(rootPath, (s) => {
+    const committed = await updateDecisionStore(rootPath, (s) => {
       recordedId = makeDecisionId(s.sessionId, primaryDomain, title.trim());
-      return upsertDecisions(s, [{ ...decision, id: recordedId, sessionId: s.sessionId }]);
+      // Autopilot accepts only a new decision or a still-pending draft of it —
+      // never one a human (or consolidation) already decided.
+      if (acceptPatch && s.decisions.find((d) => d.id === recordedId)?.status === 'draft') {
+        return patchDecision(s, recordedId, acceptPatch);
+      }
+      return upsertDecisions(s, [{ ...decision, ...acceptPatch, id: recordedId, sessionId: s.sessionId }]);
     }, 'agent');
+
+    const readVerdictWith = `openlore decisions status ${recordedId}`;
+    if (acceptPatch && committed.decisions.find((d) => d.id === recordedId)?.status === 'auto-approved') {
+      emit(rootPath, 'decisions', { event: 'decision_auto_approved', id: recordedId, title: title.trim(), transport: 'record' });
+      const syncOutcome = await spawnConsolidateBackground(rootPath, '--background-sync');
+      const syncNote = syncOutcome.outcome === 'failed'
+        ? `Spec sync could NOT be started (${syncOutcome.detail}); the next recorded decision retries it.`
+        : 'Spec sync is running in background.';
+      return {
+        id: recordedId,
+        status: 'auto-approved' as const,
+        disposition: 'promoted' as const,
+        reason: 'auto-accepted-on-record' as const,
+        autopilot: { on: true, reason: mode.reason },
+        specSync: syncOutcome.outcome,
+        readVerdictWith,
+        reviewWith: DECISIONS_REVIEW_COMMAND,
+        message: `Decision auto-accepted: "${title}" (decision autopilot: ${mode.reason}). ${syncNote} Review or reject it with \`${DECISIONS_REVIEW_COMMAND}\`.`,
+      };
+    }
 
     // Consolidate in background so commit-time gate is instant. The decision is
     // already committed (CAS upsert above), independent of the spawn's outcome —
@@ -284,13 +332,13 @@ export async function handleRecordDecision(
     // The response says DRAFT, not "recorded", and names where the verdict is read.
     // The tool proposes a decision; diff-grounded consolidation decides it
     // (change: explain-decision-rejection).
-    const readVerdictWith = `openlore decisions status ${recordedId}`;
-    const message =
-      spawnOutcome.outcome === 'failed'
+    const held = heldBack ? `Decision autopilot held it as a draft: ${heldBack}. ` : '';
+    const message = held +
+      (spawnOutcome.outcome === 'failed'
         ? `Draft decision recorded: "${title}". Consolidation could NOT be started (${spawnOutcome.detail}) — run \`openlore decisions --consolidate\` to decide it now, then read the verdict with \`${readVerdictWith}\`.`
         : spawnOutcome.outcome === 'coalesced'
           ? `Draft decision recorded: "${title}". Consolidation already running — this draft will be picked up by the in-flight run. Read its verdict with \`${readVerdictWith}\`.`
-          : `Draft decision recorded: "${title}". Diff-grounded consolidation is running in background and will promote, merge, or reject it with a stated reason. Read the verdict with \`${readVerdictWith}\`.`;
+          : `Draft decision recorded: "${title}". Diff-grounded consolidation is running in background and will promote, merge, or reject it with a stated reason. Read the verdict with \`${readVerdictWith}\`.`);
 
     return {
       id: recordedId,
@@ -298,12 +346,38 @@ export async function handleRecordDecision(
       disposition: 'pending' as const,
       reason: 'awaiting-consolidation' as const,
       consolidation: spawnOutcome.outcome,
+      ...(heldBack ? { autopilot: { on: true, reason: mode.reason, heldBack } } : {}),
       readVerdictWith,
       message,
     };
   } catch (err) {
     return { error: sanitizeMcpError(err) };
   }
+}
+
+/**
+ * Why autopilot must not accept this decision yet, or undefined. Deterministic:
+ * every anchored file exists, and a superseded decision is still in force.
+ */
+async function autopilotHoldReason(
+  rootPath: string,
+  store: { decisions?: PendingDecision[] },
+  affectedFiles: string[] | undefined,
+  supersedes: string | undefined,
+): Promise<string | undefined> {
+  for (const file of affectedFiles ?? []) {
+    try {
+      await stat(safeJoin(rootPath, file));
+    } catch {
+      return `anchored file not found: ${file}`;
+    }
+  }
+  if (supersedes) {
+    const { verifyDecisionCurrent } = await import('./claim-verification.js');
+    const verdict = await verifyDecisionCurrent(rootPath, supersedes, async () => store) as { verdict: string; reason?: string };
+    if (verdict.verdict !== 'confirmed') return `superseded decision ${supersedes} is not live (${verdict.reason ?? verdict.verdict})`;
+  }
+  return undefined;
 }
 
 // ============================================================================

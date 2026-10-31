@@ -57,14 +57,14 @@ live registry.
 <!-- standing-context-cost:start -->
 | Preset | Tools | Measured tokens | Budget |
 |---|---:|---:|---:|
-| `minimal` | 6 | 2,818 | 2,950 |
+| `minimal` | 6 | 2,854 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
 | `memory` | 3 | 1,510 | 1,610 |
 | `verify` | 5 | 2,075 | 2,220 |
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 7 | 3,171 | 3,400 |
 | `substrate` | 15 | 5,247 | 5,500 |
-| `full` | 80 | 26,132 | 27,000 |
+| `full` | 80 | 26,168 | 27,000 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line

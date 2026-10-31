@@ -199,6 +199,13 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     "label('Index built')",
     "label('Working tree')",
     'staleText',
+    // Governance block: counts and fixed strings, never repository text.
+    "label('Decision autopilot')",
+    "governance.autopilot ? c.green('on') : 'off'",
+    "label('Decisions')",
+    'governance.autoAccepted',
+    'unreviewed',
+    'c.dim(`\u2192 Review: ${governance.review} \u00b7 trail: openlore decisions log`)',
     "' '.repeat(20)",
     'c.dim(`\u2026 and ${staleCount - 5} more`)',
     "label('Last embed failure')",

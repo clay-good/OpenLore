@@ -2148,9 +2148,11 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'record_decision',
     description:
-      'Record a DRAFT architectural decision — a proposal, not a final record. ' +
+      'Record an architectural decision. ' +
       'Call this on a significant design choice: data structure, library, API contract, auth strategy. ' +
-      'Diff-grounded consolidation then promotes it (possibly rewording it, keeping your text as ' +
+      'Under decision autopilot (the default unless a blocking decisions gate is installed) it is accepted ' +
+      'at once as auto-approved and a human reviews it later; otherwise it is a DRAFT, and ' +
+      'diff-grounded consolidation then promotes it (possibly rewording it, keeping your text as ' +
       'authorStatement), merges it, or rejects it — always with a stated reason. The response returns ' +
       'the draft id and the command that reads the verdict; re-recording a decided draft returns that ' +
       'verdict instead of a second draft. Use supersedes when a later decision replaces an earlier one.',

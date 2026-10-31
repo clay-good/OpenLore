@@ -1934,6 +1934,12 @@ describe('Pi footer status', () => {
       expect(formatPiStatus({ daemon: 'incompatible', health: health('absent') })).toBe('openlore: no index (run openlore analyze)');
     });
 
+    // change: default-decision-autopilot-with-visible-trace
+    it('appends the unreviewed decision count when above zero', () => {
+      expect(formatPiStatus({ daemon: 'usable', health: health('ready', 'healthy'), unreviewed: 2 })).toBe('openlore: ready · 2 to review');
+      expect(formatPiStatus({ daemon: 'usable', health: health('ready', 'healthy'), unreviewed: 0 })).toBe('openlore: ready');
+    });
+
     it('never reports a stopped watcher it could not observe', () => {
       expect(formatPiStatus({ daemon: 'usable', health: health('ready', 'unknown') })).toBe('openlore: ready');
     });
