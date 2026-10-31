@@ -174,6 +174,12 @@ When `OPENLORE_PI_NO_SPAWN` or `pi.spawnDaemon: false` is set, automatic recover
 and the explicit restart command refuse both stopping and starting: use the
 supervising host's restart mechanism instead.
 
+The spawn opt-out is the **only** signal that protects a host-supervised daemon.
+A daemon's health response does not say who supervises it, so a host that runs
+its own OpenLore daemon (for example in-process through the API) without setting
+the opt-out can have that daemon stopped by automatic recovery. Such a host must
+set `OPENLORE_PI_NO_SPAWN` or `pi.spawnDaemon: false`.
+
 ## Verify
 
 ```bash

@@ -2154,8 +2154,10 @@ function registerOpenlore(
     const result = await resolveDaemon(cwd);
     if (result.daemon?.autoRecoverable && !automaticRecoveryAttempts.has(cwd)) {
       // A valid, repository-bound health response proves the daemon is older.
-      // Replace it on first use after an update; the CLI still refuses
-      // unverified listeners and host-supervised daemons.
+      // Replace it on first use after an update. The CLI stop refuses unverified
+      // listeners, but /health carries no "supervised" marker, so it cannot tell a
+      // host-supervised daemon from one Pi spawned: the host's spawn opt-out
+      // (checked in restartPiDaemon) is the ONLY protection for a supervised daemon.
       automaticRecoveryAttempts.add(cwd);
       const recovered = await restartDaemon(cwd, result.daemon.restartPreset);
       if (recovered.daemon) {
