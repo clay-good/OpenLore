@@ -12,9 +12,11 @@
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { readArtifactBytesBounded } from '../../utils/bounded-artifact-read.js';
 import {
   DECISIONS_PENDING_FILE,
+  OPENLORE_CONFIG_REL_PATH,
   OPENLORE_DECISIONS_SUBDIR,
   OPENLORE_DIR,
 } from '../../constants.js';
@@ -32,7 +34,7 @@ export interface AutopilotMode {
   autopilot: boolean;
   /** Why, in words a user can act on. */
   reason: string;
-  source: 'config-on' | 'config-off' | 'no-config' | 'blocking-gate' | 'default';
+  source: 'config-on' | 'config-off' | 'main-checkout' | 'no-config' | 'blocking-gate' | 'default';
 }
 
 /**
@@ -50,6 +52,46 @@ export async function hasOpenLoreCommitGate(rootPath: string): Promise<boolean> 
   }
 }
 
+/** Read a small git metadata file, or undefined. Bounded: these paths are repository-controlled. */
+async function readSmallFile(path: string): Promise<string | undefined> {
+  const read = await readArtifactBytesBounded(path, 64 * 1024).catch(() => undefined);
+  return read?.state === 'ok' ? read.bytes.toString('utf8').trim() : undefined;
+}
+
+/**
+ * The main checkout of the repository `rootPath` is a linked worktree of, or undefined when it is
+ * not one. Read from git's own files (`.git` names the worktree's git dir, whose `commondir` names
+ * the shared one), so no git process starts.
+ */
+async function mainCheckoutOf(rootPath: string): Promise<string | undefined> {
+  const pointer = await readSmallFile(join(rootPath, '.git'));
+  const gitDir = pointer?.match(/^gitdir:\s*(.+)$/m)?.[1];
+  if (!gitDir) return undefined;
+  const worktreeGitDir = isAbsolute(gitDir) ? gitDir : resolve(rootPath, gitDir);
+  const common = await readSmallFile(join(worktreeGitDir, 'commondir'));
+  if (!common) return undefined;
+  const commonDir = isAbsolute(common) ? common : resolve(worktreeGitDir, common);
+  return basename(commonDir) === '.git' ? dirname(commonDir) : undefined;
+}
+
+/**
+ * The main checkout's `governance.autopilot` for a linked worktree. Governance is a choice about the
+ * repository, and the commit gate lives in the hooks every worktree shares, while
+ * `.openlore/config.json` is per checkout: without this, a worktree created after the user chose
+ * autopilot in the main checkout got a fresh config and a blocking gate.
+ */
+async function mainCheckoutAutopilot(rootPath: string): Promise<{ value: boolean; checkout: string } | undefined> {
+  const checkout = await mainCheckoutOf(rootPath);
+  if (!checkout || resolve(checkout) === resolve(rootPath)) return undefined;
+  const raw = await readSmallFile(join(checkout, OPENLORE_CONFIG_REL_PATH));
+  try {
+    const value = raw ? (JSON.parse(raw) as Pick<OpenLoreConfig, 'governance'>).governance?.autopilot : undefined;
+    return typeof value === 'boolean' ? { value, checkout } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Resolve the autopilot mode. `gateRunning` is set by the gate itself: a gate run
  * (hook or CI `decisions --gate`) is evidence of an explicit gate, so an absent key
@@ -64,6 +106,14 @@ export async function resolveAutopilotMode(
   if (configured === true) return { autopilot: true, reason: 'governance.autopilot is true', source: 'config-on' };
   if (configured === false) {
     return { autopilot: false, reason: 'governance.autopilot is false — decisions wait for review', source: 'config-off' };
+  }
+  const inherited = await mainCheckoutAutopilot(rootPath);
+  if (inherited) {
+    return {
+      autopilot: inherited.value,
+      reason: `governance.autopilot is ${inherited.value} in the main checkout (${inherited.checkout})`,
+      source: 'main-checkout',
+    };
   }
   if (!config) {
     return { autopilot: false, reason: 'no .openlore/config.json — run "openlore init" first', source: 'no-config' };

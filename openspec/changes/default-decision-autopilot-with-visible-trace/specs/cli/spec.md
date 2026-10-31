@@ -17,6 +17,20 @@ governance state is shown.
 - **THEN** the mode is autopilot, with the reason "auto-initialized; set governance.autopilot:
   false to require review"
 
+### Requirement: AWorktreeFollowsTheMainCheckoutsGovernance
+
+When a linked worktree's own configuration has no `governance.autopilot`, the main checkout's value
+SHALL apply, and the reason SHALL name the main checkout. The commit gate lives in hooks that every
+worktree shares, while the configuration is per checkout, so a worktree created after the user chose
+a mode SHALL NOT silently get the opposite one. A worktree's own value SHALL still win.
+
+#### Scenario: An agent worktree auto-accepts like its main checkout
+
+- **GIVEN** a main checkout with `governance.autopilot: true` and the decisions gate installed
+- **AND** a new linked worktree whose configuration has no `governance` block
+- **WHEN** an agent records a decision there and commits
+- **THEN** the decision is auto-accepted and the commit is not blocked
+
 ### Requirement: RecordedDecisionsAreAcceptedWithoutAGate
 
 Under autopilot, a decision recorded with a title and rationale SHALL move directly to

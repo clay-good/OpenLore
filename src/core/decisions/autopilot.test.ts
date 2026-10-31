@@ -59,6 +59,27 @@ describe('resolveAutopilotMode', () => {
   it('is off where OpenLore was never set up (no config)', async () => {
     expect(await resolveAutopilotMode(dir, null)).toMatchObject({ autopilot: false, source: 'no-config' });
   });
+
+  it("a linked worktree follows the main checkout's choice when its own config has none", async () => {
+    // The gate lives in the hooks every worktree shares; the config is per checkout.
+    const main = join(dir, 'main');
+    const tree = join(dir, 'tree');
+    await mkdir(main);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: main, stdio: 'ignore' });
+    git('init', '-q');
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    await writeFile(join(main, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n${DECISIONS_HOOK_MARKER}\nopenlore decisions --gate\n`);
+    git('worktree', 'add', '-q', tree);
+    await mkdir(join(main, '.openlore'));
+    await writeFile(join(main, '.openlore', 'config.json'), JSON.stringify({ governance: { autopilot: true } }));
+    expect(await resolveAutopilotMode(tree, CONFIG, { gateRunning: true })).toMatchObject({ autopilot: true, source: 'main-checkout' });
+    await writeFile(join(main, '.openlore', 'config.json'), JSON.stringify({ governance: { autopilot: false } }));
+    expect(await resolveAutopilotMode(tree, CONFIG)).toMatchObject({ autopilot: false, source: 'main-checkout' });
+    // The worktree's own choice still wins.
+    expect(await resolveAutopilotMode(tree, { governance: { autopilot: true } })).toMatchObject({ autopilot: true, source: 'config-on' });
+    // The main checkout itself is not "inherited" from anywhere.
+    expect((await resolveAutopilotMode(main, CONFIG)).source).toBe('blocking-gate');
+  });
 });
 
 describe('governance trail readers', () => {

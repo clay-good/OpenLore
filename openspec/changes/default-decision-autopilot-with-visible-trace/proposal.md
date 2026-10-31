@@ -37,13 +37,13 @@ The user's goal is "auto-accept, but let me see what was accepted."
 
 ### Modified Capabilities
 
-- `cli`: adds `AutopilotIsTheDefaultForAutoInitializedRepositories`,
+- `cli`: adds `AutopilotIsTheDefaultForAutoInitializedRepositories`, `AWorktreeFollowsTheMainCheckoutsGovernance`,
   `RecordedDecisionsAreAcceptedWithoutAGate`, `GovernanceTraceIsVisibleWithoutAsking`.
 
 ## Impact
 
 - Code: `src/cli/commands/decisions.ts` (record path), `src/core/decisions/ledger.ts` (actor
-  `agent`), `src/core/services/status-report.ts`, the status line and Pi footer renderers, the
+  `agent`), `src/cli/commands/status.ts`, the status line and Pi footer renderers, the
   managed guidance block.
 - No git hook is written by auto-init (`AutoInitIsConsentGuarded` unchanged). No new MCP tool.
 - Relation: `add-agent-loop-hook-surfaces` and `add-session-handoff-briefing` push receipts into the

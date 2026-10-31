@@ -573,7 +573,14 @@ export async function runAutopilotGate(
     if (draftCount > 0) parts.push(`${draftCount} draft(s) pending background consolidation`);
     // Retried every gate, but a decision with no sync target fails every time, so name
     // where the cause is rather than promising a retry will fix it.
-    if (syncErrors.length > 0) parts.push(`${syncErrors.length} sync error(s) — see why with openlore decisions --sync`);
+    if (syncErrors.length > 0) {
+      // `decisions --sync` skips auto-approved decisions, so pointing there showed nothing.
+      // Name the cause; the decision itself stays accepted and in the trail.
+      const [first] = syncErrors;
+      const full = safe(first.error.replace(/^Error:\s*/, ''));
+      const cause = full.length <= 160 ? full : `${full.slice(0, 160).replace(/\s+\S*$/, '')}…`;
+      parts.push(`${syncErrors.length} not synced to specs (${first.id}: ${cause}); still accepted, in the trail`);
+    }
     if (unevidencedCount > 0) parts.push(`${unevidencedCount} unevidenced decision(s) require review`);
     if (parts.length > 0 || unreviewedCount > 0) {
       console.error(

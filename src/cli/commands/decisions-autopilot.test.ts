@@ -338,7 +338,8 @@ describe('decision autopilot', () => {
 
     expect(process.exitCode ?? 0).toBe(0);
     const stderr = stderrChunks.join('\n');
-    expect(stderr).toContain('1 sync error(s) — see why with openlore decisions --sync');
+    expect(stderr).toContain('1 not synced to specs (');
+    expect(stderr).toContain('has no durable owning spec or ADR target');
     expect(stderr).not.toContain('will retry next gate');
   });
 

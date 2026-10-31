@@ -51,7 +51,7 @@ left the top 5. The index is 5–16 MB larger.
 
 ### Modified Capabilities
 
-- `config`: adds `RetrievalUpgradeHintsAreForHumans` and
+- `config`: adds `RetrievalUpgradeHintsAreForHumans`, `AnExplicitKeywordChoiceAlwaysWins` and
   `LocalSemanticIsBuiltInTheBackgroundWhenItMeasurablyHelps`.
 
 ## Impact
