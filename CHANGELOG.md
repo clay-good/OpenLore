@@ -5,6 +5,10 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- **The minimum supported Node.js version is now 22.22** (`^22.22.0 || >=23.5.0`), matching
+  the file watcher's new floor (chokidar 6). On Node 22.19–22.21 the CLI now exits with code 78
+  and asks you to upgrade. (#620)
+
 ## [3.5.0] - 2026-10-25
 
 **The index heals itself, and every change comes with a receipt.**
