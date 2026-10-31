@@ -1518,7 +1518,10 @@ current — no repair starts and no answer is disclosed as served from a stale i
 verification SHALL hold for one age window. A full analysis SHALL record the content hash of
 every file it read, so the content-hash-first freshness check has a baseline and a file whose
 mtime changed without its bytes changing (a checkout, pull or new worktree) is not reported
-behind the working tree.
+behind the working tree. A file larger than the freshness scan reads SHALL keep the mtime
+fallback rather than a hash the read path can never confirm. The content check SHALL run only
+where a repair could follow it, SHALL record a changed result as well as an unchanged one, and
+SHALL use the same fingerprint configuration that `analyze` records.
 
 #### Scenario: A stale index heals itself behind an honest answer
 

@@ -66,7 +66,7 @@ describe('aged index — content decides staleness, not the clock', () => {
     await settle();
     expect(repaired).toEqual([]);
     expect(repairStatusFor(dir)).toBeUndefined();
-    expect(JSON.parse(await readFile(markerPath(dir), 'utf8'))).toMatchObject({ verifiedAtMs: expect.any(Number) });
+    expect(JSON.parse(await readFile(markerPath(dir), 'utf8'))).toMatchObject({ current: true, verifiedAtMs: expect.any(Number) });
   });
 
   it('the verification holds for the age window, so later reads do not re-check the source', async () => {
@@ -96,5 +96,28 @@ describe('aged index — content decides staleness, not the clock', () => {
     await readCachedContext(dir);
     await settle();
     expect(repaired).toEqual([resolve(dir)]);
+  });
+
+  it('a source found changed is recorded, so later reads repair without hashing again', async () => {
+    const dir = await setup();
+    await writeFile(join(dir, 'src', 'tariff.ts'), 'export const changed = true;\n');
+    await readCachedContext(dir);
+    const first = await readFile(markerPath(dir), 'utf8');
+    expect(JSON.parse(first)).toMatchObject({ current: false });
+    _resetContextCacheForTesting();
+    _resetRepairServiceForTesting(); // a new process
+    registerRepairBuilder(async (d) => { repaired.push(resolve(d)); });
+    await readCachedContext(dir);
+    await settle();
+    expect(await readFile(markerPath(dir), 'utf8')).toBe(first);
+    expect(repaired).toEqual([resolve(dir), resolve(dir)]);
+  });
+
+  it('where no repair could follow, the source is not hashed at all', async () => {
+    _resetRepairServiceForTesting(); // no builder registered (plain CLI commands, tests)
+    const dir = await layAgedIndex();
+    dirs.push(dir);
+    await readCachedContext(dir);
+    await expect(readFile(markerPath(dir), 'utf8')).rejects.toThrow();
   });
 });

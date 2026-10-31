@@ -22,7 +22,7 @@ import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, FINGERPRINT_BUDGET_OFFENDER_MIN_SHARE, FINGERPRINT_BUDGET_TOP_OFFENDERS, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
-import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
+import { canRepairInBackground, repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
 import { sanitizeForTerminal } from '../../../utils/misc.js';
 import { readPartialArtifact, readPartialIndexStamp } from '../../runtime/partial-index.js';
@@ -173,30 +173,46 @@ export function computeRepairReason(
 }
 
 /**
- * Records that an aged analysis was checked against its source and still matched, so the
- * check runs once per age window rather than on every read. It names the artifact mtime it
- * vouches for: the next analyze rewrites the artifact, and the marker then no longer applies.
+ * Records the result of checking an aged analysis against its source, so the check runs once
+ * per analysis (when the source changed) or once per age window (when it did not), not on every
+ * read. It names the artifact mtime it is about: the next analyze rewrites the artifact, and the
+ * record then no longer applies.
  */
 const FRESHNESS_VERIFIED_FILE = 'freshness-verified.json';
 
-/** When the analysis whose artifact has this mtime was last verified current, or 0. */
-async function lastVerifiedCurrentAt(analysisDir: string, artifactMtimeMs: number): Promise<number> {
+interface SourceVerification { current: boolean; verifiedAtMs: number }
+
+/** The recorded check for the analysis whose artifact has this mtime, if any. */
+async function readSourceVerification(analysisDir: string, artifactMtimeMs: number): Promise<SourceVerification | undefined> {
   try {
     const read = await readArtifactBytesBounded(join(runtimeDirOf(analysisDir), FRESHNESS_VERIFIED_FILE));
-    if (read.state !== 'ok') return 0;
-    const marker = JSON.parse(read.bytes.toString('utf8')) as { artifactMtimeMs?: unknown; verifiedAtMs?: unknown };
-    if (marker.artifactMtimeMs !== artifactMtimeMs || typeof marker.verifiedAtMs !== 'number') return 0;
-    // A marker dated in the future is not evidence; it would silence the age check for good.
-    return marker.verifiedAtMs <= Date.now() ? marker.verifiedAtMs : 0;
+    if (read.state !== 'ok') return undefined;
+    const marker = JSON.parse(read.bytes.toString('utf8')) as { artifactMtimeMs?: unknown; verifiedAtMs?: unknown; current?: unknown };
+    if (marker.artifactMtimeMs !== artifactMtimeMs || typeof marker.verifiedAtMs !== 'number' || typeof marker.current !== 'boolean') return undefined;
+    // A record dated in the future is not evidence; it would silence the age check for good.
+    return marker.verifiedAtMs <= Date.now() ? { current: marker.current, verifiedAtMs: marker.verifiedAtMs } : undefined;
   } catch {
-    return 0;
+    return undefined;
   }
 }
 
-/** Record that the analysis whose artifact has this mtime matched its source just now. */
-async function recordVerifiedCurrent(analysisDir: string, artifactMtimeMs: number): Promise<void> {
-  const marker = JSON.stringify({ artifactMtimeMs, verifiedAtMs: Date.now() });
+/** Record whether the analysis whose artifact has this mtime matched its source just now. */
+async function recordVerifiedCurrent(analysisDir: string, artifactMtimeMs: number, current: boolean): Promise<void> {
+  const marker = JSON.stringify({ artifactMtimeMs, verifiedAtMs: Date.now(), current });
   await atomicWriteFile(join(runtimeDirOf(analysisDir), FRESHNESS_VERIFIED_FILE), marker).catch(() => {});
+}
+
+/** One content check per analysis at a time: concurrent cold reads share it. */
+const sourceChecks = new Map<string, Promise<boolean>>();
+
+function checkSourceUnchanged(directory: string, artifactMtimeMs: number): Promise<boolean> {
+  const key = JSON.stringify([directory, artifactMtimeMs]);
+  let check = sourceChecks.get(key);
+  if (!check) {
+    check = isCacheFresh(directory).catch(() => false).finally(() => sourceChecks.delete(key));
+    sourceChecks.set(key, check);
+  }
+  return check;
 }
 
 /**
@@ -211,7 +227,7 @@ async function recordVerifiedCurrent(analysisDir: string, artifactMtimeMs: numbe
  * is current: nothing is rebuilt and no answer is disclosed as served from a stale index.
  * Before this check, every index older than 24 hours was reported stale and force-rebuilt,
  * however long the code had been unchanged, and agents that read "Served from a stale index"
- * fell back to grep.
+ * fell back to grep. The check runs only where a repair could follow it.
  */
 async function maybeTriggerBackgroundRepair(
   directory: string,
@@ -222,12 +238,15 @@ async function maybeTriggerBackgroundRepair(
   artifactMtimeMs: number,
 ): Promise<void> {
   try {
-    const verifiedAt = await lastVerifiedCurrentAt(analysisDir, artifactMtimeMs);
-    const reason = computeRepairReason(integrityVerdict, schemaFault, staleCount, Math.max(artifactMtimeMs, verifiedAt));
+    const verification = await readSourceVerification(analysisDir, artifactMtimeMs);
+    const ageBase = verification?.current ? Math.max(artifactMtimeMs, verification.verifiedAtMs) : artifactMtimeMs;
+    const reason = computeRepairReason(integrityVerdict, schemaFault, staleCount, ageBase);
     if (!reason) return;
-    if (reason === 'analysis-age' && await isCacheFresh(directory)) {
-      await recordVerifiedCurrent(analysisDir, artifactMtimeMs);
-      return;
+    // A recorded "source changed" for this analysis goes straight to repair, without re-hashing.
+    if (reason === 'analysis-age' && verification?.current !== false && canRepairInBackground()) {
+      const current = await checkSourceUnchanged(directory, artifactMtimeMs);
+      await recordVerifiedCurrent(analysisDir, artifactMtimeMs, current);
+      if (current) return;
     }
     repairInBackground(directory, reason);
   } catch {
@@ -1184,12 +1203,18 @@ export async function isAnalysisCacheFresh(directory: string, analysisDir: strin
  */
 export async function isCacheFresh(directory: string): Promise<boolean> {
   const config = await import('../config-manager.js').then(module => module.readOpenLoreConfig(directory));
-  const configuration = {
-    includePatterns: [...new Set(config?.analysis?.includePatterns ?? [])],
-    excludePatterns: [...new Set(config?.analysis?.excludePatterns ?? [])],
-    maxFiles: DEFAULT_MAX_FILES,
-  };
-  return isAnalysisCacheFresh(directory, join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), configuration);
+  // The same fingerprint input `analyze` records (src/api/analyze.ts): anything else hashes a
+  // different configuration and can never match, so an unchanged tree would read as changed.
+  const { analysisConfigFingerprintInput, analysisGeneratedExcludes } = await import('../../analyzer/analysis-core.js');
+  const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const configuration = analysisConfigFingerprintInput(
+    config?.analysis,
+    [],
+    [],
+    DEFAULT_MAX_FILES,
+    analysisGeneratedExcludes(directory, analysisDir, config?.openspecPath),
+  );
+  return isAnalysisCacheFresh(directory, analysisDir, configuration);
 }
 
 // ============================================================================

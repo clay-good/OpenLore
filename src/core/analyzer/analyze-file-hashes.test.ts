@@ -7,13 +7,17 @@
  * index read as "behind the working tree" for every file it touched.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runAnalysisCore } from './analysis-core.js';
 import { EdgeStore } from '../services/edge-store.js';
 import { checkCitedFileFreshness } from '../services/mcp-handlers/freshness.js';
+import { isCacheFresh } from '../services/mcp-handlers/utils.js';
+import { openloreInit } from '../../api/init.js';
+import { openloreAnalyze } from '../../api/analyze.js';
+import { SOURCE_SCAN_MAX_FILE_BYTES } from '../../constants.js';
 
 const SOURCE = 'export function computeTariff(kwh: number): number { return kwh * 0.12; }\n';
 
@@ -62,5 +66,36 @@ describe('full analysis records per-file content hashes', () => {
     await writeFile(join(root, 'src', 'tariff.ts'), `${SOURCE}export const changed = true;\n`);
     const result = await withStore((edgeStore) => checkCitedFileFreshness(root, ['src/tariff.ts'], { edgeStore }));
     expect(result.staleFiles).toEqual(['src/tariff.ts']);
+  });
+
+  it('a file too large for the freshness scan keeps the mtime fallback instead of reading stale forever', async () => {
+    await writeFile(join(root, 'src', 'big.json'), JSON.stringify({ blob: 'x'.repeat(SOURCE_SCAN_MAX_FILE_BYTES) }));
+    await runAnalysisCore(root, out, { maxFiles: 200, include: [], exclude: [], reExtract: true });
+    expect(await withStore(async (store) => store.getFileHash('src/big.json'))).toBeNull();
+    const result = await withStore((edgeStore) => checkCitedFileFreshness(root, ['src/big.json'], { edgeStore }));
+    expect(result.staleFiles).toEqual([]);
+  });
+});
+
+describe('the read-path content check agrees with analyze', () => {
+  it('an unchanged tree analyzed with configured include patterns reads as unchanged', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'analyze-include-'));
+    try {
+      await mkdir(join(dir, 'src'), { recursive: true });
+      await mkdir(join(dir, 'docs'), { recursive: true });
+      await writeFile(join(dir, 'src', 'tariff.ts'), SOURCE);
+      await writeFile(join(dir, 'docs', 'note.ts'), 'export const note = 1;\n');
+      await openloreInit({ rootPath: dir });
+      const configPath = join(dir, '.openlore', 'config.json');
+      const config = JSON.parse(await readFile(configPath, 'utf8'));
+      config.analysis = { ...config.analysis, includePatterns: ['docs/**'] };
+      await writeFile(configPath, JSON.stringify(config));
+      await openloreAnalyze({ rootPath: dir });
+      expect(await isCacheFresh(dir)).toBe(true);
+      await writeFile(join(dir, 'src', 'tariff.ts'), `${SOURCE}export const changed = true;\n`);
+      expect(await isCacheFresh(dir)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   });
 });

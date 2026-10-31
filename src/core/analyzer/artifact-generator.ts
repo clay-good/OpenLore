@@ -28,6 +28,7 @@ import {
   ARTIFACT_PARSE_HEALTH,
   ARTIFACT_DYNAMIC_BOUNDARY,
   MAX_HTML_INLINE_SCRIPT_CHARS,
+  SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../constants.js';
 import { graphDigest, writeTraversalIndexArtifact } from './condensation.js';
 import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
@@ -1547,7 +1548,9 @@ export class AnalysisArtifactGenerator {
         // Read raw bytes so an encoding fallback (invalid UTF-8) is detectable at the byte level —
         // a decoded string alone can't distinguish a lossy decode from a legit U+FFFD in the source.
         const bytes = await readFile(file.absolutePath);
-        fileHashes.set(file.path, hashOf(bytes));
+        // Above the freshness scan cap the read path will not hash a file, so a recorded hash
+        // could never be confirmed; such files keep the mtime fallback instead.
+        if (bytes.length <= SOURCE_SCAN_MAX_FILE_BYTES) fileHashes.set(file.path, hashOf(bytes));
         const content = bytes.toString('utf-8');
         const isTest = isTestFile(file.path);
         const scriptContainer = extractScriptContainer(file.path, content);
