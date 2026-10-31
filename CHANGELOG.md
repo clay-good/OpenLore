@@ -14,6 +14,9 @@ All notable changes to OpenLore are documented here. This project adheres to
   drafting, in Claude Code, Codex, and Pi. (#623)
 - **Codex support in `openlore install`/`connect`:** registers the OpenLore MCP server and a
   managed proposal hook in `.codex/` (user or project scope). (#623)
+- **The minimum supported Node.js version is now 22.22** (`^22.22.0 || >=23.5.0`), matching
+  the file watcher's new floor (chokidar 6). On Node 22.19–22.21 the CLI now exits with code 78
+  and asks you to upgrade. (#620)
 
 ## [3.5.0] - 2026-10-25
 
