@@ -489,3 +489,74 @@ describe('round-1 review regressions', () => {
     expect(f.evidence).toContain('[withheld: reads like an instruction]');
   });
 });
+
+describe('round-2 review regressions', () => {
+  it('an output above the command directory names nothing', async () => {
+    const d = repo({
+      'pkg/gen.go': 'package pkg\n//go:generate protoc --go_out=.. pkg/api.proto\n',
+      'pkg/mocks/m.go': GO_HEADER + '\npackage mocks\n',
+    });
+    expect((await classifyGeneratedFiles(d, ['pkg/mocks/m.go'])).facts.get('pkg/mocks/m.go')?.regenerateWith).toBe('unknown');
+  });
+
+  it('a cd inside a subshell applies inside it only', async () => {
+    const d = repo({
+      'Makefile': 'gen:\n\t(cd sub && tool -o out/x.go in.yaml)\n',
+      'sub/in.yaml': 'a: 1\n',
+      'sub/out/x.go': PB_GO,
+      'out/x.go': PB_GO,
+    });
+    const { facts } = await classifyGeneratedFiles(d, ['sub/out/x.go', 'out/x.go']);
+    expect(facts.get('sub/out/x.go')).toMatchObject({ generatedFrom: ['sub/in.yaml'], regenerateWith: '(cd sub && tool -o out/x.go in.yaml)' });
+    expect(facts.get('out/x.go')?.regenerateWith).toBe('unknown');
+  });
+
+  it("reads Go's single-dash flags and mockgen's Source: line", async () => {
+    const d = repo({
+      'svc/service.go': 'package svc\n//go:generate mockgen -source=service.go -destination=mocks/mock_service.go\n',
+      'svc/mocks/mock_service.go': [GO_HEADER, '// Source: service.go', '', 'package mocks', ''].join('\n'),
+      'pill/pill.go': 'package pill\n//go:generate stringer -type=Pill -output=pill_string.go\n',
+      'pill/pill_string.go': GO_HEADER + '\npackage pill\n',
+    });
+    const { facts } = await classifyGeneratedFiles(d, ['svc/mocks/mock_service.go', 'pill/pill_string.go']);
+    expect(facts.get('svc/mocks/mock_service.go')?.generatedFrom).toEqual(['svc/service.go']);
+    expect(facts.get('pill/pill_string.go')?.regenerateWith).toBe('stringer -type=Pill -output=pill_string.go');
+  });
+
+  it('a marker after the code begins, or in a string literal, is not a header', () => {
+    expect(matchHeaderMarker(['const fixture = `', GO_HEADER, '`;'].join('\n'), 'a.test.ts')).toBeNull();
+    expect(matchHeaderMarker(['// license', '', GO_HEADER, 'package x'].join('\n'))).toBe('go-code-generated');
+    expect(matchHeaderMarker(['/*', ' This file was automatically gen' + 'erated.', '*/'].join('\n'))).toBe('auto-generated-banner');
+  });
+
+  it('a pure rename is not an edit; a rename with changes is', () => {
+    const f = fact({ file: 'gen/b.pb.go' });
+    const m = new Map([[f.file, f]]);
+    expect(generatedFileEditedFindings([{ path: 'gen/b.pb.go', status: 'renamed', contentChanged: false }], m)).toEqual([]);
+    expect(generatedFileEditedFindings([{ path: 'gen/b.pb.go', status: 'renamed', contentChanged: true }], m)).toHaveLength(1);
+  });
+
+  it('a pure git mv of a generated file does not fire over a real diff', async () => {
+    const d = repo({ 'gen/a.go': PB_GO });
+    git(d, ['mv', 'gen/a.go', 'gen/b.go']);
+    expect((await guardDiff(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('matches the diff against the raw source path even when its name redacts', async () => {
+    const key = 'AKIA' + 'ABCDEFGHIJKLMNOP';
+    const d = repo({
+      [`keys/${key}.json`]: '{}\n',
+      'package.json': JSON.stringify({ scripts: { gen: `tool -i keys/${key}.json -o gen` } }),
+      'gen/a.ts': AT_GENERATED,
+    }, { [`keys/${key}.json`]: '{"v":2}\n', 'gen/a.ts': AT_GENERATED + '// regen\n' });
+    const r = await guardDiff(d, 'HEAD');
+    expect(r.findings).toEqual([]);
+    expect(JSON.stringify(r.facts)).not.toContain(key);
+  });
+
+  it('keeps recipe lines under a conditional and treats ::= as an assignment', async () => {
+    const { makefileRecipes } = await import('./generated-file-guard.js');
+    expect(makefileRecipes('X ::= 1\ngen:\nifeq ($(A),1)\n\tprotoc --go_out=gen a.proto\nendif\n').map(r => [r.target, r.command]))
+      .toEqual([['gen', 'protoc --go_out=gen a.proto']]);
+  });
+});

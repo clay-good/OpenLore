@@ -104,7 +104,8 @@ export const LOCKFILE_MANIFESTS: Readonly<Record<string, readonly string[]>> = {
 
 /** Header lines that name the file's source literally (`source: order.proto`, `Generated from openapi.yaml`). */
 const HEADER_SOURCE_PATTERNS: readonly RegExp[] = [
-  new RegExp(COMMENT_LEAD + String.raw`source:\s*["'\x60]?([^\s"'\x60]+)`),
+  // protoc writes `source:`, mockgen writes `Source:`.
+  new RegExp(COMMENT_LEAD + String.raw`source:\s*["'\x60]?([^\s"'\x60]+)`, 'i'),
   // protobuf-es writes `@generated from file foo/v1/bar.proto (package ...)`.
   new RegExp(COMMENT_LEAD + String.raw`.*?\bgenerated\s+(?:by\s+\S+\s+)?from\s+(?:file\s+)?["'\x60]?([^\s"'\x60,;()]+)`, 'i'),
 ];
@@ -216,8 +217,32 @@ async function readHead(root: string, rel: string, maxBytes: number): Promise<st
   }
 }
 
-function headerLines(head: string): string[] {
-  return head.split('\n').slice(0, HEADER_SCAN_LINES).map(l => l.replace(/\r$/, ''));
+/**
+ * The file's leading comment block: lines up to the first one that is neither blank nor a comment
+ * (the Go rule: the marker comes before the first non-comment text), within the scan limits. A
+ * marker inside a string literal or after the code begins is therefore never read.
+ */
+function headerLines(head: string, file?: string): string[] {
+  const lead = leadFor(file);
+  const out: string[] = [];
+  let inBlock: '*/' | '-->' | null = null;
+  for (const raw of head.split('\n').slice(0, HEADER_SCAN_LINES)) {
+    const line = raw.replace(/\r$/, '');
+    if (inBlock) {
+      // Inside a block comment every line is comment text; give it a comment token so the markers,
+      // which read comment lines only, see it.
+      out.push(lead.test(line) ? line : `${inBlock === '-->' ? '<!--' : '*'} ${line.trimStart()}`);
+      if (line.includes(inBlock)) inBlock = null;
+      continue;
+    }
+    if (line.trim() === '') continue;
+    if (!lead.test(line)) break;
+    out.push(line);
+    const t = line.trimStart();
+    if (t.startsWith('/*') && !t.slice(2).includes('*/')) inBlock = '*/';
+    else if (t.startsWith('<!--') && !t.slice(4).includes('-->')) inBlock = '-->';
+  }
+  return out;
 }
 
 /**
@@ -225,7 +250,7 @@ function headerLines(head: string): string[] {
  * comment syntax: in a Markdown or text file only an HTML comment counts, never a `#` heading.
  */
 export function matchHeaderMarker(head: string, file?: string): string | null {
-  const lines = headerLines(head);
+  const lines = headerLines(head, file);
   const lead = leadFor(file);
   for (const marker of GENERATED_HEADER_MARKERS) {
     if (lines.some(l => marker.test(l, lead))) return marker.id;
@@ -234,9 +259,9 @@ export function matchHeaderMarker(head: string, file?: string): string | null {
 }
 
 /** Source paths a header names literally. Trailing sentence punctuation is dropped. */
-export function headerSources(head: string): string[] {
+export function headerSources(head: string, file?: string): string[] {
   const out: string[] = [];
-  for (const line of headerLines(head)) {
+  for (const line of headerLines(head, file)) {
     for (const re of HEADER_SOURCE_PATTERNS) {
       const m = re.exec(line);
       const lit = m?.[1]?.replace(/[.,;:)\]]+$/, '');
@@ -297,7 +322,11 @@ function pathPatternKind(rel: string): { kind: 'generated' | 'vendored'; matched
  * generated file's source and regenerate command. Files that match no rule are absent from the
  * result. Best-effort per file: an unreadable file simply skips the header rule.
  */
-export async function classifyGeneratedFiles(rootDir: string, files: readonly string[]): Promise<ClassifyResult> {
+export async function classifyGeneratedFiles(
+  rootDir: string,
+  files: readonly string[],
+  opts: { raw?: boolean } = {},
+): Promise<ClassifyResult> {
   // Confined reads need an absolute root; a relative one would fail every read quietly.
   const root = resolve(rootDir);
   const facts = new Map<string, GeneratedFileFact>();
@@ -364,7 +393,8 @@ export async function classifyGeneratedFiles(rootDir: string, files: readonly st
     boundaries.push('A config source held more commands than the guard reads; commands past the limit were not matched, so a source or command may read `unknown`.');
   }
   // Every repository-derived string is bounded, redacted, and screened before it can reach an agent.
-  for (const [k, f] of facts) facts.set(k, emittedFact(f));
+  // `raw` is for internal matching only (guardDiff), never for output.
+  if (!opts.raw) for (const [k, f] of facts) facts.set(k, emittedFact(f));
   return { facts, boundaries };
 }
 
@@ -388,8 +418,9 @@ const MAX_ENTRIES_PER_SOURCE = 5_000;
 /** Characters of one command that are parsed; a longer command is truncated, never scanned whole. */
 const MAX_COMMAND_SCAN = 4_096;
 const GO_GENERATE = '//go:generate';
-const OUTPUT_FLAGS = new Set(['-o', '--out', '--output', '--output-dir', '--out-dir', '--outdir', '--outDir', '--output-path']);
-const INPUT_FLAGS = new Set(['-i', '--input', '--input-spec', '--schema', '--spec']);
+// Go's flag package spells flags with one dash (`stringer -output=`, `mockgen -destination=`).
+const OUTPUT_FLAGS = new Set(['-o', '--out', '--output', '--output-dir', '--out-dir', '--outdir', '--outDir', '--output-path', '-out', '-output', '-destination']);
+const INPUT_FLAGS = new Set(['-i', '--input', '--input-spec', '--schema', '--spec', '-input', '-source']);
 
 /** Split a shell line into simple commands and tokens. Quotes are honored; nothing is expanded. */
 export function tokenizeCommand(command: string): string[][] {
@@ -416,6 +447,8 @@ export function tokenizeCommand(command: string): string[][] {
     }
     if (c === '&' && command[i + 1] === '>') continue; // `&>` redirects like `>`
     if (c === '\n' || c === ';' || c === '|' || c === '&') { flushCommand(); continue; }
+    // A subshell `( … )` is its own marker command, so a `cd` inside it is undone at `)`.
+    if (c === '(' || c === ')') { flushCommand(); commands.push([c]); continue; }
     if (c === '>') {
       // `2>` names a file descriptor, not an argument.
       if (has && /^\d+$/.test(cur)) { cur = ''; has = false; } else flushToken();
@@ -523,7 +556,7 @@ class SourceResolver {
     //    root; an unresolvable literal is still reported as written, never re-targeted by guesswork.
     if (head !== null) {
       const dir = posix.dirname(file);
-      for (const lit of headerSources(head)) {
+      for (const lit of headerSources(head, file)) {
         const nearby = this.rel(dir, lit) || null;
         const fromRoot = normalizeRel(lit);
         const hit = nearby && await this.isFile(nearby) ? nearby
@@ -585,18 +618,23 @@ class SourceResolver {
    */
   private async matchEntry(entry: ConfigEntry, file: string): Promise<{ entry: ConfigEntry; inputs: string[] } | null> {
     let cwd: string | null = entry.cwd;
+    const subshells: string[] = [];
     for (const tokens of tokenizeCommand(entry.command)) {
+      if (tokens.length === 1 && tokens[0] === '(') { subshells.push(cwd); continue; }
+      if (tokens.length === 1 && tokens[0] === ')') { cwd = subshells.pop() ?? entry.cwd; continue; }
       if (tokens[0] === 'cd' || tokens[0] === 'pushd') {
-        cwd = tokens.length === 2 && isLiteralPath(tokens[1]) ? this.rel(cwd, tokens[1]) : null;
+        cwd = tokens.length === 2 && tokens[1] !== '-' && isLiteralPath(tokens[1]) ? this.rel(cwd, tokens[1]) : null;
         if (cwd === null) return null;
         continue;
       }
+      const here = cwd;
       const { outputs, inputs } = commandPaths(tokens);
-      const outs = outputs.map(o => this.rel(cwd!, o)).filter((o): o is string => o !== null && o !== cwd);
+      // An output that is the command's own directory, or above it, claims every file below it.
+      const outs = outputs.map(o => this.rel(here, o)).filter((o): o is string => o !== null && !under(here, o));
       if (!outs.some(o => under(file, o))) continue;
       const real: string[] = [];
       for (const raw of inputs) {
-        const p = this.rel(cwd, raw);
+        const p = this.rel(here, raw);
         if (!p || p === file || outs.some(o => under(p, o))) continue;
         if (await this.isFile(p) && !real.includes(p)) real.push(p);
       }
@@ -635,7 +673,7 @@ class SourceResolver {
       try {
         const scripts = text ? (JSON.parse(text) as { scripts?: unknown }).scripts : undefined;
         if (scripts && typeof scripts === 'object' && !Array.isArray(scripts)) {
-          for (const [name, body] of Object.entries(scripts).sort(([a], [b]) => a.localeCompare(b))) {
+          for (const [name, body] of Object.entries(scripts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
             if (typeof body === 'string') {
               add({ command: body.slice(0, MAX_COMMAND_SCAN), cwd: dir, configFile: join('package.json'), evidence: `package.json script "${name}" in ${join('package.json')}` });
             }
@@ -726,9 +764,12 @@ export function makefileRecipes(text: string): Array<{ target: string; command: 
       continue;
     }
     if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    // A conditional may wrap recipe lines; it neither opens nor closes a target.
+    if (/^\s*(?:ifeq|ifneq|ifdef|ifndef|else|endif)\b/.test(line)) continue;
     // Greedy and anchored, so linear on a long line: a rule is everything up to its first `:`.
-    const rule = /^([^\t#=:][^=:]*):(?!=)/.exec(line);
-    target = rule && !/^\s*(?:export|override|define|include|-include|ifeq|ifneq|ifdef|ifndef|else|endif)\b/.test(line)
+    // `X := y` and `X ::= y` are assignments, not rules.
+    const rule = /^([^\t#=:][^=:]*):(?!:?=)/.exec(line);
+    target = rule && !/^\s*(?:export|override|define|include|-include)\b/.test(line)
       ? rule[1].trim().split(/\s+/)[0]
       : null;
   }
@@ -742,6 +783,8 @@ export function makefileRecipes(text: string): Array<{ target: string; command: 
 export interface ChangedPath {
   path: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed';
+  /** False for a pure rename (no lines added or removed); unset means the content changed. */
+  contentChanged?: boolean;
 }
 
 const SOURCE = 'generated-file-guard';
@@ -768,10 +811,13 @@ export function generatedFileEditedFindings(
 ): GovernanceFinding[] {
   const changedSet = new Set(changed.map(c => c.path));
   const findings: GovernanceFinding[] = [];
-  for (const c of [...changed].sort((a, b) => a.path.localeCompare(b.path))) {
+  for (const c of [...changed].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     if (c.status !== 'modified' && c.status !== 'renamed') continue;
-    const fact = facts.get(c.path);
-    if (!fact) continue;
+    if (c.contentChanged === false) continue; // a move is not an edit
+    const raw = facts.get(c.path);
+    if (!raw) continue;
+    // Matching reads the facts as given; the message carries only screened repository text.
+    const fact = emittedFact(raw);
 
     if (fact.kind === 'lockfile') {
       const dir = posix.dirname(fact.file);
@@ -787,10 +833,11 @@ export function generatedFileEditedFindings(
       continue;
     }
 
-    const sources = fact.generatedFrom === 'unknown' ? [] : fact.generatedFrom;
-    const sourceChanged = sources.some(s => inChanged(changedSet, s))
-      || (fact.configFile !== undefined && changedSet.has(fact.configFile));
+    const rawSources = raw.generatedFrom === 'unknown' ? [] : raw.generatedFrom;
+    const sourceChanged = rawSources.some(s => inChanged(changedSet, s))
+      || (raw.configFile !== undefined && changedSet.has(raw.configFile));
     if (sourceChanged) continue;
+    const sources = fact.generatedFrom === 'unknown' ? [] : fact.generatedFrom;
 
     const what = fact.kind === 'vendored' ? 'vendored' : 'generated';
     const by = `${fact.rule}: ${fact.matched}`;
@@ -827,11 +874,13 @@ export async function guardDiff(root: string, baseRef: string): Promise<DiffGuar
   const changed: ChangedPath[] = [];
   for (const f of diff.files) {
     const path = reframeRepoPath(f.path, prefix);
-    if (path !== null) changed.push({ path, status: f.status });
+    if (path !== null) changed.push({ path, status: f.status, ...(f.status === 'renamed' ? { contentChanged: f.additions + f.deletions > 0 } : {}) });
   }
-  const { facts, boundaries } = await classifyGeneratedFiles(root, changed.filter(c => c.status !== 'deleted').map(c => c.path));
+  // Findings match the diff against the raw facts (redaction must not rewrite a path it compares);
+  // only screened facts leave this function.
+  const { facts, boundaries } = await classifyGeneratedFiles(root, changed.filter(c => c.status !== 'deleted').map(c => c.path), { raw: true });
   return {
-    facts: [...facts.values()],
+    facts: [...facts.values()].map(emittedFact),
     findings: generatedFileEditedFindings(changed, facts),
     boundaries,
   };
