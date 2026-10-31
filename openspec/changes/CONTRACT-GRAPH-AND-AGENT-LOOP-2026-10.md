@@ -110,5 +110,6 @@ part transports cannot do, because only the graph knows who needs to hear a fact
 ## Order
 
 The ROADMAP's Phase 1b sequences these changes. Diff findings land in `verify_change` first, because
-every hook delivers through it; the hooks come next; the board comes last, because it uses the
-ledger and the hooks.
+every hook delivers through it; the hooks come next; the board follows, because it uses the ledger
+and the hooks. The claim kinds close the phase because two of them need the contract graph and the
+ledger, but `decision-governed` has no dependency and can ship at any time.
