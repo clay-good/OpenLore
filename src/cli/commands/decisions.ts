@@ -8,7 +8,7 @@
  * are reviewed.
  */
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -34,6 +34,7 @@ import {
   illegalPromotionToApproved,
 } from '../../core/decisions/store.js';
 import { readLedger } from '../../core/decisions/ledger.js';
+import { DECISIONS_HOOK_MARKER, hasOpenLoreCommitGate, resolveAutopilotMode } from '../../core/decisions/autopilot.js';
 import { loadDecisionConstraintState } from '../../core/decisions/constraint-ledger.js';
 import { rewriteSyncedDecisionStatus } from '../../core/decisions/syncer.js';
 import { consolidateDrafts } from '../../core/decisions/consolidator.js';
@@ -161,7 +162,7 @@ async function removeAgentInstructions(rootPath: string, filePath: string): Prom
 // HOOK MANAGEMENT
 // ============================================================================
 
-const HOOK_MARKER = '# openlore-decisions-hook';
+const HOOK_MARKER = DECISIONS_HOOK_MARKER;
 const SOURCE_EXTS = /\.(ts|js|tsx|jsx|py|go|rs|rb|java|cpp|cc|swift)$/;
 
 async function sourceSnapshotFingerprint(
@@ -299,22 +300,8 @@ export async function runPostCommitDecisionCheck(rootPath: string): Promise<void
   logger.warning('openlore: pre-commit gate was bypassed (--no-verify). Architectural decisions were not reviewed for this commit. Run: openlore decisions --consolidate --gate');
 }
 
-/**
- * Does this repository already carry an OpenLore decisions commit gate?
- *
- * Read by `openlore install` so it never changes the mode of a gate someone else
- * configured: an absent `governance.autopilot` means blocking review, so writing
- * the non-blocking default over an EXISTING gate would silently downgrade it
- * (change: unify-onboarding-entrypoint).
- */
-export async function hasOpenLoreCommitGate(rootPath: string): Promise<boolean> {
-  try {
-    const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
-    return (await readFile(hookPath, 'utf-8')).includes(HOOK_MARKER);
-  } catch {
-    return false; // no hook, or unreadable — either way, no gate we must preserve
-  }
-}
+// Re-exported: `openlore install` reads it from here (change: unify-onboarding-entrypoint).
+export { hasOpenLoreCommitGate };
 
 export async function installPreCommitHook(
   rootPath: string,
@@ -586,7 +573,14 @@ export async function runAutopilotGate(
     if (draftCount > 0) parts.push(`${draftCount} draft(s) pending background consolidation`);
     // Retried every gate, but a decision with no sync target fails every time, so name
     // where the cause is rather than promising a retry will fix it.
-    if (syncErrors.length > 0) parts.push(`${syncErrors.length} sync error(s) — see why with openlore decisions --sync`);
+    if (syncErrors.length > 0) {
+      // `decisions --sync` skips auto-approved decisions, so pointing there showed nothing.
+      // Name the cause; the decision itself stays accepted and in the trail.
+      const [first] = syncErrors;
+      const full = safe(first.error.replace(/^Error:\s*/, ''));
+      const cause = full.length <= 160 ? full : `${full.slice(0, 160).replace(/\s+\S*$/, '')}…`;
+      parts.push(`${syncErrors.length} not synced to specs (${first.id}: ${cause}); still accepted, in the trail`);
+    }
     if (unevidencedCount > 0) parts.push(`${unevidencedCount} unevidenced decision(s) require review`);
     if (parts.length > 0 || unreviewedCount > 0) {
       console.error(
@@ -618,6 +612,22 @@ export async function runAutopilotGate(
     console.error(`openlore autopilot: skipped (${safe((err as Error).message)}) — commit not blocked`);
     process.exitCode = 0;
   }
+}
+
+/**
+ * Write auto-accepted (and human-approved) decisions to specs, deterministic, no LLM.
+ * Run detached by `decisions record` under autopilot, so the record returns at once
+ * (change: default-decision-autopilot-with-visible-trace).
+ */
+async function syncAcceptedDecisions(rootPath: string): Promise<void> {
+  const config = await readOpenLoreConfig(rootPath);
+  if (!config) return;
+  const openspecPath = resolveOpenspecDir(rootPath, config.openspecPath);
+  if (!(await fileExists(join(openspecPath, OPENSPEC_SPECS_SUBDIR)))) return;
+  const specMap = await buildSpecMap({ rootPath, openspecPath });
+  await syncApprovedDecisions(await loadDecisionStore(rootPath), {
+    rootPath, openspecPath, specMap, includeAutoApproved: true,
+  });
 }
 
 export function reconcileDecisionClassifications(
@@ -756,6 +766,8 @@ export const decisionsCommand = new Command('decisions')
   .option('--uninstall-hook', 'Remove pre-commit hook', false)
   .option('--verbose', 'Show detailed decision info', false)
   .option('--json', 'Output as JSON', false)
+  // Spawned detached by `decisions record` under autopilot (not a user flag).
+  .addOption(new Option('--background-sync', 'Sync accepted decisions to specs').hideHelp())
   .addHelpText(
     'after',
     `
@@ -775,9 +787,11 @@ Examples:
   $ openlore decisions log                         Transition ledger (audit trail)
   $ openlore decisions review                      Auto-accepted decisions awaiting review
 
-Decision autopilot (opt-in: { "governance": { "autopilot": true } } in .openlore/config.json):
-the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accepted
-(unreviewed)", and never blocks a commit. Every transition lands on the ledger.
+Decision autopilot (on by default unless a blocking gate is installed; turn it off with
+{ "governance": { "autopilot": false } } in .openlore/config.json): "decisions record"
+accepts a decision at once and the gate auto-accepts verified ones; both sync to specs
+marked "Auto-accepted (unreviewed)" and never block a commit. Every transition lands on
+the ledger. Review the trail with: openlore decisions review
 `
   )
   .action(async function (this: Command, options: {
@@ -795,6 +809,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
     uninstallHook: boolean;
     verbose: boolean;
     json: boolean;
+    backgroundSync?: boolean;
   }) {
     // Top-level error boundary: an unexpected throw (LLM consolidate/verify, spec-map
     // build, git, or a spec write) becomes a friendly message + exit 1 rather than an
@@ -814,6 +829,10 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
     }
     if (options.postCommitCheck) {
       await runPostCommitDecisionCheck(rootPath);
+      return;
+    }
+    if (options.backgroundSync) {
+      await syncAcceptedDecisions(rootPath);
       return;
     }
     // ── Load store (always needed) ───────────────────────────────────────────
@@ -1006,7 +1025,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           unassessed: drafts,
         });
         const unresolvedUnassessed = classifications.unassessed.filter(decisionClassificationIsUnresolved);
-        if (options.gate && openloreConfig.governance?.autopilot === true) {
+        if (options.gate && (await resolveAutopilotMode(rootPath, openloreConfig, { gateRunning: true })).autopilot) {
           await runAutopilotGate(rootPath, openloreConfig, options.json, classifications.unassessed);
           return;
         }
@@ -1109,7 +1128,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
 
       // Decision autopilot: resolve the freshly-verified decisions without
       // blocking — auto-accept, sync, advisory line, exit 0. (add-decision-autopilot)
-      if (options.gate && openloreConfig.governance?.autopilot === true) {
+      if (options.gate && (await resolveAutopilotMode(rootPath, openloreConfig, { gateRunning: true })).autopilot) {
         await runAutopilotGate(rootPath, openloreConfig, options.json, classifications.unassessed);
         return;
       }
@@ -1255,7 +1274,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
     if (options.gate && !options.consolidate) {
       // Decision autopilot: accept + sync + trail, never block. (add-decision-autopilot)
       const gateConfig = await readOpenLoreConfig(rootPath);
-      if (gateConfig?.governance?.autopilot === true) {
+      if (gateConfig && (await resolveAutopilotMode(rootPath, gateConfig, { gateRunning: true })).autopilot) {
         await runAutopilotGate(rootPath, gateConfig, options.json);
         return;
       }

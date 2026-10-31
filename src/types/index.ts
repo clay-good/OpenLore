@@ -72,8 +72,10 @@ export interface OpenLoreConfig {
    * Optional governance behavior (change: add-decision-autopilot). With
    * `autopilot: true`, the decisions commit gate auto-accepts verified decisions
    * (distinct `auto-approved` status, actor recorded on an append-only ledger),
-   * syncs them to specs, and never blocks a commit; blocking human review is the
-   * behavior when absent/false. Autopilot never touches a human-rejected decision.
+   * syncs them to specs, and never blocks a commit; `false` means blocking human
+   * review. Absent means on, unless a blocking decisions gate is installed
+   * (`resolveAutopilotMode`, change: default-decision-autopilot-with-visible-trace).
+   * Autopilot never touches a human-rejected decision.
    */
   governance?: {
     autopilot?: boolean;
@@ -286,10 +288,13 @@ export interface EmbeddingConfig {
    *    API key. The model is lazily downloaded and cached on first use. `model`
    *    is optional (defaults to a pinned small model); `baseUrl`/`apiKey` are
    *    ignored.
+   *  - `'none'`: keyword only. Opts out of the local vectors OpenLore otherwise adds in
+   *    the background, and wins over `EMBED_*` environment variables.
    * Omitting `provider` keeps the historical behaviour: a remote endpoint when
-   * `baseUrl` + `model` are present, otherwise no embeddings (keyword default).
+   * `baseUrl` + `model` are present, otherwise the keyword index, to which background
+   * builds add local vectors when the optional package is installed.
    */
-  provider?: 'remote' | 'local';
+  provider?: 'remote' | 'local' | 'none';
   /** Base URL of the OpenAI-compatible embeddings endpoint (remote provider) */
   baseUrl?: string;
   /** Embedding model name (required for remote; optional override for local) */
@@ -793,6 +798,7 @@ export type DecisionDisposition = 'pending' | 'promoted' | 'merged-into' | 'reje
 export type DecisionDispositionReason =
   | 'promoted-as-recorded'
   | 'promoted-with-rewrite'
+  | 'auto-accepted-on-record'
   | 'merged-into-consolidated'
   | 'superseded-by-later-draft'
   | 'not-in-consolidated-set'

@@ -575,7 +575,7 @@ export async function handleGetSubgraph(
 
       if (VectorIndex.exists(outputDir)) {
         const cfg = await readOpenLoreConfig(absDir);
-        const embedSvc = await resolveEmbedder(cfg);
+        const embedSvc = await resolveEmbedder(cfg, outputDir);
         if (embedSvc) {
           const results = await VectorIndex.search(outputDir, functionName, embedSvc, {
             limit: 1,
@@ -742,7 +742,7 @@ export async function handleAnalyzeImpact(
 
       if (VectorIndex.exists(outputDir)) {
         const cfg = await readOpenLoreConfig(absDir);
-        const embedSvc = await resolveEmbedder(cfg);
+        const embedSvc = await resolveEmbedder(cfg, outputDir);
         if (embedSvc) {
           const results = await VectorIndex.search(outputDir, symbol, embedSvc, {
             limit: 1,

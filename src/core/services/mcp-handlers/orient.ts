@@ -239,7 +239,7 @@ export async function handleOrient(
   if (!hasCodeIndex) {
     return {
       ...notReadyResult('No analysis found. Run "openlore analyze" first.', 'index-absent'),
-      hint: 'Plain "openlore analyze" builds a keyword (BM25) index that orient can use; add EMBED_* (or --embed) for semantic search.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) index that orient can use.',
     };
   }
 
@@ -253,7 +253,7 @@ export async function handleOrient(
   // internal score-scale token (bounded `hybrid` vs unbounded keyword) for the
   // relevance gate; `retrievalMode` is the honest, human-facing mode.
   const cfg = await readOpenLoreConfig(absDir);
-  const embedSvc = await resolveEmbedder(cfg);
+  const embedSvc = await resolveEmbedder(cfg, outputDir);
   const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
   let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
@@ -1080,9 +1080,6 @@ export async function handleOrient(
     searchMode,
     retrievalMode,
     ...(parseHealthNote ? { parseHealth: parseHealthNote } : {}),
-    ...(isKeywordRetrievalMode(retrievalMode)
-      ? { note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.' }
-      : {}),
     ...(graphIndexStale
       ? { graphIndexNote: 'Graph index unavailable — call paths, provenance, decisions, and change-coupling are omitted. Run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' }
       : {}),

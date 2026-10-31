@@ -252,13 +252,13 @@ export async function handleSearchCode(
   if (!VectorIndex.exists(outputDir)) {
     return {
       ...notReadyResult('No search index found. Run "openlore analyze" first.', 'index-absent'),
-      hint: 'Plain "openlore analyze" builds a keyword (BM25) index; add EMBED_BASE_URL/EMBED_MODEL for semantic search.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) index.',
     };
   }
 
   // Resolve the active embedder (env → local provider → remote config); null is
   // the first-class keyword default. retrievalMode is the honest, served mode.
-  const embedSvc = await resolveEmbedder(cfg);
+  const embedSvc = await resolveEmbedder(cfg, outputDir);
   let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
   limit = Math.max(1, Math.min(limit, 100));
@@ -379,11 +379,6 @@ export async function handleSearchCode(
       searchMode,
       retrievalMode,
       coverage: coverageDisclosure(verdict, questionKind),
-      ...(isKeywordRetrievalMode(retrievalMode)
-        ? {
-            note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
-          }
-        : {}),
       count: 0,
       // No ranked list: withholding it IS the abstention. `explain_retrieval_miss`
       // answers which field would have had to match.
@@ -406,11 +401,6 @@ export async function handleSearchCode(
     coverage: verdict === 'covered'
       ? { verdict, questionKind }
       : coverageDisclosure(verdict, questionKind),
-    ...(isKeywordRetrievalMode(retrievalMode)
-      ? {
-          note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
-        }
-      : {}),
     count: budgetedRows.kept.length,
     results: budgetedRows.kept,
     ...(budgetedRows.omitted > 0
@@ -446,14 +436,14 @@ export async function handleSuggestInsertionPoints(
   if (!VectorIndex.exists(outputDir)) {
     return {
       ...notReadyResult('No search index found. Run "openlore analyze" first.', 'index-absent'),
-      hint: 'Plain "openlore analyze" builds a keyword (BM25) index; add EMBED_BASE_URL/EMBED_MODEL for semantic search.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) index.',
     };
   }
 
   // Resolve the active embedder (env → local provider → remote config); null
   // triggers the first-class BM25 path in VectorIndex.search().
   const cfg = await readOpenLoreConfig(absDir);
-  const embedSvc = await resolveEmbedder(cfg);
+  const embedSvc = await resolveEmbedder(cfg, outputDir);
 
   limit = Math.max(1, Math.min(limit, 20));
   const { readCachedContext } = await import('./utils.js');
@@ -747,7 +737,7 @@ export async function handleSearchSpecs(
   // Resolve the active embedder (env → local provider → remote config); null is
   // the first-class keyword default for spec search.
   const cfg = await readOpenLoreConfig(absDir);
-  const embedSvc = await resolveEmbedder(cfg);
+  const embedSvc = await resolveEmbedder(cfg, outputDir);
   const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
   const semanticRetrievalMode = embedderMode(embedSvc);
 
@@ -798,13 +788,6 @@ export async function handleSearchSpecs(
       searchMode,
       retrievalMode,
       coverage: coverageDisclosure(verdict, 'why-decided'),
-      // The keyword-mode note is an independent disclosure, and an uncovered result is
-      // exactly when it matters: semantic ranking may be the reason nothing matched.
-      ...(isKeywordRetrievalMode(retrievalMode)
-        ? {
-            note: 'Keyword (BM25) spec search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
-          }
-        : {}),
       count: 0,
       results: [],
       ...(indexFreshness ? { indexFreshness } : {}),
@@ -818,11 +801,6 @@ export async function handleSearchSpecs(
     coverage: verdict === 'covered'
       ? { verdict, questionKind: 'why-decided' as const }
       : coverageDisclosure(verdict, 'why-decided'),
-    ...(isKeywordRetrievalMode(retrievalMode)
-      ? {
-          note: 'Keyword (BM25) spec search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
-        }
-      : {}),
     count: servedResults.length,
     results: servedResults,
     ...(indexFreshness ? { indexFreshness } : {}),
@@ -858,7 +836,7 @@ export async function handleUnifiedSearch(
 
   // Resolve the active embedder (env → local provider → remote config).
   const cfg = await readOpenLoreConfig(absDir);
-  const embedSvc = await resolveEmbedder(cfg);
+  const embedSvc = await resolveEmbedder(cfg, outputDir);
 
   limit = Math.max(1, Math.min(limit, 50));
   const results = await UnifiedSearch.unifiedSearch(outputDir, query, embedSvc, {

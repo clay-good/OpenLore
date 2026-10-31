@@ -15,9 +15,11 @@ The user's goal is "auto-accept, but let me see what was accepted."
 
 ## What Changes
 
-- **Default autopilot.** An absent `governance.autopilot` means *on* for a repository OpenLore
-  auto-initialized, and stays *blocking* for one where a human installed a blocking gate (today's
-  rule, unchanged). `governance.autopilot: false` opts out.
+- **Default autopilot, recorded.** When auto-init creates a repository's config, it writes
+  `governance.autopilot: true` there, so the default is a visible choice. An absent key still means
+  *blocking* (today's rule): a gate OpenLore cannot see must never flip to auto-accept. It writes
+  nothing when a blocking gate is installed, or in a linked worktree, which follows its main
+  checkout's value. `governance.autopilot: false` opts out.
 - **Accept on record, no gate needed.** Under autopilot, a decision recorded with a title and
   rationale moves straight to `auto-approved`, with actor `agent`, a timestamp and HEAD. It is
   written to the ledger and synced to specs in the background. The agent that recorded it is the
@@ -37,13 +39,13 @@ The user's goal is "auto-accept, but let me see what was accepted."
 
 ### Modified Capabilities
 
-- `cli`: adds `AutopilotIsTheDefaultForAutoInitializedRepositories`,
+- `cli`: adds `AutopilotIsTheDefaultForAutoInitializedRepositories`, `AWorktreeFollowsTheMainCheckoutsGovernance`,
   `RecordedDecisionsAreAcceptedWithoutAGate`, `GovernanceTraceIsVisibleWithoutAsking`.
 
 ## Impact
 
 - Code: `src/cli/commands/decisions.ts` (record path), `src/core/decisions/ledger.ts` (actor
-  `agent`), `src/core/services/status-report.ts`, the status line and Pi footer renderers, the
+  `agent`), `src/cli/commands/status.ts`, the status line and Pi footer renderers, the
   managed guidance block.
 - No git hook is written by auto-init (`AutoInitIsConsentGuarded` unchanged). No new MCP tool.
 - Relation: `add-agent-loop-hook-surfaces` and `add-session-handoff-briefing` push receipts into the

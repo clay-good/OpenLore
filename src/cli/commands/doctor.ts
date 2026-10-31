@@ -11,7 +11,7 @@ import { embeddingTlsRelaxed, withRelaxedTls } from '../../core/services/tls-sco
 import { access, stat, readFile, realpath } from 'node:fs/promises';
 import { globalOpenLoreConfigPath } from '../../utils/config-layers.js';
 import { constants as fsConstants } from 'node:fs';
-import { join, relative, isAbsolute, win32 } from 'node:path';
+import { join, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
@@ -26,10 +26,13 @@ import { validateOpenLoreConfig } from '../../core/services/config-schema.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import type { Embedder } from '../../core/analyzer/embedding-service.js';
 import {
+  backgroundSemanticAllowed,
   indexCapabilityAgreement,
+  isKeywordRetrievalMode,
   resolveEmbedder,
   semanticProviderConfigured,
   servedRetrievalMode,
+  SEMANTIC_UPGRADE_HINT,
 } from '../../core/analyzer/embedder.js';
 import { readIndexReceipt } from '../../core/analyzer/analysis-indexes.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
@@ -84,6 +87,8 @@ import {
   isResolvedGitRepository,
   resolveGitHookTarget,
 } from '../git-hooks.js';
+import { assessWiring, missingLauncherPaths } from '../install/wiring-scope.js';
+import { openloreCliEntry } from '../../utils/platform-command.js';
 
 
 // ============================================================================
@@ -101,7 +106,8 @@ type CheckStatus = 'ok' | 'warn' | 'fail';
  */
 type Remediation =
   | { kind: 'analyze'; label: string }
-  | { kind: 'rewire-mcp'; label: string };
+  | { kind: 'rewire-mcp'; label: string }
+  | { kind: 'rewire-user-scope'; label: string };
 
 export interface CheckResult {
   name: string;
@@ -780,30 +786,6 @@ async function checkMcpWiring(rootPath: string): Promise<CheckResult | null> {
   return null;
 }
 
-/**
- * Absolute paths in the wired MCP entry that are no longer on disk.
- *
- * Only ABSOLUTE paths are checked: a bare command (`npx`, `node`) is resolved through
- * PATH by the host, so its absence here would say nothing. Empty means nothing to report,
- * which is also the answer for a malformed entry — doctor reports what it observed, and
- * this check cannot see anything wrong with a shape it does not recognise.
- */
-async function missingLauncherPaths(servers: Record<string, unknown> | undefined): Promise<string[]> {
-  const entry = servers?.openlore as { command?: unknown; args?: unknown } | undefined;
-  if (!entry) return [];
-  const candidates = [entry.command, Array.isArray(entry.args) ? entry.args[0] : undefined]
-    .filter((v): v is string => typeof v === 'string' && (isAbsolute(v) || win32.isAbsolute(v)));
-  const missing: string[] = [];
-  for (const candidate of candidates) {
-    try {
-      await access(candidate, fsConstants.F_OK);
-    } catch {
-      missing.push(candidate);
-    }
-  }
-  return missing;
-}
-
 /** Every distinct `openlore` the PATH resolves to, first match first. */
 async function openloreInstallsOnPath(pathValue: string, platform: NodeJS.Platform): Promise<string[]> {
   const names = platform === 'win32' ? ['openlore.cmd', 'openlore.exe'] : ['openlore'];
@@ -863,6 +845,56 @@ export async function checkInstallHealth(
       ? { remediation: { kind: 'rewire-mcp', label: 'openlore install --agent claude-code --force' } as const }
       : {}),
   };
+}
+
+/** The `openlore install` user-scope write, without the index build (change: upgrade-repo-only-wiring). */
+const REWIRE_USER_SCOPE = { kind: 'rewire-user-scope', label: 'openlore install --user-only' } as const;
+
+/**
+ * User-scope wiring (change: upgrade-repo-only-wiring): a repository wired before
+ * user scope shipped keeps working, so nothing told its user that new repositories
+ * and worktrees get no OpenLore at all. Returns null when neither scope is wired.
+ *
+ * A user-scope launcher that no longer exists is Install health's finding; this check
+ * names it as outdated and carries the same remediation, so `--fix` runs it once.
+ */
+export async function checkUserScopeWiring(
+  rootPath: string,
+  home: string,
+  currentEntry: string | null = openloreCliEntry(),
+): Promise<CheckResult | null> {
+  const wiring = await assessWiring(rootPath, home, currentEntry);
+  const name = 'User-scope wiring';
+  if (wiring.scope === 'none') return null;
+  if (wiring.scope === 'repo only') {
+    return {
+      name,
+      status: 'warn',
+      detail: `only this repository is wired (${wiring.repoFiles.join(', ')}); `
+        + 'new repositories and worktrees will not reach OpenLore',
+      fix: "Run 'openlore doctor --fix' to wire the user scope",
+      remediation: REWIRE_USER_SCOPE,
+    };
+  }
+  if (wiring.userOutdated === 'missing-launcher') {
+    return {
+      name,
+      status: 'warn',
+      detail: '~/.claude.json wiring is outdated: its launcher no longer exists (see Install health)',
+      fix: "Run 'openlore doctor --fix' to re-wire it to this install",
+      remediation: { kind: 'rewire-mcp', label: 'openlore install --agent claude-code --force' },
+    };
+  }
+  if (wiring.userOutdated === 'npx') {
+    return {
+      name,
+      status: 'warn',
+      detail: '~/.claude.json wiring is outdated: it launches OpenLore through npx, which this install no longer writes',
+      fix: "Run 'openlore doctor --fix' to re-wire the user scope",
+      remediation: REWIRE_USER_SCOPE,
+    };
+  }
+  return { name, status: 'ok', detail: 'user scope is wired; every repository and worktree reaches OpenLore' };
 }
 
 const CLI_PROVIDERS: Record<string, () => string> = {
@@ -1025,7 +1057,7 @@ export async function checkRetrievalMode(rootPath: string): Promise<CheckResult>
   let embedder: Embedder | null = null;
   // A resolver failure is not this check's verdict to render — the endpoint check owns
   // that — so it simply leaves the keyword default in place.
-  try { embedder = await resolveEmbedder(config); } catch { /* keyword default */ }
+  try { embedder = await resolveEmbedder(config, analysisDir); } catch { /* keyword default */ }
   const mode = servedRetrievalMode(embedder, analysisDir);
 
   if (!agreement.agrees && agreement.mismatch === 'configured-but-unrealized') {
@@ -1038,12 +1070,17 @@ export async function checkRetrievalMode(rootPath: string): Promise<CheckResult>
   }
 
   // A keyword index with nothing configured is the supported default, never a finding.
+  const unconfiguredDetail = !backgroundSemanticAllowed(config)
+    ? `serving ${mode} — keyword only, by configuration`
+    : isKeywordRetrievalMode(mode)
+      ? `serving ${mode} — no embedding provider configured (the first-class default); ${SEMANTIC_UPGRADE_HINT}`
+      : `serving ${mode} — vectors added by a background build; opt out with embedding.provider "none"`;
   return {
     name: 'Retrieval mode',
     status: failure ? 'warn' : 'ok',
     detail: configured
       ? `serving ${mode}${failureDetail}`
-      : `serving ${mode} — no embedding provider configured (the first-class default)${failureDetail}`,
+      : `${unconfiguredDetail}${failureDetail}`,
     ...(failure ? { fix: 'Re-run "openlore analyze" once the embedding provider is reachable' } : {}),
   };
 }
@@ -1224,6 +1261,7 @@ Checks performed:
   • Governance corpus reference integrity
   • Injection-shaped unreviewed content (lexical advisory; never a guarantee)
   • MCP wiring (Claude Code reads .mcp.json, not .claude/settings.json)
+  • User-scope wiring (a repository wired, but not every repository and worktree)
   • LLM connection (live request with 10s timeout)
   • Embedding connection (if configured)
   • Available disk space
@@ -1242,7 +1280,8 @@ Checks performed:
       console.log('');
     }
 
-    const [staticChecks, mcpCheck, installCheck, llmCheck, embeddingCheck, retrievalModeCheck] = await Promise.all([
+    const home = process.env.OPENLORE_HOME || homedir();
+    const [staticChecks, mcpCheck, installCheck, userScopeCheck, llmCheck, embeddingCheck, retrievalModeCheck] = await Promise.all([
       Promise.all([
         checkNodeVersion(),
         checkGit(rootPath),
@@ -1259,7 +1298,8 @@ Checks performed:
         checkAnalysisCorpus(rootPath),
       ]),
       checkMcpWiring(rootPath),
-      checkInstallHealth(process.env.OPENLORE_HOME || homedir(), process.env.PATH ?? ''),
+      checkInstallHealth(home, process.env.PATH ?? ''),
+      checkUserScopeWiring(rootPath, home),
       checkLLMConnection(rootPath),
       checkEmbeddingConnection(rootPath),
       checkRetrievalMode(rootPath),
@@ -1269,6 +1309,7 @@ Checks performed:
       ...staticChecks,
       ...(mcpCheck ? [mcpCheck] : []),
       installCheck,
+      ...(userScopeCheck ? [userScopeCheck] : []),
       llmCheck,
       ...(embeddingCheck ? [embeddingCheck] : []),
       retrievalModeCheck,
@@ -1329,8 +1370,8 @@ async function confirmTty(question: string): Promise<boolean> {
   }
 }
 
-/** Run the single in-process action a remediation maps to. Returns a status line. */
-async function runRemediation(rootPath: string, r: Remediation): Promise<string> {
+/** Run the single in-process action a remediation maps to. Returns a status line. Exported for tests. */
+export async function runRemediation(rootPath: string, r: Remediation): Promise<string> {
   switch (r.kind) {
     case 'analyze': {
       const { openloreAnalyze } = await import('../../api/analyze.js');
@@ -1346,6 +1387,15 @@ async function runRemediation(rootPath: string, r: Remediation): Promise<string>
       // remediation's job, run separately if its own check surfaced it).
       await runInstall({ agent: 'claude-code', force: true, analyze: false, cwd: rootPath });
       return 'MCP wiring re-written (user scope and this repository)';
+    }
+    case 'rewire-user-scope': {
+      const { runInstall } = await import('../install/index.js');
+      // Exactly the printed `openlore install --user-only`: no repository file, git
+      // hook, or index is touched. No --force, so a hand-edited block is reported,
+      // never overwritten.
+      const code = await runInstall({ userOnly: true, cwd: rootPath });
+      if (code !== 0) throw new Error(`openlore install exited with code ${code}`);
+      return 'user scope wired';
     }
   }
 }

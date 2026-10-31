@@ -21,7 +21,7 @@ Local semantic vectors SHALL be built by default only after a recorded retrieval
 recall@5 gain of at least 5 points over keyword-with-vocabulary retrieval, with no regression on any
 corpus. When enabled, the keyword index SHALL be served first and vectors added in the background;
 answers SHALL report `local-semantic` only once vectors for the current generation exist. A missing
-package or model SHALL leave keyword serving with no error. An explicit opt-out SHALL always win.
+package or model SHALL leave keyword serving with no error.
 
 #### Scenario: Semantic arrives without waiting
 
@@ -35,3 +35,14 @@ package or model SHALL leave keyword serving with no error. An explicit opt-out 
 - **GIVEN** a benchmark result below the threshold
 - **WHEN** a repository is auto-initialized
 - **THEN** no vectors are built and the keyword index is the served default
+
+### Requirement: AnExplicitKeywordChoiceAlwaysWins
+
+An explicit opt-out (`embedding.provider: "none"`, `openlore embed --off`, or `--no-embed`) SHALL
+always win over the background semantic default.
+
+#### Scenario: An opted-out repository builds no vectors
+
+- **GIVEN** a repository with `embedding.provider: "none"`
+- **WHEN** it is auto-initialized or repaired
+- **THEN** no vectors are built and answers report keyword mode

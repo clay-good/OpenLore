@@ -30,7 +30,10 @@ vi.mock('../../core/services/one-shot-index-build.js', async (importOriginal) =>
   };
 });
 
-import { implicitOrientRoot, orientCommand, readStdin } from './orient.js';
+import { autoAcceptLine, implicitOrientRoot, orientCommand, readStdin } from './orient.js';
+import { appendLedgerEntries } from '../../core/decisions/ledger.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { pointerLineFor } from './orient-inject-render.js';
@@ -198,6 +201,32 @@ describe('orient command', () => {
       await orientCommand.parseAsync(['--json'], { from: 'user' });
       const parsed = JSON.parse(output());
       expect(parsed.openlore).toBe('no-analysis');
+    });
+
+    // change: default-decision-autopilot-with-visible-trace
+    it('names decisions auto-accepted since the previous session in one line, once', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'openlore-primer-'));
+      try {
+        const at = '2020-01-01T00:00:00Z';
+        await appendLedgerEntries(dir, [
+          { id: 'aaaa1111', title: 'Use UUIDs', from: null, to: 'auto-approved', actor: 'agent', at },
+          { id: 'bbbb2222', title: 'Cache specs', from: null, to: 'auto-approved', actor: 'agent', at },
+        ]);
+        await orientCommand.parseAsync(['--directory', dir], { from: 'user' });
+        const lines = output().split('\n').filter((l) => l.includes('auto-accepted'));
+        expect(lines).toEqual(['Decisions auto-accepted since last session (2): "Use UUIDs", "Cache specs" — review: openlore decisions review']);
+        consoleSpy.mockClear();
+        await orientCommand.parseAsync(['--directory', dir], { from: 'user' });
+        expect(output()).not.toContain('auto-accepted');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('bounds the auto-accept line to three named decisions', () => {
+      const line = autoAcceptLine(['a', 'b', 'c', 'd', 'e'].map((title) => ({ title })));
+      expect(line).toBe('Decisions auto-accepted since last session (5): "a", "b", "c" and 2 more — review: openlore decisions review');
+      expect(autoAcceptLine([])).toBeUndefined();
     });
 
     it('--json primer reports "ready" when analysis exists', async () => {

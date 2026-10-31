@@ -90,6 +90,7 @@ import { proposalContextForPrompt } from '../cli/commands/proposal-context.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { runtimeDirOf } from '../core/runtime/analysis-ownership.js';
 import { OWNERSHIP_LOCK_FILE } from '../core/runtime/advisory-lock.js';
+import { countUnreviewedDecisions } from '../core/decisions/autopilot.js';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -1138,6 +1139,8 @@ export interface PiStatusFacts {
   daemon: PiDaemonView;
   /** Absent when the health read failed: readiness is then unknown, never assumed. */
   health?: Pick<HealthResult, 'index' | 'watcher'>;
+  /** Auto-accepted decisions awaiting human review (change: default-decision-autopilot-with-visible-trace). */
+  unreviewed?: number;
 }
 
 /**
@@ -1147,7 +1150,8 @@ export interface PiStatusFacts {
  * ready index and a usable daemon. @internal
  */
 export function formatPiStatus(facts: PiStatusFacts): string {
-  const say = (text: string) => `${PI_STATUS_KEY}: ${text}`;
+  const review = facts.unreviewed ? ` · ${facts.unreviewed} to review` : '';
+  const say = (text: string) => `${PI_STATUS_KEY}: ${text}${review}`;
   if (facts.daemon === 'connecting') return say('connecting…');
   if (!facts.health) return say('status unknown');
   switch (facts.health.index) {
@@ -1195,7 +1199,8 @@ type PiWatcherReader = (cwd: string) => Promise<HealthResult['watcher']>;
 function setPiStatus(ctx: ExtensionContext, text: string | undefined): void {
   try {
     if (!ctx.hasUI || typeof ctx.ui?.setStatus !== 'function') return;
-    const label = text?.slice(`${PI_STATUS_KEY}: `.length);
+    // The color follows the readiness label, not the trailing review count.
+    const label = text?.slice(`${PI_STATUS_KEY}: `.length).split(' · ')[0];
     const color = label === 'ready'
       ? 'success'
       : label === 'connecting…' || label === 'analyzing…'
@@ -2423,7 +2428,9 @@ function registerOpenlore(
         healthCache.delete(cwd);
         health = undefined;
       }
-      setPiStatus(ctx, formatPiStatus({ daemon, ...(health ? { health } : {}) }));
+      // Read fresh every time, like the watcher: a review moves no index artifact.
+      const unreviewed = await countUnreviewedDecisions(cwd);
+      setPiStatus(ctx, formatPiStatus({ daemon, ...(health ? { health } : {}), unreviewed }));
     } catch {
       // Advisory only.
     }

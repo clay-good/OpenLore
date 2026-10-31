@@ -97,6 +97,8 @@ interface TransformersModule {
   env: { cacheDir?: string; allowLocalModels?: boolean };
 }
 
+const sharedServices = new Map<string, LocalEmbeddingService>();
+
 export class LocalEmbeddingService implements Embedder {
   private readonly model: string;
   private readonly batchSize: number;
@@ -117,7 +119,22 @@ export class LocalEmbeddingService implements Embedder {
    * operator-driven callers that pass a model they chose themselves.
    */
   static fromConfig(cfg: EmbeddingConfig): LocalEmbeddingService {
-    return new LocalEmbeddingService(resolveTrustedLocalModel(cfg.model), cfg.batchSize ?? 64);
+    return LocalEmbeddingService.shared(resolveTrustedLocalModel(cfg.model), cfg.batchSize ?? 64);
+  }
+
+  /**
+   * One instance per model for the life of the process. The loaded model is held by the
+   * instance, so a fresh one per query re-created the ONNX session on every orient and search
+   * in a long-lived server.
+   */
+  static shared(model: string = DEFAULT_LOCAL_MODEL, batchSize = 64): LocalEmbeddingService {
+    const key = `${model}\n${batchSize}`;
+    let service = sharedServices.get(key);
+    if (!service) {
+      service = new LocalEmbeddingService(model, batchSize);
+      sharedServices.set(key, service);
+    }
+    return service;
   }
 
   /** `local:` prefix lets the served retrieval mode be derived from the sidecar. */

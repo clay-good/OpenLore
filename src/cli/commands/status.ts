@@ -14,6 +14,7 @@
 import { Command } from 'commander';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
@@ -21,10 +22,12 @@ import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import type { Embedder } from '../../core/analyzer/embedding-service.js';
 import {
+  backgroundSemanticAllowed,
   indexCapabilityAgreement,
   resolveEmbedder,
   semanticProviderConfigured,
   servedRetrievalMode,
+  SEMANTIC_UPGRADE_HINT,
   type RetrievalMode,
 } from '../../core/analyzer/embedder.js';
 import { readIndexReceipt, type IndexEmbedFailure } from '../../core/analyzer/analysis-indexes.js';
@@ -32,6 +35,8 @@ import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { execFileGit } from '../../utils/git-exec.js';
+import { assessWiring, type WiringScope } from '../install/wiring-scope.js';
+import { collectGovernanceStatus, type GovernanceStatus } from '../../core/decisions/autopilot.js';
 
 
 /** Bound on the working-tree comparison: a status command must stay instant. */
@@ -42,7 +47,7 @@ const MAX_CHANGED_FILES_INSPECTED = 500;
  * unconfigured keyword index is the first-class default, a configured-but-unrealized one
  * is a finding.
  */
-export type KeywordCause = 'no-provider-configured' | 'configured-provider-unrealized' | null;
+export type KeywordCause = 'no-provider-configured' | 'configured-provider-unrealized' | 'keyword-by-configuration' | null;
 
 export interface IndexStatus {
   indexPresent: boolean;
@@ -65,6 +70,13 @@ export interface IndexStatus {
   degraded: Array<{ index: string; reason: string }>;
   /** Present when the configuration could not be read at all. */
   configUnreadable?: true;
+  /**
+   * Where OpenLore is wired: the user scope (every repository), this repository only, or
+   * nowhere. Set by `openlore status` only, so the status line never reads `~/.claude.json`.
+   */
+  wiringScope?: WiringScope;
+  /** Decision autopilot mode and its trail (change: default-decision-autopilot-with-visible-trace). */
+  governance?: GovernanceStatus;
 }
 
 interface IndexMetaShape {
@@ -164,14 +176,14 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   let embedder: Embedder | null = null;
   // A resolver failure leaves the keyword default in place; `doctor` is where a broken
   // provider is diagnosed, and `status` only reports what is being served.
-  try { embedder = await resolveEmbedder(config); } catch { /* keyword default */ }
+  try { embedder = await resolveEmbedder(config, analysisDir); } catch { /* keyword default */ }
   const retrievalMode = servedRetrievalMode(embedder, analysisDir);
   const configured = !configUnreadable && semanticProviderConfigured(config);
   const agreement = indexCapabilityAgreement(config, analysisDir);
   const keywordCause: KeywordCause = retrievalMode === 'keyword' || retrievalMode === 'keyword+vocabulary'
     ? (!agreement.agrees && agreement.mismatch === 'configured-but-unrealized'
       ? 'configured-provider-unrealized'
-      : 'no-provider-configured')
+      : !configUnreadable && !backgroundSemanticAllowed(config) ? 'keyword-by-configuration' : 'no-provider-configured')
     : null;
 
   const builtAt = meta?.builtAt ?? null;
@@ -196,6 +208,11 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   };
 }
 
+/** The wiring scope `openlore status` reports (change: upgrade-repo-only-wiring). Read-only. */
+export async function collectWiringScope(rootPath: string, home = process.env.OPENLORE_HOME || homedir()): Promise<WiringScope> {
+  return (await assessWiring(rootPath, home)).scope;
+}
+
 function describeKeywordCause(cause: KeywordCause): string {
   if (cause === 'configured-provider-unrealized') {
     return 'a semantic provider is configured, but this index carries no vectors';
@@ -203,11 +220,27 @@ function describeKeywordCause(cause: KeywordCause): string {
   if (cause === 'no-provider-configured') {
     return 'no embedding provider configured — the first-class default';
   }
+  if (cause === 'keyword-by-configuration') return 'keyword only, by configuration';
   return '';
 }
 
+/** The governance block: mode, counts, newest ledger entries, and where to review. */
+function printGovernance(governance: GovernanceStatus, c: ReturnType<typeof palette>): void {
+  const label = (text: string): string => text.padEnd(20);
+  console.log(`  ${label('Decision autopilot')} ${governance.autopilot ? c.green('on') : 'off'}${c.dim(` — ${safe(governance.reason)}`)}`);
+  const unreviewed = governance.unreviewed > 0 ? c.yellow(`${governance.unreviewed} unreviewed`) : '0 unreviewed';
+  console.log(`  ${label('Decisions')} ${governance.autoAccepted} auto-accepted, ${unreviewed}`);
+  for (const e of governance.recent) {
+    const commit = e.commit ? ` @${safe(e.commit)}` : '';
+    console.log(`  ${' '.repeat(20)} ${c.dim(`${safe(e.at.slice(0, 19).replace('T', ' '))} [${safe(e.id)}] ${safe(e.from ?? '∅')} → ${safe(e.to)} by ${safe(e.actor)}${commit}`)} ${safe(e.title)}`);
+  }
+  if (governance.autoAccepted > 0 || governance.recent.length > 0) {
+    console.log(`  ${' '.repeat(20)} ${c.dim(`→ Review: ${governance.review} · trail: openlore decisions log`)}`);
+  }
+}
+
 export const statusCommand = new Command('status')
-  .description("Report the search index's own state: retrieval mode served, when it was built, and whether it is behind the working tree")
+  .description("Report the search index's own state (retrieval mode, build time, freshness) and the decision autopilot trail")
   .option('--json', 'Output the status as JSON', false)
   .addHelpText(
     'after',
@@ -221,7 +254,17 @@ Read-only: this never builds, rebuilds, or locks the index.
   )
   .action(async (options: { json?: boolean }) => {
     const rootPath = process.cwd();
-    const status = await collectIndexStatus(rootPath);
+    const index = await collectIndexStatus(rootPath);
+    // Here and not in collectIndexStatus: the status line calls that on every render, and the
+    // governance block resolves the gate (git) and reads the whole ledger.
+    const governance = index.configUnreadable
+      ? undefined
+      : await readOpenLoreConfig(rootPath).then(config => collectGovernanceStatus(rootPath, config)).catch(() => undefined);
+    const status: IndexStatus = {
+      ...index,
+      ...(governance ? { governance } : {}),
+      wiringScope: await collectWiringScope(rootPath),
+    };
 
     if (options.json) {
       console.log(JSON.stringify(status, null, 2));
@@ -229,8 +272,14 @@ Read-only: this never builds, rebuilds, or locks the index.
     }
 
     const c = palette(Boolean(process.stdout.isTTY));
+    const label = (text: string): string => text.padEnd(20);
     logger.section('openlore status');
     console.log('');
+    const scope = status.wiringScope ?? 'none';
+    const wiringText = scope === 'user + repo'
+      ? c.green(scope)
+      : c.yellow(`${scope} — run "openlore ${scope === 'none' ? 'install' : 'doctor --fix'}"`);
+    console.log(`  ${label('Wiring scope')} ${wiringText}`);
 
     // Everything printed below that came from the repository — its config, its index
     // sidecar, its receipt, its file names — is sanitized: a repository must not be able
@@ -238,13 +287,17 @@ Read-only: this never builds, rebuilds, or locks the index.
     if (!status.indexPresent) {
       console.log(`  ${c.yellow('No search index')} in ${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`);
       console.log(`  ${c.dim('→ Run "openlore analyze" to build one')}`);
+      if (status.governance) printGovernance(status.governance, c);
       console.log('');
       return;
     }
 
     const cause = describeKeywordCause(status.keywordCause);
-    const label = (text: string): string => text.padEnd(20);
     console.log(`  ${label('Retrieval mode')} ${c.bold(safe(status.retrievalMode ?? 'unknown'))}${cause ? c.dim(` — ${cause}`) : ''}`);
+    // Text output only: `--json` is read by agents, and the hint is for a human.
+    if (status.keywordCause === 'no-provider-configured') {
+      console.log(`  ${' '.repeat(20)} ${c.dim(SEMANTIC_UPGRADE_HINT)}`);
+    }
     if (status.configuredProvider) {
       console.log(`  ${label('Configured provider')} ${safe(status.configuredProvider)}`);
     }
@@ -273,6 +326,8 @@ Read-only: this never builds, rebuilds, or locks the index.
     for (const entry of status.degraded) {
       console.log(`  ${label('Degraded')} ${c.yellow(`${safe(entry.index)}: ${safe(entry.reason)}`)}`);
     }
+
+    if (status.governance) printGovernance(status.governance, c);
 
     if (status.keywordCause === 'configured-provider-unrealized') {
       console.log('');
