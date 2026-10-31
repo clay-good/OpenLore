@@ -440,10 +440,15 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     'This guidance is written for that surface; re-run `openlore install --preset <name>` to change it ' +
     'and regenerate these instructions.\n';
 
+  // Adapters that de-duplicate against the user scope (Codex's proposal hook) must see it even
+  // under --repo-only, which never WRITES there. Reading is fail-soft: no home, no de-duplication.
+  const userScopeForReading = (): string => {
+    try { return resolveUserScopeRoot(opts.home); } catch { return ''; }
+  };
   const contextFor = (root: string, scope: InstallScope): ApplyContext => ({
     root,
     scope,
-    userScopeRoot: home || undefined,
+    userScopeRoot: home || userScopeForReading() || undefined,
     platform: process.platform,
     platformCommandRuntime: {
       nodeExecutable: process.execPath,

@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexAdapter } from './codex.js';
+import { runInstall } from '../index.js';
 import type { ApplyContext } from './types.js';
 
 const roots: string[] = [];
@@ -150,5 +151,30 @@ describe('Codex install adapter', () => {
     expect(config).toContain('openlore-proposal-context-v1');
     expect(JSON.stringify(hooks)).not.toContain('openlore-proposal-context-v1');
     expect(second.changes.every((change) => change.kind === 'noop')).toBe(true);
+  });
+
+  it('removes a stale project hook once the user scope carries the managed hook', async () => {
+    const user = await mkdtemp(join(tmpdir(), 'openlore-codex-user-stale-'));
+    const project = await mkdtemp(join(tmpdir(), 'openlore-codex-project-stale-'));
+    roots.push(user, project);
+    await codexAdapter.apply(await context(project));
+    await codexAdapter.apply(await context(user));
+
+    await codexAdapter.apply({ ...(await context(project)), userScopeRoot: user });
+
+    const hooks = await readFile(join(project, '.codex', 'hooks.json'), 'utf8');
+    expect(hooks).not.toContain('openlore-proposal-context-v1');
+    expect(await readFile(join(user, '.codex', 'hooks.json'), 'utf8')).toContain('openlore-proposal-context-v1');
+  });
+
+  it('sees the user-scope hook under --repo-only and does not install a second one', async () => {
+    const user = await mkdtemp(join(tmpdir(), 'openlore-codex-user-repo-only-'));
+    const project = await mkdtemp(join(tmpdir(), 'openlore-codex-project-repo-only-'));
+    roots.push(user, project);
+    await codexAdapter.apply(await context(user));
+
+    await runInstall({ cwd: project, agent: 'codex', repoOnly: true, home: user, analyze: false });
+
+    await expect(readFile(join(project, '.codex', 'hooks.json'), 'utf8')).rejects.toThrow();
   });
 });

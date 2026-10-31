@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 import { formatPlatformCommand, resolveOpenloreCommand } from '../../../utils/platform-command.js';
@@ -201,19 +201,18 @@ async function writeManagedText(
 }
 
 async function apply(ctx: ApplyContext): Promise<ApplyResult> {
-  if (ctx.scope !== 'user' && ctx.userScopeRoot && await connected(ctx.userScopeRoot)) {
-    return {
-      changes: [{ path: safeJoin(ctx.root, CONFIG_REL), kind: 'noop', summary: 'Codex already wired in user scope; skipped duplicate project hook' }],
-      warnings: [],
-      conflict: false,
-    };
+  const projectBesideUser = ctx.scope !== 'user' && !!ctx.userScopeRoot
+    && resolve(ctx.root) !== resolve(ctx.userScopeRoot);
+  if (projectBesideUser && await connected(ctx.userScopeRoot!)) {
+    const changes: PlannedChange[] = [{ path: safeJoin(ctx.root, CONFIG_REL), kind: 'noop', summary: 'Codex already wired in user scope; skipped duplicate project hook' }];
+    const warnings: string[] = [];
+    await removeManagedHook(ctx, changes, warnings);
+    return { changes, warnings, conflict: false };
   }
   // A user-scope hook can exist without its MCP server (for example after a
   // partial install). In that case, add the project MCP server but avoid
-  // installing a second proposal hook.
-  const skipProjectHook = ctx.scope !== 'user'
-    && !!ctx.userScopeRoot
-    && await hasManagedHook(ctx.userScopeRoot);
+  // installing a second proposal hook, and drop one an earlier project install left.
+  const skipProjectHook = projectBesideUser && await hasManagedHook(ctx.userScopeRoot!);
   const warnings: string[] = [];
   const changes: PlannedChange[] = [];
   const tomlPath = safeJoin(ctx.root, CONFIG_REL);
@@ -298,7 +297,40 @@ async function apply(ctx: ApplyContext): Promise<ApplyResult> {
     await writeManagedText(ctx, hooksPath, raw, next, `${HOOKS_REL} — Codex proposal hook (review/trust in Codex)`, changes);
   }
 
+  if (skipProjectHook) await removeManagedHook(ctx, changes, warnings);
+
   return { changes, warnings, conflict: false };
+}
+
+/** Remove only the managed proposal hook (TOML block and hooks.json entry) from `ctx.root`. */
+async function removeManagedHook(ctx: ApplyContext, changes: PlannedChange[], warnings: string[]): Promise<void> {
+  const tomlPath = safeJoin(ctx.root, CONFIG_REL);
+  const rawToml = await readIfExists(tomlPath);
+  if (rawToml !== null && isManagedText(rawToml, HOOK_START, HOOK_END)) {
+    const result = replaceManagedBlock(rawToml, HOOK_START, HOOK_END, '');
+    if (result.warning) warnings.push(`codex: ${CONFIG_REL} ${result.warning}; left unchanged.`);
+    else if (result.text !== undefined && result.text !== rawToml) {
+      const next = result.text.trim() ? `${result.text.trimEnd()}\n` : '';
+      await writeManagedText(ctx, tomlPath, rawToml, next, `${CONFIG_REL} — removed OpenLore proposal hook`, changes);
+    }
+  }
+  await removeManagedJsonHook(ctx, changes, warnings);
+}
+
+async function removeManagedJsonHook(ctx: ApplyContext, changes: PlannedChange[], warnings: string[]): Promise<void> {
+  const hooksPath = safeJoin(ctx.root, HOOKS_REL);
+  const rawHooks = await readIfExists(hooksPath);
+  if (rawHooks === null) return;
+  const parsed = parseHooks(rawHooks);
+  if (!parsed) {
+    warnings.push(`codex: refused to edit ${HOOKS_REL}; it is not valid JSON with a hooks object.`);
+    changes.push({ path: hooksPath, kind: 'noop', summary: `${HOOKS_REL} left untouched (invalid Codex hooks JSON)` });
+    return;
+  }
+  const groups = parsed.groups.filter((group) => asObject(group)?.matcher !== MANAGED_MATCHER);
+  if (groups.length === parsed.groups.length) return;
+  const serialized = JSON.stringify(nextHooksDocument(parsed.doc, groups), null, 2) + '\n';
+  await writeManagedText(ctx, hooksPath, rawHooks, serialized, `${HOOKS_REL} — removed OpenLore proposal hook`, changes);
 }
 
 async function uninstall(ctx: ApplyContext): Promise<ApplyResult> {
@@ -318,21 +350,7 @@ async function uninstall(ctx: ApplyContext): Promise<ApplyResult> {
     changes.push({ path: tomlPath, kind: 'noop', summary: `${CONFIG_REL} not present` });
   }
 
-  const hooksPath = safeJoin(ctx.root, HOOKS_REL);
-  const rawHooks = await readIfExists(hooksPath);
-  if (rawHooks !== null) {
-    const parsed = parseHooks(rawHooks);
-    if (!parsed) {
-      warnings.push(`codex: refused to edit ${HOOKS_REL}; it is not valid JSON with a hooks object.`);
-      changes.push({ path: hooksPath, kind: 'noop', summary: `${HOOKS_REL} left untouched (invalid Codex hooks JSON)` });
-    } else {
-      const groups = parsed.groups.filter((group) => asObject(group)?.matcher !== MANAGED_MATCHER);
-      if (groups.length !== parsed.groups.length) {
-        const serialized = JSON.stringify(nextHooksDocument(parsed.doc, groups), null, 2) + '\n';
-        await writeManagedText(ctx, hooksPath, rawHooks, serialized, `${HOOKS_REL} — removed OpenLore proposal hook`, changes);
-      }
-    }
-  }
+  await removeManagedJsonHook(ctx, changes, warnings);
   return { changes, warnings, conflict: false };
 }
 
