@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon, piToolSurface, PI_TOOL_SNIPPETS, PI_LEAN_TOOLS, PI_TOOL_GROUPS, PI_ACTIVATOR_TOOL, PI_STANDING_CONTEXT_BUDGETS, piRegisteredToolNames, estimatePiStandingTokens, formatPiStatus, piDaemonView, piHealthCacheKey, PI_STATUS_KEY, type PiDaemonView, type PiExtensionRuntime } from './extension.js';
+import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon, piToolSurface, PI_TOOL_SNIPPETS, PI_LEAN_TOOLS, PI_ON_DEMAND_SUBSTRATE_TOOLS, PI_TOOL_GROUPS, PI_ACTIVATOR_TOOL, PI_STANDING_CONTEXT_BUDGETS, piRegisteredToolNames, estimatePiStandingTokens, formatPiStatus, piDaemonView, piHealthCacheKey, PI_STATUS_KEY, type PiDaemonView, type PiExtensionRuntime } from './extension.js';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { HealthResult } from '../api/health.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS } from '../cli/commands/mcp.js';
@@ -1512,11 +1512,19 @@ describe('Pi lean tool surface', () => {
   });
 
   describe('groups', () => {
-    it('derives the lean set from the MCP substrate preset plus the Pi utilities', () => {
-      const expected = sorted([...TOOL_PRESETS.substrate, 'configure', 'activate_tools']);
+    it('derives the lean set from the MCP substrate preset, minus the on-demand tools, plus the Pi utilities', () => {
+      const onDemand = new Set(PI_ON_DEMAND_SUBSTRATE_TOOLS);
+      const expected = sorted([...[...TOOL_PRESETS.substrate].filter((name) => !onDemand.has(name)), 'configure', 'activate_tools']);
       expect(sorted(PI_LEAN_TOOLS)).toEqual(expected);
       // The guard fails when the Pi lean set loses a substrate tool.
       expect(sorted(PI_LEAN_TOOLS.filter((name) => name !== 'recall'))).not.toEqual(expected);
+      // An on-demand tool must still be a substrate tool, and stay reachable through a group.
+      const substrate = new Set<string>(TOOL_PRESETS.substrate);
+      const grouped = new Set(Object.values(PI_TOOL_GROUPS).flat());
+      for (const name of PI_ON_DEMAND_SUBSTRATE_TOOLS) {
+        expect(substrate.has(name), `${name} is not a substrate tool`).toBe(true);
+        expect(grouped.has(name), `${name} is in no group`).toBe(true);
+      }
     });
 
     it('registers every lean tool', () => {
@@ -1545,7 +1553,7 @@ describe('Pi lean tool surface', () => {
 
     it('counts a registered but inactive tool as surfaced for the parity guard', () => {
       // The parity guard's surfaced set is NAV_TOOLS, which is registration, not activation.
-      const surfaced = new Set(NAV_TOOLS.map((tool) => tool.name));
+      const surfaced = new Set([...NAV_TOOLS.map((tool) => tool.name), ...PI_ON_DEMAND_SUBSTRATE_TOOLS]);
       for (const names of Object.values(PI_TOOL_GROUPS)) {
         for (const name of names) expect(surfaced.has(name), `${name} is grouped but not registered`).toBe(true);
       }

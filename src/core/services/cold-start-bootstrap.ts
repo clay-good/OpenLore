@@ -45,17 +45,21 @@ import { readOpenLoreConfigDataSync, resolveOpenLoreConfigPath } from './config-
 export type RepairReason =
   | 'index-absent'
   | 'integrity-mismatched'
+  | 'integrity-degraded'
   | 'stale-region'
   | 'schema-reset'
-  | 'analysis-age';
+  | 'analysis-age'
+  | 'artifact-unservable';
 
 /** Human-facing label for each reason, used in the "refresh started" disclosure. */
 export const REPAIR_REASON_DETAIL: Record<RepairReason, string> = {
   'index-absent': 'no index found',
   'integrity-mismatched': 'the index did not reconcile against its build attestation',
+  'integrity-degraded': 'the index is materially smaller than its build attestation (a partial or truncated store)',
   'stale-region': 'part of the index is explicitly stale',
   'schema-reset': 'the index schema was reset by a version upgrade',
   'analysis-age': 'the analysis is older than the freshness threshold',
+  'artifact-unservable': 'an analysis artifact is present but could not be served (corrupt, or a lost/refused generation publish)',
 };
 
 /** Directories already repaired (or in flight) this process — build at most once each. */

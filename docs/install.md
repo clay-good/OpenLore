@@ -111,7 +111,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 | Flag | Effect |
 |------|--------|
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `pi`, `agents-md`. |
-| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 77 tools. |
+| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 80 tools. |
 | `--repo-only` | Wire this repository only — write no user-scope entries. |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
@@ -120,7 +120,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 > **Default tool surface.** A plain `openlore install` wires the read-only **`substrate`** preset:
 > 15 tools comprising the navigation core, the highest-value governance reads, and the 2 spec
 > preparation composites. Use `--preset navigation` for the lean 10-tool escape or `--preset full`
-> for all 77 tools. The decision-write and commit-gate tools remain opt-in through a preset that
+> for all 80 tools. The decision-write and commit-gate tools remain opt-in through a preset that
 > includes them.
 
 ## What it actually writes
@@ -169,10 +169,11 @@ The extension registers the navigation tools (`openlore_orient`, `openlore_searc
 caches. Requires Pi ≥ 0.78.1 and one `openlore analyze` beforehand. Full detail in
 [`examples/pi/README.md`](../examples/pi/README.md).
 
-A Pi session starts with the same lean tool set Claude Code gets by default (the `substrate`
-preset), plus `openlore_configure` and `openlore_activate_tools`. The agent calls
-`openlore_activate_tools` to turn on the `specs`, `memory`, `review`, `quality`, or `inspect`
-group. To keep every tool active from the start, set:
+A Pi session starts with the lean tool set Claude Code gets by default (the `substrate`
+preset), plus `openlore_configure` and `openlore_activate_tools`. The two spec-authoring tools
+(`openlore_prepare_spec_generation`, `openlore_prepare_spec_repair`) wait in the `specs` group.
+The agent calls `openlore_activate_tools` to turn on the `specs`, `memory`, `review`, `quality`,
+or `inspect` group. To keep every tool active from the start, set:
 
 ```json
 { "pi": { "toolSurface": "all" } }

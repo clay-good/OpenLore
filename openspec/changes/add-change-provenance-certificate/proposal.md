@@ -65,7 +65,9 @@ or the recompute-to-verify guarantee.
 
 - New: `certify_provenance` handler + `openlore certify-provenance` CLI; a versioned in-toto
   predicate schema; the reproducibility/content-address guarantee. Registered in
-  `TOOL_CAPABILITY_FAMILY` (`verify`), classified `conclusion`, cross-referencing
+  `TOOL_CAPABILITY_FAMILY` (`change` — it reasons about a diff, like its sibling
+  `change_impact_certificate`; `verify` is the opt-in preset it ships in, not its capability
+  family), classified `conclusion`, cross-referencing
   `change_impact_certificate`; tools/list payload budget re-asserted or bumped.
 - Specs: `mcp-handlers` — 1 ADDED requirement.
 - Supersedes: `add-attested-governance-artifacts` (archive as superseded).

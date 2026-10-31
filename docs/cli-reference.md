@@ -141,7 +141,7 @@ openlore install [options]   # wire agents (this repo AND your user scope),
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
                          #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 77-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 80-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries (both scopes)
@@ -158,7 +158,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 77-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 80-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -170,7 +170,7 @@ openlore connect remove [agent]      # disconnect that agent
 A bare `openlore install` wires the `substrate` surface (15 tools — navigation core + governance reads + spec-workflow composites) and, for
 Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
 injection hook. Use `--preset navigation` for the lean navigate-only core (10 tools), or
-`--preset full` for all 77 tools.
+`--preset full` for all 80 tools.
 
 ### MCP Server Options
 
@@ -179,7 +179,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: substrate, 15 tools — nav + governance + spec workflows)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 77 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 80 tools (alias --preset full)
   --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
@@ -712,7 +712,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # substrate preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 77 tools on a fixed port
+openlore serve --preset all --port 7077 # all 80 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```
@@ -755,9 +755,10 @@ field in openlore's `package.json`) and `openlore setup --tools pi --global`
 serve daemon, injecting structural context and exposing Pi's curated tool surface.
 Pi starts a full-preset backing daemon and curates the model-visible tools itself;
 if an existing narrow daemon owns the repository, stop it before starting Pi.
-A session starts with the `substrate` tools (the MCP default), `openlore_configure`,
-and `openlore_activate_tools`, which turns on the `specs`, `memory`, `review`,
-`quality`, or `inspect` group. `"pi": { "toolSurface": "all" }` in
+A session starts with the `substrate` tools (the MCP default) except the two
+spec-authoring tools, `openlore_configure`, and `openlore_activate_tools`, which
+turns on the `specs` (including spec authoring), `memory`, `review`, `quality`,
+or `inspect` group. `"pi": { "toolSurface": "all" }` in
 `.openlore/config.json` keeps every tool active.
 Its `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` tools
 compose the same deterministic daemon evidence used by MCP hosts; Pi writes or

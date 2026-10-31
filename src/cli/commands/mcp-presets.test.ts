@@ -108,7 +108,7 @@ describe('MCP tool presets', () => {
   // preset only; it must NOT leak into the lean/minimal/memory surfaces.
   it('coordination preset exposes plan_parallel_work; lean/minimal/memory do not', () => {
     const coord = selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name);
-    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'analyze_impact', 'find_path']));
+    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status', 'analyze_impact', 'find_path']));
     for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }] as const) {
       expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('plan_parallel_work');
     }
@@ -355,7 +355,7 @@ describe('MCP tool presets', () => {
   // substrate default (both-faces reads), but NOT the lean navigate-only `navigation` preset.
   it('verify_claim is in the verify preset and the substrate default, but not the lean navigation preset', () => {
     const verify = selectActiveTools(TOOL_DEFINITIONS, { preset: 'verify' }).map(t => t.name);
-    expect(new Set(verify)).toEqual(new Set(['orient', 'search_code', 'verify_claim', 'verify_change']));
+    expect(new Set(verify)).toEqual(new Set(['orient', 'search_code', 'verify_claim', 'verify_change', 'certify_provenance']));
     expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'navigation' }).map(t => t.name)).not.toContain('verify_claim');
     // The default surface is now substrate, which DOES include verify_claim.
     expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).toContain('verify_claim');
@@ -681,7 +681,13 @@ describe('tools/list payload budget (spec-28)', () => {
     // (measured 98,897 B; change: add-memory-claim-verdicts). Its description was trimmed first.
     // verify_change adds one conclusion tool (its schema + description): 99,200 → 100,700 B
     // (measured 100,184 B; change: add-verification-feedback-loop).
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(100_700);
+    // certify_provenance adds one conclusion tool: 100,700 → 102,400 B
+    // (measured 101,838 B; change: add-change-provenance-certificate).
+    // certify_merge adds one conclusion tool: 102,400 → 104,000 B
+    // (measured 103,392 B; change: add-merge-semantic-certificate).
+    // fleet_status adds one conclusion tool: 104,000 → 105,200 B
+    // (measured 104,526 B; change: add-fleet-coordination-arc).
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(105_200);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

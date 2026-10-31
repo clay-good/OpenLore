@@ -52,7 +52,7 @@ const MCP_ONLY_REASON_GROUPS: ReadonlyArray<{ reason: string; tools: readonly st
       'audit_spec_coverage', 'generate_tests', 'get_test_coverage',
       'get_minimal_context', 'get_cluster', 'get_landmarks', 'get_map', 'find_path',
       'detect_changes', 'get_health_map', 'get_surprising_connections',
-      'get_language_support', 'verify_change',
+      'get_language_support', 'verify_change', 'certify_provenance',
     ],
   },
   {
@@ -64,7 +64,7 @@ const MCP_ONLY_REASON_GROUPS: ReadonlyArray<{ reason: string; tools: readonly st
   },
   {
     reason: 'This interactive coordination or federation conclusion has no CLI command with the same request and response contract.',
-    tools: ['federation_status', 'plan_parallel_work', 'map_in_flight_conflicts'],
+    tools: ['federation_status', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status'],
   },
 ];
 

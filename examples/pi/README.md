@@ -18,7 +18,8 @@ fresh while you edit.
   `openlore_search_code`, `openlore_get_subgraph`, `openlore_analyze_impact`,
   `openlore_recall`, `openlore_verify_claim`, `openlore_blast_radius`, and more.
   The agent calls `openlore_activate_tools` to turn on a group when a task needs
-  it: `specs`, `memory`, `review`, `quality`, or `inspect`. Set
+  it: `specs` (including `openlore_prepare_spec_generation` and
+  `openlore_prepare_spec_repair`), `memory`, `review`, `quality`, or `inspect`. Set
   `"pi": { "toolSurface": "all" }` in `.openlore/config.json` to keep every tool
   active.
 - **Config wizard**: opt-in setup via `/openlore configure`

@@ -24,6 +24,8 @@ They intentionally do not move with the current schema.
 - `3.4.0-default.json` captures the unchanged default configuration factory shape for v3.4.0 and
   schema 1.2.0. `3.4.0-embedding-null.json` captures `embedding: null`, which v3.4.0 accepts to turn
   off an embedding inherited from the user-wide `~/.openlore/config.json` defaults.
+- `3.5.0-default.json` captures the unchanged default configuration factory shape for v3.5.0 and
+  schema 1.2.0 (the release added MCP tools and index self-healing, not config behavior).
 
 For each release, add at least one `<package-version>-*.json` fixture before changing the package
 version. Include both a factory-default shape and a realistic customized shape when the release

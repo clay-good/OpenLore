@@ -109,6 +109,9 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   select_tests: { kind: 'read', buildArgs: dirOnly },
   blast_radius: { kind: 'read', buildArgs: dirOnly },
   verify_change: { kind: 'read', buildArgs: dirOnly },
+  certify_provenance: { kind: 'read', buildArgs: dirOnly },
+  certify_merge: { kind: 'read', buildArgs: (f) => ({ directory: f.directory, ours: 'HEAD', theirs: 'HEAD' }) },
+  fleet_status: { kind: 'read', buildArgs: dirOnly },
 
   // ── function/symbol tools ────────────────────────────────────────────────
   get_subgraph: {

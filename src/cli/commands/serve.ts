@@ -47,7 +47,8 @@ import { releaseContextCache, validateDirectory, waitForGraphRebuild } from '../
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
-import { registerRepairHost } from '../../core/services/cold-start-bootstrap.js';
+import { registerRepairHost, registerRepairBuilder, hasAnalysis, autoInitSuppression } from '../../core/services/cold-start-bootstrap.js';
+import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
 import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
@@ -1027,6 +1028,19 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       }
     } else {
       schemaReset = false;
+      // No call-graph store at all: bootstrap it (change: self-heal-serve-daemon). The daemon
+      // had no absent-index bootstrap — unlike the stdio MCP server and the one-shot CLI — so a
+      // fresh repo opened under Pi (the daemon is Pi's sole backend) served `index-absent`
+      // forever unless a watched file happened to be edited. Use the DETACHED supervisor so the
+      // build outlives this daemon's lifetime; it self-suppresses outside a git work tree or
+      // when auto-init is opted out. `stale-region` when an analysis exists but its graph store
+      // is missing (a partial/interrupted build), `index-absent` for a truly fresh repo.
+      if (!autoInitSuppression(root)) {
+        const build = startDetachedIndexBuild(root, hasAnalysis(root) ? 'stale-region' : 'index-absent');
+        if (build.state === 'started') {
+          logger.discovery('[serve] No call-graph index — building it in the background (non-blocking, no API key).');
+        }
+      }
     }
   } catch (err) {
     logger.debug(`[serve] Failed to check schema on startup: ${err instanceof Error ? err.message : String(err)}`);
@@ -1077,6 +1091,20 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
     if (watcher) return watcher.requestColdReadRepair(staleFiles);
     triggerRebuild(root);
     return true;
+  });
+
+  // Wire the read-path self-heal into the daemon (change: self-heal-serve-daemon).
+  // Without this, `maybeTriggerBackgroundRepair` (readCachedContext) is a NO-OP inside the
+  // serve process — no repair builder is registered — so every read-path staleness reason
+  // (an empty/reset call graph, a `degraded` truncated store, an unservable artifact) was
+  // detected and disclosed but never rebuilt. The daemon's own gate only covers a schema
+  // MISMATCH (`notReady`); this closes the rest. Pi, which routes every orient through this
+  // daemon, inherited that gap. The builder funnels through the same single-flight
+  // `triggerRebuild`, so it never races the schema-reset healer or the watcher's re-analyze,
+  // and it awaits the coalesced rebuild so the "refresh started" disclosure stays honest.
+  registerRepairBuilder(async dir => {
+    triggerRebuild(dir);
+    await rebuildPromises.get(dir);
   });
 
   // Clean shutdown: drop the descriptor so clients don't reuse a dead port.

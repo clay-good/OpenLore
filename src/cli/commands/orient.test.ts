@@ -32,6 +32,7 @@ vi.mock('../../core/services/one-shot-index-build.js', async (importOriginal) =>
 
 import { implicitOrientRoot, orientCommand, readStdin } from './orient.js';
 import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
 import { pointerLineFor } from './orient-inject-render.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
@@ -256,6 +257,30 @@ describe('orient command', () => {
       mockExistsSync.mockReturnValue(true);
       await orientCommand.parseAsync(['--json'], { from: 'user' });
       expect(mockStartBuild).not.toHaveBeenCalled();
+    });
+
+    it('starts a stale-region rebuild when analysis exists but the call graph is empty (schema reset)', async () => {
+      // Regression (change: self-heal-empty-graph-index): a version-upgrade schema reset
+      // empties the edge store. Before the fix, orient saw hasAnalysis=true and started NO
+      // build, so the one-shot install hooks degraded to search every turn and never
+      // self-healed — the async read-path repair dies on the CLI's process.exit(0). The
+      // empty graph must now kick a SYNCHRONOUS rebuild, exactly as an absent index does.
+      mockExistsSync.mockReturnValue(true); // llm-context.json present → hasAnalysis(root)
+      const existsSpy = vi.spyOn(EdgeStore, 'exists').mockReturnValue(true);
+      const dbPathSpy = vi.spyOn(EdgeStore, 'dbPath').mockReturnValue('/fake/proj/.openlore/analysis/call-graph.db');
+      const openSpy = vi.spyOn(EdgeStore, 'open').mockReturnValue(
+        { notReady: null, countNodes: () => 0, close: () => {} } as unknown as ReturnType<typeof EdgeStore.open>,
+      );
+      mockStartBuild.mockReturnValue({ state: 'started' });
+      mockHandleOrient.mockResolvedValue({ task: 'x', searchMode: 'bm25_fallback', relevantFunctions: [] });
+      try {
+        await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
+        expect(mockStartBuild).toHaveBeenCalledWith(resolve('/fake/proj'), 'stale-region');
+      } finally {
+        existsSpy.mockRestore();
+        dbPathSpy.mockRestore();
+        openSpy.mockRestore();
+      }
     });
   });
 

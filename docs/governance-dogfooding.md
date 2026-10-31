@@ -27,7 +27,7 @@ evidence is the synced spec sections + ADRs.
 | EdgeStore uses SCHEMA_VERSION rebuild-on-bump instead of migrations | component | `openspec/specs/analyzer/spec.md` |
 | BM25 keyword retrieval is the zero-network floor; embeddings optional | component | `openspec/specs/analyzer/spec.md` |
 | North star: a deterministic structural context substrate for agents | system | `openspec/specs/overview/spec.md` + `openspec/decisions/adr-0001-*.md` |
-| The default MCP surface is the lean `substrate` preset, not all 77 tools (Spec 14 / ADR-0023, superseding ADR-0022) | component | `openspec/specs/cli/spec.md` |
+| The default MCP surface is the lean `substrate` preset, not all 80 tools (Spec 14 / ADR-0023, superseding ADR-0022) | component | `openspec/specs/cli/spec.md` |
 
 ¹ recorded as `cross-domain` but the consolidator re-scoped it to `component`.
 
@@ -51,10 +51,12 @@ out to be intended behavior.
 1. **Concurrent `record_decision` calls raced on `pending.json` — FIXED.** Each `record_decision`
    spawns a detached `decisions --consolidate`; under rapid recording, overlapping consolidations
    each did a load → mutate → save and the later save clobbered the earlier, silently losing
-   decisions (5 rapid records → only 3 stored). Fixed with a cross-process lock
-   ([`src/core/decisions/lock.ts`](../../src/core/decisions/lock.ts)) that serializes consolidation
-   and **re-reads the store inside the lock**, so no draft is lost. Verified by re-running the
-   repro: 5 rapid records now yield 5/5 stored. Covered by `lock.test.ts`.
+   decisions (5 rapid records → only 3 stored). Fixed with a cross-process advisory lock
+   ([`src/core/runtime/advisory-lock.ts`](../src/core/runtime/advisory-lock.ts)) that serializes
+   consolidation and a compare-and-write that **re-reads the store inside the lock**
+   ([`src/core/decisions/atomic-store.ts`](../src/core/decisions/atomic-store.ts)), so no draft is
+   lost. Verified by re-running the repro: 5 rapid records now yield 5/5 stored. Covered by
+   `atomic-store.test.ts`.
 2. **Synced ADRs were gitignored — FIXED.** `--sync` writes ADRs to `openspec/decisions/`, but a
    blanket `openspec/` rule in `.gitignore` silently excluded them — the system's own output
    couldn't be committed. Fixed by narrowing the rule to keep `openspec/decisions/` committable.
