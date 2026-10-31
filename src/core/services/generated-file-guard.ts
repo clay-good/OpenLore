@@ -167,9 +167,10 @@ export function emittedText(text: string): string {
   let clean = redacted
     // eslint-disable-next-line no-control-regex -- control characters are exactly what is removed
     .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
-    // Invisible format characters (bidi controls, zero-width, BOM) can hide or reorder text and
-    // split a phrase past the instruction screen; they carry nothing a reader needs.
-    .replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '');
+    // Invisible characters (format controls such as bidi and zero-width, soft hyphens, variation
+    // selectors, tag characters) can hide or reorder text and split a phrase past the instruction
+    // screen; they carry nothing a reader needs.
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '');
   if (clean.length > MAX_EMITTED_TEXT) clean = clean.slice(0, MAX_EMITTED_TEXT).replace(/[\uD800-\uDBFF]$/, '') + '…';
   return detectInjectionShapes(clean).length ? WITHHELD_TEXT : clean;
 }

@@ -91,7 +91,7 @@ An output that is the directory the command runs in, or a directory above it (`-
 input, so it is listed in `generatedFrom` too.
 
 Every string read from the repository (commands, header literals, script names) is cut to 512
-characters, has credentials redacted and control and invisible format characters (bidi, zero-width) removed, and is replaced by
+characters, has credentials redacted and control and invisible characters (bidi, zero-width, soft hyphens, variation selectors, tag characters) removed, and is replaced by
 `[withheld: reads like an instruction]` when it reads like one. Each directory and the workflows
 contribute at most 5,000 commands; a cap that is reached is disclosed.
 
