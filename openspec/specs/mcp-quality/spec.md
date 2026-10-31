@@ -1005,6 +1005,64 @@ mid-session.
 - **WHEN** the next Pi tool call retries
 - **THEN** Pi re-probes immediately instead of serving a cached failure for 30 seconds
 
+### Requirement: PiDaemonUpgradeRecovery
+
+The Pi extension SHALL automatically recover from a detached daemon that survives an extension
+update when an authenticated health response proves the daemon belongs to this repository and its
+reported version is older than the installed extension. Recovery SHALL happen when Pi next opens
+the project, without requiring a globally
+installed CLI or a user command, regardless of the daemon's current preset. The replacement SHALL
+reuse the preset reported by the authenticated daemon health response, so the installed release
+applies its current definition of that preset. Discovery SHALL NOT replace a daemon whose identity
+and repository cannot be verified.
+
+Recovery SHALL invoke the packaged CLI with the current Node runtime and no shell. It SHALL reuse
+the authenticated repository/PID/protocol proof and graceful stop path, wait for the announcement
+to be removed, and start the daemon with the preset captured from its authenticated health response
+only after successful stop. A refused or incomplete stop SHALL NOT launch a replacement. Recovery
+SHALL respect the host's spawn opt-out before stopping or starting anything and serialize daemon
+acquisition with restart. Pi MAY also expose `/openlore restart` for an explicit full-preset retry
+while the agent is idle.
+
+#### Scenario: An old daemon survives the host restart after a package update
+
+- **GIVEN** a full-preset daemon whose authenticated health reports a version older than the installed extension
+- **WHEN** Pi opens the project and compares that reported version with its own
+- **THEN** the authenticated old daemon is gracefully stopped and replaced by a daemon exposing
+  the installed extension's required tools, without a user command, PATH lookup, or manual process kill
+
+#### Scenario: A supervising host owns the daemon lifecycle
+
+- **GIVEN** the host has disabled extension daemon spawning
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** the extension stops and starts no process and directs the user to the supervising host
+
+#### Scenario: An older daemon uses an intentionally narrower preset
+
+- **GIVEN** a repository-bound daemon with an older version and a narrower preset
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** it replaces the daemon using the same preset and the installed release's current tool definition
+- **AND** it reports any Pi tools that remain unavailable from that preset
+
+#### Scenario: The older daemon's preset is unknown to the installed release
+
+- **GIVEN** a repository-bound daemon with an older version whose reported preset the installed release does not define
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** it stops and starts no process, keeps using the verified daemon, and warns with the explicit `/openlore restart` command
+
+#### Scenario: A current-version preset omits Pi tools
+
+- **GIVEN** a repository-bound daemon at the installed extension version with a narrower preset
+- **WHEN** Pi opens the project and discovers missing Pi tools
+- **THEN** it preserves the daemon and reports the explicit `/openlore restart` command to switch to Pi's full preset
+- **AND** it does not stop or replace the daemon automatically, because missing tools alone never trigger recovery
+
+#### Scenario: The announced listener cannot be authenticated for this repository
+
+- **GIVEN** a listener whose health does not prove the descriptor's identity and repository
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** shutdown is refused, no replacement starts, and the UI explains that the owner must stop it
+
 ### Requirement: PiInjectedContextIsBoundedAndCurrent
 
 The Pi extension SHALL build before-agent context from the current event's `cwd` and `mode`, not
@@ -1035,6 +1093,8 @@ usable daemon. The status SHALL report a stopped watcher only when the daemon re
 unknown watcher state SHALL NOT be shown as stopped. Each non-ready state SHALL name its condition
 (for example, no index, analysis running, index degraded, daemon incompatible, daemon spawning
 disabled), and it SHALL NOT use a generic failure label.
+The extension SHALL color ready status with the success theme color, in-progress status with the
+accent color, warning conditions with the warning color, and error conditions with the error color.
 
 #### Scenario: Ready repository with a usable daemon
 

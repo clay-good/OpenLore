@@ -131,7 +131,7 @@ function registerPiHandlers(): Map<string, PiEventHandler> {
   return handlers;
 }
 
-function registerPiCommands(): Map<string, PiEventHandler> {
+function registerPiCommands(runtime: PiExtensionRuntime = {}): Map<string, PiEventHandler> {
   const commands = new Map<string, PiEventHandler>();
   const pi = {
     registerTool: vi.fn(),
@@ -141,12 +141,54 @@ function registerPiCommands(): Map<string, PiEventHandler> {
     }),
     on: vi.fn(),
   } as unknown as ExtensionAPI;
-  openloreExtension(pi);
+  createPiExtension(runtime)(pi);
   return commands;
 }
 
 it('spawns a full-surface daemon because Pi curates a wider native tool set itself', () => {
   expect(PI_DAEMON_PRESET).toBe('full');
+});
+
+describe('Pi explicit daemon restart command', () => {
+  it('is available in an RPC host without a global OpenLore CLI', async () => {
+    const restartDaemon = vi.fn(async () => ({ daemon: { baseUrl: 'http://127.0.0.1:9' } }));
+    const notify = vi.fn();
+    await registerPiCommands({ restartDaemon }).get('openlore')?.('restart', {
+      cwd: '/project', mode: 'rpc', hasUI: true, isIdle: () => true,
+      ui: { notify, setStatus: vi.fn() },
+    });
+    expect(restartDaemon).toHaveBeenCalledWith('/project');
+    expect(notify).toHaveBeenCalledWith('OpenLore daemon restarted.', 'info');
+  });
+
+  it('does not interrupt a running agent turn', async () => {
+    const restartDaemon = vi.fn();
+    const notify = vi.fn();
+    await registerPiCommands({ restartDaemon }).get('openlore')?.('restart', {
+      cwd: '/project', mode: 'rpc', hasUI: true, isIdle: () => false, ui: { notify },
+    });
+    expect(restartDaemon).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('current agent turn'), 'warning');
+  });
+
+  it('serializes duplicate restarts and exposes a refused stop in the host UI', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const restartDaemon = vi.fn(async () => {
+      await gate;
+      return { daemon: null, failureKind: 'stop' as const, failure: 'Owner must stop this daemon.' };
+    });
+    const notify = vi.fn();
+    const command = registerPiCommands({ restartDaemon }).get('openlore')!;
+    const ctx = { cwd: '/project', mode: 'rpc', hasUI: true, isIdle: () => true, ui: { notify, setStatus: vi.fn() } };
+    const first = command('restart', ctx);
+    await command('restart', ctx);
+    expect(restartDaemon).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('already in progress'), 'info');
+    release();
+    await first;
+    expect(notify).toHaveBeenCalledWith('Owner must stop this daemon.', 'error');
+  });
 });
 
 it('launches the Pi daemon without a shell and preserves hostile paths as one argument', async () => {
@@ -435,7 +477,7 @@ it('refuses a pre-existing narrow daemon with actionable remediation', async () 
     expect(isUsableDaemon(discovered!)).toBe(false);
     const result = await callTool(discovered!, 'orient', { task: 'x' }, dir) as { error?: string };
     expect(result.error).toMatch(/does not expose \d+ Pi tool/);
-    expect(result.error).toContain('openlore serve --stop');
+    expect(result.error).toContain('/openlore restart');
 
     await daemon?.close();
     daemon = await startServe({
@@ -1857,6 +1899,7 @@ describe('Pi footer status', () => {
     };
     return {
       setStatus,
+      notify: ctx.ui.notify,
       texts: () => setStatus.mock.calls.map((call) => call[1] as string | undefined),
       last: () => setStatus.mock.calls.at(-1)?.[1] as string | undefined,
       start,
@@ -1980,6 +2023,7 @@ describe('Pi footer status', () => {
     });
     await h.start();
     expect(h.last()).toBe('openlore: daemon incompatible');
+    expect(h.notify).toHaveBeenCalledWith('old', 'warning');
 
     const spawnOff = statusHarness({ readHealth: async () => health('ready') });
     await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ pi: { spawnDaemon: false } }));
@@ -1991,6 +2035,37 @@ describe('Pi footer status', () => {
     }
     expect(spawnOff.last()).toBe('openlore: daemon not started (spawn disabled)');
   });
+
+  it('replaces an older daemon once, reusing its preset', async () => {
+    const older = {
+      baseUrl: 'http://127.0.0.1:9', token: 't', autoRecoverable: true, restartPreset: 'full',
+      restartExpect: { pid: 42, version: '0.0.1' },
+    };
+    const resolveDaemon = vi.fn(async () => ({ daemon: older } as Awaited<ReturnType<Resolve>>));
+    const restartDaemon = vi.fn(async () => ({ daemon: { baseUrl: 'http://127.0.0.1:10', token: 't' } }));
+    const h = statusHarness({ readHealth: async () => health('ready', 'healthy'), resolveDaemon, restartDaemon });
+    await h.start();
+    expect(restartDaemon).toHaveBeenCalledTimes(1);
+    expect(restartDaemon).toHaveBeenCalledWith(dir, 'full', { pid: 42, version: '0.0.1' });
+    expect(h.last()).toBe('openlore: ready');
+  });
+
+  it.each(['spawn-disabled', 'stop', 'unknown-preset'] as const)(
+    'keeps serving a tool-complete older daemon it could not replace (%s)',
+    async (failureKind) => {
+      const older = { baseUrl: 'http://127.0.0.1:9', token: 't', autoRecoverable: true, restartPreset: 'full' };
+      const restartDaemon = vi.fn(async () => ({ daemon: null, failureKind, failure: 'host owns it' }));
+      const h = statusHarness({
+        readHealth: async () => health('ready', 'healthy'),
+        resolveDaemon: async () => ({ daemon: older } as Awaited<ReturnType<Resolve>>),
+        restartDaemon,
+      });
+      await h.start();
+      expect(restartDaemon).toHaveBeenCalledTimes(1);
+      expect(h.last()).toBe('openlore: ready');
+      expect(h.notify).toHaveBeenCalledWith('host owns it', 'warning');
+    },
+  );
 
   it('refreshes after an agent run as readiness changes', async () => {
     let current = health('building');
