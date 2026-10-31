@@ -28,6 +28,7 @@ import {
   ARTIFACT_PARSE_HEALTH,
   ARTIFACT_DYNAMIC_BOUNDARY,
   MAX_HTML_INLINE_SCRIPT_CHARS,
+  SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../constants.js';
 import { graphDigest, writeTraversalIndexArtifact } from './condensation.js';
 import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
@@ -445,6 +446,8 @@ export class AnalysisArtifactGenerator {
    * the same store handle that rebuilds the graph (change: optimize-hash-keyed-analyze).
    */
   private _pass1Memo?: Pass1MemoWrite;
+  /** SHA-256 of the bytes each analyzed file was read as; written beside the graph. */
+  private _fileHashes?: Map<string, string>;
   /** Off-heap overlay hand-off for this build; drained into `cfg_overlay` after `clearAll()`. */
   private _cfgSpill: CfgSpill | undefined;
   /** Files reused vs. re-extracted on the last build — surfaced by the analyze summary. */
@@ -695,7 +698,7 @@ export class AnalysisArtifactGenerator {
           const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
           await writeEdgesToSQLite(
             artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
-            this._pass1Memo, this._cfgSpill,
+            this._pass1Memo, this._cfgSpill, this._fileHashes,
           );
         }
       } catch {
@@ -705,6 +708,7 @@ export class AnalysisArtifactGenerator {
         // the whole corpus (tens of MB), and nothing after this point — continuity
         // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
         this._pass1Memo = undefined;
+        this._fileHashes = undefined;
         // The spill has either been drained into the table or abandoned; either way the file is
         // temporary and must not outlive the build.
         await this._cfgSpill?.dispose();
@@ -1533,12 +1537,20 @@ export class AnalysisArtifactGenerator {
     // fix-analyze-native-abort-and-file-cost-budget).
     const sizeCapped: Array<{ path: string; language: string }> = [];
     const scriptContainerFiles: import('./sfc-script-extractor.js').ScriptContainerFileRecord[] = [];
+    // The baseline the read path compares a cited file against. Without it, freshness fell back
+    // to comparing mtimes, so a checkout, pull or new worktree that rewrote unchanged files made
+    // the whole index read as "behind the working tree" until a rebuild.
+    const fileHashes = new Map<string, string>();
+    const hashOf = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
 
     for (const file of repoMap.allFiles) {
       try {
         // Read raw bytes so an encoding fallback (invalid UTF-8) is detectable at the byte level —
         // a decoded string alone can't distinguish a lossy decode from a legit U+FFFD in the source.
         const bytes = await readFile(file.absolutePath);
+        // Above the freshness scan cap the read path will not hash a file, so a recorded hash
+        // could never be confirmed; such files keep the mtime fallback instead.
+        if (bytes.length <= SOURCE_SCAN_MAX_FILE_BYTES) fileHashes.set(file.path, hashOf(bytes));
         const content = bytes.toString('utf-8');
         const isTest = isTestFile(file.path);
         const scriptContainer = extractScriptContainer(file.path, content);
@@ -1642,6 +1654,7 @@ export class AnalysisArtifactGenerator {
     } finally {
       memo?.close();
     }
+    this._fileHashes = fileHashes;
     this._pass1Memo = memo
       ? { ...memo.cache.take(), analyzedPaths: callGraphFiles.map(f => f.path) }
       : undefined;
@@ -1868,6 +1881,7 @@ export async function writeEdgesToSQLite(
   cfgs?: Array<{ functionId: string; filePath: string; cfg: import('./cfg.js').FunctionCfg }>,
   pass1Memo?: Pass1MemoWrite,
   cfgSpill?: CfgSpill,
+  fileHashes?: ReadonlyMap<string, string>,
 ): Promise<void> {
   const { EdgeStore } = await import('../services/edge-store.js');
   // Analyze/write path: this is the one site allowed to drop-and-rebuild on a
@@ -1911,6 +1925,8 @@ export async function writeEdgesToSQLite(
     // (change: harden-analyze-rebuild-atomicity).
     await store.transactionAsync(async () => {
       store.clearAll();
+      // In the same transaction as the graph, so the hashes always describe the bytes it was built from.
+      if (fileHashes) store.setFileHashes([...fileHashes].map(([path, hash]) => [norm(path), hash]));
       store.insertNodes(prodNodes, hubIds, entryIds);
       store.insertEdges(prodEdges);
       store.insertInheritanceEdges(inheritanceEdges);

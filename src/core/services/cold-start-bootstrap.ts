@@ -187,6 +187,11 @@ export function registerRepairBuilder(fn: RepairBuilder): void {
   registeredBuilder = fn;
 }
 
+/** True when a repair could run here: a builder is registered and auto-analysis is not disabled. */
+export function canRepairInBackground(): boolean {
+  return registeredBuilder !== null && !process.env.OPENLORE_NO_AUTO_ANALYZE;
+}
+
 /** True once an `openlore analyze` artifact exists for the directory. */
 export function hasAnalysis(directory: string): boolean {
   return existsSync(join(directory, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'));

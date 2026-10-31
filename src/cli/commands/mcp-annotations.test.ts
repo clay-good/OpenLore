@@ -43,6 +43,7 @@ const READ_ONLY_TOOL_MAY_WRITE: Record<string, string> = {
   'restoreGuard@src/utils/path-confinement.ts': 'restores a confinement guard link it created',
   // Rebuildable caches and scratch space.
   'persistCorpusSidecar@src/core/analyzer/vector-index.ts': 'rebuildable BM25 corpus sidecar',
+  'recordVerifiedCurrent@src/core/services/mcp-handlers/utils.ts': 'runtime marker: an aged index was checked against its source',
   'latchFailed@src/core/analyzer/cfg-spill.ts': 'removes its own CFG spill file',
   'sweepLeakedCfgSpills@src/core/analyzer/cfg-spill.ts': 'removes leaked CFG spill files',
   'sweepLeakedStaging@src/core/analyzer/text-line-index.ts': 'removes leaked text-index staging',
