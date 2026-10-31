@@ -125,6 +125,30 @@ describe('Pi daemon upgrade recovery', () => {
     expect(await readFile(path, 'utf8')).toBe(before);
   });
 
+  it('does not stop a daemon that changed since it was found to be older', async () => {
+    await ensureDaemonResult(root, { launch: launch(root, tools, '', '0.0.1'), timeoutMs: 5000 });
+    const path = join(root, '.openlore', 'serve.json');
+    const before = await readFile(path, 'utf8');
+    const { pid } = JSON.parse(before) as { pid: number };
+    // Same PID but a different version stands in for "another session already replaced it".
+    const result = await restartPiDaemon(root, {
+      stop: stop(root), launch: launch(root), expect: { pid, version: '0.0.0' },
+    });
+    expect(result.daemon).not.toBeNull();
+    expect(await readFile(path, 'utf8')).toBe(before);
+  });
+
+  it('stops and replaces the daemon when it is still the expected older one', async () => {
+    await ensureDaemonResult(root, { launch: launch(root, tools, '', '0.0.1'), timeoutMs: 5000 });
+    const path = join(root, '.openlore', 'serve.json');
+    const { pid } = JSON.parse(await readFile(path, 'utf8')) as { pid: number };
+    const result = await restartPiDaemon(root, {
+      stop: stop(root), launch: launch(root), timeoutMs: 5000, expect: { pid, version: '0.0.1' },
+    });
+    expect(result.daemon && isUsableDaemon(result.daemon)).toBe(true);
+    expect(JSON.parse(await readFile(path, 'utf8')).pid).not.toBe(pid);
+  });
+
   it('does not launch a replacement when the stop process fails', async () => {
     const result = await restartPiDaemon(root, {
       stop: { command: process.execPath, args: ['-e', 'process.exit(7)'] },

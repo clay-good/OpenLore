@@ -1927,13 +1927,16 @@ describe('Pi footer status', () => {
   });
 
   it('replaces an older daemon once, reusing its preset', async () => {
-    const older = { baseUrl: 'http://127.0.0.1:9', token: 't', autoRecoverable: true, restartPreset: 'full' };
+    const older = {
+      baseUrl: 'http://127.0.0.1:9', token: 't', autoRecoverable: true, restartPreset: 'full',
+      restartExpect: { pid: 42, version: '0.0.1' },
+    };
     const resolveDaemon = vi.fn(async () => ({ daemon: older } as Awaited<ReturnType<Resolve>>));
     const restartDaemon = vi.fn(async () => ({ daemon: { baseUrl: 'http://127.0.0.1:10', token: 't' } }));
     const h = statusHarness({ readHealth: async () => health('ready', 'healthy'), resolveDaemon, restartDaemon });
     await h.start();
     expect(restartDaemon).toHaveBeenCalledTimes(1);
-    expect(restartDaemon).toHaveBeenCalledWith(dir, 'full');
+    expect(restartDaemon).toHaveBeenCalledWith(dir, 'full', { pid: 42, version: '0.0.1' });
     expect(h.last()).toBe('openlore: ready');
   });
 

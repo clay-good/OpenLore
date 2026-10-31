@@ -567,6 +567,8 @@ interface Daemon {
   autoRecoverable?: boolean;
   /** Preset reported by the authenticated daemon, reused for automatic recovery. */
   restartPreset?: string;
+  /** Identity of the older daemon, re-checked immediately before automatic recovery stops it. */
+  restartExpect?: { pid: number; version: string };
 }
 
 interface DaemonProbe {
@@ -737,7 +739,13 @@ function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
-    ...(autoRecoverable ? { autoRecoverable: true, restartPreset: health.preset } : {}),
+    ...(autoRecoverable
+      ? {
+          autoRecoverable: true,
+          restartPreset: health.preset,
+          restartExpect: { pid: health.pid, version: health.version as string },
+        }
+      : {}),
     ...(missing.length > 0
       ? {
           incompatibility:
@@ -904,6 +912,8 @@ export async function restartPiDaemon(
     launch?: { command: string; args: string[] };
     timeoutMs?: number;
     preset?: string;
+    /** Stop only while the announced daemon is still this one (automatic recovery). */
+    expect?: { pid: number; version: string };
   } = {},
 ): Promise<EnsureDaemonResult> {
   if (!(await piMaySpawnDaemon(cwd))) {
@@ -929,6 +939,23 @@ export async function restartPiDaemon(
     command: packaged.command,
     args: [packaged.args[0], 'serve', '--directory', cwd, '--stop'],
   };
+  const launch = options.launch ?? {
+    command: packaged.command,
+    args: [packaged.args[0], 'serve', '--directory', cwd, '--preset', options.preset ?? PI_DAEMON_PRESET],
+  };
+  if (options.expect) {
+    // Re-check right before the stop: another Pi session on this repository may already have
+    // replaced the older daemon, and stopping its current-version successor would interrupt it.
+    // If the announcement changed, adopt (or start) whatever is there instead of stopping.
+    // A window remains: the CLI stop re-reads serve.json after waiting on the startup lock and
+    // cannot be told "stop only PID X", so a replacement published inside that wait can still be
+    // stopped. Closing it fully needs a PID-bound stop in the CLI.
+    const current = await readDescriptor(cwd);
+    const probe = current ? await probeHealth(current, cwd) : null;
+    if (probe?.health?.pid !== options.expect.pid || probe.health.version !== options.expect.version) {
+      return ensureDaemonResult(cwd, { launch, timeoutMs: options.timeoutMs });
+    }
+  }
   try {
     // Reuse the CLI's startup lock, authenticated root/PID health proof, graceful
     // shutdown, and bounded drain. Never signal the repo-writable descriptor PID.
@@ -950,10 +977,6 @@ export async function restartPiDaemon(
         'A legacy or unverified daemon must be stopped by its owner; see .openlore/serve.log.',
     };
   }
-  const launch = options.launch ?? {
-    command: packaged.command,
-    args: [packaged.args[0], 'serve', '--directory', cwd, '--preset', options.preset ?? PI_DAEMON_PRESET],
-  };
   return ensureDaemonResult(cwd, { launch, timeoutMs: options.timeoutMs });
 }
 
@@ -2097,7 +2120,11 @@ export interface PiExtensionRuntime {
   /** Replaces daemon discovery/spawn. */
   resolveDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
   /** Replaces explicit daemon restart. */
-  restartDaemon?: (cwd: string, preset?: string) => Promise<EnsureDaemonResult>;
+  restartDaemon?: (
+    cwd: string,
+    preset?: string,
+    expect?: { pid: number; version: string },
+  ) => Promise<EnsureDaemonResult>;
 }
 
 function registerOpenlore(
@@ -2125,7 +2152,9 @@ function registerOpenlore(
   const readHealth = runtime.readHealth ?? defaultHealthReader;
   const readWatcher = runtime.readWatcher ?? readWatcherState;
   const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
-  const restartDaemon = runtime.restartDaemon ?? ((cwd: string, preset?: string) => restartPiDaemon(cwd, { preset }));
+  const restartDaemon = runtime.restartDaemon
+    ?? ((cwd: string, preset?: string, expect?: { pid: number; version: string }) =>
+      restartPiDaemon(cwd, { preset, expect }));
   // Background work may outlive the event that started it. A generation makes those continuations
   // harmless after shutdown or session replacement without retaining an ExtensionContext globally.
   let sessionGeneration = 0;
@@ -2177,7 +2206,7 @@ function registerOpenlore(
       // host-supervised daemon from one Pi spawned: the host's spawn opt-out
       // (checked in restartPiDaemon) is the ONLY protection for a supervised daemon.
       automaticRecoveryAttempts.add(cwd);
-      const recovered = await restartDaemon(cwd, result.daemon.restartPreset);
+      const recovered = await restartDaemon(cwd, result.daemon.restartPreset, result.daemon.restartExpect);
       if (recovered.daemon) {
         automaticRecoveryFailures.delete(cwd);
         return recordDaemonResult(cwd, recovered);
