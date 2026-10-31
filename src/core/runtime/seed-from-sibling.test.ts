@@ -12,12 +12,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { openloreInit } from '../../api/init.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { dispatchTool } from '../services/tool-dispatch.js';
 import { _resetRepairServiceForTesting, recordDetachedRepair } from '../services/cold-start-bootstrap.js';
 import { seedFromSiblingCheckout, servingSeededIndex } from './seed-from-sibling.js';
+import { _resetContextCacheForTesting } from '../services/mcp-handlers/utils.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
 
@@ -35,7 +36,8 @@ function git(cwd: string, ...args: string[]): string {
 function addWorktree(): string {
   const path = join(base, `wt-${++worktrees}`);
   git(main, 'worktree', 'add', '-q', '-b', `branch-${worktrees}`, path);
-  return realpathSync(path);
+  // `.native` expands Windows 8.3 short names (RUNNER~1), which git never reports.
+  return realpathSync.native(path);
 }
 
 /** Run `mutate` against the main checkout's index, restoring it afterwards. */
@@ -62,7 +64,7 @@ function expectUntouched(worktree: string): void {
 }
 
 beforeAll(async () => {
-  base = realpathSync(mkdtempSync(join(tmpdir(), 'openlore-seed-')));
+  base = realpathSync.native(mkdtempSync(join(tmpdir(), 'openlore-seed-')));
   main = join(base, 'main');
   mkdirSync(join(main, 'src'), { recursive: true });
   writeFileSync(join(main, 'src', 'tariff.ts'),
@@ -70,6 +72,9 @@ beforeAll(async () => {
   writeFileSync(join(main, 'src', 'rate.ts'), 'export function rate(): number { return 0.12; }\n');
   writeFileSync(join(main, '.gitignore'), '.openlore/\n');
   git(main, 'init', '-q');
+  // Same bytes in every checkout: with autocrlf (Windows CI) a worktree checks out CRLF while
+  // these files were written LF, and the content check rightly reports every file changed.
+  git(main, 'config', 'core.autocrlf', 'false');
   git(main, 'add', '.');
   git(main, 'commit', '-qm', 'init');
   await openloreInit({ rootPath: main });
@@ -82,11 +87,20 @@ afterAll(() => {
 
 afterEach(() => {
   _resetRepairServiceForTesting();
+  // Close cached index handles first: Windows refuses to delete an open SQLite file, and a
+  // worktree left behind is a healthy sibling every later test would seed from.
+  _resetContextCacheForTesting();
   // A seeded worktree is itself a sibling with an index: remove each one, so every test sees
   // the main checkout as the only candidate.
   for (let n = 1; n <= worktrees; n++) {
     const path = join(base, `wt-${n}`);
-    if (existsSync(path)) git(main, 'worktree', 'remove', '--force', path);
+    if (!existsSync(path)) continue;
+    try {
+      git(main, 'worktree', 'remove', '--force', path);
+    } catch {
+      rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      git(main, 'worktree', 'prune');
+    }
   }
 });
 
@@ -96,7 +110,9 @@ describe('seeding a new worktree from a sibling checkout', () => {
     expect(existsSync(join(worktree, '.openlore'))).toBe(false);
 
     const seed = await seedFromSiblingCheckout(worktree);
-    expect(seed).toMatchObject({ state: 'seeded', source: realpathSync(main) });
+    expect(seed).toMatchObject({ state: 'seeded' });
+    // git reports forward slashes on Windows; compare as paths, not strings.
+    expect(resolve((seed as { source: string }).source)).toBe(realpathSync.native(main));
     expect(await servingSeededIndex(worktree)).toBe(true);
 
     recordDetachedRepair(worktree, 'seeded');
