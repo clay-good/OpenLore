@@ -1512,6 +1512,14 @@ generalized cold-start bootstrap: non-blocking, never-throw, opt-out via
 its trigger SHALL disclose and stop, never loop. Detection and disclosure are unchanged;
 repair is additive.
 
+Age alone SHALL NOT make an index stale. An analysis past the age threshold SHALL first be
+compared with its source by content fingerprint; when the source is unchanged, the index is
+current — no repair starts and no answer is disclosed as served from a stale index — and that
+verification SHALL hold for one age window. A full analysis SHALL record the content hash of
+every file it read, so the content-hash-first freshness check has a baseline and a file whose
+mtime changed without its bytes changing (a checkout, pull or new worktree) is not reported
+behind the working tree.
+
 #### Scenario: A stale index heals itself behind an honest answer
 
 - **GIVEN** a repo whose index attestation reconciles to `mismatched`
@@ -1519,6 +1527,13 @@ repair is additive.
 - **THEN** the response is served with the existing staleness verdict plus a
   "background refresh started" note, exactly one background `analyze` starts, and a later
   call after it completes serves fresh results with no verdict
+
+#### Scenario: An old index over unchanged code is current
+
+- **GIVEN** an analysis older than the age threshold whose source files are byte-identical to
+  what it was built from, though their mtimes are newer
+- **WHEN** any graph-dependent tool is called
+- **THEN** the response carries no repair marker and no stale-file note, and no rebuild starts
 
 #### Scenario: Repair never blocks or lies
 

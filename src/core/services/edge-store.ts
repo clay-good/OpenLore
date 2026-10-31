@@ -1328,6 +1328,15 @@ export class EdgeStore {
       .run(filePath, hash, Date.now());
   }
 
+  /** {@link setFileHash} for a whole build: one prepared statement, run per file. */
+  setFileHashes(hashes: Iterable<[filePath: string, hash: string]>): void {
+    const insert = this.db.prepare(
+      'INSERT OR REPLACE INTO file_hashes (file_path, content_hash, updated_at) VALUES (?, ?, ?)'
+    );
+    const now = Date.now();
+    for (const [filePath, hash] of hashes) insert.run(filePath, hash, now);
+  }
+
 
   deleteFileHash(filePath: string): void {
     this.db.prepare('DELETE FROM file_hashes WHERE file_path = ?').run(filePath);
