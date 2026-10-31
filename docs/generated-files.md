@@ -19,7 +19,7 @@ Each mark is `{ file, rule, matched, kind, generatedFrom, regenerateWith, eviden
 | Order | Rule | Matches | `certainty` |
 |-------|------|---------|-------------|
 | 1 | `lockfile` | a lockfile name below (decided first, so a lockfile's own banner never hides its manifest) | `declared` |
-| 2 | `header-marker` | a marker below, in the file's leading comment block (blank and comment lines before the first other line, within the first 40 lines and 8 KiB) | `declared` |
+| 2 | `header-marker` | a marker below, in the file's leading comment block (blank and comment lines before the first other line, within the first 40 lines and 8 KiB; a BOM and one opening `<?php`, `<?xml …?>`, `"use strict";`, or `@file:` line are skipped) | `declared` |
 | 3 | `gitattributes` | `linguist-generated` or `linguist-vendored` set for the path (read with `git check-attr`) | `declared` |
 | 4 | `path-pattern` | `*.d.ts`, `*.generated.*`, `generated/`, `__generated__/`, `vendor/`, `vendored/`, `node_modules/` | `path-pattern` |
 
@@ -91,7 +91,7 @@ An output that is the directory the command runs in, or a directory above it (`-
 input, so it is listed in `generatedFrom` too.
 
 Every string read from the repository (commands, header literals, script names) is cut to 512
-characters, has credentials redacted and control characters removed, and is replaced by
+characters, has credentials redacted and control and invisible format characters (bidi, zero-width) removed, and is replaced by
 `[withheld: reads like an instruction]` when it reads like one. Each directory and the workflows
 contribute at most 5,000 commands; a cap that is reached is disclosed.
 
@@ -112,7 +112,7 @@ How "its source changed" is decided:
 |--------|------------------------|
 | A repository path (resolved) | that exact path is in the diff |
 | A header literal that is not at that path (`sourceNotFound`) | a changed path ends with it; a bare file name (`query.sql`) must be in the same top-level directory as the generated file |
-| The config file holding the command | the command text itself changed since the base, not just the file (a dependency bump does not count) |
+| The config file holding the command | the command itself changed since the base, not just the file (a dependency bump does not count). The base file is parsed the same way as the current one, so layout (line continuations, YAML block scalars, JSON escapes) does not matter. A base file that cannot be read is disclosed, and the edit is still reported. |
 
 A diff that changes only lockfiles has no code change; `blast_radius` says so in its headline and
 still lists the lockfiles in `generated`.

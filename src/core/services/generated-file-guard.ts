@@ -44,6 +44,8 @@ const COMMENT_LEAD = String.raw`^\s*(?:\/\/+!?|#+!?|\/\*+!?|\*+|--+|;+|<!--|%+)\
 const MARKUP_COMMENT_LEAD = String.raw`^\s*<!--\s*`;
 const MARKUP_EXTENSIONS = /\.(?:md|mdx|markdown|rst|adoc|txt)$/i;
 
+const HEADER_PREAMBLE = /^\s*(?:<\?php\b.*|<\?xml\b.*\?>\s*|['"]use strict['"];?\s*|@file:.*)$/;
+
 const leadFor = (file?: string) => new RegExp(file && MARKUP_EXTENSIONS.test(file) ? MARKUP_COMMENT_LEAD : COMMENT_LEAD);
 
 /**
@@ -162,8 +164,12 @@ export const WITHHELD_TEXT = '[withheld: reads like an instruction]';
  */
 export function emittedText(text: string): string {
   const redacted = redactSecretText(text.slice(0, MAX_EMITTED_TEXT * 4)).value;
-  // eslint-disable-next-line no-control-regex -- control characters are exactly what is removed
-  let clean = redacted.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ');
+  let clean = redacted
+    // eslint-disable-next-line no-control-regex -- control characters are exactly what is removed
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    // Invisible format characters (bidi controls, zero-width, BOM) can hide or reorder text and
+    // split a phrase past the instruction screen; they carry nothing a reader needs.
+    .replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '');
   if (clean.length > MAX_EMITTED_TEXT) clean = clean.slice(0, MAX_EMITTED_TEXT).replace(/[\uD800-\uDBFF]$/, '') + '…';
   return detectInjectionShapes(clean).length ? WITHHELD_TEXT : clean;
 }
@@ -230,7 +236,11 @@ function headerLines(head: string, file?: string): string[] {
   const lead = leadFor(file);
   const out: string[] = [];
   let inBlock: '*/' | '-->' | null = null;
-  for (const raw of head.split('\n').slice(0, HEADER_SCAN_LINES)) {
+  const lines = head.replace(/^\uFEFF/, '').split('\n').slice(0, HEADER_SCAN_LINES);
+  // One opening line that must precede any comment in its language is skipped: `<?php`, an XML
+  // declaration, `"use strict";`, a Kotlin `@file:` annotation.
+  if (lines.length && HEADER_PREAMBLE.test(lines[0].replace(/\r$/, ''))) lines.shift();
+  for (const raw of lines) {
     const line = raw.replace(/\r$/, '');
     if (inBlock) {
       // Inside a block comment every line is comment text; give it a comment token so the markers,
@@ -665,27 +675,15 @@ class SourceResolver {
     // go-generate directives: they run in the directory of the file that holds them.
     for (const name of names.filter(n => n.endsWith('.go')).slice(0, MAX_GO_FILES_PER_DIR)) {
       const text = await this.readText(join(name));
-      if (!text || !text.includes('//go:generate')) continue;
-      text.split('\n').forEach((raw, idx) => {
-        // Prefix test and trim, no regex: a directive line is repository content of any length.
-        if (!raw.startsWith(GO_GENERATE) || !/\s/.test(raw.charAt(GO_GENERATE.length))) return;
-        const cmd = raw.slice(GO_GENERATE.length, GO_GENERATE.length + MAX_COMMAND_SCAN).trim();
-        if (cmd) add({ command: cmd, cwd: dir, configFile: join(name), evidence: `go:generate in ${join(name)}:${idx + 1}` });
-      });
+      if (!text) continue;
+      for (const g of goGenerateCommands(text)) add({ command: g.command, cwd: dir, configFile: join(name), evidence: `go:generate in ${join(name)}:${g.line}` });
     }
 
     if (names.includes('package.json')) {
       const text = await this.readText(join('package.json'));
-      try {
-        const scripts = text ? (JSON.parse(text) as { scripts?: unknown }).scripts : undefined;
-        if (scripts && typeof scripts === 'object' && !Array.isArray(scripts)) {
-          for (const [name, body] of Object.entries(scripts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-            if (typeof body === 'string') {
-              add({ command: body.slice(0, MAX_COMMAND_SCAN), cwd: dir, configFile: join('package.json'), evidence: `package.json script "${name}" in ${join('package.json')}` });
-            }
-          }
-        }
-      } catch { /* unparseable manifest: no entries */ }
+      for (const sc of text ? packageScripts(text) : []) {
+        add({ command: sc.command, cwd: dir, configFile: join('package.json'), evidence: `package.json script "${sc.name}" in ${join('package.json')}` });
+      }
     }
 
     for (const mk of ['GNUmakefile', 'Makefile', 'makefile']) {
@@ -710,39 +708,87 @@ class SourceResolver {
       const rel = `${wfDir}/${name}`;
       const text = await this.readText(rel);
       if (!text) continue;
-      let doc: unknown;
-      try { doc = parseYaml(text); } catch { continue; }
-      const jobs = (doc as { jobs?: unknown } | null)?.jobs;
-      if (!jobs || typeof jobs !== 'object') continue;
-      const workflowDefault = runWorkingDirectory(doc);
-      for (const [jobId, job] of Object.entries(jobs as Record<string, unknown>)) {
-        const steps = (job as { steps?: unknown })?.steps;
-        if (!Array.isArray(steps)) continue;
-        const jobDefault = runWorkingDirectory(job) ?? workflowDefault;
-        steps.forEach((step, idx) => {
-          const run = (step as { run?: unknown })?.run;
-          if (typeof run !== 'string') return;
-          // step `working-directory`, else the job's `defaults.run`, else the workflow's.
-          const wd = (step as { 'working-directory'?: unknown })?.['working-directory'] ?? jobDefault;
-          let cwd = '';
-          if (wd !== undefined) {
-            // A computed directory (`${{ matrix.dir }}`) is unknown: the step names nothing.
-            if (typeof wd !== 'string' || !isLiteralPath(wd)) return;
-            const norm = posix.normalize(wd).replace(/\/+$/, '');
-            if (norm !== '.' && norm !== '') {
-              const r = normalizeRel(norm);
-              if (r === null || norm.startsWith('/')) return;
-              cwd = r;
-            }
+      for (const r of workflowRuns(text)) {
+        let cwd = '';
+        if (r.wd !== undefined) {
+          // A computed directory (`${{ matrix.dir }}`) is unknown: the step names nothing.
+          if (typeof r.wd !== 'string' || !isLiteralPath(r.wd)) continue;
+          const norm = posix.normalize(r.wd).replace(/\/+$/, '');
+          if (norm !== '.' && norm !== '') {
+            const rr = normalizeRel(norm);
+            if (rr === null || norm.startsWith('/')) continue;
+            cwd = rr;
           }
-          if (entries.length >= MAX_ENTRIES_PER_SOURCE) { this.capped = true; return; }
-          entries.push({ command: run.slice(0, MAX_COMMAND_SCAN).trim(), cwd, configFile: rel, evidence: `CI run step ${jobId}#${idx + 1} in ${rel}` });
-        });
+        }
+        if (entries.length >= MAX_ENTRIES_PER_SOURCE) { this.capped = true; break; }
+        entries.push({ command: r.command, cwd, configFile: rel, evidence: `CI run step ${r.jobId}#${r.step} in ${rel}` });
       }
     }
     this.workflowEntries = entries;
     return entries;
   }
+}
+
+// ── Config parsers: pure, shared by the resolver and by the base-revision comparison, so a command
+//    is normalized the same way on both sides. ──
+
+/** go-generate directives: prefix test and trim, no regex — a directive line can be any length. */
+export function goGenerateCommands(text: string): Array<{ command: string; line: number }> {
+  if (!text.includes(GO_GENERATE)) return [];
+  const out: Array<{ command: string; line: number }> = [];
+  text.split('\n').forEach((raw, idx) => {
+    const line = raw.replace(/\r$/, '');
+    if (!line.startsWith(GO_GENERATE) || !/\s/.test(line.charAt(GO_GENERATE.length))) return;
+    const command = line.slice(GO_GENERATE.length, GO_GENERATE.length + MAX_COMMAND_SCAN).trim();
+    if (command) out.push({ command, line: idx + 1 });
+  });
+  return out;
+}
+
+/** `scripts` of a package.json, by name in code-unit order; none when it does not parse. */
+export function packageScripts(text: string): Array<{ name: string; command: string }> {
+  try {
+    const scripts = (JSON.parse(text) as { scripts?: unknown }).scripts;
+    if (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)) return [];
+    return Object.entries(scripts)
+      .filter((e): e is [string, string] => typeof e[1] === 'string')
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([name, body]) => ({ name, command: body.slice(0, MAX_COMMAND_SCAN) }));
+  } catch {
+    return [];
+  }
+}
+
+/** `run:` steps of a GitHub Actions workflow with their raw working directory (step, job, then workflow default). */
+export function workflowRuns(text: string): Array<{ jobId: string; step: number; command: string; wd: unknown }> {
+  let doc: unknown;
+  try { doc = parseYaml(text); } catch { return []; }
+  const jobs = (doc as { jobs?: unknown } | null)?.jobs;
+  if (!jobs || typeof jobs !== 'object') return [];
+  const out: Array<{ jobId: string; step: number; command: string; wd: unknown }> = [];
+  const workflowDefault = runWorkingDirectory(doc);
+  for (const [jobId, job] of Object.entries(jobs as Record<string, unknown>)) {
+    const steps = (job as { steps?: unknown })?.steps;
+    if (!Array.isArray(steps)) continue;
+    const jobDefault = runWorkingDirectory(job) ?? workflowDefault;
+    steps.forEach((step, idx) => {
+      const run = (step as { run?: unknown })?.run;
+      if (typeof run !== 'string') return;
+      const wd = (step as { 'working-directory'?: unknown })?.['working-directory'] ?? jobDefault;
+      out.push({ jobId, step: idx + 1, command: run.slice(0, MAX_COMMAND_SCAN).trim(), wd });
+    });
+  }
+  return out;
+}
+
+/** Every command a config file holds, parsed by its kind; null for a file that is not a config source. */
+export function commandsInConfig(configFile: string, text: string): string[] | null {
+  const name = posix.basename(configFile);
+  if (name === 'package.json') return packageScripts(text).map(s => s.command);
+  if (name === 'GNUmakefile' || name === 'Makefile' || name === 'makefile') return makefileRecipes(text).map(r => r.command);
+  if (name.endsWith('.go')) return goGenerateCommands(text).map(g => g.command);
+  if (/^\.github\/workflows\/[^/]+\.ya?ml$/.test(configFile)) return workflowRuns(text).map(r => r.command);
+  return null;
 }
 
 /** `defaults.run.working-directory` of a workflow or job; undefined when not set. */
@@ -845,7 +891,7 @@ export function generatedFileEditedFindings(
       if (manifestChanged) continue;
       findings.push({
         code: 'generated-file-edited', severity: 'info', source: SOURCE, subject: fact.file,
-        message: `Lockfile ${fact.file} changed without its manifest (${manifests.join(' or ')}) in the diff.`,
+        message: `Lockfile ${emittedText(fact.file)} changed without its manifest (${manifests.join(' or ')}) in the diff.`,
         location: { path: fact.file },
       });
       continue;
@@ -858,6 +904,7 @@ export function generatedFileEditedFindings(
     const sources = fact.generatedFrom === 'unknown' ? [] : fact.generatedFrom;
 
     const what = fact.kind === 'vendored' ? 'vendored' : 'generated';
+    const shown = emittedText(fact.file);
     const by = `${fact.rule}: ${fact.matched}`;
     const from = !sources.length ? 'its source is unknown'
       : fact.sourceNotFound?.length === sources.length ? `its header names ${sources.join(', ')}, which is not at that path in the repository`
@@ -868,20 +915,30 @@ export function generatedFileEditedFindings(
       severity: fact.certainty === 'declared' ? 'warning' : 'info',
       source: SOURCE,
       subject: fact.file,
-      message: `${fact.file} is ${what} (${by}${fact.certainty === 'path-pattern' ? ', path pattern only' : ''}) and was edited; ${from}${regen}.`,
+      message: `${shown} is ${what} (${by}${fact.certainty === 'path-pattern' ? ', path pattern only' : ''}) and was edited; ${from}${regen}.`,
       location: { path: fact.file },
     });
   }
   return findings;
 }
 
-/** A file's content at a ref (path from the repository root); null when it did not exist there. */
-async function readAtRef(root: string, ref: string, repoPath: string): Promise<string | null> {
+/**
+ * A file's content at a ref (path from the repository root). `absent` when the path does not exist
+ * at the ref (a config file the diff added); `unreadable` for any other failure, such as a file
+ * over the size limit — the two are different claims.
+ */
+async function readAtRef(root: string, ref: string, repoPath: string): Promise<string | { absent: boolean }> {
+  const spec = `${ref}:${repoPath}`;
   try {
-    const { stdout } = await execFileGit('git', ['show', `${ref}:${repoPath}`], { cwd: root, maxBuffer: MAX_CONFIG_BYTES * 4 });
+    await execFileGit('git', ['cat-file', '-e', spec], { cwd: root });
+  } catch {
+    return { absent: true };
+  }
+  try {
+    const { stdout } = await execFileGit('git', ['cat-file', 'blob', spec], { cwd: root, maxBuffer: MAX_CONFIG_BYTES });
     return stdout;
   } catch {
-    return null;
+    return { absent: false };
   }
 }
 
@@ -912,15 +969,26 @@ export async function guardDiff(root: string, baseRef: string, prefetched?: read
   const { facts, boundaries } = await classifyGeneratedFiles(root, changed.filter(c => c.status !== 'deleted').map(c => c.path), { raw: true });
   // A config file edit counts as editing the source side only when the regenerate command itself
   // changed: a dependency bump in package.json must not hide a hand edit to generated output.
+  // The base config is parsed by the same parser as the current one, so a command compares equal
+  // whatever its layout (continuations, YAML block scalars, JSON escapes).
   const changedSet = new Set(changed.map(c => c.path));
   const commandChanged = new Set<string>();
-  const baseText = new Map<string, string | null>();
+  const baseCommands = new Map<string, Set<string> | 'absent' | 'unreadable'>();
   for (const f of facts.values()) {
     if (!f.configFile || f.regenerateWith === 'unknown' || !changedSet.has(f.configFile)) continue;
-    if (!baseText.has(f.configFile)) baseText.set(f.configFile, await readAtRef(root, baseRef, prefix + f.configFile));
-    const before = baseText.get(f.configFile);
-    const cmd = f.regenerateWith;
-    if (before === null || before === undefined || !(before.includes(cmd) || before.includes(JSON.stringify(cmd).slice(1, -1)))) commandChanged.add(f.file);
+    if (!baseCommands.has(f.configFile)) {
+      const at = await readAtRef(root, baseRef, prefix + f.configFile);
+      baseCommands.set(f.configFile, typeof at === 'string'
+        ? new Set(commandsInConfig(f.configFile, at) ?? [])
+        : at.absent ? 'absent' : 'unreadable');
+    }
+    const before = baseCommands.get(f.configFile)!;
+    if (before === 'unreadable') continue; // unknown: the hand edit is still reported, and the gap disclosed
+    if (before === 'absent' || !before.has(f.regenerateWith)) commandChanged.add(f.file);
+  }
+  const unreadable = [...baseCommands].filter(([, v]) => v === 'unreadable').map(([k]) => k);
+  if (unreadable.length) {
+    boundaries.push(`The base revision of ${unreadable.join(', ')} could not be read, so a change to its regenerate command was not credited as a source change.`);
   }
   return {
     facts: [...facts.values()].map(emittedFact),

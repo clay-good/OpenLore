@@ -174,7 +174,8 @@ function renderHuman(b: BlastRadiusBriefing): string {
   // Generated files the diff changed, with their source and regenerate command (add-generated-file-guard).
   const GENERATED_SHOWN = 5;
   for (const g of (b.generated ?? []).slice(0, GENERATED_SHOWN)) {
-    const from = g.generatedFrom === 'unknown' ? 'source unknown' : `from ${g.generatedFrom.join(', ')}`;
+    const from = g.generatedFrom === 'unknown' ? 'source unknown'
+      : `from ${g.generatedFrom.map(s => (g.sourceNotFound?.includes(s) ? `${s} (not at that path)` : s)).join(', ')}`;
     const regen = g.regenerateWith === 'unknown' ? '' : `; regenerate: ${g.regenerateWith}`;
     lines.push(sanitizeForTerminal(`   ⚠ ${g.kind} ${g.file} (${g.rule}: ${g.matched}) — ${from}${regen}`));
   }

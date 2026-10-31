@@ -609,13 +609,26 @@ export async function computeBlastRadius(
   return withIndexStaleness(absDir, briefing, ctx);
 }
 
+/** "1 lockfile and 2 generated files": the generated marks counted by kind, in a fixed order. */
+function generatedSummary(marks: readonly GeneratedFileFact[]): string {
+  const nouns: Array<[GeneratedFileFact['kind'], string, string]> = [
+    ['generated', 'generated file', 'generated files'],
+    ['vendored', 'vendored file', 'vendored files'],
+    ['lockfile', 'lockfile', 'lockfiles'],
+  ];
+  const parts = nouns
+    .map(([kind, one, many]) => { const n = marks.filter(m => m.kind === kind).length; return n ? `${n} ${n === 1 ? one : many}` : ''; })
+    .filter(Boolean);
+  return parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
 /** One-line conclusion summarizing the briefing. */
 function renderHeadline(b: BlastRadiusBriefing): string {
-  const gen = b.generated?.length ?? 0;
+  const gen = generatedSummary(b.generated ?? []);
   if (b.changed.files === 0) {
     // A lockfile-only diff has no code change, but it is not "no change".
-    return gen > 0
-      ? `No code changes vs ${b.resolvedBaseRef}; ${gen} generated, vendored, or lockfile file${gen === 1 ? '' : 's'} changed.`
+    return gen
+      ? `No code changes vs ${b.resolvedBaseRef}; ${gen} changed.`
       : 'No changes vs ' + b.resolvedBaseRef + ' — nothing to brief.';
   }
   const parts: string[] = [
@@ -638,7 +651,7 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
   if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
-  if (gen > 0) parts.push(`${gen} generated or vendored file${gen === 1 ? '' : 's'} changed`);
+  if (gen) parts.push(`${gen} changed`);
   const pushed = b.injectedMemories?.length ?? 0;
   if (pushed > 0) parts.push(`${pushed} triggered memor${pushed === 1 ? 'y' : 'ies'} to read`);
   return parts.join('; ') + '.';
