@@ -193,18 +193,27 @@ function resolveImportedFqn(index: TargetIndex, fqn: string, memberImport = fals
   return uniqueTarget(index, fqn.slice(0, fqn.lastIndexOf('.')));
 }
 
-interface GoImportSpec { alias?: string; source: string }
+/** One Go import, as written: its path, any alias, and the 1-based line it is on. */
+export interface GoImportSpec { alias?: string; source: string; line: number }
 
-function goImportSpecs(content: string): GoImportSpec[] {
+/**
+ * The Go imports a file declares, as written — including the ones that resolve to nothing, which is
+ * what the phantom-reference check needs (change: add-phantom-reference-findings). `parseGoImports`
+ * above narrows these to the ones it could bind; this is the unfiltered scan, so both agree on what
+ * counts as a Go import line.
+ */
+export function goImportSpecs(content: string): GoImportSpec[] {
   const specs: GoImportSpec[] = [];
   const code = sanitizeForRegex(content, true);
   let inBlock = false;
+  let lineNumber = 0;
   const add = (text: string): void => {
     const m = text.match(/^[ \t]*(?:([A-Za-z_]\w*|[._])[ \t]+)?"([^"]+)"/);
     if (!m || m[1] === '_' || m[1] === '.') return;
-    specs.push({ alias: m[1], source: m[2] });
+    specs.push({ alias: m[1], source: m[2], line: lineNumber });
   };
   for (const line of code.split('\n')) {
+    lineNumber++;
     if (!inBlock) {
       const single = line.match(/^[ \t]*import[ \t]+(?!\()(.+)$/);
       if (single) add(single[1]);

@@ -161,3 +161,73 @@ describe('projectVerifyReceipt — generated-file guard (add-generated-file-guar
     expect(r.summary.generatedFilesEdited).toBe(0);
   });
 });
+
+describe('projectVerifyReceipt — phantom references (add-phantom-reference-findings)', () => {
+  const refs = {
+    findings: [
+      {
+        code: 'unresolved-internal-symbol', severity: 'error' as const, source: 'phantom-references',
+        subject: './utils#formatDate',
+        message: "src/app.ts imports 'formatDate' from './utils', which src/utils.ts does not export; it exports formatTime.",
+        location: { path: 'src/app.ts', line: 3 },
+      },
+      {
+        code: 'undeclared-dependency', severity: 'error' as const, source: 'phantom-references',
+        subject: 'left-padx',
+        message: "src/app.ts imports 'left-padx', which no manifest in scope declares (package.json).",
+        location: { path: 'src/app.ts', line: 4 },
+      },
+    ],
+    notAssessed: [{ file: 'src/Main.java', reason: 'this check cannot read Java imports' }],
+    boundaries: ['Path aliases are not resolved, so these were not checked: @app/thing.'],
+    summary: { filesChecked: 2, referencesChecked: 5 },
+  };
+
+  it('projects each finding with its own next action and returns them in findings', () => {
+    const r = projectVerifyReceipt(briefing({}), {}, undefined, undefined, refs) as unknown as Receipt & { findings?: Array<{ code: string }> };
+    const items = r.items.filter(i => i.check === 'phantom_references');
+    expect(items).toHaveLength(2);
+    expect(items.find(i => i.subject.includes('formatDate'))!.nextAction).toContain('does not export that name');
+    expect(items.find(i => i.subject.includes('left-padx'))!.nextAction).toContain('No manifest declares');
+    expect(r.summary.unresolvedReferences).toBe(2);
+    // classifyFindings returns one deterministic order (by code and subject), not the input order.
+    expect(r.findings?.map(f => f.code).sort()).toEqual(['undeclared-dependency', 'unresolved-internal-symbol']);
+  });
+
+  it('carries the check boundaries and says how many references it could not assess', () => {
+    const r = projectVerifyReceipt(briefing({}), {}, undefined, undefined, refs) as unknown as Receipt;
+    expect(r.boundaries.some(b => b.includes('@app/thing'))).toBe(true);
+    expect(r.boundaries.some(b => b.includes('1 added reference could not be assessed'))).toBe(true);
+  });
+
+  it('honors enforcement.policy per code: blocking gates, off drops', () => {
+    const blocking = projectVerifyReceipt(briefing({}), {}, undefined, { 'undeclared-dependency': 'blocking' }, refs) as unknown as Receipt & { gated?: boolean; findings?: Array<{ code: string; enforcementClass: string }> };
+    expect(blocking.gated).toBe(true);
+    expect(blocking.findings?.find(f => f.code === 'undeclared-dependency')?.enforcementClass).toBe('blocking');
+    const off = projectVerifyReceipt(briefing({}), {}, undefined, { 'undeclared-dependency': 'off', 'unresolved-internal-symbol': 'off' }, refs) as unknown as Receipt & { findings?: unknown };
+    expect(off.items.some(i => i.check === 'phantom_references')).toBe(false);
+    expect(off.findings).toBeUndefined();
+    expect(off.summary.unresolvedReferences).toBe(0);
+  });
+
+  it('a failed check is a boundary, not a failed receipt', () => {
+    const r = projectVerifyReceipt(briefing({}), {}, undefined, undefined, { error: 'boom' }) as unknown as Receipt & { findings?: unknown };
+    expect(r.boundaries.some(b => b.includes('reference check unavailable: boom'))).toBe(true);
+    expect(r.findings).toBeUndefined();
+    expect(r.summary.unresolvedReferences).toBe(0);
+  });
+
+  it('keeps the guard findings and the reference findings in one list', () => {
+    const guard = {
+      facts: [], boundaries: [],
+      findings: [{
+        code: 'generated-file-edited', severity: 'warning' as const, source: 'generated-file-guard',
+        subject: 'gen/a.pb.go', message: 'gen/a.pb.go is generated and was edited.', location: { path: 'gen/a.pb.go' },
+      }],
+    };
+    const r = projectVerifyReceipt(briefing({}), {}, guard, undefined, refs) as unknown as Receipt & { findings?: Array<{ code: string }> };
+    expect(r.findings?.map(f => f.code).sort()).toEqual(['generated-file-edited', 'undeclared-dependency', 'unresolved-internal-symbol']);
+    expect(r.summary.generatedFilesEdited).toBe(1);
+    expect(r.summary.unresolvedReferences).toBe(2);
+  });
+});

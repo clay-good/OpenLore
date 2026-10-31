@@ -8,8 +8,10 @@
  *
  * Today it composes `blast_radius` — which itself already composes `select_tests` (tests to run)
  * and the spec/memory/decision drift passes — plus `structural_diff` (removed / re-signed functions
- * and new calls into deprecated code) and the generated-file guard (`generated-file-edited`: a
- * generated file or lockfile edited without its source; change: add-generated-file-guard). It is advisory, read-only, offline, and grader-not-author:
+ * and new calls into deprecated code), the generated-file guard (`generated-file-edited`: a
+ * generated file or lockfile edited without its source; change: add-generated-file-guard), and the
+ * phantom-reference check (imports, named exports, and packages the diff adds that resolve to
+ * nothing; change: add-phantom-reference-findings). It is advisory, read-only, offline, and grader-not-author:
  * it names the tests to run and the breaks to fix; it never runs the tests or edits a file.
  *
  * NoRedundantConclusions: each component still answers its own question. verify_change only
@@ -20,6 +22,7 @@ import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js'
 import { handleStructuralDiff } from './structural-diff.js';
 import { validateDirectory } from './utils.js';
 import { guardDiff, type DiffGuardResult } from '../generated-file-guard.js';
+import { checkPhantomReferences, type PhantomReferenceResult } from '../phantom-references.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { classifyFindings, effectivePolicy, type ClassifiedFinding, type EnforcementPolicy } from './enforcement-policy.js';
 
@@ -46,6 +49,14 @@ export interface VerifyChangeInput {
 
 const DEFAULT_ITEM_CAP = 25;
 
+/** The one next action for each phantom-reference code; the finding message carries the evidence. */
+const NEXT_ACTION_BY_CODE: Record<string, string> = {
+  'unresolved-internal-import': 'No file is at that path; create the module or correct the import.',
+  'unresolved-internal-symbol': 'The target does not export that name; export it there, or import a name it does export.',
+  'undeclared-dependency': 'No manifest declares that package; add it to the manifest, or use one that is declared.',
+  'unpinned-dependency': 'The lockfile does not pin it; run the package manager so the lockfile matches the manifest.',
+};
+
 interface StructuralDiffShape {
   summary?: { removedFunctions?: number; signatureChanges?: number; deprecatedCallsAdded?: number };
   removed?: Array<{ name?: string; file?: string }>;
@@ -63,6 +74,7 @@ export function projectVerifyReceipt(
   sd: StructuralDiffShape,
   guard?: DiffGuardResult | { error: string },
   policy?: EnforcementPolicy,
+  references?: PhantomReferenceResult | { error: string },
 ): Record<string, unknown> {
   const items: ReceiptItem[] = [];
   const boundaries: string[] = [...b.caveats];
@@ -144,6 +156,25 @@ export function projectVerifyReceipt(
     });
   }
 
+  // ── References the diff adds that resolve to nothing (phantom-reference check) ──
+  const refsOk = references && !('error' in references) ? references : undefined;
+  if (references && 'error' in references) boundaries.push(`reference check unavailable: ${references.error}`);
+  else if (refsOk) boundaries.push(...refsOk.boundaries);
+  const refGate = refsOk && refsOk.findings.length ? classifyFindings(refsOk.findings, policy) : undefined;
+  const refFindings: ClassifiedFinding[] = refGate ? refGate.classified.filter(f => f.enforcementClass !== 'off') : [];
+  for (const f of refFindings) {
+    items.push({
+      subject: f.message,
+      check: 'phantom_references',
+      severity: f.severity,
+      nextAction: NEXT_ACTION_BY_CODE[f.code] ?? 'The reference resolves to nothing; correct it before landing.',
+    });
+  }
+  // A reference that could not be judged is said once, with its count — never read as resolved.
+  if (refsOk && refsOk.notAssessed.length) {
+    boundaries.push(`${refsOk.notAssessed.length} added reference${refsOk.notAssessed.length === 1 ? '' : 's'} could not be assessed (${[...new Set(refsOk.notAssessed.map(n => n.reason))].slice(0, 3).join('; ')}).`);
+  }
+
   // ── Spec drift (composed inside blast_radius) ──
   for (const s of b.specs.items.slice(0, 10)) {
     items.push({
@@ -186,12 +217,15 @@ export function projectVerifyReceipt(
       signatureChanges: sd.summary?.signatureChanges ?? 0,
       deprecatedCallsAdded: sd.summary?.deprecatedCallsAdded ?? 0,
       generatedFilesEdited: guardFindings.length,
+      unresolvedReferences: refFindings.length,
     },
     items: kept,
     ...(omitted > 0 ? { truncated: { omitted, note: 'Lower-severity items omitted; raise the cap to see them.' } } : {}),
     testsToRun,
     // Registered governance findings (GovernanceFinding shape) an enforcement policy can name.
-    ...(guardFindings.length ? { findings: guardFindings, gated: guardGate!.gated } : {}),
+    ...(guardFindings.length || refFindings.length
+      ? { findings: [...guardFindings, ...refFindings], gated: (guardGate?.gated ?? false) || (refGate?.gated ?? false) }
+      : {}),
     // The guard's disclosures can also reach blast_radius's caveats: say each once.
     boundaries: [...new Set(boundaries)],
     // Grader, not author: these are actions for the caller to take — nothing was run or written.
@@ -208,11 +242,21 @@ export async function handleVerifyChange(
 ): Promise<Record<string, unknown>> {
   // The guard runs inside blast_radius on the same diff read; its result is reused, not recomputed.
   let shared: DiffGuardResult | undefined;
-  const briefing = await computeBlastRadius({ directory: input.directory, baseRef: input.baseRef }, { guard: g => { shared = g; } });
+  let sharedRefs: PhantomReferenceResult | undefined;
+  const briefing = await computeBlastRadius(
+    { directory: input.directory, baseRef: input.baseRef },
+    { guard: g => { shared = g; }, references: r => { sharedRefs = r; } },
+  );
   if ('error' in briefing) {
     return { tool: 'verify_change', posture: 'advisory', error: briefing.error };
   }
   const b = briefing as BlastRadiusBriefing;
+  let references: PhantomReferenceResult | { error: string };
+  try {
+    references = sharedRefs ?? await checkPhantomReferences(await validateDirectory(input.directory), b.resolvedBaseRef);
+  } catch (err) {
+    references = { error: err instanceof Error ? err.message : String(err) };
+  }
   const sd = (await handleStructuralDiff({ directory: input.directory, baseRef: input.baseRef })) as StructuralDiffShape;
   // Best-effort like the other components: a failed guard is a boundary, never a failed receipt.
   let guard: DiffGuardResult | { error: string };
@@ -227,5 +271,5 @@ export async function handleVerifyChange(
   } catch {
     policy = undefined; // an unreadable config is "no policy declared": source defaults apply
   }
-  return projectVerifyReceipt(b, sd, guard, policy);
+  return projectVerifyReceipt(b, sd, guard, policy, references);
 }

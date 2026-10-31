@@ -20,6 +20,8 @@
 
 import type { ChangedFile } from '../../../types/index.js';
 import { guardDiff, type DiffGuardResult, type GeneratedFileFact } from '../generated-file-guard.js';
+import { checkPhantomReferences, type PhantomReferenceResult } from '../phantom-references.js';
+import type { GovernanceFinding } from './enforcement-policy.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
 import { loadDecisionStore } from '../../decisions/store.js';
@@ -234,6 +236,12 @@ export interface BlastRadiusBriefing {
    * and regenerate command (change: add-generated-file-guard). Absent when none are.
    */
   generated?: GeneratedFileFact[];
+  /**
+   * References the diff adds that resolve to nothing — a missing module, a name the target does not
+   * export, an undeclared or unpinned package (change: add-phantom-reference-findings). Absent when
+   * every added reference resolved.
+   */
+  phantomReferences?: { count: number; findings: GovernanceFinding[]; notAssessed: number };
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -266,8 +274,11 @@ const DECISION_KINDS = new Set<DriftIssue['kind']>(['adr-gap', 'adr-orphaned']);
  */
 export async function computeBlastRadius(
   input: BlastRadiusInput,
-  /** Internal: receives the generated-file guard result, so verify_change reuses it. */
-  hooks: { guard?: (guard: DiffGuardResult) => void } = {},
+  /** Internal: receives the composed diff checks' results, so verify_change reuses them. */
+  hooks: {
+    guard?: (guard: DiffGuardResult) => void;
+    references?: (refs: PhantomReferenceResult) => void;
+  } = {},
 ): Promise<BlastRadiusBriefing | { error: string }> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
@@ -465,6 +476,22 @@ export async function computeBlastRadius(
     generatedNote = `Generated files could not be classified: ${err instanceof Error ? err.message : String(err)}`;
   }
 
+  // ── 4d. References the diff adds (change: add-phantom-reference-findings) ───
+  // Best-effort like every composed check: a failure is a caveat, never a failed briefing.
+  let references: PhantomReferenceResult | null = null;
+  let referencesNote: string | null = null;
+  try {
+    references = await checkPhantomReferences(
+      absDir, resolvedBaseRef, allDiffEntries,
+      // The corpus: what the index knows is a file, so a candidate suggestion names a real path.
+      new Set((cg.nodes ?? []).map(n => n.filePath).filter((f): f is string => typeof f === 'string')),
+    );
+    hooks.references?.(references);
+    if (references.boundaries.length) referencesNote = references.boundaries.join(' ');
+  } catch (err) {
+    referencesNote = `Added references could not be checked: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
   const caveats: string[] = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
@@ -492,6 +519,7 @@ export async function computeBlastRadius(
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
   }
   if (generatedNote) caveats.push(generatedNote);
+  if (referencesNote) caveats.push(referencesNote);
   if (driftFilesOmitted > 0) {
     caveats.push(`Spec/memory drift omitted ${driftFilesOmitted} changed file${driftFilesOmitted === 1 ? '' : 's'} after reaching its analysis limit; absence of a finding does not cover those files.`);
   }
@@ -601,6 +629,9 @@ export async function computeBlastRadius(
     federation,
     ...memoryInjection,
     ...(generated.length ? { generated } : {}),
+    ...(references && references.findings.length
+      ? { phantomReferences: { count: references.findings.length, findings: references.findings, notAssessed: references.notAssessed.length } }
+      : {}),
     headline: '',
     posture: 'advisory',
     caveats,
@@ -624,6 +655,7 @@ function generatedSummary(marks: readonly GeneratedFileFact[]): string {
 
 /** One-line conclusion summarizing the briefing. */
 function renderHeadline(b: BlastRadiusBriefing): string {
+  const refs = b.phantomReferences?.count ?? 0;
   const gen = generatedSummary(b.generated ?? []);
   if (b.changed.files === 0) {
     // A lockfile-only diff has no code change, but it is not "no change".
@@ -652,6 +684,7 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
   if (gen) parts.push(`${gen} changed`);
+  if (refs > 0) parts.push(`${refs} added reference${refs === 1 ? '' : 's'} resolve${refs === 1 ? 's' : ''} to nothing`);
   const pushed = b.injectedMemories?.length ?? 0;
   if (pushed > 0) parts.push(`${pushed} triggered memor${pushed === 1 ? 'y' : 'ies'} to read`);
   return parts.join('; ') + '.';
