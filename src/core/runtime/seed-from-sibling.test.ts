@@ -111,8 +111,10 @@ describe('seeding a new worktree from a sibling checkout', () => {
 
     const seed = await seedFromSiblingCheckout(worktree);
     expect(seed).toMatchObject({ state: 'seeded' });
-    // git reports forward slashes on Windows; compare as paths, not strings.
-    expect(resolve((seed as { source: string }).source)).toBe(realpathSync.native(main));
+    // git reports forward slashes on Windows, and the seed compares paths case-insensitively
+    // there; compare as paths, not strings.
+    const asPath = (p: string): string => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p));
+    expect(asPath((seed as { source: string }).source)).toBe(asPath(realpathSync.native(main)));
     expect(await servingSeededIndex(worktree)).toBe(true);
 
     recordDetachedRepair(worktree, 'seeded');
