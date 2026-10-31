@@ -27,6 +27,8 @@
       commit on `invalidated` — deferred (needs the per-anchor verdict detail surfaced)
 - [ ] Live per-branch arc EXECUTION in `fleet_status` (today it references the arc tools to run per
       branch) + the `openlore fleet-status` CLI — deferred
+- [ ] Addendum 2026-10-31: verification records move to the git-common-dir store (via
+      `add-peer-footprint-board`); branch-landed expiry shares the board rule
 
 ## Verification
 - [x] `stateForFreshness` maps fresh → still-valid, drifted → invalidated, orphaned →

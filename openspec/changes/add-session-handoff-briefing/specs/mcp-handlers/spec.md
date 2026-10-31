@@ -31,3 +31,18 @@ adjacent siblings.
 - **WHEN** the briefing is composed
 - **THEN** the orphaned memory is withheld from the authoritative section per the recall
   discipline, and the withholding is disclosed
+
+### Requirement: HandoffBriefingSurvivesCompaction
+
+When the session ledger is present, `get_handoff_briefing` SHALL include in its touched set the
+symbols the session edited and already committed, in addition to the working-tree diff, and SHALL
+list the ledger's open facts. When the peer footprint board is present, it SHALL include the
+session's declared footprint. The after-compact hook moment SHALL print this briefing unless the
+repository disables that moment.
+
+#### Scenario: Committed work survives compaction
+
+- **GIVEN** a session that edited and committed `parseConfig`, then was compacted with a clean
+  working tree
+- **WHEN** the after-compact hook prints the briefing
+- **THEN** the briefing names `parseConfig` as touched this session, rather than "nothing in flight"

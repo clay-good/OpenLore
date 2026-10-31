@@ -25,6 +25,21 @@
 - [ ] `openlore verify-change [--base <ref>] [--staged] [--json]` CLI + opt-in pre-landing gate hook
       (today the capability ships as the MCP tool; the CLI + `--staged` are the remaining surface)
 
+- [ ] Speculative `patch` input (addendum 2026-10-31): parse a unified diff, apply in memory to the
+      current file contents (new files allowed within include patterns), build from the patched
+      in-memory file list through the on-disk Pass-1 cache, compose every check over it; `speculative: true` + patched-file list in the
+      receipt; non-applying hunk / out-of-corpus file / over-cap patch → fatal with reason; never
+      writes to disk
+
+- [ ] Addendum 2026-10-31: compose `check_architecture` violations whose edges the diff adds (not
+      pre-existing ones); `secret-added` finding over added lines via `secret-redaction.ts` patterns
+      (registered, advisory, value never echoed); receipt sections for the contract / weakening /
+      phantom / generated families as each ships
+
+- [ ] Reword `nextAction` strings (`verify-change.ts`) as facts naming the check or file ("tests to
+      re-run: …", "consumers of the narrowed export: …"), not orders, so hooks can push them under
+      the neutral-wording rule (decision 8e95746d)
+
 ## Verification
 - [x] Projection test: risk + removed fn + spec drift + deprecated call → one severity-ranked
       receipt, each item carries subject/check/severity/next-action, tests-to-run named
@@ -36,8 +51,13 @@
 - [x] tool-registration guards green (tool-contract, honesty-contract budget, doc-claim-sync,
       mcp-tool-count-doc, epistemic-lease)
 - [ ] CLI + gate-hook tests (with the remaining CLI surface)
+- [ ] Speculative patch: a patch that removes a called function yields the same receipt items as the
+      same edit written to disk; the working tree is byte-identical before and after; a hunk that
+      does not apply fails the verification with the hunk named
 
 ## Spec
+- [ ] `mcp-handlers` delta: ADD SpeculativePatchIsGradedInMemory
+- [ ] `mcp-handlers` delta: ADD DiffScopedRuleAndSecretFindings
 - [x] `mcp-handlers` delta: ADD ChangeVerificationReceiptIsComposedAndActionable (MCP tool;
       `certify_public_surface` fold-in and the CLI/`--staged` surface remain, so the change stays
       open until they land)

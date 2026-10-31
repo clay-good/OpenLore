@@ -20,6 +20,8 @@
       inference)
 - [ ] Expose declared target boundaries to the architecture rule engine as matchable scopes
       (consumed by `widen-architecture-rule-vocabulary`'s rules; that change is not modified here)
+- [ ] Addendum 2026-10-31: zero-config tier reading npm/yarn/pnpm workspaces, Nx `project.json`,
+      Cargo `[workspace]`, `go.work` into `declared::` package nodes; exported artifact wins when present
 
 ## Verification
 - [ ] Per-format fixtures: a checked-in artifact per tool ingests to the same normalized graph;

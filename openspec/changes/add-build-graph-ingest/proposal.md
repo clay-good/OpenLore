@@ -56,6 +56,19 @@ Naming: `import` bootstraps/re-binds the index (bundle, SCIP occurrences); `inge
 foreign *declared* evidence — if implementation review prefers one verb, folding this under
 `openlore import --build-graph` is acceptable; the contract is unchanged either way.
 
+## Addendum (2026-10-31): read workspace manifests natively, with no export step
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. The ingest above needs an exported build-tool
+artifact. Most monorepos also declare packages in plain manifests that OpenLore can read with no
+tool installed: npm/yarn/pnpm `workspaces` / `pnpm-workspace.yaml`, Nx `project.json`, Cargo
+`[workspace]`, `go.work`. A zero-config tier reuses the workspace reader the analyzer already has (`workspace-shards.ts`,
+which reads these files for shard-scoped analysis) and turns its output into package nodes (name, root, declared
+dependencies on sibling packages, the package's own `test` script) with the same `declared::`
+provenance and droppable-overlay rule. It feeds the same consumers: package-level affected set for
+`blast_radius`, per-package test commands for `select_tests`, and declared package boundaries for
+architecture rules. When an exported artifact is also present, the artifact wins and disagreements
+are the existing `build-graph-disagreement` finding.
+
 ## Why this is in scope
 
 Decision `c6d1ad07`: deterministic, local, no LLM — the artifact is produced by the user's own

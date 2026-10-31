@@ -31,6 +31,7 @@ into `openspec/specs/` on archive. Nothing here is code yet — these are the sp
 |-------|------|----------------|
 | **0 — Harden first** | Make the moat's claims measured, not asserted | The whole pitch is "deterministic and sound"; prove it before building more on top |
 | **1 — New direction (3 features)** | Verification feedback loop, change-provenance certificate, fleet coordination arc | The net-new capabilities that extend the moat into the industry's open problems |
+| **1b — Into the agent loop** | Diff findings agents most need, pushed through harness hooks; contract graph; parallel-agent facts | Turns pull-only receipts into feedback at the moment the agent can act |
 | **2 — Remaining moat + interop** | The rest of the BUILD/interop set | Still high-value; sequenced after the new direction lands |
 | **3 — Defer** | Breadth proposals | Promote only on a concrete user need |
 
@@ -56,6 +57,32 @@ analysis engine, no LLM.
 | [`add-merge-semantic-certificate`](openspec/changes/add-merge-semantic-certificate) | `certify_merge`: "git merges cleanly, the combination is broken" — the landing verdict the fleet arc records | the public-surface breaking-change classifier (shipped); **dependency of the fleet arc** |
 | [`add-fleet-coordination-arc`](openspec/changes/add-fleet-coordination-arc) | Drift-aware shared verification memory + `fleet_status`: completes dispatch → in-flight → landing so parallel agents don't re-verify what's still valid and never trust a verdict the base invalidated | shipped `plan_parallel_work` / `map_in_flight_conflicts` + anchored memory + freshness lease + `certify_merge` |
 
+## Phase 1b — Into the agent loop (added 2026-10-31)
+
+Research and triage: [`CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`](openspec/changes/CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md).
+Phase 1 builds the receipts; Phase 1b catches the diff shapes agents most often get wrong and
+pushes every receipt to the agent at the moment it can act, including between parallel agents.
+Work in this order:
+
+| # | Change | What it does for the agent |
+|---|--------|----------------------------|
+| 1 | [`add-generated-file-guard`](openspec/changes/add-generated-file-guard) | "This file is generated from `order.proto`; regenerate with …" |
+| 2 | [`add-phantom-reference-findings`](openspec/changes/add-phantom-reference-findings) | Invented imports, exports, and packages caught, before the write through `verify_change`'s `patch` input |
+| 3 | [`add-check-weakening-findings`](openspec/changes/add-check-weakening-findings) | Skipped/deleted tests, removed assertions, suppressions, relaxed CI — joined to the code they guarded |
+| 4 | [`add-session-structural-ledger`](openspec/changes/add-session-structural-ledger) | Names the symbol that changed under the agent; sees modify/revert loops; edits after the last test run |
+| 5 | [`add-agent-loop-hook-surfaces`](openspec/changes/add-agent-loop-hook-surfaces) | Receipts pushed after edits, after compaction, before stop, at sub-agent start, at task creation |
+| 6 | [`add-session-handoff-briefing`](openspec/changes/add-session-handoff-briefing) | Compaction no longer loses the in-flight change (promoted from Defer) |
+| 7 | [`add-service-contract-certification`](openspec/changes/add-service-contract-certification) | API schemas as graph nodes: handler ↔ operation, parity, breaking verdicts, consumers (promoted from Phase 2) |
+| 8 | [`add-iac-code-binding`](openspec/changes/add-iac-code-binding) | Which code a resource runs; which manifests still set a renamed env var |
+| 9 | [`add-peer-footprint-board`](openspec/changes/add-peer-footprint-board) | Parallel agents see each other's footprints and are told when a peer changes what they read |
+
+Items 1–3 add findings, not tools, and land in `verify_change` (its 2026-10-31 addenda also add the
+speculative `patch` input, diff-scoped architecture violations, and `secret-added`). The phase adds
+three tools, none in the default surface: `get_handoff_briefing` and `certify_service_contract`
+(`full` preset) and `declare_footprint` (`coordination` preset). The lane for parallel
+agents: OpenLore computes and publishes coordination facts; harness transports deliver them; no
+messaging, dispatch, or locks.
+
 ## Phase 2 — Remaining moat + interop
 
 Kept as open proposals; sequence after Phase 1.
@@ -72,8 +99,9 @@ Kept as open proposals; sequence after Phase 1.
 [`add-behavior-neutral-change-verdict`](openspec/changes/add-behavior-neutral-change-verdict) ·
 [`add-team-memory-promotion`](openspec/changes/add-team-memory-promotion) ·
 [`add-coverage-map-test-selection`](openspec/changes/add-coverage-map-test-selection) ·
-[`add-service-contract-certification`](openspec/changes/add-service-contract-certification) ·
-[`add-incremental-early-cutoff`](openspec/changes/add-incremental-early-cutoff)
+[`add-incremental-early-cutoff`](openspec/changes/add-incremental-early-cutoff) ·
+[`add-call-site-usage-profile`](openspec/changes/add-call-site-usage-profile) (promoted from Defer) ·
+[`add-build-graph-ingest`](openspec/changes/add-build-graph-ingest) (promoted from Defer: zero-config workspace tier)
 
 ## Phase 3 — Defer
 
@@ -83,11 +111,11 @@ promote one is a concrete user need, not completeness.
 
 `add-data-flow-conclusions` · `add-datastore-access-graph` · `add-ffi-boundary-edges` ·
 `add-effect-purity-inference` · `add-resource-lifecycle-conclusions` · `add-shared-state-hazard-conclusions` ·
-`add-flag-impact-analysis` · `add-log-anchor-conclusions` · `add-call-site-usage-profile` ·
+`add-flag-impact-analysis` · `add-log-anchor-conclusions` ·
 `add-doc-claim-certification` · `add-migration-impact-certificate` · `add-knowledge-map-and-coupling-upgrades` ·
 `add-refactoring-aware-churn` · `add-symbol-provenance-conclusions` · `add-ownership-tagged-conclusions` ·
 `add-codeowners-ownership-evidence` · `add-invalidation-receipts` · `add-assumption-anchored-resolutions` ·
-`add-build-graph-ingest` · `add-test-evidence-claims` · `add-session-handoff-briefing` ·
+`add-test-evidence-claims` ·
 `adopt-spec-link-status-vocabulary`
 
 `honour-npmrc-in-update-check` is effectively **built** — only a manual private-registry check remains.

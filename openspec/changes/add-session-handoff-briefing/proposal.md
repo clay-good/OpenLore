@@ -40,8 +40,8 @@
      failing/stale certificate lease.
 - **Deterministic and replayable:** the same repository state produces a byte-identical
   briefing — it can be regenerated, diffed, and trusted in a way no conversation summary can.
-  The briefing is pull-shaped: the successor (or a Stop-hook, or a human) requests it; nothing
-  is auto-injected.
+  The briefing is pull-shaped: the successor (or a Stop-hook, or a human) requests it. The one
+  exception is the after-compaction push (see the 2026-10-31 addendum).
 - **Just-in-time re-fetch identifiers:** every truncated or summarized element names the exact
   tool call that expands it (`get_function_body`, `recall`, `get_spec`, …), so the successor
   pays tokens only for what it actually needs — the briefing is an index into the substrate,
@@ -54,9 +54,31 @@
   until then).
 - **Deliberately NOT borrowed / NOT built:** conversation-transcript parsing or summarization
   (the briefing reads the repository, never the chat); host-specific plan-file formats;
-  auto-injection at session start (`orient` owns session-start context; this tool owns
-  succession and cross-references it); any persistence of briefings (recompute on demand — the
+  auto-injection at a fresh session start (`orient` owns session-start context; this tool owns
+  succession and cross-references it — the post-compaction start is the exception, per the
+  addendum); any persistence of briefings (recompute on demand — the
   repo state IS the storage).
+
+## Addendum (2026-10-31): compaction is a succession, so the briefing is pushed there
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. Compaction is the most frequent succession event,
+and it happens inside one session. Context loss on long tasks is measured, not assumed (Chroma's
+context-rot study, https://research.trychroma.com/context-rot; context overflow is a leading failure
+on SWE-Bench Pro, https://arxiv.org/abs/2509.16941). In Claude Code, `PreCompact` cannot inject
+context; the injection point is `SessionStart` with the `compact` matcher (Codex is the same; Pi has
+`session_before_compact`). This addendum **revises** two lines above, already edited in place to
+point here: "nothing is auto-injected" and "auto-injection at session start" in the not-built list.
+
+- **Pushed after compaction (opt-out).** The after-compact moment of `add-agent-loop-hook-surfaces`
+  prints this briefing. It stays pull-shaped everywhere else; `orient` still owns session start.
+  `hooks.after-compact: false` turns the push off.
+- **Session ledger as an input.** When `add-session-structural-ledger` is present, the briefing's
+  touched set is the working-tree diff **plus** the symbols this session edited and already
+  committed, and it adds the ledger's open facts (background changes, edit oscillation, edits after
+  the last test run). Determinism holds for a fixed repository state and ledger; without a ledger,
+  output is exactly as specified above.
+- **Declared footprint.** When `add-peer-footprint-board` is present, the briefing includes this
+  agent's declared footprint, so the post-compaction agent keeps its claim and its peers' hazards.
 
 ## Why this is in scope
 
@@ -70,7 +92,7 @@ summaries it displaces.
 
 - Files: one composer handler (footprint × recall × drift × select_tests × change-dir scan),
   CLI command, tool-contract classification (`conclusion`, family `change`), presets/docs.
-- Specs: `cli` — 1 ADDED requirement; `mcp-handlers` — 1 ADDED requirement.
+- Specs: `cli` — 1 ADDED requirement; `mcp-handlers` — 2 ADDED requirements (composition; compaction survival).
 - Tool surface: +1 tool in `full` preset only; adjacent cross-references name `blast_radius`
   (diff-for-review), `briefing_since` (catch-up), and `orient` (session start) per
   NoRedundantConclusions.

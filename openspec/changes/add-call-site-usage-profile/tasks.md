@@ -14,6 +14,8 @@
 - [ ] `get_usage_profile` handler (family `navigate`, class `conclusion`; siblings:
       `get_style_fingerprint`, `get_subgraph`) + `openlore usage-profile --symbol <name>
       [--max <n>] [--json]`
+- [ ] Addendum 2026-10-31: ≤3 example call sites by fixed tier order (production > test, distinct
+      regions, path order); one-line profile in `orient` for target symbols above the evidence floor
 
 ## Verification
 - [ ] Fixture with 20 call sites: dominant arity/option/await facets match hand counts, with

@@ -43,6 +43,24 @@ rules (statistical inference over call sequences — replaced by plain counting 
 sites), cross-repo corpora, and any recommendation ranking ("callers usually also call Y" is
 sequence mining, refused — the tool reports one symbol's observed call shapes only).
 
+## Addendum (2026-10-31): show real call sites, and push the profile when it matters
+
+Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. Grounding generation in real in-repo usage
+reduces invented and misused APIs (https://arxiv.org/abs/2509.22202,
+https://arxiv.org/abs/2404.00971). Two additions, no new tool:
+
+- **Up to 3 example call sites** with the profile, chosen by a fixed tier order (no weights):
+  production caller before test caller, then callers from distinct regions (`get_map` communities)
+  before a second caller from the same region, then file path order as the final tie-break. Each
+  example is the call expression's source lines with file:line.
+- **`orient` carries a one-line profile** for each target symbol whose profile clears the evidence
+  floor (for example "`fetchUser`: awaited in 14/14 calls; `options.timeout` passed in 12/14"), with
+  the tool call that expands it. Below the floor, nothing is shown.
+
+Promoted from Defer to Phase 2 of `ROADMAP.md`: it is the positive half of
+`add-phantom-reference-findings` (that change says a reference does not exist; this says how the
+existing one is used).
+
 ## Why this is in scope
 
 Targets the highest-frequency agent failure the substrate can measure (unidiomatic calls) with
