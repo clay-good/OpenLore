@@ -1061,13 +1061,18 @@ export async function handleOrient(
 
   // Generated-file guard (change: add-generated-file-guard): mark the files in scope that are
   // generated or vendored, with the literal source and regenerate command, so an agent edits the
-  // source instead of output the next generator run erases. Best-effort; absent when none are.
-  let generatedFiles: GeneratedFileFact[] = [];
-  try {
-    generatedFiles = [...(await classifyGeneratedFiles(absDir, relevantFiles)).facts.values()];
-  } catch {
-    // additive enrichment — never fail orient over the generated-file marks
+  // source instead of output the next generator run erases. Full mode only: the lean prompt-hook
+  // path renders none of it. The budget-held-back files are classified too, so a file the budget
+  // fit adds keeps its mark. Best-effort; absent when none are.
+  let generatedByFile = new Map<string, GeneratedFileFact>();
+  if (!lean) {
+    try {
+      generatedByFile = (await classifyGeneratedFiles(absDir, [...relevantFiles, ...extraPairs.map(p => p.fn.filePath)])).facts;
+    } catch {
+      // additive enrichment — never fail orient over the generated-file marks
+    }
   }
+  const generatedFiles = generatedFilesFor(relevantFiles, generatedByFile);
 
   // Minimal-sufficient navigation core — always returned (Spec 27).
   const core = {
@@ -1152,8 +1157,13 @@ export async function handleOrient(
     nextSteps,
   };
   return tokenBudget
-    ? fitOrientToBudget(absDir, result, tokenBudget, extras, llmCtx)
+    ? fitOrientToBudget(absDir, result, tokenBudget, extras, llmCtx, generatedByFile)
     : withIndexStaleness(absDir, result, llmCtx);
+}
+
+/** The generated-file marks for `files`, in their order; empty when none is generated. */
+function generatedFilesFor(files: readonly string[], byFile: ReadonlyMap<string, GeneratedFileFact>): GeneratedFileFact[] {
+  return files.map(f => byFile.get(f)).filter((f): f is GeneratedFileFact => f !== undefined);
 }
 
 /**
@@ -1224,6 +1234,7 @@ async function fitOrientToBudget(
   tokenBudget: number,
   extras: Array<{ fn: OrientFunction; path: OrientCallPath }>,
   llmCtx: Awaited<ReturnType<typeof readCachedContext>>,
+  generatedByFile: ReadonlyMap<string, GeneratedFileFact> = new Map(),
 ): Promise<Record<string, unknown>> {
   // The final response with its receipt settled: `estimatedTokens` is the size of exactly this rendering,
   // so every candidate is measured as it would be sent.
@@ -1245,9 +1256,12 @@ async function fitOrientToBudget(
   if (fitsBudget(baseFinal)) {
     const extend = (count: number) => {
       const added = extras.slice(0, count);
+      const relevantFiles = [...new Set([...payload.relevantFiles, ...added.map(pair => pair.fn.filePath)])];
+      const generatedFiles = generatedFilesFor(relevantFiles, generatedByFile);
       return {
         ...payload,
-        relevantFiles: [...new Set([...payload.relevantFiles, ...added.map(pair => pair.fn.filePath)])],
+        ...(generatedFiles.length ? { generatedFiles } : {}),
+        relevantFiles,
         relevantFunctions: [...payload.relevantFunctions, ...added.map(pair => pair.fn)],
         callPaths: [...payload.callPaths, ...added.map(pair => pair.path)],
       };

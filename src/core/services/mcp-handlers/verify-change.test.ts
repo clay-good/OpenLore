@@ -121,6 +121,24 @@ describe('projectVerifyReceipt — generated-file guard (add-generated-file-guar
     expect(r.findings?.map(f => f.code)).toEqual(['generated-file-edited']);
   });
 
+  it('classifies findings by enforcement.policy: blocking gates, off drops them', () => {
+    const blocking = projectVerifyReceipt(briefing({}), {}, guard, { 'generated-file-edited': 'blocking' }) as unknown as Receipt & { findings?: Array<{ enforcementClass: string }>; gated?: boolean };
+    expect(blocking.findings?.[0].enforcementClass).toBe('blocking');
+    expect(blocking.gated).toBe(true);
+    const advisory = projectVerifyReceipt(briefing({}), {}, guard) as unknown as Receipt & { findings?: Array<{ enforcementClass: string }>; gated?: boolean };
+    expect(advisory.findings?.[0].enforcementClass).toBe('advisory');
+    expect(advisory.gated).toBe(false);
+    const off = projectVerifyReceipt(briefing({}), {}, guard, { 'generated-file-edited': 'off' }) as unknown as Receipt & { findings?: unknown };
+    expect(off.findings).toBeUndefined();
+    expect(off.items.some(i => i.check === 'generated_file_guard')).toBe(false);
+  });
+
+  it('states a boundary once even when blast_radius already carries it', () => {
+    const note = 'the .gitattributes rule did not run';
+    const r = projectVerifyReceipt(briefing({ caveats: [note] }), {}, { ...guard, boundaries: [note] }) as unknown as Receipt;
+    expect(r.boundaries.filter(b => b === note)).toHaveLength(1);
+  });
+
   it('a failed guard is a boundary, not a failed receipt', () => {
     const r = projectVerifyReceipt(briefing({}), {}, { error: 'boom' }) as unknown as Receipt & { findings?: unknown };
     expect(r.boundaries.some(b => b.includes('generated-file guard unavailable: boom'))).toBe(true);

@@ -18,7 +18,7 @@
  * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
  */
 
-import { classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
+import { guardDiff, type GeneratedFileFact } from '../generated-file-guard.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
 import { loadDecisionStore } from '../../decisions/store.js';
@@ -449,12 +449,10 @@ export async function computeBlastRadius(
   let generated: GeneratedFileFact[] = [];
   let generatedNote: string | null = null;
   try {
-    const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
-    const prefix = (await getRepoPrefix(absDir)) ?? '';
-    const live = diffEntries.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
-    const classified = await classifyGeneratedFiles(absDir, live);
-    generated = [...classified.facts.values()];
-    if (classified.boundaries.length) generatedNote = classified.boundaries.join(' ');
+    // Its own diff read with lockfiles kept: the main diff above skips them by design.
+    const guard = await guardDiff(absDir, resolvedBaseRef);
+    generated = guard.facts;
+    if (guard.boundaries.length) generatedNote = guard.boundaries.join(' ');
   } catch (err) {
     generatedNote = `Generated files could not be classified: ${err instanceof Error ? err.message : String(err)}`;
   }

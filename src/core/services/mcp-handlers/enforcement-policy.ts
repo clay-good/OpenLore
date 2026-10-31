@@ -337,6 +337,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     remediation: 'Rising complexity: {subject}; split or simplify it before adding more branches.',
   },
   // ── generated-file guard (add-generated-file-guard) ──
+  // Returned and classified by verify_change; `openlore enforce` does not collect it.
   'generated-file-edited': {
     defaultClass: 'advisory',
     source: 'generated-file-guard',

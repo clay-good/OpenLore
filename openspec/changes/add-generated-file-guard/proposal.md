@@ -16,7 +16,8 @@ OpenLore excludes some generated paths today by path pattern only (`isExcludedPa
 
 ## What changes
 
-- **Detection, closed rules, in order:** (1) the standard header marker in the first lines of the
+- **Detection, closed rules, in order:** (0) lockfiles by name, decided first so a lockfile's own
+  banner never hides its manifest (review finding); (1) the standard header marker in the first lines of the
   file — Go's `^// Code generated .* DO NOT EDIT\.$` (https://go.dev/s/generatedcode), `@generated`,
   `DO NOT EDIT` / `AUTO-GENERATED` banners from a closed list of generator headers; (2)
   `.gitattributes` `linguist-generated` / `linguist-vendored`; (3) lockfiles by name;

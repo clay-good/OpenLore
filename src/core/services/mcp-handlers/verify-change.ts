@@ -20,6 +20,8 @@ import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js'
 import { handleStructuralDiff } from './structural-diff.js';
 import { validateDirectory } from './utils.js';
 import { guardDiff, type DiffGuardResult } from '../generated-file-guard.js';
+import { readOpenLoreConfig } from '../config-manager.js';
+import { classifyFindings, effectivePolicy, type ClassifiedFinding, type EnforcementPolicy } from './enforcement-policy.js';
 
 type Severity = 'critical' | 'error' | 'warning' | 'info';
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, error: 1, warning: 2, info: 3 };
@@ -60,6 +62,7 @@ export function projectVerifyReceipt(
   b: BlastRadiusBriefing,
   sd: StructuralDiffShape,
   guard?: DiffGuardResult | { error: string },
+  policy?: EnforcementPolicy,
 ): Record<string, unknown> {
   const items: ReceiptItem[] = [];
   const boundaries: string[] = [...b.caveats];
@@ -115,7 +118,9 @@ export function projectVerifyReceipt(
   }
 
   // ── Generated files edited by hand (generated-file guard) ──
-  const guardFindings = guard && !('error' in guard) ? guard.findings : [];
+  // Classified by the operator's enforcement.policy; a code set to `off` is dropped entirely.
+  const guardGate = guard && !('error' in guard) && guard.findings.length ? classifyFindings(guard.findings, policy) : undefined;
+  const guardFindings: ClassifiedFinding[] = guardGate ? guardGate.classified.filter(f => f.enforcementClass !== 'off') : [];
   if (guard && 'error' in guard) boundaries.push(`generated-file guard unavailable: ${guard.error}`);
   else if (guard) boundaries.push(...guard.boundaries);
   const factsByFile = new Map((guard && !('error' in guard) ? guard.facts : []).map(f => [f.file, f]));
@@ -182,8 +187,9 @@ export function projectVerifyReceipt(
     ...(omitted > 0 ? { truncated: { omitted, note: 'Lower-severity items omitted; raise the cap to see them.' } } : {}),
     testsToRun,
     // Registered governance findings (GovernanceFinding shape) an enforcement policy can name.
-    ...(guardFindings.length ? { findings: guardFindings } : {}),
-    boundaries,
+    ...(guardFindings.length ? { findings: guardFindings, gated: guardGate!.gated } : {}),
+    // The guard's disclosures can also reach blast_radius's caveats: say each once.
+    boundaries: [...new Set(boundaries)],
     // Grader, not author: these are actions for the caller to take — nothing was run or written.
     note: 'Advisory receipt. verify_change names the tests to run and the breaks to fix; it runs no tests and edits no files.',
   };
@@ -209,5 +215,11 @@ export async function handleVerifyChange(
   } catch (err) {
     guard = { error: err instanceof Error ? err.message : String(err) };
   }
-  return projectVerifyReceipt(b, sd, guard);
+  let policy: EnforcementPolicy | undefined;
+  try {
+    policy = effectivePolicy(await readOpenLoreConfig(await validateDirectory(input.directory)));
+  } catch {
+    policy = undefined; // an unreadable config is "no policy declared": source defaults apply
+  }
+  return projectVerifyReceipt(b, sd, guard, policy);
 }
