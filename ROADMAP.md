@@ -75,6 +75,7 @@ Work in this order:
 | 7 | [`add-service-contract-certification`](openspec/changes/add-service-contract-certification) | API schemas as graph nodes: handler ↔ operation, parity, breaking verdicts, consumers (promoted from Phase 2) |
 | 8 | [`add-iac-code-binding`](openspec/changes/add-iac-code-binding) | Which code a resource runs; which manifests still set a renamed env var |
 | 9 | [`add-peer-footprint-board`](openspec/changes/add-peer-footprint-board) | Parallel agents see each other's footprints and are told when a peer changes what they read |
+| 10 | [`add-graph-claim-kinds`](openspec/changes/add-graph-claim-kinds) | `verify_claim` answers "is this endpoint implemented / called?", "does a decision govern this?", "is what I read still current?" (`decision-governed` can ship first) |
 
 Items 1–3 add findings, not tools, and land in `verify_change` (its 2026-10-31 addenda also add the
 speculative `patch` input, diff-scoped architecture violations, and `secret-added`). The phase adds

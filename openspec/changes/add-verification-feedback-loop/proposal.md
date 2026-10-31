@@ -100,6 +100,11 @@ Two more come from code that already exists and need no new change:
   line, and pattern class, never the value. This is a safety net, not a scanner: gitleaks and
   trufflehog stay the real tools.
 
+- **New import cycles.** The file-level dependency cycles that `detectDependencyCycles`
+  (`dependency-graph.ts`) already finds are computed for the base and for the patched or written
+  tree; a cycle present only after the change is a `cycle-introduced` finding (registered, advisory)
+  that names the files in the cycle in order. Cycles that already existed are not reported.
+
 Each family ships with its own change; this addendum only fixes where they appear.
 
 ## Why this is in scope

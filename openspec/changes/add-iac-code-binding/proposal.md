@@ -37,6 +37,12 @@ bindings are missing:
   in the corpus is listed as `undeclared-in-corpus` (informational: production may inject it).
   `blast_radius` on a diff that changes an env key in code lists the IaC sites that still set the
   old key.
+- **`orient` shows the infrastructure a handler depends on.** For a function in scope, `orient` lists
+  the env vars it (transitively, within its own module) reads and, for each, the IaC sites that set
+  it, plus the resources bound to it by `deploys_symbol` — one budgeted additive field.
+- **OpenTofu files.** `.tofu` and `.tofu.json` are recognized as Terraform/HCL by the language
+  detector (today only `.tf`, `.tfvars`, `.tf.json` are), so OpenTofu repositories get the same
+  resource graph.
 - **Secrets stay out.** Only the key, the location, and whether a literal value is present are
   recorded — never the value.
 
@@ -58,5 +64,5 @@ boundary of `analyze_env_impact`).
   Docker, Kubernetes extractors; env-key capture in Kubernetes, Docker/compose, Terraform,
   CloudFormation, GitHub Actions; resolver against the corpus; `env-impact.ts` field; `blast_radius`
   additive field; language-support capability `iacCodeBinding`.
-- Specs: `analyzer` — 1 ADDED; `mcp-handlers` — 1 ADDED.
+- Specs: `analyzer` — 2 ADDED; `mcp-handlers` — 1 ADDED.
 - Tool surface: none added.

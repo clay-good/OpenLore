@@ -24,6 +24,12 @@
 - [ ] Before-stop fact: symbols edited after the last run + the tests that reach them; withheld
       with reason when no payloads were seen
 - [ ] Delivered-fact record for hook dedupe
+- [ ] Canonical-form SHA-256 for contract elements and IaC resources (sorted-key serialization of
+      parsed fields); tracked in served/edited like code symbols
+- [ ] `leaseToken` on `orient` and `recall`: digest of the served (address, hash) set, registered in
+      `.openlore/session-ledger/tokens/` (bounded, expiring with the session)
+- [ ] `status --json` session counts: body-only, signature-changed (disjoint), exports-changed,
+      contract-elements-changed, iac-resources-changed; no thresholds
 
 ## Verification
 - [ ] Served symbol edited by another process → next response names it; edited by this session →
@@ -32,6 +38,9 @@
 - [ ] A → B → A → B → oscillation reported; A → B → A and A → B → C → D → not reported
 - [ ] Watcher off → background notes withheld with the reason in status
 - [ ] Ledger cap holds; drop count disclosed
+- [ ] Reformatted OpenAPI YAML → no note; changed path in it → note naming the operation
+- [ ] A `leaseToken` from session A resolves in a separate process; changed entries listed
+- [ ] Session counts match a fixture diff; no percentage or threshold field exists
 - [ ] Edit → `npm test` → edit again → before-stop names the second edit's symbols and their tests;
       edit → test with no later edit → nothing
 - [ ] Lease wording guard (no imperatives) still green; full suite green
@@ -40,3 +49,5 @@
 - [ ] `mcp-handlers` delta: ADD LeaseNamesBackgroundChangesToServedSymbols
 - [ ] `mcp-handlers` delta: ADD EditOscillationIsObservedFromContentHashes
 - [ ] `mcp-handlers` delta: ADD EditsAfterTheLastTestRunAreNamed
+- [ ] `mcp-handlers` delta: ADD ServedContractsAndResourcesCarryCanonicalHashes
+- [ ] `mcp-handlers` delta: ADD LeaseTokensAndSessionCountsAreExposedAsData

@@ -33,7 +33,8 @@
 
 - [ ] Addendum 2026-10-31: compose `check_architecture` violations whose edges the diff adds (not
       pre-existing ones); `secret-added` finding over added lines via `secret-redaction.ts` patterns
-      (registered, advisory, value never echoed); receipt sections for the contract / weakening /
+      (registered, advisory, value never echoed); `cycle-introduced` from
+      `detectDependencyCycles` at base vs after (new cycles only, files named in order); receipt sections for the contract / weakening /
       phantom / generated families as each ships
 
 - [ ] Reword `nextAction` strings (`verify-change.ts`) as facts naming the check or file ("tests to

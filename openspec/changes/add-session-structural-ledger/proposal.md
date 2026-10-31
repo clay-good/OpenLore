@@ -60,6 +60,22 @@ does.
   the loop hooks never repeat one.
 - **Peer publishing.** The `edited` list is published to the peer board when
   `add-peer-footprint-board` ships, so a peer that read a symbol learns this session changed it.
+- **Contract and IaC nodes are tracked like code.** Contract elements (`add-service-contract-certification`)
+  and IaC resources have no tree-sitter symbol hash, so their served hash is the SHA-256 of the
+  element's canonical form (its parsed fields serialized with sorted keys). A reformat of the YAML does
+  not change it; a changed path, field, or resource attribute does. "`POST /v1/checkout` (openapi.yaml)
+  changed since you read it at 14:02" is then the same note as for a function.
+- **A portable lease token.** `orient` and `recall` return a short `leaseToken`: the digest of the
+  (address, hash) set they served, registered in the ledger store
+  (`.openlore/session-ledger/tokens/`). A sub-agent or orchestrator that holds the token, in any
+  process, can ask `verify_claim` (kind `lease-current`, `add-graph-claim-kinds`) which entries changed
+  since. The token is a lookup key, not a secret or a signature.
+- **Raw session counts, no budget.** `openlore status --json` reports per session: symbols whose body
+  changed with the same signature, symbols whose signature changed (the existing signature
+  classifier; each symbol counted once), public exports
+  changed, contract elements changed, IaC resources changed, and the oscillation and test-run facts.
+  These are counts; OpenLore sets no threshold and computes no percentage — a host orchestrator that
+  wants a "drift budget" applies its own limits to these numbers.
 - **Exposure to harnesses.** `openlore status --json` and the existing `panic-check` hook output carry
   the two signals as data (`backgroundChanges[]`, `editOscillation[]`), so a host orchestrator can
   read them. OpenLore does not halt anything; the existing opt-in `experimental_blocking` mode is the
@@ -76,7 +92,8 @@ hash's design) and the note says "body changed", never "behavior changed".
 ## Not built
 
 A session id passed by the harness (the session is the MCP server process, as for the lease today);
-cumulative "blast-radius percentage" budgets (an arbitrary weighted score — rejected); stopping or
+cumulative "blast-radius percentage" budgets or any threshold (an arbitrary weighted score —
+rejected; the raw counts above are what an orchestrator needs); stopping or
 sandboxing the agent; recording file contents (only addresses and hashes are stored).
 
 ## Relation to other changes
@@ -92,7 +109,7 @@ sandboxing the agent; recording file contents (only addresses and hashes are sto
 - Files: ledger store (new, small), hooks into the served-symbol paths of the listed tools, the MCP
   watcher batch handler (hash the re-indexed files' symbols), the lease note builder, the panic
   signal table, `status` and `panic-check` output.
-- Specs: `mcp-handlers` — 3 ADDED requirements.
+- Specs: `mcp-handlers` — 5 ADDED requirements.
 - Tool surface: no new tool. Lease weight table unchanged.
 - Risk: ledger growth on long sessions (mitigated: capped entries, oldest dropped, drop count
   disclosed); hash cost on large batches (mitigated: hashes are computed only for files the watcher

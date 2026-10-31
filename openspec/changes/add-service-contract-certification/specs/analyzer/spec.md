@@ -54,3 +54,19 @@ rather than dropped.
 - **GIVEN** a spec operation `GET /v1/orders/{id}` and a handler on `GET /v1/order/:id`
 - **WHEN** the repository is analyzed
 - **THEN** no `implements_endpoint` edge is created and both appear in the unmatched lists
+
+### Requirement: ClientCallsAreBoundToTheOperationsTheyConsume
+
+A client call site extracted by the HTTP projection SHALL be linked by a `consumes_endpoint` edge
+to the OpenAPI operation with the same method and normalized path template, whether or not a
+handler for that operation is in the repository. A call through a generated client SHALL be linked
+only when the module is classified generated with the spec as its known source and the called
+method name equals the operation's `operationId`. A client call whose path is not literal SHALL be
+disclosed as unbound, never linked by similarity.
+
+#### Scenario: Calls to an external API are visible
+
+- **GIVEN** a vendored OpenAPI document for an external service declaring `POST /v1/charges`, and a
+  client `POST` call to a literal `/v1/charges` path with no handler in the repository
+- **WHEN** the repository is analyzed
+- **THEN** a `consumes_endpoint` edge links the calling function to `POST /v1/charges`

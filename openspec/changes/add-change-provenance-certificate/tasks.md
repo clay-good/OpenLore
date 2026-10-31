@@ -23,6 +23,9 @@
 - [ ] Fold in `certify_public_surface` (explicit breaking-export verdicts) as a predicate field
 - [ ] `openlore certify-provenance [--base <ref>] [--change <id>] [--format in-toto|json] [--out
       <path>]` CLI (today the capability ships as the MCP tool; the CLI is the CI-emission surface)
+- [ ] Addendum 2026-10-31: fold contract verdicts + parity, diff-scoped architecture violations and
+      `cycle-introduced`, weakening/phantom/generated/`secret-added` findings, anchored decisions on
+      changed symbols with freshness, and ledger session counts — each as its source ships
 
 ## Verification
 - [x] Reproducibility test: same inputs → same digest; digest changes with the change content

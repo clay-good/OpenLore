@@ -9,6 +9,11 @@
       element → field and `$ref` edges; language-support capability `contractSchemas`
 - [ ] Implements edges: route handlers from the existing HTTP route parser ↔ operations by method +
       normalized path template (`{id}` ≡ `:id` ≡ `<id>`), labeled `implements_endpoint`
+- [ ] Consumes edges: HTTP-projection client call sites ↔ operations (`consumes_endpoint`), also for
+      operations with no in-repo handler; generated-client calls via `operationId` when the module is a
+      generated file sourced from the spec
+- [ ] `contract-payload-missing-required`: object-literal request bodies vs required properties;
+      non-literal bodies disclosed
 - [ ] Parity pass: `declared-unimplemented`, `implemented-undeclared` (only under a path prefix the
       spec claims); dynamic handler paths disclosed
 - [ ] Closed rule table + differ: breaking | dangerous | non-breaking | potentially-breaking;
@@ -17,10 +22,12 @@
       generated-client imports; file:line + reaching tests; external consumers disclosed
 - [ ] `certify_service_contract` handler + `openlore certify-service-contract [--base <ref>]` CLI;
       base via `resolveBaseRefDisclosed` (fatal on bad base)
-- [ ] `orient` additive field: the contract node for a handler in scope; `blast_radius` additive
+- [ ] `orient` additive field: the contract node for a handler in scope, with its stated request
+      constraints (required, type, enum, format, bounds); `blast_radius` additive
       field: contract elements touched by the diff; both budgeted
 - [ ] Register `contract-breaking`, `contract-declared-unimplemented`,
-      `contract-implemented-undeclared` in `FINDING_CODE_REGISTRY` (advisory)
+      `contract-implemented-undeclared`, `contract-payload-missing-required` in
+      `FINDING_CODE_REGISTRY` (advisory)
 - [ ] Wiring checklist: conclusion classification (family `change`), `full` preset, Pi
       surfaced-or-excluded, lease weights, docs table row, adjacent cross-references
 
@@ -48,5 +55,7 @@
 ## Spec
 - [ ] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized
 - [ ] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers
+- [ ] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume
+- [ ] `mcp-handlers` delta: ADD LiteralPayloadsAreCheckedAgainstRequiredProperties
 - [ ] `mcp-handlers` delta: ADD ContractVerdictsJoinConsumersConservatively
 - [ ] `mcp-handlers` delta: ADD ContractParityIsTwoWayAndScoped

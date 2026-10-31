@@ -11,7 +11,8 @@ file, and line, and whether a literal value is present. The value itself SHALL N
 output or artifact. A variable read in code with no declaration in the corpus SHALL be listed as
 `undeclared-in-corpus` with the boundary that runtime injection and external secret stores are not
 visible. `blast_radius` on a diff that renames or removes an env-var read SHALL list the IaC sites
-that still set the old name.
+that still set the old name. `orient` SHALL list, for a function in its scope, the env vars it reads
+with their declaration sites and the resources bound to it by a deploy-target edge.
 
 #### Scenario: Manifests that set a variable are named
 

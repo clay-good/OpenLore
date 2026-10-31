@@ -80,6 +80,9 @@ It SHALL also apply the existing credential patterns to the diff's added lines a
 as a registered advisory `secret-added` finding naming the file, line, and pattern class, without
 echoing the matched value.
 
+It SHALL report each file-level dependency cycle present after the change but not at the base as a
+registered advisory `cycle-introduced` finding that names the files of the cycle in order.
+
 #### Scenario: Only a new violation is reported
 
 - **GIVEN** a declared rule "core must not import cli", one existing violation at the base, and a
@@ -92,3 +95,11 @@ echoing the matched value.
 - **GIVEN** a diff that adds a line containing an API key matching a credential pattern
 - **WHEN** `verify_change` runs
 - **THEN** a `secret-added` finding names the file and line, and no output contains the key
+
+#### Scenario: A new import cycle is named
+
+- **GIVEN** a base where `a.ts` imports `b.ts`, and a speculative patch that makes `b.ts` import
+  `a.ts`
+- **WHEN** `verify_change` runs with the patch
+- **THEN** a `cycle-introduced` finding names `a.ts` → `b.ts` → `a.ts`, and cycles present at the base
+  are not reported

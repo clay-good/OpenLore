@@ -13,6 +13,9 @@
 - [ ] `analyze_env_impact`: `declaredBy[]`, `undeclared-in-corpus`; `blast_radius`: IaC sites still
       setting a key the diff renamed or removed in code
 - [ ] Language-support capability `iacCodeBinding` derived from the extractors
+- [ ] `orient` additive field: env vars read by in-scope functions + their IaC declaration sites +
+      `deploys_symbol` resources; budgeted
+- [ ] Language detection: `.tofu`, `.tofu.json` → Terraform
 
 ## Verification
 - [ ] Lambda handler string binds to the exported function; renaming it surfaces the resource in
@@ -20,8 +23,11 @@
 - [ ] `${var.handler}` → disclosed unresolved, not dropped
 - [ ] `DATABASE_URL` set in a K8s Deployment and a compose file → both in `declaredBy`; no value stored
 - [ ] A code rename of an env key → `blast_radius` lists the manifests that still set the old key
+- [ ] `orient` on a Lambda handler lists its resource and the manifests setting the vars it reads
+- [ ] A `.tofu` file produces the same resources as the same content in a `.tf` file
 - [ ] Full suite green
 
 ## Spec
 - [ ] `analyzer` delta: ADD IacResourcesBindToTheCodeTheyRun
+- [ ] `analyzer` delta: ADD OpenTofuFilesAreTerraform
 - [ ] `mcp-handlers` delta: ADD EnvImpactNamesIacDeclarationSites
