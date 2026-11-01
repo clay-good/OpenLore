@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { handleDeclareFootprint } from './mcp-handlers/declare-footprint.js';
 import { peerChangeNotices } from './peer-notices.js';
+import { boardDir, readBoard } from './footprint-board.js';
 import { runHook } from '../../cli/commands/hook.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../constants.js';
 
@@ -55,7 +56,7 @@ describe('peer change notices', () => {
     expect(notices).toEqual([expect.objectContaining({ symbol: 'parseConfig', file: 'src/config.ts', peer: expect.objectContaining({ actorId: 'agent-b', branch: 'feat-b' }) })]);
     const text = await afterEdit(a, 'src/other.ts');
     expect(text).toContain('Peer agent-b (feat-b');
-    expect(text).toContain('changed parseConfig (src/config.ts)');
+    expect(text).toContain('changed parseConfig (src/config.ts), which an agent in this worktree declared reading');
     // Stated once per session.
     expect(await afterEdit(a, 'src/other.ts')).not.toContain('changed parseConfig');
   });
@@ -76,6 +77,38 @@ describe('peer change notices', () => {
     await handleDeclareFootprint({ directory: a, actorId: 'agent-a', readSet: ['parseConfig'] });
     await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['src/other.ts'] });
     expect(await peerChangeNotices(a)).toEqual([]);
+  });
+
+  it('a peer deleting the file of a symbol I declared reading is named', async () => {
+    const { a, b } = clone();
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', readSet: ['parseConfig'] });
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['parseConfig'] });
+    rmSync(join(b, 'src/config.ts'));
+    expect((await peerChangeNotices(a)).map(n => n.symbol)).toEqual(['parseConfig']);
+  });
+
+  it('a peer that rebased onto someone else\'s change is not blamed for it', async () => {
+    const { a, b } = clone();
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', readSet: ['parseConfig'] });
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['src/other.ts'] });
+    const c = `${a}-c`;
+    dirs.push(c);
+    git(a, 'worktree', 'add', '-q', c, 'main');
+    write(c, 'src/config.ts', CONFIG_TS.replace('JSON.parse(s)', 'JSON.parse(s || "{}")'));
+    git(c, 'commit', '-qam', 'upstream changes parseConfig');
+    git(b, 'rebase', '-q', 'main');
+    expect(await peerChangeNotices(a)).toEqual([]);
+  });
+
+  it('a board entry whose base is not a commit id is skipped, never passed to git', async () => {
+    const { a, b } = clone();
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', readSet: ['parseConfig'] });
+    const dir = (await boardDir(a))!;
+    writeFileSync(join(dir, 'forged.json'), JSON.stringify({ version: 1, actorId: 'forged', worktree: b, branch: 'feat-b', writes: [], reads: [], creates: [], declaredAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), baseAtDeclare: '--output=pwned' }));
+    writeFileSync(join(dir, 'bad-read.json'), JSON.stringify({ version: 1, actorId: 'bad', worktree: b, branch: 'feat-b', writes: [], reads: [null], creates: [], declaredAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() }));
+    const board = await readBoard(a);
+    expect(board.unreadable).toBe(2);
+    expect(board.live.map(l => l.entry.actorId)).toEqual(['agent-a']);
   });
 
   it('no board, or no peers: nothing', async () => {

@@ -267,10 +267,10 @@ async function afterTools(root: string, files: string[], baseline: string | unde
     const { emittedText: t } = await import('../../core/services/generated-file-guard.js');
     for (const n of await peerChangeNotices(root)) {
       items.push({
-        key: `peer:${n.peer.actorId}:${n.file}#${n.symbol}`,
+        key: `peer:${n.peer.actorId}:${n.id}`,
         severity: 'warning',
         // Board fields are peer-written: screened before they reach the agent.
-        text: sanitizeForTerminal(`Peer ${t(n.peer.actorId)} (${t(n.peer.branch || 'detached')} in ${t(n.peer.worktree)}) changed ${t(n.symbol)} (${t(n.file)}), which you declared reading at ${t(n.declaredAt).slice(11, 16)} UTC.`),
+        text: sanitizeForTerminal(`Peer ${t(n.peer.actorId)} (${t(n.peer.branch || 'detached')} in ${t(n.peer.worktree)}) changed ${t(n.symbol)} (${t(n.file)}), which an agent in this worktree declared reading at ${t(n.declaredAt).slice(11, 16)} UTC.`),
         next: `re-read ${t(n.symbol)} before relying on it`,
       });
     }

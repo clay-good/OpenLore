@@ -1,44 +1,51 @@
 /**
- * Peer change notices: a peer changed a symbol this agent declared it reads
+ * Peer change notices: a peer changed a symbol this worktree's agent declared it reads
  * (change: add-peer-change-notices).
  *
  * Computed from the peer footprint board, not from messages: for each symbol in the read-set an
  * agent of this worktree declared (`declare_footprint`), each live peer's worktree is checked. The
- * symbol counts as changed by the peer only when the peer's own base commit still had the text this
- * agent declared, and the peer's working tree no longer does — so a peer that merely branched from
- * an older version is not blamed for a difference it did not make. Read-only; a neutral fact for the
- * after-tools hook.
+ * symbol counts as changed by the peer only when the peer's base commits — at declaration and now —
+ * still had the declared text, and the peer's working tree no longer does. So a peer that merely
+ * branched from an older version, or rebased onto someone else's change, is not blamed for a
+ * difference it did not make. Read-only; a neutral fact for the after-tools hook.
  */
 
 import { relative, isAbsolute, join } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import { readFileConfined } from '../../utils/path-confinement.js';
 import { readBlobsAtRef, readBlobsPerFile } from '../../utils/git-blobs.js';
+import { execFileGit } from '../../utils/git-exec.js';
 import { symbolHash, type BoardEntry, type BoardSymbol } from './footprint-board.js';
 
-const MAX_READS = 200;
+/** Read × peer comparisons per call: the hook runs on every tool call. */
+const MAX_CHECKS = 400;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 
 export interface PeerChangeNotice {
+  /** The declared symbol's id (file and name). */
+  id: string;
   symbol: string;
   file: string;
   peer: { actorId: string; worktree: string; branch: string };
-  /** When this agent declared reading the symbol. */
+  /** When the read-set was declared. */
   declaredAt: string;
 }
 
-
 /** Whether `text` still holds the declared symbol (at its span, or wherever its head now appears). */
-function holds(text: string, s: BoardSymbol): boolean {
-  if (s.hash === undefined || s.start === undefined || s.end === undefined) return true; // nothing to compare: never a notice
+function holdsExactly(text: string, s: BoardSymbol): boolean {
   if (symbolHash(text.slice(s.start, s.end)) === s.hash) return true;
   if (!s.head) return false;
-  const len = s.end - s.start;
+  const len = s.end! - s.start!;
   for (let at = text.indexOf(s.head), tries = 0; at !== -1 && tries < 64; at = text.indexOf(s.head, at + 1), tries++) {
     if (symbolHash(text.slice(at, at + len)) === s.hash) return true;
   }
   return false;
 }
+
+/** A committed blob holds the symbol as checked out: git stores LF, a CRLF checkout hashed CRLF. */
+const blobHolds = (blob: string, s: BoardSymbol) => holdsExactly(blob, s) || (!blob.includes('\r') && holdsExactly(blob.replace(/\n/g, '\r\n'), s));
+
+const isMissing = (e: unknown) => (e as NodeJS.ErrnoException)?.code === 'ENOENT';
 
 /** The symbols this worktree's agents declared reading that a live peer has since changed. */
 export async function peerChangeNotices(root: string): Promise<PeerChangeNotice[]> {
@@ -53,30 +60,78 @@ export async function peerChangeNotices(root: string): Promise<PeerChangeNotice[
   for (const { entry } of board.live) ((await real(entry.worktree)) === here ? mine : peers).push(entry);
   if (!mine.length || !peers.length) return [];
 
+  // Per peer: its working-tree files and its base blobs, read once per call.
+  const peerText = new Map<string, Promise<string | null>>();
+  const baseBlobs = new Map<string, Promise<string[] | null>>();
+  const currentBase = new Map<string, Promise<string | null>>();
+  const peerFile = (peer: BoardEntry, peerRoot: string, file: string) => {
+    const k = `${peer.actorId}\0${file}`;
+    if (!peerText.has(k)) {
+      peerText.set(k, readFileConfined(peerRoot, file, MAX_FILE_BYTES)
+        // Deleted by the peer: the declared text is gone. Any other failure: nothing to compare.
+        .catch(e => (isMissing(e) ? '' : null)));
+    }
+    return peerText.get(k)!;
+  };
+  const peerBase = (peer: BoardEntry) => {
+    if (!currentBase.has(peer.actorId)) {
+      currentBase.set(peer.actorId, (async () => {
+        try {
+          const { stdout } = await execFileGit('git', ['merge-base', 'HEAD', 'refs/heads/main'], { cwd: peer.worktree });
+          return String(stdout).trim() || null;
+        } catch {
+          try {
+            const { stdout } = await execFileGit('git', ['merge-base', 'HEAD', 'refs/heads/master'], { cwd: peer.worktree });
+            return String(stdout).trim() || null;
+          } catch { return null; }
+        }
+      })());
+    }
+    return currentBase.get(peer.actorId)!;
+  };
+  /** The file at the peer's base at declaration and its base now (one or two blobs), or null when unreadable. */
+  const bases = (peer: BoardEntry, repoPath: string) => {
+    const k = `${peer.actorId}\0${repoPath}`;
+    if (!baseBlobs.has(k)) {
+      baseBlobs.set(k, (async () => {
+        const refs = [peer.baseAtDeclare!];
+        const now = await peerBase(peer);
+        if (now && now !== peer.baseAtDeclare) refs.push(now);
+        const out: string[] = [];
+        for (const ref of refs) {
+          const blobs = await readBlobsAtRef(peer.worktree, ref, [repoPath]).catch(() => readBlobsPerFile(peer.worktree, ref, [repoPath]));
+          const b = blobs.get(repoPath);
+          if (b === undefined) return null;
+          out.push(b);
+        }
+        return out;
+      })());
+    }
+    return baseBlobs.get(k)!;
+  };
+
   const notices: PeerChangeNotice[] = [];
   const seen = new Set<string>();
+  let checks = 0;
   for (const me of mine) {
     // Symbol files are relative to the analysis root, which may sit below the worktree's top.
     const rootRel = relative(await real(me.worktree), await real(me.root ?? me.worktree));
     if (rootRel.startsWith('..') || isAbsolute(rootRel)) continue;
     const prefix = rootRel ? `${rootRel.split('\\').join('/')}/` : '';
-    for (const read of me.reads.slice(0, MAX_READS)) {
-      if (read.hash === undefined) continue;
+    for (const read of me.reads) {
+      if (read.hash === undefined || read.start === undefined || read.end === undefined) continue; // nothing to compare
       for (const peer of peers) {
-        const key = `${peer.actorId}\0${read.file}\0${read.name}`;
+        if (!peer.baseAtDeclare) continue; // no base to attribute a change with
+        const key = `${peer.actorId}\0${read.id}`;
         if (seen.has(key)) continue;
-        const peerRoot = join(peer.worktree, rootRel);
-        let now: string;
-        try { now = await readFileConfined(peerRoot, read.file, MAX_FILE_BYTES); } catch { continue; } // not in the peer's tree: not its edit
-        if (holds(now, read)) continue;
-        // Attributable to the peer only when its base still had the declared text.
-        if (!peer.baseAtDeclare) continue;
-        const repoPath = `${prefix}${read.file}`;
-        const blobs = await readBlobsAtRef(peer.worktree, peer.baseAtDeclare, [repoPath]).catch(() => readBlobsPerFile(peer.worktree, peer.baseAtDeclare!, [repoPath]));
-        const base = blobs.get(repoPath);
-        if (base === undefined || !holds(base, read)) continue;
+        if (++checks > MAX_CHECKS) return notices;
+        const now = await peerFile(peer, join(peer.worktree, rootRel), read.file);
+        if (now === null || (now && holdsExactly(now, read))) continue;
+        // Attributable to the peer only when its bases still had the declared text.
+        const blobs = await bases(peer, `${prefix}${read.file}`);
+        if (!blobs || !blobs.every(b => blobHolds(b, read))) continue;
         seen.add(key);
-        notices.push({ symbol: read.name, file: read.file, peer: { actorId: peer.actorId, worktree: peer.worktree, branch: peer.branch }, declaredAt: me.declaredAt });
+        notices.push({ id: read.id, symbol: read.name, file: read.file, peer: { actorId: peer.actorId, worktree: peer.worktree, branch: peer.branch }, declaredAt: me.declaredAt });
       }
     }
   }

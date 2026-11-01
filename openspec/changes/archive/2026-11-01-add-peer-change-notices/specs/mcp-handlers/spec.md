@@ -8,8 +8,9 @@ When a live peer on the footprint board changes a symbol in the read-set this wo
 declared (`declare_footprint`), the next `after-tools` receipt SHALL name the symbol, its file, the
 peer's actor, branch, and worktree, and when the read-set was declared, as a neutral fact, once per
 session. The change SHALL be computed from the board and the peer's working tree, with no message
-transport: the declared text no longer holds in the peer's tree, and the peer's base commit at
-declaration still held it, so a peer that only branched from an older version is not blamed. An
+transport: the declared text no longer holds in the peer's tree (a deleted file counts), and the peer's base
+commit at declaration and its base now both still hold it, so a peer that branched from an older
+version or rebased onto another change is not blamed. An
 edit to a symbol outside the declared read-set SHALL produce no notice.
 
 #### Scenario: A peer changes what I read
