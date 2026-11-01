@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -54,14 +54,27 @@ describe('sub-agent start briefing', () => {
     expect((await runHook('subagent-start', start(a))).stdout).toBe('');
   });
 
-  it('parallel sub-agents each get their own task, matched by agent type then queue order', async () => {
+  it('parallel sub-agents: a unique type gets its task; two of one type get none rather than each other\'s', async () => {
     const { a } = clone();
     await runHook('before-subagent', agentCall(a, 'first explore task'));
     await runHook('before-subagent', agentCall(a, 'a plan task', { subagent_type: 'Plan' }));
     await runHook('before-subagent', agentCall(a, 'second explore task'));
     expect(context((await runHook('subagent-start', start(a, 'Plan'))).stdout)?.additionalContext).toContain('a plan task');
-    expect(context((await runHook('subagent-start', start(a))).stdout)?.additionalContext).toContain('first explore task');
-    expect(context((await runHook('subagent-start', start(a))).stdout)?.additionalContext).toContain('second explore task');
+    // The two Explore hooks race in a real harness: their order is not the start order.
+    expect((await runHook('subagent-start', start(a))).stdout).toBe('');
+    expect((await runHook('subagent-start', start(a))).stdout).toBe('');
+  });
+
+  it('a key cut at the length limit is still redacted; nothing is stored when injection is off', async () => {
+    const { a } = clone();
+    const key = `-----BEGIN RSA PRIVATE KEY-----\n${'MIIEowIBAAKCAQEA'.repeat(400)}\n-----END RSA PRIVATE KEY-----`;
+    await runHook('before-subagent', agentCall(a, `deploy with ${key}`));
+    const stored = readFileSync(join(a, OPENLORE_DIR, 'session-ledger', 'subagent-tasks.json'), 'utf-8');
+    expect(stored).not.toContain('MIIEowIBAAKCAQEA');
+    rmSync(join(a, OPENLORE_DIR, 'session-ledger', 'subagent-tasks.json'));
+    write(a, join(OPENLORE_DIR, 'config.json'), JSON.stringify({ contextInjection: { mode: 'off' } }));
+    await runHook('before-subagent', agentCall(a, 'a task'));
+    expect(existsSync(join(a, OPENLORE_DIR, 'session-ledger', 'subagent-tasks.json'))).toBe(false);
   });
 
   it('live peers from other worktrees are listed; credentials in a queued prompt are not stored', async () => {

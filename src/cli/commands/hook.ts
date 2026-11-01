@@ -13,6 +13,8 @@
  * | `before-stop` | `Stop`                       | the `verify_change` receipt for the session's diff, shown   |
  * |               |                              | to the user; the agent sees it only as a policy block       |
  * | `after-compact` | `SessionStart` (`compact`)  | the handoff briefing of the in-flight change                |
+ * | `before-subagent` | `PreToolUse` (`Agent|Task`) | nothing: queues the sub-agent's task                      |
+ * | `subagent-start` | `SubagentStart`            | the sub-agent's task-scoped briefing and the board's peers  |
  *
  * Every hook reads the harness payload from stdin and prints at most one budgeted receipt as the
  * event's `additionalContext`; it prints nothing when it has nothing new. A fact already delivered
@@ -50,7 +52,7 @@ export const HOOK_EVENT: Record<HookMoment, string> = {
 /** Per-moment budget, in characters of the printed receipt (about four characters a token). */
 const BUDGET_CHARS: Record<HookMoment, number> = { 'before-edit': 1600, 'after-tools': 4800, 'before-stop': 8000, 'after-compact': 8000, 'before-subagent': 0, 'subagent-start': 6000 };
 /** Hard time limit per moment; past it the hook prints nothing. */
-const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000, 'after-compact': 30_000, 'before-subagent': 5_000, 'subagent-start': 20_000 };
+const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000, 'after-compact': 30_000, 'before-subagent': 5_000, 'subagent-start': 10_000 };
 const STDIN_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_DELIVERED = 2000;
 
@@ -431,7 +433,7 @@ async function subagentStart(root: string, payload: HookPayload, timeoutMs: numb
     const work = withLoggerOptions({ quiet: true }, async () => {
       const { takeSubagentTask, subagentBriefing } = await import('../../core/services/subagent-briefing.js');
       const prompt = await takeSubagentTask(root, { sessionId: payload.sessionId, agentType: payload.agentType }).catch(() => undefined);
-      return subagentBriefing(root, prompt);
+      return subagentBriefing(root, prompt, BUDGET_CHARS['subagent-start']);
     });
     const text = await Promise.race([work, timeout]);
     if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
@@ -466,6 +468,14 @@ async function afterCompact(root: string, timeoutMs: number): Promise<HookRunRes
   }
 }
 
+/** Whether task-scoped context injection is turned off (`contextInjection.mode: "off"`). */
+function injectionOff(root: string): boolean {
+  try {
+    const cfg = JSON.parse(readFileSync(join(root, OPENLORE_DIR, 'config.json'), 'utf-8')) as { contextInjection?: { mode?: string } };
+    return cfg?.contextInjection?.mode === 'off';
+  } catch { return false; }
+}
+
 /** Whether `hooks.<moment>` is turned off in `.openlore/config.json` (an unreadable config is "on"). */
 function momentDisabled(root: string, moment: HookMoment): boolean {
   try {
@@ -495,9 +505,14 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
   if (moment === 'after-compact') return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment]);
   if (moment === 'before-subagent') {
-    if ((payload.toolName === 'Agent' || payload.toolName === 'Task') && payload.agentPrompt) {
+    // Nothing reads the queue when sub-agent briefings or task injection are off: nothing is stored.
+    if ((payload.toolName === 'Agent' || payload.toolName === 'Task') && payload.agentPrompt && !momentDisabled(root, 'subagent-start') && !injectionOff(root)) {
       const { queueSubagentTask } = await import('../../core/services/subagent-briefing.js');
-      await withLoggerOptions({ quiet: true }, () => queueSubagentTask(root, { sessionId: payload.sessionId, agentType: payload.subagentType, prompt: payload.agentPrompt! })).catch(() => undefined);
+      let timer: NodeJS.Timeout | undefined;
+      // Bounded: a held queue lock must never stall the parent's Agent call.
+      const limit = new Promise<void>(r => { timer = setTimeout(r, opts.timeoutMs ?? TIMEOUT_MS[moment]); timer.unref?.(); });
+      await Promise.race([withLoggerOptions({ quiet: true }, () => queueSubagentTask(root, { sessionId: payload.sessionId, agentType: payload.subagentType, prompt: payload.agentPrompt! })).catch(() => undefined), limit]);
+      if (timer) clearTimeout(timer);
     }
     return silent; // only queues: the parent's tool call gets no output
   }
