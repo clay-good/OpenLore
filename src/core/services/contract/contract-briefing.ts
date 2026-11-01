@@ -69,7 +69,7 @@ export async function contractsForFiles(root: string, files: readonly string[], 
   const via = new Map<string, string>();
   const names = [...new Set(functions)].filter(n => /^[A-Za-z_$][\w$]{3,}$/.test(n)).slice(0, MAX_NAMES);
   if (names.length) {
-    const pattern = new RegExp(`(?<![\\w$])(${names.map(n => n.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`);
+    const pattern = new RegExp(`(?<![\\w$])(${names.map(n => n.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')).join('|')})(?![\\w$])`);
     const { readFileConfined } = await import('../../../utils/path-confinement.js');
     for (const f of [...new Set(routes.map(r => r.file))].filter(f => !inScope.has(f)).slice(0, MAX_ROUTE_FILES_READ)) {
       const text = await readFileConfined(root, f, MAX_ROUTE_FILE_BYTES).catch(() => null);
