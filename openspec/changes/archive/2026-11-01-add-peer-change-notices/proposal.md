@@ -1,6 +1,7 @@
 # Peer change notices: tell an agent when a peer changes what it read
 
-> Status: PROPOSED (2026-11-01). Split from `add-peer-footprint-board`, whose board,
+> Status: SHIPPED (2026-11-01), declared read-set only; the rest moved to
+> `add-peer-notices-served-set-and-fleet-records`. Split from `add-peer-footprint-board`, whose board,
 > `declare_footprint`, and coordination-tool reads shipped.
 
 ## Why

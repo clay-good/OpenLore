@@ -118,10 +118,18 @@ export async function removeEntry(root: string, actorId: string): Promise<boolea
   return true;
 }
 
+const isSymbol = (v: unknown): v is BoardSymbol => {
+  const s = v as Partial<BoardSymbol> | null;
+  return !!s && typeof s === 'object' && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.file === 'string'
+    && (s.start === undefined || Number.isSafeInteger(s.start)) && (s.end === undefined || Number.isSafeInteger(s.end))
+    && (s.hash === undefined || typeof s.hash === 'string') && (s.head === undefined || typeof s.head === 'string');
+};
 const isEntry = (v: unknown): v is BoardEntry => {
   const e = v as Partial<BoardEntry> | null;
   return !!e && e.version === 1 && typeof e.actorId === 'string' && /^[\w.@:/+-]{1,128}$/.test(e.actorId) && typeof e.worktree === 'string' && typeof e.branch === 'string'
-    && Array.isArray(e.writes) && Array.isArray(e.reads) && Array.isArray(e.creates) && typeof e.lastSeenAt === 'string';
+    && Array.isArray(e.writes) && e.writes.every(isSymbol) && Array.isArray(e.reads) && e.reads.every(isSymbol) && Array.isArray(e.creates) && typeof e.lastSeenAt === 'string'
+    // Peer-written and later passed to git: a commit id only, never an option or a revision expression.
+    && (e.baseAtDeclare === undefined || (typeof e.baseAtDeclare === 'string' && /^[0-9a-f]{40,64}$/.test(e.baseAtDeclare)));
 };
 
 /** The default branch (`main`, else `master`), or null. */
@@ -216,6 +224,7 @@ export async function readBoard(root: string, opts: { now?: number } = {}): Prom
     out.boundaries.push(`The board directory holds ${names.length} files; the first ${MAX_FILES_READ} were read.`);
     names = names.slice(0, MAX_FILES_READ);
   }
+  if (!names.length) return out; // an unused board: no git calls (the hooks read it on every tool call)
   const now = opts.now ?? Date.now();
   const main = await defaultBranch(root);
   const worktrees = await worktreePaths(root);
@@ -246,6 +255,8 @@ export async function worktreeIdentity(root: string): Promise<{ worktree: string
   const main = await defaultBranch(root);
   let baseAtDeclare: string | undefined;
   if (main) { try { baseAtDeclare = await git(root, ['merge-base', 'HEAD', `refs/heads/${main}`]); } catch { /* none */ } }
+  // No default branch: the commit checked out at declaration is the base peer notices compare with.
+  else { try { baseAtDeclare = await git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']); } catch { /* unborn */ } }
   return { worktree, branch, ...(baseAtDeclare ? { baseAtDeclare } : {}) };
 }
 

@@ -100,6 +100,7 @@ export function readBlobsAtRef(absDir: string, ref: string, paths: readonly stri
 /** Per-file `git show` — the correctness fallback when the batch read fails. */
 export async function readBlobsPerFile(absDir: string, ref: string, paths: readonly string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
+  if (ref.startsWith('-')) return out; // never an option
   for (const path of paths) {
     try {
       const { stdout } = await execFileGit('git', gitPathArgs('show', `${ref}:${path}`), { cwd: absDir, timeout: GIT_READ_TIMEOUT_MS });
