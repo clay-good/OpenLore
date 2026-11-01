@@ -254,9 +254,13 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
   const { scanEnvDeclarations } = await import('../env-declaration-scan.js');
   const iac = await scanEnvDeclarations(absDir);
   for (const b of iac.boundaries) boundaries.add(b);
+  // Repository text (resource names, paths) is screened before it reaches output.
+  const { emittedText } = await import('../generated-file-guard.js');
   const declaredBy = iac.declarations.filter(d => d.name === name)
-    .map(d => ({ ecosystem: d.ecosystem, resource: d.resource, file: d.file, line: d.line, literalValue: d.literalValue }));
-  const declaration = declaredBy.length || entry.hasDefault ? 'declared' : 'undeclared-in-corpus';
+    .map(d => ({ ecosystem: d.ecosystem, resource: emittedText(d.resource), file: emittedText(d.file), line: d.line, literalValue: d.literalValue }));
+  // A `.env`-style declaration file that lists the name (even with an empty value) declares it.
+  const inEnvFile = entry.hasDefault || entry.files.some(f => /(?:^|\/)\.env(?:\.[^/]*)?$/.test(f));
+  const declaration = declaredBy.length || inEnvFile ? 'declared' : 'undeclared-in-corpus';
   if (declaration === 'undeclared-in-corpus') {
     boundaries.add(
       'undeclared-in-corpus: no file in this repository sets this variable. It is not "unset": it may be ' +
@@ -293,7 +297,7 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     declaration,
     declaredBy: declaredBy.slice(0, MAX_LIST),
     ...(declaredBy.length > MAX_LIST ? { declaredByTruncated: declaredBy.length - MAX_LIST } : {}),
-    ...(iac.opaque.length ? { opaqueEnvSources: iac.opaque.slice(0, 20) } : {}),
+    ...(iac.opaque.length ? { opaqueEnvSources: iac.opaque.slice(0, 20).map(o => ({ ...o, resource: emittedText(o.resource), file: emittedText(o.file) })) } : {}),
     affectedFunctions: affectedFunctions.slice(0, MAX_LIST),
     reachingTests: reachingTests.slice(0, MAX_LIST),
     affectedFiles: [...affectedFiles].sort(),

@@ -7,25 +7,27 @@
  * resource, the file and line, and whether a value is written there literally — NEVER the value.
  *
  * A source that sets variables this reader cannot enumerate (Kubernetes `envFrom`, compose
- * `env_file`, an environment map built by an expression) is returned as an opaque source, so the
- * caller can say the variable may be set there instead of implying it is not.
+ * `env_file`, ECS `EnvironmentFiles`, a Terraform `dynamic "env"`, an environment map built by an
+ * expression) is returned as an opaque source, so the caller can say the variable may be set there
+ * instead of implying it is not.
  *
- * Pure and deterministic: one file in, sites out. No I/O, no rendering (Helm), no `terraform plan`.
+ * Pure, deterministic, and linear in the file size: one file in, sites out. No I/O, no rendering
+ * (Helm), no `terraform plan`. Keys are read only where the format puts keys — never from inside a
+ * value, a string, a comment, or a heredoc.
  */
 
-import { LineCounter, parseAllDocuments, isMap, isSeq, isScalar, type Node } from 'yaml';
-import { scanHclBlocks } from './terraform.js';
+import { LineCounter, parseAllDocuments, isAlias, isMap, isSeq, isScalar, type Document, type Node } from 'yaml';
 
 export type EnvEcosystem = 'Kubernetes' | 'Docker Compose' | 'Dockerfile' | 'Terraform' | 'CloudFormation' | 'GitHub Actions';
 
 export interface EnvDeclaration {
   name: string;
   ecosystem: EnvEcosystem;
-  /** The resource that sets it: `Deployment/api`, `service/web`, `aws_lambda_function.orders`, `job/build`. */
+  /** The resource that sets it: `Deployment/api/web`, `service/web`, `aws_lambda_function.orders`, `job/build`. */
   resource: string;
   file: string;
   line: number;
-  /** Whether a value is written at this site as a literal (no interpolation, reference, or secret source). */
+  /** Whether a non-empty value is written at this site as a literal (no interpolation, reference, or secret source). */
   literalValue: boolean;
 }
 
@@ -43,22 +45,13 @@ export interface EnvDeclarationScan {
   opaque: OpaqueEnvSource[];
 }
 
+/** Declarations read from one file at most (a bound on hostile input, not a real-world limit). */
+const MAX_PER_FILE = 10_000;
 /** Interpolation or substitution markers: a value containing one is not literal. */
 const INTERPOLATED = /\$\{|\$\(|\$[A-Za-z_]|\{\{/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
-
-type Pair = { key: unknown; value: unknown };
-const keyOf = (p: Pair): string | undefined => (isScalar(p.key) && typeof p.key.value === 'string' ? p.key.value : undefined);
-const pairsOf = (n: unknown): Pair[] => (isMap(n) ? (n.items as Pair[]) : []);
-const get = (n: unknown, key: string): unknown => pairsOf(n).find(p => keyOf(p) === key)?.value;
-const strOf = (n: unknown): string | undefined => (isScalar(n) && n.value !== null && n.value !== undefined ? String(n.value) : undefined);
-
-/** Whether a YAML value node is a literal written value (a plain scalar, no tag, no interpolation). */
-function literalNode(n: unknown): boolean {
-  if (!isScalar(n) || n.value === null || n.value === undefined) return false;
-  if ((n as { tag?: string }).tag && !(n as { tag?: string }).tag!.startsWith('tag:yaml.org')) return false;
-  return !INTERPOLATED.test(String(n.value));
-}
+/** A literal is a non-empty value with no interpolation. */
+const literalText = (v: string | undefined) => v !== undefined && v !== '' && !INTERPOLATED.test(v);
 
 export function extractEnvDeclarations(file: { path: string; content: string; language: string }): EnvDeclarationScan {
   const out: EnvDeclarationScan = { declarations: [], opaque: [] };
@@ -72,30 +65,55 @@ export function extractEnvDeclarations(file: { path: string; content: string; la
   } catch {
     // A file that cannot be read yields nothing here; the caller discloses parse limits.
   }
+  if (out.declarations.length > MAX_PER_FILE) out.declarations.length = MAX_PER_FILE;
   return out;
 }
 
 // ── Dockerfile ──────────────────────────────────────────────────────────────
 
 function dockerfile(file: { path: string; content: string }, out: EnvDeclarationScan): void {
-  const lines = file.content.split('\n');
+  const lines = file.content.split(/\r?\n/);
   let stage = 'Dockerfile';
   for (let i = 0; i < lines.length; i++) {
     const start = i;
-    let text = lines[i];
-    // Join line continuations.
-    while (/\\\s*$/.test(text) && i + 1 < lines.length) text = text.replace(/\\\s*$/, ' ') + lines[++i];
-    const from = /^\s*FROM\s+\S+(?:\s+AS\s+(\S+))?/i.exec(text);
+    if (/^\s*#/.test(lines[i])) continue;
+    // Join line continuations (parts joined once: repeated concatenation was quadratic); comment
+    // lines inside one are not part of the instruction.
+    const parts: string[] = [];
+    let cur = lines[i];
+    while (cur.trimEnd().endsWith('\\') && i + 1 < lines.length) {
+      parts.push(cur.trimEnd().slice(0, -1));
+      i++;
+      cur = /^\s*#/.test(lines[i]) ? '\\' : lines[i];
+    }
+    parts.push(cur.trimEnd().endsWith('\\') ? cur.trimEnd().slice(0, -1) : cur);
+    const text = parts.join(' ');
+    // A heredoc body (`RUN <<EOF … EOF`) is data, not instructions.
+    const heredoc = /<<-?\s*["']?([A-Za-z_]\w*)["']?/.exec(text);
+    if (heredoc && /^\s*[A-Za-z]+\s/.test(text)) {
+      while (i + 1 < lines.length && lines[i + 1].trim() !== heredoc[1]) i++;
+      i++;
+    }
+    const from = /^\s*FROM\s+(?:--\S+\s+)*\S+(?:\s+AS\s+(\S+))?/i.exec(text);
     if (from) { stage = from[1] ? `stage/${from[1]}` : 'Dockerfile'; continue; }
     const env = /^\s*ENV\s+(.*)$/i.exec(text);
     if (!env) continue;
     const body = env[1].trim();
     const add = (name: string, value: string | undefined) => {
-      if (ENV_NAME.test(name)) out.declarations.push({ name, ecosystem: 'Dockerfile', resource: stage, file: file.path, line: start + 1, literalValue: value !== undefined && value !== '' && !INTERPOLATED.test(value) });
+      if (ENV_NAME.test(name)) out.declarations.push({ name, ecosystem: 'Dockerfile', resource: stage, file: file.path, line: start + 1, literalValue: literalText(value) });
     };
     if (/^[A-Za-z_][\w.-]*=/.test(body)) {
-      // ENV KEY=value KEY2="value two"
-      for (const m of body.matchAll(/([A-Za-z_][\w.-]*)=("(?:[^"\\]|\\.)*"|'[^']*'|\S*)/g)) add(m[1], m[2].replace(/^["']|["']$/g, ''));
+      // ENV KEY=value KEY2="value two" KEY3=escaped\ space — pairs separated by unescaped whitespace.
+      const pair = /([A-Za-z_][\w.-]*)=("(?:[^"\\]|\\.)*"|'[^']*'|(?:\\.|[^\s\\])*)/y;
+      let at = 0;
+      while (at < body.length) {
+        while (at < body.length && /\s/.test(body[at])) at++;
+        pair.lastIndex = at;
+        const m = pair.exec(body);
+        if (!m) break;
+        add(m[1], m[2].replace(/^(["'])([\s\S]*)\1$/, '$2'));
+        at = pair.lastIndex;
+      }
     } else {
       // Legacy form: ENV KEY value
       const legacy = /^([A-Za-z_][\w.-]*)\s+(.*)$/.exec(body);
@@ -106,195 +124,359 @@ function dockerfile(file: { path: string; content: string }, out: EnvDeclaration
 
 // ── Terraform / OpenTofu (HCL and JSON) ─────────────────────────────────────
 
-/** The matching close brace of the `{` at `open` in HCL text (strings skipped), or -1. */
-function closeBrace(text: string, open: number): number {
-  let depth = 0;
-  for (let k = open; k < text.length; k++) {
-    const c = text[k];
-    if (c === '"') { k++; while (k < text.length && text[k] !== '"') { if (text[k] === '\\') k++; k++; } continue; }
-    if (c === '{') depth++;
-    else if (c === '}' && --depth === 0) return k;
+/**
+ * The HCL text with comments, string contents, and heredoc bodies blanked (same length, newlines
+ * kept), so structure is read only from code. Quotes stay, so a quoted key keeps its position.
+ */
+function maskHcl(src: string): string {
+  const out = src.split('');
+  const blank = (from: number, to: number) => { for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' '; };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '#' || (c === '/' && src[i + 1] === '/')) {
+      const end = src.indexOf('\n', i);
+      const stop = end === -1 ? src.length : end;
+      blank(i, stop);
+      i = stop;
+    } else if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      const stop = end === -1 ? src.length : end + 2;
+      blank(i, stop);
+      i = stop;
+    } else if (c === '"') {
+      let k = i + 1;
+      while (k < src.length && src[k] !== '"' && src[k] !== '\n') k += src[k] === '\\' ? 2 : 1;
+      blank(i + 1, Math.min(k, src.length));
+      i = k + 1;
+    } else if (c === '<' && src[i + 1] === '<') {
+      const m = /^<<-?([A-Za-z_]\w*)\r?\n/.exec(src.slice(i, i + 80));
+      if (!m) { i += 2; continue; }
+      const bodyStart = i + m[0].length;
+      const endRe = new RegExp(`\\n[ \\t]*${m[1]}\\b`, 'g');
+      endRe.lastIndex = bodyStart - 1;
+      const em = endRe.exec(src);
+      const stop = em ? em.index + 1 : src.length;
+      blank(bodyStart, stop);
+      i = stop;
+    } else i++;
   }
-  return -1;
+  return out.join('');
 }
 
 function terraform(file: { path: string; content: string }, out: EnvDeclarationScan): void {
   if (file.path.toLowerCase().endsWith('.json')) { yamlLike({ ...file, language: 'Terraform' }, out); return; }
-  for (const block of scanHclBlocks(file.content)) {
-    if (block.type !== 'resource' && block.type !== 'module') continue;
-    const resource = block.type === 'module' ? `module.${block.labels[0] ?? ''}` : block.labels.join('.');
-    const body = block.body;
-    const lineOf = (off: number) => block.startLine + (body.slice(0, off).match(/\n/g)?.length ?? 0);
-    // environment { variables = { KEY = value } }
-    for (const m of body.matchAll(/\bvariables\s*=\s*/g)) {
-      const at = m.index! + m[0].length;
-      if (body[at] !== '{') {
-        out.opaque.push({ ecosystem: 'Terraform', resource, file: file.path, line: lineOf(m.index!), reason: 'an environment map built by an expression' });
+  const src = file.content;
+  const masked = maskHcl(src);
+  // Matching braces in one pass.
+  const close = new Map<number, number>();
+  const stack: number[] = [];
+  for (let k = 0; k < masked.length; k++) {
+    if (masked[k] === '{') stack.push(k);
+    else if (masked[k] === '}' && stack.length) close.set(stack.pop()!, k);
+  }
+  const lineStarts = [0];
+  for (let k = 0; k < src.length; k++) if (src[k] === '\n') lineStarts.push(k + 1);
+  const lineOf = (off: number) => {
+    let lo = 0, hi = lineStarts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= off) lo = mid; else hi = mid - 1; }
+    return lo + 1;
+  };
+  /** Direct children of the block body (open, end): `name {` blocks and `name = ` attributes. */
+  const children = (open: number, end: number) => {
+    const found: Array<{ kind: 'block' | 'attr'; name: string; labels: string; at: number; open?: number; valueAt?: number }> = [];
+    let k = open + 1;
+    while (k < end) {
+      const ch = masked[k];
+      if (ch === '{') { k = (close.get(k) ?? end) + 1; continue; }
+      const m = /^([A-Za-z_][\w-]*)((?:[ \t]+"[^"\n]*")*)[ \t]*(=(?!=)|\{)/.exec(masked.slice(k, k + 512));
+      const atBoundary = k === open + 1 || /[\s{]/.test(masked[k - 1]);
+      if (m && atBoundary) {
+        const opIdx = k + m[0].length - 1;
+        if (m[3] === '{') { found.push({ kind: 'block', name: m[1], labels: m[2], at: k, open: opIdx }); k = (close.get(opIdx) ?? end) + 1; }
+        else { found.push({ kind: 'attr', name: m[1], labels: '', at: k, valueAt: opIdx + 1 }); k = opIdx + 1; }
         continue;
       }
-      const end = closeBrace(body, at);
-      const inner = body.slice(at + 1, end === -1 ? body.length : end);
-      for (const kv of inner.matchAll(/(?:^|[\n,{])\s*"?([A-Za-z_][\w.-]*)"?\s*=\s*([^\n,}]*)/g)) {
-        const value = kv[2].trim();
-        out.declarations.push({
-          name: kv[1], ecosystem: 'Terraform', resource, file: file.path, line: lineOf(at + 1 + kv.index! + kv[0].indexOf(kv[1])),
-          literalValue: /^"[^"]*"$/.test(value) && !INTERPOLATED.test(value),
-        });
+      k++;
+    }
+    return found;
+  };
+  const isLiteral = (from: number, to: number) => {
+    // A trailing comment is blank in the mask: end the value at its last code character.
+    let e = to;
+    while (e > from && /\s/.test(masked[e - 1])) e--;
+    const v = src.slice(from, e).trim();
+    return /^"[^"\n]*"$/.test(v) && v.length > 2 && !/\$\{|%\{/.test(v);
+  };
+  /** The value range of an attribute: to the end of the line (masked), or the close of a `{`/`[` it opens. */
+  const valueEnd = (from: number, end: number) => {
+    let k = from;
+    while (k < end && (masked[k] === ' ' || masked[k] === '\t')) k++;
+    if (masked[k] === '{') return (close.get(k) ?? end) + 1;
+    let depth = 0;
+    for (; k < end; k++) {
+      const ch = masked[k];
+      if (ch === '[' || ch === '(') depth++;
+      else if (ch === ']' || ch === ')') depth--;
+      else if (depth <= 0 && (ch === '\n' || ch === ',' || ch === '}')) break;
+    }
+    return k;
+  };
+
+  for (const top of children(-1, masked.length)) {
+    if (top.kind !== 'block' || top.name !== 'resource' || top.open === undefined) continue;
+    const labels = [...top.labels.matchAll(/"/g)].length >= 4 ? labelsAt(top.at) : [];
+    const resource = labels.join('.') || 'resource';
+    const end = close.get(top.open) ?? masked.length;
+    visit(top.open, end, resource);
+  }
+
+  /** The labels of a block header at `at`, read from the original text. */
+  function labelsAt(at: number): string[] {
+    const header = src.slice(at, masked.indexOf('{', at));
+    return [...header.matchAll(/"([^"\n]*)"/g)].map(m => m[1]);
+  }
+
+  function visit(open: number, end: number, resource: string): void {
+    for (const c of children(open, end)) {
+      if (out.declarations.length > MAX_PER_FILE) return;
+      if (c.kind === 'block' && c.open !== undefined) {
+        const cEnd = close.get(c.open) ?? end;
+        if (c.name === 'environment') environment(c.open, cEnd, resource);
+        else if (c.name === 'env') envBlock(c.at, c.open, cEnd, resource);
+        else if (c.name === 'env_from' || (c.name === 'dynamic' && /^"env(?:_from)?"$/.test(src.slice(c.at, c.open).replace(/^dynamic\s*/, '').trim()))) {
+          out.opaque.push({ ecosystem: 'Terraform', resource, file: file.path, line: lineOf(c.at), reason: c.name === 'env_from' ? 'env_from (a ConfigMap or Secret whose keys are not read here)' : 'a dynamic env block' });
+        } else visit(c.open, cEnd, resource);
       }
     }
-    // kubernetes provider: env { name = "KEY" value = "..." }
-    for (const m of body.matchAll(/\benv\s*\{/g)) {
-      const at = m.index! + m[0].length - 1;
-      const end = closeBrace(body, at);
-      const inner = body.slice(at + 1, end === -1 ? body.length : end);
-      const name = /\bname\s*=\s*"([^"]+)"/.exec(inner);
-      if (!name || !ENV_NAME.test(name[1])) continue;
-      const value = /\bvalue\s*=\s*([^\n]*)/.exec(inner)?.[1].trim() ?? '';
-      out.declarations.push({ name: name[1], ecosystem: 'Terraform', resource, file: file.path, line: lineOf(m.index!), literalValue: /^"[^"]*"$/.test(value) && !INTERPOLATED.test(value) });
+  }
+
+  /** `environment { variables = { KEY = value } }`: keys at depth 1 of the map only. */
+  function environment(open: number, end: number, resource: string): void {
+    for (const c of children(open, end)) {
+      if (c.kind !== 'attr' || c.name !== 'variables' || c.valueAt === undefined) continue;
+      let k = c.valueAt;
+      while (k < end && /[ \t]/.test(masked[k])) k++;
+      if (masked[k] !== '{') {
+        out.opaque.push({ ecosystem: 'Terraform', resource, file: file.path, line: lineOf(c.at), reason: 'an environment map built by an expression' });
+        continue;
+      }
+      const mapEnd = close.get(k) ?? end;
+      let p = k + 1;
+      while (p < mapEnd) {
+        // A key is a bare identifier or a quoted string (blanked by the mask: its name is read from `src`).
+        const m = /^[\s,]*(?:"([^"\n]*)"|([A-Za-z_][\w.-]*))[ \t]*=(?!=)/.exec(masked.slice(p, p + 300));
+        if (!m) {
+          // Not a key here: move past this element.
+          const next = valueEnd(p, mapEnd);
+          p = next > p ? next + 1 : p + 1;
+          continue;
+        }
+        const quoted = m[1] !== undefined;
+        const keyAt = p + (quoted ? m[0].indexOf('"') + 1 : m[0].indexOf(m[2]));
+        const name = quoted ? src.slice(keyAt, keyAt + m[1].length) : m[2];
+        const vStart = p + m[0].length;
+        const vEnd = valueEnd(vStart, mapEnd);
+        if (ENV_NAME.test(name)) out.declarations.push({ name, ecosystem: 'Terraform', resource, file: file.path, line: lineOf(keyAt), literalValue: isLiteral(vStart, vEnd) });
+        p = vEnd + 1;
+      }
     }
+  }
+
+  /** The kubernetes provider's `env { name = "KEY" value = "…" }`. */
+  function envBlock(at: number, open: number, end: number, resource: string): void {
+    let name: string | undefined;
+    let literal = false;
+    for (const c of children(open, end)) {
+      if (c.kind !== 'attr' || c.valueAt === undefined) continue;
+      const vEnd = valueEnd(c.valueAt, end);
+      if (c.name === 'name') name = /^\s*"([^"\n]*)"\s*$/.exec(src.slice(c.valueAt, vEnd))?.[1];
+      else if (c.name === 'value') literal = isLiteral(c.valueAt, vEnd);
+    }
+    if (name && ENV_NAME.test(name)) out.declarations.push({ name, ecosystem: 'Terraform', resource, file: file.path, line: lineOf(at), literalValue: literal });
   }
 }
 
 // ── YAML / JSON ecosystems ──────────────────────────────────────────────────
 
+type Pair = { key: unknown; value: unknown };
+
 function yamlLike(file: { path: string; content: string; language: string }, out: EnvDeclarationScan): void {
   const lc = new LineCounter();
-  const docs = parseAllDocuments(file.content, { lineCounter: lc, uniqueKeys: false });
+  const docs = parseAllDocuments(file.content, { lineCounter: lc, uniqueKeys: false, merge: true });
+  if (!Array.isArray(docs)) return;
+  const eco = file.language as EnvEcosystem;
+  for (const doc of docs) {
+    const root = (doc as Document).contents;
+    if (!root) continue;
+    const r = makeReader(doc as Document, lc, file.path, eco, out);
+    if (file.language === 'Kubernetes') r.kubernetes(root);
+    else if (file.language === 'Docker Compose') r.compose(root);
+    else if (file.language === 'GitHub Actions') r.actions(root);
+    else if (file.language === 'CloudFormation') r.cloudFormation(root);
+    else if (file.language === 'Terraform') r.tfJson(root);
+  }
+}
+
+function makeReader(doc: Document, lc: LineCounter, file: string, eco: EnvEcosystem, out: EnvDeclarationScan) {
+  /** Aliases resolved (bounded), so a shared anchor counts where it is used. */
+  const deref = (n: unknown): unknown => {
+    let cur = n;
+    for (let hop = 0; hop < 8 && isAlias(cur); hop++) cur = cur.resolve(doc);
+    return isAlias(cur) ? undefined : cur;
+  };
+  const keyOf = (p: Pair): string | undefined => { const k = deref(p.key); return isScalar(k) && typeof k.value === 'string' ? k.value : undefined; };
+  const isMerge = (p: Pair) => isScalar(p.key) && typeof p.key.value === 'symbol';
+  /** A mapping's pairs with `<<` merges applied (explicit keys win). */
+  const pairsOf = (n: unknown, depth = 0): Pair[] => {
+    const m = deref(n);
+    if (!isMap(m) || depth > 8) return [];
+    const own = (m.items as Pair[]).filter(p => !isMerge(p));
+    const merged: Pair[] = [];
+    for (const p of m.items as Pair[]) {
+      if (!isMerge(p)) continue;
+      const v = deref(p.value);
+      for (const src of isSeq(v) ? v.items : [v]) merged.push(...pairsOf(src, depth + 1));
+    }
+    const ownKeys = new Set(own.map(keyOf));
+    return [...merged.filter(p => !ownKeys.has(keyOf(p))), ...own];
+  };
+  const get = (n: unknown, key: string): unknown => deref(pairsOf(n).find(p => keyOf(p) === key)?.value);
+  const keyNode = (n: unknown, key: string): unknown => pairsOf(n).find(p => keyOf(p) === key)?.key;
+  const strOf = (n: unknown): string | undefined => { const s = deref(n); return isScalar(s) && s.value !== null && s.value !== undefined ? String(s.value) : undefined; };
+  const itemsOf = (n: unknown): unknown[] => { const s = deref(n); return isSeq(s) ? s.items.map(deref) : []; };
   const lineOf = (n: unknown) => {
     const r = (n as { range?: [number, number, number] } | undefined)?.range;
     return r ? lc.linePos(r[0]).line : 1;
   };
-  const eco = file.language as EnvEcosystem;
-  const declare = (name: string, resource: string, keyNode: unknown, valueNode: unknown, literal?: boolean) => {
-    if (ENV_NAME.test(name)) out.declarations.push({ name, ecosystem: eco, resource, file: file.path, line: lineOf(keyNode), literalValue: literal ?? literalNode(valueNode) });
+  /** A literal written value: a non-empty plain scalar, no custom tag, no interpolation. */
+  const literalNode = (n: unknown): boolean => {
+    const s = deref(n);
+    if (!isScalar(s) || s.value === null || s.value === undefined) return false;
+    const tag = (s as { tag?: string }).tag;
+    if (tag && !tag.startsWith('tag:yaml.org')) return false;
+    return literalText(String(s.value));
   };
-  const opaque = (resource: string, node: unknown, reason: string) => out.opaque.push({ ecosystem: eco, resource, file: file.path, line: lineOf(node), reason });
+  const declare = (name: string, resource: string, at: unknown, literal: boolean) => {
+    if (out.declarations.length <= MAX_PER_FILE && ENV_NAME.test(name)) out.declarations.push({ name, ecosystem: eco, resource, file, line: lineOf(at), literalValue: literal });
+  };
+  const opaque = (resource: string, at: unknown, reason: string) => out.opaque.push({ ecosystem: eco, resource, file, line: lineOf(at), reason });
+  const isNull = (n: unknown) => n === undefined || n === null || (isScalar(n) && (n.value === null || n.value === undefined));
   /** A `KEY: value` map, or an opaque source when the map is an expression. */
   const envMap = (n: unknown, resource: string, owner: unknown) => {
-    if (isMap(n)) for (const p of n.items as Pair[]) { const k = keyOf(p); if (k) declare(k, resource, p.key, p.value); }
-    else if (n !== undefined && n !== null) opaque(resource, owner, 'an environment map built by an expression');
+    const m = deref(n);
+    if (isMap(m)) { for (const p of pairsOf(m)) { const k = keyOf(p); if (k) declare(k, resource, p.key, literalNode(p.value)); } }
+    else if (!isNull(m)) opaque(resource, owner, 'an environment map built by an expression');
   };
 
-  for (const doc of docs) {
-    if (!(doc as { contents?: unknown }).contents) continue;
-    const root = (doc as { contents: Node }).contents;
-    if (file.language === 'Kubernetes') kubernetes(root);
-    else if (file.language === 'Docker Compose') compose(root);
-    else if (file.language === 'GitHub Actions') actions(root);
-    else if (file.language === 'CloudFormation') cloudFormation(root);
-    else if (file.language === 'Terraform') tfJson(root);
-  }
-
-  function kubernetes(root: Node): void {
-    const resource = `${strOf(get(root, 'kind')) ?? 'Resource'}/${strOf(get(get(root, 'metadata'), 'name')) ?? '?'}`;
-    // Every container list anywhere in the object (pods, deployments, jobs, cron jobs).
-    const stack: unknown[] = [root];
-    while (stack.length) {
-      const n = stack.pop();
-      if (isSeq(n)) { for (const i of n.items) stack.push(i); continue; }
-      if (!isMap(n)) continue;
-      for (const p of n.items as Pair[]) {
-        const k = keyOf(p);
-        if ((k === 'containers' || k === 'initContainers' || k === 'ephemeralContainers') && isSeq(p.value)) {
-          for (const c of p.value.items) {
-            const cname = strOf(get(c, 'name'));
-            const where = cname ? `${resource}/${cname}` : resource;
-            const env = get(c, 'env');
-            if (isSeq(env)) {
-              for (const e of env.items) {
-                const name = strOf(get(e, 'name'));
-                if (!name) continue;
-                const nameNode = pairsOf(e).find(x => keyOf(x) === 'name')?.key;
-                declare(name, where, nameNode, get(e, 'value'), get(e, 'valueFrom') === undefined && literalNode(get(e, 'value')));
-              }
+  return {
+    kubernetes(root: Node): void {
+      // A `kind: List` holds its objects in `items`.
+      if (strOf(get(root, 'kind')) === 'List') { for (const item of itemsOf(get(root, 'items'))) this.kubernetes(item as Node); return; }
+      const resource = `${strOf(get(root, 'kind')) ?? 'Resource'}/${strOf(get(get(root, 'metadata'), 'name')) ?? '?'}`;
+      // Every container list anywhere in the object (pods, deployments, jobs, cron jobs).
+      const stack: unknown[] = [root];
+      const seen = new Set<unknown>();
+      while (stack.length) {
+        const n = deref(stack.pop());
+        if (seen.has(n)) continue;
+        seen.add(n);
+        if (isSeq(n)) { for (const i of n.items) stack.push(i); continue; }
+        if (!isMap(n)) continue;
+        for (const p of pairsOf(n)) {
+          const k = keyOf(p);
+          if (k === 'containers' || k === 'initContainers' || k === 'ephemeralContainers') {
+            for (const c of itemsOf(p.value)) {
+              const cname = strOf(get(c, 'name'));
+              const where = cname ? `${resource}/${cname}` : resource;
+              const env = get(c, 'env');
+              if (isSeq(env)) {
+                for (const e of itemsOf(env)) {
+                  const name = strOf(get(e, 'name'));
+                  if (name) declare(name, where, keyNode(e, 'name'), get(e, 'valueFrom') === undefined && literalNode(get(e, 'value')));
+                }
+              } else if (!isNull(env)) opaque(where, keyNode(c, 'env'), 'an env list that is not a literal list');
+              if (get(c, 'envFrom') !== undefined) opaque(where, keyNode(c, 'envFrom'), 'envFrom (a ConfigMap or Secret whose keys are not read here)');
             }
-            const envFrom = get(c, 'envFrom');
-            if (envFrom !== undefined) opaque(where, pairsOf(c).find(x => keyOf(x) === 'envFrom')?.key, 'envFrom (a ConfigMap or Secret whose keys are not read here)');
-          }
-        } else stack.push(p.value);
-      }
-    }
-  }
-
-  function compose(root: Node): void {
-    for (const s of pairsOf(get(root, 'services'))) {
-      const svc = keyOf(s);
-      if (!svc) continue;
-      const resource = `service/${svc}`;
-      const env = get(s.value, 'environment');
-      if (isSeq(env)) {
-        for (const item of env.items) {
-          const text = strOf(item);
-          if (!text) continue;
-          const eq = text.indexOf('=');
-          const name = eq === -1 ? text : text.slice(0, eq);
-          const value = eq === -1 ? undefined : text.slice(eq + 1);
-          declare(name, resource, item, undefined, value !== undefined && value !== '' && !INTERPOLATED.test(value));
+          } else stack.push(p.value);
         }
-      } else envMap(env, resource, s.key);
-      const envFile = pairsOf(s.value).find(x => keyOf(x) === 'env_file');
-      if (envFile) opaque(resource, envFile.key, 'env_file (a file whose keys are not read here)');
-    }
-  }
+      }
+    },
 
-  function actions(root: Node): void {
-    const at = (n: unknown, resource: string) => {
-      const p = pairsOf(n).find(x => keyOf(x) === 'env');
-      if (p) envMap(p.value, resource, p.key);
-    };
-    at(root, `workflow`);
-    for (const j of pairsOf(get(root, 'jobs'))) {
-      const job = keyOf(j);
-      if (!job) continue;
-      at(j.value, `job/${job}`);
-      at(get(j.value, 'container'), `job/${job}/container`);
-      for (const svc of pairsOf(get(j.value, 'services'))) at(svc.value, `job/${job}/service/${keyOf(svc) ?? '?'}`);
-      const steps = get(j.value, 'steps');
-      if (isSeq(steps)) steps.items.forEach((st, i) => at(st, `job/${job}/step/${strOf(get(st, 'id')) ?? strOf(get(st, 'name')) ?? i + 1}`));
-    }
-  }
+    compose(root: Node): void {
+      for (const s of pairsOf(get(root, 'services'))) {
+        const svc = keyOf(s);
+        if (!svc) continue;
+        const resource = `service/${svc}`;
+        const env = get(s.value, 'environment');
+        if (isSeq(env)) {
+          for (const item of env.items) {
+            const text = strOf(item);
+            if (!text) continue;
+            const eq = text.indexOf('=');
+            const name = eq === -1 ? text : text.slice(0, eq);
+            declare(name, resource, deref(item), literalText(eq === -1 ? undefined : text.slice(eq + 1)));
+          }
+        } else envMap(env, resource, keyNode(s.value, 'environment'));
+        if (get(s.value, 'env_file') !== undefined) opaque(resource, keyNode(s.value, 'env_file'), 'env_file (a file whose keys are not read here)');
+      }
+    },
 
-  function cloudFormation(root: Node): void {
-    const variables = (owner: unknown, resource: string) => {
-      const env = get(owner, 'Environment');
-      const v = pairsOf(env).find(x => keyOf(x) === 'Variables');
-      if (v) envMap(v.value, resource, v.key);
-    };
-    variables(get(get(root, 'Globals'), 'Function'), 'Globals/Function');
-    for (const r of pairsOf(get(root, 'Resources'))) {
-      const id = keyOf(r);
-      if (!id) continue;
-      const props = get(r.value, 'Properties');
-      variables(props, id);
-      // ECS: ContainerDefinitions[].Environment[] { Name, Value }
-      const defs = get(props, 'ContainerDefinitions');
-      if (isSeq(defs)) {
-        for (const d of defs.items) {
+    actions(root: Node): void {
+      const at = (n: unknown, resource: string) => {
+        if (get(n, 'env') !== undefined) envMap(get(n, 'env'), resource, keyNode(n, 'env'));
+      };
+      at(root, 'workflow');
+      for (const j of pairsOf(get(root, 'jobs'))) {
+        const job = keyOf(j);
+        if (!job) continue;
+        at(j.value, `job/${job}`);
+        at(get(j.value, 'container'), `job/${job}/container`);
+        for (const svc of pairsOf(get(j.value, 'services'))) at(svc.value, `job/${job}/service/${keyOf(svc) ?? '?'}`);
+        itemsOf(get(j.value, 'steps')).forEach((st, i) => at(st, `job/${job}/step/${strOf(get(st, 'id')) ?? strOf(get(st, 'name')) ?? i + 1}`));
+      }
+    },
+
+    cloudFormation(root: Node): void {
+      const variables = (owner: unknown, resource: string) => {
+        const env = get(owner, 'Environment');
+        if (get(env, 'Variables') !== undefined) envMap(get(env, 'Variables'), resource, keyNode(env, 'Variables'));
+      };
+      variables(get(get(root, 'Globals'), 'Function'), 'Globals/Function');
+      for (const r of pairsOf(get(root, 'Resources'))) {
+        const id = keyOf(r);
+        if (!id) continue;
+        const props = get(r.value, 'Properties');
+        variables(props, id);
+        // ECS: ContainerDefinitions[].Environment[] { Name, Value } and Secrets[] { Name, ValueFrom }.
+        for (const d of itemsOf(get(props, 'ContainerDefinitions'))) {
           const where = `${id}/${strOf(get(d, 'Name')) ?? '?'}`;
-          const env = get(d, 'Environment');
-          if (!isSeq(env)) continue;
-          for (const e of env.items) {
+          for (const e of itemsOf(get(d, 'Environment'))) {
             const name = strOf(get(e, 'Name'));
-            if (name) declare(name, where, pairsOf(e).find(x => keyOf(x) === 'Name')?.key, get(e, 'Value'));
+            if (name) declare(name, where, keyNode(e, 'Name'), literalNode(get(e, 'Value')));
           }
+          for (const e of itemsOf(get(d, 'Secrets'))) {
+            const name = strOf(get(e, 'Name'));
+            if (name) declare(name, where, keyNode(e, 'Name'), false);
+          }
+          if (get(d, 'EnvironmentFiles') !== undefined) opaque(where, keyNode(d, 'EnvironmentFiles'), 'EnvironmentFiles (files whose keys are not read here)');
         }
       }
-    }
-  }
+    },
 
-  function tfJson(root: Node): void {
-    for (const t of pairsOf(get(root, 'resource'))) {
-      for (const r of pairsOf(t.value)) {
-        const resource = `${keyOf(t)}.${keyOf(r)}`;
-        const bodies = isSeq(r.value) ? r.value.items : [r.value];
-        for (const b of bodies) {
-          const env = get(b, 'environment');
-          for (const e of isSeq(env) ? env.items : [env]) {
-            const v = pairsOf(e).find(x => keyOf(x) === 'variables');
-            if (v) envMap(v.value, resource, v.key);
+    tfJson(root: Node): void {
+      for (const t of pairsOf(get(root, 'resource'))) {
+        for (const r of pairsOf(t.value)) {
+          const resource = `${keyOf(t)}.${keyOf(r)}`;
+          const bodies = isSeq(deref(r.value)) ? itemsOf(r.value) : [deref(r.value)];
+          for (const b of bodies) {
+            const env = get(b, 'environment');
+            for (const e of isSeq(env) ? itemsOf(env) : [env]) {
+              if (get(e, 'variables') !== undefined) envMap(get(e, 'variables'), resource, keyNode(e, 'variables'));
+            }
           }
         }
       }
-    }
-  }
+    },
+  };
 }

@@ -549,7 +549,8 @@ export async function computeBlastRadius(
   }
   if (generatedNote) caveats.push(generatedNote);
   if (referencesNote) caveats.push(referencesNote);
-  if (envNote && envRenames?.removedReads.length) caveats.push(envNote);
+  // A failed check, or a limit it hit, is always said; it never reads as a clean check.
+  if (envNote) caveats.push(envNote);
   if (driftFilesOmitted > 0) {
     caveats.push(`Spec/memory drift omitted ${driftFilesOmitted} changed file${driftFilesOmitted === 1 ? '' : 's'} after reaching its analysis limit; absence of a finding does not cover those files.`);
   }

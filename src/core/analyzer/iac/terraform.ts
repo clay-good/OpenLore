@@ -16,7 +16,7 @@ import { dirname, posix as posixPath } from 'node:path';
 import type { IacGraph, IacReference, IacResource, IacModule } from './types.js';
 import { emptyIacGraph } from './types.js';
 
-export interface HclBlock {
+interface HclBlock {
   /** e.g. "resource", "data", "module", "variable", "output", "provider", "locals", "terraform" */
   type: string;
   /** Quoted labels after the type, e.g. ["aws_s3_bucket", "logs"]. */
@@ -434,16 +434,20 @@ function attrValue(body: string, key: string): string | null {
 /**
  * Scan top-level HCL blocks, tracking strings/comments/heredocs and brace depth.
  */
-export function scanHclBlocks(content: string): HclBlock[] {
+function scanHclBlocks(content: string): HclBlock[] {
   const blocks: HclBlock[] = [];
   const len = content.length;
   let i = 0;
   let line = 1;
 
+  // Line starts, indexed once: recounting from offset 0 per block was quadratic in the block count.
+  const lineStarts: number[] = [];
+  for (let k = 0; k < len; k++) if (content[k] === '\n') lineStarts.push(k);
+  /** 1 + the number of newlines before `idx` (binary search over the newline offsets). */
   const lineAt = (idx: number): number => {
-    let n = 1;
-    for (let k = 0; k < idx && k < len; k++) if (content[k] === '\n') n++;
-    return n;
+    let lo = 0, hi = lineStarts.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (lineStarts[mid] < idx) lo = mid + 1; else hi = mid; }
+    return lo + 1;
   };
 
   while (i < len) {

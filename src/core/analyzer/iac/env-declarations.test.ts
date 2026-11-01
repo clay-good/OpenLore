@@ -97,3 +97,72 @@ describe('OpenTofu files are Terraform', () => {
     expect(extractTerraform([{ path: 'main.tofu.json', content: json }]).resources.map(r => r.address)).toEqual(['aws_s3_bucket.logs']);
   });
 });
+
+describe('adversarial review regressions', () => {
+  const names = (path: string, language: string, content: string) => scan(path, language, content).declarations.map(d => d.name);
+  const lambda = (body: string) => `resource "aws_lambda_function" "f" {\n  environment {\n    variables = {\n${body}\n    }\n  }\n}\n`;
+
+  it('Terraform: text inside a value, a nested map, or a heredoc is never a name', () => {
+    expect(names('m.tf', 'Terraform', lambda('      DB_URL = "postgres://h?a=1,sslpass=Sup3rS3cret"\n      A = "a, FAKE = b"\n      C = { nested = 1, other = 2 }\n      H = <<EOT\nFAKE_IN_HEREDOC = 1\nEOT\n      D = "ok"')))
+      .toEqual(['DB_URL', 'A', 'C', 'H', 'D']);
+  });
+
+  it('Terraform: comments are not code, and a comment brace does not end the map', () => {
+    const tf = lambda('      # OLD = "x" }\n      A = "1" # trailing { comment\n      // B = "2"\n      C = "x}y"');
+    expect(scan('m.tf', 'Terraform', tf).declarations.map(d => `${d.name} ${d.literalValue}`)).toEqual(['A true', 'C true']);
+    expect(names('m.tf', 'Terraform', '# resource "aws_lambda_function" "x" {\n#   environment { variables = { OLD = "x" } }\n# }\n')).toEqual([]);
+  });
+
+  it('Terraform: only environment.variables in resource blocks; module inputs and templatefile maps are not env', () => {
+    const tf = 'resource "aws_ssm_document" "d" {\n  content = templatefile("x.tpl", { variables = { NOTENV = 1 } })\n}\nmodule "m" {\n  variables = { MOD = 1 }\n}\n';
+    expect(names('m.tf', 'Terraform', tf)).toEqual([]);
+  });
+
+  it('Terraform: dynamic env and env_from are opaque; CRLF files read', () => {
+    const tf = 'resource "kubernetes_deployment" "d" {\n  spec {\n    dynamic "env" {\n      for_each = var.e\n    }\n    env_from {\n      config_map_ref { name = "c" }\n    }\n  }\n}\n';
+    expect(scan('m.tf', 'Terraform', tf).opaque.map(o => o.reason)).toEqual(['a dynamic env block', expect.stringContaining('env_from')]);
+    expect(names('m.tf', 'Terraform', lambda('      A = "1"').replace(/\n/g, '\r\n'))).toEqual(['A']);
+  });
+
+  it('Dockerfile: CRLF, escaped spaces, heredocs, comments in continuations, FROM flags', () => {
+    expect(names('Dockerfile', 'Dockerfile', 'FROM x\r\nENV A=1\r\nENV B 2\r\n')).toEqual(['A', 'B']);
+    expect(names('Dockerfile', 'Dockerfile', 'ENV A=x\\ hunter2=y\n')).toEqual(['A']);
+    expect(names('Dockerfile', 'Dockerfile', 'RUN <<EOF\nENV FAKE=1\nEOF\nENV REAL=1\n')).toEqual(['REAL']);
+    expect(names('Dockerfile', 'Dockerfile', 'ENV A=1 \\\n# c\n    B=2\n')).toEqual(['A', 'B']);
+    expect(scan('Dockerfile', 'Dockerfile', 'FROM --platform=$B node AS build\nENV A=1\n').declarations[0].resource).toBe('stage/build');
+  });
+
+  it('YAML aliases and merge keys are resolved', () => {
+    const k = 'kind: Pod\nmetadata: {name: p}\nspec:\n  containers:\n    - name: c\n      env:\n        - &shared {name: A, value: "1"}\n    - name: d\n      env:\n        - *shared\n';
+    expect(scan('k.yaml', 'Kubernetes', k).declarations.map(d => d.resource)).toEqual(['Pod/p/c', 'Pod/p/d']);
+    const c = 'x-env: &env {SHARED: "1"}\nx-base: &base\n  environment: {BASE: "1"}\nservices:\n  web:\n    environment: {<<: *env, OWN: "2"}\n  api:\n    <<: *base\n';
+    expect(names('docker-compose.yml', 'Docker Compose', c).sort()).toEqual(['BASE', 'OWN', 'SHARED']);
+  });
+
+  it('Kubernetes List items; ECS Secrets and EnvironmentFiles; null compose environment', () => {
+    expect(scan('k.yaml', 'Kubernetes', 'kind: List\nitems:\n  - kind: Pod\n    metadata: {name: p}\n    spec:\n      containers:\n        - name: c\n          env: [{name: A, value: "1"}]\n').declarations[0].resource).toBe('Pod/p/c');
+    const cfn = 'Resources:\n  T:\n    Type: AWS::ECS::TaskDefinition\n    Properties:\n      ContainerDefinitions:\n        - Name: app\n          Secrets: [{Name: DB_PASSWORD, ValueFrom: arn}]\n          EnvironmentFiles: [{Value: arn, Type: s3}]\n';
+    const r = scan('t.yaml', 'CloudFormation', cfn);
+    expect(r.declarations.map(d => `${d.name} ${d.literalValue}`)).toEqual(['DB_PASSWORD false']);
+    expect(r.opaque.map(o => o.reason)).toEqual([expect.stringContaining('EnvironmentFiles')]);
+    expect(scan('docker-compose.yml', 'Docker Compose', 'services:\n  a:\n    environment:\n')).toEqual({ declarations: [], opaque: [] });
+  });
+
+  it('an empty value is not literal in any ecosystem', () => {
+    expect(scan('k.yaml', 'Kubernetes', 'kind: Pod\nmetadata: {name: p}\nspec:\n  containers:\n    - name: c\n      env: [{name: E, value: ""}]\n').declarations[0].literalValue).toBe(false);
+    expect(scan('Dockerfile', 'Dockerfile', 'ENV E=\n').declarations[0].literalValue).toBe(false);
+  });
+
+  it('hostile input stays linear (8x the input, well under 64x the time)', () => {
+    const time = (f: () => void) => { const t = performance.now(); f(); return performance.now() - t; };
+    const nested = (n: number) => `resource "aws_lambda_function" "f" {\n  environment {\n${'    variables = {\n'.repeat(n)}  }\n}\n`;
+    const cont = (n: number) => `ENV A=1 \\\n${'  B=2 \\\n'.repeat(n)}  C=3\n`;
+    for (const [label, gen, lang] of [['tf', nested, 'Terraform'], ['df', cont, 'Dockerfile']] as const) {
+      const p = label === 'tf' ? 'm.tf' : 'Dockerfile';
+      time(() => scan(p, lang, gen(1000)));
+      const a = Math.min(time(() => scan(p, lang, gen(2000))), time(() => scan(p, lang, gen(2000))));
+      const b = Math.min(time(() => scan(p, lang, gen(16000))), time(() => scan(p, lang, gen(16000))));
+      expect(b / Math.max(a, 1)).toBeLessThan(24);
+    }
+  });
+});

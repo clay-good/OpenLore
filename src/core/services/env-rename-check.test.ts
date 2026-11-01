@@ -77,4 +77,26 @@ describe('checkEnvRenames', () => {
     expect((await checkEnvRenames(root, 'HEAD', [{ path: 'src/db.ts', status: 'deleted' }])).removedReads).toEqual(['DATABASE_URL']);
     expect(await checkEnvRenames(root, 'HEAD', [{ path: 'Dockerfile', status: 'modified' }])).toEqual({ removedReads: [], stillSet: [], boundaries: [] });
   });
+
+  it('from a subdirectory, changed files outside it are not compared (no false removals)', async () => {
+    const root = repo({ ...MANIFESTS, 'svc/app.ts': 'export const u = process.env.DATABASE_URL;\n', 'other/x.ts': 'export const o = process.env.OTHER_VAR;\n' });
+    write(root, 'svc/app.ts', 'export const u = process.env.DB_URL;\n');
+    write(root, 'other/x.ts', '// note\nexport const o = process.env.OTHER_VAR;\n');
+    const r = await checkEnvRenames(join(root, 'svc'), 'HEAD', [{ path: 'other/x.ts', status: 'modified' }, { path: 'svc/app.ts', status: 'modified' }]);
+    expect(r.removedReads).toEqual(['DATABASE_URL']);
+  });
+
+  it('the base side is read at the merge-base, not the base branch tip', async () => {
+    const root = repo({ 'src/app.ts': 'export const a = process.env.A;\n' });
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: root, env: GIT_ENV });
+    git('checkout', '-q', '-b', 'feat');
+    write(root, 'src/app.ts', 'export const a = process.env.A;\nexport const b = 1;\n');
+    git('commit', '-qam', 'feat');
+    git('checkout', '-q', 'main');
+    write(root, 'src/app.ts', 'export const a = process.env.A;\nexport const n = process.env.NEW_ON_MAIN;\n');
+    git('commit', '-qam', 'main moves');
+    git('checkout', '-q', 'feat');
+    const r = await checkEnvRenames(root, 'main', [{ path: 'src/app.ts', status: 'modified' }]);
+    expect(r.removedReads).toEqual([]);
+  });
 });
