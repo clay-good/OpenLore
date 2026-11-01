@@ -38,6 +38,14 @@ Until an after-edit hook reports an edit in a session, background-change notes a
 because an edit cannot be told apart from another process's. `openlore status` says so. Edit loops
 do not depend on the hook.
 
+## Test runs
+
+The `after-tools` hook also records the session's test runs (see
+[agent-loop hooks](install.md#agent-loop-hooks)) in
+`.openlore/session-ledger/test-runs/<session>.json`: the files edited, each run's time, command,
+and exit status, and the symbol hashes at the last run. The `before-stop` receipt names what was
+edited after that run.
+
 ## Reading it from another process
 
 `openlore status --json` has a `session` block: `counts` (served, edited, untracked, dropped),
