@@ -112,6 +112,8 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   certify_provenance: { kind: 'read', buildArgs: dirOnly },
   certify_merge: { kind: 'read', buildArgs: (f) => ({ directory: f.directory, ours: 'HEAD', theirs: 'HEAD' }) },
   fleet_status: { kind: 'read', buildArgs: dirOnly },
+  // Reading the board only: a declare would write to the clone's shared board.
+  declare_footprint: { kind: 'read', buildArgs: (f) => ({ directory: f.directory, action: 'list' }) },
 
   // ── function/symbol tools ────────────────────────────────────────────────
   get_subgraph: {

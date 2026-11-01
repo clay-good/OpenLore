@@ -308,6 +308,7 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 | `parallel-work-conflict` | plan-parallel-work | advisory | Two tasks proposed for concurrent work have a write-write (WAW) conflict; `plan_parallel_work` schedules them into different waves. |
 | `parallel-work-cycle` | plan-parallel-work | advisory | A set of proposed tasks forms an unorderable read-after-write cycle; `plan_parallel_work` schedules the members mutually exclusive and the circular dependency should be resolved. |
 | `cross-actor-conflict` | interference-map | advisory | Two in-flight changes (branches/PRs/agent tasks, within or across a federation) have a write-write (WAW) conflict on a shared symbol; `map_in_flight_conflicts` reports them as must-not-land-concurrently. A CI check can name this code to warn when a new PR collides with an open one. |
+| `duplicate-intent` | declare-footprint | advisory | Two live agents on the peer board intend to create the same symbol name or file. |
 | `export-removed` | public-surface | advisory | An exported symbol was removed from the public surface. |
 | `export-renamed` | public-surface | advisory | An exported symbol was renamed; consumers binding the old name break. |
 | `export-visibility-reduced` | public-surface | advisory | An exported symbol is still defined but no longer exported. |

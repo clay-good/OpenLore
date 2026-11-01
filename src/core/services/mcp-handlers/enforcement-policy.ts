@@ -450,6 +450,12 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A set of proposed tasks forms an unorderable read-after-write cycle; no wave order satisfies all dependencies, so the members are scheduled mutually exclusive and the circular dependency should be resolved.',
   },
   // ── cross-actor interference map (add-cross-actor-interference-map) ──
+  'duplicate-intent': {
+    defaultClass: 'advisory',
+    source: 'declare-footprint',
+    description: 'Two live agents on the peer board intend to create the same symbol name or file (change: add-peer-footprint-board).',
+    remediation: 'Duplicate intent {subject}: agree which agent creates it, or release one footprint.',
+  },
   'cross-actor-conflict': {
     defaultClass: 'advisory',
     source: 'interference-map',

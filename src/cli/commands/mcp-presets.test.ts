@@ -108,7 +108,7 @@ describe('MCP tool presets', () => {
   // preset only; it must NOT leak into the lean/minimal/memory surfaces.
   it('coordination preset exposes plan_parallel_work; lean/minimal/memory do not', () => {
     const coord = selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name);
-    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status', 'analyze_impact', 'find_path']));
+    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status', 'declare_footprint', 'analyze_impact', 'find_path']));
     for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }] as const) {
       expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('plan_parallel_work');
     }
@@ -691,7 +691,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // (measured 106,065 B; change: add-session-handoff-briefing).
     // certify_service_contract adds one conclusion tool: 106,800 → 107,800 B
     // (measured 107,279 B; change: add-service-contract-certification).
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(107_800);
+    // declare_footprint adds one conclusion tool: 107,800 → 109,300 B
+    // (measured 108,500 B; change: add-peer-footprint-board).
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(109_300);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

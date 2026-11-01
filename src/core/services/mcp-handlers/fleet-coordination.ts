@@ -156,8 +156,28 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
       landing: 'certify_merge — whether two branches that merge cleanly break in combination',
       branches: input.branches ?? [],
     },
+    // Live agent footprints on the clone's board (change: add-peer-footprint-board).
+    board: await boardSummary(absDir),
     boundaries: [
       'Advisory and read-only. Live PR/branch harvesting, expire-on-land record lifecycle, and the CLI are follow-ups; today the arc tools are referenced per branch, not executed here.',
     ],
+  };
+}
+
+/** The live peer-board entries, screened, as served local-unreviewed data. */
+async function boardSummary(absDir: string): Promise<Record<string, unknown>> {
+  const { readBoard } = await import('../footprint-board.js');
+  const { emittedText } = await import('../generated-file-guard.js');
+  const board = await readBoard(absDir);
+  return {
+    live: board.live.map(({ entry: e, moved }) => ({
+      actorId: emittedText(e.actorId), branch: emittedText(e.branch), worktree: emittedText(e.worktree),
+      ...(e.title ? { title: emittedText(e.title) } : {}),
+      writes: e.writes.length, reads: e.reads.length, creates: e.creates.length, lastSeenAt: e.lastSeenAt,
+      ...(moved.length ? { movedSinceDeclared: moved.map(emittedText) } : {}),
+      provenance: 'local-unreviewed',
+    })),
+    ...(board.ended.length ? { ended: board.ended.length } : {}),
+    note: 'declare_footprint publishes and releases entries; map_in_flight_conflicts classifies them against branches and PRs.',
   };
 }

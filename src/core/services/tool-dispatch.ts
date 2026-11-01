@@ -487,6 +487,12 @@ async function dispatchToolImpl(
   } else if (name === 'certify_merge') {
     const { directory, ours, theirs, base, maxFindings } = args as { directory: string; ours: string; theirs: string; base?: string; maxFindings?: number };
     return handleCertifyMerge({ directory, ours, theirs, base, maxFindings });
+  } else if (name === 'declare_footprint') {
+    const { directory, action, actorId, title, writeSet, readSet, writeMode } = args as {
+      directory: string; action?: 'declare' | 'release' | 'list'; actorId?: string; title?: string; writeSet?: string[]; readSet?: string[]; writeMode?: 'append' | 'modify';
+    };
+    const { handleDeclareFootprint } = await import('./mcp-handlers/declare-footprint.js');
+    return handleDeclareFootprint({ directory, action, actorId, title, writeSet, readSet, writeMode });
   } else if (name === 'fleet_status') {
     const { directory, branches } = args as { directory: string; branches?: string[] };
     return handleFleetStatus({ directory, branches });
