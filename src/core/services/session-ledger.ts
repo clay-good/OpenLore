@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
+import { isDockerfilePath } from '../analyzer/iac/docker.js';
 import { OPENLORE_DIR } from '../../constants.js';
 import { emittedText } from './generated-file-guard.js';
 
@@ -61,11 +62,11 @@ export const OSCILLATION_RETURNS = 2;
 const AGENT_EDITS_MAX_BYTES = 256 * 1024;
 const AGENT_EDITS_KEEP = 1000;
 
-export interface ServedEntry { id: string; name: string; file: string; hash: string; servedAt: number }
+export interface ServedEntry { id: string; name: string; file: string; hash: string; servedAt: number; kind?: 'contract' | 'iac' }
 /** One version of a symbol: its hash, when it was observed, and whether by sampling at a tool call. */
 /** A symbol's version: its body hash, and its declaration-line hash when the parser gave one. */
 interface Version { hash: string; at: number; sampled: boolean; sig?: string }
-export interface EditedEntry { id: string; name: string; file: string; versions: Version[]; returns: number; exported?: boolean }
+export interface EditedEntry { id: string; name: string; file: string; versions: Version[]; returns: number; exported?: boolean; kind?: 'contract' | 'iac' }
 
 /**
  * How the agent's edits changed the session's symbols (change: add-ledger-contract-hashes-and-counts):
@@ -74,8 +75,17 @@ export interface EditedEntry { id: string; name: string; file: string; versions:
  * in exactly one of `bodyOnly`, `signatureChanged`, `unclassified` (a declaration line missing or one
  * the parser may have cut), or `firstSeenAfterEdit` (its first observed version was already the
  * agent's edit, so its baseline is unknown). `exportsChanged` counts the changed ones a module exports.
+ * A DECLARATION (an OpenAPI operation, an infrastructure resource) has no declaration line to
+ * compare, so it is counted on its own line instead — `contractElementsChanged` or
+ * `iacResourcesChanged` — and never as `unclassified`.
  */
-export interface ChangeKinds { bodyOnly: number; signatureChanged: number; unclassified: number; firstSeenAfterEdit: number; exportsChanged: number }
+export interface ChangeKinds {
+  bodyOnly: number; signatureChanged: number; unclassified: number; firstSeenAfterEdit: number; exportsChanged: number;
+  /** Declared OpenAPI operations the agent changed (change: add-ledger-contract-hashes). */
+  contractElementsChanged: number;
+  /** Declared infrastructure resources the agent changed. */
+  iacResourcesChanged: number;
+}
 
 /**
  * A declaration line the parser may have cut or overrun: it stops at the first `{` (an object type,
@@ -119,8 +129,15 @@ export interface LedgerSnapshot {
   withheld?: string;
 }
 
+/**
+ * One tracked element of a file: its normalized hash, and what KIND of thing it is. A declaration
+ * (an OpenAPI operation, an infrastructure resource) is tracked exactly like a code symbol — same
+ * ids, same versions, same notes — but counted on its own line (change: add-ledger-contract-hashes).
+ */
+export interface HashedElement { name: string; hash: string; sig?: string; exported?: boolean; kind?: 'contract' | 'iac' }
+
 /** Normalized per-symbol hashes for one file's text; `undefined` when the file cannot be hashed. */
-export type FileHasher = (file: string, content: string) => Promise<Map<string, { name: string; hash: string; sig?: string; exported?: boolean }> | undefined>;
+export type FileHasher = (file: string, content: string) => Promise<Map<string, HashedElement> | undefined>;
 
 /** The default hasher: the same extraction and hash the index and changed-set use. */
 export const hashFileSymbols: FileHasher = async (file, content) => {
@@ -185,14 +202,50 @@ export const hashWholeFile: FileHasher = async (file, content) => {
 /** Non-code files a briefing can name, hashed as a whole. */
 const WHOLE_FILE = /\.(?:md|ya?ml|json)$/i;
 
+/**
+ * Whether any hasher handles this file at all, so keeping its text can lead somewhere. A
+ * Dockerfile has no extension to detect, and declares resources (change:
+ * add-ledger-contract-hashes), so it is named here rather than counted untracked from the start.
+ */
+function trackableFile(file: string): boolean {
+  return detectLanguage(file) !== 'unknown' || WHOLE_FILE.test(file) || isDockerfilePath(file);
+}
+
+/**
+ * Declared elements of a file a session can be served: an OpenAPI/Swagger operation, or an
+ * infrastructure resource. `undefined` when the file declares none (change:
+ * add-ledger-contract-hashes).
+ */
+const hashDeclarations: FileHasher = async (file, content) => {
+  try {
+    const { hashContractOperations, hashIacResources, resolveIacLanguage } = await import('./declaration-hashes.js');
+    if (/\.(?:ya?ml|json)$/i.test(file)) {
+      const operations = hashContractOperations(file, content);
+      if (operations) return operations;
+    }
+    const language = resolveIacLanguage(file, content);
+    return language ? await hashIacResources(file, content, language) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * A declaration's own elements first (an operation, a resource), then code symbols, then — for a
+ * file a briefing can name whole — one whole-file hash. A specification that cannot be read falls
+ * through to the whole-file hash, so a change to it is still seen, just named by its file.
+ */
 export const defaultHasher: FileHasher = async (file, content) =>
-  (await hashFileSymbols(file, content)) ?? (WHOLE_FILE.test(file) ? hashWholeFile(file, content) : undefined);
+  (await hashDeclarations(file, content))
+  ?? (await hashFileSymbols(file, content))
+  ?? (WHOLE_FILE.test(file) ? hashWholeFile(file, content) : undefined);
 
 /** A persisted `changeKinds` with every count a finite, non-negative integer; anything else is dropped. */
 function validChangeKinds(x: unknown): x is ChangeKinds {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
   const r = x as Record<string, unknown>;
-  return ['bodyOnly', 'signatureChanged', 'unclassified', 'firstSeenAfterEdit', 'exportsChanged']
+  return ['bodyOnly', 'signatureChanged', 'unclassified', 'firstSeenAfterEdit', 'exportsChanged',
+    'contractElementsChanged', 'iacResourcesChanged']
     .every(k => typeof r[k] === 'number' && Number.isSafeInteger(r[k]) && (r[k] as number) >= 0);
 }
 
@@ -351,7 +404,7 @@ export class SessionLedger {
     const work = async () => {
       for (const [file, names] of files) {
         // A file no hasher handles is untracked from the start, not merely "not changed yet".
-        if (detectLanguage(file) === 'unknown' && !WHOLE_FILE.test(file)) { this.untracked.add(file); continue; }
+        if (!trackableFile(file)) { this.untracked.add(file); continue; }
         const content = await this.readCurrent(file, MAX_SERVED_FILE_BYTES);
         if (content === undefined) { this.untracked.add(file); continue; }
         // Re-serving shows the agent the current text: it becomes the version the agent read, for
@@ -396,8 +449,8 @@ export class SessionLedger {
       if (p.names !== 'all' && !p.names.has(h.name)) continue;
       found.add(h.name);
       this.served.delete(id); // the latest serve is the one that counts
-      this.served.set(id, { id, name: h.name, file, hash: h.hash, servedAt: p.servedAt });
-      this.noteVersion(id, h.name, file, { hash: h.hash, at: p.servedAt, sampled: true, ...(h.sig ? { sig: h.sig } : {}) }, h.exported);
+      this.served.set(id, { id, name: h.name, file, hash: h.hash, servedAt: p.servedAt, ...(h.kind ? { kind: h.kind } : {}) });
+      this.noteVersion(id, h.name, file, { hash: h.hash, at: p.servedAt, sampled: true, ...(h.sig ? { sig: h.sig } : {}) }, h.exported, h.kind);
     }
     if (p.names !== 'all') for (const n of p.names) if (!found.has(n)) this.untracked.add(`${file}::${n}`);
     this.cap(this.served);
@@ -437,18 +490,19 @@ export class SessionLedger {
     await this.resolveServed(file);
     const hashes = await this.hasher(file, content);
     if (!hashes) { this.untracked.add(file); return; }
-    for (const [id, h] of hashes) this.noteVersion(id, h.name, file, { hash: h.hash, at, sampled, ...(h.sig ? { sig: h.sig } : {}) }, h.exported);
+    for (const [id, h] of hashes) this.noteVersion(id, h.name, file, { hash: h.hash, at, sampled, ...(h.sig ? { sig: h.sig } : {}) }, h.exported, h.kind);
     this.seenMtime.set(file, await this.mtime(file));
   }
 
   /** Append a symbol's version; consecutive equal versions are one version. */
-  private noteVersion(id: string, name: string, file: string, v: Version, exported?: boolean): void {
+  private noteVersion(id: string, name: string, file: string, v: Version, exported?: boolean, kind?: 'contract' | 'iac'): void {
     let e = this.edited.get(id);
     if (!e) {
-      e = { id, name, file, versions: [], returns: 0 };
+      e = { id, name, file, versions: [], returns: 0, ...(kind ? { kind } : {}) };
       this.edited.set(id, e);
       this.cap(this.edited);
     }
+    if (kind && !e.kind) e.kind = kind;
     if (exported !== undefined) e.exported = exported || e.exported === true;
     // The first version is kept apart: the version list is trimmed on a long session.
     if (!this.firstVersion.has(id)) this.firstVersion.set(id, v);
@@ -577,7 +631,7 @@ export class SessionLedger {
    */
   changeKinds(agentEdits = readAgentEdits(this.root, this.startedAt)): ChangeKinds | undefined {
     if (!agentEdits.length) return undefined;
-    const k: ChangeKinds = { bodyOnly: 0, signatureChanged: 0, unclassified: 0, firstSeenAfterEdit: 0, exportsChanged: 0 };
+    const k: ChangeKinds = { bodyOnly: 0, signatureChanged: 0, unclassified: 0, firstSeenAfterEdit: 0, exportsChanged: 0, contractElementsChanged: 0, iacResourcesChanged: 0 };
     for (const e of this.edited.values()) {
       if (e.id.endsWith('::*')) continue; // a whole file (Markdown, YAML), not a symbol
       const first = this.firstVersion.get(e.id);
@@ -587,6 +641,10 @@ export class SessionLedger {
       // Its first observation was already the agent's edit (a file read outside OpenLore, then edited).
       if (this.ownVersion(e.file, undefined, first, agentEdits) && !this.servedBefore(e.id, first)) { k.firstSeenAfterEdit++; continue; }
       if (!own || first.hash === last.hash) continue;
+      // A declaration has no declaration line to compare: it is counted as what it is, not as
+      // an unclassified code symbol (change: add-ledger-contract-hashes).
+      if (e.kind === 'contract') { k.contractElementsChanged++; continue; }
+      if (e.kind === 'iac') { k.iacResourcesChanged++; continue; }
       if (first.sig === undefined || last.sig === undefined) k.unclassified++;
       else if (first.sig === last.sig) k.bodyOnly++;
       else k.signatureChanged++;
@@ -660,17 +718,37 @@ export function servedItems(tool: string, result: unknown): Array<{ file: string
     const name = typeof row.name === 'string' ? row.name : undefined;
     return file && name ? [{ file, name }] : [];
   };
+  /**
+   * Operations a `contracts` briefing named (change: add-ledger-contract-hashes). The briefing
+   * carries `operation` and `spec: "<file>:<line>"`, so the element is tracked by the same
+   * (file, address) pair the specification hasher keys — a teammate's change to it is then named
+   * by the operation, not by the file.
+   */
+  const contracts = (briefing: unknown) => rows((briefing as Record<string, unknown> | undefined)?.contracts).flatMap(c => {
+    const operation = typeof c.operation === 'string' ? c.operation : undefined;
+    const spec = typeof c.spec === 'string' ? c.spec : undefined;
+    const file = spec?.replace(/:\d+$/, '');
+    return operation && file ? [{ file, name: operation }] : [];
+  });
+  /** Declared operations a cross-domain lane named (`analyze_impact` / `get_subgraph`). */
+  const operations = (v: unknown) => rows((v as Record<string, unknown> | undefined)?.operations)
+    .flatMap(o => (typeof o.name === 'string' && typeof o.file === 'string' ? [{ file: o.file, name: o.name }] : []));
   switch (tool) {
     case 'orient':
       return [
         ...rows(r.relevantFunctions).flatMap(pick),
         // A spec file a briefing names is tracked as a whole file.
         ...rows(r.specDomains).flatMap(d => (typeof d.specFile === 'string' ? [{ file: d.specFile }] : [])),
+        ...contracts(r.contracts),
       ];
     case 'get_function_skeleton':
       return typeof r.filePath === 'string' ? [{ file: r.filePath }] : [];
     case 'get_subgraph':
-      return rows(r.nodes).filter(n => n.isExternal !== true).flatMap(pick);
+      return [...rows(r.nodes).filter(n => n.isExternal !== true).flatMap(pick), ...operations(r.crossDomain)];
+    case 'analyze_impact':
+      return operations(r.crossDomain);
+    case 'blast_radius':
+      return contracts(r.contracts);
     case 'search_code':
       return rows(r.results).slice(0, 5).flatMap(pick);
     default:

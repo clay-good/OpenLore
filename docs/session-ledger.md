@@ -23,6 +23,23 @@ not change them). The ledger stores addresses and hashes only, never file conten
   re-index batch is recorded. When a shared `openlore serve` daemon runs it instead, versions are
   sampled at each tool call (`editSource: "sampled"`).
 
+### Declarations, not only code
+
+A **declared OpenAPI operation** and an **infrastructure resource** are tracked exactly like a code
+symbol — same ids (`openapi.yaml::POST /v1/checkout`, `main.tf::aws_s3_bucket.logs`), same
+versions, same notes — so a teammate's change is named by the element, not by the file it lives in.
+Each is hashed from what its reader parses:
+
+| Element | Hash covers | So this is not a change |
+|---|---|---|
+| An OpenAPI/Swagger operation | its parsed model: method, path, `operationId`, deprecation, parameters, request body and success response (each with the reader's Merkle hash of the schema it references) | re-indenting the document, re-wrapping it, or adding an operation above this one |
+| An infrastructure resource | the normalized text of its declared span, where its property values live | re-indenting or re-aligning the block |
+
+A resource whose span the extractor could not close falls back to the parsed IaC model — address,
+type, module, declaration header, deploy binding and references — which is a weaker hash: a changed
+property value inside such a resource is not seen. A specification that cannot be read falls back
+to one whole-file hash, so the change is still seen, named by its file.
+
 A session is one MCP server process. Its ledger is
 `.openlore/session-ledger/<pid>.json`, removed when the server exits.
 
@@ -61,11 +78,13 @@ listed as not covered; call paths and insertion points are not part of a lease.
 ## Reading it from another process
 
 `openlore status --json` has a `session` block: `counts` (served, edited, untracked, dropped),
-`changeKinds` (how the agent's edits changed code symbols, first version against latest:
+`changeKinds` (how the agent's edits changed the session's elements, first version against latest:
 `bodyOnly`, `signatureChanged`, `unclassified` — a declaration line missing or one the parser may
-have cut, such as an arrow function — and `firstSeenAfterEdit` — the first version seen was already
-the agent's edit — are disjoint; `exportsChanged` counts the changed exported ones; counts only, no
-percentage or threshold; present only when an after-edit hook reports the agent's edits; JSON only),
+have cut, such as an arrow function — `firstSeenAfterEdit` — the first version seen was already
+the agent's edit — `contractElementsChanged` and `iacResourcesChanged` — a declaration has no
+declaration line to compare, so it is counted as what it is — are disjoint; `exportsChanged` counts
+the changed exported ones; counts only, no percentage or threshold; present only when an after-edit
+hook reports the agent's edits; JSON only),
 `backgroundChanges[]`, `editOscillation[]` (with each symbol's recent hash cycle), `editSource`, and
 `withheld` when a fact is withheld. When the panic layer is on (`panicResponse.mode` `advisory` or
 `experimental_blocking`), the `panic-check` hook adds `sessionLedger` with the same two lists to its
