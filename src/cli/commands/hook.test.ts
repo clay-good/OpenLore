@@ -225,6 +225,37 @@ describe('review round 1', () => {
     expect(context((await runHook('after-tools', payload(root, 'src/f.test.ts', { session_id: 'later' }))).stdout)?.additionalContext).toContain('test `a`');
   });
 
+  it('after a branch switch, other people\'s commits are not the session\'s work', async () => {
+    const root = repo({ 'src/f.ts': 'export function f() { return 1; }\n', 'src/f.test.ts': TEST });
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({ enforcement: { policy: { 'test-disabled': 'blocking' } } }));
+    execFileSync('git', ['checkout', '-qb', 'colleague'], { cwd: root, env: GIT_ENV });
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));
+    execFileSync('git', ['commit', '-qam', 'skip b'], { cwd: root, env: GIT_ENV });
+    execFileSync('git', ['checkout', '-q', 'main'], { cwd: root, env: GIT_ENV });
+    verify.result = {};
+    await runHook('before-edit', payload(root, 'src/f.ts', { session_id: 'sw' })); // the session starts on main
+    execFileSync('git', ['checkout', '-q', 'colleague'], { cwd: root, env: GIT_ENV });
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'") + '\n');
+    expect((await runHook('after-tools', payload(root, 'src/f.test.ts', { session_id: 'sw' }))).stdout).toBe('');
+  });
+
+  it('an agent\'s own commits during the session still count as its work', async () => {
+    const root = repo({ 'src/f.ts': 'export function f() { return 1; }\n', 'src/f.test.ts': TEST });
+    await runHook('before-edit', payload(root, 'src/f.ts', { session_id: 'own' })); // the session starts
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));
+    execFileSync('git', ['commit', '-qam', 'skip b'], { cwd: root, env: GIT_ENV });
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'") + '\n');
+    expect(context((await runHook('after-tools', payload(root, 'src/f.test.ts', { session_id: 'own' }))).stdout)?.additionalContext).toContain('test `b`');
+  });
+
+  it('finds the project from the edited file when the working directory is a monorepo top', async () => {
+    const top = repo({ 'packages/app/gen/x.pb.go': GENERATED });
+    rmSync(join(top, '.openlore'), { recursive: true });
+    mkdirSync(join(top, 'packages/app/.openlore'));
+    const r = await runHook('before-edit', JSON.stringify({ session_id: 'mt', cwd: top, tool_input: { file_path: join(top, 'packages/app/gen/x.pb.go') } }));
+    expect(context(r.stdout)?.additionalContext).toContain('is generated');
+  });
+
   it('works when the OpenLore root is a subfolder of the git repository', async () => {
     const top = repo({ 'packages/app/src/f.ts': 'export function f() { return 1; }\n', 'packages/app/src/f.test.ts': TEST });
     const app = join(top, 'packages/app');

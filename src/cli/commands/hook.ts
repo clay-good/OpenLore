@@ -166,6 +166,30 @@ async function writeSession(root: string, sessionId: string | undefined, rec: Se
   } catch { /* dedupe is best-effort: at worst a fact is said twice */ }
 }
 
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf899d15f71049056';
+
+/**
+ * What this session's facts compare with: its start commit, when every move of HEAD since then was
+ * a commit (the session's own work). A checkout, pull, merge, reset, or rebase since then brings in
+ * work that is not the session's, so the facts compare with HEAD from that point. Unknown (no HEAD
+ * yet): the empty tree.
+ */
+async function sessionBaseline(root: string, startHead: string): Promise<string | undefined> {
+  const head = await headSha(root);
+  if (!head) return startHead === EMPTY_TREE ? EMPTY_TREE : undefined;
+  if (startHead === EMPTY_TREE || startHead === head) return startHead;
+  try {
+    const { execFileGit } = await import('../../utils/git-exec.js');
+    const log = String((await execFileGit('git', ['reflog', '--format=%H %gs', '-n', '500', 'HEAD'], { cwd: root })).stdout).split('\n');
+    for (const line of log) {
+      const [sha, ...rest] = line.split(' ');
+      if (sha === startHead) return startHead; // reached the start: only commits since
+      if (!/^commit\b/.test(rest.join(' '))) return head;
+    }
+  } catch { /* no reflog: compare with HEAD */ }
+  return head;
+}
+
 async function headSha(root: string): Promise<string | undefined> {
   try {
     const { execFileGit } = await import('../../utils/git-exec.js');
@@ -310,7 +334,9 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
   const payload = parseHookPayload(raw);
   // The OpenLore root: the nearest directory at or above the session's working directory (the agent
   // may have `cd`-ed into a subdirectory) that has `.openlore`. None: nothing to say.
-  const root = openloreRoot(resolve(payload.cwd ?? opts.cwd ?? process.cwd()));
+  const start = resolve(payload.cwd ?? opts.cwd ?? process.cwd());
+  // The working directory first; when it is above the project (a monorepo top), the edited file's.
+  const root = openloreRoot(start) ?? (payload.files[0] ? openloreRoot(dirname(resolve(start, payload.files[0]))) : undefined);
   if (!root) return silent;
   if (momentDisabled(root, moment)) return silent;
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
@@ -321,9 +347,10 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
   const timeout = new Promise<'timeout'>(r => { timer = setTimeout(() => r('timeout'), opts.timeoutMs ?? TIMEOUT_MS[moment]); timer.unref?.(); });
   try {
     const session = readSession(root, payload.sessionId);
-    // The commit this session started from: recorded by its first hook, reused by every later one.
-    const baseline = session.startHead ?? await headSha(root);
-    if (!session.startHead && baseline) session.startHead = baseline;
+    // The commit this session started from: recorded by its first hook (git's empty tree on an
+    // unborn branch), reused by every later one.
+    if (!session.startHead) session.startHead = (await headSha(root)) ?? EMPTY_TREE;
+    const baseline = await sessionBaseline(root, session.startHead);
     // Quiet: the hook's stdout is the harness's JSON channel, so no log line may reach it.
     const work = withLoggerOptions({ quiet: true }, async () => {
       if (moment === 'before-edit') return { items: await beforeEdit(root, files) };
