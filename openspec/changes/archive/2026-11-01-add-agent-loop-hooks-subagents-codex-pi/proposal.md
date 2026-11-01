@@ -1,6 +1,7 @@
 # Agent-loop hooks, part 2: sub-agents, task creation, Codex and Pi
 
-> Status: PROPOSED (2026-10-31). Split from `add-agent-loop-hook-surfaces`, whose `openlore hook`
+> Status: SHIPPED (2026-11-01), sub-agent start only; the other parts moved to
+> `add-agent-loop-hooks-codex-pi-and-pending-edits`. Originally proposed 2026-10-31. Split from `add-agent-loop-hook-surfaces`, whose `openlore hook`
 > command and Claude Code before-edit, after-edit, and before-stop moments shipped first, and the
 > after-compact moment shipped with `add-session-handoff-briefing`. Each part below needs a receipt
 > or an adapter that has not shipped.

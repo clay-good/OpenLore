@@ -294,6 +294,8 @@ const hooksRule: ConfigRule = {
     'after-tools': booleanRule,
     'before-stop': booleanRule,
     'after-compact': booleanRule,
+    'before-subagent': booleanRule,
+    'subagent-start': booleanRule,
   }),
   required: requiredFor<HooksConfig>({}),
 };

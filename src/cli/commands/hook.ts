@@ -33,7 +33,7 @@ import { withLoggerOptions } from '../../utils/logger.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
 
-export const HOOK_MOMENTS = ['before-edit', 'after-tools', 'before-stop', 'after-compact'] as const;
+export const HOOK_MOMENTS = ['before-edit', 'after-tools', 'before-stop', 'after-compact', 'before-subagent', 'subagent-start'] as const;
 export type HookMoment = typeof HOOK_MOMENTS[number];
 
 /** The harness event each moment is wired to (Claude Code). */
@@ -42,12 +42,15 @@ export const HOOK_EVENT: Record<HookMoment, string> = {
   'after-tools': 'PostToolUse',
   'before-stop': 'Stop',
   'after-compact': 'SessionStart',
+  // The parent's Agent/Task call queues the sub-agent's task; SubagentStart briefs the sub-agent.
+  'before-subagent': 'PreToolUse',
+  'subagent-start': 'SubagentStart',
 };
 
 /** Per-moment budget, in characters of the printed receipt (about four characters a token). */
-const BUDGET_CHARS: Record<HookMoment, number> = { 'before-edit': 1600, 'after-tools': 4800, 'before-stop': 8000, 'after-compact': 8000 };
+const BUDGET_CHARS: Record<HookMoment, number> = { 'before-edit': 1600, 'after-tools': 4800, 'before-stop': 8000, 'after-compact': 8000, 'before-subagent': 0, 'subagent-start': 6000 };
 /** Hard time limit per moment; past it the hook prints nothing. */
-const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000, 'after-compact': 30_000 };
+const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000, 'after-compact': 30_000, 'before-subagent': 5_000, 'subagent-start': 20_000 };
 const STDIN_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_DELIVERED = 2000;
 
@@ -68,6 +71,11 @@ export interface HookPayload {
   /** The shell call was interrupted before it finished. */
   interrupted?: boolean;
   stopHookActive: boolean;
+  /** An Agent/Task tool call: the sub-agent's task and type. */
+  agentPrompt?: string;
+  subagentType?: string;
+  /** A SubagentStart event: the starting sub-agent's type. */
+  agentType?: string;
 }
 
 /** Read the fields OpenLore uses from a harness hook payload (Claude Code's shape). */
@@ -95,6 +103,9 @@ export function parseHookPayload(raw: string): HookPayload {
     ...(typeof p.tool_name === 'string' ? { toolName: p.tool_name } : {}),
     files: files.slice(0, 1),
     stopHookActive: p.stop_hook_active === true,
+    ...(typeof input.prompt === 'string' && input.prompt ? { agentPrompt: input.prompt } : {}),
+    ...(typeof input.subagent_type === 'string' && input.subagent_type ? { subagentType: input.subagent_type } : {}),
+    ...(typeof p.agent_type === 'string' && p.agent_type ? { agentType: p.agent_type } : {}),
   };
 }
 
@@ -409,6 +420,31 @@ function openloreRoot(start: string): string | undefined {
 }
 
 /**
+ * `subagent-start`: the starting sub-agent's task-scoped briefing (its task as queued by
+ * `before-subagent`) and the live peers on the footprint board. Not deduplicated: each sub-agent is
+ * a fresh context.
+ */
+async function subagentStart(root: string, payload: HookPayload, timeoutMs: number): Promise<HookRunResult> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<'timeout'>(r => { timer = setTimeout(() => r('timeout'), timeoutMs); timer.unref?.(); });
+  try {
+    const work = withLoggerOptions({ quiet: true }, async () => {
+      const { takeSubagentTask, subagentBriefing } = await import('../../core/services/subagent-briefing.js');
+      const prompt = await takeSubagentTask(root, { sessionId: payload.sessionId, agentType: payload.agentType }).catch(() => undefined);
+      return subagentBriefing(root, prompt);
+    });
+    const text = await Promise.race([work, timeout]);
+    if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
+    const capped = sanitizeForTerminal(text, { keepNewlines: true }).slice(0, BUDGET_CHARS['subagent-start']).replace(/[\uD800-\uDBFF]$/, '');
+    return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: capped } }), exitCode: 0 };
+  } catch {
+    return { stdout: '', exitCode: 0 };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * `after-compact`: the handoff briefing, so the agent resumes from the computed state of its change
  * rather than the compaction summary alone. Stated after every compaction (not deduplicated).
  */
@@ -458,6 +494,14 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
   if (momentDisabled(root, moment)) return silent;
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
   if (moment === 'after-compact') return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment]);
+  if (moment === 'before-subagent') {
+    if ((payload.toolName === 'Agent' || payload.toolName === 'Task') && payload.agentPrompt) {
+      const { queueSubagentTask } = await import('../../core/services/subagent-briefing.js');
+      await withLoggerOptions({ quiet: true }, () => queueSubagentTask(root, { sessionId: payload.sessionId, agentType: payload.subagentType, prompt: payload.agentPrompt! })).catch(() => undefined);
+    }
+    return silent; // only queues: the parent's tool call gets no output
+  }
+  if (moment === 'subagent-start') return subagentStart(root, payload, opts.timeoutMs ?? TIMEOUT_MS[moment]);
   const files = payload.files.map(f => repoPath(root, f)).filter((f): f is string => !!f);
   // A shell command (after-tools sees them too): count it and record a test run, nothing else, so a
   // shell call stays cheap.

@@ -317,7 +317,7 @@ With `mode: "off"`, `openlore orient --inject` emits nothing and exits 0.
 
 ## Agent-loop hooks
 
-In a repository install, `openlore install` also wires four moments of the agent loop into
+In a repository install, `openlore install` also wires six moments of the agent loop into
 `.claude/settings.json`, so the agent gets OpenLore's receipts without calling a tool. Each runs
 `openlore hook <moment>`, reads the hook payload, and prints at most one short receipt as the
 event's `additionalContext` — or nothing, when there is nothing new.
@@ -328,6 +328,8 @@ event's `additionalContext` — or nothing, when there is nothing new.
 | `after-tools` | `PostToolUse`, same tools and `Bash`; `PostToolUseFailure` on `Bash` (a failing command) | a shell command is counted, and a test run is recorded (below); an edit is recorded for the [session ledger](session-ledger.md), which can then name background changes; new ledger facts; for the edited file: [check weakening](check-weakening.md), [phantom references](phantom-references.md), and [generated files](generated-files.md); a live peer on the [board](mcp-tools.md) that changed a symbol this worktree declared reading (`declare_footprint` `readSet`) or that `orient`/`recall` served here in the last 30 minutes |
 | `before-stop` | `Stop` | the `verify_change` receipt for the session's diff, plus the symbols edited after the last test run and the tests that reach them, shown to **you** (a `systemMessage`): context for the agent at `Stop` would make it keep working |
 | `after-compact` | `SessionStart` (matcher `compact`) | the [handoff briefing](mcp-tools.md) of the in-flight change, so the agent resumes from computed state, not only the compaction summary (stated after every compaction) |
+| `before-subagent` | `PreToolUse` on `Agent\|Task` | nothing: it queues the sub-agent's task (credentials redacted, kept in `.openlore/session-ledger/` for at most 10 minutes), because `SubagentStart` does not carry it |
+| `subagent-start` | `SubagentStart` | the sub-agent itself gets the task-scoped `orient` briefing for its own task (matched by session and agent type, oldest first) and the live peers of other worktrees on the board (`declare_footprint`) |
 
 - **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
   hook ran, so work committed earlier is not raised again in every session.
