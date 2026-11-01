@@ -190,6 +190,29 @@ describe('review round 1', () => {
     expect(context(r.stdout)?.additionalContext).toContain('is generated');
   });
 
+  it('never takes the home directory or a parent repository for the OpenLore root', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'olhome-')));
+    dirs.push(home);
+    mkdirSync(join(home, '.openlore'));
+    const project = join(home, 'proj');
+    mkdirSync(join(project, 'gen'), { recursive: true });
+    writeFileSync(join(project, 'gen/order.pb.go'), GENERATED);
+    const prev = process.env.OPENLORE_HOME;
+    process.env.OPENLORE_HOME = home;
+    try {
+      const r = await runHook('before-edit', JSON.stringify({ session_id: 'h', cwd: project, tool_input: { file_path: join(project, 'gen/order.pb.go') } }));
+      expect(r.stdout).toBe('');
+    } finally {
+      if (prev === undefined) delete process.env.OPENLORE_HOME; else process.env.OPENLORE_HOME = prev;
+    }
+    // A repository without .openlore inside one that has it is its own project: silent.
+    const outer = repo();
+    const inner = join(outer, 'vendor/inner');
+    mkdirSync(join(inner, '.git'), { recursive: true });
+    writeFileSync(join(inner, 'x.pb.go'), GENERATED);
+    expect((await runHook('before-edit', JSON.stringify({ session_id: 'i', cwd: inner, tool_input: { file_path: join(inner, 'x.pb.go') } }))).stdout).toBe('');
+  });
+
   it('compares with the commit the session started from, not with earlier commits', async () => {
     const root = repo({ 'src/f.ts': 'export function f() { return 1; }\n', 'src/f.test.ts': TEST });
     write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));

@@ -23,6 +23,7 @@
 
 import { Command } from 'commander';
 import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readStdin } from '../../utils/stdin.js';
@@ -274,10 +275,17 @@ async function beforeStop(root: string, baseline: string | undefined): Promise<{
   return { items, block: reason };
 }
 
+/**
+ * The nearest directory at or above `start` that has `.openlore`, within the same repository: the
+ * walk stops at the repository's top (a `.git` entry) and never accepts the home directory, whose
+ * `~/.openlore` is OpenLore's user-level store, not a project.
+ */
 function openloreRoot(start: string): string | undefined {
+  const home = resolve(process.env.OPENLORE_HOME ?? homedir());
   for (let dir = start; ; dir = dirname(dir)) {
+    if (dir === home) return undefined;
     if (existsSync(join(dir, OPENLORE_DIR))) return dir;
-    if (dirname(dir) === dir) return undefined;
+    if (existsSync(join(dir, '.git')) || dirname(dir) === dir) return undefined;
   }
 }
 
