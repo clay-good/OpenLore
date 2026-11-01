@@ -161,3 +161,23 @@ describe('cost', () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
+
+describe('round-4 regressions', () => {
+  it('does not read a property access as a keyword before a slash', () => {
+    const src = "const a = obj.in / 2, b = require('./real') / 3;\n";
+    expect(invariant(src, 'js')).toContain("require('./real')");
+    for (const access of ['x.new', 'obj.of', 'o.return', 'a_in', 'case_']) {
+      expect(maskNonCode(`const v = ${access} / 2, w = require('./real');\n`, 'js'), access).toContain("'./real'");
+    }
+  });
+
+  it('keeps the file readable when an interpolation holds an unbalanced brace', () => {
+    const src = "const t = `a ${s.replace(/[{]/g, '')} b`;\nimport x from './real';\n";
+    expect(invariant(src, 'js')).toContain("import x from './real';");
+  });
+
+  it('blanks past an over-long unterminated regex instead of opening a comment', () => {
+    const src = `const r = /[/*]${'x'.repeat(1100)}/;\nimport x from './real';\n`;
+    expect(invariant(src, 'js')).toContain("import x from './real';");
+  });
+});

@@ -756,11 +756,19 @@ export async function checkPhantomReferences(
         await checkSymbols(ref, target);
         continue;
       }
-      if (relativeSpec) {
-        const candidates = pathCandidates(absRoot, file.path, ref.specifier, corpus);
+      // A Python absolute import whose top-level package IS a package in this repository names a
+      // module here, so a miss is a missing module — not a dependency to install.
+      const internalPython = ecosystem === 'pypi' && !relativeSpec
+        ? await pythonPackageRoot(absRoot, ref.specifier)
+        : null;
+      if (relativeSpec || internalPython !== null) {
+        const candidates = relativeSpec ? pathCandidates(absRoot, file.path, ref.specifier, corpus) : [];
+        const where = internalPython !== null
+          ? `, whose package is ${internalPython} in this repository`
+          : '';
         findings.push(finding(
           'unresolved-internal-import', 'error', ref.specifier,
-          `${ref.file} imports '${ref.specifier}', which is not a file in this repository${candidates.length ? `; nearby: ${candidates.join(', ')}` : ''}.`,
+          `${ref.file} imports '${ref.specifier}'${where}, which is not a module in this repository${candidates.length ? `; nearby: ${candidates.join(', ')}` : ''}.`,
           { path: ref.file, line: ref.line },
         ));
         continue;
@@ -995,6 +1003,25 @@ async function resolveInternal(
     if (!abs) continue;
     const rel = relative(absRoot, abs).split(sep).join('/');
     if (rel && !rel.startsWith('..')) return rel;
+  }
+  return null;
+}
+
+/**
+ * The directory of the in-repo Python package a dotted specifier starts with, or null when its top
+ * level names no package here. A `src` layout puts the package one directory down, and a namespace
+ * package has no `__init__.py`, so a directory holding a `.py` file counts.
+ */
+async function pythonPackageRoot(absRoot: string, specifier: string): Promise<string | null> {
+  const top = specifier.split('.')[0];
+  if (!top || top === '__future__') return null;
+  for (const root of PYTHON_PACKAGE_ROOTS) {
+    const dir = root ? `${root}/${top}` : top;
+    if ((await readOrFail(absRoot, `${dir}/__init__.py`)).kind !== 'absent') return dir;
+    try {
+      const entries = await readdir(join(absRoot, dir), { withFileTypes: true });
+      if (entries.some(e => e.isFile() && e.name.endsWith('.py'))) return dir;
+    } catch { /* not a directory here */ }
   }
   return null;
 }

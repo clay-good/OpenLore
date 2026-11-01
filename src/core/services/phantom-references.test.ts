@@ -775,3 +775,48 @@ describe('dependency groups', () => {
     expect(r.findings.map(f => f.subject)).toEqual(['lint']);
   });
 });
+
+describe('round-4 regressions', () => {
+  it('reports a missing module of a real in-repo package, not a package to install', async () => {
+    const d = repo(
+      {
+        'pyproject.toml': '[project]\nname = "app-dist"\ndependencies = []\n',
+        'app/__init__.py': '', 'app/real.py': 'VALUE = 1\n', 'main.py': 'x = 1\n',
+      },
+      { 'main.py': 'from app.real import VALUE\nfrom app.nope import other\nx = [VALUE, other]\n' },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => [f.code, f.subject])).toEqual([['unresolved-internal-import', 'app.nope']]);
+    expect(r.findings[0].message).toContain('whose package is app in this repository');
+  });
+
+  it('treats an import of the distribution this repository builds as internal', async () => {
+    const d = repo(
+      { 'pyproject.toml': '[project]\nname = "my-dist"\ndependencies = []\n', 'app.py': 'x = 1\n' },
+      { 'app.py': 'import my_dist\nx = my_dist\n' },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('still reports a genuinely undeclared package in a repo that has package directories', async () => {
+    const d = repo(
+      {
+        'pyproject.toml': '[project]\nname = "app-dist"\ndependencies = []\n',
+        'app/__init__.py': '', 'main.py': 'x = 1\n',
+      },
+      { 'main.py': 'import totally_made_up_pkg\nx = 1\n' },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings.map(f => f.subject)).toEqual(['totally_made_up_pkg']);
+  });
+
+  it('reads a Cargo manifest whose earlier value holds a bracket', async () => {
+    const cargo = '[dependencies]\ntokio = { version = "1", features = ["full"] }\nserde = "1.0"\n';
+    const d = repo(
+      { 'Cargo.toml': cargo, 'src/lib.rs': 'pub fn f() {}\n' },
+      { 'src/lib.rs': 'use serde::Serialize;\npub fn f() {}\n' },
+    );
+    // Rust has no import support in the matrix, so nothing is reported either way; what matters is
+    // that the manifest reader sees every dependency (asserted directly in external-packages.test.ts).
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+});

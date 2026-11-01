@@ -36,7 +36,7 @@ const MAX_REGEX_LITERAL = 1_024;
 const MAX_TEMPLATE_DEPTH = 16;
 
 /** Keywords after which a `/` can only begin a regex literal, never divide. */
-const REGEX_AFTER_KEYWORD = /\b(?:return|typeof|case|in|of|new|delete|void|yield|do|else|instanceof|throw|await)$/;
+const REGEX_AFTER_KEYWORD = /(?<![.\w$])(?:return|typeof|case|in|of|new|delete|void|yield|do|else|instanceof|throw|await)$/;
 
 /** True when a `/` at this point opens a regex literal rather than being a division operator. */
 function opensRegex(tail: string): boolean {
@@ -68,18 +68,25 @@ function skipQuoted(content: string, start: number): number {
  * ending it early — the shape that would otherwise leak a fixture's body as code.
  */
 function skipTemplate(content: string, start: number, depth = 0): number {
-  let i = start + 1;
-  while (i < content.length) {
-    const c = content[i];
-    if (c === '\\') { i += 2; continue; }
-    if (c === '`') return i + 1;
-    if (c === '$' && content[i + 1] === '{' && depth < MAX_TEMPLATE_DEPTH) {
-      i = skipInterpolation(content, i + 2, depth + 1);
-      continue;
+  const scan = (followInterpolations: boolean): number => {
+    let i = start + 1;
+    while (i < content.length) {
+      const c = content[i];
+      if (c === '\\') { i += 2; continue; }
+      if (c === '`') return i + 1;
+      if (followInterpolations && c === '$' && content[i + 1] === '{' && depth < MAX_TEMPLATE_DEPTH) {
+        i = skipInterpolation(content, i + 2, depth + 1);
+        continue;
+      }
+      i++;
     }
-    i++;
-  }
-  return content.length;
+    return content.length;
+  };
+  const end = scan(true);
+  // A brace inside a regex or a string the interpolation scan does not model (`${s.replace(/[{]/g,'')}`)
+  // never balances, and the scan then runs to the end of the file. Falling back to the simple
+  // "ends at the next backtick" rule keeps the rest of the file readable as code.
+  return end >= content.length && content[content.length - 1] !== '`' ? scan(false) : end;
 }
 
 /** Index just past the `}` that closes an interpolation whose body starts at `start`. */
@@ -189,6 +196,15 @@ export function maskNonCode(content: string, flavor: MaskFlavor): string {
         blank(content.slice(i + 1, j - 1));
         emitCode('/');
         i = j;
+        continue;
+      }
+      if (j >= limit && limit < length) {
+        // Longer than any real literal and still open: blank the rest of the line rather than
+        // re-reading the slash as code, where a `/*` inside it would open a comment to EOF.
+        const nl = content.indexOf('\n', i);
+        const stop = nl === -1 ? length : nl;
+        blank(content.slice(i, stop));
+        i = stop;
         continue;
       }
       // Not a regex after all; fall through and treat the slash as code.

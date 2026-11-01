@@ -67,13 +67,32 @@ async function parseNpm(rootDir: string): Promise<ExternalPackage[]> {
  * The body of a TOML table: the lines after its `[header]` line, up to the next line that opens a
  * table. Found without a regex over the content, so no section shape can make it backtrack.
  */
-function tomlSection(raw: string, header: string): string {
+export function tomlSection(raw: string, header: string): string {
+  /** The table a line opens, if it opens one: `[x]`, `[[x]]`, with an optional trailing comment. */
+  const tableOf = (line: string): string | null => {
+    const m = /^\s*(\[{1,2})\s*([^\]]*?)\s*(\]{1,2})\s*(?:#.*)?$/.exec(line.replace(/\r$/, ''));
+    return m && m[1].length === m[3].length ? m[2].replace(/["']/g, '') : null;
+  };
   const lines = raw.split('\n');
-  const start = lines.findIndex(l => l.trim() === `[${header}]`);
+  const start = lines.findIndex(l => tableOf(l) === header);
   if (start === -1) return '';
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex(l => l.trimStart().startsWith('['));
-  return (end === -1 ? rest : rest.slice(0, end)).join('\n');
+  const body: string[] = [];
+  // Only another TABLE HEADER ends the section. A value's array can start a line with `[` and look
+  // exactly like one, so a line inside an unclosed array — or right after a key awaiting its value
+  // — is never read as a header.
+  let depth = 0;
+  let awaitingValue = false;
+  for (const line of lines.slice(start + 1)) {
+    const text = line.replace(/\r$/, '').replace(/\s+#.*$/, '');
+    if (depth === 0 && !awaitingValue && tableOf(line) !== null) break;
+    body.push(line);
+    for (const ch of text) {
+      if (ch === '[') depth++;
+      else if (ch === ']') depth = Math.max(0, depth - 1);
+    }
+    if (text.trim() !== '') awaitingValue = /=\s*$/.test(text);
+  }
+  return body.join('\n');
 }
 
 /**
@@ -82,9 +101,8 @@ function tomlSection(raw: string, header: string): string {
  * dependency.
  */
 export function parsePyprojectName(raw: string): string | null {
-  for (const section of [/^\[project\]([\s\S]*?)(?=^\[|$)/m, /^\[tool\.poetry\]([\s\S]*?)(?=^\[|$)/m]) {
-    const block = section.exec(raw);
-    const name = block && /^name\s*=\s*["']([^"']+)["']/m.exec(block[1]);
+  for (const header of ['project', 'tool.poetry']) {
+    const name = /^\s*name\s*=\s*["']([^"']+)["']/m.exec(tomlSection(raw, header));
     if (name) return name[1];
   }
   return null;
@@ -120,13 +138,11 @@ export function parsePyprojectManifest(raw: string): ExternalPackage[] {
 
     // Poetry: [tool.poetry.dependencies] (prod) and [tool.poetry.dev-dependencies] (dev)
     for (const [section, isDev] of [
-      ['tool\\.poetry\\.dependencies', false],
-      ['tool\\.poetry\\.dev-dependencies', true],
-      ['tool\\.poetry\\.group\\.dev\\.dependencies', true],
+      ['tool.poetry.dependencies', false],
+      ['tool.poetry.dev-dependencies', true],
+      ['tool.poetry.group.dev.dependencies', true],
     ] as const) {
-      const block = raw.match(new RegExp(`\\[${section}\\]([\\s\\S]*?)(?=\\[|$)`));
-      if (!block) continue;
-      for (const line of block[1].split('\n')) {
+      for (const line of tomlSection(raw, section).split('\n')) {
         const m = line.match(/^(\w[\w-]*)\s*=\s*["']([^"']+)["']/);
         // skip python version constraint line
         if (m && m[1] !== 'python') out.push({ name: m[1], version: m[2], ecosystem: 'pypi', isDev });
@@ -178,11 +194,9 @@ export function parseCargoManifest(raw: string): ExternalPackage[] {
     // a Cargo workspace declares versions its members inherit with `pkg.workspace = true`.
     for (const [section, isDev] of [
       ['dependencies', false], ['dev-dependencies', true], ['build-dependencies', true],
-      ['workspace\\.dependencies', false],
+      ['workspace.dependencies', false],
     ] as const) {
-      const block = raw.match(new RegExp(`\\[${section}\\]([\\s\\S]*?)(?=\\[|$)`));
-      if (!block) continue;
-      for (const line of block[1].split('\n')) {
+      for (const line of tomlSection(raw, section).split('\n')) {
         const simple = line.match(/^(\w[\w-]*)\s*=\s*["']([^"']+)["']/);
         if (simple) { out.push({ name: simple[1], version: simple[2], ecosystem: 'cargo', isDev }); continue; }
         const inline = line.match(/^(\w[\w-]*)\s*=\s*\{[^}]*version\s*=\s*["']([^"']+)["']/);
