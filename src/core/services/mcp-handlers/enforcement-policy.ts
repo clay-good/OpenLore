@@ -237,6 +237,11 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'An API operation is declared in a specification but no indexed route handler serves it.',
     remediation: 'Declared but not served: {subject}; add the route, or remove the operation from the specification.',
   },
+  'contract-payload-missing-required': {
+    defaultClass: 'advisory', source: 'service-contract',
+    description: 'A client call site sends a literal request body that lacks a property the operation requires.',
+    remediation: 'Request body at {subject} is missing a required property; add it, or correct the specification.',
+  },
   'contract-implemented-undeclared': {
     defaultClass: 'advisory', source: 'service-contract',
     description: 'A route handler serves a path under one the specification covers, but the specification does not declare it.',
