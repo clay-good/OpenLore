@@ -23,7 +23,8 @@ import { readFile } from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import type Parser from 'tree-sitter';
 import { safeJoin } from '../../utils/path-confinement.js';
-import { execFileGit, spawnGit } from '../../utils/git-exec.js';
+import { execFileGit } from '../../utils/git-exec.js';
+import { readBlobsAtRef, readBlobsPerFile } from '../../utils/git-blobs.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { isTestFile } from '../analyzer/test-file.js';
@@ -1316,61 +1317,23 @@ export async function resolveWeakeningBaseline(root: string, baseRef: string | u
   return { ref, commit, ...(note ? { note } : {}) };
 }
 
-/** Run git with `input` on stdin; bounded output. */
-function gitWithInput(root: string, args: string[], input: string, maxBytes: number): Promise<Buffer> {
-  return new Promise((resolveRun, rejectRun) => {
-    const child = spawnGit('git', args, { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let settled = false;
-    const fail = (err: Error) => { if (!settled) { settled = true; child.kill(); rejectRun(err); } };
-    child.on('error', fail);
-    child.stdin.on('error', fail);
-    child.stdout.on('data', (c: Buffer) => {
-      size += c.length;
-      if (size > maxBytes) fail(new Error('git output exceeded its bound'));
-      else chunks.push(c);
-    });
-    child.on('close', code => {
-      if (settled) return;
-      settled = true;
-      if (code === 0) resolveRun(Buffer.concat(chunks));
-      else rejectRun(new Error(`git ${args[0]} exited ${code}`));
-    });
-    child.stdin.end(input);
-  });
-}
-
 type Blob = string | null | 'too-large';
 
 /**
- * Read many `rev:path` blobs with two git processes (sizes, then contents) instead of two per file.
- * Absent → `null`; over the cap → `'too-large'`.
+ * Read many `ref:path` blobs: one `git cat-file --batch` per ref (the per-file reader is the
+ * fallback). Absent → `null`; over the cap → `'too-large'`.
  */
-async function readBlobs(root: string, specs: readonly string[]): Promise<Map<string, Blob>> {
+async function readBlobs(root: string, wanted: ReadonlyArray<{ ref: string; path: string }>): Promise<Map<string, Blob>> {
   const out = new Map<string, Blob>();
-  const asked = specs.filter(sp => !/[\n\r]/.test(sp));
-  for (const sp of specs) if (!asked.includes(sp)) out.set(sp, null);
-  if (!asked.length) return out;
-  const checks = (await gitWithInput(root, ['cat-file', '--batch-check'], asked.map(sp => sp + '\n').join(''), 1024 * 1024 + asked.length * 128))
-    .toString('utf-8').split('\n');
-  const wanted: Array<{ spec: string; sha: string; size: number }> = [];
-  asked.forEach((sp, i) => {
-    const m = /^([0-9a-f]{40,64}) blob (\d+)$/.exec(checks[i] ?? '');
-    if (!m) out.set(sp, null);
-    else if (Number(m[2]) > MAX_FILE_BYTES) out.set(sp, 'too-large');
-    else wanted.push({ spec: sp, sha: m[1], size: Number(m[2]) });
-  });
-  if (!wanted.length) return out;
-  const total = wanted.reduce((n, w) => n + w.size + 128, 0);
-  const buf = await gitWithInput(root, ['cat-file', '--batch'], wanted.map(w => w.sha + '\n').join(''), total);
-  let pos = 0;
-  for (const w of wanted) {
-    const nl = buf.indexOf(0x0a, pos);
-    if (nl < 0) { out.set(w.spec, null); continue; }
-    pos = nl + 1;
-    out.set(w.spec, buf.subarray(pos, pos + w.size).toString('utf-8'));
-    pos += w.size + 1;
+  const byRef = new Map<string, string[]>();
+  for (const w of wanted) (byRef.get(w.ref) ?? byRef.set(w.ref, []).get(w.ref)!).push(w.path);
+  for (const [ref, paths] of byRef) {
+    const unique = [...new Set(paths)];
+    const blobs = await readBlobsAtRef(root, ref, unique).catch(() => readBlobsPerFile(root, ref, unique));
+    for (const path of unique) {
+      const text = blobs.get(path);
+      out.set(`${ref}:${path}`, text === undefined ? null : Buffer.byteLength(text, 'utf-8') > MAX_FILE_BYTES ? 'too-large' : text);
+    }
   }
   return out;
 }
@@ -1461,12 +1424,12 @@ export async function checkWeakening(input: {
       .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     if (relevant.length > MAX_FILES) boundaries.push(`Check weakening read the first ${MAX_FILES} of ${relevant.length} changed files.`);
     const read = [...relevant.slice(0, MAX_FILES), ...(policy ? [policy] : [])];
-    const specs = new Set<string>();
+    const wanted: Array<{ ref: string; path: string }> = [];
     for (const e of read) {
-      if (e.status !== 'added') specs.add(`${baseline.commit}:${e.oldPath ?? e.path}`);
-      if (e.status !== 'deleted' && input.headRef) specs.add(`${input.headRef}:${e.path}`);
+      if (e.status !== 'added') wanted.push({ ref: baseline.commit, path: e.oldPath ?? e.path });
+      if (e.status !== 'deleted' && input.headRef) wanted.push({ ref: input.headRef, path: e.path });
     }
-    const blobs = await readBlobs(input.root, [...specs]);
+    const blobs = await readBlobs(input.root, wanted);
     const sideOf = async (e: typeof entries[number], side: 'base' | 'current'): Promise<Blob> => {
       if (side === 'base') return e.status === 'added' ? null : blobs.get(`${baseline.commit}:${e.oldPath ?? e.path}`) ?? null;
       if (e.status === 'deleted') return null;

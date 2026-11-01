@@ -52,13 +52,12 @@ const READ_ONLY_TOOL_MAY_WRITE: Record<string, string> = {
   // rev-parse) and `gh` reads through it. A tool that issues a state-changing git command is a writer.
   // The trace cannot tell a read subcommand from a write, so this entry is a reviewed trust boundary.
   'execFileGit@src/utils/git-exec.ts': 'git and gh read subcommands through the hardened runner',
-  // Same reviewed trust boundary as execFileGit, streaming shape: certify_merge reads blobs with
-  // `git cat-file --batch` (stdin-fed specs, stdout-streamed content) through the hardened spawnGit
-  // runner. spawnGit is typed `typeof spawn`, so the call resolves straight to the spawn primitive
-  // and the read is attributed to this function — a read-only git subcommand, not state change.
-  'readBlobsAtRef@src/core/services/mcp-handlers/merge-semantic-certificate.ts': 'git cat-file --batch blob read through the hardened spawn runner',
-  // Check weakening reads baseline blobs the same way (`git cat-file --batch-check` / `--batch`).
-  'gitWithInput@src/core/services/check-weakening.ts': 'git cat-file --batch-check/--batch blob read through the hardened spawn runner',
+  // Same reviewed trust boundary as execFileGit, streaming shape: certify_merge and the
+  // phantom-reference check read blobs with `git cat-file --batch` (stdin-fed specs,
+  // stdout-streamed content) through the hardened spawnGit runner. spawnGit is typed `typeof
+  // spawn`, so the call resolves straight to the spawn primitive and the read is attributed to this
+  // function — a read-only git subcommand, not state change.
+  'readBlobsAtRef@src/utils/git-blobs.ts': 'git cat-file --batch blob read through the hardened spawn runner',
   // Argument-gated writes every read-only dispatch turns off (asserted below).
   'writeSpecLinkIndex@src/core/generator/spec-link-service.ts': 'mapping.json cache, only when persist is true',
   'audit@src/api/audit.ts': 'audit report, only when save is true',

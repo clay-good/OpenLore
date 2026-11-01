@@ -23,8 +23,8 @@ groups:
 | `verify_change` as the one landing place for all diff findings, plus new architecture violations and secrets on added lines | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
 | Name the symbol that changed under the agent; detect modify/revert edit loops; name edits made after the last test run | [add-session-structural-ledger](add-session-structural-ledger/) | new |
 | IaC resource → the code it runs; IaC sites that set each env var | [add-iac-code-binding](add-iac-code-binding/) | new |
-| Tests deleted, skipped, or emptied; expected values changed; suppressions; swallowed errors; relaxed CI | [add-check-weakening-findings](archive/2026-10-31-add-check-weakening-findings/) | shipped |
-| Imports, exports, and packages that do not exist or are not declared | [add-phantom-reference-findings](add-phantom-reference-findings/) | new |
+| Tests deleted, skipped, or emptied; expected values changed; suppressions; swallowed errors; relaxed CI | [add-check-weakening-findings](archive/2026-10-31-add-check-weakening-findings/) | shipped (#634) |
+| Imports, exports, and packages that do not exist or are not declared | [add-phantom-reference-findings](archive/2026-10-31-add-phantom-reference-findings/) | shipped (#632) |
 | Generated or vendored file edited by hand; name its source and regenerate command | [add-generated-file-guard](archive/2026-10-31-add-generated-file-guard/) | shipped (#629) |
 | Push receipts after edits, after compaction, before stop, at sub-agent start, at task creation | [add-agent-loop-hook-surfaces](add-agent-loop-hook-surfaces/) | new |
 | Shared footprint board across worktrees; peer read-after-write notices; duplicate intent | [add-peer-footprint-board](add-peer-footprint-board/) | new |

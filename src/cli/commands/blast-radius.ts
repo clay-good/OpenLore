@@ -180,6 +180,13 @@ function renderHuman(b: BlastRadiusBriefing): string {
     lines.push(sanitizeForTerminal(`   ⚠ ${g.kind} ${g.file} (${g.rule}: ${g.matched}) — ${from}${regen}`));
   }
   if ((b.generated?.length ?? 0) > GENERATED_SHOWN) lines.push(`   … and ${b.generated!.length - GENERATED_SHOWN} more generated file(s)`);
+  // References the diff adds that resolve to nothing (add-phantom-reference-findings).
+  const REFERENCES_SHOWN = 5;
+  for (const u of (b.phantomReferences?.unresolved ?? []).slice(0, REFERENCES_SHOWN)) {
+    lines.push(sanitizeForTerminal(`   ⚠ ${u.code}: ${u.subject} (${u.path}${u.line ? `:${u.line}` : ''})`));
+  }
+  const refTotal = b.phantomReferences?.count ?? 0;
+  if (refTotal > REFERENCES_SHOWN) lines.push(`   … and ${refTotal - REFERENCES_SHOWN} more unresolved reference(s)`);
   for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;

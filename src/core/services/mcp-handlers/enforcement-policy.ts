@@ -336,6 +336,32 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A high-complexity function in a churned file never got simpler and ended more complex over its sampled recent commits (rising) and is at or above the high-complexity threshold.',
     remediation: 'Rising complexity: {subject}; split or simplify it before adding more branches.',
   },
+  // ── phantom references (add-phantom-reference-findings) ──
+  // Returned and classified by verify_change; `openlore enforce` does not collect them.
+  'unresolved-internal-import': {
+    defaultClass: 'advisory',
+    source: 'phantom-references',
+    description: 'A diff adds a relative import whose target is not a file in this repository, so the module does not exist. A path alias the resolver cannot follow is disclosed instead, never reported.',
+    remediation: 'Import of {subject} resolves to no file; create the module or correct the path.',
+  },
+  'unresolved-internal-symbol': {
+    defaultClass: 'advisory',
+    source: 'phantom-references',
+    description: "A diff adds a named import that the target module does not export, read from the target's current content. A target that re-exports from somewhere unfollowable is disclosed instead, never reported.",
+    remediation: 'The module does not export {subject}; export it there, or import a name it does export.',
+  },
+  'undeclared-dependency': {
+    defaultClass: 'advisory',
+    source: 'phantom-references',
+    description: 'A diff adds an import of an external package that no manifest in scope declares, and that is not the language\'s standard library — the shape an invented (and squattable) package name takes. An ecosystem with no readable manifest is disclosed instead.',
+    remediation: 'Nothing declares {subject}; add it to the manifest, or use a package that is declared.',
+  },
+  'unpinned-dependency': {
+    defaultClass: 'advisory',
+    source: 'phantom-references',
+    description: 'A diff adds an import of a package its manifest declares, but the lockfile beside that changed manifest does not pin it, so a clean install will not have it. An absent or unparseable lockfile yields no finding.',
+    remediation: 'The lockfile does not pin {subject}; run the package manager\'s install so the lockfile is updated with the manifest.',
+  },
   // ── generated-file guard (add-generated-file-guard) ──
   // Returned and classified by verify_change; `openlore enforce` does not collect it.
   'generated-file-edited': {
