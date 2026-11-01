@@ -704,10 +704,10 @@ export const TOOL_DEFINITIONS = [
         directory: { type: 'string', description: DIR_DESC },
         kind: {
           type: 'string',
-          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed'],
+          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current'],
           description: 'The kind of claim to verify.',
         },
-        subject: { type: 'string', description: 'A symbol; a decision id for decision-current; "METHOD /path" for endpoint kinds.' },
+        subject: { type: 'string', description: 'A symbol; a decision id; "METHOD /path"; or a leaseToken.' },
         object: { type: 'string', description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' },
       },
       required: ['kind', 'subject'],

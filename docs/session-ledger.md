@@ -46,6 +46,15 @@ The `after-tools` hook also records the session's test runs (see
 and exit status, and the symbol hashes at the last run. The `before-stop` receipt names what was
 edited after that run.
 
+## Lease tokens
+
+`orient` and `recall` return a `leaseToken` (`lt_` and 20 hex characters) naming the symbols and
+files they served, with their content hashes at that moment, stored in
+`.openlore/session-ledger/tokens/` for 12 hours. Any process on the clone can pass it to
+`verify_claim` with kind `lease-current`: confirmed when everything still hashes the same, refuted
+naming each changed or removed entry. An edit to an unserved symbol in the same file does not
+change the lease; a reformatted Markdown or YAML file does not either.
+
 ## Reading it from another process
 
 `openlore status --json` has a `session` block: `counts` (served, edited, untracked, dropped),

@@ -164,8 +164,29 @@ export async function dispatchTool(
     const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
     // Data-dependent next-call receipts (change: add-conclusion-followup-hints).
     const hinted = withFollowupHints(canonical, checked);
-    return withPartialIndexReceipt(await redactSourceToolResult(canonical, hinted, directory), directory);
+    const leased = await withLeaseToken(canonical, hinted, args, directory);
+    return withPartialIndexReceipt(await redactSourceToolResult(canonical, leased, directory), directory);
   });
+}
+
+/**
+ * `orient` and `recall` carry a `leaseToken` naming what they served, so another process can ask
+ * `verify_claim` (`lease-current`) whether it is still current (change: add-session-lease-tokens).
+ * Best effort: no token is attached when nothing was served or the token cannot be written.
+ */
+async function withLeaseToken(tool: string, result: unknown, args: Record<string, unknown>, directory: string): Promise<unknown> {
+  if ((tool !== 'orient' && tool !== 'recall') || !result || typeof result !== 'object' || Array.isArray(result) || 'error' in result) return result;
+  try {
+    const { resolve } = await import('node:path');
+    const { existsSync } = await import('node:fs');
+    const root = resolve(typeof args.directory === 'string' ? args.directory : directory);
+    if (!existsSync(resolve(root, '.openlore'))) return result;
+    const { servedForLease, issueLeaseToken } = await import('./lease-tokens.js');
+    const token = await issueLeaseToken(root, servedForLease(tool, result));
+    return token ? { ...(result as Record<string, unknown>), leaseToken: token } : result;
+  } catch {
+    return result;
+  }
 }
 
 /**

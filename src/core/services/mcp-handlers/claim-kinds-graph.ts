@@ -21,7 +21,7 @@ import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-grap
 import type { PendingDecision, StructuralAnchor } from '../../../types/index.js';
 import type { ContractDocument, ContractOperation } from '../contract/openapi.js';
 
-export type GraphClaimKind = 'endpoint-implemented' | 'endpoint-consumed' | 'decision-governed';
+export type GraphClaimKind = 'endpoint-implemented' | 'endpoint-consumed' | 'decision-governed' | 'lease-current';
 type Verdict = 'confirmed' | 'refuted' | 'unverifiable';
 
 const EXTERNAL_CALLERS = 'Callers in other repositories, through generated clients, or with dynamic URLs are not visible here.';
@@ -255,6 +255,28 @@ async function decisionGoverned(root: string, subject: string): Promise<unknown>
   }
 }
 
+/** `lease-current`: does every (symbol or file, hash) a lease token named still hash the same? */
+async function leaseCurrent(root: string, subject: string): Promise<unknown> {
+  const { emittedText } = await import('../generated-file-guard.js');
+  const claim = { kind: 'lease-current' as const, subject: emittedText(subject) };
+  const staleness = await computeStaleness(root);
+  const { checkLease } = await import('../lease-tokens.js');
+  const r = await checkLease(root, subject.trim());
+  if (r.status !== 'checked') return { claim, verdict: 'unverifiable' as Verdict, reason: emittedText(r.reason), confidenceBoundary: assembleBoundary({ staleness }) };
+  const changed = r.changed.map(c => ({ file: emittedText(c.file), ...(c.name ? { name: emittedText(c.name) } : {}), why: c.why }));
+  const receipt = { issuedAt: r.createdAt, entries: r.entries, changed };
+  if (!changed.length) {
+    return { claim, verdict: 'confirmed' as Verdict, reason: `All ${r.entries} served entr${r.entries === 1 ? 'y' : 'ies'} of the lease (issued ${r.createdAt}) hash the same as when they were served.`, receipt, confidenceBoundary: assembleBoundary({ staleness }) };
+  }
+  const named = changed.slice(0, 8).map(c => `${c.name ? `${c.name} (${c.file})` : c.file}${c.why === 'removed' ? ' [removed]' : c.why === 'file-changed' ? ' [file changed]' : ''}`).join(', ');
+  return {
+    claim, verdict: 'refuted' as Verdict,
+    reason: `${changed.length} of ${r.entries} served entr${r.entries === 1 ? 'y' : 'ies'} changed since the lease was issued (${r.createdAt}): ${named}${changed.length > 8 ? ` and ${changed.length - 8} more` : ''}. Re-read them before relying on what was served.`,
+    receipt, confidenceBoundary: assembleBoundary({ staleness }),
+  };
+}
+
 export async function verifyGraphClaim(root: string, kind: GraphClaimKind, subject: string): Promise<unknown> {
+  if (kind === 'lease-current') return leaseCurrent(root, subject);
   return kind === 'decision-governed' ? decisionGoverned(root, subject) : endpointClaim(root, kind, subject);
 }
