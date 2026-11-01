@@ -435,7 +435,7 @@ describe('SessionLedger — session change counts (change: add-ledger-contract-h
     await new Promise(r => setTimeout(r, 5));
     await ledger.refresh(5000);
   }
-  const zero = { bodyOnly: 0, signatureChanged: 0, unclassified: 0, firstSeenAfterEdit: 0, exportsChanged: 0 };
+  const zero = { bodyOnly: 0, signatureChanged: 0, unclassified: 0, firstSeenAfterEdit: 0, exportsChanged: 0, contractElementsChanged: 0, iacResourcesChanged: 0 };
 
   it('counts the agent\'s body-only and signature changes disjointly, and changed exports, with no thresholds', async () => {
     const root = repo();

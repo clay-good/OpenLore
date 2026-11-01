@@ -23,15 +23,7 @@ interface InFile { path: string; content: string; language: string }
  * `<name>.Dockerfile`, or `Containerfile` (Podman's equivalent). Compose files are
  * `.yaml`/`.yml` and are classified by `classifyYaml`, not here.
  */
-export function isDockerfilePath(path: string): boolean {
-  const base = path.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
-  return (
-    base === 'dockerfile' ||
-    base === 'containerfile' ||
-    base.startsWith('dockerfile.') ||
-    base.endsWith('.dockerfile')
-  );
-}
+export { isDockerfilePath } from '../language-detection.js';
 
 const posixDir = (p: string): string => {
   const posix = p.replace(/\\/g, '/');

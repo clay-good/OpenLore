@@ -77,6 +77,22 @@ export function detectLanguage(filePath: string): string {
 }
 
 /**
+ * Whether a path names a Dockerfile. It has no extension to switch on, so this lives beside the
+ * canonical extension map rather than in the Docker extractor, which pulls in a YAML parser —
+ * every reader that only needs the path test (the session ledger, `status`) would otherwise load
+ * it (change: add-ledger-contract-hashes).
+ */
+export function isDockerfilePath(path: string): boolean {
+  const base = path.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
+  return (
+    base === 'dockerfile' ||
+    base === 'containerfile' ||
+    base.startsWith('dockerfile.') ||
+    base.endsWith('.dockerfile')
+  );
+}
+
+/**
  * Whether a JavaScript/TypeScript-family file needs tree-sitter-typescript's TSX grammar.
  * Keep this path decision beside the canonical extension map so parser consumers cannot drift.
  */

@@ -23,6 +23,29 @@ not change them). The ledger stores addresses and hashes only, never file conten
   re-index batch is recorded. When a shared `openlore serve` daemon runs it instead, versions are
   sampled at each tool call (`editSource: "sampled"`).
 
+### Declarations, not only code
+
+A **declared OpenAPI operation** and an **infrastructure resource** are tracked alongside code
+symbols, with the same ids (`openapi.yaml::POST /v1/checkout`, `main.tf::aws_s3_bucket.logs`), so a
+teammate's change is named by the element rather than by the file it lives in.
+
+An element model is always narrower than its file, so a declaration file is hashed **both ways**:
+one entry per element, and one whole-file entry beside them. The element names the change when it
+can; the whole-file entry is the backstop, and it means the worst case is a change named by its
+file — never silence.
+
+| Entry | Hash covers | Sees | Does not see |
+|---|---|---|---|
+| An OpenAPI/Swagger operation | its parsed model: method, path, `operationId`, deprecation, parameters, request body and success response, each with the reader's Merkle hash of the schema it references (even through a local `$ref`) | a changed parameter, required property, schema type, or success-response shape | `security`, non-2xx responses, anything behind an external `$ref`, a path added or removed |
+| An infrastructure resource, **Terraform** and **Bicep** | the normalized text of its declared span | any property value in the block | — |
+| An infrastructure resource, every other ecosystem (Kubernetes, Helm, CloudFormation, Ansible, Docker, Compose, GitHub Actions) | the parsed IaC model: address, type, kind, module, declaration header, deploy binding, references — those extractors do not close a resource's span | a changed image, dependency, or header | a property value inside the block (a replica count, a port, a step's command) |
+| The whole file | its whitespace-normalized text | every edit the rows above miss, including an element deleted or renamed, and a specification that stops parsing | a change in a file the specification only `$ref`s |
+
+What each row does not see is covered by the row below it, and the file-level row is reported only
+when no element in that file already named the change — one edit is one fact. Unlike the
+code-symbol hash, a resource's span hash is text-level: a comment added inside the block reads as a
+change.
+
 A session is one MCP server process. Its ledger is
 `.openlore/session-ledger/<pid>.json`, removed when the server exits.
 
@@ -56,16 +79,20 @@ confirmed when everything has the same text, refuted naming each changed or remo
 unverifiable when a file cannot be read. An edit to an unserved function, or an edit above a served
 one, does not change the lease; a reformatted Markdown, YAML, or JSON file does not either.
 Whitespace inside a served function does. A served name the index cannot locate (a class) is
-listed as not covered; call paths and insertion points are not part of a lease.
+listed as not covered; call paths and insertion points are not part of a lease. A lease covers
+functions and files: a declared operation the `contracts` briefing named is tracked by the ledger
+but is not part of a lease, so `lease-current` says nothing about it either way.
 
 ## Reading it from another process
 
 `openlore status --json` has a `session` block: `counts` (served, edited, untracked, dropped),
-`changeKinds` (how the agent's edits changed code symbols, first version against latest:
+`changeKinds` (how the agent's edits changed the session's elements, first version against latest:
 `bodyOnly`, `signatureChanged`, `unclassified` — a declaration line missing or one the parser may
-have cut, such as an arrow function — and `firstSeenAfterEdit` — the first version seen was already
-the agent's edit — are disjoint; `exportsChanged` counts the changed exported ones; counts only, no
-percentage or threshold; present only when an after-edit hook reports the agent's edits; JSON only),
+have cut, such as an arrow function — `firstSeenAfterEdit` — the first version seen was already
+the agent's edit — `contractElementsChanged` and `iacResourcesChanged` — a declaration has no
+declaration line to compare, so it is counted as what it is — are disjoint; `exportsChanged` counts
+the changed exported ones; counts only, no percentage or threshold; present only when an after-edit
+hook reports the agent's edits; JSON only),
 `backgroundChanges[]`, `editOscillation[]` (with each symbol's recent hash cycle), `editSource`, and
 `withheld` when a fact is withheld. When the panic layer is on (`panicResponse.mode` `advisory` or
 `experimental_blocking`), the `panic-check` hook adds `sessionLedger` with the same two lists to its
@@ -91,7 +118,8 @@ facts are withheld and the reason is given: OpenLore never picks a session.
   seconds before it (or 5 seconds after); a later version by another process is still named.
 
 - A file OpenLore cannot hash (an unsupported language, over 1 MB) is counted as `untracked`, never
-  treated as unchanged.
+  treated as unchanged. A declaration file is always hashed as a whole as well, so an element its
+  model cannot see is still reported by file — see the table above for which part sees what.
 - The ledger keeps 2,000 entries per list; older ones are dropped and counted in `dropped`.
 - An oscillation is two returns to an earlier version (A → B → A → B). One return (A → B → A) is
   not reported. There is no score and no threshold beyond that count; only the existing opt-in

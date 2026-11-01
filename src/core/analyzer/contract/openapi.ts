@@ -317,8 +317,17 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
     }
     // The object's shape apart from its properties and required list, which the rules compare.
     // A member with nothing else (only properties or a required list) adds nothing to the shape.
-    const hash = sha((parts as Json[]).map(p => omit(p, [...TYPE_KEYS, 'properties', 'required', 'allOf']))
-      .filter(p => Object.keys(p).some(k => !DOC_ONLY.has(k) && !k.startsWith('x-'))).map(node).join('+'));
+    //
+    // One part of the required list IS in the hash: a name required but never declared as a
+    // property. The rules compare `required` only THROUGH the properties, so such a name is
+    // compared nowhere — and a client that must now send it is affected. It belongs in the hash of
+    // "everything the rule table does not compare" (change: add-ledger-contract-hashes).
+    const undeclaredRequired = [...req].filter(name => !props.has(name)).sort();
+    const hash = sha([
+      ...(parts as Json[]).map(p => omit(p, [...TYPE_KEYS, 'properties', 'required', 'allOf']))
+        .filter(p => Object.keys(p).some(k => !DOC_ONLY.has(k) && !k.startsWith('x-'))).map(node),
+      ...(undeclaredRequired.length ? [`req:${JSON.stringify(undeclaredRequired)}`] : []),
+    ].join('+'));
     return { properties: [...props.values()].sort((a, b) => (a.name < b.name ? -1 : 1)), assessed: true, hash };
   };
   const jsonMediaEntry = (content: unknown): [string, Json] | undefined => {
