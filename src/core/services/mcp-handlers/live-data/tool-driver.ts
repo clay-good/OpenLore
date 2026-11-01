@@ -173,6 +173,11 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     // Whole-repo descriptive idiom profile over the cached repo's fingerprint.
     buildArgs: (f) => ({ directory: f.directory }),
   },
+  certify_service_contract: {
+    kind: 'read',
+    // Contract surface and route parity of the repo's OpenAPI documents (surface mode).
+    buildArgs: (f) => ({ directory: f.directory }),
+  },
   get_handoff_briefing: {
     kind: 'read',
     // Session-succession briefing of the working tree's in-flight state.

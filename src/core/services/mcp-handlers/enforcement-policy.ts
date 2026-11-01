@@ -225,6 +225,23 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'An exported signature changed and its compatibility cannot be proven from the available types (potentially-breaking, never breaking-classed).',
     remediation: 'Unprovable signature change: {subject}; restore the type annotations so compatibility can be classified, or review consumers by hand.',
   },
+  // ── service contract certification (add-service-contract-certification) ──
+  // Emitted only by `certify_service_contract`; `openlore enforce` does not run it.
+  'contract-breaking': {
+    defaultClass: 'advisory', source: 'service-contract',
+    description: 'An API schema element changed in a way existing clients may not handle (breaking or dangerous rule).',
+    remediation: 'Contract change {subject}: version the API, keep the old shape, or update the listed consumers.',
+  },
+  'contract-declared-unimplemented': {
+    defaultClass: 'advisory', source: 'service-contract',
+    description: 'An API operation is declared in a specification but no indexed route handler serves it.',
+    remediation: 'Declared but not served: {subject}; add the route, or remove the operation from the specification.',
+  },
+  'contract-implemented-undeclared': {
+    defaultClass: 'advisory', source: 'service-contract',
+    description: 'A route handler serves a path under one the specification covers, but the specification does not declare it.',
+    remediation: 'Served but not declared: {subject}; declare the operation, or move the route out of the covered path.',
+  },
   // ── dynamic-boundary disclosure (disclose-dynamic-boundary-regions) ──
   'dynamic-boundary-in-conclusion-scope': {
     // Advisory, like every non-corpus code: blocking is always opt-in. A team that wants CI to

@@ -1956,6 +1956,7 @@ export function estimatePiStandingTokens(tools: ReadonlyArray<{
 // conclusion tool fails CI until its author makes this decision explicitly, the
 // same fails-until-you-classify discipline tool-contract.test.ts enforces.
 export const PI_EXCLUDED_CONCLUSION_TOOLS: Record<string, string> = {
+  certify_service_contract: 'opt-in full-preset API-contract check; `openlore certify-service-contract` serves it from the CLI.',
   get_handoff_briefing: 'Session succession reaches Pi through its compaction event (`session_before_compact`) in add-agent-loop-hooks-subagents-codex-pi; until then `openlore handoff` serves it from the CLI.',
   explain_retrieval_miss: 'opt-in full-preset retrieval diagnostic; Pi exposes the primary search_code/search_specs paths',
   prepare_spec_generation: 'surfaced by the dedicated openlore_prepare_spec_generation entry point',

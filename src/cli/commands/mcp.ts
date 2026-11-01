@@ -1944,6 +1944,26 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'certify_service_contract',
+    description:
+      'USE THIS WHEN: you change an OpenAPI/Swagger schema or the routes serving it. Unlike ' +
+      'certify_public_surface (exported code), this certifies the HTTP contract. No baseRef: declared ' +
+      'operations and parity with indexed route handlers. With baseRef: a closed-table verdict per ' +
+      'changed element vs the merge-base (breaking | dangerous | non-breaking | potentially-breaking), ' +
+      'breaking ones with their in-repo client call sites, and a suggestedBump. An unreadable spec is ' +
+      'notAssessed, never unchanged. Advisory findings can be gated by enforcement.policy.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Compare with this ref (its merge-base with HEAD).' },
+        maxResults: { type: 'number', description: 'Cap per list (default 100, max 1000).' },
+        allowBaseFallback: { type: 'boolean', description: 'Fall back to the default branch when baseRef does not resolve (disclosed).' },
+      },
+    },
+  },
+  {
     name: 'get_handoff_briefing',
     description:
       'USE THIS WHEN: you take over in-flight work in a fresh context (after compaction, a cleared ' +
@@ -2482,6 +2502,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW | t
   get_style_fingerprint: _RO,
   briefing_since: _RO,
   get_handoff_briefing: _RO,
+  certify_service_contract: _RO,
   find_clones: _RO,
   analyze_error_propagation: _RO,
   analyze_env_impact: _RO,
