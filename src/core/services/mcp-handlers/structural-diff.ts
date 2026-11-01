@@ -38,6 +38,7 @@ import {
   type DeclaredFootprintInput,
 } from './footprint-escape.js';
 import { findDeprecatedCalls, deprecatedCallFindings, DEPRECATED_CALLS_CAVEAT } from './deprecated-calls.js';
+import { checkWeakening } from '../check-weakening.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
@@ -183,6 +184,14 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     return { error: `git diff failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 
+  // ── Check weakening (add-check-weakening-findings) ─────────────────────────
+  // Computed before the code-only filter: a relaxed CI or lint config is a finding on its own. It
+  // reads its own fixed baseline (the merge-base with the requested or default branch), so a weakening
+  // committed earlier on the branch is still compared. Best-effort: a failure is reported in the block.
+  // The cached context is read once here and shared with the stale-caller pass below.
+  const ctx = await readCachedContext(absDir);
+  const weakening = await checkWeakeningBlock(absDir, input, ctx?.callGraph as SerializedCallGraph | undefined);
+
   // Code files only; logical path = the new path (so a file move doesn't explode
   // into all-removed + all-added at the function level).
   const fileScope = input.files ? new Set(input.files) : null;
@@ -205,6 +214,7 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
       message: 'No changed code files between the two states (only non-code or no changes).',
       summary: emptySummary(),
       ...(escapeBlock ? { escapeAnalysis: escapeBlock } : {}),
+      checkWeakening: weakening,
       soundness: diffSoundness(true),
     };
   }
@@ -343,7 +353,6 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
 
   // ── Stale callers — callers (in the canonical graph) of a node whose signature
   //    changed or that was removed, that are NOT themselves in the changed set ──
-  const ctx = await readCachedContext(absDir);
   const changedPaths = new Set(codeChanged.map(c => c.path));
   const staleCallerNote = ctx?.edgeStore
     ? undefined
@@ -424,8 +433,35 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
         gated: deprecatedGate.gated,
       },
     } : {}),
+    checkWeakening: weakening,
     soundness: diffSoundness(false, failedSnapshots),
   };
+}
+
+/**
+ * The `checkWeakening` block: the shapes against the fixed baseline, classified by the repo's
+ * enforcement policy (advisory by default; a code set to `off` is dropped).
+ */
+async function checkWeakeningBlock(absDir: string, input: StructuralDiffInput, callGraph: SerializedCallGraph | undefined): Promise<Record<string, unknown>> {
+  try {
+    const result = await checkWeakening({
+      root: absDir,
+      baseRef: input.baseRef,
+      headRef: input.headRef,
+      callGraph,
+      files: input.files,
+    });
+    const gate = classifyFindings(result.findings, effectivePolicy(await readOpenLoreConfig(absDir)));
+    return {
+      baseline: result.baseline,
+      findings: gate.classified.filter(f => f.enforcementClass !== 'off'),
+      gated: gate.gated,
+      ...(result.notAssessed.length ? { notAssessed: result.notAssessed } : {}),
+      ...(result.boundaries.length ? { boundaries: result.boundaries } : {}),
+    };
+  } catch (err) {
+    return { error: `Check weakening was not assessed: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /**

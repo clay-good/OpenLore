@@ -3113,6 +3113,137 @@ perform.
 - **THEN** the content remains unchanged
 - **AND** the CLI reports the ownership conflict or warning
 
+### Requirement: RepoOnlyWiringIsOfferedTheUserScope
+
+The system SHALL detect when OpenLore is wired for a repository but not for the user scope, or when
+the user-scope wiring predates the current shape. `openlore doctor` SHALL report it as a warning
+with the user-scope install as its remedy, and `openlore status` SHALL report the wiring scope.
+`openlore doctor --fix`, and `openlore update` after a successful upgrade on an interactive
+terminal, SHALL offer that remedy; `--yes` accepts it.
+
+#### Scenario: A repo-only install is noticed
+
+- **GIVEN** a repository with OpenLore-managed `.mcp.json` wiring and no user-scope OpenLore entry
+- **WHEN** the user runs `openlore doctor`
+- **THEN** a "User-scope wiring" warning names the gap ("new repositories and worktrees will not
+  reach OpenLore") and the `doctor --fix` remedy
+
+#### Scenario: An upgrade offers the rewire once
+
+- **GIVEN** the same machine, on an interactive terminal
+- **WHEN** `openlore update` upgrades successfully
+- **THEN** it asks once whether to wire the user scope, and writes nothing unless the user agrees
+  or passed `--yes`
+
+### Requirement: OnlyAHumanRunCommandWritesUserConfiguration
+
+User-level configuration SHALL be written only by an explicit, human-run command. A hook, the MCP
+server, the serve daemon and auto-initialization SHALL NOT write it.
+
+#### Scenario: Agent-driven paths never write the home directory
+
+- **GIVEN** any hook, MCP or serve call in a repository with repo-only wiring
+- **WHEN** the call completes
+- **THEN** no file outside the repository and the OpenLore cache was written
+
+### Requirement: NewWorktreeIsSeededFromASiblingCheckout
+
+When a directory inside a git work tree has no index, and another checkout of the same repository
+(the same git common directory) holds a published index that verifies and attests healthy, the
+first build SHALL seed from that index, serve it at once, and start a background rebuild that reuses
+the seeded per-file memo. Each answer during the rebuild SHALL carry the repair reason `seeded`, and
+each cited file whose content differs from the seed SHALL be reported behind the working tree.
+
+#### Scenario: A new worktree answers on its first call
+
+- **GIVEN** a main checkout with a healthy index, and a new linked worktree of the same repository
+  with no `.openlore` directory
+- **WHEN** the first `orient` call runs in the worktree
+- **THEN** it returns functions and call paths from the seeded index, with a repair marker naming
+  `seeded`, and a background rebuild has started
+
+#### Scenario: Files the worktree changed are named, not hidden
+
+- **GIVEN** a seeded worktree whose branch changed one file relative to the seed
+- **WHEN** an answer cites that file before the rebuild finishes
+- **THEN** that file, and only that file, is reported behind the working tree
+
+### Requirement: SeedingCopiesOnlyVerifiedArtifacts
+
+Seeding SHALL copy only the known analysis artifacts, never symbolic links or runtime state. Any
+failure to find, verify or copy a seed SHALL fall back to the cold build. Seeding SHALL obey the same
+opt-outs as auto-initialization.
+
+#### Scenario: An unverifiable seed is never used
+
+- **GIVEN** a sibling index whose manifest fails to verify, or that is mid-build
+- **WHEN** the worktree's first call runs
+- **THEN** no artifact is copied and the ordinary cold build starts
+
+### Requirement: AutopilotIsTheDefaultForAutoInitializedRepositories
+
+When background auto-initialization creates a repository's configuration, it SHALL record
+`governance.autopilot: true` in it, unless a blocking decisions gate is installed or the directory is
+a linked worktree whose main checkout sets the key. An absent key SHALL keep meaning blocking review,
+so a gate OpenLore cannot see (a CI-only gate, a hook manager, a fresh clone) never turns into
+auto-accept. The resolved mode and its reason SHALL be reported wherever governance state is shown.
+
+#### Scenario: A repository nobody configured runs on autopilot
+
+- **GIVEN** a git repository that auto-init indexed, with no prior OpenLore configuration and no gate
+- **WHEN** governance state is reported
+- **THEN** the configuration carries `governance.autopilot: true`, and the mode is autopilot with the
+  reason "governance.autopilot is true — set it to false to require review"
+
+#### Scenario: An unset key never flips a gate it cannot see
+
+- **GIVEN** a configuration with no `governance.autopilot` and no OpenLore hook in the checkout
+- **WHEN** a decision is recorded
+- **THEN** it stays a draft for review
+
+### Requirement: AWorktreeFollowsTheMainCheckoutsGovernance
+
+When a linked worktree's own configuration has no `governance.autopilot`, the main checkout's value
+SHALL apply, and the reason SHALL name the main checkout. The commit gate lives in hooks that every
+worktree shares, while the configuration is per checkout, so a worktree created after the user chose
+a mode SHALL NOT silently get the opposite one. A worktree's own value SHALL still win.
+
+#### Scenario: An agent worktree auto-accepts like its main checkout
+
+- **GIVEN** a main checkout with `governance.autopilot: true` and the decisions gate installed
+- **AND** a new linked worktree whose configuration has no `governance` block
+- **WHEN** an agent records a decision there and commits
+- **THEN** the decision is auto-accepted and the commit is not blocked
+
+### Requirement: RecordedDecisionsAreAcceptedWithoutAGate
+
+Under autopilot, a decision recorded with a title and rationale SHALL move directly to
+`auto-approved` with actor `agent`, its timestamp and the HEAD commit. It SHALL be appended to the
+ledger and synced to specs in the background, with no git hook and no LLM call. Only deterministic
+checks SHALL gate it (anchored files exist; a superseded decision is live). A decision failing them
+SHALL stay `draft` with the reason. A human rejection SHALL never be re-accepted.
+
+#### Scenario: A recorded decision is accepted at once
+
+- **GIVEN** an autopilot repository with no gate and no API key
+- **WHEN** an agent runs `openlore decisions record --title … --rationale …`
+- **THEN** the decision is `auto-approved`, a ledger entry with actor `agent` exists, and the spec
+  sync runs in the background
+
+### Requirement: GovernanceTraceIsVisibleWithoutAsking
+
+`openlore status` SHALL report the governance mode, the auto-accepted and unreviewed counts, and
+the newest ledger entries. The status line and Pi footer SHALL show the unreviewed count when it is
+above zero. The session primer SHALL name decisions auto-accepted since the previous session in at
+most one line. Each surface SHALL point to `openlore decisions review`.
+
+#### Scenario: The user sees what was accepted
+
+- **GIVEN** two decisions auto-accepted since the last session
+- **WHEN** a new session starts and the user runs `openlore status`
+- **THEN** the primer has one line naming both, the status line shows "2 to review", and `status`
+  lists the ledger entries with the review command
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts

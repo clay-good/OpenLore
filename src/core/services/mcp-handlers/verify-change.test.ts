@@ -161,3 +161,50 @@ describe('projectVerifyReceipt — generated-file guard (add-generated-file-guar
     expect(r.summary.generatedFilesEdited).toBe(0);
   });
 });
+
+describe('projectVerifyReceipt — check weakening (add-check-weakening-findings)', () => {
+  const finding = (over: Record<string, unknown> = {}) => ({
+    code: 'test-disabled', severity: 'error' as const, source: 'check-weakening',
+    subject: 'src/config.test.ts::parses empty config',
+    message: '`it.skip` was added to test `parses empty config` (src/config.test.ts:4). The test file reaches parseConfig, which this diff also changes.',
+    remediation: 'Test src/config.test.ts::parses empty config no longer runs; re-enable it, or record why it is off.',
+    enforcementClass: 'advisory' as const, reaches: ['parseConfig'], reachesChanged: ['parseConfig'],
+    ...over,
+  });
+  const sd = (over: Record<string, unknown> = {}) => ({
+    checkWeakening: { baseline: { ref: 'main', commit: 'a'.repeat(40) }, findings: [finding()], ...over },
+  });
+
+  it('projects each finding into an item with its remediation, and returns it in findings', () => {
+    const r = projectVerifyReceipt(briefing({}), sd()) as unknown as Receipt & { findings?: Array<{ code: string; reachesChanged?: string[] }>; checkWeakeningBaseline?: unknown; gated?: boolean };
+    const item = r.items.find(i => i.check === 'check_weakening')!;
+    expect(item.severity).toBe('error');
+    expect(item.subject).toContain('parseConfig');
+    expect(item.nextAction).toContain('re-enable it');
+    expect(r.summary.checksWeakened).toBe(1);
+    expect(r.findings?.map(f => f.code)).toEqual(['test-disabled']);
+    expect(r.findings?.[0].reachesChanged).toEqual(['parseConfig']);
+    expect(r.checkWeakeningBaseline).toEqual({ ref: 'main', commit: 'a'.repeat(40) });
+    expect(r.gated).toBe(false);
+    // The weakening baseline differs from the receipt's base (HEAD): said once, plainly.
+    expect(r.boundaries.filter(b => b.startsWith('Check weakening compares against the merge-base with main'))).toHaveLength(1);
+  });
+
+  it('a blocking weakening finding gates the receipt, alongside guard findings', () => {
+    const r = projectVerifyReceipt(briefing({}), sd({ findings: [finding({ enforcementClass: 'blocking' })] })) as unknown as Receipt & { gated?: boolean };
+    expect(r.gated).toBe(true);
+  });
+
+  it('not-assessed files, boundaries and a failure are disclosed, never a silent clean', () => {
+    const r = projectVerifyReceipt(briefing({}), sd({
+      findings: [],
+      notAssessed: [{ file: 'spec/a_spec.rb', shapes: ['test-disabled'], reason: 'Ruby is outside the closed language table' }],
+      boundaries: ['No default branch was found'],
+    })) as unknown as Receipt & { findings?: unknown };
+    expect(r.findings).toBeUndefined();
+    expect(r.boundaries.some(b => b.includes('not assessed for 1 file(s) (spec/a_spec.rb)'))).toBe(true);
+    expect(r.boundaries).toContain('No default branch was found');
+    const failed = projectVerifyReceipt(briefing({}), { checkWeakening: { error: 'Check weakening was not assessed: boom' } }) as unknown as Receipt;
+    expect(failed.boundaries).toContain('Check weakening was not assessed: boom');
+  });
+});
