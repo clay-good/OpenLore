@@ -244,7 +244,7 @@ describe('check weakening — check configs', () => {
     const pkg = await cfg('package.json',
       '{ "jest": { "coverageThreshold": { "global": { "lines": 90, "branches": 80 } } } }',
       '{ "jest": { "coverageThreshold": { "global": { "lines": 60, "branches": 80 } } } }');
-    expect(pkg.findings.map(f => f.message)).toEqual(['A coverage threshold `lines` was lowered from 90 to 60 in package.json.']);
+    expect(pkg.findings.map(f => f.message)).toEqual(['A coverage threshold `lines` (in `global`) was lowered from 90 to 60 in package.json.']);
     const lint = await cfg('.eslintrc.json', '{ "rules": {\n  "no-console": "error"\n} }', '{ "rules": {\n  "no-console": "off"\n} }');
     expect(codes(lint)).toEqual(['check-config-relaxed']);
   });
@@ -252,7 +252,7 @@ describe('check weakening — check configs', () => {
   it('pyproject: only check sections count', async () => {
     const base = '[tool.coverage.report]\nfail_under = 85\n[tool.setuptools.packages.find]\nexclude = []\n';
     const r = await cfg('pyproject.toml', base, base.replace('fail_under = 85', 'fail_under = 70').replace('exclude = []', 'exclude = ["docs"]'));
-    expect(r.findings.map(f => f.message)).toEqual(['A coverage threshold `failunder` was lowered from 85 to 70 in pyproject.toml.']);
+    expect(r.findings.map(f => f.message)).toEqual(['A coverage threshold `failunder` (in `tool.coverage.report`) was lowered from 85 to 70 in pyproject.toml.']);
     const ruff = await cfg('pyproject.toml', '[tool.ruff]\nline-length = 100\n', '[tool.ruff]\nline-length = 100\nextend-ignore = ["E501"]\n');
     expect(codes(ruff)).toEqual(['check-config-relaxed']);
   });
@@ -516,9 +516,18 @@ describe('check weakening — review round 2 (detection)', () => {
 
   it('thresholds: reordering is not lowering; a removed threshold is reported', async () => {
     const t = (a: number, b: number) => `module.exports = { coverageThreshold: { global: { lines: ${a} }, './src/legacy/': { lines: ${b} } } };\n`;
-    expect((await detect([{ path: 'jest.config.js', base: t(90, 40), current: t(40, 90) }])).findings).toEqual([]);
+    const swapped = "module.exports = { coverageThreshold: { './src/legacy/': { lines: 40 }, global: { lines: 90 } } };\n";
+    expect((await detect([{ path: 'jest.config.js', base: t(90, 40), current: swapped }])).findings).toEqual([]);
+    // A per-path entry added next to global is not a lowering; lowering one path is found even when another rises.
+    const added = "module.exports = { coverageThreshold: { global: { lines: 90 }, './src/legacy/': { lines: 40 }, './src/new.ts': { lines: 50 } } };\n";
+    expect((await detect([{ path: 'jest.config.js', base: t(90, 40), current: added }])).findings).toEqual([]);
+    expect((await detect([{ path: 'jest.config.js', base: t(90, 40), current: t(95, 30) }])).findings.map(f => f.message))
+      .toEqual(['A coverage threshold `lines` (in `./src/legacy/`) was lowered from 40 to 30 in jest.config.js.']);
     const gone = await detect([{ path: 'jest.config.js', base: t(90, 40), current: 'module.exports = {};\n' }]);
-    expect(gone.findings.map(f => f.message)).toEqual(['A coverage threshold `lines` was removed from jest.config.js (2 before, 0 now).']);
+    expect(gone.findings.map(f => f.message).sort()).toEqual([
+      'A coverage threshold `lines` (in `./src/legacy/`) was removed from jest.config.js.',
+      'A coverage threshold `lines` (in `global`) was removed from jest.config.js.',
+    ]);
   });
 
   it('lint: max-warnings and keys outside rules are not a rule turned off', async () => {
@@ -536,7 +545,7 @@ describe('check weakening — review round 2 (detection)', () => {
   });
 
   it('a test moved to another file in the same diff is not removed; a new file\'s catches are not "now caught"', async () => {
-    const body = "it('adds zero', () => { expect(add(1, 0)).toBe(1); });\n";
+    const body = "it('adds zero', () => { const r = add(1, 0); expect(r).toBe(1); expect(typeof r).toBe('number'); });\n";
     const r = await detect([
       { path: 'src/add.test.ts', base: "it('adds', () => { expect(add(1, 1)).toBe(2); });\n" + body, current: "it('adds', () => { expect(add(1, 1)).toBe(2); });\n" },
       { path: 'src/zero.test.ts', base: null, current: body },
@@ -590,5 +599,96 @@ describe('check weakening — review round 2 (git)', () => {
       ['check-config-relaxed', '.openlore/config.json'],
       ['test-removed', 'src/we"ird.test.ts'],
     ]);
+  });
+});
+
+describe('check weakening — review round 3', () => {
+  const LONG = "() => { const r = check(); expect(r.ok).toBe(true); expect(r.n).toBe(2); }";
+
+  it('a short common body elsewhere does not hide a removal; one copy hides one removal; a moved-and-skipped test is disabled', async () => {
+    const short = "it('t2', () => { expect(f()).toBe(2); });\n";
+    const r1 = await detect([
+      { path: 'src/a.test.ts', base: "it('t1', () => { expect(f()).toBe(1); });\n" + short, current: "it('t1', () => { expect(f()).toBe(1); });\n" },
+      { path: 'src/c.test.ts', base: null, current: short.replace("'t2'", "'copy'") },
+    ]);
+    expect(codes(r1)).toEqual(['test-removed']);
+    const two = `it('x', ${LONG});\nit('y', ${LONG});\n`;
+    const r2 = await detect([
+      { path: 'src/a.test.ts', base: two, current: null },
+      { path: 'src/b.test.ts', base: null, current: `it('moved', ${LONG});\n` },
+    ]);
+    expect(r2.findings.map(f => f.message)).toEqual([expect.stringContaining('was removed (1 test case(s) not found elsewhere in the diff; 1 moved)')]);
+    const r3 = await detect([
+      { path: 'src/a.test.ts', base: `it('works', ${LONG});\nit('other', () => { expect(1).toBe(1); });\n`, current: "it('other', () => { expect(1).toBe(1); });\n" },
+      { path: 'src/b.test.ts', base: null, current: `xit('works', ${LONG});\n` },
+    ]);
+    expect(codes(r3)).toEqual(['test-disabled']);
+  });
+
+  it('Go setup literals and parametrize ids are not expected values', async () => {
+    const go = 'package c\nfunc TestServe(t *testing.T) {\n\tcfg := Config{Port: 8080}\n\tif Serve(cfg) != nil { t.Errorf("bad") }\n}\n';
+    expect((await detect([{ path: 'config/c_test.go', base: go, current: go.replace('8080', '9090') }])).findings).toEqual([]);
+    const py = '@pytest.mark.parametrize("a,b", [(1, 2)], ids=["one"])\ndef test_inc(a, b):\n    assert inc(a) == b\n';
+    expect((await detect([{ path: 'tests/test_config.py', base: py, current: py.replace('"one"', '"first"') }])).findings).toEqual([]);
+  });
+
+  it('codecov threshold is a tolerated drop; constant-false CI conditions and GitLab rules never are off; flags keep their values', async () => {
+    const cc = (t: number) => `coverage:\n  status:\n    project:\n      default:\n        target: 80\n        threshold: ${t}\n`;
+    expect((await detect([{ path: 'codecov.yml', base: cc(5), current: cc(1) }])).findings).toEqual([]);
+    expect(codes(await detect([{ path: 'codecov.yml', base: cc(1), current: cc(20) }]))).toEqual(['check-config-relaxed']);
+    const wf = (cond: string) => `jobs:\n  t:\n    steps:\n      - name: U\n${cond}        run: npm test\n`;
+    expect(codes(await detect([{ path: '.github/workflows/ci.yml', base: wf(''), current: wf('        if: ${{ 0 }}\n') }]))).toEqual(['check-config-relaxed']);
+    const gl = 'test:\n  script:\n    - pytest\n';
+    expect(codes(await detect([{ path: '.gitlab-ci.yml', base: gl, current: gl + '  rules:\n    - when: never\n' }]))).toEqual(['check-config-relaxed']);
+    const k = (a: string, b: string) => `jobs:\n  t:\n    steps:\n      - run: pytest -k ${a} --ignore ${b}\n`;
+    expect(codes(await detect([{ path: '.github/workflows/ci.yml', base: k('fast', 'slow'), current: k('slow', 'fast') }]))).toEqual(['check-config-relaxed']);
+  });
+
+  it('a helper file under a test directory is not reported as not-assessed', async () => {
+    const r = await detect([{ path: 'tests/helpers.ts', base: 'export const a = 1;\n', current: 'export const a = 2;\n' }]);
+    expect(r.notAssessed).toEqual([]);
+  });
+});
+
+describe('check weakening — review round 3 (git)', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it('an unresolvable explicit base on the default branch falls back like the automatic baseline', async () => {
+    const remote = mkdtempSync(join(tmpdir(), 'olcw3r-'));
+    const dir = mkdtempSync(join(tmpdir(), 'olcw3-'));
+    dirs.push(remote, dir);
+    git(remote, 'init', '-q', '--bare', '-b', 'main');
+    git(dir, 'init', '-q', '-b', 'main');
+    write(dir, 'src/config.test.ts', JS_BASE);
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'one');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'main');
+    write(dir, 'src/config.test.ts', JS_BASE.replace("it('parses spaces'", "it.skip('parses spaces'"));
+    git(dir, 'commit', '-qam', 'skip');
+    for (const baseRef of [undefined, 'nope-branch']) {
+      const r = await checkWeakening({ root: dir, baseRef });
+      expect(r.baseline.ref).toBe('origin/main');
+      expect(r.findings.map(f => f.code)).toEqual(['test-disabled']);
+    }
+  });
+
+  it('a plain mv of a production file is compared with its old self; an ignored config.json is disclosed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olcw3m-'));
+    dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    const src = '// eslint-disable-next-line no-console\nexport function f() {\n  try {\n    g();\n  } catch (e) {\n    throw e;\n  }\n}\nexport const a = 1;\nexport const b = 2;\n';
+    write(dir, 'src/a.ts', src);
+    write(dir, '.gitignore', '.openlore/\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'one');
+    git(dir, 'checkout', '-qb', 'f');
+    unlinkSync(join(dir, 'src/a.ts'));
+    write(dir, 'lib/a.ts', src.replace('    throw e;\n', ''));
+    write(dir, '.openlore/config.json', JSON.stringify({ enforcement: { policy: { 'error-swallowed': 'off' } } }));
+    const r = await checkWeakening({ root: dir });
+    expect(r.findings.map(f => f.code)).toEqual(['error-swallowed']);
+    expect(r.boundaries.some(b => b.includes('is not tracked by git'))).toBe(true);
   });
 });

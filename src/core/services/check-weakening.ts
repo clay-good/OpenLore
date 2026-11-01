@@ -115,7 +115,14 @@ interface TestCase {
   literals: string[];
   /** Hash of the body text, to tell a renamed test from a removed one. */
   bodyHash: string;
+  /** Normalized body length: short bodies are too common to identify a moved test. */
+  bodySize?: number;
 }
+
+/** A new test case elsewhere in the diff that a removed one may have moved to. */
+interface MovedCase { file: string; key: string; disabled: string | null }
+/** Bodies shorter than this (normalized) are too common to be evidence that a test moved. */
+const MIN_MOVED_BODY = 48;
 
 function hash(text: string): string {
   return createHash('sha256').update(text.replace(/\s+/g, ' ').trim()).digest('hex').slice(0, 16);
@@ -309,7 +316,7 @@ function jsCases(root: Node): TestCase[] {
             focused: focused ?? m.focused,
             assertions: a.count,
             literals: [...dataLiterals(callee.table), ...a.literals],
-            bodyHash: hash(body?.text ?? ''),
+            bodyHash: hash(body?.text ?? ''), bodySize: (body?.text ?? '').replace(/\s+/g, ' ').trim().length,
           });
           continue; // a test case's body holds no further cases
         }
@@ -367,7 +374,14 @@ function pyCases(root: Node): TestCase[] {
         }
       }
     }
-    for (const dec of pyDecorators(n)) if (/\bparametrize\b/.test(dec)) literals.unshift(...dataLiterals(n.parent?.namedChildren.find(c => c.text === dec)));
+    // `parametrize(argnames, argvalues, ids=…)`: the argvalues rows are expected values; names and ids are not.
+    for (const dec of n.parent?.type === 'decorated_definition' ? n.parent.namedChildren.filter(c => c.type === 'decorator') : []) {
+      if (!/\bparametrize\b/.test(dec.text)) continue;
+      let call: Node | undefined;
+      for (const d of walk(dec)) if (d.type === 'call') { call = d; break; }
+      const positional = call?.childForFieldName('arguments')?.namedChildren.filter(a => a.type !== 'keyword_argument') ?? [];
+      literals.unshift(...dataLiterals(positional[1]));
+    }
     const skipDecorator = decorators.find(d => PY_SKIP_DECORATOR.test(d));
     const skipCall = body && /\b(?:pytest\.skip|self\.skipTest)\s*\(/.test(body.text);
     out.push({
@@ -377,7 +391,7 @@ function pyCases(root: Node): TestCase[] {
       focused: null,
       assertions: count,
       literals,
-      bodyHash: hash(body?.text ?? ''),
+      bodyHash: hash(body?.text ?? ''), bodySize: (body?.text ?? '').replace(/\s+/g, ' ').trim().length,
     });
   }
   return out;
@@ -419,11 +433,25 @@ function goCase(key: string, line: number, body: Node, out: TestCase[]): void {
       disabled ??= `t.${field}`;
     }
   }
-  // A table-driven test's rows are its expected values: the composite literals in its own body.
-  for (const n of walk(body, c => goSubtest(c) !== null || c.type === 'composite_literal')) {
-    if (n !== body && n.type === 'composite_literal') literals.unshift(...dataLiterals(n));
+  // A table-driven test's rows are its expected values: a composite literal the test ranges over,
+  // directly or through the variable it is assigned to. Setup literals are not expected values.
+  const ranged = new Set<string>();
+  const tables: Node[] = [];
+  for (const n of walk(body, c => goSubtest(c) !== null)) {
+    if (n.type !== 'range_clause') continue;
+    const over = n.childForFieldName('right');
+    if (over?.type === 'composite_literal') tables.push(over);
+    else if (over?.type === 'identifier') ranged.add(over.text);
   }
-  out.push({ key, line, disabled, focused: null, assertions: count, literals, bodyHash: hash(body.text) });
+  for (const n of walk(body, c => goSubtest(c) !== null)) {
+    if (n.type !== 'short_var_declaration' && n.type !== 'var_spec' && n.type !== 'assignment_statement') continue;
+    const left = (n.childForFieldName('left') ?? n.childForFieldName('name'))?.text ?? '';
+    const right = n.childForFieldName('right') ?? n.childForFieldName('value');
+    const lit = right?.namedChildren.find(c => c.type === 'composite_literal') ?? (right?.type === 'composite_literal' ? right : undefined);
+    if (lit && left.split(/\s*,\s*/).some(name => ranged.has(name))) tables.push(lit);
+  }
+  for (const t of tables) literals.unshift(...dataLiterals(t));
+  out.push({ key, line, disabled, focused: null, assertions: count, literals, bodyHash: hash(body.text), bodySize: body.text.replace(/\s+/g, ' ').trim().length });
   for (const s of subtests) goCase(`${key}/${s.title}`, s.line, s.body, out);
 }
 
@@ -483,11 +511,14 @@ function javaCases(root: Node): TestCase[] {
       focused: null,
       assertions: count,
       literals,
-      bodyHash: hash(body?.text ?? ''),
+      bodyHash: hash(body?.text ?? ''), bodySize: (body?.text ?? '').replace(/\s+/g, ' ').trim().length,
     });
   }
   return out;
 }
+
+/** A file named as a test (not a helper that only lives under a test directory). */
+const TEST_FILE_NAME = /(?:[._-](?:test|spec)s?\.[^/]+$|(?:^|\/)test_[^/]+\.py$|_test\.(?:go|py)$|Tests?\.java$|(?:^|\/)__tests__\/[^/]+\.[cm]?[jt]sx?$)/;
 
 /** Test libraries in an assessed language that are outside the closed table, by an import of theirs. */
 const UNSUPPORTED_FRAMEWORKS: Record<string, RegExp> = {
@@ -498,7 +529,16 @@ const UNSUPPORTED_FRAMEWORKS: Record<string, RegExp> = {
 };
 UNSUPPORTED_FRAMEWORKS.JavaScript = UNSUPPORTED_FRAMEWORKS.TypeScript;
 
+const casesCache = new WeakMap<Node, TestCase[]>();
 function extractCases(language: string, root: Node): TestCase[] {
+  const cached = casesCache.get(root);
+  if (cached) return cached;
+  const cases = extractCasesUncached(language, root);
+  casesCache.set(root, cases);
+  return cases;
+}
+
+function extractCasesUncached(language: string, root: Node): TestCase[] {
   const raw = language === 'Python' ? pyCases(root)
     : language === 'Go' ? goCases(root)
       : language === 'Java' ? javaCases(root)
@@ -635,7 +675,7 @@ export function checkConfigKind(path: string): ConfigKind | null {
 }
 
 const IGNORE_KEY = /(?:^|[\s"'{,[-])(?:exclude|excludes|extend-exclude|exclude[_-](?:dirs|files|lines|rules)|ignore|ignores|ignorePatterns|extend-ignore|per-file-ignores|(?:test|coverage|module|watch)PathIgnorePatterns|testIgnore|omit|skip-(?:dirs|files)|norecursedirs|deselect|disable|disabled-checks|--ignore|--deselect|ignore[_-](?:missing[_-]imports|errors))\b/i;
-const THRESHOLD = /\b(fail[_-]?under|cov-fail-under|branches|functions|lines|statements|threshold|minimum[_-]?coverage|min[_-]?coverage)\b["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)/g;
+const THRESHOLD = /\b(fail[_-]?under|cov-fail-under|branches|functions|lines|statements|threshold|target|minimum[_-]?coverage|min[_-]?coverage)\b["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)/g;
 const CHECK_SECTION = /pytest|coverage|ruff|flake8|pylint|mypy|pycodestyle|bandit|testenv/i;
 const TEST_COMMAND = /\b(?:(?:npm|pnpm|yarn|bun)(?: run)? test\b|vitest|jest|mocha|pytest|tox\b|go test|cargo test|(?:mvn|mvnw)\b.*\b(?:test|verify)\b|gradlew?\b.*\b(?:test|check)\b|rspec|make (?:test|check)\b|dotnet test|phpunit)/;
 
@@ -689,10 +729,39 @@ function sectionOf(lines: string[], index: number): string {
   return '';
 }
 
+/** The key of the object (or YAML/INI section) a threshold sits in: `global`, `./src/a.ts`, `report`. */
+function thresholdOwner(text: string, index: number): string {
+  let depth = 0;
+  for (let i = index - 1; i >= 0 && index - i < 4000; i--) {
+    const ch = text[i];
+    if (ch === '}') depth++;
+    else if (ch === '{') {
+      if (depth === 0) {
+        const m = /["']?([^"'\s{}:,]+)["']?\s*[:=]\s*$/.exec(text.slice(Math.max(0, i - 200), i));
+        return m ? m[1] : '';
+      }
+      depth--;
+    }
+  }
+  // Indentation-scoped (YAML) or sectioned (INI/TOML): the nearest less-indented key or `[section]`.
+  const lines = text.slice(0, index).split(/\r?\n/);
+  const own = lines.pop() ?? '';
+  const indent = own.length - own.trimStart().length;
+  for (let k = lines.length - 1; k >= 0; k--) {
+    const l = lines[k];
+    const sec = /^\s*\[([^\]]+)\]/.exec(l);
+    if (sec) return sec[1];
+    const ind = l.length - l.trimStart().length;
+    if (l.trim() && ind < indent) return l.trim().replace(/:.*$/, '');
+  }
+  return '';
+}
+
+/** Thresholds by `owner/key`, in order of appearance within that owner. */
 function thresholds(text: string): Map<string, number[]> {
   const out = new Map<string, number[]>();
   for (const m of text.matchAll(THRESHOLD)) {
-    const key = m[1].toLowerCase().replace(/[-_]/g, '');
+    const key = `${thresholdOwner(text, m.index ?? 0)}/${m[1].toLowerCase().replace(/[-_]/g, '')}`;
     (out.get(key) ?? out.set(key, []).get(key)!).push(Number(m[2]));
   }
   return out;
@@ -707,9 +776,21 @@ interface CiFacts {
   disabled: Set<string>;
 }
 
-/** A command's identity: its tokens, sorted (flag order and line layout do not matter). */
+/**
+ * A command's identity: its program, then its flags (each with the value that follows it), sorted, so
+ * flag order and line layout do not matter but which value goes with which flag does.
+ */
 function commandKey(command: string): string {
-  return command.split(/\s+/).filter(Boolean).sort().join(' ');
+  const tokens = command.split(/\s+/).filter(Boolean);
+  const head: string[] = [];
+  const flags: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t.startsWith('-')) { head.push(t); continue; }
+    const next = tokens[i + 1];
+    if (!t.includes('=') && next !== undefined && !next.startsWith('-')) { flags.push(`${t} ${next}`); i++; } else flags.push(t);
+  }
+  return [...head, ...flags.sort()].join(' ');
 }
 
 function ciFacts(text: string): CiFacts | null {
@@ -730,7 +811,9 @@ function ciFacts(text: string): CiFacts | null {
   };
   const truthy = (v: unknown) => v === true || v === 'true' || (typeof v === 'string' && /\$\{\{/.test(v))
     || (!!v && typeof v === 'object' && !Array.isArray(v)); // GitLab `allow_failure: { exit_codes: … }`
-  const off = (v: unknown) => v === false || v === 'false' || (typeof v === 'string' && /^\$\{\{\s*false\s*\}\}$/.test(v.trim()));
+  // A constant false condition: `false`, `${{ false }}`, `${{ 0 }}`, `${{ false && … }}`.
+  const off = (v: unknown) => v === false || v === 0 || v === 'false' || v === '0'
+    || (typeof v === 'string' && /^\$\{\{\s*(?:false|0)\s*(?:&&[^}]*)?\}\}$/.test(v.trim()));
   const jobs = (doc as Record<string, unknown>).jobs;
   if (jobs && typeof jobs === 'object') {
     // GitHub Actions.
@@ -757,7 +840,12 @@ function ciFacts(text: string): CiFacts | null {
       const j = job as Record<string, unknown>;
       record(`job ${jobName}`, j.script);
       if (truthy(j.allow_failure)) facts.allowFailure.add(`job ${jobName}`);
-      if (j.when === 'manual' || j.when === 'never') facts.disabled.add(`job ${jobName}`);
+      const unconditional = (r: unknown) => !!r && typeof r === 'object' && !['if', 'changes', 'exists'].some(k => k in (r as object));
+      const rules = Array.isArray(j.rules) ? (j.rules as Array<Record<string, unknown>>) : [];
+      const firstUnconditional = rules.find(unconditional);
+      if (j.when === 'manual' || j.when === 'never' || (firstUnconditional && (firstUnconditional.when === 'never' || firstUnconditional.when === 'manual'))) {
+        facts.disabled.add(`job ${jobName}`);
+      }
     }
   }
   return facts;
@@ -806,19 +894,22 @@ function configRelaxations(path: string, kind: ConfigKind, base: string, current
     }
   }
   if (kind !== 'lint' && kind !== 'ignore-file') {
-    // Compared as sorted values per key: reordering entries changes nothing, a lowered one is found
-    // at its rank, and a key with fewer values than before lost a threshold.
+    // Each threshold is matched by the object it sits in (`global`, a path) and its key, so moving,
+    // reordering or adding entries changes nothing; a lowered or removed one is found. In Codecov,
+    // `threshold` is the drop it tolerates: raising it is the relaxation.
+    const codecov = /(?:^|\/)\.?codecov\.ya?ml$/.test(path);
     const after = thresholds(current);
     for (const [key, was] of thresholds(base)) {
       const now = after.get(key) ?? [];
+      const [owner, name] = [key.slice(0, key.lastIndexOf('/')), key.slice(key.lastIndexOf('/') + 1)];
+      const label = owner ? `${name}\` (in \`${owner}\`)` : `${name}\``;
       if (now.length < was.length) {
-        out.push({ message: `A coverage threshold \`${key}\` was removed from ${path} (${was.length} before, ${now.length} now).`, discriminator: `threshold-removed:${key}` });
+        out.push({ message: `A coverage threshold \`${label} was removed from ${path}.`, discriminator: `threshold-removed:${key}` });
         continue;
       }
-      const a = [...was].sort((x, y) => x - y);
-      const b = [...now].sort((x, y) => x - y);
-      const i = a.findIndex((v, k) => b[k] < v);
-      if (i >= 0) out.push({ message: `A coverage threshold \`${key}\` was lowered from ${a[i]} to ${b[i]} in ${path}.`, discriminator: `threshold:${key}` });
+      const inverted = codecov && name === 'threshold';
+      const i = was.findIndex((v, k) => (inverted ? now[k] > v : now[k] < v));
+      if (i >= 0) out.push({ message: `A coverage threshold \`${label} was ${inverted ? 'raised (a larger tolerated drop)' : 'lowered'} from ${was[i]} to ${now[i]} in ${path}.`, discriminator: `threshold:${key}` });
     }
   }
   return out;
@@ -922,14 +1013,19 @@ export async function detectWeakeningShapes(
     }
     return t;
   };
-  const movedBodies = new Set<string>();
+  // Each new case can account for one removed case (consumed on use), and only when its body is
+  // large enough to be distinctive.
+  const movedBodies = new Map<string, MovedCase[]>();
   for (const f of files) {
     const language = detectLanguage(f.path);
     if (f.tooLarge || f.current === null || !isTestFile(f.path) || !ASSESSED_LANGUAGES.has(language)) continue;
     const { baseRoot, curRoot: cur } = await rootsOf(f, language);
     if (!cur || cur.hasError) continue;
     const baseHashes = new Set(baseRoot && !baseRoot.hasError ? extractCases(language, baseRoot).map(c => c.bodyHash) : []);
-    for (const c of extractCases(language, cur)) if (!baseHashes.has(c.bodyHash)) movedBodies.add(c.bodyHash);
+    for (const c of extractCases(language, cur)) {
+      if (baseHashes.has(c.bodyHash) || (c.bodySize ?? 0) < MIN_MOVED_BODY) continue;
+      (movedBodies.get(c.bodyHash) ?? movedBodies.set(c.bodyHash, []).get(c.bodyHash)!).push({ file: f.path, key: c.key, disabled: c.disabled });
+    }
   }
 
   for (const f of files) {
@@ -1020,7 +1116,7 @@ export async function detectWeakeningShapes(
 function testShapes(
   f: WeakeningFile, language: string, baseRoot: Node | null, curRoot: Node | null,
   reach: ReachIndex | undefined, changedIds: ReadonlySet<string> | undefined, notAssessed: NotAssessed[], noReach: string[],
-  movedBodies?: ReadonlySet<string>,
+  movedBodies?: Map<string, MovedCase[]>,
 ): CheckWeakeningFinding[] {
   const out: CheckWeakeningFinding[] = [];
   // A test library outside the closed table: its cases and assertions are not recognized, so the
@@ -1037,6 +1133,9 @@ function testShapes(
   const reached = r.symbols.map(s => emittedText(s.name));
   const changed = r.symbols.filter(s => changedIds?.has(s.id)).map(s => emittedText(s.name));
   if (!baseCases.length && !curCases.length) {
+    // A helper or fixture under a test directory holds no tests: nothing to assess. A test-shaped
+    // file with no recognized case is a framework outside the table.
+    if (!TEST_FILE_NAME.test(f.path)) return out;
     notAssessed.push({ file: emittedText(f.path), shapes: TEST_SHAPES, reason: 'no test case of a framework in the closed table was recognized' });
     return out;
   }
@@ -1055,9 +1154,42 @@ function testShapes(
     };
   };
 
+  /**
+   * The new case a removed one moved to, consumed so one copy accounts for one removal: first an
+   * unpaired case in this file with the same body (a rename, any size), then one elsewhere in the
+   * diff (only for a body large enough to be distinctive).
+   */
+  const takeMoved = (b: TestCase): MovedCase | undefined => {
+    const k = localNew.findIndex(c => c.bodyHash === b.bodyHash);
+    if (k >= 0) {
+      const c = localNew.splice(k, 1)[0];
+      const list = movedBodies?.get(c.bodyHash);
+      const own = list?.findIndex(m => m.file === f.path && m.key === c.key) ?? -1;
+      if (own >= 0) list!.splice(own, 1);
+      return { file: f.path, key: c.key, disabled: c.disabled };
+    }
+    if ((b.bodySize ?? 0) < MIN_MOVED_BODY) return undefined;
+    const list = movedBodies?.get(b.bodyHash);
+    const other = list?.findIndex(m => m.file !== f.path) ?? -1;
+    return other >= 0 ? list!.splice(other, 1)[0] : undefined;
+  };
+  let localNew: TestCase[] = [];
+  /** A removed case that reappears elsewhere: no removal, unless it came back disabled. */
+  const movedFinding = (b: TestCase, m: MovedCase): void => {
+    if (m.disabled && !b.disabled) {
+      out.push(joined(finding('test-disabled', 'warning', `${m.file}::${m.key}`,
+        `Test ${quote(b.key)} moved from ${f.path} to ${m.file} as ${quote(m.key)}, with ${quote(m.disabled)} added.`, m.file, undefined, `${m.key}:skip`), true));
+    }
+  };
+
   if (f.current === null) {
-    if (baseCases.length) {
-      out.push(joined(finding('test-removed', 'warning', f.path, `Test file ${f.path} was removed (${baseCases.length} test case(s)).`, f.path, undefined, 'file'), true));
+    let gone = 0;
+    for (const b of baseCases) {
+      const m = takeMoved(b);
+      if (m) movedFinding(b, m); else gone++;
+    }
+    if (gone) {
+      out.push(joined(finding('test-removed', 'warning', f.path, `Test file ${f.path} was removed (${gone} test case(s)${gone < baseCases.length ? ` not found elsewhere in the diff; ${baseCases.length - gone} moved` : ''}).`, f.path, undefined, 'file'), true));
     }
     return out;
   }
@@ -1080,13 +1212,15 @@ function testShapes(
     }
     rest.forEach((b, k) => { if (free[k]) pairOf.set(b, free[k]); });
   }
-  const paired = new Set(pairOf.values());
-  const newBodies = new Set([...curCases.filter(c => !paired.has(c)).map(c => c.bodyHash), ...(movedBodies ?? [])]);
+  const pairedCur = new Set(pairOf.values());
+  localNew = curCases.filter(c => !pairedCur.has(c));
   let evcUnassessed = false;
   for (const b of baseCases) {
     const c = pairOf.get(b);
     if (!c) {
-      if (newBodies.has(b.bodyHash)) continue; // renamed or moved to another file, same body
+      // Renamed in this file, or moved to another file, with the same body.
+      const m = takeMoved(b);
+      if (m) { movedFinding(b, m); continue; }
       out.push(joined(finding('test-removed', 'warning', `${f.path}::${b.key}`, `Test ${quote(b.key)} was removed from ${f.path}.`, f.path, b.line, b.key), true));
       continue;
     }
@@ -1116,7 +1250,9 @@ function testShapes(
     }
   }
   if (evcUnassessed) {
-    notAssessed.push({ file: emittedText(f.path), shapes: ['expected-value-changed'], reason: 'the index records no production symbol this test file reaches, so a changed expected value cannot be told apart from one updated with its code' });
+    notAssessed.push({ file: emittedText(f.path), shapes: ['expected-value-changed'], reason: !reach || !changedIds
+      ? 'no index (or no changed-symbol set) is available, so a changed expected value cannot be told apart from one updated with its code'
+      : 'the index records no production symbol this test file reaches, so a changed expected value cannot be told apart from one updated with its code' });
   }
   return out;
 }
@@ -1140,21 +1276,23 @@ export async function resolveWeakeningBaseline(root: string, baseRef: string | u
   const { resolveBaseRefDisclosed } = await import('../drift/git-diff.js');
   const explicit = baseRef && baseRef !== 'HEAD' && baseRef !== 'auto' ? baseRef : undefined;
   const resolution = await resolveBaseRefDisclosed(root, explicit ?? 'auto');
-  let ref = resolution.resolved;
+  // An explicit ref that did not resolve gets the automatic baseline (with the fallback disclosed).
+  const pinned = explicit && !resolution.fellBack ? explicit : undefined;
+  let ref = pinned ? resolution.resolved : resolution.fellBack ? (await resolveBaseRefDisclosed(root, 'auto')).resolved : resolution.resolved;
   const tip = headRef ?? 'HEAD';
   const mergeBase = async (r: string): Promise<string> => {
     try { return (await git(root, ['merge-base', r, tip])).trim(); } catch { return ''; }
   };
   // No default branch and no parent commit (a single-commit repo, a shallow clone): the empty tree
   // would make every file "added", where nothing can be weakened. The current commit is the baseline.
-  if (!explicit && ref === EMPTY_TREE) ref = 'HEAD';
+  if (!pinned && ref === EMPTY_TREE) ref = 'HEAD';
   let commit = await mergeBase(ref);
   const noCommonAncestor = !SHA.test(commit);
   let tipSha = '';
   try { tipSha = (await git(root, ['rev-parse', '--verify', `${tip}^{commit}`])).trim(); } catch { /* unborn */ }
   // On the default branch itself the local merge-base is the tip: the agent's own commits would be
   // the baseline. The remote branch, when there is one, is the point those commits started from.
-  if (!explicit && SHA.test(commit) && commit === tipSha) {
+  if (!pinned && SHA.test(commit) && commit === tipSha) {
     for (const remote of ['refs/remotes/origin/HEAD', 'origin/main', 'origin/master']) {
       const mb = await mergeBase(remote);
       if (SHA.test(mb) && mb !== tipSha) { ref = remote; commit = mb; break; }
@@ -1164,13 +1302,15 @@ export async function resolveWeakeningBaseline(root: string, baseRef: string | u
     try { commit = (await git(root, ['rev-parse', '--verify', `${ref}^{commit}`])).trim(); } catch { commit = ref; }
   }
   let note: string | undefined;
-  if (noCommonAncestor) {
+  if (!tipSha) {
+    note = `${tip} does not name a commit, so there is nothing to compare.`;
+  } else if (noCommonAncestor) {
     note = `${ref} shares no history with ${tip}, so the weakening baseline is the tip of ${ref}, not a branch point.`;
   } else if (resolution.fellBack) {
     note = `The base ref '${emittedText(resolution.requested)}' did not resolve, so the weakening baseline is ${ref}.`;
-  } else if (!explicit && (ref === 'HEAD~1' || ref === 'HEAD' || !/^(?:main|master|refs\/remotes\/origin\/HEAD|origin\/main|origin\/master)$/.test(ref))) {
+  } else if (!pinned && (ref === 'HEAD~1' || ref === 'HEAD' || !/^(?:main|master|refs\/remotes\/origin\/HEAD|origin\/main|origin\/master)$/.test(ref))) {
     note = `No default branch was found, so the weakening baseline is ${ref}; pass baseRef to compare against the branch point.`;
-  } else if (!explicit && commit === tipSha) {
+  } else if (!pinned && commit === tipSha) {
     note = 'The weakening baseline is the current commit (this is the default branch, with no remote ahead of it), so only uncommitted changes are compared; pass baseRef to compare an earlier point.';
   }
   return { ref, commit, ...(note ? { note } : {}) };
@@ -1332,12 +1472,43 @@ export async function checkWeakening(input: {
       if (e.status === 'deleted') return null;
       return input.headRef ? blobs.get(`${input.headRef}:${e.path}`) ?? null : inWorkTree(input.root, e.path);
     };
+    const sides: Array<{ path: string; base: Blob; current: Blob; status: ChangedFile['status'] }> = [];
     for (const e of relevant.slice(0, MAX_FILES)) {
-      const base = await sideOf(e, 'base');
-      const current = await sideOf(e, 'current');
-      if (base === 'too-large' || current === 'too-large') { files.push({ path: e.path, base: null, current: null, tooLarge: true }); continue; }
-      if (base === null && current === null) continue;
-      files.push({ path: e.path, base, current });
+      sides.push({ path: e.path, base: await sideOf(e, 'base'), current: await sideOf(e, 'current'), status: e.status });
+    }
+    // A plain `mv` (not staged) is a deleted file plus an untracked one: pair them by content, as
+    // `git diff -M` pairs a staged rename, so the moved file is compared with its old self.
+    const lineSet = (t: string) => new Set(t.split(/\r?\n/).map(l => l.trim()).filter(Boolean));
+    for (const d of sides.filter(x => x.status === 'deleted' && typeof x.base === 'string')) {
+      const ext = d.path.slice(d.path.lastIndexOf('.'));
+      const before = lineSet(d.base as string);
+      let best: { a: typeof d; score: number } | undefined;
+      for (const a of sides) {
+        if (a.status !== 'added' || typeof a.current !== 'string' || a.base !== null || !a.path.endsWith(ext)) continue;
+        const after = lineSet(a.current);
+        let common = 0;
+        for (const l of before) if (after.has(l)) common++;
+        const score = common / Math.max(1, before.size + after.size - common);
+        if (score >= 0.5 && (!best || score > best.score)) best = { a, score };
+      }
+      if (best) {
+        best.a.base = d.base;
+        best.a.status = 'renamed';
+        d.base = null; // folded into the renamed file
+      }
+    }
+    for (const x of sides) {
+      if (x.base === 'too-large' || x.current === 'too-large') { files.push({ path: x.path, base: null, current: null, tooLarge: true }); continue; }
+      if (x.base === null && x.current === null) continue;
+      files.push({ path: x.path, base: x.base, current: x.current });
+    }
+    if (!policy && !input.headRef) {
+      // `openlore init` gitignores `.openlore/`: its policy then has no baseline to compare with.
+      try {
+        await readFile(safeJoin(input.root, '.openlore/config.json'));
+        const tracked = nulRecords(await git(input.root, gitPathArgs('ls-files', '-z', '--', '.openlore/config.json'))).length > 0;
+        if (!tracked) boundaries.push('`.openlore/config.json` is not tracked by git, so a change to its enforcement policy cannot be compared with the baseline; codes it sets to `off` are listed in `silenced`.');
+      } catch { /* no config file */ }
     }
     if (policy) {
       const base = await sideOf(policy, 'base');

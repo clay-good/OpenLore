@@ -57,6 +57,8 @@ const READ_ONLY_TOOL_MAY_WRITE: Record<string, string> = {
   // runner. spawnGit is typed `typeof spawn`, so the call resolves straight to the spawn primitive
   // and the read is attributed to this function — a read-only git subcommand, not state change.
   'readBlobsAtRef@src/core/services/mcp-handlers/merge-semantic-certificate.ts': 'git cat-file --batch blob read through the hardened spawn runner',
+  // Check weakening reads baseline blobs the same way (`git cat-file --batch-check` / `--batch`).
+  'gitWithInput@src/core/services/check-weakening.ts': 'git cat-file --batch-check/--batch blob read through the hardened spawn runner',
   // Argument-gated writes every read-only dispatch turns off (asserted below).
   'writeSpecLinkIndex@src/core/generator/spec-link-service.ts': 'mapping.json cache, only when persist is true',
   'audit@src/api/audit.ts': 'audit report, only when save is true',
