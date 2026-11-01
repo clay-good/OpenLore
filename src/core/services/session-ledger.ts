@@ -22,7 +22,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, unlinkSync, appendFileSync, mkdirSync, openSync, fstatSync, closeSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, unlinkSync, appendFileSync, mkdirSync, openSync, fstatSync, closeSync, realpathSync, writeFileSync } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
@@ -41,6 +41,10 @@ export const LEDGER_EXPIRY_MS = 30 * 60 * 1000;
 const MAX_ENTRIES = 2000;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES_PER_RESPONSE = 10;
+/** Served files are hashed in the background; larger ones would stall the event loop. */
+const MAX_SERVED_FILE_BYTES = 256 * 1024;
+/** Served text kept in memory until the file changes; the oldest is dropped past this. */
+const MAX_PENDING_BYTES = 16 * 1024 * 1024;
 /** Files hashed per watcher batch; a larger batch (a branch switch, a formatter) is bulk, not an edit loop. */
 const MAX_FILES_PER_BATCH = 20;
 /** How long a tool call waits for the ledger before it answers with what is known. */
@@ -112,8 +116,11 @@ export const hashWholeFile: FileHasher = async (file, content) => {
 };
 
 /** Code files get symbol hashes; any other file one whole-file hash. */
+/** Non-code files a briefing can name, hashed as a whole. */
+const WHOLE_FILE = /\.(?:md|ya?ml|json)$/i;
+
 export const defaultHasher: FileHasher = async (file, content) =>
-  (await hashFileSymbols(file, content)) ?? (/\.(?:md|ya?ml|json)$/i.test(file) ? hashWholeFile(file, content) : undefined);
+  (await hashFileSymbols(file, content)) ?? (WHOLE_FILE.test(file) ? hashWholeFile(file, content) : undefined);
 
 function hhmm(ms: number): string {
   const d = new Date(ms);
@@ -124,12 +131,18 @@ function ledgerDir(root: string): string {
   return join(root, OPENLORE_DIR, SESSION_LEDGER_DIR);
 }
 
+/** Create the ledger directory with its own `.gitignore`: session files are never committed. */
+function ensureLedgerDir(root: string): string {
+  const dir = ledgerDir(root);
+  mkdirSync(dir, { recursive: true });
+  try { writeFileSync(join(dir, '.gitignore'), '*\n', { flag: 'wx' }); } catch { /* already there */ }
+  return dir;
+}
+
 /** Append one agent edit to the worktree's log (the after-edit hook's only write). Never throws. */
 export function recordAgentEdit(root: string, file: string, at = Date.now()): void {
   try {
-    const dir = ledgerDir(root);
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, AGENT_EDITS_FILE);
+    const path = join(ensureLedgerDir(root), AGENT_EDITS_FILE);
     // One descriptor for the append, the size check and the read, so they see the same file.
     const fd = openSync(path, 'a+');
     let keep: string | undefined;
@@ -179,8 +192,16 @@ export class SessionLedger {
   private loopsSeen = new Set<string>();
   private editSource: 'watcher' | 'sampled' = 'sampled';
   private writeTimer: NodeJS.Timeout | undefined;
-  /** Serializes the asynchronous hashing so entries land in the order the work arrived. */
+  /** Serializes the watcher and sampling work so versions land in the order they were observed. */
   private queue: Promise<void> = Promise.resolve();
+  /** Reading of served files: its own chain, which a tool call never waits for. */
+  private servedQueue: Promise<void> = Promise.resolve();
+  /**
+   * Served files not hashed yet: the text the agent was shown, held in memory (never persisted) and
+   * hashed only once the file changes — so serving costs a read, not a parse.
+   */
+  private pending = new Map<string, { content: string; servedAt: number; names: Set<string> | 'all' }>();
+  private pendingBytes = 0;
 
   private disposed = false;
 
@@ -199,17 +220,18 @@ export class SessionLedger {
     return this.queue;
   }
 
-  /** Wait for queued hashing (tests). */
-  settle(): Promise<void> {
-    return this.queue;
+  /** Wait for all queued hashing (tests). */
+  async settle(): Promise<void> {
+    await this.servedQueue;
+    await this.queue;
   }
 
-  private async readCurrent(file: string): Promise<string | undefined> {
+  private async readCurrent(file: string, maxBytes = MAX_FILE_BYTES): Promise<string | undefined> {
     try {
       // One handle for the size check and the read, so a file swapped in between is not read.
       const fh = await open(safeJoin(this.root, file), 'r');
       try {
-        if ((await fh.stat()).size > MAX_FILE_BYTES) return undefined;
+        if ((await fh.stat()).size > maxBytes) return undefined;
         return await fh.readFile('utf-8');
       } finally {
         await fh.close();
@@ -228,8 +250,8 @@ export class SessionLedger {
 
   /**
    * Record what a tool response served: symbols by (name, file), or whole files (every symbol in
-   * them, for a file-level answer such as a skeleton). Only the first files are hashed. A requested
-   * name the hasher does not return (a class, an unsupported construct) is counted as untracked.
+   * them, for a file-level answer such as a skeleton). The text is kept until the file changes and
+   * hashed then; a file too large to keep is counted untracked.
    */
   recordServed(items: ReadonlyArray<{ file: string; name?: string }>): Promise<void> {
     const at = this.now(); // when it was served, before any read: a later hook entry is a later edit
@@ -241,26 +263,56 @@ export class SessionLedger {
       else if (prev !== 'all') byFile.set(it.file, (prev ?? new Set()).add(it.name));
     }
     const files = [...byFile].slice(0, MAX_FILES_PER_RESPONSE);
-    return this.enqueue(async () => {
+    const work = async () => {
       for (const [file, names] of files) {
-        const content = await this.readCurrent(file);
-        const hashes = content === undefined ? undefined : await this.hasher(file, content);
-        if (!hashes) { this.untracked.add(file); continue; }
-        const found = new Set<string>();
-        for (const [id, h] of hashes) {
-          if (names !== 'all' && !names.has(h.name)) continue;
-          found.add(h.name);
-          this.served.delete(id); // re-serving refreshes the entry and its position
-          this.served.set(id, { id, name: h.name, file, hash: h.hash, servedAt: at });
-          // A version the agent is shown is a version the symbol had: a changed one is recorded.
-          this.noteVersion(id, h.name, file, { hash: h.hash, at, sampled: true });
-        }
-        if (names !== 'all') for (const n of names) if (!found.has(n)) this.untracked.add(`${file}::${n}`);
+        // A file no hasher handles is untracked from the start, not merely "not changed yet".
+        if (detectLanguage(file) === 'unknown' && !WHOLE_FILE.test(file)) { this.untracked.add(file); continue; }
+        const content = await this.readCurrent(file, MAX_SERVED_FILE_BYTES);
+        if (content === undefined) { this.untracked.add(file); continue; }
+        // Re-serving shows the agent the current text: it becomes the version the agent read, for
+        // the names served now and before.
+        const before = this.pending.get(file);
+        const earlier = [...this.served.values()].filter(e => e.file === file).map(e => e.name);
+        const merged: Set<string> | 'all' = names === 'all' || before?.names === 'all'
+          ? 'all' : new Set([...names, ...(before?.names ?? []), ...earlier]);
+        if (before) this.pendingBytes -= before.content.length;
+        this.pending.delete(file);
+        this.pending.set(file, { content, servedAt: at, names: merged });
+        this.pendingBytes += content.length;
         this.seenMtime.set(file, await this.mtime(file));
       }
-      this.cap(this.served);
+      // Bounded memory: the oldest unhashed served files are dropped and counted.
+      for (const [file, p] of this.pending) {
+        if (this.pendingBytes <= MAX_PENDING_BYTES) break;
+        this.pending.delete(file);
+        this.pendingBytes -= p.content.length;
+        this.untracked.add(file);
+        this.dropped++;
+      }
       this.scheduleWrite();
-    });
+    };
+    this.servedQueue = this.servedQueue.then(work, work).catch(() => {});
+    return this.servedQueue;
+  }
+
+  /** Hash a served file's kept text: the versions the agent read. Names the hasher lacks are untracked. */
+  private async resolveServed(file: string): Promise<void> {
+    const p = this.pending.get(file);
+    if (!p) return;
+    this.pending.delete(file);
+    this.pendingBytes -= p.content.length;
+    const hashes = await this.hasher(file, p.content);
+    if (!hashes) { this.untracked.add(file); return; }
+    const found = new Set<string>();
+    for (const [id, h] of hashes) {
+      if (p.names !== 'all' && !p.names.has(h.name)) continue;
+      found.add(h.name);
+      this.served.delete(id); // the latest serve is the one that counts
+      this.served.set(id, { id, name: h.name, file, hash: h.hash, servedAt: p.servedAt });
+      this.noteVersion(id, h.name, file, { hash: h.hash, at: p.servedAt, sampled: true });
+    }
+    if (p.names !== 'all') for (const n of p.names) if (!found.has(n)) this.untracked.add(`${file}::${n}`);
+    this.cap(this.served);
   }
 
   /**
@@ -298,6 +350,10 @@ export class SessionLedger {
 
   private async observe(file: string, content: string, at: number, sampled: boolean): Promise<void> {
     if (Buffer.byteLength(content) > MAX_FILE_BYTES) { this.untracked.add(file); return; }
+    const kept = this.pending.get(file);
+    if (kept && kept.content === content) { this.seenMtime.set(file, await this.mtime(file)); return; } // unchanged since served
+    await this.servedQueue; // a serve still being read lands first
+    await this.resolveServed(file);
     const firstSeen = !this.seenMtime.has(file);
     const hashes = await this.hasher(file, content);
     if (!hashes) { this.untracked.add(file); return; }
@@ -334,11 +390,12 @@ export class SessionLedger {
     const at = this.now();
     const work = this.enqueue(async () => {
       const files = new Set<string>([...this.served.values()].map(s => s.file));
+      for (const file of this.pending.keys()) files.add(file);
       if (this.editSource === 'sampled') for (const e of this.edited.values()) files.add(e.file);
       for (const file of files) {
         const m = await this.mtime(file);
         if (m === this.seenMtime.get(file)) continue;
-        const content = await this.readCurrent(file);
+        const content = await this.readCurrent(file, MAX_SERVED_FILE_BYTES);
         if (content === undefined) { this.untracked.add(file); this.seenMtime.set(file, m); continue; }
         await this.observe(file, content, at, true);
       }
@@ -418,10 +475,14 @@ export class SessionLedger {
     return `[openlore freshness] ${lines.join(' ')} Informational signal.`;
   }
 
-  /** Symbols newly in an edit loop since the last call (the panic layer's input). */
+  /**
+   * Symbols that reached an edit loop since the last call (the panic layer's input): each symbol
+   * once, when it first returns to an earlier version for the second time. Further returns are in
+   * the note and the status, but add no more to the panic score.
+   */
   takeNewOscillations(): EditOscillation[] {
-    const out = this.facts([]).editOscillation.filter(o => !this.loopsSeen.has(`${o.id}#${o.returns}`));
-    for (const o of out) this.loopsSeen.add(`${o.id}#${o.returns}`);
+    const out = this.facts([]).editOscillation.filter(o => !this.loopsSeen.has(o.id));
+    for (const o of out) this.loopsSeen.add(o.id);
     return out;
   }
 
@@ -435,7 +496,7 @@ export class SessionLedger {
       updatedAt: new Date(this.now()).toISOString(),
       editSource: this.editSource,
       agentEditsReported: f.agentEditsReported,
-      counts: { served: this.served.size, edited: [...this.edited.values()].filter(e => e.versions.length > 1).length, untracked: this.untracked.size, dropped: this.dropped },
+      counts: { served: this.served.size + [...this.pending.values()].reduce((n, p) => n + (p.names === 'all' ? 1 : p.names.size), 0), edited: [...this.edited.values()].filter(e => e.versions.length > 1).length, untracked: this.untracked.size, dropped: this.dropped },
       backgroundChanges: f.backgroundChanges,
       editOscillation: f.editOscillation,
       ...(f.withheld ? { withheld: f.withheld } : {}),
@@ -455,7 +516,7 @@ export class SessionLedger {
   async persist(): Promise<void> {
     if (this.disposed) return;
     try {
-      const path = join(ledgerDir(this.root), `${process.pid}.json`);
+      const path = join(ensureLedgerDir(this.root), `${process.pid}.json`);
       await atomicWriteFile(path, JSON.stringify(this.snapshot(), null, 2) + '\n');
       // Disposed while writing: the session is over, so its file must not outlive it.
       if (this.disposed) { try { unlinkSync(path); } catch { /* gone */ } }

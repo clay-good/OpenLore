@@ -9,7 +9,8 @@ The session ledger tells the agent both facts, in plain words, without blocking 
 | A symbol the agent read changed under it | a note on the next tool response; `openlore status` | `Served earlier: parseConfig (src/config.ts) — its body changed since you read it at 14:02.` |
 | A symbol returned to an earlier version for the second time | the same note; `openlore status`; the panic layer (`edit_oscillation`) | `parseConfig (src/config.ts) returned to an earlier version twice this session.` |
 
-Each fact is stated once. At most three changed symbols are named, the rest counted. A reformat or
+Serving costs a file read, not a parse: the text the agent was shown is kept in memory (up to
+16 MB, never written to disk) and hashed only when the file changes. Each fact is stated once. At most three changed symbols are named, the rest counted. A reformat or
 comment edit is not a change: versions are normalized content hashes (whitespace and comments do
 not change them). The ledger stores addresses and hashes only, never file contents.
 

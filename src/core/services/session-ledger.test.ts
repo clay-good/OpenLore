@@ -165,6 +165,8 @@ describe('SessionLedger — bounds and persistence', () => {
     const many: FileHasher = async () => new Map(Array.from({ length: 2100 }, (_, i) => [`src/big.ts::f${i}`, { name: `f${i}`, hash: 'h' }]));
     const ledger = new SessionLedger(root, many);
     await ledger.recordServed([{ file: 'src/big.ts' }]);
+    write(root, 'src/big.ts', 'y'); // served text is hashed once the file changes
+    await ledger.refresh(5000);
     const s = ledger.snapshot();
     expect(s.counts.served).toBe(2000);
     expect(s.counts.dropped).toBeGreaterThanOrEqual(100);
@@ -314,6 +316,8 @@ describe('SessionLedger — review round 1', () => {
     write(root, 'src/config.ts', A);
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'src/config.ts', name: 'Loader' }, { file: 'src/config.ts', name: 'parseConfig' }]);
+    write(root, 'src/config.ts', B);
+    await ledger.refresh(5000);
     const c = ledger.snapshot().counts;
     expect([c.served, c.untracked]).toEqual([1, 1]);
   });
@@ -347,5 +351,39 @@ describe('SessionLedger — review round 1', () => {
     writeFileSync(join(dir, `${process.pid}.json`), JSON.stringify({ ...base, backgroundChanges: 5, counts: { served: 'x' } }));
     const live = readLiveLedger(root);
     expect('ledger' in live && [live.ledger.backgroundChanges, live.ledger.counts.served]).toEqual([[], 0]);
+  });
+});
+
+describe('SessionLedger — review round 2', () => {
+  it('hashing what a response served never delays the next tool call', async () => {
+    const root = repo();
+    write(root, 'src/config.ts', A);
+    const slow: FileHasher = async () => { await new Promise(r => setTimeout(r, 500)); return new Map(); };
+    const ledger = new SessionLedger(root, slow);
+    void ledger.recordServed([{ file: 'src/config.ts' }]);
+    const t0 = Date.now();
+    await ledger.refresh();
+    expect(Date.now() - t0).toBeLessThan(200);
+  });
+
+  it('a symbol enters the panic layer once, however many times it loops', async () => {
+    const root = repo();
+    write(root, 'src/config.ts', A);
+    const ledger = new SessionLedger(root);
+    ledger.setWatcherActive(true);
+    await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
+    let panicInputs = 0;
+    for (const v of [B, A, B, A, B, A]) {
+      await ledger.recordReindexed([{ rel: 'src/config.ts', content: v }]);
+      panicInputs += ledger.takeNewOscillations().length;
+    }
+    expect(panicInputs).toBe(1);
+    expect(ledger.facts([]).editOscillation[0].returns).toBe(5);
+  });
+
+  it('the ledger directory ignores itself in git', () => {
+    const root = repo();
+    recordAgentEdit(root, 'src/a.ts');
+    expect(readFileSync(join(root, '.openlore', SESSION_LEDGER_DIR, '.gitignore'), 'utf-8')).toBe('*\n');
   });
 });

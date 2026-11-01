@@ -3075,7 +3075,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // The ledger samples what changed since the last call before panic reads its loops.
       const sessionLedger = directory ? ledgerFor(directory) : undefined;
       if (sessionLedger) await sessionLedger.refresh().catch(() => {});
-      const newEditLoops = sessionLedger?.takeNewOscillations().length ?? 0;
+
       if (tracker && directory) {
         const isOrient = name === 'orient';
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
@@ -3096,7 +3096,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
               staleDepth: tracker.staleDepth,
               directory,
               tool: name,
-              editOscillation: newEditLoops,
+              // Taken only here, where panic reads them, so a loop is never consumed unread.
+              editOscillation: sessionLedger?.takeNewOscillations().length ?? 0,
             });
           }
           // Locked read-modify-write so this per-call score/level update cannot clobber a
