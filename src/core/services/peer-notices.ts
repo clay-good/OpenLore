@@ -1,9 +1,11 @@
 /**
- * Peer change notices: a peer changed a symbol this worktree's agent declared it reads
- * (change: add-peer-change-notices).
+ * Peer change notices: a peer changed a symbol this worktree's agent declared it reads, or was
+ * recently served by `orient` or `recall` (changes: add-peer-change-notices,
+ * add-peer-notices-served-set-and-fleet-records).
  *
  * Computed from the peer footprint board, not from messages: for each symbol in the read-set an
- * agent of this worktree declared (`declare_footprint`), each live peer's worktree is checked. The
+ * agent of this worktree declared (`declare_footprint`), and each function a lease token issued in
+ * this worktree within {@link SERVED_WINDOW_MS} names, each live peer's worktree is checked. The
  * symbol counts as changed by the peer only when the peer's base commits — at declaration and now —
  * still had the declared text, and the peer's working tree no longer does. So a peer that merely
  * branched from an older version, or rebased onto someone else's change, is not blamed for a
@@ -15,50 +17,89 @@ import { realpath } from 'node:fs/promises';
 import { readFileConfined } from '../../utils/path-confinement.js';
 import { readBlobsAtRef, readBlobsPerFile } from '../../utils/git-blobs.js';
 import { execFileGit } from '../../utils/git-exec.js';
-import { symbolHash, type BoardEntry, type BoardSymbol } from './footprint-board.js';
+import { symbolHash, type BoardEntry } from './footprint-board.js';
+import { PANIC_SESSION_EXPIRY_MS } from './mcp-handlers/panic-constants.js';
 
 /** Read × peer comparisons per call: the hook runs on every tool call. */
 const MAX_CHECKS = 400;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
+/** Served functions count for as long as a board entry stays live without a refresh. */
+export const SERVED_WINDOW_MS = PANIC_SESSION_EXPIRY_MS;
+
+/** A symbol this worktree read: its span, its text hash (and the hash function), and how and when it was read. */
+interface ReadSymbol {
+  id: string; name: string; file: string; start: number; end: number; hash: string; head?: string;
+  hashOf: (text: string) => string;
+  via: 'declared' | 'served';
+  at: string;
+  /** The analysis root relative to the worktree top ('' at the top), and its repository-path prefix. */
+  rootRel: string; prefix: string;
+}
 
 export interface PeerChangeNotice {
-  /** The declared symbol's id (file and name). */
+  /** The symbol's id (file and name). */
   id: string;
   symbol: string;
   file: string;
+  /** Where the symbol began when it was read (tells same-name symbols in one file apart). */
+  start: number;
   peer: { actorId: string; worktree: string; branch: string };
-  /** When the read-set was declared. */
-  declaredAt: string;
+  /** How this worktree read it: a declared read-set, or served by `orient` or `recall`. */
+  via: 'declared' | 'served';
+  /** When the read-set was declared, or when it was served. */
+  at: string;
 }
 
 /** Whether `text` still holds the declared symbol (at its span, or wherever its head now appears). */
-function holdsExactly(text: string, s: BoardSymbol): boolean {
-  if (symbolHash(text.slice(s.start, s.end)) === s.hash) return true;
+function holdsExactly(text: string, s: ReadSymbol): boolean {
+  if (s.hashOf(text.slice(s.start, s.end)) === s.hash) return true;
   if (!s.head) return false;
-  const len = s.end! - s.start!;
+  const len = s.end - s.start;
   for (let at = text.indexOf(s.head), tries = 0; at !== -1 && tries < 64; at = text.indexOf(s.head, at + 1), tries++) {
-    if (symbolHash(text.slice(at, at + len)) === s.hash) return true;
+    if (s.hashOf(text.slice(at, at + len)) === s.hash) return true;
   }
   return false;
 }
 
 /** A committed blob holds the symbol as checked out: git stores LF, a CRLF checkout hashed CRLF. */
-const blobHolds = (blob: string, s: BoardSymbol) => holdsExactly(blob, s) || (!blob.includes('\r') && holdsExactly(blob.replace(/\n/g, '\r\n'), s));
+const blobHolds = (blob: string, s: ReadSymbol) => holdsExactly(blob, s) || (!blob.includes('\r') && holdsExactly(blob.replace(/\n/g, '\r\n'), s));
 
 const isMissing = (e: unknown) => (e as NodeJS.ErrnoException)?.code === 'ENOENT';
 
-/** The symbols this worktree's agents declared reading that a live peer has since changed. */
+/** The symbols this worktree's agents declared reading, or were served, that a live peer has since changed. */
 export async function peerChangeNotices(root: string): Promise<PeerChangeNotice[]> {
   const { readBoard, worktreeIdentity } = await import('./footprint-board.js');
   const board = await readBoard(root);
-  if (board.live.length < 2) return [];
+  if (!board.live.length) return [];
   const here = await realpath((await worktreeIdentity(root)).worktree).catch(() => undefined);
   if (!here) return [];
   const real = async (p: string) => realpath(p).catch(() => p);
   const mine: BoardEntry[] = [];
   const peers: BoardEntry[] = [];
   for (const { entry } of board.live) ((await real(entry.worktree)) === here ? mine : peers).push(entry);
-  if (!mine.length || !peers.length) return [];
+  if (!peers.length) return [];
+
+  const rootPrefix = (rootRel: string) => (rootRel ? `${rootRel.split('\\').join('/')}/` : '');
+  const reads: ReadSymbol[] = [];
+  for (const me of mine) {
+    // Symbol files are relative to the analysis root, which may sit below the worktree's top.
+    const rootRel = relative(await real(me.worktree), await real(me.root ?? me.worktree));
+    if (rootRel.startsWith('..') || isAbsolute(rootRel)) continue;
+    for (const r of me.reads) {
+      if (r.hash === undefined || r.start === undefined || r.end === undefined) continue; // nothing to compare
+      reads.push({ id: r.id, name: r.name, file: r.file, start: r.start, end: r.end, hash: r.hash, head: r.head, hashOf: symbolHash, via: 'declared', at: me.declaredAt, rootRel, prefix: rootPrefix(rootRel) });
+    }
+  }
+  try {
+    const { recentServedFunctions, leaseTextHash } = await import('./lease-tokens.js');
+    const rootRel = relative(here, await real(root));
+    if (!rootRel.startsWith('..') && !isAbsolute(rootRel)) {
+      for (const f of await recentServedFunctions(root, SERVED_WINDOW_MS)) {
+        reads.push({ id: `${f.file}::${f.name}`, name: f.name, file: f.file, start: f.start, end: f.end, hash: f.hash, head: f.head, hashOf: leaseTextHash, via: 'served', at: f.servedAt, rootRel, prefix: rootPrefix(rootRel) });
+      }
+    }
+  } catch { /* no tokens */ }
+  if (!reads.length) return [];
 
   // Per peer: its working-tree files and its base blobs, read once per call.
   const peerText = new Map<string, Promise<string | null>>();
@@ -113,26 +154,20 @@ export async function peerChangeNotices(root: string): Promise<PeerChangeNotice[
   const notices: PeerChangeNotice[] = [];
   const seen = new Set<string>();
   let checks = 0;
-  for (const me of mine) {
-    // Symbol files are relative to the analysis root, which may sit below the worktree's top.
-    const rootRel = relative(await real(me.worktree), await real(me.root ?? me.worktree));
-    if (rootRel.startsWith('..') || isAbsolute(rootRel)) continue;
-    const prefix = rootRel ? `${rootRel.split('\\').join('/')}/` : '';
-    for (const read of me.reads) {
-      if (read.hash === undefined || read.start === undefined || read.end === undefined) continue; // nothing to compare
-      for (const peer of peers) {
-        if (!peer.baseAtDeclare) continue; // no base to attribute a change with
-        const key = `${peer.actorId}\0${read.id}`;
-        if (seen.has(key)) continue;
-        if (++checks > MAX_CHECKS) return notices;
-        const now = await peerFile(peer, join(peer.worktree, rootRel), read.file);
-        if (now === null || (now && holdsExactly(now, read))) continue;
-        // Attributable to the peer only when its bases still had the declared text.
-        const blobs = await bases(peer, `${prefix}${read.file}`);
-        if (!blobs || !blobs.every(b => blobHolds(b, read))) continue;
-        seen.add(key);
-        notices.push({ id: read.id, symbol: read.name, file: read.file, peer: { actorId: peer.actorId, worktree: peer.worktree, branch: peer.branch }, declaredAt: me.declaredAt });
-      }
+  for (const read of reads) {
+    for (const peer of peers) {
+      if (!peer.baseAtDeclare) continue; // no base to attribute a change with
+      // One notice per peer and symbol; a declared read comes first and wins over the same served one.
+      const key = `${peer.actorId}\0${read.file}\0${read.name}\0${read.start}`; // start: same-name symbols in one file differ
+      if (seen.has(key)) continue;
+      if (++checks > MAX_CHECKS) return notices;
+      const now = await peerFile(peer, join(peer.worktree, read.rootRel), read.file);
+      if (now === null || (now && holdsExactly(now, read))) continue;
+      // Attributable to the peer only when its bases still had the text this worktree read.
+      const blobs = await bases(peer, `${read.prefix}${read.file}`);
+      if (!blobs || !blobs.every(b => blobHolds(b, read))) continue;
+      seen.add(key);
+      notices.push({ id: read.id, symbol: read.name, file: read.file, start: read.start, peer: { actorId: peer.actorId, worktree: peer.worktree, branch: peer.branch }, via: read.via, at: read.at });
     }
   }
   return notices;

@@ -31,6 +31,8 @@ const MAX_TOKENS = 500;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const HEAD_CHARS = 80;
 const TOKEN_RE = /^lt_[0-9a-f]{20}$/;
+const TOKEN_FILE_RE = /^lt_[0-9a-f]{20}\.json$/;
+const MAX_RECENT_TOKENS = 50;
 /** Text files whose formatting carries no meaning: hashed whitespace-normalized. */
 const NORMALIZED = /\.(?:md|markdown|ya?ml|json)$/i;
 
@@ -153,6 +155,39 @@ const isEntry = (e: unknown): e is LeaseEntry => {
   return typeof x.name === 'string' && typeof x.hash === 'string' && typeof x.head === 'string'
     && Number.isInteger(x.start) && Number.isInteger(x.end) && x.end! > x.start!;
 };
+
+/** A function served in this worktree, from a recent token: its span, raw-text hash, and when. */
+export interface RecentServed { file: string; name: string; start: number; end: number; hash: string; head: string; servedAt: string }
+
+/** The raw-text hash tokens use, for callers that compare served text elsewhere. */
+export const leaseTextHash = sha;
+
+/**
+ * Functions served by tokens issued within `windowMs` (newest serve of each kept), read-only.
+ * Bounded: the newest {@link MAX_RECENT_TOKENS} tokens and {@link MAX_ENTRIES} functions.
+ */
+export async function recentServedFunctions(root: string, windowMs: number, now = Date.now()): Promise<RecentServed[]> {
+  const dir = await tokensDirForRead(root);
+  let files: Array<{ n: string; t: number }>;
+  try {
+    files = readdirSync(dir).filter(n => TOKEN_FILE_RE.test(n)).map(n => ({ n, t: statSync(join(dir, n)).mtimeMs })).filter(f => now - f.t <= windowMs);
+  } catch { return []; }
+  files.sort((a, b) => b.t - a.t);
+  const out = new Map<string, RecentServed>();
+  for (const f of files.slice(0, MAX_RECENT_TOKENS)) {
+    let rec: LeaseRecord;
+    try { rec = JSON.parse(await readFileConfined(dir, f.n, 512 * 1024, true)) as LeaseRecord; } catch { continue; }
+    const created = Date.parse(rec?.createdAt);
+    if (rec?.version !== 1 || !Number.isFinite(created) || now - created > windowMs || !Array.isArray(rec.entries)) continue;
+    for (const e of rec.entries.filter(isEntry)) {
+      const key = `${e.file}\0${e.name ?? ''}`;
+      if (e.name === undefined || out.has(key)) continue; // newest token first: its serve counts
+      out.set(key, { file: e.file, name: e.name, start: e.start!, end: e.end!, hash: e.hash!, head: e.head!, servedAt: rec.createdAt });
+      if (out.size >= MAX_ENTRIES) return [...out.values()];
+    }
+  }
+  return [...out.values()];
+}
 
 /** Whether every entry of a token still has the same text. */
 export async function checkLease(root: string, token: string): Promise<LeaseCheck> {
