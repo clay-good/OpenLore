@@ -31,7 +31,8 @@ groups:
 | Generated or vendored file edited by hand; name its source and regenerate command | [add-generated-file-guard](archive/2026-10-31-add-generated-file-guard/) | shipped (#629) |
 | Push receipts after edits, after compaction, before stop, at sub-agent start, at task creation | [add-agent-loop-hook-surfaces](archive/2026-10-31-add-agent-loop-hook-surfaces/) (Claude Code; the rest in [add-agent-loop-hooks-subagents-codex-pi](add-agent-loop-hooks-subagents-codex-pi/)) | shipped |
 | Shared footprint board across worktrees; duplicate intent | [add-peer-footprint-board](archive/2026-11-01-add-peer-footprint-board/) | shipped |
-| Peer read-after-write notices; fleet records on the board | [add-peer-change-notices](add-peer-change-notices/) | split from the above |
+| Peer read-after-write notices (declared reads) | [add-peer-change-notices](archive/2026-11-01-add-peer-change-notices/) | shipped |
+| Peer notices for the served set; fleet records on the board | [add-peer-notices-served-set-and-fleet-records](add-peer-notices-served-set-and-fleet-records/) | split from the above |
 | Compaction pushes the handoff briefing | [add-session-handoff-briefing](archive/2026-11-01-add-session-handoff-briefing/) | shipped |
 | Real call-site examples; profile line in `orient` | [add-call-site-usage-profile](add-call-site-usage-profile/) | existing, addendum, promoted |
 | Workspace manifests as package nodes, no export step | [add-build-graph-ingest](add-build-graph-ingest/) | existing, addendum |

@@ -261,6 +261,20 @@ async function afterTools(root: string, files: string[], baseline: string | unde
       items.push({ key: `loop:${o.id}#${o.returns}`, severity: 'warning', text: `${o.name} (${o.file}) returned to an earlier version ${o.returns} times this session.` });
     }
   }
+  // A peer changed a symbol this worktree's agent declared it reads (change: add-peer-change-notices).
+  try {
+    const { peerChangeNotices } = await import('../../core/services/peer-notices.js');
+    const { emittedText: t } = await import('../../core/services/generated-file-guard.js');
+    for (const n of await peerChangeNotices(root)) {
+      items.push({
+        key: `peer:${n.peer.actorId}:${n.file}#${n.symbol}`,
+        severity: 'warning',
+        // Board fields are peer-written: screened before they reach the agent.
+        text: sanitizeForTerminal(`Peer ${t(n.peer.actorId)} (${t(n.peer.branch || 'detached')} in ${t(n.peer.worktree)}) changed ${t(n.symbol)} (${t(n.file)}), which you declared reading at ${t(n.declaredAt).slice(11, 16)} UTC.`),
+        next: `re-read ${t(n.symbol)} before relying on it`,
+      });
+    }
+  } catch { /* the board is optional */ }
   if (!files.length) return items;
 
   items.push(...(await beforeEdit(root, files)));
