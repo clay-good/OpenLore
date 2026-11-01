@@ -255,7 +255,7 @@ async function decisionGoverned(root: string, subject: string): Promise<unknown>
   }
 }
 
-/** `lease-current`: does every (symbol or file, hash) a lease token named still hash the same? */
+/** `lease-current`: is the exact text of everything a lease token served still the same? */
 async function leaseCurrent(root: string, subject: string): Promise<unknown> {
   const { emittedText } = await import('../generated-file-guard.js');
   const claim = { kind: 'lease-current' as const, subject: emittedText(subject) };
@@ -263,17 +263,24 @@ async function leaseCurrent(root: string, subject: string): Promise<unknown> {
   const { checkLease } = await import('../lease-tokens.js');
   const r = await checkLease(root, subject.trim());
   if (r.status !== 'checked') return { claim, verdict: 'unverifiable' as Verdict, reason: emittedText(r.reason), confidenceBoundary: assembleBoundary({ staleness }) };
+  const ref = (c: { file: string; name?: string }) => (c.name ? `${emittedText(c.name)} (${emittedText(c.file)})` : emittedText(c.file));
   const changed = r.changed.map(c => ({ file: emittedText(c.file), ...(c.name ? { name: emittedText(c.name) } : {}), why: c.why }));
-  const receipt = { issuedAt: r.createdAt, entries: r.entries, changed };
-  if (!changed.length) {
-    return { claim, verdict: 'confirmed' as Verdict, reason: `All ${r.entries} served entr${r.entries === 1 ? 'y' : 'ies'} of the lease (issued ${r.createdAt}) hash the same as when they were served.`, receipt, confidenceBoundary: assembleBoundary({ staleness }) };
+  const unsettled = r.unsettled.map(u => ({ file: emittedText(u.file), ...(u.name ? { name: emittedText(u.name) } : {}), reason: emittedText(u.reason) }));
+  const notCovered = r.notCovered.map(emittedText);
+  const receipt = { issuedAt: r.createdAt, entries: r.entries, changed, ...(unsettled.length ? { unsettled } : {}), ...(notCovered.length ? { notCovered } : {}) };
+  const scope = `The lease covers the functions and files the response served${notCovered.length ? `, except ${notCovered.length} it could not locate (${notCovered.slice(0, 3).join(', ')})` : ''}; call paths and insertion points are not part of it.`;
+  if (changed.length) {
+    const named = r.changed.slice(0, 8).map(c => `${ref(c)}${c.why === 'removed' ? ' [file removed]' : ''}`).join(', ');
+    return {
+      claim, verdict: 'refuted' as Verdict,
+      reason: `${changed.length} of ${r.entries} served entr${r.entries === 1 ? 'y' : 'ies'} changed since the lease was issued (${r.createdAt}): ${named}${changed.length > 8 ? ` and ${changed.length - 8} more` : ''}. Re-read them before relying on what was served. ${scope}`,
+      receipt, confidenceBoundary: assembleBoundary({ staleness }),
+    };
   }
-  const named = changed.slice(0, 8).map(c => `${c.name ? `${c.name} (${c.file})` : c.file}${c.why === 'removed' ? ' [removed]' : c.why === 'file-changed' ? ' [file changed]' : ''}`).join(', ');
-  return {
-    claim, verdict: 'refuted' as Verdict,
-    reason: `${changed.length} of ${r.entries} served entr${r.entries === 1 ? 'y' : 'ies'} changed since the lease was issued (${r.createdAt}): ${named}${changed.length > 8 ? ` and ${changed.length - 8} more` : ''}. Re-read them before relying on what was served.`,
-    receipt, confidenceBoundary: assembleBoundary({ staleness }),
-  };
+  if (unsettled.length) {
+    return { claim, verdict: 'unverifiable' as Verdict, reason: `${unsettled.length} served entr${unsettled.length === 1 ? 'y' : 'ies'} could not be checked: ${unsettled.slice(0, 3).map(u => `${ref(u)} — ${u.reason}`).join('; ')}. ${scope}`, receipt, confidenceBoundary: assembleBoundary({ staleness }) };
+  }
+  return { claim, verdict: 'confirmed' as Verdict, reason: `All ${r.entries} served entr${r.entries === 1 ? 'y has' : 'ies have'} the same text as when the lease was issued (${r.createdAt}). ${scope}`, receipt, confidenceBoundary: assembleBoundary({ staleness }) };
 }
 
 export async function verifyGraphClaim(root: string, kind: GraphClaimKind, subject: string): Promise<unknown> {

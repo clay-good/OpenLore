@@ -48,12 +48,15 @@ edited after that run.
 
 ## Lease tokens
 
-`orient` and `recall` return a `leaseToken` (`lt_` and 20 hex characters) naming the symbols and
-files they served, with their content hashes at that moment, stored in
-`.openlore/session-ledger/tokens/` for 12 hours. Any process on the clone can pass it to
-`verify_claim` with kind `lease-current`: confirmed when everything still hashes the same, refuted
-naming each changed or removed entry. An edit to an unserved symbol in the same file does not
-change the lease; a reformatted Markdown or YAML file does not either.
+`orient` and `recall` return a `leaseToken` (`lt_` and 20 hex characters) naming the functions and
+files they served, with a hash of their exact text at that moment, stored in
+`.openlore/session-ledger/tokens/` for 12 hours. Issuing reads the files and the cached index only
+(no parsing). Any process on the clone can pass it to `verify_claim` with kind `lease-current`:
+confirmed when everything has the same text, refuted naming each changed or removed entry, and
+unverifiable when a file cannot be read. An edit to an unserved function, or an edit above a served
+one, does not change the lease; a reformatted Markdown, YAML, or JSON file does not either.
+Whitespace inside a served function does. A served name the index cannot locate (a class) is
+listed as not covered; call paths and insertion points are not part of a lease.
 
 ## Reading it from another process
 
