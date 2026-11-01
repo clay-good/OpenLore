@@ -181,6 +181,46 @@ describe('declaration hashes', () => {
     expect(after.get('openapi.yaml::POST /v1/checkout')!.hash).toBe(before.get('openapi.yaml::POST /v1/checkout')!.hash);
   });
 
+  it('sees a required name that declares no property of its own', () => {
+    // The rule table compares `required` only through the declared properties, so this change is
+    // compared nowhere else — a client must now send `token`.
+    const before = hashContractOperations('openapi.yaml', SPEC)!;
+    const after = hashContractOperations('openapi.yaml', SPEC.replace('required: [cart]', 'required: [cart, token]'))!;
+    expect(after.get('openapi.yaml::POST /v1/checkout')!.hash)
+      .not.toBe(before.get('openapi.yaml::POST /v1/checkout')!.hash);
+  });
+
+  it('sees a changed success-response code', () => {
+    const before = hashContractOperations('openapi.yaml', SPEC)!;
+    const after = hashContractOperations('openapi.yaml', SPEC.replace("'201': { description: created }", "'200': { description: ok }"))!;
+    expect(after.get('openapi.yaml::POST /v1/checkout')!.hash)
+      .not.toBe(before.get('openapi.yaml::POST /v1/checkout')!.hash);
+  });
+
+  it('sees a change inside a schema the operation only references', () => {
+    const referenced = `openapi: 3.0.0
+info: { title: t, version: '1' }
+paths:
+  /v1/checkout:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Cart' }
+      responses: { '201': { description: created } }
+components:
+  schemas:
+    Cart:
+      type: object
+      properties:
+        item: { type: string }
+`;
+    const before = hashContractOperations('openapi.yaml', referenced)!;
+    const after = hashContractOperations('openapi.yaml', referenced.replace('item: { type: string }', 'item: { type: integer }'))!;
+    expect(after.get('openapi.yaml::POST /v1/checkout')!.hash)
+      .not.toBe(before.get('openapi.yaml::POST /v1/checkout')!.hash);
+  });
+
   it('is not a specification when the file merely mentions the word', () => {
     expect(hashContractOperations('package.json', '{"dependencies":{"swagger":"^2.0.0"}}')).toBeUndefined();
   });
