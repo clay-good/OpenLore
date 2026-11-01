@@ -10,6 +10,9 @@
       parsed fields); tracked in served/edited like code symbols
 - [ ] `leaseToken` on `orient` and `recall`: digest of the served (address, hash) set, registered in
       `.openlore/session-ledger/tokens/` (bounded, expiring with the session)
+- [ ] `verify_claim` kind `lease-current` (subject: a `leaseToken`): confirmed when every (address, hash)
+      still matches, refuted listing changed entries, unverifiable for an unknown or expired token
+      (moved from add-graph-claim-kinds)
 - [ ] `status --json` session counts: body-only, signature-changed (disjoint), exports-changed,
       contract-elements-changed, iac-resources-changed; no thresholds
 
@@ -25,3 +28,4 @@
 - [ ] `mcp-handlers` delta: ADD EditsAfterTheLastTestRunAreNamed
 - [ ] `mcp-handlers` delta: ADD ServedContractsAndResourcesCarryCanonicalHashes
 - [ ] `mcp-handlers` delta: ADD LeaseTokensAndSessionCountsAreExposedAsData
+- [ ] `mcp-handlers` delta: ADD LeaseTokensAreVerifiableClaims

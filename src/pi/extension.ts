@@ -1405,8 +1405,8 @@ export const NAV_TOOLS: NavToolSpec[] = [
     description: 'Verify a structural claim against the graph before asserting it — "X is dead", "Y calls Z", "Z is safe to change" — or a decision-authority claim ("ADR abc12345 governs this") before citing it, and get a deterministic verdict (confirmed / refuted / unverifiable) with a citation receipt.',
     guideline: 'Before you tell the user a structural fact ("X is dead", "Y calls Z", "this is safe to change"), or cite a decision id to a human, call openlore_verify_claim with `kind` and `subject` (and `object` for relational kinds: calls, reaches, impacts). For `decision-current`, `subject` is the 8-character decision id — a "refuted" verdict names the live superseder to cite instead. An "unverifiable" verdict means hedge or read the source rather than assert.',
     parameters: Type.Object({
-      kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'] as const, { description: 'REQUIRED. The kind of claim to verify (structural, or decision-current for decision authority).' }),
-      subject: Type.String({ description: 'REQUIRED. What the claim is about: a function/method name for structural kinds, or an 8-character decision id for decision-current.' }),
+      kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed'] as const, { description: 'REQUIRED. The kind of claim to verify.' }),
+      subject: Type.String({ description: 'REQUIRED. A symbol; a decision id for decision-current; "METHOD /path" for endpoint kinds.' }),
       object: Type.Optional(Type.String({ description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' })),
     }),
   },

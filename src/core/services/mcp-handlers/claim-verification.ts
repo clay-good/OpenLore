@@ -7,7 +7,8 @@
  * agent's confident-wrong failure mode ("this function is dead", "Y calls Z") into
  * checked-or-flagged, and makes the agent's output auditable.
  *
- *   claim   = { kind: 'calls'|'reaches'|'dead'|'impacts'|'safe-to-change'|'decision-current', subject, object? }
+ *   claim   = { kind: 'calls'|'reaches'|'dead'|'impacts'|'safe-to-change'|'decision-current'
+ *              |'decision-governed'|'endpoint-implemented'|'endpoint-consumed', subject, object? }
  *   verdict = { verdict: 'confirmed'|'refuted'|'unverifiable', reason, receipt?, confidenceBoundary }
  *
  * Every verdict is a deterministic computation, never an LLM judgement and never a
@@ -67,10 +68,14 @@ import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-grap
 import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 import type { GroundingCertificate, StructuralAnchor, PendingDecision } from '../../../types/index.js';
 
-export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current';
+export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current'
+  | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed';
 const CLAIM_KINDS: ReadonlySet<string> = new Set<ClaimKind>([
   'calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current',
+  'decision-governed', 'endpoint-implemented', 'endpoint-consumed',
 ]);
+/** Kinds over contracts and governance, evaluated in `claim-kinds-graph.ts` (change: add-graph-claim-kinds). */
+const GRAPH_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['decision-governed', 'endpoint-implemented', 'endpoint-consumed']);
 /** Kinds that relate two symbols and so require an `object`. */
 const RELATIONAL_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['calls', 'reaches', 'impacts']);
 /** Kinds verified against the decision store rather than the call graph. */
@@ -137,6 +142,10 @@ interface Resolution {
  * name (multiple matches at the chosen precision) resolves to no node so the
  * caller can return `unverifiable` rather than guess which symbol was meant.
  */
+export function resolveClaimSymbol(cg: SerializedCallGraph, name: string): Resolution {
+  return resolveSymbol(cg, name);
+}
+
 function resolveSymbol(cg: SerializedCallGraph, name: string): Resolution {
   const lower = name.toLowerCase();
   const code = cg.nodes.filter(isCodeNode);
@@ -150,7 +159,7 @@ function resolveSymbol(cg: SerializedCallGraph, name: string): Resolution {
 }
 
 /** Read the build commit the index was analyzed at, if it was captured. */
-async function readIndexCommit(absDir: string): Promise<string | null> {
+export async function readIndexCommit(absDir: string): Promise<string | null> {
   try {
     // Bounded read: repository-controlled artifact (symlink / FIFO / oversized all fail closed).
     const raw = await readArtifactBounded(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT));
@@ -418,6 +427,9 @@ function shortTitle(s: string, max = 80): string {
 const AUTHORITATIVE_FOR_CITATION: ReadonlySet<PendingDecision['status']> =
   new Set<PendingDecision['status']>(['verified', 'approved', 'auto-approved', 'synced']);
 
+/** Whether a decision status puts it in force (shared with `decision-governed`). */
+export const isAuthoritativeForCitation = (status: PendingDecision['status']): boolean => AUTHORITATIVE_FOR_CITATION.has(status);
+
 /** A citation for a decision-claim verdict — the decision-store analogue of {@link Receipt}. */
 interface DecisionReceipt {
   indexCommit: string | null;
@@ -581,7 +593,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
   const absDir = await validateDirectory(input.directory);
 
   if (!CLAIM_KINDS.has(input.kind)) {
-    return { error: `Unknown claim kind "${input.kind}". Use one of: calls, reaches, dead, impacts, safe-to-change, decision-current.` };
+    return { error: `Unknown claim kind "${input.kind}". Use one of: ${[...CLAIM_KINDS].join(', ')}.` };
   }
   if (!input.subject || !input.subject.trim()) {
     return { error: 'A claim must name a "subject" symbol.' };
@@ -592,6 +604,10 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
   // verifier path stays untouched.
   if (DECISION_KINDS.has(input.kind)) {
     return verifyDecisionCurrent(absDir, input.subject);
+  }
+  if (GRAPH_KINDS.has(input.kind)) {
+    const { verifyGraphClaim } = await import('./claim-kinds-graph.js');
+    return verifyGraphClaim(absDir, input.kind as 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed', input.subject.trim());
   }
 
   const needsObject = RELATIONAL_KINDS.has(input.kind);

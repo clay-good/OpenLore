@@ -60,11 +60,11 @@ live registry.
 | `minimal` | 6 | 2,854 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
 | `memory` | 3 | 1,510 | 1,610 |
-| `verify` | 5 | 2,075 | 2,220 |
+| `verify` | 5 | 2,077 | 2,220 |
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 8 | 3,476 | 3,720 |
-| `substrate` | 15 | 5,247 | 5,500 |
-| `full` | 83 | 27,125 | 28,400 |
+| `substrate` | 15 | 5,250 | 5,500 |
+| `full` | 83 | 27,128 | 28,400 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
@@ -311,7 +311,7 @@ Durable, code-anchored notes that self-invalidate when the code they describe mo
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `verify_claim` | Verify a claim **before** asserting it to a human: a deterministic verdict (`confirmed` / `refuted` / `unverifiable`) plus a citation receipt. Structural kinds (`calls`, `reaches`, `dead`, `impacts`, `safe-to-change`) check the call graph ("X is dead", "Y calls Z", "this is safe to change"). The `decision-current` kind checks whether a recorded decision is still authoritative before you cite it — `subject` is an 8-char decision id, and the verdict is `refuted` (naming the live superseder to cite instead) if that decision was superseded or rejected. An `unverifiable` verdict means hedge or read the source. Registered only under `openlore mcp --preset verify`. | Yes (structural kinds) |
+| `verify_claim` | Verify a claim **before** asserting it to a human: a deterministic verdict (`confirmed` / `refuted` / `unverifiable`) plus a citation receipt. Structural kinds (`calls`, `reaches`, `dead`, `impacts`, `safe-to-change`) check the call graph ("X is dead", "Y calls Z", "this is safe to change"). The `decision-current` kind checks whether a recorded decision is still authoritative before you cite it — `subject` is an 8-char decision id, and the verdict is `refuted` (naming the live superseder to cite instead) if that decision was superseded or rejected. `decision-governed` (subject: a symbol) confirms when an authoritative decision or memory is anchored to it, listing ids and freshness; a draft, superseded, or orphaned record is listed as not governing. `endpoint-implemented` and `endpoint-consumed` (subject: an OpenAPI/Swagger operation, `METHOD /path`, base path and parameter names optional) confirm when an indexed route handler serves it, or a client call site in this repository calls it; a refuted `endpoint-consumed` is scoped to this repository and names callers elsewhere as not visible; an operation no readable specification declares is `unverifiable`. An `unverifiable` verdict means hedge or read the source. Registered only under `openlore mcp --preset verify`. | Yes (structural kinds) |
 
 **Federation (multi-repo, opt-in)**
 
