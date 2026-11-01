@@ -261,13 +261,13 @@ export async function worktreeIdentity(root: string): Promise<{ worktree: string
 }
 
 /** Live board entries as task descriptors for the coordination tools (write seeds only). */
-export async function liveTaskDescriptors(root: string): Promise<Array<{ id: string; branch: string; seedSymbols: string[]; writeMode?: 'append' | 'modify' }>> {
+export async function liveTaskDescriptors(root: string): Promise<Array<{ id: string; branch: string; seedSymbols: string[]; writeMode?: 'append' | 'modify'; worktree: string; root?: string }>> {
   const board = await readBoard(root);
   // Seeds are the symbols resolved at declaration (ids), never raw peer text: an entry with no
   // resolved write (only intended creations) is not a task here.
   return board.live
     .filter(l => l.entry.writes.length > 0)
-    .map(l => ({ id: l.entry.actorId, branch: l.entry.branch, seedSymbols: l.entry.writes.map(w => w.id), ...(l.entry.writeMode ? { writeMode: l.entry.writeMode } : {}) }));
+    .map(l => ({ id: l.entry.actorId, branch: l.entry.branch, seedSymbols: l.entry.writes.map(w => w.id), ...(l.entry.writeMode ? { writeMode: l.entry.writeMode } : {}), worktree: l.entry.worktree, ...(l.entry.root ? { root: l.entry.root } : {}) }));
 }
 
 /**

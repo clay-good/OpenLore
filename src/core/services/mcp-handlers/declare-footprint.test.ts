@@ -131,7 +131,7 @@ describe('declare_footprint', () => {
   it('live entries join map_in_flight_conflicts as agent tasks', async () => {
     const { a } = clone();
     await handleDeclareFootprint({ directory: a, actorId: 'agent-a', writeSet: ['parseConfig'], writeMode: 'append' });
-    expect(await liveTaskDescriptors(a)).toEqual([{ id: 'agent-a', branch: 'feat-a', seedSymbols: ['src/config.ts::parseConfig'], writeMode: 'append' }]);
+    expect(await liveTaskDescriptors(a)).toEqual([expect.objectContaining({ id: 'agent-a', branch: 'feat-a', seedSymbols: ['src/config.ts::parseConfig'], writeMode: 'append' })]);
   });
 
   it('plan_parallel_work with includeBoard plans the live board agents as tasks', async () => {
@@ -145,19 +145,51 @@ describe('declare_footprint', () => {
     expect(JSON.stringify(plan.conflicts)).toContain('board:agent-b');
   });
 
-  it('a fleet verdict recorded in one worktree is visible in its sibling; a legacy record is folded in', async () => {
+  it('a fleet verdict recorded in one worktree is visible in its sibling, labeled as recorded elsewhere', async () => {
     const { a, b } = clone();
+    const legacy = join(b, OPENLORE_DIR, 'coordination', 'verification-records.json');
     write(b, join(OPENLORE_DIR, 'coordination', 'verification-records.json'), JSON.stringify([
       { id: 'legacy', verdict: 'surface-stable', branch: 'feat-b', baseCommit: 'abc', producedBy: 'certify_public_surface', anchors: [] },
       { id: 'junk', verdict: 'not-a-verdict' },
     ]));
     await recordVerification(a, { id: 'v1', verdict: 'merge-compatible', branch: 'feat-a', baseCommit: git(a, 'rev-parse', 'HEAD'), producedBy: 'certify_merge', anchors: [] });
-    const ids = async (dir: string) => ((await handleFleetStatus({ directory: dir })).verificationMemory as { records: Array<{ id: string }> }).records.map(r => r.id).sort();
-    expect(await ids(b)).toEqual(['legacy', 'v1']);
-    expect(await ids(a)).toEqual(['v1']);
+    const states = async (dir: string) => Object.fromEntries(((await handleFleetStatus({ directory: dir })).verificationMemory as { records: Array<{ id: string; state: string }> }).records.map(r => [r.id, r.state]));
+    expect(await states(b)).toEqual({ legacy: 'needs-reverification', v1: 'other-worktree' });
+    expect(await states(a)).toEqual({ v1: 'needs-reverification' });
+    // A legacy file holding a record that could not be read is kept, not deleted.
     await recordVerification(b, { id: 'v2', verdict: 'blast-radius-clean', branch: 'feat-b', baseCommit: 'abc', producedBy: 'blast_radius', anchors: [] });
-    expect(existsSync(join(b, OPENLORE_DIR, 'coordination', 'verification-records.json'))).toBe(false);
-    expect(await ids(a)).toEqual(['legacy', 'v1', 'v2']);
+    expect(existsSync(legacy)).toBe(true);
+    // Its readable record was still folded into the shared file.
+    expect(Object.keys(await states(a)).sort()).toEqual(['legacy', 'v1', 'v2']);
+    // A clean legacy file is folded in and retired.
+    write(b, join(OPENLORE_DIR, 'coordination', 'verification-records.json'), JSON.stringify([
+      { id: 'legacy', verdict: 'surface-stable', branch: 'feat-b', baseCommit: 'abc', producedBy: 'certify_public_surface', anchors: [] },
+    ]));
+    await recordVerification(b, { id: 'v3', verdict: 'blast-radius-clean', branch: 'feat-b', baseCommit: 'abc', producedBy: 'blast_radius', anchors: [] });
+    expect(existsSync(legacy)).toBe(false);
+    expect(Object.keys(await states(a)).sort()).toEqual(['legacy', 'v1', 'v2', 'v3']);
+  });
+
+  it('a shared records file that cannot be read is never written over; a bad anchor never crashes fleet_status', async () => {
+    const { a } = clone();
+    const shared = join(dirname((await boardDir(a))!), 'verification-records.json');
+    mkdirSync(dirname(shared), { recursive: true });
+    writeFileSync(shared, '{ not json');
+    await expect(recordVerification(a, { id: 'v1', verdict: 'merge-compatible', branch: 'feat-a', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [] })).rejects.toThrow(/could not be read/);
+    writeFileSync(shared, JSON.stringify([
+      { id: 'bad-anchor', verdict: 'merge-compatible', branch: 'x', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [{ filePath: 5 }] },
+      { id: 'no-hash', verdict: 'merge-compatible', branch: 'x', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [{ filePath: 'src/config.ts' }] },
+    ]));
+    const records = ((await handleFleetStatus({ directory: a })).verificationMemory as { records: Array<{ id: string; state: string }> }).records;
+    expect(records).toEqual([expect.objectContaining({ id: 'no-hash', state: 'needs-reverification' })]);
+  });
+
+  it('includeBoard never plans this directory\'s own entry against itself', async () => {
+    const { a } = clone();
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', writeSet: ['parseConfig'] });
+    const plan = await handlePlanParallelWork({ directory: a, tasks: [{ id: 'mine', seedSymbols: ['parseConfig'] }], includeBoard: true }) as { taskCount: number; boardTasks: string[] };
+    expect(plan.boardTasks).toEqual([]);
+    expect(plan.taskCount).toBe(1);
   });
 
   it('rejects bad input without writing', async () => {

@@ -21,10 +21,10 @@ import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import type { StructuralAnchor } from '../../../types/index.js';
 import { validateDirectory, safeJoin } from './utils.js';
 import { OPENLORE_DIR } from '../../../constants.js';
-import { mkdir, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdir, rm, realpath, lstat } from 'node:fs/promises';
+import { dirname, join, relative, isAbsolute } from 'node:path';
 import { readFileConfined } from '../../../utils/path-confinement.js';
-import { atomicWriteFile } from '../../decisions/atomic-store.js';
+import { atomicWriteFile, withCommitLock } from '../../decisions/atomic-store.js';
 
 /** The coordination verdicts whose currency the fleet tracks. */
 export type CoordinationVerdict = 'blast-radius-clean' | 'surface-stable' | 'merge-compatible';
@@ -40,9 +40,11 @@ export interface VerificationRecord {
   /** The tool that produced the verdict. */
   producedBy: string;
   anchors: StructuralAnchor[];
+  /** The analysis directory (canonical) that recorded it; set when records are shared by the clone. */
+  worktree?: string;
 }
 
-export type RecordState = 'still-valid' | 'carried' | 'invalidated' | 'needs-reverification';
+export type RecordState = 'still-valid' | 'carried' | 'invalidated' | 'needs-reverification' | 'other-worktree';
 
 export interface ClassifiedRecord {
   id: string;
@@ -81,18 +83,24 @@ const REASON: Record<RecordState, string> = {
   'carried': 'the proven symbols moved but are unchanged (anchors re-pointed)',
   'invalidated': 'a proven symbol changed since the verdict was recorded; re-verify',
   'needs-reverification': 'a proven symbol could not be located, or the graph is unavailable; re-verify',
+  'other-worktree': 'recorded in another worktree of this clone; its code is not this one, so it is not checked here — run fleet_status there',
 };
 
 /** Classify each record's currency against a freshness view. Pure over (records, view). */
 export function classifyRecords(
   records: readonly VerificationRecord[],
   view: Parameters<typeof memoryFreshness>[1] | null,
+  here?: string,
 ): ClassifiedRecord[] {
   return records.map((r) => {
     let state: RecordState = 'needs-reverification';
-    if (view) {
-      const { freshness, anchored } = memoryFreshness(r.anchors, view);
-      state = stateForFreshness(freshness, anchored);
+    if (here !== undefined && r.worktree !== undefined && r.worktree !== here) state = 'other-worktree';
+    // An anchor with no captured hash proves only that a file exists: never a fresh verdict.
+    else if (view && r.anchors.every(a => typeof a.contentHash === 'string')) {
+      try {
+        const { freshness, anchored } = memoryFreshness(r.anchors, view);
+        state = stateForFreshness(freshness, anchored);
+      } catch { /* an anchor the view cannot read: re-verify */ }
     }
     return {
       id: r.id, branch: r.branch, verdict: r.verdict, producedBy: r.producedBy,
@@ -102,12 +110,19 @@ export function classifyRecords(
 }
 
 const VERDICTS = new Set<string>(['blast-radius-clean', 'surface-stable', 'merge-compatible']);
+const optStr = (v: unknown) => v === undefined || typeof v === 'string';
+/** An anchor the freshness check can read without throwing: a string path, string identity fields. */
+const isAnchor = (v: unknown): v is StructuralAnchor => {
+  const a = v as Partial<StructuralAnchor> | null;
+  return !!a && typeof a === 'object' && typeof a.filePath === 'string'
+    && optStr(a.nodeId) && optStr(a.stableId) && optStr(a.symbolName) && optStr(a.contentHash) && optStr((a as { spanText?: unknown }).spanText);
+};
 /** Records are written by any worktree of the clone: only well-formed ones are read. */
 const isRecord = (v: unknown): v is VerificationRecord => {
   const r = v as Partial<VerificationRecord> | null;
   return !!r && typeof r === 'object' && typeof r.id === 'string' && r.id.length <= 256 && VERDICTS.has(r.verdict as string)
     && typeof r.branch === 'string' && typeof r.baseCommit === 'string' && typeof r.producedBy === 'string'
-    && Array.isArray(r.anchors) && r.anchors.every(a => !!a && typeof a === 'object');
+    && optStr(r.worktree) && Array.isArray(r.anchors) && r.anchors.every(isAnchor);
 };
 
 /**
@@ -121,33 +136,70 @@ async function sharedRecordsDir(absDir: string): Promise<string | null> {
   return board ? dirname(board) : null;
 }
 
-async function readRecordsAt(dir: string, name: string): Promise<VerificationRecord[]> {
+/** A records file: its well-formed records, and whether it was read whole (`missing` when absent). */
+interface RecordsRead { records: VerificationRecord[]; state: 'read' | 'missing' | 'unreadable'; complete: boolean }
+
+async function readRecordsAt(dir: string, name: string): Promise<RecordsRead> {
+  let text: string;
+  try { text = await readFileConfined(dir, name, MAX_RECORDS_BYTES); } catch (e) {
+    return { records: [], state: (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'missing' : 'unreadable', complete: false };
+  }
   try {
-    const parsed: unknown = JSON.parse(await readFileConfined(dir, name, MAX_RECORDS_BYTES));
-    return Array.isArray(parsed) ? parsed.filter(isRecord).slice(0, MAX_RECORDS) : [];
-  } catch { return []; }
+    const parsed: unknown = JSON.parse(text);
+    if (!Array.isArray(parsed)) return { records: [], state: 'unreadable', complete: false };
+    const records = parsed.filter(isRecord);
+    return { records: records.slice(0, MAX_RECORDS), state: 'read', complete: records.length === parsed.length && records.length <= MAX_RECORDS };
+  } catch { return { records: [], state: 'unreadable', complete: false }; }
 }
 
 /** The shared records, plus any legacy per-worktree record the shared file does not hold yet. */
-async function loadRecords(absDir: string): Promise<VerificationRecord[]> {
-  const shared = await sharedRecordsDir(absDir);
-  const records = shared ? await readRecordsAt(shared, RECORDS_FILE) : [];
+async function loadRecords(absDir: string): Promise<{ records: VerificationRecord[]; shared: RecordsRead | null; legacy: RecordsRead }> {
+  const dir = await sharedRecordsDir(absDir);
+  const shared = dir ? await readRecordsAt(dir, RECORDS_FILE) : null;
+  const legacy = await readRecordsAt(absDir, LEGACY_RECORDS_REL);
+  const records = [...(shared?.records ?? [])];
   const ids = new Set(records.map(r => r.id));
-  for (const r of await readRecordsAt(absDir, LEGACY_RECORDS_REL)) if (!ids.has(r.id)) records.push(r);
-  return records;
+  for (const r of legacy.records) if (!ids.has(r.id)) records.push(r);
+  return { records, shared, legacy };
 }
 
-/** Record a verification verdict (coordination-scoped), shared by the clone's worktrees. Advisory, best-effort. */
+/** Newest records that fit the read limit (compact JSON), so every write stays readable. */
+function fitRecords(records: VerificationRecord[]): string {
+  let kept = records.slice(-MAX_RECORDS);
+  let text = JSON.stringify(kept);
+  while (Buffer.byteLength(text) > MAX_RECORDS_BYTES && kept.length > 1) {
+    kept = kept.slice(Math.ceil(kept.length / 10));
+    text = JSON.stringify(kept);
+  }
+  return text;
+}
+
+/**
+ * Record a verification verdict (coordination-scoped), shared by the clone's worktrees. Advisory.
+ * Serialized by a lock next to the file; refuses to write over a records file it could not read.
+ */
 export async function recordVerification(absDir: string, record: VerificationRecord): Promise<void> {
-  const records = await loadRecords(absDir);
-  const next = records.filter(r => r.id !== record.id);
-  next.push(record);
-  const shared = await sharedRecordsDir(absDir);
-  const path = shared ? join(shared, RECORDS_FILE) : safeJoin(absDir, LEGACY_RECORDS_REL);
+  const dir = await sharedRecordsDir(absDir);
+  const path = dir ? join(dir, RECORDS_FILE) : safeJoin(absDir, LEGACY_RECORDS_REL);
   await mkdir(dirname(path), { recursive: true });
-  await atomicWriteFile(path, JSON.stringify(next.slice(-MAX_RECORDS), null, 2));
-  // Folded into the shared file: the legacy copy is this tool's own artifact and is retired.
-  if (shared) await rm(safeJoin(absDir, LEGACY_RECORDS_REL), { force: true }).catch(() => {});
+  const worktree = dir ? await realpath(absDir).catch(() => absDir) : undefined;
+  await withCommitLock(`${path}.lock`, async () => {
+    const { records, shared, legacy } = await loadRecords(absDir);
+    const own = dir ? shared! : legacy;
+    if (own.state === 'unreadable') throw new Error(`The verification records at ${path} could not be read; nothing was written over them.`);
+    const next = records.filter(r => r.id !== record.id);
+    next.push({ ...record, ...(worktree ? { worktree } : {}) });
+    await atomicWriteFile(path, fitRecords(next));
+    // Folded into the shared file: the legacy copy (this tool's own artifact) is retired only when
+    // every record in it was read and carried over, and it is a regular file inside this directory.
+    if (dir && legacy.state === 'read' && legacy.complete) {
+      const legacyPath = safeJoin(absDir, LEGACY_RECORDS_REL);
+      const realLegacy = await realpath(legacyPath).catch(() => null);
+      const top = await realpath(absDir).catch(() => absDir);
+      const rel = realLegacy ? relative(top, realLegacy) : '..';
+      if (!rel.startsWith('..') && !isAbsolute(rel) && (await lstat(legacyPath)).isFile()) await rm(legacyPath, { force: true }).catch(() => {});
+    }
+  });
 }
 
 export interface FleetStatusInput {
@@ -163,7 +215,8 @@ export interface FleetStatusInput {
  */
 export async function handleFleetStatus(input: FleetStatusInput): Promise<Record<string, unknown>> {
   const absDir = await validateDirectory(input.directory);
-  const records = await loadRecords(absDir);
+  const { records } = await loadRecords(absDir);
+  const here = await realpath(absDir).catch(() => absDir);
 
   let view: Parameters<typeof memoryFreshness>[1] | null = null;
   try {
@@ -173,10 +226,10 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
 
   // Any worktree of the clone may have written a record: its text is screened before it is served.
   const { emittedText } = await import('../generated-file-guard.js');
-  const classified = classifyRecords(records, view).map(c => ({ ...c, id: emittedText(c.id), branch: emittedText(c.branch), producedBy: emittedText(c.producedBy), baseCommit: emittedText(c.baseCommit) }));
+  const classified = classifyRecords(records, view, here).map(c => ({ ...c, id: emittedText(c.id), branch: emittedText(c.branch), producedBy: emittedText(c.producedBy), baseCommit: emittedText(c.baseCommit) }));
   const counts = classified.reduce<Record<RecordState, number>>((acc, c) => {
     acc[c.state] = (acc[c.state] ?? 0) + 1; return acc;
-  }, { 'still-valid': 0, 'carried': 0, 'invalidated': 0, 'needs-reverification': 0 });
+  }, { 'still-valid': 0, 'carried': 0, 'invalidated': 0, 'needs-reverification': 0, 'other-worktree': 0 });
 
   return {
     tool: 'fleet_status',

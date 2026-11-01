@@ -28,6 +28,7 @@
  * (add-finding-enforcement-policy).
  */
 
+import { relative } from 'node:path';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import {
   computeFootprint,
@@ -629,23 +630,48 @@ function renderFootprint(f: Footprint): RenderedFootprint {
   };
 }
 
+/** The worktree top of a directory (canonical), or the directory itself outside git. */
+async function worktreeTop(absDir: string): Promise<string> {
+  const { realpath } = await import('node:fs/promises');
+  try {
+    const { execFileGit } = await import('../../../utils/git-exec.js');
+    const { stdout } = await execFileGit('git', ['rev-parse', '--show-toplevel'], { cwd: absDir });
+    const top = String(stdout).trim();
+    return await realpath(top).catch(() => top);
+  } catch { return realpath(absDir).catch(() => absDir); }
+}
+
 /** MCP dispatch entry. */
 export async function handlePlanParallelWork(input: PlanParallelWorkInput): Promise<unknown> {
-  if (!input.includeBoard) return computePlanParallelWork(input);
+  if (input.includeBoard !== true || !Array.isArray(input.tasks)) return computePlanParallelWork(input);
   // The live board entries join as tasks: their write seeds are the symbol ids resolved at declaration.
   const { liveTaskDescriptors } = await import('../footprint-board.js');
+  const { realpath } = await import('node:fs/promises');
   const absDir = await validateDirectory(input.directory);
-  const given = new Set((Array.isArray(input.tasks) ? input.tasks : []).map(t => t?.id));
-  const board = (await liveTaskDescriptors(absDir).catch(() => []))
-    .map(d => ({ id: `board:${d.id}`, seedSymbols: d.seedSymbols, ...(d.writeMode ? { writeMode: d.writeMode } : {}) }))
-    .filter(t => !given.has(t.id));
-  const plan = await computePlanParallelWork({ ...input, tasks: [...(input.tasks ?? []), ...board] });
+  const real = (p: string) => realpath(p).catch(() => p);
+  const here = await real(absDir);
+  const given = new Set(input.tasks.map(t => t?.id));
+  const skipped: string[] = [];
+  const board: TaskDescriptor[] = [];
+  for (const d of await liveTaskDescriptors(absDir).catch(() => [])) {
+    const id = `board:${d.id}`;
+    if (given.has(id)) continue;
+    const entryRoot = await real(d.root ?? d.worktree);
+    // This directory's own entries are the caller's work, already in its task list.
+    if (entryRoot === here) continue;
+    // Seeds are ids in the entry's own analysis root: another root's ids would not resolve here.
+    if (relative(await real(d.worktree), entryRoot) !== relative(await worktreeTop(absDir), here)) { skipped.push(`${id} (analysis root differs from this directory's)`); continue; }
+    if (input.tasks.length + board.length >= MAX_TASKS) { skipped.push(`${id} (plan task cap ${MAX_TASKS})`); continue; }
+    board.push({ id, seedSymbols: d.seedSymbols, ...(d.writeMode ? { writeMode: d.writeMode } : {}) });
+  }
+  const plan = await computePlanParallelWork({ ...input, tasks: [...input.tasks, ...board] });
   if ('error' in plan) return plan;
   return {
     ...plan,
     boardTasks: board.map(t => t.id),
+    ...(skipped.length ? { boardTasksSkipped: skipped } : {}),
     boardNote: board.length
-      ? 'Tasks named board:<actorId> are live peer-board entries (declare_footprint), planned on the write-sets they declared; their entries are peer-written (local-unreviewed).'
-      : 'No live peer-board entry declares a write-set; only the given tasks are planned.',
+      ? 'Tasks named board:<actorId> are live peer-board entries (declare_footprint) from other worktrees, planned on the write-sets they declared; their entries are peer-written (local-unreviewed).'
+      : 'No live peer-board entry from another worktree declares a write-set; only the given tasks are planned.',
   };
 }
