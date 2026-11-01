@@ -324,6 +324,21 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 
 > **Note on the parallel-work / cross-actor codes.** `parallel-work-conflict` / `parallel-work-cycle` (from `plan_parallel_work`) and `cross-actor-conflict` (from `map_in_flight_conflicts`) are emitted **only** by those MCP tools, which `openlore enforce` never runs (the gate is diff-based; these tools need a caller-supplied task list or live git/PR state). Naming them in `enforcement.policy` lets the **caller that invokes the tool** classify its `findings[]` with `resolveEnforcementClass` and block in its own CI — e.g. a CI check that warns when a new PR's footprint collides with an open one; the bundled commit gate never produces or blocks on them.
 
+### Agent-loop hooks
+
+`openlore install` wires three agent-loop moments in a repository's Claude Code settings (see
+[install](install.md#agent-loop-hooks)). Each is on unless turned off here:
+
+```json
+{ "hooks": { "before-edit": true, "after-tools": true, "before-stop": false } }
+```
+
+| Key | Moment |
+|-----|--------|
+| `before-edit` | before an edit tool runs: generated, vendored, or lockfile target |
+| `after-tools` | after an edit: session-ledger record and facts, check weakening, phantom references |
+| `before-stop` | before the agent stops: the `verify_change` receipt (blocks only on policy-blocking findings) |
+
 ### Task-scoped context injection
 
 An optional `contextInjection` block controls the per-task orientation that `openlore install` wires as a Claude Code `UserPromptSubmit` hook (`openlore orient --inject`). It runs `orient` against your submitted prompt and places a bounded, ignorable orientation block in context *before the agent's first turn*, so the common task begins already oriented without a manual `orient` call — amortizing the per-task round-trip the [Value Scorecard](AGENT-BENCHMARKS.md) attributes the small/familiar loss case to. Omit the block entirely for the defaults below (injection enabled). See [`openlore install`](install.md#task-scoped-context-injection).

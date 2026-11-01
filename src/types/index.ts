@@ -122,6 +122,15 @@ export interface OpenLoreConfig {
   workspace?: WorkspaceConfig;
   /** Pi extension settings, including who owns daemon spawn authority. */
   pi?: PiConfig;
+  /** Agent-loop hook moments; `false` turns one off (change: add-agent-loop-hook-surfaces). */
+  hooks?: HooksConfig;
+}
+
+/** Each agent-loop moment wired by `openlore install`; absent or `true` is on, `false` is off. */
+export interface HooksConfig {
+  'before-edit'?: boolean;
+  'after-tools'?: boolean;
+  'before-stop'?: boolean;
 }
 
 export interface PiConfig {

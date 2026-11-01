@@ -277,19 +277,39 @@ function mcpEntry(
  * REMOVAL, stranding the very hooks uninstall exists to take out
  * (change: harden-windows-hook-quoting).
  */
-const MANAGED_HOOKS: ReadonlyArray<{ key: string; args: readonly string[] }> = [
+interface ManagedHook {
+  key: string;
+  args: readonly string[];
+  /**
+   * An agent-loop moment (change: add-agent-loop-hook-surfaces). Its group carries
+   * `_openloreHook: <moment>` and is identified by that alone, so it never touches another
+   * `_openlore` group on the same event (the opt-in `check-edit` PostToolUse hook).
+   */
+  moment?: string;
+  /** Tool-name matcher for tool events (the edit tools). */
+  matcher?: string;
+  /** Hook timeout, in seconds. */
+  timeout?: number;
+}
+
+const EDIT_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit';
+
+const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
   { key: 'SessionStart', args: ['orient', '--json'] },
   { key: 'UserPromptSubmit', args: ['orient', '--inject'] },
+  { key: 'PreToolUse', args: ['hook', 'before-edit'], moment: 'before-edit', matcher: EDIT_TOOLS, timeout: 15 },
+  { key: 'PostToolUse', args: ['hook', 'after-tools'], moment: 'after-tools', matcher: EDIT_TOOLS, timeout: 30 },
+  { key: 'Stop', args: ['hook', 'before-stop'], moment: 'before-stop', timeout: 90 },
 ];
 
 /** The hook keys OpenLore manages, with commands resolved for the generating host. */
 function managedHooks(
   platform: NodeJS.Platform,
   runtime: ApplyContext['platformCommandRuntime'],
-): ReadonlyArray<{ key: string; command: string }> {
-  return MANAGED_HOOKS.map(({ key, args }) => ({
-    key,
-    command: formatPlatformCommand(resolveOpenloreCommand(args, platform, runtime), platform),
+): ReadonlyArray<{ def: ManagedHook; command: string }> {
+  return MANAGED_HOOKS.map(def => ({
+    def,
+    command: formatPlatformCommand(resolveOpenloreCommand(def.args, platform, runtime), platform),
   }));
 }
 
@@ -312,30 +332,34 @@ function hookCommandHazard(
   return null;
 }
 
-function ourHookGroup(command: string): Record<string, unknown> {
+function ourHookGroup(command: string, def: ManagedHook): Record<string, unknown> {
   return {
-    matcher: '',
+    matcher: def.matcher ?? '',
     _openlore: true,
-    hooks: [{ type: 'command', command }],
+    ...(def.moment ? { _openloreHook: def.moment } : {}),
+    hooks: [{ type: 'command', command, ...(def.timeout ? { timeout: def.timeout } : {}) }],
   };
 }
 
-function isOurHookEntry(entry: unknown): boolean {
+/** Whether `entry` is the group install manages for `def` (a loop moment's marker, or the plain marker). */
+function isOurHookEntry(entry: unknown, def: ManagedHook): boolean {
   if (!entry || typeof entry !== 'object') return false;
-  return (entry as Record<string, unknown>)._openlore === true;
+  const e = entry as Record<string, unknown>;
+  if (def.moment) return e._openlore === true && e._openloreHook === def.moment;
+  return e._openlore === true && e._openloreHook === undefined;
 }
 
 /** Replace our marker-identified group in `existing`, leaving user-authored entries untouched. */
-function mergeOurHook(existing: unknown, command: string): unknown[] {
+function mergeOurHook(existing: unknown, command: string, def: ManagedHook): unknown[] {
   const arr = Array.isArray(existing) ? existing : [];
-  const withoutOurs = arr.filter((e) => !isOurHookEntry(e));
-  return [...withoutOurs, ourHookGroup(command)];
+  const withoutOurs = arr.filter((e) => !isOurHookEntry(e, def));
+  return [...withoutOurs, ourHookGroup(command, def)];
 }
 
 /** Remove our marker-identified group from `existing`, leaving user-authored entries untouched. */
-function stripOurHook(existing: unknown): unknown[] {
+function stripOurHook(existing: unknown, def: ManagedHook): unknown[] {
   const arr = Array.isArray(existing) ? existing : [];
-  return arr.filter((e) => !isOurHookEntry(e));
+  return arr.filter((e) => !isOurHookEntry(e, def));
 }
 
 async function readJsonOrEmpty(path: string): Promise<Record<string, unknown>> {
@@ -761,10 +785,11 @@ export const claudeCodeAdapter: Adapter = {
     // worse than no hook, and silently leaving it while reporting a refusal is worse still
     // (change: harden-windows-hook-quoting).
     if (commandHazard) {
-      for (const { key } of MANAGED_HOOKS) {
-        const original = (base.hooks as Record<string, unknown>)?.[key];
+      for (const def of MANAGED_HOOKS) {
+        const { key } = def;
+        const original = (nextHooks[key] ?? (base.hooks as Record<string, unknown>)?.[key]);
         if (!Array.isArray(original)) continue;
-        const filtered = stripOurHook(original);
+        const filtered = stripOurHook(original, def);
         if (filtered.length === original.length) continue;
         if (filtered.length === 0) {
           delete nextHooks[key];
@@ -775,14 +800,19 @@ export const claudeCodeAdapter: Adapter = {
         }
       }
       mdResult.warnings.push(
-        `The SessionStart and UserPromptSubmit hooks were NOT wired, because ${commandHazard}. `
+        `The SessionStart, UserPromptSubmit, and agent-loop hooks were NOT wired, because ${commandHazard}. `
         + 'Everything else was installed, and any earlier OpenLore hook was removed rather than '
         + 'left pointing at a command this host cannot run. Reinstall openlore from a path '
         + 'without that character to get the hooks.',
       );
     } else {
-      for (const { key, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
-        const merged = mergeOurHook((base.hooks as Record<string, unknown>)?.[key], command);
+      for (const { def, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
+        const { key } = def;
+        // Loop moments run on every edit. The user scope would run them in every repository the
+        // agent touches, OpenLore or not, so they are wired per repository only.
+        if (def.moment && ctx.scope === 'user') continue;
+        // Several managed groups may share an event: merge into what this loop already built.
+        const merged = mergeOurHook(nextHooks[key] ?? (base.hooks as Record<string, unknown>)?.[key], command, def);
         nextHooks[key] = merged;
         settingsEdits.push({ path: ['hooks', key], value: merged });
       }
@@ -969,10 +999,11 @@ export const claudeCodeAdapter: Adapter = {
     }
     const hooksObj = parsed.hooks as Record<string, unknown> | undefined;
     if (hooksObj) {
-      for (const { key } of MANAGED_HOOKS) {
+      for (const def of MANAGED_HOOKS) {
+        const { key } = def;
         if (!Array.isArray(hooksObj[key])) continue;
         const original = hooksObj[key] as unknown[];
-        const filtered = stripOurHook(original);
+        const filtered = stripOurHook(original, def);
         if (filtered.length !== original.length) changed = true;
         if (filtered.length === 0) {
           removalEdits.push({ path: ['hooks', key], value: undefined });

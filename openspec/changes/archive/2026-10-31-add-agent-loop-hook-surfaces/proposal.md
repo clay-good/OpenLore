@@ -1,8 +1,11 @@
 # Agent-loop hook surfaces: push the right receipt at each point in the loop
 
-> Status: PROPOSED (2026-10-31, `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`). Wire OpenLore's
-> deterministic receipts into the harness events that exist in 2026, so the agent gets them without
-> having to think of calling a tool. No new MCP tool.
+> Status: SHIPPED (2026-10-31) for Claude Code: `openlore hook <moment>` and the before-edit
+> (generated files), after-edit (ledger facts + generated-file, phantom-reference and
+> check-weakening facts for the edited file), and before-stop (`verify_change`) moments, wired per
+> repository. Compaction, sub-agent start, task creation, pre-write phantom grading, Codex, and Pi
+> moved to [`add-agent-loop-hooks-compaction-subagents-codex-pi`](../add-agent-loop-hooks-compaction-subagents-codex-pi/).
+> See [docs/install.md](../../../docs/install.md#agent-loop-hooks).
 
 ## The gap
 

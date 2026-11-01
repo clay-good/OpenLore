@@ -315,6 +315,35 @@ With `mode: "off"`, `openlore orient --inject` emits nothing and exits 0.
   notice to stderr, and exits non-zero — which does **not** block your prompt) until an `openlore`
   carrying `--inject` is what `npx` resolves. Run `openlore --version` to check.
 
+## Agent-loop hooks
+
+In a repository install, `openlore install` also wires three moments of the agent loop into
+`.claude/settings.json`, so the agent gets OpenLore's receipts without calling a tool. Each runs
+`openlore hook <moment>`, reads the hook payload, and prints at most one short receipt as the
+event's `additionalContext` — or nothing, when there is nothing new.
+
+| Moment | Claude Code event | What the agent is told |
+|--------|-------------------|------------------------|
+| `before-edit` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | the target is a generated file (its source and regenerate command), vendored code, or a lockfile |
+| `after-tools` | `PostToolUse`, same tools | the edit is recorded for the [session ledger](session-ledger.md), which can then name background changes; new ledger facts; for the edited file: [check weakening](check-weakening.md), [phantom references](phantom-references.md), and [generated files](generated-files.md) |
+| `before-stop` | `Stop` | the `verify_change` receipt for the session's diff |
+
+- **Once each.** A fact is stated once per Claude Code session (keyed by the payload's
+  `session_id`; without one, nothing is deduplicated).
+- **Bounded.** Each receipt has a size budget (the most severe facts first, the rest counted) and a
+  time limit (8 s, 15 s, 50 s); past it the hook prints nothing.
+- **Advisory.** Hooks exit 0 and never block, with one exception: when your
+  [`enforcement.policy`](configuration.md#enforcement-policy) makes a finding code `blocking`, the
+  `before-stop` hook blocks the stop and lists those findings. It does not block twice in a row.
+- **Repository scope only.** The moments run on every edit, so a user-scope install does not wire
+  them (they would run in every repository). Run `openlore install` in the repository to get them.
+- **Turning one off:** `"hooks": { "before-edit": false }` in `.openlore/config.json`.
+  `openlore status` lists the wired moments and marks the ones turned off.
+- Uninstall removes only these groups (each carries `_openloreHook: <moment>`); your own hooks, and
+  the opt-in `openlore check-edit --hook`, are left as they are.
+
+Codex and Pi, and the compaction, sub-agent, and task-created moments, follow in a later change.
+
 ## Known follow-ups
 
 - **Continue MCP registration**: Continue's MCP config path varies across recent versions, so

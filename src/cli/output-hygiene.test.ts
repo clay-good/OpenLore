@@ -190,6 +190,7 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     'c.dim(\'\u2192 Run "openlore analyze" to build one\')',
     "label('Wiring scope')",
     "label('Session ledger')",
+    "label('Loop hooks')",
     // A fixed WiringScope literal, never repository text.
     'wiringText',
     "label('Retrieval mode')",

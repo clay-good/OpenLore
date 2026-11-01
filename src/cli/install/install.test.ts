@@ -407,6 +407,30 @@ describe('openlore install (end-to-end)', () => {
     expect(after.hooks.SessionStart).toBeUndefined();
   });
 
+  it('claude-code install wires the agent-loop moments, each identified by its own marker', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    // The opt-in check-edit hook is also an `_openlore` group on PostToolUse: it must survive.
+    const checkEdit = { matcher: 'Edit|Write|MultiEdit|NotebookEdit', _openlore: true, hooks: [{ type: 'command', command: 'openlore check-edit --hook' }] };
+    await writeFile(join(dir, '.claude/settings.json'), JSON.stringify({ hooks: { PostToolUse: [checkEdit] } }, null, 2), 'utf8');
+
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false })).toBe(0);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false }); // idempotent
+    const settings = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8'));
+    expect(settings.hooks.PreToolUse).toEqual([{
+      matcher: 'Edit|Write|MultiEdit|NotebookEdit', _openlore: true, _openloreHook: 'before-edit',
+      hooks: [{ type: 'command', command: expectedHook(['hook', 'before-edit']), timeout: 15 }],
+    }]);
+    expect(settings.hooks.PostToolUse).toHaveLength(2);
+    expect(settings.hooks.PostToolUse[0]).toEqual(checkEdit);
+    expect(settings.hooks.PostToolUse[1]._openloreHook).toBe('after-tools');
+    expect(settings.hooks.Stop[0]).toMatchObject({ _openloreHook: 'before-stop', hooks: [{ command: expectedHook(['hook', 'before-stop']), timeout: 90 }] });
+
+    await runInstall({ cwd: dir, agent: 'claude-code', uninstall: true });
+    const after = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8'));
+    expect(after.hooks).toEqual({ PostToolUse: [checkEdit] });
+  });
+
   it('cursor install writes .cursor/mcp.json with mcpServers.openlore', async () => {
     await mkdir(join(dir, '.cursor'), { recursive: true });
     const code = await runInstall({ cwd: dir, agent: 'cursor', analyze: false });

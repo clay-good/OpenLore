@@ -53,7 +53,7 @@ const OWN_EDIT_WINDOW_MS = 5000;
 /** How far before the watcher's record an agent edit may lie (debounce plus a slow re-index). */
 const OWN_EDIT_LAG_MS = 30_000;
 const MAX_NAMED = 3;
-const NO_AGENT_EDITS = 'No after-edit hook has reported an edit this session, so the agent\'s own edits cannot be told apart from other processes\' edits; background-change notes are withheld. `openlore setup --check-edit-hook claude` installs one for Claude Code.';
+const NO_AGENT_EDITS = 'No after-edit hook has reported an edit this session, so the agent\'s own edits cannot be told apart from other processes\' edits; background-change notes are withheld. `openlore install` in the repository wires one for Claude Code.';
 /** Returns to an earlier version before a loop is reported (A → B → A → B: two). */
 export const OSCILLATION_RETURNS = 2;
 /** The agent-edit log is cut back to its newest entries past this size. */
