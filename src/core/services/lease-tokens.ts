@@ -18,6 +18,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { readdirSync, statSync, unlinkSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { readFileConfined } from '../../utils/path-confinement.js';
@@ -54,8 +55,15 @@ const tokensDir = async (root: string) => {
   const { ensureLedgerDir } = await import('./session-ledger.js');
   return join(ensureLedgerDir(root), 'tokens');
 };
-/** The same directory for reading: a check never creates anything. */
-const tokensDirForRead = (root: string) => join(root, OPENLORE_DIR, 'session-ledger', 'tokens');
+/**
+ * The same directory for reading: a check never creates anything. Canonical, so the strict confined
+ * read (which refuses a symbolic-link path component) accepts it where the temp or home path is an
+ * alias (macOS /var → /private/var, a Windows 8.3 short name).
+ */
+const tokensDirForRead = async (root: string) => {
+  const dir = join(root, OPENLORE_DIR, 'session-ledger', 'tokens');
+  return realpath(dir).catch(() => dir);
+};
 const sha = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 20);
 const fileTextHash = (file: string, text: string) => sha(NORMALIZED.test(file) ? text.replace(/\s+/g, ' ').trim() : text);
 
@@ -151,7 +159,7 @@ export async function checkLease(root: string, token: string): Promise<LeaseChec
   if (!TOKEN_RE.test(token)) return { status: 'unknown', reason: `"${token.slice(0, 40)}" is not a lease token (expected lt_ followed by 20 hex characters).` };
   let rec: LeaseRecord;
   try {
-    rec = JSON.parse(await readFileConfined(tokensDirForRead(root), `${token}.json`, 512 * 1024, true)) as LeaseRecord;
+    rec = JSON.parse(await readFileConfined(await tokensDirForRead(root), `${token}.json`, 512 * 1024, true)) as LeaseRecord;
   } catch {
     return { status: 'unknown', reason: `No lease ${token} is recorded in this clone: it was issued elsewhere, has been pruned, or is mistyped.` };
   }

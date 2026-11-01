@@ -136,6 +136,15 @@ describe('lease tokens', () => {
     expect(performance.now() - t).toBeLessThan(1500);
   });
 
+  it('a token resolves through an aliased (non-canonical) root path', async () => {
+    const raw = mkdtempSync(join(tmpdir(), 'ollease-alias-')); // macOS: /var → /private/var
+    dirs.push(raw);
+    write(raw, 'src/config.ts', CONFIG);
+    index(raw, 'src/config.ts', CONFIG, ['parseConfig']);
+    const token = (await issueLeaseToken(raw, [{ file: 'src/config.ts', name: 'parseConfig' }]))!;
+    expect((await lease(raw, token)).verdict).toBe('confirmed');
+  });
+
   it('nothing served → no token; the token store is not committed', async () => {
     const root = repo();
     expect(await issueLeaseToken(root, [])).toBeUndefined();
