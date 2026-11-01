@@ -186,8 +186,10 @@ export async function callSitesFor(
   boundaries: string[],
   /** Filled with the per-operation totals (before the per-operation cap) and whether a file cap was hit. */
   stats?: { capped: boolean; totals: Map<string, number> },
-): Promise<Map<string, Array<{ file: string; line: number; method: string; url: string }>>> {
-  const out = new Map<string, Array<{ file: string; line: number; method: string; url: string }>>();
+  /** Also carry each call's offset and client (for reading its body); not served. */
+  withCall = false,
+): Promise<Map<string, Array<{ file: string; line: number; method: string; url: string; offset?: number; client?: string }>>> {
+  const out = new Map<string, Array<{ file: string; line: number; method: string; url: string; offset?: number; client?: string }>>();
   const { extractHttpCalls, buildHttpEdges, normalizeUrl } = await import('../../analyzer/http-route-parser.js');
   const { mapFilesBounded } = await import('../../analyzer/bounded-file-scan.js');
   const routes = ops.flatMap(({ file, op }) => [...new Set([op.path, op.declaredPath])].map(p => ({
@@ -201,13 +203,70 @@ export async function callSitesFor(
   for (const e of buildHttpEdges(calls, routes)) {
     const list = out.get(e.route.handlerName) ?? [];
     const file = emittedText(e.call.file.startsWith(root) ? e.call.file.slice(root.length + 1).split('\\').join('/') : e.call.file);
-    if (!list.some(c => c.file === file && c.line === e.call.line)) list.push({ file, line: e.call.line, method: e.call.method, url: emittedText(e.call.url) });
+    if (!list.some(c => c.file === file && c.line === e.call.line)) {
+      list.push({ file, line: e.call.line, method: e.call.method, url: emittedText(e.call.url), ...(withCall ? { ...(e.call.offset !== undefined ? { offset: e.call.offset } : {}), client: e.call.client } : {}) });
+    }
     out.set(e.route.handlerName, list);
   }
   if (stats) for (const [k, v] of out) stats.totals.set(k, v.length);
   for (const [k, v] of out) out.set(k, v.sort((a, b) => sortStr(`${a.file}:${String(a.line).padStart(8, '0')}`, `${b.file}:${String(b.line).padStart(8, '0')}`)).slice(0, MAX_CONSUMERS_PER_ELEMENT));
   boundaries.push('Consumers are client call sites in this repository whose method and literal path match; callers in other repositories, and calls through generated clients or dynamic URLs, are not known here.');
   return out;
+}
+
+/** Call sites whose body is read per run, and not-assessed sites listed. */
+const MAX_PAYLOAD_SITES = 200;
+const MAX_PAYLOAD_LISTED = 20;
+
+/**
+ * Each in-repo call site of an operation whose request body requires properties: a literal body
+ * (an object, or `JSON.stringify` of one) missing a required property is a
+ * `contract-payload-missing-required` finding; any other body is listed as not assessed.
+ */
+async function checkPayloads(root: string, docs: readonly ContractDocument[], findings: GovernanceFinding[], boundaries: string[]): Promise<Record<string, unknown>> {
+  const ops = docs.flatMap(d => d.operations.filter(op => op.body?.assessed && op.body.properties.some(p => p.required)).map(op => ({ file: d.file, op })));
+  if (!ops.length) return { assessed: false, reason: 'no operation requires request-body properties' };
+  const sites = await callSitesFor(root, ops, [], undefined, true);
+  const { readCallBody } = await import('../contract/payload-literal.js');
+  const byAddress = new Map(ops.map(o => [o.op.address, o]));
+  const notAssessed: Array<{ file: string; line: number; operation: string; reason: string }> = [];
+  const texts = new Map<string, string | null>();
+  let checked = 0;
+  let conforming = 0;
+  let capped = false;
+  for (const [address, list] of sites) {
+    const o = byAddress.get(address);
+    if (!o) continue;
+    const required = o.op.body!.properties.filter(p => p.required).map(p => p.name);
+    for (const site of list) {
+      if (checked >= MAX_PAYLOAD_SITES) { capped = true; break; }
+      checked++;
+      if (!texts.has(site.file)) texts.set(site.file, await readFileConfined(root, site.file, MAX_SPEC_BYTES).catch(() => null));
+      const text = texts.get(site.file);
+      const body = text == null || site.offset === undefined || !site.client
+        ? { kind: 'not-literal' as const, reason: 'the call could not be read' }
+        : readCallBody(text, site.offset, site.client);
+      if (body.kind === 'absent') {
+        findings.push({ code: 'contract-payload-missing-required', severity: 'warning', source: 'service-contract', subject: emittedText(`${site.file}:${site.line}`),
+          discriminator: address, message: emittedText(`${site.file}:${site.line} calls ${address} with no request body; the specification (${o.file}:${o.op.line}) requires ${required.join(', ')}.`),
+          location: { path: site.file, line: site.line } });
+        continue;
+      }
+      if (body.kind === 'not-literal') { notAssessed.push({ file: site.file, line: site.line, operation: emittedText(address), reason: body.reason }); continue; }
+      const missing = required.filter(k => !body.keys.includes(k));
+      if (!missing.length) { conforming++; continue; }
+      findings.push({ code: 'contract-payload-missing-required', severity: 'warning', source: 'service-contract', subject: emittedText(`${site.file}:${site.line}`),
+        discriminator: address, message: emittedText(`${site.file}:${site.line} calls ${address} without required body propert${missing.length === 1 ? 'y' : 'ies'} ${missing.join(', ')} (${o.file}:${o.op.line}).`),
+        location: { path: site.file, line: site.line } });
+    }
+  }
+  if (capped) boundaries.push(`Request bodies were read at the first ${MAX_PAYLOAD_SITES} call sites only.`);
+  return {
+    assessed: true, callSites: checked, conforming,
+    notAssessed: notAssessed.length,
+    ...(notAssessed.length ? { notAssessedSites: notAssessed.slice(0, MAX_PAYLOAD_LISTED).map(n => ({ ...n, file: emittedText(n.file) })) } : {}),
+    note: 'Only literal bodies (an object, or JSON.stringify of one, in fetch or axios post/put/patch) are checked; a body built elsewhere is not assessed, never called conforming.',
+  };
 }
 
 export async function handleCertifyServiceContract(input: CertifyServiceContractInput): Promise<Record<string, unknown>> {
@@ -249,6 +308,9 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     if (p.dynamic) boundaries.push(`${p.dynamic} route handler(s) with a dynamic path were not compared with the specifications.`);
     parity = { assessed: true, matched: p.matched, declaredUnimplemented: p.declaredUnimplemented.length, implementedUndeclared: p.implementedUndeclared.length };
   }
+
+  // ── Literal request bodies against the required properties (add-contract-graph-projection) ──
+  const payload = await checkPayloads(root, head.docs, findings, boundaries).catch(e => ({ assessed: false, reason: e instanceof Error ? e.message.split('\n')[0] : String(e) }));
 
   // ── Breaking-change verdicts against the merge-base ──
   let changesOut: Record<string, unknown> | undefined;
@@ -325,6 +387,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     specs,
     surface: head.docs.flatMap(d => d.operations.map(o => ({ file: emittedText(d.file), address: emittedText(o.address), line: o.line, ...(o.operationId ? { operationId: emittedText(o.operationId) } : {}), ...(o.deprecated ? { deprecated: true } : {}) }))).slice(0, limit),
     parity,
+    payload,
     ...(changesOut ? { changes: changesOut } : {}),
     findings: shown,
     ...(kept.length > shown.length ? { findingsOmitted: kept.length - shown.length } : {}),

@@ -3,7 +3,8 @@
 > Status: PROPOSED (2026-11-01). Split from `add-service-contract-certification`, whose OpenAPI
 > phase shipped `certify_service_contract` (reader, rule table, parity, in-repo consumer join).
 > Research: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. The briefings' first slice (operations served
-> by routes in scope, in `orient` and `blast_radius`) shipped in `add-contract-briefings`.
+> by routes in scope, in `orient` and `blast_radius`) shipped in `add-contract-briefings`; the payload check in
+> `certify_service_contract` shipped in `add-contract-payload-check`.
 
 ## Why
 
