@@ -555,9 +555,9 @@ async function dispatchToolImpl(
       args as { directory: string; kind: ClaimKind; subject: string; object?: string };
     return handleVerifyClaim({ directory, kind, subject, object });
   } else if (name === 'plan_parallel_work') {
-    const { directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile } =
-      args as { directory: string; tasks: TaskDescriptor[]; readMaxDistance?: number; affectedMaxDepth?: number; ambientFanInPercentile?: number };
-    return handlePlanParallelWork({ directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile });
+    const { directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, includeBoard } =
+      args as { directory: string; tasks: TaskDescriptor[]; readMaxDistance?: number; affectedMaxDepth?: number; ambientFanInPercentile?: number; includeBoard?: boolean };
+    return handlePlanParallelWork({ directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, includeBoard });
   } else if (name === 'map_in_flight_conflicts') {
     const { directory, baseRef, includeBranches, branches, includePullRequests, tasks, maxChanges, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, federation, federationRepos } =
       args as {

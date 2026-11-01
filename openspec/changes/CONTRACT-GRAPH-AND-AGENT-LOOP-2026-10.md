@@ -33,7 +33,7 @@ groups:
 | Shared footprint board across worktrees; duplicate intent | [add-peer-footprint-board](archive/2026-11-01-add-peer-footprint-board/) | shipped |
 | Peer read-after-write notices (declared reads) | [add-peer-change-notices](archive/2026-11-01-add-peer-change-notices/) | shipped |
 | Peer notices for the served set | [add-peer-notices-served-set-and-fleet-records](archive/2026-11-01-add-peer-notices-served-set-and-fleet-records/) | shipped |
-| Fleet records on the board; plan against the board | [add-board-fleet-records-and-planning](add-board-fleet-records-and-planning/) | split from the above |
+| Fleet records on the board; plan against the board | [add-board-fleet-records-and-planning](archive/2026-11-01-add-board-fleet-records-and-planning/) | shipped |
 | Compaction pushes the handoff briefing | [add-session-handoff-briefing](archive/2026-11-01-add-session-handoff-briefing/) | shipped |
 | Real call-site examples; profile line in `orient` | [add-call-site-usage-profile](add-call-site-usage-profile/) | existing, addendum, promoted |
 | Workspace manifests as package nodes, no export step | [add-build-graph-ingest](add-build-graph-ingest/) | existing, addendum |
