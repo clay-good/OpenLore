@@ -49,7 +49,8 @@
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore statusline` | Print the current search-index state for Claude Code's status line | No |
-| `openlore hook <moment>` | Print one agent-loop receipt from a hook payload on stdin (`before-edit`, `after-tools`, `before-stop`); wired by `install` — see [agent-loop hooks](install.md#agent-loop-hooks) | No |
+| `openlore hook <moment>` | Print one agent-loop receipt from a hook payload on stdin (`before-edit`, `after-tools`, `before-stop`, `after-compact`); wired by `install` — see [agent-loop hooks](install.md#agent-loop-hooks) | No |
+| `openlore handoff` | Brief the in-flight change for a successor session (`get_handoff_briefing`); `--json`, `--budget <tokens>` | No |
 | `openlore doctor` | Check environment and configuration for common issues | No |
 | `openlore features` | List opt-in features, which are active, and the one command/snippet to turn on each (`--json`, `--inactive`) | No |
 | `openlore update` | Upgrade openlore to the latest published version (detects npm-global / Homebrew / npx); `--check` reports availability, `--dry-run` prints the command without running it | No |
@@ -143,7 +144,7 @@ openlore install [options]   # wire agents (this repo AND your user scope),
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
                          #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 80-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 81-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries (both scopes)
@@ -160,7 +161,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 80-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 81-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -172,7 +173,7 @@ openlore connect remove [agent]      # disconnect that agent
 A bare `openlore install` wires the `substrate` surface (15 tools — navigation core + governance reads + spec-workflow composites) and, for
 Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
 injection hook. Use `--preset navigation` for the lean navigate-only core (10 tools), or
-`--preset full` for all 80 tools.
+`--preset full` for all 81 tools.
 
 ### MCP Server Options
 
@@ -181,7 +182,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: substrate, 15 tools — nav + governance + spec workflows)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 80 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 81 tools (alias --preset full)
   --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
@@ -717,7 +718,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # substrate preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 80 tools on a fixed port
+openlore serve --preset all --port 7077 # all 81 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

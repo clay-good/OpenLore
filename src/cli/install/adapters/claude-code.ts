@@ -300,6 +300,7 @@ const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
   { key: 'PreToolUse', args: ['hook', 'before-edit'], moment: 'before-edit', matcher: EDIT_TOOLS, timeout: 15 },
   { key: 'PostToolUse', args: ['hook', 'after-tools'], moment: 'after-tools', matcher: EDIT_TOOLS, timeout: 30 },
   { key: 'Stop', args: ['hook', 'before-stop'], moment: 'before-stop', timeout: 90 },
+  { key: 'SessionStart', args: ['hook', 'after-compact'], moment: 'after-compact', matcher: 'compact', timeout: 60 },
 ];
 
 /** The hook keys OpenLore manages, with commands resolved for the generating host. */

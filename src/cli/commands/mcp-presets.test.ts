@@ -687,7 +687,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // (measured 103,392 B; change: add-merge-semantic-certificate).
     // fleet_status adds one conclusion tool: 104,000 → 105,200 B
     // (measured 104,526 B; change: add-fleet-coordination-arc).
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(105_200);
+    // get_handoff_briefing adds one conclusion tool: 105,200 → 106,800 B
+    // (measured 106,065 B; change: add-session-handoff-briefing).
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(106_800);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

@@ -326,7 +326,7 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 
 ### Agent-loop hooks
 
-`openlore install` wires three agent-loop moments in a repository's Claude Code settings (see
+`openlore install` wires four agent-loop moments in a repository's Claude Code settings (see
 [install](install.md#agent-loop-hooks)). Each is on unless turned off here:
 
 ```json
@@ -338,6 +338,7 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 | `before-edit` | before an edit tool runs: generated, vendored, or lockfile target |
 | `after-tools` | after an edit: session-ledger record and facts, check weakening, phantom references |
 | `before-stop` | before the agent stops: the `verify_change` receipt (blocks only on policy-blocking findings) |
+| `after-compact` | after the conversation is compacted: the handoff briefing of the in-flight change |
 
 ### Task-scoped context injection
 

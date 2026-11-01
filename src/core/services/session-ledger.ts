@@ -38,6 +38,7 @@ export const AGENT_EDITS_FILE = 'agent-edits.jsonl';
 /** A ledger not written for this long belongs to no live session (the panic-state session rule). */
 export const LEDGER_EXPIRY_MS = 30 * 60 * 1000;
 const MAX_ENTRIES = 2000;
+const MAX_EDITED_LISTED = 200;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES_PER_RESPONSE = 10;
 /** Served files are hashed in the background; larger ones would stall the event loop. */
@@ -82,6 +83,11 @@ export interface LedgerSnapshot {
   counts: { served: number; edited: number; untracked: number; dropped: number };
   /** Watcher batches of more than 20 files (a branch switch, a stash), which record no versions. */
   bulkBatches?: number;
+  /**
+   * Symbols this session saw change (more than one version), first {@link MAX_EDITED_LISTED}: the
+   * work in flight, even once committed (the handoff briefing's touched set).
+   */
+  edited?: Array<{ id: string; name: string; file: string }>;
   backgroundChanges: BackgroundChange[];
   editOscillation: EditOscillation[];
   /** Why background-change notes are withheld, when they are. */
@@ -504,6 +510,8 @@ export class SessionLedger {
       editSource: this.editSource,
       agentEditsReported: f.agentEditsReported,
       ...(this.bulkBatches ? { bulkBatches: this.bulkBatches } : {}),
+      edited: [...this.edited.values()].filter(e => e.versions.length > 1).slice(-MAX_EDITED_LISTED)
+        .map(e => ({ id: emittedText(e.id), name: emittedText(e.name), file: emittedText(e.file) })),
       counts: { served: this.served.size + [...this.pending.values()].reduce((n, p) => n + (p.names === 'all' ? 1 : p.names.size), 0), edited: [...this.edited.values()].filter(e => e.versions.length > 1).length, untracked: this.untracked.size, dropped: this.dropped },
       backgroundChanges: f.backgroundChanges,
       editOscillation: f.editOscillation,
@@ -593,6 +601,10 @@ function validSnapshot(v: unknown, root: string, filePid: number, now: number): 
     agentEditsReported: s.agentEditsReported === true,
     counts: { served: num(counts?.served), edited: num(counts?.edited), untracked: num(counts?.untracked), dropped: num(counts?.dropped) },
     ...(num(s.bulkBatches) ? { bulkBatches: num(s.bulkBatches) } : {}),
+    edited: list(s.edited, e => {
+      const [id, name, file] = [str(e.id), str(e.name), str(e.file)];
+      return id && name && file ? { id, name, file } : undefined;
+    }).slice(0, MAX_EDITED_LISTED),
     backgroundChanges: list(s.backgroundChanges, e => {
       const [id, name, file, servedAt, changedAt] = [str(e.id), str(e.name), str(e.file), str(e.servedAt), str(e.changedAt)];
       return id && name && file && servedAt && changedAt ? { id, name, file, servedAt, changedAt } : undefined;

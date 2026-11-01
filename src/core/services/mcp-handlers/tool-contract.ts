@@ -124,6 +124,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   certify_public_surface: 'conclusion',
   get_style_fingerprint: 'conclusion',
   briefing_since: 'conclusion',
+  get_handoff_briefing: 'conclusion',
 };
 
 /** The tools intentionally allowed to emit raw topology, sorted for stable assertions. */
@@ -255,6 +256,7 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   certify_provenance: 'change',
   certify_public_surface: 'change',
   briefing_since: 'change',
+  get_handoff_briefing: 'change',
   detect_changes: 'change',
 
   // --- remember: durable, code-anchored facts (memory + decision lifecycle) ---

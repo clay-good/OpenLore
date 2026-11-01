@@ -555,6 +555,10 @@ async function dispatchToolImpl(
     const { directory, communityId, filePath, language } =
       args as { directory: string; communityId?: string; filePath?: string; language?: string };
     return handleGetStyleFingerprint({ directory, communityId, filePath, language });
+  } else if (name === 'get_handoff_briefing') {
+    const { directory, tokenBudget } = args as { directory: string; tokenBudget?: number };
+    const { handleGetHandoffBriefing } = await import('./mcp-handlers/handoff.js');
+    return handleGetHandoffBriefing({ directory, tokenBudget });
   } else if (name === 'briefing_since') {
     const { directory, baseRef, filePattern, maxResults } =
       args as { directory: string; baseRef?: string; filePattern?: string; maxResults?: number };

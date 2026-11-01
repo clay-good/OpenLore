@@ -349,12 +349,14 @@ describe('openlore install (end-to-end)', () => {
     const code = await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
     expect(code).toBe(0);
     const settings = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8'));
-    expect(settings.hooks.SessionStart).toHaveLength(2);
+    // The user's group, our session-start primer, and the after-compact handoff moment.
+    expect(settings.hooks.SessionStart).toHaveLength(3);
     expect(settings.hooks.SessionStart[0]).toEqual(userHook);
     expect(settings.hooks.SessionStart[1]._openlore).toBe(true);
     expect(settings.hooks.SessionStart[1].hooks[0].command).toBe(
       expectedHook(['orient', '--json'])
     );
+    expect(settings.hooks.SessionStart[2]).toMatchObject({ matcher: 'compact', _openloreHook: 'after-compact' });
 
     await runInstall({ cwd: dir, agent: 'claude-code', uninstall: true });
     const after = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8'));
