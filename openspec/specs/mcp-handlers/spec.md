@@ -4264,10 +4264,11 @@ not a literal SHALL be listed as not assessed, never reported as conforming.
 
 ### Requirement: SessionCountsAreExposedAsData
 
-`openlore status --json` SHALL report per-session counts of changed symbols whose body changed with
-an unchanged signature, whose signature changed, and whose signature could not be read (each symbol
-in exactly one of the three), and of changed exported symbols, comparing each symbol's first
-observed version with its latest. The system SHALL NOT compute a percentage, score, or threshold.
+`openlore status --json` SHALL report, for code symbols the agent's edits changed (as the after-edit
+hook attributes them; withheld without that report), counts of body-only changes, signature changes,
+unclassified changes (signature unreadable or possibly cut), and symbols first seen after the agent
+edited them (each symbol in one), and of changed exported symbols. It SHALL NOT compute a percentage,
+score, or threshold.
 
 #### Scenario: Counts, not budgets
 

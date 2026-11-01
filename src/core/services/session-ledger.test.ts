@@ -427,35 +427,70 @@ describe('SessionLedger — review round 2', () => {
 });
 
 describe('SessionLedger — session change counts (change: add-ledger-contract-hashes-and-counts)', () => {
-  it('counts body-only and signature changes disjointly, and changed exports, with no thresholds', async () => {
+  /** An agent edit as the after-edit hook records it, then the next tool call samples it. */
+  async function agentWrite(ledger: SessionLedger, root: string, rel: string, content: string): Promise<void> {
+    await new Promise(r => setTimeout(r, 5));
+    write(root, rel, content);
+    recordAgentEdit(root, rel);
+    await new Promise(r => setTimeout(r, 5));
+    await ledger.refresh(5000);
+  }
+  const zero = { bodyOnly: 0, signatureChanged: 0, unclassified: 0, firstSeenAfterEdit: 0, exportsChanged: 0 };
+
+  it('counts the agent\'s body-only and signature changes disjointly, and changed exports, with no thresholds', async () => {
     const root = repo();
     const START = 'export function a(x: number) { return x; }\nfunction b(x: number) { return x; }\nexport function c(x: number) { return x; }\n';
     write(root, 'src/m.ts', START);
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'src/m.ts' }]);
-    // Bodies of a and b change; c's signature changes.
-    write(root, 'src/m.ts', 'export function a(x: number) { return x + 1; }\nfunction b(x: number) { return x * 2; }\nexport function c(x: number, y = 0) { return x; }\n');
-    await ledger.refresh(5000);
-    expect(ledger.changeKinds()).toEqual({ bodyOnly: 2, signatureChanged: 1, unclassified: 0, exportsChanged: 2 });
+    await agentWrite(ledger, root, 'src/m.ts', 'export function a(x: number) { return x + 1; }\nfunction b(x: number) { return x * 2; }\nexport function c(x: number, y = 0) { return x; }\n');
+    const counts = { ...zero, bodyOnly: 2, signatureChanged: 1, exportsChanged: 2 };
+    expect(ledger.changeKinds()).toEqual(counts);
     const snap = ledger.snapshot() as LedgerSnapshot & Record<string, unknown>;
-    expect(snap.changeKinds).toEqual({ bodyOnly: 2, signatureChanged: 1, unclassified: 0, exportsChanged: 2 });
+    expect(snap.changeKinds).toEqual(counts);
     expect(JSON.stringify(snap)).not.toMatch(/percent|threshold|ratio|score/i);
     // Another process (openlore status) reads the same counts.
     await ledger.persist();
     const live = readLiveLedger(root);
-    expect('ledger' in live && live.ledger.changeKinds).toEqual({ bodyOnly: 2, signatureChanged: 1, unclassified: 0, exportsChanged: 2 });
+    expect('ledger' in live && live.ledger.changeKinds).toEqual(counts);
     ledger.dispose();
   });
 
-  it('a symbol changed and changed back is not counted', async () => {
+  it('without an after-edit report, or for another process\'s edit, nothing is counted', async () => {
     const root = repo();
     write(root, 'src/config.ts', A);
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'src/config.ts' }]);
-    write(root, 'src/config.ts', B);
+    write(root, 'src/config.ts', B); // not the agent's: no after-edit report
     await ledger.refresh(5000);
+    expect(ledger.changeKinds()).toBeUndefined();
+    expect(ledger.snapshot().changeKinds).toBeUndefined();
+    recordAgentEdit(root, 'src/elsewhere.ts'); // the hook works, but this edit is not the agent's
+    expect(ledger.changeKinds()).toEqual(zero);
+  });
+
+  it('an arrow function or a cut declaration line is unclassified, never a guessed signature change', async () => {
+    const root = repo();
+    write(root, 'src/m.ts', 'export const f = (x: number) => x + 1;\nexport function g(o: { a: number }) { return o; }\n');
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'src/m.ts' }]);
+    await agentWrite(ledger, root, 'src/m.ts', 'export const f = (x: number) => x + 2;\nexport function g(o: { a: string }) { return o; }\n');
+    expect(ledger.changeKinds()).toMatchObject({ bodyOnly: 0, signatureChanged: 0, unclassified: 2 });
+  });
+
+  it('a symbol first seen after the agent edited it has an unknown baseline; a changed-back symbol and a Markdown file are not counted', async () => {
+    const root = repo();
     write(root, 'src/config.ts', A);
-    await ledger.refresh(5000);
-    expect(ledger.changeKinds()).toEqual({ bodyOnly: 0, signatureChanged: 0, unclassified: 0, exportsChanged: 0 });
+    write(root, 'docs/spec.md', '# a\n');
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'src/config.ts' }, { file: 'docs/spec.md' }]);
+    await agentWrite(ledger, root, 'src/config.ts', B);
+    await agentWrite(ledger, root, 'src/config.ts', A);
+    await agentWrite(ledger, root, 'docs/spec.md', '# b\n');
+    // A file never served: its first observation is the agent's edit.
+    ledger.setWatcherActive(true);
+    recordAgentEdit(root, 'src/new.ts');
+    await ledger.recordReindexed([{ rel: 'src/new.ts', content: 'export function n() { return 1; }\n' }]);
+    expect(ledger.changeKinds()).toEqual({ ...zero, firstSeenAfterEdit: 1 });
   });
 });

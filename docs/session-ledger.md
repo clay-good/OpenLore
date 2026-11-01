@@ -61,9 +61,12 @@ listed as not covered; call paths and insertion points are not part of a lease.
 ## Reading it from another process
 
 `openlore status --json` has a `session` block: `counts` (served, edited, untracked, dropped),
-`changeKinds` (how the session's changed symbols changed, first version against latest: `bodyOnly`,
-`signatureChanged`, and `unclassified` are disjoint; `exportsChanged` counts the changed exported
-ones — counts only, no percentage or threshold), `backgroundChanges[]`, `editOscillation[]` (with each symbol's recent hash cycle), `editSource`, and
+`changeKinds` (how the agent's edits changed code symbols, first version against latest:
+`bodyOnly`, `signatureChanged`, `unclassified` — a declaration line missing or one the parser may
+have cut, such as an arrow function — and `firstSeenAfterEdit` — the first version seen was already
+the agent's edit — are disjoint; `exportsChanged` counts the changed exported ones; counts only, no
+percentage or threshold; present only when an after-edit hook reports the agent's edits; JSON only),
+`backgroundChanges[]`, `editOscillation[]` (with each symbol's recent hash cycle), `editSource`, and
 `withheld` when a fact is withheld. When the panic layer is on (`panicResponse.mode` `advisory` or
 `experimental_blocking`), the `panic-check` hook adds `sessionLedger` with the same two lists to its
 JSON output when they are not empty.

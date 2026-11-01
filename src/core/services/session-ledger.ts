@@ -68,12 +68,27 @@ interface Version { hash: string; at: number; sampled: boolean; sig?: string }
 export interface EditedEntry { id: string; name: string; file: string; versions: Version[]; returns: number; exported?: boolean }
 
 /**
- * How the session's changed symbols changed (change: add-ledger-contract-hashes-and-counts): counts
- * only, never a percentage or threshold. A symbol is counted when its latest version differs from
- * its first; it is in exactly one of `bodyOnly`, `signatureChanged`, `unclassified` (no declaration
- * line on one side). `exportsChanged` counts the changed symbols a module exports.
+ * How the agent's edits changed the session's symbols (change: add-ledger-contract-hashes-and-counts):
+ * counts only, never a percentage or threshold. A code symbol is counted when the agent's after-edit
+ * hook attributes one of its versions to the agent and its latest version differs from its first:
+ * in exactly one of `bodyOnly`, `signatureChanged`, `unclassified` (a declaration line missing or one
+ * the parser may have cut), or `firstSeenAfterEdit` (its first observed version was already the
+ * agent's edit, so its baseline is unknown). `exportsChanged` counts the changed ones a module exports.
  */
-export interface ChangeKinds { bodyOnly: number; signatureChanged: number; unclassified: number; exportsChanged: number }
+export interface ChangeKinds { bodyOnly: number; signatureChanged: number; unclassified: number; firstSeenAfterEdit: number; exportsChanged: number }
+
+/**
+ * A declaration line the parser may have cut or overrun: it stops at the first `{` (an object type,
+ * a destructured parameter, a Go `interface{}`) and keeps an arrow function's expression body.
+ * Such a line is not compared.
+ */
+function reliableSignature(sig: string): boolean {
+  if (sig.includes('=>')) return false;
+  const t = sig.replace(/->/g, ''); // a Python return arrow
+  const count = (c: string) => t.split(c).length - 1;
+  if (count('(') !== count(')') || count('[') !== count(']') || count('<') !== count('>')) return false;
+  return !/\b(?:interface|struct|func)\s*$/.test(t.trim()) && !/[:,(<|&]\s*$/.test(t.trim());
+}
 
 export interface BackgroundChange { id: string; name: string; file: string; servedAt: string; changedAt: string }
 export interface EditOscillation { id: string; name: string; file: string; returns: number; cycle: string[] }
@@ -116,22 +131,29 @@ export const hashFileSymbols: FileHasher = async (file, content) => {
     const result = await extractFileWithContentHashes({ path: file, content, language });
     if (!result?.contentHashes) return undefined;
     const names = new Map(result.nodes.map(n => [n.id, n.name]));
-    const sigs = new Map(result.nodes.filter(n => n.signature).map(n => [n.id, createHash('sha256').update(n.signature!).digest('hex').slice(0, 16)]));
-    let exported: Set<string> | undefined;
-    try {
-      const { exportedNames } = await import('./mcp-handlers/public-surface.js');
-      exported = exportedNames(content, language);
-    } catch { /* export knowledge is optional */ }
+    // Every node's declaration line per id, in order (overloads and twins share an id); one the
+    // parser may have cut makes the id's signature unknown.
+    const sigLists = new Map<string, string[] | null>();
+    for (const n of result.nodes) {
+      const list = sigLists.get(n.id);
+      if (list === null) continue;
+      if (!n.signature || !reliableSignature(n.signature)) { sigLists.set(n.id, null); continue; }
+      sigLists.set(n.id, [...(list ?? []), n.signature]);
+    }
+    const sigs = new Map([...sigLists].flatMap(([id, l]) => (l ? [[id, createHash('sha256').update(l.join('\n')).digest('hex').slice(0, 16)] as const] : [])));
+    const exported = await exportedSet(content, language);
     const out = new Map<string, { name: string; hash: string; sig?: string; exported?: boolean }>();
     // A twin id (an overload, a re-declared name) joins its hashes, as the changed-set does.
     for (const s of result.contentHashes.symbols) {
       const prev = out.get(s.id);
       const name = names.get(s.id) ?? s.id;
       const sig = sigs.get(s.id);
+      // A top-level symbol only: a method shares its name with no export (`Class.method` ids).
+      const topLevel = !(s.id.split('::').pop() ?? '').includes('.');
       out.set(s.id, {
         name, hash: prev ? `${prev.hash}+${s.hash}` : s.hash,
-        ...(sig !== undefined ? { sig: prev?.sig !== undefined ? `${prev.sig}+${sig}` : sig } : {}),
-        ...(exported ? { exported: exported.has(name) } : {}),
+        ...(sig !== undefined ? { sig } : {}),
+        ...(exported && topLevel ? { exported: exported.has(name) } : {}),
       });
     }
     return out;
@@ -139,6 +161,19 @@ export const hashFileSymbols: FileHasher = async (file, content) => {
     return undefined;
   }
 };
+
+/** The names a module exports, or undefined for a language the export reader does not know. */
+async function exportedSet(content: string, language: string): Promise<Set<string> | undefined> {
+  if (language === 'Go') {
+    // Go exports by capitalization.
+    return new Set([...content.matchAll(/^func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)/gm)].map(m => m[1]));
+  }
+  if (language !== 'TypeScript' && language !== 'JavaScript' && language !== 'Python') return undefined;
+  try {
+    const { exportedNames } = await import('./mcp-handlers/public-surface.js');
+    return exportedNames(content, language);
+  } catch { return undefined; }
+}
 
 /** A whole-file hash for non-code files a briefing names (spec Markdown): whitespace-normalized text. */
 export const hashWholeFile: FileHasher = async (file, content) => {
@@ -152,6 +187,14 @@ const WHOLE_FILE = /\.(?:md|ya?ml|json)$/i;
 
 export const defaultHasher: FileHasher = async (file, content) =>
   (await hashFileSymbols(file, content)) ?? (WHOLE_FILE.test(file) ? hashWholeFile(file, content) : undefined);
+
+/** A persisted `changeKinds` with every count a finite, non-negative integer; anything else is dropped. */
+function validChangeKinds(x: unknown): x is ChangeKinds {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
+  const r = x as Record<string, unknown>;
+  return ['bodyOnly', 'signatureChanged', 'unclassified', 'firstSeenAfterEdit', 'exportsChanged']
+    .every(k => typeof r[k] === 'number' && Number.isSafeInteger(r[k]) && (r[k] as number) >= 0);
+}
 
 /** Keep a bookkeeping set bounded on a long session (oldest first out). */
 function trimSet(set: Set<string>): void {
@@ -409,7 +452,8 @@ export class SessionLedger {
     if (exported !== undefined) e.exported = exported || e.exported === true;
     // The first version is kept apart: the version list is trimmed on a long session.
     if (!this.firstVersion.has(id)) this.firstVersion.set(id, v);
-    if (this.firstVersion.size > MAX_ENTRIES * 2) for (const k of this.firstVersion.keys()) if (!this.edited.has(k)) this.firstVersion.delete(k);
+    // Evicted from `edited`: its baseline goes too, so a returning id starts over (consistently).
+    if (this.firstVersion.size > this.edited.size) for (const k of this.firstVersion.keys()) if (!this.edited.has(k)) this.firstVersion.delete(k);
     if (e.versions.at(-1)?.hash === v.hash) return;
     if (e.versions.some(x => x.hash === v.hash)) e.returns++;
     e.versions.push(v);
@@ -527,19 +571,34 @@ export class SessionLedger {
     return out;
   }
 
-  /** How the session's changed symbols changed: net of the first and latest versions. */
-  changeKinds(): ChangeKinds {
-    const k: ChangeKinds = { bodyOnly: 0, signatureChanged: 0, unclassified: 0, exportsChanged: 0 };
+  /**
+   * How the agent's edits changed the session's code symbols, net of first and latest versions.
+   * Undefined without an after-edit report: the agent's edits cannot be told from others'.
+   */
+  changeKinds(agentEdits = readAgentEdits(this.root, this.startedAt)): ChangeKinds | undefined {
+    if (!agentEdits.length) return undefined;
+    const k: ChangeKinds = { bodyOnly: 0, signatureChanged: 0, unclassified: 0, firstSeenAfterEdit: 0, exportsChanged: 0 };
     for (const e of this.edited.values()) {
+      if (e.id.endsWith('::*')) continue; // a whole file (Markdown, YAML), not a symbol
       const first = this.firstVersion.get(e.id);
       const last = e.versions.at(-1);
-      if (!first || !last || first.hash === last.hash) continue;
+      if (!first || !last) continue;
+      const own = e.versions.some((v, i) => i > 0 && this.ownVersion(e.file, e.versions[i - 1], v, agentEdits));
+      // Its first observation was already the agent's edit (a file read outside OpenLore, then edited).
+      if (this.ownVersion(e.file, undefined, first, agentEdits) && !this.servedBefore(e.id, first)) { k.firstSeenAfterEdit++; continue; }
+      if (!own || first.hash === last.hash) continue;
       if (first.sig === undefined || last.sig === undefined) k.unclassified++;
       else if (first.sig === last.sig) k.bodyOnly++;
       else k.signatureChanged++;
       if (e.exported) k.exportsChanged++;
     }
     return k;
+  }
+
+  /** Whether the version was the one served (its text was read through OpenLore before any edit). */
+  private servedBefore(id: string, v: Version): boolean {
+    const s = this.served.get(id);
+    return !!s && s.hash === v.hash && s.servedAt <= v.at;
   }
 
   snapshot(): LedgerSnapshot {
@@ -556,7 +615,7 @@ export class SessionLedger {
       edited: [...this.edited.values()].filter(e => e.versions.length > 1).slice(-MAX_EDITED_LISTED)
         .map(e => ({ id: emittedText(e.id), name: emittedText(e.name), file: emittedText(e.file) })),
       counts: { served: this.served.size + [...this.pending.values()].reduce((n, p) => n + (p.names === 'all' ? 1 : p.names.size), 0), edited: [...this.edited.values()].filter(e => e.versions.length > 1).length, untracked: this.untracked.size, dropped: this.dropped },
-      changeKinds: this.changeKinds(),
+      ...(f.agentEditsReported ? { changeKinds: this.changeKinds() } : {}),
       backgroundChanges: f.backgroundChanges,
       editOscillation: f.editOscillation,
       ...(f.withheld ? { withheld: f.withheld } : {}),
@@ -644,7 +703,7 @@ function validSnapshot(v: unknown, root: string, filePid: number, now: number): 
     editSource: s.editSource === 'watcher' ? 'watcher' : 'sampled',
     agentEditsReported: s.agentEditsReported === true,
     counts: { served: num(counts?.served), edited: num(counts?.edited), untracked: num(counts?.untracked), dropped: num(counts?.dropped) },
-    ...(s.changeKinds && typeof s.changeKinds === 'object' ? { changeKinds: (({ bodyOnly, signatureChanged, unclassified, exportsChanged }: Record<string, unknown>) => ({ bodyOnly: num(bodyOnly), signatureChanged: num(signatureChanged), unclassified: num(unclassified), exportsChanged: num(exportsChanged) }))(s.changeKinds as Record<string, unknown>) } : {}),
+    ...(validChangeKinds(s.changeKinds) ? { changeKinds: s.changeKinds } : {}),
     ...(num(s.bulkBatches) ? { bulkBatches: num(s.bulkBatches) } : {}),
     edited: list(s.edited, e => {
       const [id, name, file] = [str(e.id), str(e.name), str(e.file)];
