@@ -304,6 +304,9 @@ const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
   { key: 'PostToolUseFailure', args: ['hook', 'after-tools'], moment: 'after-tools', matcher: 'Bash', timeout: 30 },
   { key: 'Stop', args: ['hook', 'before-stop'], moment: 'before-stop', timeout: 90 },
   { key: 'SessionStart', args: ['hook', 'after-compact'], moment: 'after-compact', matcher: 'compact', timeout: 60 },
+  // A sub-agent's task is queued from the parent's Agent call (SubagentStart does not carry it).
+  { key: 'PreToolUse', args: ['hook', 'before-subagent'], moment: 'before-subagent', matcher: 'Agent|Task', timeout: 10 },
+  { key: 'SubagentStart', args: ['hook', 'subagent-start'], moment: 'subagent-start', timeout: 30 },
 ];
 
 /** The hook keys OpenLore manages, with commands resolved for the generating host. */

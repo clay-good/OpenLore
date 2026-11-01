@@ -422,7 +422,11 @@ describe('openlore install (end-to-end)', () => {
     expect(settings.hooks.PreToolUse).toEqual([{
       matcher: 'Edit|Write|MultiEdit|NotebookEdit', _openlore: true, _openloreHook: 'before-edit',
       hooks: [{ type: 'command', command: expectedHook(['hook', 'before-edit']), timeout: 15 }],
+    }, {
+      matcher: 'Agent|Task', _openlore: true, _openloreHook: 'before-subagent',
+      hooks: [{ type: 'command', command: expectedHook(['hook', 'before-subagent']), timeout: 10 }],
     }]);
+    expect(settings.hooks.SubagentStart).toEqual([{ matcher: '', _openlore: true, _openloreHook: 'subagent-start', hooks: [{ type: 'command', command: expectedHook(['hook', 'subagent-start']), timeout: 30 }] }]);
     expect(settings.hooks.PostToolUse).toHaveLength(2);
     expect(settings.hooks.PostToolUse[0]).toEqual(checkEdit);
     expect(settings.hooks.PostToolUse[1]._openloreHook).toBe('after-tools');

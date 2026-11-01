@@ -343,6 +343,8 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 | `after-tools` | after an edit: session-ledger record and facts, check weakening, phantom references, peer changes to declared or served symbols |
 | `before-stop` | before the agent stops: the `verify_change` receipt (blocks only on policy-blocking findings) |
 | `after-compact` | after the conversation is compacted: the handoff briefing of the in-flight change |
+| `before-subagent` | before an `Agent`/`Task` call: queues the sub-agent's task (prints nothing) |
+| `subagent-start` | when a sub-agent starts: its task-scoped briefing and the live peers on the board |
 
 ### Task-scoped context injection
 

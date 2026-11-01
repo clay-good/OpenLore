@@ -49,7 +49,7 @@
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore statusline` | Print the current search-index state for Claude Code's status line | No |
-| `openlore hook <moment>` | Print one agent-loop receipt from a hook payload on stdin (`before-edit`, `after-tools`, `before-stop`, `after-compact`); wired by `install` — see [agent-loop hooks](install.md#agent-loop-hooks) | No |
+| `openlore hook <moment>` | Print one agent-loop receipt from a hook payload on stdin (`before-edit`, `after-tools`, `before-stop`, `after-compact`, `before-subagent`, `subagent-start`); wired by `install` — see [agent-loop hooks](install.md#agent-loop-hooks) | No |
 | `openlore handoff` | Brief the in-flight change for a successor session (`get_handoff_briefing`); `--json`, `--budget <tokens>` | No |
 | `openlore footprint` | Share this agent's intended write-set and read-set with the other worktrees of the clone and see the hazards with live peers: `declare --write a,b [--read c] [--title …] [--actor id] [--append]`, `release`, `list`. Advisory; nothing is locked | Yes |
 | `openlore doctor` | Check environment and configuration for common issues | No |

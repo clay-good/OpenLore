@@ -132,6 +132,8 @@ export interface HooksConfig {
   'after-tools'?: boolean;
   'before-stop'?: boolean;
   'after-compact'?: boolean;
+  'before-subagent'?: boolean;
+  'subagent-start'?: boolean;
 }
 
 export interface PiConfig {
