@@ -14,8 +14,8 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readdir, readFile, rm } from 'node:fs/promises';
-import { join, isAbsolute, resolve } from 'node:path';
+import { readdir, realpath, rm } from 'node:fs/promises';
+import { join, isAbsolute, resolve, dirname, basename } from 'node:path';
 import { execFileGit } from '../../utils/git-exec.js';
 import { readFileConfined } from '../../utils/path-confinement.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
@@ -23,6 +23,8 @@ import { PANIC_SESSION_EXPIRY_MS } from './mcp-handlers/panic-constants.js';
 
 /** Live entries the board holds at most. */
 export const MAX_BOARD_ENTRIES = 64;
+/** Board files read at most per read. */
+const MAX_FILES_READ = 512;
 /** Bytes one entry file may hold. */
 const MAX_ENTRY_BYTES = 256 * 1024;
 /** Symbols per set recorded at most. */
@@ -36,6 +38,8 @@ export interface BoardSymbol {
   start?: number;
   end?: number;
   hash?: string;
+  /** The symbol's first characters, to find it again after edits above it. */
+  head?: string;
 }
 
 export interface BoardEntry {
@@ -54,6 +58,10 @@ export interface BoardEntry {
   reads: BoardSymbol[];
   /** Write seeds that resolve to nothing yet: symbols or files the agent intends to create. */
   creates: string[];
+  /** Existing files with no symbols that the agent will write. */
+  fileWrites?: string[];
+  /** The analysis root the symbol paths are relative to (default: the worktree). */
+  root?: string;
   /** The declared write mode (default `modify`). */
   writeMode?: 'append' | 'modify';
   /** The branch's merge-base with the default branch at declaration. */
@@ -66,7 +74,7 @@ export type EndReason = 'expired' | 'worktree-removed' | 'branch-deleted' | 'bra
 
 export interface BoardRead {
   live: Array<{ entry: BoardEntry; moved: string[] }>;
-  ended: Array<{ actorId: string; reason: EndReason; file: string }>;
+  ended: Array<{ actorId: string; reason: EndReason; file: string; lastSeenAt: string }>;
   /** Entry files that could not be read or parsed. */
   unreadable: number;
   boundaries: string[];
@@ -111,7 +119,7 @@ export async function removeEntry(root: string, actorId: string): Promise<boolea
 
 const isEntry = (v: unknown): v is BoardEntry => {
   const e = v as Partial<BoardEntry> | null;
-  return !!e && e.version === 1 && typeof e.actorId === 'string' && typeof e.worktree === 'string' && typeof e.branch === 'string'
+  return !!e && e.version === 1 && typeof e.actorId === 'string' && /^[\w.@:/+-]{1,128}$/.test(e.actorId) && typeof e.worktree === 'string' && typeof e.branch === 'string'
     && Array.isArray(e.writes) && Array.isArray(e.reads) && Array.isArray(e.creates) && typeof e.lastSeenAt === 'string';
 };
 
@@ -124,10 +132,12 @@ async function defaultBranch(root: string): Promise<string | null> {
 }
 
 /** Why an entry is no longer live, or null when it is. */
-async function endReason(root: string, e: BoardEntry, now: number, main: string | null): Promise<EndReason | null> {
+async function endReason(root: string, e: BoardEntry, now: number, main: string | null, worktrees: Set<string> | null): Promise<EndReason | null> {
   const seen = Date.parse(e.lastSeenAt);
   if (!Number.isFinite(seen) || now - seen > PANIC_SESSION_EXPIRY_MS) return 'expired';
-  if (!existsSync(e.worktree)) return 'worktree-removed';
+  // Only a worktree of this clone counts (a crafted path elsewhere is not one).
+  if (!existsSync(e.worktree) || (worktrees && !worktrees.has(e.worktree))) return 'worktree-removed';
+  if (e.root && e.root !== e.worktree && !e.root.startsWith(`${e.worktree}/`)) return 'worktree-removed';
   if (!e.branch) return null; // a detached HEAD: only expiry and release end it
   let tip: string;
   try {
@@ -136,24 +146,51 @@ async function endReason(root: string, e: BoardEntry, now: number, main: string 
     return 'branch-deleted';
   }
   // Merged: the branch has commits of its own, and they are now in the default branch.
+  // A fast-forward or pull onto main moves the tip along main's own history: that is not a merge.
   if (main && e.branch !== main && e.baseAtDeclare && tip !== e.baseAtDeclare) {
     try {
       await git(root, ['merge-base', '--is-ancestor', tip, `refs/heads/${main}`]);
-      return 'branch-merged';
+      const firstParent = await git(root, ['rev-list', '--first-parent', '--max-count=5000', `refs/heads/${main}`]);
+      if (!firstParent.split('\n').includes(tip)) return 'branch-merged';
     } catch { /* not an ancestor */ }
   }
   return null;
 }
 
-/** Symbols whose text at their declared span no longer hashes the same in the entry's worktree. */
+/** The worktrees of this clone (absolute, real paths), or null when git cannot list them. */
+async function worktreePaths(root: string): Promise<Set<string> | null> {
+  try {
+    const out = await git(root, ['worktree', 'list', '--porcelain']);
+    const paths = out.split('\n').filter(l => l.startsWith('worktree ')).map(l => l.slice('worktree '.length));
+    const real = await Promise.all(paths.map(p => realpath(p).catch(() => p)));
+    return new Set([...paths, ...real]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Declared symbols whose text changed: the hash at the declared span, else at each place the
+ * symbol's first characters now appear (an edit above a symbol moves it without changing it).
+ */
 async function movedSymbols(e: BoardEntry): Promise<string[]> {
   const moved = new Set<string>();
   const byFile = new Map<string, BoardSymbol[]>();
   for (const s of [...e.writes, ...e.reads]) if (s.hash && s.start !== undefined && s.end !== undefined) (byFile.get(s.file) ?? byFile.set(s.file, []).get(s.file)!).push(s);
   for (const [file, syms] of byFile) {
     let text: string | null;
-    try { text = await readFileConfined(e.worktree, file, 4 * 1024 * 1024); } catch { text = null; }
-    for (const s of syms) if (text === null || symbolHash(text.slice(s.start, s.end)) !== s.hash) moved.add(s.name);
+    try { text = await readFileConfined(e.root ?? e.worktree, file, 4 * 1024 * 1024); } catch { text = null; }
+    for (const s of syms) {
+      if (text !== null && symbolHash(text.slice(s.start, s.end)) === s.hash) continue;
+      const len = s.end! - s.start!;
+      let found = false;
+      if (text !== null && s.head) {
+        for (let at = text.indexOf(s.head), tries = 0; at !== -1 && tries < 64 && !found; at = text.indexOf(s.head, at + 1), tries++) {
+          found = symbolHash(text.slice(at, at + len)) === s.hash;
+        }
+      }
+      if (!found) moved.add(s.name);
+    }
   }
   return [...moved].sort();
 }
@@ -167,23 +204,28 @@ export async function readBoard(root: string, opts: { now?: number } = {}): Prom
   const dir = await boardDir(root);
   if (!dir) { out.boundaries.push('The board was not read: it lives in the git common directory and this is not a git work tree.'); return out; }
   let names: string[];
-  try { names = (await readdir(dir)).filter(n => n.endsWith('.json')).sort(); } catch { return out; }
+  try { names = (await readdir(dir)).filter(n => n.endsWith('.json')).sort(); } catch { names = []; }
+  if (names.length > MAX_FILES_READ) {
+    out.boundaries.push(`The board directory holds ${names.length} files; the first ${MAX_FILES_READ} were read.`);
+    names = names.slice(0, MAX_FILES_READ);
+  }
   const now = opts.now ?? Date.now();
   const main = await defaultBranch(root);
+  const worktrees = await worktreePaths(root);
   for (const n of names) {
     let entry: unknown;
     try {
-      const raw = await readFile(join(dir, n), 'utf-8');
-      if (raw.length > MAX_ENTRY_BYTES) throw new Error('too large');
-      entry = JSON.parse(raw);
+      // Confined, size-checked before reading, regular files only (a FIFO or device never blocks).
+      entry = JSON.parse(await readFileConfined(dir, n, MAX_ENTRY_BYTES, true));
     } catch { out.unreadable++; continue; }
     if (!isEntry(entry)) { out.unreadable++; continue; }
-    const reason = await endReason(root, entry, now, main);
-    if (reason) { out.ended.push({ actorId: entry.actorId, reason, file: join(dir, n) }); continue; }
+    const reason = await endReason(root, entry, now, main, worktrees);
+    if (reason) { out.ended.push({ actorId: entry.actorId, reason, file: join(dir, n), lastSeenAt: entry.lastSeenAt }); continue; }
     out.live.push({ entry, moved: await movedSymbols(entry) });
   }
   if (out.unreadable) out.boundaries.push(`${out.unreadable} board entr${out.unreadable === 1 ? 'y' : 'ies'} could not be read and ${out.unreadable === 1 ? 'was' : 'were'} skipped.`);
   if (!main) out.boundaries.push('No main or master branch: a merged branch is not detected; its entry ends when released, deleted, or expired.');
+  else out.boundaries.push('A squash-merged or fast-forwarded branch is not detected as merged; its entry ends when released, when the branch is deleted, or after 30 minutes without a refresh.');
   out.boundaries.push('The board covers the worktrees of this clone only; agents in other clones or on other machines are not visible.');
   out.live.sort((a, b) => (a.entry.actorId < b.entry.actorId ? -1 : a.entry.actorId > b.entry.actorId ? 1 : 0));
   return out;
@@ -201,14 +243,25 @@ export async function worktreeIdentity(root: string): Promise<{ worktree: string
 }
 
 /** Live board entries as task descriptors for the coordination tools (write seeds only). */
-export async function liveTaskDescriptors(root: string): Promise<Array<{ id: string; seedSymbols: string[]; writeMode?: 'append' | 'modify' }>> {
+export async function liveTaskDescriptors(root: string): Promise<Array<{ id: string; branch: string; seedSymbols: string[]; writeMode?: 'append' | 'modify' }>> {
   const board = await readBoard(root);
+  // Seeds are the symbols resolved at declaration (ids), never raw peer text: an entry with no
+  // resolved write (only intended creations) is not a task here.
   return board.live
-    .filter(l => l.entry.writeSeeds.length > 0)
-    .map(l => ({ id: l.entry.actorId, seedSymbols: l.entry.writeSeeds, ...(l.entry.writeMode ? { writeMode: l.entry.writeMode } : {}) }));
+    .filter(l => l.entry.writes.length > 0)
+    .map(l => ({ id: l.entry.actorId, branch: l.entry.branch, seedSymbols: l.entry.writes.map(w => w.id), ...(l.entry.writeMode ? { writeMode: l.entry.writeMode } : {}) }));
 }
 
-/** Remove the entry files of ended entries (best effort). */
+/**
+ * Remove the entry files of ended entries (best effort). An entry refreshed since it was judged
+ * ended (its `lastSeenAt` changed) is kept.
+ */
 export async function pruneEnded(ended: BoardRead['ended']): Promise<void> {
-  for (const e of ended) await rm(e.file, { force: true }).catch(() => undefined);
+  for (const e of ended) {
+    try {
+      const now = JSON.parse(await readFileConfined(dirname(e.file), basename(e.file), MAX_ENTRY_BYTES, true)) as { lastSeenAt?: string };
+      if (now.lastSeenAt !== e.lastSeenAt) continue;
+    } catch { /* unreadable: nothing to keep */ }
+    await rm(e.file, { force: true }).catch(() => undefined);
+  }
 }

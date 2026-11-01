@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { handleDeclareFootprint } from './declare-footprint.js';
-import { readBoard, liveTaskDescriptors } from '../footprint-board.js';
+import { readBoard, liveTaskDescriptors, pruneEnded, boardDir } from '../footprint-board.js';
 import { renderFootprint } from '../../../cli/commands/footprint.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
 import { PANIC_SESSION_EXPIRY_MS } from './panic-constants.js';
@@ -127,7 +127,7 @@ describe('declare_footprint', () => {
   it('live entries join map_in_flight_conflicts as agent tasks', async () => {
     const { a } = clone();
     await handleDeclareFootprint({ directory: a, actorId: 'agent-a', writeSet: ['parseConfig'], writeMode: 'append' });
-    expect(await liveTaskDescriptors(a)).toEqual([{ id: 'agent-a', seedSymbols: ['parseConfig'], writeMode: 'append' }]);
+    expect(await liveTaskDescriptors(a)).toEqual([{ id: 'agent-a', branch: 'feat-a', seedSymbols: ['src/config.ts::parseConfig'], writeMode: 'append' }]);
   });
 
   it('rejects bad input without writing', async () => {
@@ -135,5 +135,72 @@ describe('declare_footprint', () => {
     expect((await handleDeclareFootprint({ directory: a, writeSet: [] })).error).toContain('writeSet or readSet');
     expect((await handleDeclareFootprint({ directory: a, actorId: 'bad id with spaces', writeSet: ['x'] })).error).toContain('actorId');
     expect((await readBoard(a)).live).toEqual([]);
+  });
+
+  it('the default id works in any folder and is unique per worktree path', async () => {
+    const { a } = clone();
+    const spaced = `${a} copy two`;
+    dirs.push(spaced);
+    git(a, 'worktree', 'add', '-q', '--detach', spaced, 'main');
+    index(spaced);
+    const x = `${a}-x/wt`; const y = `${a}-y/wt`;
+    dirs.push(`${a}-x`, `${a}-y`);
+    git(a, 'worktree', 'add', '-q', '--detach', x, 'main');
+    git(a, 'worktree', 'add', '-q', '--detach', y, 'main');
+    index(x); index(y);
+    expect((await handleDeclareFootprint({ directory: spaced, writeSet: ['parseConfig'] })).error).toBeUndefined();
+    await handleDeclareFootprint({ directory: x, writeSet: ['loadConfig'] });
+    const r = await handleDeclareFootprint({ directory: y, writeSet: ['loadConfig'] });
+    expect((r.conflicts as Array<{ hazard: string }>).map(c => c.hazard)).toContain('WAW');
+    expect((await handleDeclareFootprint({ directory: spaced, action: 'list' })).error).toBeUndefined();
+  });
+
+  it('a fast-forward onto main is not a merge; an existing symbol-less file is a write, not a creation', async () => {
+    const { a, b } = clone();
+    write(b, 'data/config.json', '{}');
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['parseConfig', 'data/config.json'] });
+    git(a, 'checkout', '-q', 'main');
+    write(a, 'src/other.ts', 'export const x = 1;\n');
+    git(a, 'add', '-A'); git(a, 'commit', '-qm', 'main moves');
+    git(b, 'merge', '-q', '--ff-only', 'main');
+    expect((await readBoard(a)).live.map(l => l.entry.actorId)).toEqual(['agent-b']);
+    write(a, 'data/config.json', '{}');
+    const r = await handleDeclareFootprint({ directory: a, actorId: 'agent-a', writeSet: ['data/config.json'] });
+    expect((r.entry as { creates: string[]; fileWrites?: string[] })).toMatchObject({ creates: [], fileWrites: ['data/config.json'] });
+    expect((r.conflicts as Array<{ hazard: string; witnesses?: string[] }>)[0]).toMatchObject({ hazard: 'WAW', witnesses: ['data/config.json'] });
+  });
+
+  it('an edit above a declared symbol does not mark it moved', async () => {
+    const { a } = clone();
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', writeSet: ['loadConfig'] });
+    write(a, 'src/config.ts', `import x from "y";\n${CONFIG_TS}`);
+    expect((await readBoard(a)).live[0].moved).toEqual([]);
+  });
+
+  it('unreadable, oversized, and crafted entries are skipped; a refreshed entry is not pruned', async () => {
+    const { a, b } = clone();
+    const dir = (await boardDir(a))!;
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['loadConfig'] });
+    if (process.platform !== 'win32') execFileSync('mkfifo', [join(dir, 'fifo.json')]);
+    writeFileSync(join(dir, 'big.json'), 'x'.repeat(300 * 1024));
+    writeFileSync(join(dir, 'crafted.json'), JSON.stringify({ version: 1, actorId: 'evil', worktree: '/private/etc', branch: '', writeSeeds: [], readSeeds: [],
+      writes: [{ id: 'x', name: 'hosts', file: 'hosts', start: 0, end: 9, hash: 'x' }], reads: [], creates: [], declaredAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() }));
+    const r = await readBoard(a);
+    expect(r.live.map(l => l.entry.actorId)).toEqual(['agent-b']);
+    expect(r.ended).toEqual([expect.objectContaining({ actorId: 'evil', reason: 'worktree-removed' })]);
+    // A stale read, then a refresh, then the prune: the refreshed entry stays.
+    const stale = await readBoard(a, { now: Date.now() + PANIC_SESSION_EXPIRY_MS + 1000 });
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['loadConfig'] });
+    await pruneEnded(stale.ended.filter(e => e.actorId === 'agent-b'));
+    expect((await readBoard(a)).live.map(l => l.entry.actorId)).toEqual(['agent-b']);
+  });
+
+  it('an index rooted below the git top level hashes symbols from that root', async () => {
+    const { a } = clone();
+    const pkg = join(a, 'pkg');
+    write(pkg, 'src/config.ts', CONFIG_TS);
+    index(pkg);
+    await handleDeclareFootprint({ directory: pkg, actorId: 'pkg-agent', writeSet: ['parseConfig'] });
+    expect((await readBoard(a)).live.find(l => l.entry.actorId === 'pkg-agent')?.moved).toEqual([]);
   });
 });

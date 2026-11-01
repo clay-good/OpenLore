@@ -1039,7 +1039,14 @@ export async function computeInterferenceMap(
   try {
     const { liveTaskDescriptors } = await import('../footprint-board.js');
     const ids = new Set(supplied.map(t => t?.id));
-    boardTasks = (await liveTaskDescriptors(absDir)).filter(t => !ids.has(t.id));
+    // An entry whose branch is already a harvested branch change is that same work: adding it would
+    // pair the agent with its own branch.
+    const harvested = new Set([...assessed, ...notAssessed].filter(x => ('node' in x ? x.node.kind : x.kind) === 'branch' && ('node' in x ? x.node.repo : x.repo) === home.name)
+      .map(x => ('node' in x ? x.node.ref : x.ref)));
+    const live = (await liveTaskDescriptors(absDir)).filter(t => !ids.has(t.id));
+    const covered = live.filter(t => t.branch && harvested.has(t.branch));
+    if (covered.length) caveats.push(`${covered.length} live peer-board entr${covered.length === 1 ? 'y is' : 'ies are'} already represented by ${covered.length === 1 ? 'its' : 'their'} branch change.`);
+    boardTasks = live.filter(t => !covered.includes(t)).map(({ branch: _b, ...t }) => t);
   } catch { /* the board is optional: unreadable means no board tasks */ }
   if (boardTasks.length) caveats.push(`${boardTasks.length} live peer-board entr${boardTasks.length === 1 ? 'y joins' : 'ies join'} as agent tasks (declare_footprint).`);
   for (const t of [...supplied, ...boardTasks]) {

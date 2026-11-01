@@ -12,7 +12,8 @@
  * branches, PRs, and these live entries; `fleet_status` lists them with the verification arc.
  */
 
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { computeFootprint, classifyHazard, type Footprint, type WriteMode } from './change-footprint.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -47,9 +48,13 @@ const ACTOR_RE = /^[\w.@:/+-]{1,128}$/;
  * The key two intended creations collide on: the bare symbol name (`src/url.ts::normalizeUrl` and
  * `normalizeUrl` are the same intent), or the file path for a file.
  */
+const SOURCE_EXT = /\.(?:[cm]?[jt]sx?|py|go|rb|rs|java|kt|cs|php|swift|c|h|cpp|json|ya?ml|toml|md|sql|sh)$/i;
+const normPath = (p: string) => p.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+const looksLikeFile = (s: string) => s.includes('/') || SOURCE_EXT.test(s);
+const existingFile = (root: string, seed: string) => !seed.includes('::') && looksLikeFile(seed) && existsSync(join(root, normPath(seed)));
 const creationKey = (seed: string): string => {
   if (seed.includes('::')) return `name:${seed.slice(seed.lastIndexOf('::') + 2)}`;
-  return seed.includes('/') || /\.[A-Za-z]{1,5}$/.test(seed) ? `file:${seed}` : `name:${seed}`;
+  return looksLikeFile(seed) ? `file:${normPath(seed)}` : `name:${seed}`;
 };
 
 function screenTitle(raw: string | undefined): { title?: string; titleWithheld?: boolean } {
@@ -70,7 +75,7 @@ async function toBoardSymbols(root: string, cg: SerializedCallGraph, members: Re
     if (n && typeof n.startIndex === 'number' && typeof n.endIndex === 'number') {
       if (!texts.has(m.filePath)) texts.set(m.filePath, await readFileConfined(root, m.filePath, 4 * 1024 * 1024).catch(() => null));
       const text = texts.get(m.filePath);
-      if (text) Object.assign(sym, { start: n.startIndex, end: n.endIndex, hash: symbolHash(text.slice(n.startIndex, n.endIndex)) });
+      if (text) Object.assign(sym, { start: n.startIndex, end: n.endIndex, hash: symbolHash(text.slice(n.startIndex, n.endIndex)), head: text.slice(n.startIndex, Math.min(n.endIndex, n.startIndex + 80)) });
     }
     out.push(sym);
   }
@@ -105,8 +110,12 @@ export async function handleDeclareFootprint(input: DeclareFootprintInput): Prom
   const action = input.action ?? 'declare';
   let identity: Awaited<ReturnType<typeof worktreeIdentity>>;
   try { identity = await worktreeIdentity(root); } catch { return { error: 'Not a git work tree: the board lives in the git common directory.' }; }
-  const actorId = input.actorId?.trim() || `${identity.branch || 'detached'}@${basename(identity.worktree)}`;
-  if (!ACTOR_RE.test(actorId)) return { error: 'actorId must be 1-128 characters: letters, digits, and . _ @ : / + -' };
+  // The default id names the branch and folder, and is unique per worktree path (two folders with
+  // the same name, or two detached worktrees, never share an entry).
+  const token = (s: string) => s.replace(/[^\w.-]+/g, '-').slice(0, 48) || 'x';
+  const defaultId = `${token(identity.branch || 'detached')}@${token(basename(identity.worktree))}-${symbolHash(identity.worktree).slice(0, 6)}`;
+  const actorId = input.actorId?.trim() || defaultId;
+  if (action !== 'list' && !ACTOR_RE.test(actorId)) return { error: 'actorId must be 1-128 characters: letters, digits, and . _ @ : / + -' };
 
   if (action === 'release') {
     const released = await removeEntry(root, actorId);
@@ -151,7 +160,11 @@ export async function handleDeclareFootprint(input: DeclareFootprintInput): Prom
     readSeeds,
     writes: writeFp ? await toBoardSymbols(root, cg, writeFp.writeSet) : [],
     reads: readFp ? await toBoardSymbols(root, cg, readFp.writeSet) : [],
-    creates: writeFp ? writeFp.unresolvedSeeds : [],
+    // An unresolved seed that names an existing file (a JSON or config file with no symbols) is a
+    // file write, not a creation.
+    creates: writeFp ? writeFp.unresolvedSeeds.filter(s => !existingFile(root, s)) : [],
+    fileWrites: writeFp ? writeFp.unresolvedSeeds.filter(s => existingFile(root, s)).map(normPath) : [],
+    root,
     ...(identity.baseAtDeclare ? { baseAtDeclare: identity.baseAtDeclare } : {}),
     ...(input.writeMode ? { writeMode: input.writeMode } : {}),
     declaredAt: existing?.declaredAt ?? now,
@@ -169,20 +182,24 @@ export async function handleDeclareFootprint(input: DeclareFootprintInput): Prom
     if (p.actorId === actorId) continue;
     const v = classifyHazard(mine, footprintOf(cg, p));
     const dup = p.creates.filter(c => myCreates.has(creationKey(c)));
+    // Two agents writing the same file that holds no symbols (a JSON or config file).
+    const sharedFiles = (p.fileWrites ?? []).filter(f => (entry.fileWrites ?? []).includes(f));
     const peerId = emittedText(p.actorId);
-    if (v.kind === 'WAW') {
+    if (v.kind === 'WAW' || (v.kind === 'none' && sharedFiles.length)) {
       findings.push({ code: 'parallel-work-conflict', severity: 'warning', source: 'declare-footprint', subject: `${actorId} × ${peerId}`,
-        message: emittedText(`Write-write conflict with ${p.actorId} (${p.branch || 'detached'} in ${p.worktree}) on ${v.witnesses.slice(0, 3).map(w => name.get(w) ?? w).join(', ')}.`) });
+        message: emittedText(`Write-write conflict with ${p.actorId} (${p.branch || 'detached'} in ${p.worktree}) on ${[...v.witnesses.map(w => name.get(w) ?? w), ...sharedFiles].slice(0, 3).join(', ')}.`) });
     }
     if (dup.length) {
       findings.push({ code: 'duplicate-intent', severity: 'warning', source: 'declare-footprint', subject: `${actorId} × ${peerId}`,
         message: emittedText(`Both ${actorId} and ${p.actorId} intend to create ${dup.slice(0, 3).join(', ')}.`) });
     }
-    if (v.kind === 'none' && !dup.length) continue;
+    if (v.kind === 'none' && !dup.length && !sharedFiles.length) continue;
+    const kind = v.kind !== 'none' ? v.kind : sharedFiles.length ? 'WAW' : 'duplicate-intent';
+    const witnesses = [...v.witnesses.map(w => name.get(w) ?? w), ...sharedFiles];
     peers.push({
       ...peerView(p, moved),
-      hazard: dup.length && v.kind === 'none' ? 'duplicate-intent' : v.kind,
-      ...(v.kind !== 'none' ? { witnesses: v.witnesses.slice(0, 20).map(w => emittedText(name.get(w) ?? w)) } : {}),
+      hazard: kind,
+      ...(witnesses.length ? { witnesses: witnesses.slice(0, 20).map(emittedText) } : {}),
       ...(v.direction ? { direction: v.direction } : {}),
       ...(dup.length ? { duplicateIntent: dup.map(emittedText) } : {}),
     });
@@ -205,6 +222,8 @@ export async function handleDeclareFootprint(input: DeclareFootprintInput): Prom
       writes: entry.writes.map(w => `${w.name} (${w.file})`),
       reads: entry.reads.map(r => `${r.name} (${r.file})`),
       creates: entry.creates,
+      ...(entry.fileWrites?.length ? { fileWrites: entry.fileWrites } : {}),
+      ...(readFp?.unresolvedSeeds.length ? { unresolvedReads: readFp.unresolvedSeeds } : {}),
     },
     livePeers: board.live.filter(l => l.entry.actorId !== actorId).length,
     conflicts: peers,
