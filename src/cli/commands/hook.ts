@@ -200,15 +200,6 @@ async function headSha(root: string): Promise<string | undefined> {
   }
 }
 
-async function repoTop(root: string): Promise<string | undefined> {
-  try {
-    const { execFileGit } = await import('../../utils/git-exec.js');
-    return String((await execFileGit('git', ['rev-parse', '--show-toplevel'], { cwd: root })).stdout).trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Where `root` sits in its git repository (`packages/app/`), so git-based checks get repo paths. */
 async function repoPrefix(root: string): Promise<string> {
   const { getRepoPrefix } = await import('../../core/drift/git-diff.js');
@@ -270,7 +261,9 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   }
 
   const { checkWeakening } = await import('../../core/services/check-weakening.js');
-  const top = prefix ? await repoTop(root) : root;
+  // The repository top, derived from this root and its prefix (git's own spelling of the path can
+  // differ on Windows: forward slashes, a long name for an 8.3 one).
+  const top = resolve(root, ...prefix.split('/').filter(Boolean).map(() => '..'));
   const weak = top ? await checkWeakening({ root: top, baseRef: baseline, files: repoFiles }).catch(() => undefined) : undefined;
   for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, severity: f.severity, text: f.message });
   return items;
