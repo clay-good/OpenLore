@@ -317,6 +317,9 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 | `param-type-narrowed` | public-surface | advisory | A parameter type of an exported signature was narrowed. |
 | `return-type-narrowed` | public-surface | advisory | The return type of an exported signature was narrowed. |
 | `signature-unprovable` | public-surface | advisory | An exported signature changed and its compatibility cannot be proven from the available types; emitted at severity `warning`, never breaking-classed. |
+| `contract-breaking` | service-contract | advisory | An API schema element changed in a way existing clients may not handle (a breaking or dangerous rule of `certify_service_contract`). |
+| `contract-declared-unimplemented` | service-contract | advisory | An API operation is declared in a specification but no indexed route handler serves it. |
+| `contract-implemented-undeclared` | service-contract | advisory | A route handler serves a path under one the specification covers, but the specification does not declare it. |
 
 > **Note on the surface codes.** The change-impact certificate's *own* `--json` finding codes are `surface-newly-reached` / `surface-critical` (see [mcp-tools.md](mcp-tools.md)); the enforcement gate governs the **per-severity** codes `surface-info` / `surface-warn` / `surface-critical` (one per declared surface severity). To block a surface via `enforcement.policy`, name the per-severity code (e.g. `"surface-critical": "blocking"`), not `surface-newly-reached` — an unrecognized code is retained but governs nothing.
 

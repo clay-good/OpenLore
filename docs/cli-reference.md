@@ -58,6 +58,7 @@
 | `openlore blast-radius` | Pre-flight structural blast-radius briefing for the current diff (advisory; `--install-hook` for a pre-commit hook) | No |
 | `openlore coverage-gaps` | Ranked structural test-coverage gaps: important code with NO reaching test (the inverse of `select_tests`), no runtime. Scope to a diff (`--base`/`--symbols`) or region (`--file-pattern`). Read-only, never blocks | Yes |
 | `openlore certify-public-surface` | Certify the public API surface (no `--base`) or the breaking-change verdict for the working-tree diff (`--base <ref>`): removed/renamed exports, incompatible signatures, each breaking change with its consumers. `--accept` records intended breakages with a justification. Deterministic, never blocks | Yes |
+| `openlore certify-service-contract` | Certify OpenAPI/Swagger contracts against the code: declared operations and parity with the indexed route handlers (no `--base`), or the breaking-change verdict for each changed element with its in-repo callers (`--base <ref>`). Read-only, advisory | Yes |
 | `openlore style-fingerprint` | Descriptive per-language idiom profile (function form, binding, conditional, async, string, naming case) for the repo, a region (`--community <id>`), or a file (`--file <path>`); `--language` filters, `--json` for machine output. Evidence-floor + enforcement-aware nulls. Read-only, deterministic, never blocks | Yes |
 | `openlore briefing-since` | Catch-up briefing of what changed since a base ref (`--base <ref>`), ranked by significance tier — surprising-change (a stable hub moved) > hub-change > chokepoint-change > ordinary-change — from existing labels (not a score); grouped by region, with tests-to-run and a no-silent-truncation receipt. Scope with `--file-pattern`, bound with `--max`, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore find-clones` | Existing clones of ONE query — a function `--symbol <name>` (or `name::path`) in the index, or raw `--snippet <code>` (even code not yet written) — ranked exact > structural > near. The edit-time "does this already exist? reuse it" companion to the whole-repo `get_duplicate_report`. `--min <ratio>` sets the near floor (default 0.7), `--max <n>` bounds the list, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
@@ -144,7 +145,7 @@ openlore install [options]   # wire agents (this repo AND your user scope),
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
                          #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 81-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 82-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries (both scopes)
@@ -161,7 +162,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 81-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 82-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -173,7 +174,7 @@ openlore connect remove [agent]      # disconnect that agent
 A bare `openlore install` wires the `substrate` surface (15 tools — navigation core + governance reads + spec-workflow composites) and, for
 Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
 injection hook. Use `--preset navigation` for the lean navigate-only core (10 tools), or
-`--preset full` for all 81 tools.
+`--preset full` for all 82 tools.
 
 ### MCP Server Options
 
@@ -182,7 +183,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: substrate, 15 tools — nav + governance + spec workflows)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 81 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 82 tools (alias --preset full)
   --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
@@ -642,6 +643,18 @@ openlore certify-public-surface --base v2.0.0 --accept --justification "v3 drops
 
 The closed classification rules: a **removed** or **renamed** export, an **added required parameter**, a parameter made **required**, or a **narrowed** parameter/return type is `breaking`; an added **trailing optional** parameter, a **new export**, or a **widened** return type is `non-breaking`; anything that cannot be *proven* compatible from the available signatures (untyped/dynamically-typed, or an incomparable type change) is `potentially-breaking` — **never silently safe**, since there is no type checker and no build in the loop. A renamed export is reported as a rename (via symbol-identity continuity), not a remove+add. A symbol still defined but no longer exported is reported as `visibility-reduced` (public → private); a re-export (`export { X } from …`) follows its definition — it is tracked at the definition site, not separately at the barrel, so a barrel'd symbol is never double-counted. Each breaking or potentially-breaking change, and each added export, carries stable rule codes (`export-removed`, `export-renamed`, `export-visibility-reduced`, `param-removed`, `param-required-added`, `param-became-required`, `param-type-narrowed`, `return-type-narrowed`, `signature-unprovable`, `export-added`), and the verdict carries a `suggestedBump`: `major` when any change is breaking; withheld (`null`, printed as `withheld (reason)`) when any change is potentially-breaking or any changed code file is in a language whose signatures are not classified (for example Go, Vue, or shell; test, Terraform, and config files do not count); otherwise `minor` when an export was added, else `patch` (an added optional parameter or a widened return type alone suggests `patch`). Each breaking rule code (severity `error`) and each `signature-unprovable` (severity `warning`) is also a registered governance finding in `findings[]`, so the caller that runs the tool can gate an individual rule with `enforcement.policy`; `openlore enforce` does not run it. Each breaking change is also split into `breaking-consumed` (at least one indexed consumer binds it; the consumers are listed, each with how it binds: a resolved `call`; an `import` of the symbol by name, aliases resolved and followed through re-exporting modules; a `module-import` (a default, namespace, or whole-module import that may use it); or an `unresolved-call` from an importing file or the defining file when the index was rebuilt after the symbol went away) or `breaking-unconsumed-in-index` (none found). `consumerCensus` names the import evidence used and what it cannot see — imports the analyzer does not resolve (for example Python absolute imports in a src layout) and aliased re-exports. For a rename only callers of the old name count; for a removed `export` keyword only other files count. Zero indexed consumers is never "safe": external/unindexed consumers are disclosed as a known-unknowable boundary on both. By default only in-repo consumers are checked; `--federation` (optionally `--federation-repos a,b`) also counts consumers in indexed sibling repos, matched by symbol name, and names the repos it checked and skipped. `--accept --justification "<why>"` records the diff's unaccepted breaking findings in the checked-in `.openlore/public-surface-baseline.jsonl` (one sorted JSON line per rule code, symbol, and discriminator — the before/after contract with parameter names and types but not formatting, the removed declaration, or the rename target — so accepting one break never covers a later, different one). `--accept` never edits `.gitignore`: it reports whether Git tracks, would track, or ignores the file, and for an ignored file (the usual case, since `.openlore/` is ignored) prints the one command that adds it: `git add -f .openlore/public-surface-baseline.jsonl`. Once committed, ignore rules no longer apply to it. It refuses without a justification, never overwrites a baseline it cannot read, never accepts findings computed against a fallback base, and never silently drops a decision anchor: re-accepting an entry whose decision expired needs a new `--decision`. An accepted entry's justification is changed by editing the file. Later runs list a matched finding under `baseline.accepted` with its justification and leave it out of `findings[]`; the verdict, summary, and bump still count it, and any new break still reports. `--decision <id>` anchors the acceptance to a current decision: when that decision is superseded, rejected, or missing, the acceptance is listed as `stale` (naming the superseder) and the finding reports again. A baseline that cannot be read honors nothing and says why. Signature classification covers TypeScript/JavaScript/Python; other languages fail-soft to surface membership only (a removed/added export is still reported, without a signature classification). Test files are excluded from the surface. Advisory — it is a report and never blocks; its only write is `--accept`. The matching MCP tool `certify_public_surface` is exposed under `openlore mcp --preset full`.
 
+#### Service contract certification
+
+Check OpenAPI 3.x and Swagger 2.0 documents against the routes that serve them and the clients that call them:
+
+```bash
+openlore certify-service-contract                  # declared operations + parity with the indexed route handlers
+openlore certify-service-contract --base main      # verdict for each changed contract element vs the merge-base
+openlore certify-service-contract --base main --json
+```
+
+Without `--base`, every specification in the repository (tracked or untracked, not ignored; `node_modules`, `vendor`, `dist`, and `build` skipped) is listed with its operations, and parity is checked against the route inventory `openlore analyze` writes: an operation no handler serves, and a handler under a path the specification covers (the operation's path or its parent) that the specification does not declare. A route is matched with and without the specification's base path (`servers[0].url` or `basePath`), and path parameters match whatever the framework names them. With `--base <ref>`, each changed element gets one rule from a closed table — `breaking`, `dangerous`, `non-breaking`, or `potentially-breaking` — and each breaking or dangerous one lists the client call sites in this repository whose method and literal path match. Only local `$ref`s are followed; external `$ref`s, `oneOf`/`anyOf`, callbacks, and webhooks are listed as outside the model, and a changed schema there is `potentially-breaking`, which withholds the suggested version bump. A specification that cannot be parsed is `notAssessed`, never "no changes". Findings `contract-breaking`, `contract-declared-unimplemented`, and `contract-implemented-undeclared` are advisory unless `enforcement.policy` says otherwise; `openlore enforce` does not run this command. The matching MCP tool `certify_service_contract` is exposed under `openlore mcp --preset full`.
+
 #### Change significance briefing
 
 ```bash
@@ -718,7 +731,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # substrate preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 81 tools on a fixed port
+openlore serve --preset all --port 7077 # all 82 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

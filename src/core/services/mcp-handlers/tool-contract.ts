@@ -125,6 +125,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_style_fingerprint: 'conclusion',
   briefing_since: 'conclusion',
   get_handoff_briefing: 'conclusion',
+  certify_service_contract: 'conclusion',
 };
 
 /** The tools intentionally allowed to emit raw topology, sorted for stable assertions. */
@@ -255,6 +256,7 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   change_impact_certificate: 'change',
   certify_provenance: 'change',
   certify_public_surface: 'change',
+  certify_service_contract: 'change',
   briefing_since: 'change',
   get_handoff_briefing: 'change',
   detect_changes: 'change',
