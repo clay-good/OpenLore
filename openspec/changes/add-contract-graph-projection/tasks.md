@@ -10,7 +10,8 @@
 ## Briefings and consumers
 - [x] `orient` / `blast_radius`: operations served by routes in scope — shipped in `add-contract-briefings`
 - [ ] `blast_radius`: contract elements a changed specification file touches
-- [ ] `certify_service_contract`: reaching tests per consumer; federated consumers by stable id
+- [x] `certify_service_contract`: reaching tests per consumer — shipped in `add-contract-consumer-tests`
+- [ ] `certify_service_contract`: federated consumers by stable id
 - [x] `contract-payload-missing-required` in `certify_service_contract` — shipped in `add-contract-payload-check`
 - [x] `verify_change` carries payload findings — shipped in `add-verify-change-payload-findings`
 
@@ -22,4 +23,4 @@
 - [ ] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL)
 - [ ] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers
 - [ ] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume
-- [ ] `mcp-handlers` delta: ADD ContractConsumersCarryTheirTestsAndFederatedPeers
+- [ ] `mcp-handlers` delta: ADD ChangedSpecificationsAndFederatedConsumersSurface

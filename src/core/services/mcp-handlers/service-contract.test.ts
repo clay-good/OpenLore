@@ -73,7 +73,7 @@ describe('certify_service_contract', () => {
     const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
     const changes = r.changes as { total: number; items: Array<{ rule: string; class: string; address: string; consumers: Array<{ file: string; line: number }> }>; suggestedBump: string };
     expect(changes.items.map(c => `${c.rule} ${c.address}`)).toEqual(['operation-removed DELETE /v1/orders/{id}', 'response-property-removed GET /v1/orders/{id}']);
-    expect(changes.items[0].consumers).toEqual([{ file: 'src/client.ts', line: 2, method: 'DELETE', url: '/v1/orders/${id}' }]);
+    expect(changes.items[0].consumers).toEqual([{ file: 'src/client.ts', line: 2, method: 'DELETE', url: '/v1/orders/${id}', testsNotComputed: 'no index: run `openlore analyze`' }]);
     expect(changes.items[1].consumers.map(c => c.line)).toEqual([1]);
     expect(changes.suggestedBump).toBe('major');
     const breaking = (r.findings as Array<{ code: string; severity: string; message: string }>).filter(f => f.code === 'contract-breaking');
@@ -241,5 +241,21 @@ describe('certify_service_contract', () => {
     const { handleVerifyChange } = await import('./verify-change.js');
     const r = await handleVerifyChange({ directory: root, baseRef: 'HEAD' }) as { findings?: Array<{ code: string; subject: string }> };
     expect((r.findings ?? []).filter(f => f.code === 'contract-payload-missing-required').map(f => f.subject).sort()).toEqual(['src/a.ts:2', 'src/new.ts:1']);
+  });
+
+  it('each consumer of a breaking change names the tests that reach the function holding the call', async () => {
+    const nodes = [
+      { id: 'src/client.ts::get', name: 'get', filePath: 'src/client.ts', startLine: 1, endLine: 1, language: 'TypeScript' },
+      { id: 'src/client.ts::drop', name: 'drop', filePath: 'src/client.ts', startLine: 2, endLine: 2, language: 'TypeScript' },
+      { id: 'src/client.test.ts::drops an order', name: 'drops an order', filePath: 'src/client.test.ts', startLine: 1, endLine: 3, language: 'TypeScript', isTest: true },
+    ];
+    const edges = [{ callerId: 'src/client.test.ts::drops an order', calleeId: 'src/client.ts::drop', calleeName: 'drop', line: 2, confidence: 'import' }];
+    const root = repo({ 'api/openapi.yaml': SPEC, 'src/client.ts': CLIENT, 'src/client.test.ts': "import { drop } from './client';\nit('drops an order', () => drop('1'));\n" });
+    write(root, '.openlore/analysis/llm-context.json', JSON.stringify({ callGraph: { nodes, edges } }));
+    write(root, 'api/openapi.yaml', SPEC.replace(/ {4}delete:\n(.*\n){2}/, ''));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const removed = (r.changes as { items: Array<{ rule: string; consumers: Array<{ tests?: string[]; testsTotal?: number }> }> }).items.find(c => c.rule === 'operation-removed')!;
+    expect(removed.consumers[0].tests?.join(' ')).toContain('drops an order');
+    expect(removed.consumers[0].testsTotal).toBeGreaterThanOrEqual(1);
   });
 });
