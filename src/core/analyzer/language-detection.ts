@@ -63,8 +63,9 @@ export const EXTENSION_TO_LANGUAGE: Readonly<Record<string, string>> = {
  */
 export function detectLanguage(filePath: string): string {
   const lower = filePath.toLowerCase();
-  // Terraform is unambiguous by extension (incl. the *.tf.json variant).
-  if (lower.endsWith('.tf') || lower.endsWith('.tfvars') || lower.endsWith('.tf.json')) {
+  // Terraform is unambiguous by extension (incl. the *.tf.json variant). OpenTofu's `.tofu` and
+  // `.tofu.json` are the same language (change: add-iac-code-binding).
+  if (lower.endsWith('.tf') || lower.endsWith('.tfvars') || lower.endsWith('.tf.json') || lower.endsWith('.tofu') || lower.endsWith('.tofu.json')) {
     return 'Terraform';
   }
   // Bicep is unambiguous by extension (Azure IaC DSL).

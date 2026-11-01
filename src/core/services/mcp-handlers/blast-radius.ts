@@ -252,6 +252,14 @@ export interface BlastRadiusBriefing {
     filesChecked: number;
     referencesChecked: number;
   };
+  /**
+   * Env vars the diff stops reading anywhere, each with the infrastructure sites that still set the
+   * old name (change: add-iac-code-binding). Absent when the diff removes no env-var read.
+   */
+  envDeclarations?: {
+    removedReads: string[];
+    stillSet: Array<{ name: string; sites: Array<{ ecosystem: string; resource: string; file: string; line: number }> }>;
+  };
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -502,6 +510,17 @@ export async function computeBlastRadius(
     referencesNote = `Added references could not be checked: ${err instanceof Error ? err.message : String(err)}`;
   }
 
+  // ── 4e. Env vars the diff stops reading, still set by infrastructure (change: add-iac-code-binding) ──
+  let envRenames: import('../env-rename-check.js').EnvRenameCheck | null = null;
+  let envNote: string | null = null;
+  try {
+    const { checkEnvRenames } = await import('../env-rename-check.js');
+    envRenames = await checkEnvRenames(absDir, resolvedBaseRef, diffEntries);
+    if (envRenames.boundaries.length) envNote = [...new Set(envRenames.boundaries)].join(' ');
+  } catch (err) {
+    envNote = `Env-var reads the diff removed could not be checked: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
   const caveats: string[] = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
@@ -530,6 +549,8 @@ export async function computeBlastRadius(
   }
   if (generatedNote) caveats.push(generatedNote);
   if (referencesNote) caveats.push(referencesNote);
+  // A failed check, or a limit it hit, is always said; it never reads as a clean check.
+  if (envNote) caveats.push(envNote);
   if (driftFilesOmitted > 0) {
     caveats.push(`Spec/memory drift omitted ${driftFilesOmitted} changed file${driftFilesOmitted === 1 ? '' : 's'} after reaching its analysis limit; absence of a finding does not cover those files.`);
   }
@@ -650,6 +671,9 @@ export async function computeBlastRadius(
             ...references.summary,
           },
         }
+      : {}),
+    ...(envRenames?.removedReads.length
+      ? { envDeclarations: { removedReads: envRenames.removedReads, stillSet: envRenames.stillSet } }
       : {}),
     headline: '',
     posture: 'advisory',

@@ -8,7 +8,7 @@
  * scanner keeps the dependency tree flat and install-clean, and is fully
  * deterministic. We never evaluate HCL; we only read declared blocks + refs.
  *
- * Files: *.tf, *.tf.json, *.tfvars. (The JSON variant is handled tolerantly by
+ * Files: *.tf, *.tf.json, *.tfvars, and OpenTofu's *.tofu, *.tofu.json. (The JSON variant is handled tolerantly by
  * the same reference scan; structural JSON parsing is a spec-07 follow-up.)
  */
 
@@ -39,7 +39,7 @@ export function extractTerraform(
   const moduleSources: Array<{ mod: IacModule; sourceDir: string | null }> = [];
 
   for (const file of files) {
-    if (file.path.toLowerCase().endsWith('.tf.json')) {
+    if (/\.(?:tf|tofu)\.json$/i.test(file.path)) {
       ingestTfJson(file, graph, dirResources, moduleSources);
       continue;
     }
@@ -440,10 +440,14 @@ function scanHclBlocks(content: string): HclBlock[] {
   let i = 0;
   let line = 1;
 
+  // Line starts, indexed once: recounting from offset 0 per block was quadratic in the block count.
+  const lineStarts: number[] = [];
+  for (let k = 0; k < len; k++) if (content[k] === '\n') lineStarts.push(k);
+  /** 1 + the number of newlines before `idx` (binary search over the newline offsets). */
   const lineAt = (idx: number): number => {
-    let n = 1;
-    for (let k = 0; k < idx && k < len; k++) if (content[k] === '\n') n++;
-    return n;
+    let lo = 0, hi = lineStarts.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (lineStarts[mid] < idx) lo = mid + 1; else hi = mid; }
+    return lo + 1;
   };
 
   while (i < len) {
