@@ -26,6 +26,14 @@ const MAX_BLOB_BYTES_TOTAL = 512 * 1024 * 1024;
  */
 export function readBlobsAtRef(absDir: string, ref: string, paths: readonly string[]): Promise<Map<string, string>> {
   return new Promise((resolve, reject) => {
+    // Specs are fed one per line and replies are correlated BY ORDER, so a path containing a
+    // newline would be two requests and shift every later reply onto the wrong file. Such a path is
+    // legal in a repository, so the batch refuses the whole call and the per-file reader takes over.
+    const newline = paths.find(p => p.includes('\n'));
+    if (newline !== undefined) {
+      reject(new Error('git cat-file --batch cannot address a path containing a newline'));
+      return;
+    }
     const child = spawnGit('git', gitPathArgs('cat-file', '--batch'), { cwd: absDir, stdio: ['pipe', 'pipe', 'pipe'] });
     const out = new Map<string, string>();
     const decoder = new TextDecoder('utf-8');

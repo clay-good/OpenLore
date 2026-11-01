@@ -40,6 +40,7 @@ import {
   type ImportInfo,
 } from '../analyzer/import-parser.js';
 import { goImportSpecs, sanitizeForRegex } from '../analyzer/import-resolver-bridge.js';
+import { maskFlavorFor, maskNonCode } from '../analyzer/code-mask.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { languageSupport } from '../analyzer/language-support.js';
 import {
@@ -319,8 +320,12 @@ interface ManifestScope {
   manifests: Array<{ path: string; ecosystem: PackageEcosystem }>;
   /** Manifests that exist but did not parse: the ecosystem cannot be judged. */
   failed: string[];
-  /** The Go module path declared by the nearest `go.mod`, if any — imports under it are internal. */
-  goModules: string[];
+  /**
+   * Go modules declared in scope: the module path and the directory of the `go.mod` that declares
+   * it. An import under the module path names a directory relative to THAT directory, which is not
+   * the analyzed root when the module lives in a subdirectory.
+   */
+  goModules: Array<{ module: string; dir: string }>;
   /** Alias patterns from tsconfig/jsconfig `paths` and package.json `imports`. */
   aliasPatterns: string[];
   /** Workspace package names: a bare import of one of these is internal. */
@@ -427,7 +432,7 @@ class ScopeReader {
     declared: Array<{ ecosystem: PackageEcosystem; names: string[] }>;
     manifests: Array<{ path: string; ecosystem: PackageEcosystem }>;
     failed: string[];
-    goModules: string[];
+    goModules: Array<{ module: string; dir: string }>;
     aliasPatterns: string[];
     workspaceNames: string[];
   }>();
@@ -485,7 +490,7 @@ class ScopeReader {
       declared: [] as Array<{ ecosystem: PackageEcosystem; names: string[] }>,
       manifests: [] as Array<{ path: string; ecosystem: PackageEcosystem }>,
       failed: [] as string[],
-      goModules: [] as string[],
+      goModules: [] as Array<{ module: string; dir: string }>,
       aliasPatterns: [] as string[],
       workspaceNames: [] as string[],
     };
@@ -520,7 +525,7 @@ class ScopeReader {
       }
       if (name === 'go.mod') {
         const m = /^module\s+(\S+)/m.exec(text);
-        if (m) entry.goModules.push(m[1]);
+        if (m) entry.goModules.push({ module: m[1], dir });
       }
     }
     for (const config of ['tsconfig.json', 'jsconfig.json', 'tsconfig.base.json']) {
@@ -732,7 +737,8 @@ export async function checkPhantomReferences(
         break;
       }
       referencesChecked++;
-      if (ref.isDynamic && ref.specifier === '') {
+      if (ref.specifier.trim() === '') {
+        // Either a computed dynamic import or a specifier the mask blanked: nothing to resolve.
         dynamicSkipped.add(ref.file);
         continue;
       }
@@ -868,49 +874,39 @@ export async function checkPhantomReferences(
 }
 
 /**
- * Imports whose statement really is code. The import scanners are regex-based over comment-blanked
- * text, so example source inside a string or a template literal — a test fixture, a codegen
- * template, a documentation snippet — is read as an import of its own. Sanitizing blanks string and
- * template bodies while preserving every line break, so an import whose keyword no longer survives
- * on its line came from inside a string and is dropped.
- */
-function realCodeOnly(content: string, imports: ImportInfo[]): ImportInfo[] {
-  if (imports.length === 0) return imports;
-  const masked = sanitizeForRegex(content, false).split('\n');
-  return imports.filter(imp => {
-    const line = masked[imp.line - 1];
-    return line === undefined || /\b(?:import|require|export|from)\b/.test(line);
-  });
-}
-
-/**
  * Re-export statements as imports: `export { a, b } from './x'` reads `a` and `b` from `./x`, and
  * `export * from './x'` reads the module as a whole. Written as one scan so the names and the line
  * come from the same place the import parser would give them.
  */
 export function reExportsAsImports(content: string): ImportInfo[] {
   const out: ImportInfo[] = [];
-  const lines = content.split('\n');
-  const push = (source: string, names: string[], wholeModule: boolean, line: number) => {
+  const lineOf = (offset: number): number => {
+    let line = 1;
+    for (let i = 0; i < offset && i < content.length; i++) if (content[i] === '\n') line++;
+    return line;
+  };
+  const push = (source: string, names: string[], wholeModule: boolean, offset: number) => {
     out.push({
       source, isRelative: source.startsWith('.'), isPackage: !source.startsWith('.'), isBuiltin: false,
       importedNames: names, importedSourceNames: names,
-      hasDefault: false, hasNamespace: wholeModule, isTypeOnly: false, isDynamic: false, line,
+      hasDefault: false, hasNamespace: wholeModule, isTypeOnly: false, isDynamic: false,
+      line: lineOf(offset),
     });
   };
-  for (const [index, raw] of lines.entries()) {
-    const line = raw.replace(/\r$/, '');
-    const star = /^\s*export\s+\*(?:\s+as\s+[A-Za-z_$][\w$]*)?\s+from\s*["']([^"']+)["']/.exec(line);
-    if (star) { push(star[1], [], true, index + 1); continue; }
-    const named = /^\s*export\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(line);
-    if (!named) continue;
-    const names = named[1].split(',')
-      // `export { a as b } from` reads `a` from the target, not `b`.
-      .map(part => part.trim().split(/\s+as\s+/)[0].trim())
-      .filter(n => n.length > 0 && n !== 'default');
-    push(named[2], names, names.length === 0, index + 1);
+  // Both forms are matched across lines: a long barrel is formatted with one name per line.
+  // `[^}]*` cannot run past the closing brace, so neither pattern backtracks across the file.
+  for (const m of content.matchAll(/\bexport\s+\*(?:\s+as\s+[A-Za-z_$][\w$]*)?\s+from\s*["']([^"'\n]+)["']/g)) {
+    push(m[1], [], true, m.index);
   }
-  return out;
+  for (const m of content.matchAll(/\bexport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"'\n]+)["']/g)) {
+    const names = m[1].split(',')
+      // `export { a as b } from` reads `a` from the target, not `b`; an inline `type` modifier
+      // (`export { type Foo }`) is part of the syntax, not part of the name.
+      .map(part => part.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim())
+      .filter(n => n.length > 0 && n !== 'default');
+    push(m[2], names, names.length === 0, m.index);
+  }
+  return out.sort((a, z) => a.line - z.line);
 }
 
 /** Whether a file's language has import support in the language-support matrix. */
@@ -924,17 +920,23 @@ export function supportsImports(filePath: string): boolean {
  * PHP), and a file in one of those is disclosed as not assessed rather than counted as clean.
  */
 export function extractImports(filePath: string, content: string): ImportInfo[] | null {
-  switch (detectLanguage(filePath)) {
+  const language = detectLanguage(filePath);
+  // Every scanner below runs over the MASKED content, so an import written inside a string, a
+  // template literal, a comment, or a docstring does not exist as far as this check is concerned.
+  // The mask preserves offsets, so reported lines still point at the original file.
+  const flavor = maskFlavorFor(language);
+  const code = flavor ? maskNonCode(content, flavor) : content;
+  switch (language) {
     case 'TypeScript':
     case 'JavaScript':
       // A re-export (`export { x } from './y'`) reads a module exactly as an import does, so it is
       // one of the references a hallucinated barrel gets wrong.
-      return realCodeOnly(content, [...parseJSImports(content), ...reExportsAsImports(content)]);
+      return [...parseJSImports(code), ...reExportsAsImports(code)];
     case 'Python':
-      return realCodeOnly(content, parsePythonImports(content));
+      return parsePythonImports(code);
     case 'Go':
       // Go imports a PACKAGE path, so it binds no names this check could verify against a file.
-      return goImportSpecs(content).map(spec => ({
+      return goImportSpecs(code).map(spec => ({
         source: spec.source,
         isRelative: spec.source.startsWith('.'),
         isPackage: !spec.source.startsWith('.'),
@@ -996,10 +998,12 @@ function pathCandidates(absRoot: string, fromRel: string, specifier: string, cor
  * The repository directory a Go import under the module's own path names; null when the specifier is
  * not under any declared module path.
  */
-function goPackageDir(specifier: string, goModules: readonly string[]): string | null {
-  for (const module of goModules) {
-    if (specifier === module) return '';
-    if (specifier.startsWith(module + '/')) return specifier.slice(module.length + 1);
+function goPackageDir(specifier: string, goModules: ReadonlyArray<{ module: string; dir: string }>): string | null {
+  for (const { module, dir } of goModules) {
+    const subpath = specifier === module ? '' : specifier.startsWith(module + '/') ? specifier.slice(module.length + 1) : null;
+    if (subpath === null) continue;
+    // The module's own directory is where its package paths are rooted.
+    return !subpath ? dir : dir ? `${dir}/${subpath}` : subpath;
   }
   return null;
 }
@@ -1013,7 +1017,7 @@ function isInternalPackage(
 ): boolean {
   if (scope.workspaceNames.has(pkg)) return true;
   if (ecosystem === 'go') {
-    return scope.goModules.some(m => specifier === m || specifier.startsWith(m + '/'));
+    return scope.goModules.some(m => specifier === m.module || specifier.startsWith(m.module + '/'));
   }
   return false;
 }

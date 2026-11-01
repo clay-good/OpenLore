@@ -17,7 +17,9 @@ All four are advisory. `verify_change` classifies them with
 [`enforcement.policy`](configuration.md), so `blocking` sets `gated: true` and `off` drops them;
 `openlore enforce` does not collect them. `blast_radius` carries the same references as facts in
 `phantomReferences.unresolved` — it holds no policy, so it reports what was found and leaves the
-classification to `verify_change`.
+classification to `verify_change`. That block is present whenever the check ran, with
+`filesChecked` and `referencesChecked`, so `count: 0` reads as "checked, all resolved" rather than
+"not checked"; it is absent only when the check could not run, and then a caveat says why.
 
 ## What counts as added
 
@@ -27,7 +29,13 @@ a file the diff adds is added. A name imported under an alias is checked under t
 must export (`import { real as local }` checks `real`).
 
 A re-export reads a module exactly as an import does, so `export { x } from './y'` and
-`export * from './y'` are references too — a hallucinated barrel is one of the shapes this catches.
+`export * from './y'` are references too, across as many lines as the statement spans — a
+hallucinated barrel is one of the shapes this catches.
+
+Only what is code counts. Before any scan, the file's comments, strings, template literals,
+docstrings and regex literals are blanked while every offset is preserved, so an `import` written
+inside a test fixture, a code sample, or a docstring is not a reference at all. Module specifiers
+survive the mask, because a specifier is the one string the statement needs.
 
 ## How each answer is reached
 
@@ -72,3 +80,11 @@ No package-registry or network lookup: a name being *declared* is not proof that
 is supply-chain tooling's job. No version-range or vulnerability checks. No type checking of member
 signatures. Member accesses on a namespace import (`utils.formatDate()`) are not yet extracted; only imports,
 named imports, and re-exports are.
+
+Two limits worth knowing:
+
+- **Untracked files are not in the diff**, so a reference in a brand-new file that has never been
+  staged is not checked. `git add` it, and it is.
+- **A package reached only through npm hoisting is reported.** If `packages/web` imports a package
+  that only `packages/core` declares, that is `undeclared-dependency`: it installs today and breaks
+  on a clean per-package install. Declare it where it is used, or set the code to `off`.

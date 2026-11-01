@@ -634,3 +634,66 @@ describe('hardening found in review', () => {
     expect(facts).toEqual([{ code: 'undeclared-dependency', path: 'src/x.ts', line: 1, subject: 'left-padx' }]);
   });
 });
+
+describe('round-2 regressions', () => {
+  it('anchors a Go module path to the directory of its go.mod', async () => {
+    const d = repo(
+      {
+        'backend/go.mod': 'module example.com/proj/backend\n\ngo 1.22\n',
+        'backend/util/util.go': 'package util\n',
+        'backend/main.go': 'package main\n',
+      },
+      { 'backend/main.go': 'package main\n\nimport (\n\t"example.com/proj/backend/util"\n\t"example.com/proj/backend/nope"\n)\n' },
+    );
+    const corpus = ['backend/go.mod', 'backend/util/util.go', 'backend/main.go'];
+    const r = await checkPhantomReferences(d, 'HEAD', undefined, corpus);
+    expect(r.findings.map(f => f.subject)).toEqual(['example.com/proj/backend/nope']);
+  });
+
+  it('does not report an inline type modifier as a missing export', async () => {
+    const d = repo(
+      {
+        'package.json': PKG(),
+        'src/x.ts': 'export interface Foo { a: number }\nexport const bar = 1;\n',
+        'src/barrel.ts': 'export const own = 1;\n',
+      },
+      { 'src/barrel.ts': "export { type Foo, bar } from './x.js';\nexport const own = 1;\n" },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('checks a re-export written across several lines', async () => {
+    const d = repo(
+      { 'package.json': PKG(), 'src/x.ts': 'export const present = 1;\n', 'src/barrel.ts': 'export const own = 1;\n' },
+      { 'src/barrel.ts': "export {\n  present,\n  absent,\n} from './x.js';\n" },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => f.subject)).toEqual(['./x.js#absent']);
+    expect(r.findings[0].location?.line).toBe(1);
+  });
+
+  it('a Python comment holding an apostrophe does not hide the file imports', async () => {
+    const d = repo(
+      { 'requirements.txt': '', 'm.py': 'x = 1\n' },
+      { 'm.py': "# Don't do this\nimport nonexistent_pkg\nx = 1\n" },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings.map(f => f.subject)).toEqual(['nonexistent_pkg']);
+  });
+
+  it('a quote inside a regex literal does not hide the file imports', async () => {
+    const d = repo(
+      { 'package.json': PKG(), 'src/x.ts': 'export const x = 1;\n' },
+      { 'src/x.ts': "const RE = /['\"]/;\nimport pad from 'left-padx';\nexport const x = [RE, pad];\n" },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings.map(f => f.subject)).toEqual(['left-padx']);
+  });
+
+  it('reports references in source order whatever matched first', async () => {
+    const d = repo(
+      { 'package.json': PKG(), 'src/x.ts': 'export const x = 1;\n' },
+      { 'src/x.ts': "export * from './a-ghost.js';\nexport { n } from './b-ghost.js';\nimport d from './c-ghost.js';\nexport const x = d;\n" },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => f.location?.line)).toEqual([1, 2, 3]);
+  });
+});

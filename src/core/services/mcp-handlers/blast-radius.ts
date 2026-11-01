@@ -240,10 +240,18 @@ export interface BlastRadiusBriefing {
   generated?: GeneratedFileFact[];
   /**
    * References the diff adds that resolve to nothing — a missing module, a name the target does not
-   * export, an undeclared or unpinned package (change: add-phantom-reference-findings). Absent when
-   * every added reference resolved.
+   * export, an undeclared or unpinned package (change: add-phantom-reference-findings). Present
+   * whenever the check RAN, with `referencesChecked` so that `count: 0` reads as "checked, all
+   * resolved" and not as "not checked"; absent only when the check could not run (then a caveat
+   * says why).
    */
-  phantomReferences?: { count: number; unresolved: PhantomReferenceFact[]; notAssessed: number };
+  phantomReferences?: {
+    count: number;
+    unresolved: PhantomReferenceFact[];
+    notAssessed: number;
+    filesChecked: number;
+    referencesChecked: number;
+  };
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -633,12 +641,13 @@ export async function computeBlastRadius(
     ...(generated.length ? { generated } : {}),
     // Facts, not findings: an operator's enforcement policy is applied by verify_change, which owns
     // it, so this briefing never reports a code the policy switched off as if it were live.
-    ...(references && references.findings.length
+    ...(references
       ? {
           phantomReferences: {
             count: references.findings.length,
             unresolved: phantomReferenceFacts(references),
             notAssessed: references.notAssessed.length,
+            ...references.summary,
           },
         }
       : {}),
