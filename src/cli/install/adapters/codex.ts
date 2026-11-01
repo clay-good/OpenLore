@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
@@ -13,6 +13,41 @@ const MCP_START = '# >>> openlore managed mcp server';
 const MCP_END = '# <<< openlore managed mcp server';
 const HOOK_START = '# >>> openlore managed proposal hook';
 const HOOK_END = '# <<< openlore managed proposal hook';
+
+/**
+ * The agent-loop moments Codex can receive (change: add-agent-loop-hooks-codex-and-pi). Codex's
+ * hooks follow Claude Code's protocol: `apply_patch` edits and `Bash` commands on PreToolUse and
+ * PostToolUse, `additionalContext`, and a SessionStart `compact` source. Repository scope only, in
+ * `.codex/hooks.json`. A group is recognized by its command (`openlore … hook <moment> --harness
+ * codex`), since Codex's hook schema has no room for an ownership marker.
+ */
+const LOOP_HOOKS: ReadonlyArray<{ event: string; moment: string; matcher?: string; timeout: number }> = [
+  { event: 'PreToolUse', moment: 'before-edit', matcher: 'apply_patch', timeout: 15 },
+  { event: 'PostToolUse', moment: 'after-tools', matcher: 'apply_patch|Bash', timeout: 30 },
+  { event: 'Stop', moment: 'before-stop', timeout: 90 },
+  { event: 'SessionStart', moment: 'after-compact', matcher: 'compact', timeout: 60 },
+];
+const LOOP_COMMAND = /\bhook (?:before-edit|after-tools|before-stop|after-compact) --harness codex$/;
+
+const isLoopHook = (h: unknown) => typeof asObject(h)?.command === 'string' && LOOP_COMMAND.test(asObject(h)!.command as string);
+
+/**
+ * A hooks.json event list without OpenLore's loop hooks: each managed hook is dropped, and a group
+ * left with no hook is dropped with it (a user's own hook added to the group stays). Also reports
+ * whether anything was removed.
+ */
+function withoutLoopHooks(groups: unknown[]): { kept: unknown[]; removed: boolean } {
+  let removed = false;
+  const kept: unknown[] = [];
+  for (const g of groups) {
+    const hooks = asObject(g)?.hooks;
+    if (!Array.isArray(hooks) || !hooks.some(isLoopHook)) { kept.push(g); continue; }
+    removed = true;
+    const rest = hooks.filter((h) => !isLoopHook(h));
+    if (rest.length) kept.push({ ...asObject(g)!, hooks: rest });
+  }
+  return { kept, removed };
+}
 
 interface CodexHookGroup {
   matcher?: unknown;
@@ -207,6 +242,7 @@ async function apply(ctx: ApplyContext): Promise<ApplyResult> {
     const changes: PlannedChange[] = [{ path: safeJoin(ctx.root, CONFIG_REL), kind: 'noop', summary: 'Codex already wired in user scope; skipped duplicate project hook' }];
     const warnings: string[] = [];
     await removeManagedHook(ctx, changes, warnings);
+    if (ctx.scope !== 'user') await applyLoopHooks(ctx, changes, warnings);
     return { changes, warnings, conflict: false };
   }
   // A user-scope hook can exist without its MCP server (for example after a
@@ -298,8 +334,70 @@ async function apply(ctx: ApplyContext): Promise<ApplyResult> {
   }
 
   if (skipProjectHook) await removeManagedHook(ctx, changes, warnings);
+  if (ctx.scope !== 'user') await applyLoopHooks(ctx, changes, warnings);
 
   return { changes, warnings, conflict: false };
+}
+
+/**
+ * Write (or, with `remove`, drop) the agent-loop groups in `.codex/hooks.json`, keeping every other
+ * group. A hooks file that is not a JSON object of event arrays is left untouched with a warning.
+ */
+async function applyLoopHooks(ctx: ApplyContext, changes: PlannedChange[], warnings: string[], remove = false): Promise<void> {
+  const hooksPath = safeJoin(ctx.root, HOOKS_REL);
+  const raw = await readIfExists(hooksPath);
+  if (raw === null && remove) return;
+  let doc: Record<string, unknown> | null = {};
+  if (raw !== null) {
+    try { doc = asObject(JSON.parse(raw)); } catch { doc = null; }
+  }
+  if (!doc || (doc.hooks !== undefined && !asObject(doc.hooks))) {
+    warnings.push(`codex: refused to edit ${HOOKS_REL} for the agent-loop hooks; it is not valid JSON with a hooks object.`);
+    return;
+  }
+  const hooks: Record<string, unknown> = { ...(asObject(doc.hooks) ?? {}) };
+  // Every event, not only today's: a moment an earlier version wired elsewhere is removed too.
+  let removedAny = false;
+  for (const [event, current] of Object.entries(hooks)) {
+    if (!Array.isArray(current)) continue;
+    const { kept, removed } = withoutLoopHooks(current);
+    if (!removed) continue;
+    removedAny = true;
+    if (kept.length) hooks[event] = kept;
+    else delete hooks[event];
+  }
+  for (const { event, moment, matcher, timeout } of LOOP_HOOKS) {
+    const current = hooks[event];
+    if (current !== undefined && !Array.isArray(current)) {
+      if (!remove) warnings.push(`codex: ${HOOKS_REL} hooks.${event} is not a list; OpenLore did not add its ${moment} hook.`);
+      continue;
+    }
+    const kept = [...((current ?? []) as unknown[])];
+    if (!remove) {
+      let command: string;
+      try {
+        command = formatPlatformCommand(resolveOpenloreCommand(['hook', moment, '--harness', 'codex'], ctx.platform, ctx.platformCommandRuntime), ctx.platform);
+      } catch (error) {
+        warnings.push(`codex: could not configure the ${moment} hook: ${(error as Error).message}`);
+        continue;
+      }
+      kept.push({ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command, timeout }] });
+    }
+    if (kept.length) hooks[event] = kept;
+    else delete hooks[event];
+  }
+  const next = { ...doc };
+  if (Object.keys(hooks).length) next.hooks = hooks;
+  else delete next.hooks;
+  if (remove && !removedAny) return;
+  const serialized = Object.keys(next).length ? JSON.stringify(next, null, 2) + '\n' : '';
+  // The file held only OpenLore's loop hooks: it goes, as it came.
+  if (remove && !serialized) {
+    if (!ctx.dryRun) await rm(hooksPath, { force: true });
+    changes.push({ path: hooksPath, kind: 'delete', summary: `${HOOKS_REL} — removed OpenLore agent-loop hooks` });
+    return;
+  }
+  await writeManagedText(ctx, hooksPath, raw, serialized, `${HOOKS_REL} — ${remove ? 'removed OpenLore agent-loop hooks' : 'Codex agent-loop hooks (review/trust in Codex)'}`, changes);
 }
 
 /** Remove only the managed proposal hook (TOML block and hooks.json entry) from `ctx.root`. */
@@ -351,6 +449,7 @@ async function uninstall(ctx: ApplyContext): Promise<ApplyResult> {
   }
 
   await removeManagedJsonHook(ctx, changes, warnings);
+  await applyLoopHooks(ctx, changes, warnings, true);
   return { changes, warnings, conflict: false };
 }
 

@@ -90,9 +90,18 @@ export function parseHookPayload(raw: string): HookPayload {
     if (v && typeof v === 'object') p = v as Record<string, unknown>;
   } catch { /* an unreadable payload is an empty one */ }
   const input = p.tool_input && typeof p.tool_input === 'object' ? (p.tool_input as Record<string, unknown>) : {};
-  const files = [input.file_path, input.path, input.notebook_path].filter((f): f is string => typeof f === 'string' && f.length > 0);
+  // Codex edits through `apply_patch`: its `command` is the patch text, naming every file it touches.
+  const patch = p.tool_name === 'apply_patch' && typeof input.command === 'string' ? input.command : undefined;
+  const files = patch !== undefined
+    ? patchFiles(patch)
+    : [input.file_path, input.path, input.notebook_path].filter((f): f is string => typeof f === 'string' && f.length > 0);
   const response = p.tool_response && typeof p.tool_response === 'object' ? (p.tool_response as Record<string, unknown>) : {};
   let exit = [response.exit_code, response.exitCode, response.returncode, response.code].find((x): x is number => typeof x === 'number' && Number.isInteger(x));
+  // Codex sends a shell result as text: its exit status line, when present, heads the text.
+  if (exit === undefined && typeof p.tool_response === 'string') {
+    const m = /^(?:Exit code: |Process exited with code )(\d+)\b/m.exec(p.tool_response.split('\n', 3).join('\n'));
+    if (m) exit = Number(m[1]);
+  }
   // Claude Code reports a non-zero shell exit as a tool failure (PostToolUseFailure, `error` text).
   if (exit === undefined && p.hook_event_name === 'PostToolUseFailure') {
     const m = typeof p.error === 'string' ? /exit code (\d+)/i.exec(p.error) : null;
@@ -100,18 +109,31 @@ export function parseHookPayload(raw: string): HookPayload {
   }
   return {
     ...(response.interrupted === true || p.is_interrupt === true ? { interrupted: true } : {}),
-    ...(typeof input.command === 'string' && input.command ? { command: input.command } : {}),
+    ...(patch === undefined && typeof input.command === 'string' && input.command ? { command: input.command } : {}),
     ...(exit !== undefined ? { exit } : {}),
     ...(typeof p.session_id === 'string' && p.session_id ? { sessionId: p.session_id } : {}),
     ...(typeof p.cwd === 'string' && p.cwd ? { cwd: p.cwd } : {}),
     ...(typeof p.tool_name === 'string' ? { toolName: p.tool_name } : {}),
-    files: files.slice(0, 1),
+    files: files.slice(0, patch !== undefined ? MAX_PATCH_FILES : 1),
     stopHookActive: p.stop_hook_active === true,
     ...(typeof input.prompt === 'string' && input.prompt ? { agentPrompt: input.prompt } : {}),
     ...(typeof input.subagent_type === 'string' && input.subagent_type ? { subagentType: input.subagent_type } : {}),
     ...(typeof p.agent_type === 'string' && p.agent_type ? { agentType: p.agent_type } : {}),
     ...pendingEdit(input),
   };
+}
+
+/** Files of one patch recorded and checked (a larger patch is a bulk change). */
+const MAX_PATCH_FILES = 200;
+
+/** The files a Codex `apply_patch` patch adds, updates, deletes, or moves to, in order, once each. */
+export function patchFiles(patch: string): string[] {
+  const out = new Set<string>();
+  for (const line of patch.split(/\r?\n/)) {
+    const m = /^\s*\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$/.exec(line);
+    if (m && m[1]) out.add(m[1]);
+  }
+  return [...out];
 }
 
 /** The pending change an edit tool call carries (Claude Code's Write, Edit, and MultiEdit inputs). */
@@ -600,7 +622,8 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
     return silent; // only queues: the parent's tool call gets no output
   }
   if (moment === 'subagent-start') return subagentStart(root, payload, opts.timeoutMs ?? TIMEOUT_MS[moment]);
-  const files = payload.files.map(f => repoPath(root, f)).filter((f): f is string => !!f);
+  // A relative path is the harness's, from its working directory (Codex patches), not the root's.
+  const files = payload.files.map(f => repoPath(root, resolve(start, f))).filter((f): f is string => !!f);
   // A shell command (after-tools sees them too): count it and record a test run, nothing else, so a
   // shell call stays cheap.
   if (moment === 'after-tools' && payload.command !== undefined && !files.length) {
@@ -656,12 +679,13 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
 export const hookCommand = new Command('hook')
   .description('Print the receipt for one moment of the agent loop (wired by `openlore install` into harness hooks)')
   .argument('<moment>', `one of: ${HOOK_MOMENTS.join(', ')}`)
+  .option('--harness <name>', 'the harness that runs the hook (claude-code, codex); wired by install')
   .addHelpText('after', `
 Reads the harness hook payload on stdin and prints at most one receipt as the event's
 additionalContext. Prints nothing when there is nothing new; always exits 0. Turn a moment off with
 "hooks": { "<moment>": false } in .openlore/config.json.
 `)
-  .action(async (moment: string) => {
+  .action(async (moment: string, options: { harness?: string }) => {
     if (!(HOOK_MOMENTS as readonly string[]).includes(moment)) process.exit(0);
     let raw = '';
     try { raw = await readStdin(process.stdin, 1500, STDIN_MAX_BYTES); } catch { /* no payload */ }
@@ -672,5 +696,7 @@ additionalContext. Prints nothing when there is nothing new; always exits 0. Tur
     let r: HookRunResult;
     try { r = await runHook(moment as HookMoment, raw); } finally { process.stdout.write = write; }
     if (r.stdout) write(r.stdout + '\n');
+    // Codex expects JSON from a Stop hook that exits 0; an empty object says nothing.
+    else if (options.harness === 'codex' && moment === 'before-stop') write('{}\n');
     process.exit(0);
   });
