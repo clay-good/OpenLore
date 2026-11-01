@@ -26,9 +26,9 @@ groups:
 | Tests deleted, skipped, or emptied; expected values changed; suppressions; swallowed errors; relaxed CI | [add-check-weakening-findings](archive/2026-10-31-add-check-weakening-findings/) | shipped (#634) |
 | Imports, exports, and packages that do not exist or are not declared | [add-phantom-reference-findings](archive/2026-10-31-add-phantom-reference-findings/) | shipped (#632) |
 | Generated or vendored file edited by hand; name its source and regenerate command | [add-generated-file-guard](archive/2026-10-31-add-generated-file-guard/) | shipped (#629) |
-| Push receipts after edits, after compaction, before stop, at sub-agent start, at task creation | [add-agent-loop-hook-surfaces](archive/2026-10-31-add-agent-loop-hook-surfaces/) (Claude Code; the rest in [add-agent-loop-hooks-compaction-subagents-codex-pi](add-agent-loop-hooks-compaction-subagents-codex-pi/)) | shipped |
+| Push receipts after edits, after compaction, before stop, at sub-agent start, at task creation | [add-agent-loop-hook-surfaces](archive/2026-10-31-add-agent-loop-hook-surfaces/) (Claude Code; the rest in [add-agent-loop-hooks-subagents-codex-pi](add-agent-loop-hooks-subagents-codex-pi/)) | shipped |
 | Shared footprint board across worktrees; peer read-after-write notices; duplicate intent | [add-peer-footprint-board](add-peer-footprint-board/) | new |
-| Compaction pushes the handoff briefing | [add-session-handoff-briefing](add-session-handoff-briefing/) | existing, addendum |
+| Compaction pushes the handoff briefing | [add-session-handoff-briefing](archive/2026-11-01-add-session-handoff-briefing/) | shipped |
 | Real call-site examples; profile line in `orient` | [add-call-site-usage-profile](add-call-site-usage-profile/) | existing, addendum, promoted |
 | Workspace manifests as package nodes, no export step | [add-build-graph-ingest](add-build-graph-ingest/) | existing, addendum |
 | MCP 2026-07-28 is published: correct cache-hint scope, deterministic `tools/list`, `subscriptions/listen` | [adopt-mcp-tasks-and-cache-hints](adopt-mcp-tasks-and-cache-hints/) | existing, addendum |

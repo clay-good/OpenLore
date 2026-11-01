@@ -1,13 +1,9 @@
 # Session handoff briefing: succession as a computed receipt, not a lossy summary
 
-> Status: PROPOSED (2026-07-27, field research sweep — `FIELD-RESEARCH-2026-07.md`). When an
-> agent session ends mid-change — context exhausted, cleared, or moved to another machine — the
-> successor session today inherits an LLM-written summary. Compute the succession artifact from
-> the substrate instead: one deterministic, replayable briefing of the in-flight work. Prior
-> art: the context-engineering literature measured iterative LLM rewriting eroding detail
-> ("context collapse", ACE — https://arxiv.org/abs/2510.04618), and the field is converging on
-> goal-scoped succession artifacts over whole-conversation compaction; the borrow is the
-> succession *shape* — the content here is computed, which no surveyed system does.
+> Status: SHIPPED (2026-10-31): `get_handoff_briefing` (`full` preset), `openlore handoff [--json]`,
+> and the `after-compact` hook moment, with the session ledger's committed edits and open facts as
+> inputs. The unfinished receipt reports the index lease (certificate leases are not persisted, so
+> there is none to report). The declared footprint is added when `add-peer-footprint-board` ships.
 
 ## The gap
 

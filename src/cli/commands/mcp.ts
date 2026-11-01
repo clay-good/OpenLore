@@ -1944,6 +1944,28 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'get_handoff_briefing',
+    description:
+      'USE THIS WHEN: you take over in-flight work in a fresh context (after compaction, a cleared ' +
+      'session, or another machine) and need the state of the change, not a prose summary. Unlike ' +
+      'blast_radius (reviews a pending diff), briefing_since (catches up on others\' landed changes) ' +
+      'and orient (starts a task), this hands an in-flight change over: the symbols touched (working ' +
+      'tree, plus those this session committed when a session ledger is live) with callers, the open ' +
+      'openspec changes naming them with unchecked tasks quoted, the tests that reach them, anchored ' +
+      'memories and decisions in scope (orphaned ones withheld), specs that may go stale, and the ' +
+      'uncommitted files and index lease. Every element names the call that expands it; a budget trims ' +
+      'the least central sections first with omission receipts. Deterministic: the same repository ' +
+      'state gives the same briefing. A clean tree says nothing is in flight. Reads no transcript.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        tokenBudget: { type: 'number', description: 'Approximate token budget for the briefing (default 1500, 300-8000).' },
+      },
+    },
+  },
+  {
     name: 'briefing_since',
     description:
       'USE THIS WHEN: a lot changed in this repo since you last looked (a large PR to review, ' +
@@ -2459,6 +2481,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW | t
   certify_public_surface: _RO,
   get_style_fingerprint: _RO,
   briefing_since: _RO,
+  get_handoff_briefing: _RO,
   find_clones: _RO,
   analyze_error_propagation: _RO,
   analyze_env_impact: _RO,

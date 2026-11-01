@@ -43,7 +43,7 @@ describe('SessionLedger — background changes', () => {
     const ledger = new SessionLedger(root);
     await ledger.recordServed(servedItems('orient', { relevantFunctions: [{ name: 'parseConfig', filePath: 'src/config.ts' }] }));
     write(root, 'src/config.ts', B);
-    await ledger.refresh();
+    await ledger.refresh(5000);
     const otherFile = [{ file: 'src/elsewhere.ts', at: Date.now() }]; // the hook is installed: it reported an unrelated edit
     const note = ledger.takeNote(otherFile);
     expect(note).toMatch(/^\[openlore freshness\] Served earlier: parseConfig \(src\/config\.ts\) — its body changed since you read it at \d\d:\d\d\. Informational signal\.$/);
@@ -61,7 +61,7 @@ describe('SessionLedger — background changes', () => {
     const editedAt = Date.now();
     write(root, 'src/config.ts', B);
     await new Promise(r => setTimeout(r, 5));
-    await ledger.refresh();
+    await ledger.refresh(5000);
     expect(ledger.takeNote([{ file: 'src/config.ts', at: editedAt }])).toBeNull();
   });
 
@@ -71,7 +71,7 @@ describe('SessionLedger — background changes', () => {
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
     write(root, 'src/config.ts', A.replace('{ return s.trim(); }', '{\n    // trimmed\n    return s.trim();\n}'));
-    await ledger.refresh();
+    await ledger.refresh(5000);
     expect(ledger.takeNote([{ file: 'x', at: Date.now() }])).toBeNull();
   });
 
@@ -81,7 +81,7 @@ describe('SessionLedger — background changes', () => {
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
     write(root, 'src/config.ts', B);
-    await ledger.refresh();
+    await ledger.refresh(5000);
     const f = ledger.facts([]);
     expect(f.backgroundChanges).toEqual([]);
     expect(f.withheld).toContain('No after-edit hook has reported an edit this session');
@@ -95,7 +95,7 @@ describe('SessionLedger — background changes', () => {
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'src/many.ts' }]);
     write(root, 'src/many.ts', src.replace(/return (\d)/g, 'return $1 + 1'));
-    await ledger.refresh();
+    await ledger.refresh(5000);
     const note = ledger.takeNote([{ file: 'x', at: Date.now() }])!;
     expect(note.match(/its body changed/g)).toHaveLength(3);
     expect(note).toContain('and 2 more');
@@ -115,7 +115,7 @@ describe('SessionLedger — background changes', () => {
     const ledger = new SessionLedger(root);
     await ledger.recordServed(servedItems('orient', { specDomains: [{ domain: 'cli', specFile: 'openspec/specs/cli/spec.md' }] }));
     write(root, 'openspec/specs/cli/spec.md', '# CLI\n\nThe CLI SHALL work offline.\n');
-    await ledger.refresh();
+    await ledger.refresh(5000);
     expect(ledger.takeNote([{ file: 'x', at: Date.now() }])).toContain('openspec/specs/cli/spec.md (openspec/specs/cli/spec.md) — its body changed');
   });
 });
@@ -152,7 +152,7 @@ describe('SessionLedger — edit oscillation', () => {
     write(root, 'src/config.ts', A);
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
-    for (const v of [B, A, B]) { write(root, 'src/config.ts', v); await ledger.refresh(); }
+    for (const v of [B, A, B]) { write(root, 'src/config.ts', v); await ledger.refresh(5000); }
     expect(ledger.snapshot().editSource).toBe('sampled');
     expect(ledger.facts([]).editOscillation.map(l => l.returns)).toEqual([2]);
   });
@@ -282,7 +282,7 @@ describe('SessionLedger — review round 1', () => {
     await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
     write(root, 'src/config.ts', B);
     await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
-    await ledger.refresh();
+    await ledger.refresh(5000);
     expect(ledger.takeNote([{ file: 'x', at: 1 }])).toBeNull();
   });
 
@@ -400,7 +400,7 @@ describe('SessionLedger — review round 2', () => {
     const ledger = new SessionLedger(root, slow);
     void ledger.recordServed([{ file: 'src/config.ts' }]);
     const t0 = Date.now();
-    await ledger.refresh();
+    await ledger.refresh(5000);
     expect(Date.now() - t0).toBeLessThan(200);
   });
 

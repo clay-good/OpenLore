@@ -4,7 +4,7 @@
 > (generated files), after-edit (ledger facts + generated-file, phantom-reference and
 > check-weakening facts for the edited file), and before-stop (`verify_change`) moments, wired per
 > repository. Compaction, sub-agent start, task creation, pre-write phantom grading, Codex, and Pi
-> moved to [`add-agent-loop-hooks-compaction-subagents-codex-pi`](../add-agent-loop-hooks-compaction-subagents-codex-pi/).
+> moved to [`add-agent-loop-hooks-subagents-codex-pi`](../add-agent-loop-hooks-subagents-codex-pi/).
 > See [docs/install.md](../../../docs/install.md#agent-loop-hooks).
 
 ## The gap

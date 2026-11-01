@@ -3299,6 +3299,29 @@ hook's standard output SHALL carry only the receipt.
 - **WHEN** the before-stop hook runs on the same diff
 - **THEN** the hook blocks the stop and its message names the finding
 
+### Requirement: HandoffBriefingIsDeterministicAndReplayable
+
+`openlore handoff [--json]` SHALL produce the session-succession briefing deterministically: the
+same repository state (working tree, index, stores) yields a byte-identical briefing, with no
+timestamps or ordering nondeterminism, so a successor can regenerate and diff it. A clean
+working tree SHALL return an explicit nothing-in-flight statement with the current lease state,
+never an empty payload, and an index trailing the working tree SHALL carry the standard
+staleness disclosure. The command SHALL read only the repository — never any conversation
+transcript — and SHALL NOT persist briefings.
+
+#### Scenario: Regeneration is byte-identical
+
+- **GIVEN** a repository with uncommitted edits and no further changes
+- **WHEN** `openlore handoff --json` runs twice
+- **THEN** the two outputs are byte-identical
+
+#### Scenario: A clean tree says so
+
+- **GIVEN** a clean working tree
+- **WHEN** `openlore handoff` runs
+- **THEN** the output states nothing is in flight and reports the lease state — not an empty
+  object
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts
@@ -3315,7 +3338,7 @@ openlore emits SCIP for interop with external indexers but never imports it; the
 
 **Consequences:** SCIP consumers get a snapshot; openlore never depends on SCIP being read back.
 
-### MCP exposes a curated navigation tool preset, not all 80 tools
+### MCP exposes a curated navigation tool preset, not all 81 tools
 
 **Status:** Approved
 **Date:** 2026-06-01

@@ -293,6 +293,7 @@ const hooksRule: ConfigRule = {
     'before-edit': booleanRule,
     'after-tools': booleanRule,
     'before-stop': booleanRule,
+    'after-compact': booleanRule,
   }),
   required: requiredFor<HooksConfig>({}),
 };

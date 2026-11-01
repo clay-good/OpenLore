@@ -12,6 +12,7 @@
  * |               |                              | for the edited file                                         |
  * | `before-stop` | `Stop`                       | the `verify_change` receipt for the session's diff, shown   |
  * |               |                              | to the user; the agent sees it only as a policy block       |
+ * | `after-compact` | `SessionStart` (`compact`)  | the handoff briefing of the in-flight change                |
  *
  * Every hook reads the harness payload from stdin and prints at most one budgeted receipt as the
  * event's `additionalContext`; it prints nothing when it has nothing new. A fact already delivered
@@ -31,7 +32,7 @@ import { withLoggerOptions } from '../../utils/logger.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
 
-export const HOOK_MOMENTS = ['before-edit', 'after-tools', 'before-stop'] as const;
+export const HOOK_MOMENTS = ['before-edit', 'after-tools', 'before-stop', 'after-compact'] as const;
 export type HookMoment = typeof HOOK_MOMENTS[number];
 
 /** The harness event each moment is wired to (Claude Code). */
@@ -39,12 +40,13 @@ export const HOOK_EVENT: Record<HookMoment, string> = {
   'before-edit': 'PreToolUse',
   'after-tools': 'PostToolUse',
   'before-stop': 'Stop',
+  'after-compact': 'SessionStart',
 };
 
 /** Per-moment budget, in characters of the printed receipt (about four characters a token). */
-const BUDGET_CHARS: Record<HookMoment, number> = { 'before-edit': 1600, 'after-tools': 4800, 'before-stop': 8000 };
+const BUDGET_CHARS: Record<HookMoment, number> = { 'before-edit': 1600, 'after-tools': 4800, 'before-stop': 8000, 'after-compact': 8000 };
 /** Hard time limit per moment; past it the hook prints nothing. */
-const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000 };
+const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000, 'after-compact': 30_000 };
 const STDIN_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_DELIVERED = 2000;
 
@@ -306,6 +308,28 @@ function openloreRoot(start: string): string | undefined {
   }
 }
 
+/**
+ * `after-compact`: the handoff briefing, so the agent resumes from the computed state of its change
+ * rather than the compaction summary alone. Stated after every compaction (not deduplicated).
+ */
+async function afterCompact(root: string, timeoutMs: number): Promise<HookRunResult> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<'timeout'>(r => { timer = setTimeout(() => r('timeout'), timeoutMs); timer.unref?.(); });
+  try {
+    const work = withLoggerOptions({ quiet: true }, async () => {
+      const { handleGetHandoffBriefing, renderHandoff } = await import('../../core/services/mcp-handlers/handoff.js');
+      return renderHandoff(await handleGetHandoffBriefing({ directory: root }));
+    });
+    const text = await Promise.race([work, timeout]);
+    if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
+    return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text.slice(0, BUDGET_CHARS['after-compact']).replace(/[\uD800-\uDBFF]$/, '') } }), exitCode: 0 };
+  } catch {
+    return { stdout: '', exitCode: 0 };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** Whether `hooks.<moment>` is turned off in `.openlore/config.json` (an unreadable config is "on"). */
 function momentDisabled(root: string, moment: HookMoment): boolean {
   try {
@@ -333,6 +357,7 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
   if (!root) return silent;
   if (momentDisabled(root, moment)) return silent;
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
+  if (moment === 'after-compact') return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment]);
   const files = payload.files.map(f => repoPath(root, f)).filter((f): f is string => !!f);
   if (moment === 'before-edit' && !files.length) return silent;
 

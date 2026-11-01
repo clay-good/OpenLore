@@ -1,14 +1,14 @@
-# Agent-loop hooks, part 2: compaction, sub-agents, task creation, Codex and Pi
+# Agent-loop hooks, part 2: sub-agents, task creation, Codex and Pi
 
 > Status: PROPOSED (2026-10-31). Split from `add-agent-loop-hook-surfaces`, whose `openlore hook`
-> command and Claude Code before-edit, after-edit, and before-stop moments shipped first. Each part
-> below needs a receipt or an adapter that has not shipped.
+> command and Claude Code before-edit, after-edit, and before-stop moments shipped first, and the
+> after-compact moment shipped with `add-session-handoff-briefing`. Each part below needs a receipt
+> or an adapter that has not shipped.
 
 ## Why
 
 | Part | Needs |
 |------|-------|
-| After compaction: the handoff briefing | `add-session-handoff-briefing` |
 | Sub-agent start: task-scoped `orient` + peers' footprints | `add-peer-footprint-board` (the `orient` half can ship alone) |
 | Team task created (block only, when a coordination code is blocking) | `add-peer-footprint-board` |
 | After any tool batch (`PostToolBatch`): test runs for the session ledger | `add-session-ledger-runs-contracts-tokens` |

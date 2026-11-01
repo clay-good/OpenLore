@@ -9,7 +9,7 @@ one token-budgeted briefing: touched symbols with callers from the working-tree 
 in-scope anchored memories and decisions (orphaned withheld, drifted flagged, per the recall
 discipline); drifted specs and open change directories referencing touched paths with their
 unchecked task lines; reaching tests for the touched set; and unfinished-signal receipts
-(uncommitted files, staged/unstaged split, stale certificate lease). Every truncated or
+(uncommitted files, staged/unstaged split, the index lease). Every truncated or
 summarized element SHALL carry a re-fetch identifier naming the tool call that expands it, and
 budget truncation SHALL be peripheral-first with per-section omission receipts. The tool SHALL
 be a `conclusion` in family `change`, available only in the `full` preset, cross-referencing

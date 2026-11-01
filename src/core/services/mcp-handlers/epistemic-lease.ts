@@ -196,6 +196,7 @@ const TOOL_WEIGHTS: Record<string, number> = {
   working_set_context: 3,         // ← get_minimal_context (3) — budgeted structural briefing
   structural_diff: 3,             // ← detect_changes (3) — diff-scoped structural read
   briefing_since: 3,              // ← detect_changes (3) — changed-symbols-since-ref read
+  get_handoff_briefing: 3,        // ← briefing_since (3) — in-flight-change briefing read
   certify_public_surface: 3,      // ← detect_changes (3) — diff-scoped export verdict
 
   // Graph traversal / cross-module

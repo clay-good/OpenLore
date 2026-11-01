@@ -111,7 +111,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 | Flag | Effect |
 |------|--------|
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `pi`, `agents-md`. |
-| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 80 tools. |
+| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 81 tools. |
 | `--repo-only` | Wire this repository only — write no user-scope entries. |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
@@ -120,7 +120,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 > **Default tool surface.** A plain `openlore install` wires the read-only **`substrate`** preset:
 > 15 tools comprising the navigation core, the highest-value governance reads, and the 2 spec
 > preparation composites. Use `--preset navigation` for the lean 10-tool escape or `--preset full`
-> for all 80 tools. The decision-write and commit-gate tools remain opt-in through a preset that
+> for all 81 tools. The decision-write and commit-gate tools remain opt-in through a preset that
 > includes them.
 
 ## What it actually writes
@@ -317,7 +317,7 @@ With `mode: "off"`, `openlore orient --inject` emits nothing and exits 0.
 
 ## Agent-loop hooks
 
-In a repository install, `openlore install` also wires three moments of the agent loop into
+In a repository install, `openlore install` also wires four moments of the agent loop into
 `.claude/settings.json`, so the agent gets OpenLore's receipts without calling a tool. Each runs
 `openlore hook <moment>`, reads the hook payload, and prints at most one short receipt as the
 event's `additionalContext` — or nothing, when there is nothing new.
@@ -327,6 +327,7 @@ event's `additionalContext` — or nothing, when there is nothing new.
 | `before-edit` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | the target is a generated file (its source and regenerate command), vendored code, or a lockfile |
 | `after-tools` | `PostToolUse`, same tools | the edit is recorded for the [session ledger](session-ledger.md), which can then name background changes; new ledger facts; for the edited file: [check weakening](check-weakening.md), [phantom references](phantom-references.md), and [generated files](generated-files.md) |
 | `before-stop` | `Stop` | the `verify_change` receipt for the session's diff, shown to **you** (a `systemMessage`): context for the agent at `Stop` would make it keep working |
+| `after-compact` | `SessionStart` (matcher `compact`) | the [handoff briefing](mcp-tools.md) of the in-flight change, so the agent resumes from computed state, not only the compaction summary (stated after every compaction) |
 
 - **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
   hook ran, so work committed earlier is not raised again in every session.
@@ -336,7 +337,7 @@ event's `additionalContext` — or nothing, when there is nothing new.
 - **Found from a subdirectory.** The hook uses the nearest directory at or above the session's
   working directory that has `.openlore/`.
 - **Bounded.** Each receipt has a size budget (the most severe facts first, the rest counted) and a
-  time limit (8 s, 15 s, 50 s); past it the hook prints nothing.
+  time limit (8 s, 15 s, 50 s, 30 s); past it the hook prints nothing.
 - **Advisory.** Hooks exit 0 and never block, with one exception: when your
   [`enforcement.policy`](configuration.md#enforcement-policy) makes a finding code `blocking`, the
   `before-stop` hook blocks the stop and lists those findings for the agent. It does not block twice
@@ -349,7 +350,7 @@ event's `additionalContext` — or nothing, when there is nothing new.
 - Uninstall removes only these groups (each carries `_openloreHook: <moment>`); your own hooks, and
   the opt-in `openlore check-edit --hook`, are left as they are.
 
-Codex and Pi, and the compaction, sub-agent, and task-created moments, follow in a later change.
+Codex and Pi, and the sub-agent and task-created moments, follow in a later change.
 
 ## Known follow-ups
 

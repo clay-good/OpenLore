@@ -131,6 +131,7 @@ export interface HooksConfig {
   'before-edit'?: boolean;
   'after-tools'?: boolean;
   'before-stop'?: boolean;
+  'after-compact'?: boolean;
 }
 
 export interface PiConfig {
