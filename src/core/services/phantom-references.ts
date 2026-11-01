@@ -703,6 +703,7 @@ export async function checkPhantomReferences(
   // dominate the check on a large diff. A path the batch does not return is read on its own below,
   // where absent and unreadable can still be told apart.
   const baseBlobs = await baseRevisions(absRoot, baseRef, checked.filter(f => f.status !== 'added').map(f => prefix + f.path));
+  const pythonPackages = new Map<string, string | null>();
   const aliasesSkipped = new Set<string>();
   const dynamicSkipped = new Set<string>();
   const ecosystemsWithoutManifest = new Set<PackageEcosystem>();
@@ -756,19 +757,11 @@ export async function checkPhantomReferences(
         await checkSymbols(ref, target);
         continue;
       }
-      // A Python absolute import whose top-level package IS a package in this repository names a
-      // module here, so a miss is a missing module — not a dependency to install.
-      const internalPython = ecosystem === 'pypi' && !relativeSpec
-        ? await pythonPackageRoot(absRoot, ref.specifier)
-        : null;
-      if (relativeSpec || internalPython !== null) {
-        const candidates = relativeSpec ? pathCandidates(absRoot, file.path, ref.specifier, corpus) : [];
-        const where = internalPython !== null
-          ? `, whose package is ${internalPython} in this repository`
-          : '';
+      if (relativeSpec) {
+        const candidates = pathCandidates(absRoot, file.path, ref.specifier, corpus);
         findings.push(finding(
           'unresolved-internal-import', 'error', ref.specifier,
-          `${ref.file} imports '${ref.specifier}'${where}, which is not a module in this repository${candidates.length ? `; nearby: ${candidates.join(', ')}` : ''}.`,
+          `${ref.file} imports '${ref.specifier}', which is not a module in this repository${candidates.length ? `; nearby: ${candidates.join(', ')}` : ''}.`,
           { path: ref.file, line: ref.line },
         ));
         continue;
@@ -818,11 +811,24 @@ export async function checkPhantomReferences(
       }
       const declared = scope.declared.get(ecosystem) ?? new Set<string>();
       if (!declares(ecosystem, declared, pkg)) {
-        findings.push(finding(
-          'undeclared-dependency', 'error', pkg,
-          `${ref.file} imports '${ref.specifier}', which no manifest in scope declares (${manifests.map(m => m.path).join(', ')}).`,
-          { path: ref.file, line: ref.line },
-        ));
+        // Nothing declares it. A Python specifier whose top level is a package in THIS repository
+        // names a module here, so the miss is a missing module, not a dependency to install. This
+        // sits after the standard-library and manifest checks on purpose: a declared dependency or
+        // a standard-library module that happens to share a local directory's name is neither.
+        const internalPython = ecosystem === 'pypi'
+          ? await pythonPackageRoot(absRoot, ref.specifier, pythonPackages)
+          : null;
+        findings.push(internalPython !== null
+          ? finding(
+              'unresolved-internal-import', 'error', ref.specifier,
+              `${ref.file} imports '${ref.specifier}', whose package is ${internalPython} in this repository, which has no such module.`,
+              { path: ref.file, line: ref.line },
+            )
+          : finding(
+              'undeclared-dependency', 'error', pkg,
+              `${ref.file} imports '${ref.specifier}', which no manifest in scope declares (${manifests.map(m => m.path).join(', ')}).`,
+              { path: ref.file, line: ref.line },
+            ));
         continue;
       }
       // ── Declared: is it pinned, when the diff changed the declaring manifest? ──
@@ -1012,12 +1018,28 @@ async function resolveInternal(
  * level names no package here. A `src` layout puts the package one directory down, and a namespace
  * package has no `__init__.py`, so a directory holding a `.py` file counts.
  */
-async function pythonPackageRoot(absRoot: string, specifier: string): Promise<string | null> {
+async function pythonPackageRoot(
+  absRoot: string,
+  specifier: string,
+  cache: Map<string, string | null>,
+): Promise<string | null> {
   const top = specifier.split('.')[0];
   if (!top || top === '__future__') return null;
+  // One answer per top-level name: a diff importing twenty modules of one package would otherwise
+  // read the same directories twenty times.
+  const cached = cache.get(top);
+  if (cached !== undefined) return cached;
+  const found = await findPythonPackage(absRoot, top);
+  cache.set(top, found);
+  return found;
+}
+
+async function findPythonPackage(absRoot: string, top: string): Promise<string | null> {
   for (const root of PYTHON_PACKAGE_ROOTS) {
     const dir = root ? `${root}/${top}` : top;
     if ((await readOrFail(absRoot, `${dir}/__init__.py`)).kind !== 'absent') return dir;
+    // A single-file module cannot hold a submodule either, so it answers the question too.
+    if ((await readOrFail(absRoot, `${dir}.py`)).kind !== 'absent') return `${dir}.py`;
     try {
       const entries = await readdir(join(absRoot, dir), { withFileTypes: true });
       if (entries.some(e => e.isFile() && e.name.endsWith('.py'))) return dir;

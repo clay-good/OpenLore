@@ -8,7 +8,7 @@ them for the references a diff **adds**. No network request is made on any path.
 
 | Finding | The reference |
 |---------|---------------|
-| `unresolved-internal-import` | a relative import whose target is not a file in this repository (or, in Go, a path under the module's own path that names no package directory) |
+| `unresolved-internal-import` | a reference to a module this repository does not have: a relative import that resolves to no file, a Go path under the module's own path naming no package directory, or a Python import whose top-level package is in this repository but has no such module |
 | `unresolved-internal-symbol` | a named import the target module does not export |
 | `undeclared-dependency` | a bare specifier that no manifest in scope declares and that is not the standard library |
 | `unpinned-dependency` | imported, declared in a manifest the diff changed, but absent from the lockfile beside it |
@@ -45,6 +45,10 @@ survive the mask, because a specifier is the one string the statement needs.
 | Does the target export the name? | The target's **current** content is parsed, never the index, so an export the same diff adds resolves. A barrel is followed to the module that really exports the name. |
 | Is the package declared? | Every manifest between the file and the repository root: `package.json` (including `optionalDependencies`), `pyproject.toml` (PEP 621 dependencies and extras, PEP 735 dependency groups, Poetry sections), `requirements*.txt`, `go.mod`, `Cargo.toml`. Internal, so never reported: a name declared by any workspace member a `workspaces` glob names (including a sibling package), a Go import under a declared module path (resolved against the directory of the `go.mod` that declares it), and a Python import of the distribution this repository itself builds, including under a `src/` layout. |
 | Is it pinned? | Every lockfile beside the changed manifest: `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock`, `Cargo.lock`, `go.sum`. Any one of them pinning the package settles it, so a stale lockfile beside a live one reports nothing. Python names compare by PEP 503 normalization, Cargo names across `-` and `_`, Go by module prefix. |
+
+Nothing is reported for a standard-library module or a declared dependency, whatever the repository
+happens to contain: both are decided before the local-package question, so a local directory named
+`json` or `requests` changes no answer.
 
 Standard-library modules are a closed per-language rule: Node's own `builtinModules` list plus the
 `node:` scheme; the CPython standard-library module names; and, for Go, the language's own rule that

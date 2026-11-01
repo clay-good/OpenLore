@@ -75,3 +75,16 @@ describe('other ecosystems', () => {
       .toEqual(['github.com/a/b', 'github.com/c/d']);
   });
 });
+
+describe('round-5 regressions', () => {
+  it('does not let a bracket inside a string or a column-0 comment swallow the next table', () => {
+    const raw = [
+      '[dependencies]', 'path_hint = "a[b"', '# TODO set a =', 'serde = "1.0"', '',
+      '[dev-dependencies]', 'criterion = "0.5"', '',
+    ].join('\n');
+    expect(tomlSection(raw, 'dependencies')).not.toContain('criterion');
+    const declared = parseCargoManifest(raw);
+    expect(declared.filter(p => p.name === 'criterion')).toHaveLength(1);
+    expect(names(declared)).toEqual(['criterion', 'path_hint', 'serde']);
+  });
+});

@@ -820,3 +820,49 @@ describe('round-4 regressions', () => {
     expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
   });
 });
+
+describe('round-5 regressions', () => {
+  it('never reports a standard-library import because a local directory shares its name', async () => {
+    const d = repo(
+      { 'pyproject.toml': '[project]\nname = "app"\ndependencies = []\n', 'json/helper.py': 'x = 1\n', 'main.py': 'x = 1\n' },
+      { 'main.py': 'import json\nfrom json import dumps\nx = json\n' },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('never reports a declared dependency because a local directory shares its name', async () => {
+    const d = repo(
+      {
+        'pyproject.toml': '[project]\nname = "app"\ndependencies = ["requests>=2.0"]\n',
+        'lib/requests/thing.py': 'x = 1\n', 'main.py': 'x = 1\n',
+      },
+      { 'main.py': 'import requests\nx = requests\n' },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('names the package when an undeclared specifier is a module of a local package', async () => {
+    const d = repo(
+      {
+        'pyproject.toml': '[project]\nname = "app-dist"\ndependencies = []\n',
+        'app/__init__.py': '', 'single.py': 'VALUE = 1\n', 'main.py': 'x = 1\n',
+      },
+      { 'main.py': 'from app.nope import x\nfrom single.nope import y\nz = [x, y]\n' },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => [f.code, f.subject])).toEqual([
+      ['unresolved-internal-import', 'app.nope'],
+      ['unresolved-internal-import', 'single.nope'],
+    ]);
+    expect(r.findings[1].message).toContain('single.py');
+  });
+
+  it('reads a Poetry inline-table dependency as declared', async () => {
+    const pyproject = [
+      '[tool.poetry]', 'name = "app"', '',
+      '[tool.poetry.dependencies]', 'python = "^3.11"', 'foo = { version = "1.0", extras = ["x"] }', '',
+    ].join('\n');
+    const d = repo({ 'pyproject.toml': pyproject, 'main.py': 'x = 1\n' }, { 'main.py': 'import foo\nx = foo\n' });
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+});

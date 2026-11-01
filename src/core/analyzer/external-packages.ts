@@ -83,7 +83,8 @@ export function tomlSection(raw: string, header: string): string {
   let depth = 0;
   let awaitingValue = false;
   for (const line of lines.slice(start + 1)) {
-    const text = line.replace(/\r$/, '').replace(/\s+#.*$/, '');
+    // A comment may sit at column 0, and a quoted value may hold a bracket; neither is structure.
+    const text = line.replace(/\r$/, '').replace(/(^|\s)#.*$/, '').replace(/"[^"]*"|'[^']*'/g, '""');
     if (depth === 0 && !awaitingValue && tableOf(line) !== null) break;
     body.push(line);
     for (const ch of text) {
@@ -145,7 +146,13 @@ export function parsePyprojectManifest(raw: string): ExternalPackage[] {
       for (const line of tomlSection(raw, section).split('\n')) {
         const m = line.match(/^(\w[\w-]*)\s*=\s*["']([^"']+)["']/);
         // skip python version constraint line
-        if (m && m[1] !== 'python') out.push({ name: m[1], version: m[2], ecosystem: 'pypi', isDev });
+        if (m && m[1] !== 'python') { out.push({ name: m[1], version: m[2], ecosystem: 'pypi', isDev }); continue; }
+        // An inline table declares the dependency too: `foo = { version = "1.0", extras = [...] }`.
+        const inline = line.match(/^(\w[\w-]*)\s*=\s*\{/);
+        if (inline && inline[1] !== 'python') {
+          const version = /version\s*=\s*["']([^"']+)["']/.exec(line);
+          out.push({ name: inline[1], version: version?.[1] ?? '*', ecosystem: 'pypi', isDev });
+        }
       }
     }
 
