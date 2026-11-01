@@ -8,7 +8,7 @@
  * checked-or-flagged, and makes the agent's output auditable.
  *
  *   claim   = { kind: 'calls'|'reaches'|'dead'|'impacts'|'safe-to-change'|'decision-current'
- *              |'decision-governed'|'endpoint-implemented'|'endpoint-consumed', subject, object? }
+ *              |'decision-governed'|'endpoint-implemented'|'endpoint-consumed'|'lease-current', subject, object? }
  *   verdict = { verdict: 'confirmed'|'refuted'|'unverifiable', reason, receipt?, confidenceBoundary }
  *
  * Every verdict is a deterministic computation, never an LLM judgement and never a
@@ -69,13 +69,13 @@ import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 import type { GroundingCertificate, StructuralAnchor, PendingDecision } from '../../../types/index.js';
 
 export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current'
-  | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed';
+  | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current';
 const CLAIM_KINDS: ReadonlySet<string> = new Set<ClaimKind>([
   'calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current',
-  'decision-governed', 'endpoint-implemented', 'endpoint-consumed',
+  'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current',
 ]);
 /** Kinds over contracts and governance, evaluated in `claim-kinds-graph.ts` (change: add-graph-claim-kinds). */
-const GRAPH_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['decision-governed', 'endpoint-implemented', 'endpoint-consumed']);
+const GRAPH_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current']);
 /** Kinds that relate two symbols and so require an `object`. */
 const RELATIONAL_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['calls', 'reaches', 'impacts']);
 /** Kinds verified against the decision store rather than the call graph. */
@@ -607,7 +607,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
   }
   if (GRAPH_KINDS.has(input.kind)) {
     const { verifyGraphClaim } = await import('./claim-kinds-graph.js');
-    return verifyGraphClaim(absDir, input.kind as 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed', input.subject.trim());
+    return verifyGraphClaim(absDir, input.kind as 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current', input.subject.trim());
   }
 
   const needsObject = RELATIONAL_KINDS.has(input.kind);

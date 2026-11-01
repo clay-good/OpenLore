@@ -146,7 +146,7 @@ function ledgerDir(root: string): string {
 }
 
 /** Create the ledger directory with its own `.gitignore`: session files are never committed. */
-function ensureLedgerDir(root: string): string {
+export function ensureLedgerDir(root: string): string {
   const dir = ledgerDir(root);
   mkdirSync(dir, { recursive: true });
   try { writeFileSync(join(dir, '.gitignore'), '*\n', { flag: 'wx' }); } catch { /* already there */ }
