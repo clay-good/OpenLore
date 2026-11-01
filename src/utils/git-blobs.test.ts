@@ -16,7 +16,7 @@ const ENV = {
   GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com',
 };
 let dirs: string[] = [];
-afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs = []; });
+afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); dirs = []; });
 
 function repo(files: Record<string, string>): string {
   const d = mkdtempSync(join(tmpdir(), 'openlore-blobs-'));
