@@ -9,7 +9,7 @@ when it thinks of the contract. `verify_change` is the receipt it reads before i
 
 ## What changes
 
-`verify_change` runs the same check on call sites in the files the diff changes: each finding is an
+`verify_change` runs the same check on call sites on lines the diff adds or changes, and in files not yet added to git (only those files are read): each finding is an
 item (`contract_payload`), a classified finding (`enforcement.policy` may gate it), and a summary
 count; bodies it could not read are one boundary line.
 

@@ -4286,9 +4286,10 @@ score, or threshold.
 
 ### Requirement: VerifyChangeCarriesPayloadFindings
 
-`verify_change` SHALL carry `contract-payload-missing-required` findings for call sites in the files
-the diff changes, as receipt items and as findings `enforcement.policy` classifies, and SHALL state
-how many request bodies there it could not read.
+`verify_change` SHALL carry `contract-payload-missing-required` findings for call sites on lines the
+diff adds or changes, and in files not yet added to git, as receipt items and as findings
+`enforcement.policy` classifies; an older call site in a touched file SHALL NOT be reported. It SHALL
+state how many request bodies there it could not read.
 
 #### Scenario: A new call site without a required field
 

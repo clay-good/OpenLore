@@ -292,6 +292,40 @@ export function projectVerifyReceipt(
   };
 }
 
+/** Root-relative files not yet added to git (not ignored). */
+async function untrackedFiles(root: string): Promise<string[]> {
+  try {
+    const { execFileGit } = await import('../../../utils/git-exec.js');
+    const { gitPathArgs } = await import('../../../utils/git-args.js');
+    const { stdout } = await execFileGit('git', gitPathArgs('ls-files', '-z', '--others', '--exclude-standard'), { cwd: root });
+    return String(stdout).split('\0').filter(Boolean);
+  } catch { return []; }
+}
+
+/** Per root-relative file, the line ranges (in the working tree) the diff against `base` added or changed. */
+async function addedLines(root: string, base: string, files: readonly string[]): Promise<Map<string, Array<[number, number]>>> {
+  const out = new Map<string, Array<[number, number]>>();
+  if (!files.length) return out;
+  try {
+    const { execFileGit } = await import('../../../utils/git-exec.js');
+    const { gitPathArgs } = await import('../../../utils/git-args.js');
+    // --relative: paths relative to the root, as the files are given.
+    const { stdout } = await execFileGit('git', gitPathArgs('diff', '-U0', '--no-color', '--relative', '--no-ext-diff', base, '--', ...files.slice(0, 500)), { cwd: root, maxBuffer: 64 * 1024 * 1024 });
+    let file: string | undefined;
+    for (const line of String(stdout).split('\n')) {
+      const f = /^\+\+\+ b\/(.+)$/.exec(line);
+      if (f) { file = f[1]; continue; }
+      const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+      if (h && file) {
+        const start = Number(h[1]);
+        const count = h[2] === undefined ? 1 : Number(h[2]);
+        if (count > 0) (out.get(file) ?? out.set(file, []).get(file)!).push([start, start + count - 1]);
+      }
+    }
+  } catch { /* no ranges: nothing is attributed to the diff */ }
+  return out;
+}
+
 /** File paths the index knows, for the reference check's candidates; empty when it is unavailable. */
 async function corpusFiles(directory: string): Promise<string[]> {
   try {
@@ -353,9 +387,14 @@ export async function handleVerifyChange(
     const { getChangedFiles, getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
     const prefix = (await getRepoPrefix(root)) ?? '';
     const diff = await getChangedFiles({ rootPath: root, baseRef: b.resolvedBaseRef, includeUnstaged: true });
-    const files = diff.files.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
+    const tracked = diff.files.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
+    // A file not yet added to git is all new (the agent often stops before `git add`).
+    const untracked = await untrackedFiles(root);
+    const added = await addedLines(root, b.resolvedBaseRef, tracked);
     const { payloadFindingsForFiles } = await import('./service-contract.js');
-    payload = await payloadFindingsForFiles(root, files);
+    // Only call sites on lines the diff added or changed: an older call in a touched file is not this change's.
+    payload = await payloadFindingsForFiles(root, [...new Set([...tracked, ...untracked])], (file, line) =>
+      untracked.includes(file) || (added.get(file)?.some(([from, to]) => line >= from && line <= to) ?? false));
   } catch (err) {
     payload = { error: err instanceof Error ? err.message : String(err) };
   }

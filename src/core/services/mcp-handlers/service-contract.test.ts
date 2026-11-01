@@ -231,4 +231,15 @@ describe('certify_service_contract', () => {
     expect(r.findings.map(f => f.subject)).toEqual(['src/b.ts:1']);
     expect((await payloadFindingsForFiles(root, [])).findings).toEqual([]);
   });
+
+  it('verify_change reports only call sites on lines the diff adds, and new untracked files', async () => {
+    const POST = `openapi: 3.0.3\ninfo: {title: Orders, version: '1'}\npaths:\n  /orders:\n    post:\n      requestBody:\n        required: true\n        content: {application/json: {schema: {type: object, required: [customerId], properties: {customerId: {type: string}}}}}\n      responses: {'201': {description: created}}\n`;
+    const bad = (name: string) => `export const ${name} = () => fetch('/orders', { method: 'POST', body: JSON.stringify({ x: 1 }) });\n`;
+    const root = repo({ 'api/openapi.yaml': POST, 'src/a.ts': bad('old'), '.openlore/analysis/llm-context.json': JSON.stringify({ callGraph: { nodes: [], edges: [] } }) });
+    write(root, 'src/a.ts', bad('old') + bad('added'));
+    write(root, 'src/new.ts', bad('fresh'));
+    const { handleVerifyChange } = await import('./verify-change.js');
+    const r = await handleVerifyChange({ directory: root, baseRef: 'HEAD' }) as { findings?: Array<{ code: string; subject: string }> };
+    expect((r.findings ?? []).filter(f => f.code === 'contract-payload-missing-required').map(f => f.subject).sort()).toEqual(['src/a.ts:2', 'src/new.ts:1']);
+  });
 });
