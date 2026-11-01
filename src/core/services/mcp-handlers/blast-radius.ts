@@ -252,12 +252,12 @@ export interface BlastRadiusBriefing {
     filesChecked: number;
     referencesChecked: number;
   };
+  /** OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection). */
+  contracts?: import('../contract/contract-briefing.js').ContractBriefing;
   /**
    * Env vars the diff stops reading anywhere, each with the infrastructure sites that still set the
    * old name (change: add-iac-code-binding). Absent when the diff removes no env-var read.
    */
-  /** OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection). */
-  contracts?: import('../contract/contract-briefing.js').ContractBriefing;
   envDeclarations?: {
     removedReads: string[];
     stillSet: Array<{ name: string; sites: Array<{ ecosystem: string; resource: string; file: string; line: number }> }>;

@@ -4221,11 +4221,11 @@ worktrees to the planned tasks, named `board:<actorId>`; this directory's own en
 ### Requirement: ContractOperationsSurfaceInTheBriefings
 
 `orient` SHALL include, as an additive `contracts` field, the OpenAPI operations served by indexed
-routes in the files of its relevant functions, and `blast_radius` SHALL include the same for routes
-in the files the diff changes. Each entry SHALL name the operation address, its `operationId`, the
-specification file and line, the serving route, the required parameters and request-body
-properties, and deprecation. A route matches an operation by method and normalized path. Nothing
-SHALL be added when no file in scope has an indexed route or no specification declares one.
+routes in the files of its relevant functions or in route files that name one of them, and
+`blast_radius` SHALL include the same for routes in the files the diff changes. Each entry SHALL
+name the operation address, `operationId`, specification file and line, serving route, required
+parameters and body properties, and deprecation. A route SHALL match by method and full path, or
+without the base path only when unique and not all-parameter; nothing is added otherwise.
 
 #### Scenario: orient shows the contract of the handler being edited
 

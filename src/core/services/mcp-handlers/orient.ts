@@ -1054,7 +1054,7 @@ export async function handleOrient(
   if (!lean && relevantFunctions.length > 0) {
     try {
       const { contractsForFiles } = await import('../contract/contract-briefing.js');
-      contracts = await contractsForFiles(absDir, [...new Set(relevantFunctions.map(f => f.filePath))]);
+      contracts = await contractsForFiles(absDir, [...new Set(relevantFunctions.map(f => f.filePath))], relevantFunctions.map(f => f.name));
     } catch { /* never fail orient over the contract summary */ }
   }
 

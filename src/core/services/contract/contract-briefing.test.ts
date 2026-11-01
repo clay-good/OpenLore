@@ -52,9 +52,26 @@ describe('contract elements in the briefings', () => {
     const root = repo({ 'api/openapi.yaml': SPEC, '.openlore/analysis/route-inventory.json': INVENTORY, 'src/orders.ts': 'export {};\n', 'src/health.ts': 'export {};\n' });
     const r = await contractsForFiles(root, ['src/orders.ts']);
     expect(r?.contracts).toEqual([
-      { operation: 'GET /v1/orders/{id}', spec: 'api/openapi.yaml:13', route: { file: 'src/orders.ts', method: 'GET', path: '/orders/:id' }, deprecated: true, requiredParams: ['id (path, string)'], requiredBody: [] },
-      { operation: 'POST /v1/orders', operationId: 'createOrder', spec: 'api/openapi.yaml:6', route: { file: 'src/orders.ts', method: 'POST', path: '/orders' }, requiredParams: [], requiredBody: ['qty (integer)', 'sku (string)'] },
+      { operation: 'GET /v1/orders/{id}', spec: 'api/openapi.yaml:13', route: { file: 'src/orders.ts', method: 'GET', path: '/orders/:id' }, deprecated: true, matchedWithoutBasePath: true, requiredParams: ['id (path, string)'], requiredBody: [] },
+      { operation: 'POST /v1/orders', operationId: 'createOrder', spec: 'api/openapi.yaml:6', route: { file: 'src/orders.ts', method: 'POST', path: '/orders' }, matchedWithoutBasePath: true, requiredParams: [], requiredBody: ['qty (integer)', 'sku (string)'] },
     ]);
+  });
+
+  it('a generic path never matches another specification without its base path; a full-path match does', async () => {
+    const PETS = `openapi: 3.0.3\ninfo: {title: Pets, version: '1'}\nservers: [{url: /api/v1}]\npaths:\n  /{petId}:\n    get: {operationId: getPet, responses: {'200': {description: ok}}}\n  /:\n    post: {operationId: createPet, responses: {'201': {description: ok}}}\n  /pets:\n    get: {operationId: listPets, responses: {'200': {description: ok}}}\n`;
+    const inv = routes([['GET', '/:id', 'src/tasks.ts'], ['POST', '/', 'src/tasks.ts'], ['GET', '/api/v1/pets', 'src/pets.ts']]);
+    const root = repo({ 'pets/openapi.yaml': PETS, 'api/openapi.yaml': SPEC, '.openlore/analysis/route-inventory.json': inv, 'src/tasks.ts': 'x', 'src/pets.ts': 'x' });
+    expect(await contractsForFiles(root, ['src/tasks.ts'])).toBeUndefined();
+    const pets = await contractsForFiles(root, ['src/pets.ts']);
+    expect(pets?.contracts.map(c => [c.operation, c.matchedWithoutBasePath])).toEqual([['GET /api/v1/pets', undefined]]);
+  });
+
+  it('a route file outside the scope joins it when it names a function in scope', async () => {
+    const router = "router.post('/orders', async (req, res) => res.json(await orderService.createOrder(req.body)));\n";
+    const root = repo({ 'api/openapi.yaml': SPEC, '.openlore/analysis/route-inventory.json': routes([['POST', '/orders', 'src/routes.ts']]), 'src/routes.ts': router, 'src/service.ts': 'export function createOrder() {}\n' });
+    const r = await contractsForFiles(root, ['src/service.ts'], ['createOrder', 'ord']);
+    expect(r?.contracts).toEqual([expect.objectContaining({ operation: 'POST /v1/orders', routeFileNames: 'createOrder', route: expect.objectContaining({ file: 'src/routes.ts' }) })]);
+    expect(await contractsForFiles(root, ['src/service.ts'], ['deleteOrder'])).toBeUndefined();
   });
 
   it('no route in scope, no inventory, or no specification: nothing', async () => {
