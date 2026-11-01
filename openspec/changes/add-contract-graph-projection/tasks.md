@@ -12,7 +12,7 @@
 - [ ] `blast_radius`: contract elements a changed specification file touches
 - [ ] `certify_service_contract`: reaching tests per consumer; federated consumers by stable id
 - [x] `contract-payload-missing-required` in `certify_service_contract` — shipped in `add-contract-payload-check`
-- [ ] `verify_change` carries payload findings for call sites the diff adds or changes
+- [x] `verify_change` carries payload findings — shipped in `add-verify-change-payload-findings`
 
 ## Formats
 - [ ] protobuf v3 reader, implements edges from generated-server registrations, rule-table additions (field number/type, `reserved`, removed RPC)
@@ -23,4 +23,3 @@
 - [ ] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers
 - [ ] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume
 - [ ] `mcp-handlers` delta: ADD ContractConsumersCarryTheirTestsAndFederatedPeers
-- [ ] `mcp-handlers` delta: ADD VerifyChangeCarriesPayloadFindings

@@ -221,4 +221,14 @@ describe('certify_service_contract', () => {
     expect(r.payload).toMatchObject({ callSites: 2, conforming: 1 });
     expect(r.findings.filter(f => f.code === 'contract-payload-missing-required').map(f => f.message)).toEqual([expect.stringContaining('items')]);
   });
+
+  it('payloadFindingsForFiles checks only call sites in the given files', async () => {
+    const POST = `openapi: 3.0.3\ninfo: {title: Orders, version: '1'}\npaths:\n  /orders:\n    post:\n      requestBody:\n        required: true\n        content: {application/json: {schema: {type: object, required: [customerId], properties: {customerId: {type: string}}}}}\n      responses: {'201': {description: created}}\n`;
+    const bad = "export const a = () => fetch('/orders', { method: 'POST', body: JSON.stringify({ x: 1 }) });\n";
+    const root = repo({ 'api/openapi.yaml': POST, 'src/a.ts': bad, 'src/b.ts': bad });
+    const { payloadFindingsForFiles } = await import('./service-contract.js');
+    const r = await payloadFindingsForFiles(root, ['src/b.ts']);
+    expect(r.findings.map(f => f.subject)).toEqual(['src/b.ts:1']);
+    expect((await payloadFindingsForFiles(root, [])).findings).toEqual([]);
+  });
 });

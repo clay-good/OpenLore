@@ -224,7 +224,7 @@ const MAX_PAYLOAD_LISTED = 20;
  * (an object, or `JSON.stringify` of one) missing a required property is a
  * `contract-payload-missing-required` finding; any other body is listed as not assessed.
  */
-async function checkPayloads(root: string, docs: readonly ContractDocument[], findings: GovernanceFinding[], boundaries: string[]): Promise<Record<string, unknown>> {
+async function checkPayloads(root: string, docs: readonly ContractDocument[], findings: GovernanceFinding[], boundaries: string[], onlyFiles?: ReadonlySet<string>): Promise<Record<string, unknown>> {
   const ops = docs.flatMap(d => d.operations.filter(op => op.body?.assessed && op.body.properties.some(p => p.required)).map(op => ({ file: d.file, op })));
   if (!ops.length) return { assessed: false, reason: 'no operation requires request-body properties' };
   const stats = { capped: false, totals: new Map<string, number>() };
@@ -245,6 +245,7 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
     if (!o) continue;
     const required = o.op.body!.properties.filter(p => p.required).map(p => p.name);
     for (const site of list) {
+      if (onlyFiles && !onlyFiles.has(site.file)) continue;
       if (checked >= MAX_PAYLOAD_SITES) { capped = true; break; }
       checked++;
       if (!texts.has(site.file)) texts.set(site.file, await readFileConfined(root, site.file, MAX_SPEC_BYTES).catch(() => null));
@@ -277,6 +278,21 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
     ...(notAssessed.length ? { notAssessedSites: notAssessed.slice(0, MAX_PAYLOAD_LISTED).map(n => ({ ...n, file: emittedText(n.file) })) } : {}),
     note: 'Only literal bodies (an object, or JSON.stringify of one, in the platform fetch or axios post/put/patch) are checked; a required body not sent is a finding; any other body, and calls in other languages, are not assessed, never called conforming.',
   };
+}
+
+/**
+ * The payload check for call sites in `files` (root-relative), for `verify_change`: the same rule as
+ * `certify_service_contract`'s `payload`, scoped to the files a diff changes.
+ */
+export async function payloadFindingsForFiles(root: string, files: readonly string[]): Promise<{ findings: GovernanceFinding[]; boundaries: string[]; notAssessed: number }> {
+  const findings: GovernanceFinding[] = [];
+  const boundaries: string[] = [];
+  if (!files.length) return { findings, boundaries, notAssessed: 0 };
+  const side = await headSpecsCached(root);
+  if (side.capped) boundaries.push('The specification scan reached its cap; request bodies were checked against the specifications found.');
+  if (!side.docs.length) return { findings, boundaries, notAssessed: 0 };
+  const r = await checkPayloads(root, side.docs, findings, boundaries, new Set(files));
+  return { findings, boundaries, notAssessed: typeof r.notAssessed === 'number' ? r.notAssessed : 0 };
 }
 
 export async function handleCertifyServiceContract(input: CertifyServiceContractInput): Promise<Record<string, unknown>> {
