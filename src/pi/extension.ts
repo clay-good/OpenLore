@@ -37,6 +37,7 @@ import type {
   ExtensionContext,
   SessionShutdownEvent,
   SessionStartEvent,
+  ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
@@ -2239,7 +2240,47 @@ export interface PiExtensionRuntime {
     preset?: string,
     expect?: { pid: number; version: string },
   ) => Promise<EnsureDaemonResult>;
+  /** Replaces the child process that runs one agent-loop moment (tests). */
+  runLoopMoment?: (moment: string, payload: Record<string, unknown>, cwd: string) => Promise<string | undefined>;
 }
+
+/** How long a tool result waits for its after-edit receipt before it is returned without one. */
+const LOOP_MOMENT_TIMEOUT_MS = 15_000;
+const LOOP_MOMENT_MAX_STDOUT = 256 * 1024;
+
+/**
+ * Run one agent-loop moment (`openlore hook <moment>`) in a child process and return its
+ * `additionalContext`: the analyzer never loads in the Pi host (change:
+ * add-agent-loop-hooks-pi-and-task-created). Undefined on silence, timeout, or any failure.
+ */
+export async function runLoopMomentChild(moment: string, payload: Record<string, unknown>, cwd: string): Promise<string | undefined> {
+  const cliEntry = fileURLToPath(new URL('../cli/index.js', import.meta.url));
+  return new Promise((resolveResult) => {
+    let out = '';
+    let settled = false;
+    const done = (v: string | undefined) => { if (!settled) { settled = true; clearTimeout(timer); resolveResult(v); } };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(process.execPath, [cliEntry, 'hook', moment, '--harness', 'pi'], { cwd, env: process.env, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    } catch { resolveResult(undefined); return; }
+    const timer = setTimeout(() => { child.kill(); done(undefined); }, LOOP_MOMENT_TIMEOUT_MS);
+    timer.unref?.();
+    child.stdout?.on('data', (d: Buffer) => { if (out.length < LOOP_MOMENT_MAX_STDOUT) out += d.toString('utf8'); });
+    child.on('error', () => done(undefined));
+    child.on('close', () => {
+      try {
+        const parsed = JSON.parse(out) as { hookSpecificOutput?: { additionalContext?: unknown } };
+        const text = parsed?.hookSpecificOutput?.additionalContext;
+        done(typeof text === 'string' && text ? text : undefined);
+      } catch { done(undefined); }
+    });
+    child.stdin?.on('error', () => { /* the child exited early */ });
+    child.stdin?.end(JSON.stringify(payload));
+  });
+}
+
+/** Pi's built-in tools, as the hook payload names them (Claude Code's tool names). */
+const PI_LOOP_TOOLS: Record<string, string> = { edit: 'Edit', write: 'Write', bash: 'Bash' };
 
 function registerOpenlore(
   pi: ExtensionAPI,
@@ -2731,6 +2772,33 @@ function registerOpenlore(
     sessionGeneration += 1;
     if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
     if (ctx) setPiStatus(ctx, undefined);
+  });
+
+  // ── B2: agent-loop receipt after an edit or shell command (change: add-agent-loop-hooks-pi-and-task-created) ──
+  // The after-tools facts (generated files, phantom references, check weakening, peer changes, test
+  // runs) are appended to the tool result the agent reads, computed in a child process.
+  pi.on('tool_result', async (event: ToolResultEvent, ctx: ExtensionContext): Promise<{ content: ToolResultEvent['content'] } | void> => {
+    if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    const tool = PI_LOOP_TOOLS[event.toolName];
+    if (!tool) return;
+    const input = event.input as { path?: unknown; command?: unknown };
+    if (tool === 'Bash' ? typeof input.command !== 'string' : typeof input.path !== 'string') return;
+    // An edit Pi refused changed nothing; a failed shell command is still a run (a failed test run).
+    if (tool !== 'Bash' && event.isError) return;
+    let sessionId: string | undefined;
+    try { sessionId = ctx.sessionManager.getSessionId(); } catch { /* no session id: nothing is deduplicated */ }
+    const payload: Record<string, unknown> = {
+      ...(sessionId ? { session_id: sessionId } : {}),
+      cwd: ctx.cwd,
+      hook_event_name: 'PostToolUse',
+      tool_name: tool,
+      tool_input: tool === 'Bash' ? { command: input.command } : { file_path: input.path },
+      // Pi reports a non-zero exit as an error result; its exit code is not in the event.
+      ...(tool === 'Bash' ? { tool_response: { exit_code: event.isError ? 1 : 0 } } : {}),
+    };
+    const text = await (runtime.runLoopMoment ?? runLoopMomentChild)('after-tools', payload, ctx.cwd).catch(() => undefined);
+    if (!text) return;
+    return { content: [...event.content, { type: 'text', text: `\n${text}` }] };
   });
 
   // ── C: context injection ──

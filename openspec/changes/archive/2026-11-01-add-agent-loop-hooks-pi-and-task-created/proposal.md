@@ -1,6 +1,7 @@
 # Agent-loop hooks, part 5: Pi, task creation, Codex sub-agents
 
-> Status: PROPOSED (2026-11-01). Split from `add-agent-loop-hooks-codex-and-pi`, which shipped the
+> Status: SHIPPED (2026-11-01), the Pi after-edit receipt only; the rest moved to
+> `add-agent-loop-hooks-task-created-and-compaction`. Split from `add-agent-loop-hooks-codex-and-pi`, which shipped the
 > Codex moments.
 
 ## Why
