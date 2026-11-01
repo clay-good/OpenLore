@@ -20,7 +20,7 @@ import { execFileGit } from '../../utils/git-exec.js';
 import { symbolHash, type BoardEntry } from './footprint-board.js';
 import { PANIC_SESSION_EXPIRY_MS } from './mcp-handlers/panic-constants.js';
 
-/** Read × peer comparisons per call: the hook runs on every tool call. */
+/** Base-blob reads per call (only a symbol whose peer text differs needs one): the hook runs on every tool call. */
 const MAX_CHECKS = 400;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 /** Served functions count for as long as a board entry stays live without a refresh. */
@@ -41,8 +41,8 @@ export interface PeerChangeNotice {
   id: string;
   symbol: string;
   file: string;
-  /** Where the symbol began when it was read (tells same-name symbols in one file apart). */
-  start: number;
+  /** The file's path from the worktree top (the once-per-session key). */
+  repoPath: string;
   peer: { actorId: string; worktree: string; branch: string };
   /** How this worktree read it: a declared read-set, or served by `orient` or `recall`. */
   via: 'declared' | 'served';
@@ -106,7 +106,7 @@ export async function peerChangeNotices(root: string): Promise<PeerChangeNotice[
   const baseBlobs = new Map<string, Promise<string[] | null>>();
   const currentBase = new Map<string, Promise<string | null>>();
   const peerFile = (peer: BoardEntry, peerRoot: string, file: string) => {
-    const k = `${peer.actorId}\0${file}`;
+    const k = `${peer.actorId}\0${peerRoot}\0${file}`;
     if (!peerText.has(k)) {
       peerText.set(k, readFileConfined(peerRoot, file, MAX_FILE_BYTES)
         // Deleted by the peer: the declared text is gone. Any other failure: nothing to compare.
@@ -157,17 +157,18 @@ export async function peerChangeNotices(root: string): Promise<PeerChangeNotice[
   for (const read of reads) {
     for (const peer of peers) {
       if (!peer.baseAtDeclare) continue; // no base to attribute a change with
-      // One notice per peer and symbol; a declared read comes first and wins over the same served one.
-      const key = `${peer.actorId}\0${read.file}\0${read.name}\0${read.start}`; // start: same-name symbols in one file differ
+      // One notice per peer and symbol (by repository path and name: a span moves when lines are added
+      // above it); a declared read comes first and wins over the same served one.
+      const key = `${peer.actorId}\0${read.prefix}${read.file}\0${read.name}`;
       if (seen.has(key)) continue;
-      if (++checks > MAX_CHECKS) return notices;
       const now = await peerFile(peer, join(peer.worktree, read.rootRel), read.file);
       if (now === null || (now && holdsExactly(now, read))) continue;
+      if (++checks > MAX_CHECKS) return notices;
       // Attributable to the peer only when its bases still had the text this worktree read.
       const blobs = await bases(peer, `${read.prefix}${read.file}`);
       if (!blobs || !blobs.every(b => blobHolds(b, read))) continue;
       seen.add(key);
-      notices.push({ id: read.id, symbol: read.name, file: read.file, start: read.start, peer: { actorId: peer.actorId, worktree: peer.worktree, branch: peer.branch }, via: read.via, at: read.at });
+      notices.push({ id: read.id, symbol: read.name, file: read.file, repoPath: `${read.prefix}${read.file}`, peer: { actorId: peer.actorId, worktree: peer.worktree, branch: peer.branch }, via: read.via, at: read.at });
     }
   }
   return notices;

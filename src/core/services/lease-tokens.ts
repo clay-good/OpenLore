@@ -17,9 +17,9 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { readdirSync, statSync, unlinkSync } from 'node:fs';
+import { readdirSync, statSync, lstatSync, unlinkSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative, isAbsolute } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { readFileConfined } from '../../utils/path-confinement.js';
 import { OPENLORE_DIR } from '../../constants.js';
@@ -32,7 +32,8 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const HEAD_CHARS = 80;
 const TOKEN_RE = /^lt_[0-9a-f]{20}$/;
 const TOKEN_FILE_RE = /^lt_[0-9a-f]{20}\.json$/;
-const MAX_RECENT_TOKENS = 50;
+const MAX_RECENT_TOKENS = 20;
+const CLOCK_SKEW_MS = 60_000;
 /** Text files whose formatting carries no meaning: hashed whitespace-normalized. */
 const NORMALIZED = /\.(?:md|markdown|ya?ml|json)$/i;
 
@@ -168,17 +169,25 @@ export const leaseTextHash = sha;
  */
 export async function recentServedFunctions(root: string, windowMs: number, now = Date.now()): Promise<RecentServed[]> {
   const dir = await tokensDirForRead(root);
-  let files: Array<{ n: string; t: number }>;
-  try {
-    files = readdirSync(dir).filter(n => TOKEN_FILE_RE.test(n)).map(n => ({ n, t: statSync(join(dir, n)).mtimeMs })).filter(f => now - f.t <= windowMs);
-  } catch { return []; }
+  // Only this root's own token directory: a symbolic link to another worktree's is not "served here".
+  const top = await realpath(root).catch(() => root);
+  const rel = relative(top, dir);
+  if (rel.startsWith('..') || isAbsolute(rel)) return [];
+  const recent = (t: number) => t <= now + CLOCK_SKEW_MS && now - t <= windowMs; // a future time never counts as recent
+  let names: string[];
+  try { names = readdirSync(dir).filter(n => TOKEN_FILE_RE.test(n)); } catch { return []; }
+  const files: Array<{ n: string; t: number }> = [];
+  for (const n of names) {
+    // One by one: a token pruned meanwhile, or a link, is skipped without hiding the rest.
+    try { const st = lstatSync(join(dir, n)); if (st.isFile() && recent(st.mtimeMs)) files.push({ n, t: st.mtimeMs }); } catch { /* gone */ }
+  }
   files.sort((a, b) => b.t - a.t);
   const out = new Map<string, RecentServed>();
   for (const f of files.slice(0, MAX_RECENT_TOKENS)) {
     let rec: LeaseRecord;
     try { rec = JSON.parse(await readFileConfined(dir, f.n, 512 * 1024, true)) as LeaseRecord; } catch { continue; }
     const created = Date.parse(rec?.createdAt);
-    if (rec?.version !== 1 || !Number.isFinite(created) || now - created > windowMs || !Array.isArray(rec.entries)) continue;
+    if (rec?.version !== 1 || !Number.isFinite(created) || !recent(created) || !Array.isArray(rec.entries)) continue;
     for (const e of rec.entries.filter(isEntry)) {
       const key = `${e.file}\0${e.name ?? ''}`;
       if (e.name === undefined || out.has(key)) continue; // newest token first: its serve counts

@@ -4178,11 +4178,11 @@ edit to a symbol outside the declared read-set SHALL produce no notice.
 
 ### Requirement: PeersAreToldWhenAServedSymbolChanges
 
-When a live peer on the footprint board changes a function that `orient` or `recall` served in this
-worktree within the board's live window, the next `after-tools` receipt SHALL name the function,
-the peer, and when it was served, once per session, with the same attribution rule as a declared
-read: the peer's bases at declaration and now still hold the served text. A symbol both declared and
-served SHALL be named once, as declared.
+When a live peer on the footprint board changes a function that `orient` or `recall` served under
+the hook's analysis root (in any session) within the board's live window, the next `after-tools`
+receipt SHALL name the function, the peer, and when it was served, once per session per peer and
+symbol, with the same attribution rule as a declared read: the peer's bases at declaration and now
+still hold the served text. A symbol both declared and served SHALL be named once, as declared.
 
 #### Scenario: A peer changes what I was served
 
