@@ -25,7 +25,7 @@ import { readFileConfined } from '../../../utils/path-confinement.js';
 import { readBlobsAtRef, readBlobsPerFile } from '../../../utils/git-blobs.js';
 import { readArtifactBounded, ANALYSIS_ARTIFACT_MAX_BYTES } from '../../../utils/bounded-artifact-read.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ROUTE_INVENTORY } from '../../../constants.js';
-import { readOpenApi, looksLikeOpenApi, MAX_SPEC_BYTES, type ContractDocument } from '../contract/openapi.js';
+import { readOpenApi, looksLikeOpenApi, MAX_SPEC_BYTES, type ContractDocument, type ContractOperation } from '../contract/openapi.js';
 import { diffContracts, contractParity, contractBump, type ContractChange, type IndexedRoute } from '../contract/contract-diff.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { classifyFindings, effectivePolicy, type GovernanceFinding } from './enforcement-policy.js';
@@ -62,7 +62,7 @@ async function workingFiles(root: string, ext: RegExp): Promise<string[]> {
 const MAX_CANDIDATES = MAX_SPEC_FILES * 10;
 
 /** One revision's specifications, with what was and was not examined. */
-interface SpecSide {
+export interface SpecSide {
   docs: ContractDocument[];
   /** Specifications that could not be parsed. */
   unreadable: Array<{ file: string; reason: string }>;
@@ -95,7 +95,7 @@ function parseSide(candidates: string[], texts: Map<string, string>, unread: Spe
   return side;
 }
 
-async function headSpecs(root: string): Promise<SpecSide> {
+export async function headSpecs(root: string): Promise<SpecSide> {
   const candidates = await workingFiles(root, SPEC_EXT);
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
@@ -130,7 +130,7 @@ async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
 }
 
 /** The route inventory written by `analyze` (undefined when absent). */
-async function indexedRoutes(root: string): Promise<IndexedRoute[] | undefined> {
+export async function indexedRoutes(root: string): Promise<IndexedRoute[] | undefined> {
   const read = await readArtifactBounded(join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ROUTE_INVENTORY), ANALYSIS_ARTIFACT_MAX_BYTES).catch(() => null);
   if (!read) return undefined;
   try {
@@ -147,8 +147,6 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
   const out = new Map<string, Array<{ file: string; line: number; method: string; url: string }>>();
   const addresses = new Set(changes.filter(c => c.class === 'breaking' || c.class === 'dangerous').map(c => c.address));
   if (!addresses.size) return out;
-  const { extractHttpCalls, buildHttpEdges, normalizeUrl } = await import('../../analyzer/http-route-parser.js');
-  const { mapFilesBounded } = await import('../../analyzer/bounded-file-scan.js');
   // The operations as routes: with and without their base path (a client may hold the base URL).
   const ops = docs.flatMap(d => d.operations.map(op => ({ d, op }))).filter(x => addresses.has(x.op.address));
   // Removed operations are only in the base revision: route them by their address.
@@ -157,8 +155,23 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
     const [method, path] = [addr.slice(0, addr.indexOf(' ')), addr.slice(addr.indexOf(' ') + 1)];
     ops.push({ d: { file: '', format: 'openapi-3', basePath: '', operations: [], unassessed: [], opaquePaths: [] }, op: { address: addr, key: addr, method, path, declaredPath: path, line: 0, deprecated: false, params: [] } });
   }
-  const routes = ops.flatMap(({ d, op }) => [...new Set([op.path, op.declaredPath])].map(p => ({
-    file: d.file, method: op.method, path: p, normalizedPath: normalizeUrl(p), handlerName: op.address,
+  return callSitesFor(root, ops.map(({ d, op }) => ({ file: d.file, op })), boundaries);
+}
+
+/**
+ * Client call sites in this repository whose HTTP method and literal path match each operation
+ * (with or without its base path), keyed by operation address.
+ */
+export async function callSitesFor(
+  root: string,
+  ops: ReadonlyArray<{ file: string; op: Pick<ContractOperation, 'address' | 'method' | 'path' | 'declaredPath' | 'line'> }>,
+  boundaries: string[],
+): Promise<Map<string, Array<{ file: string; line: number; method: string; url: string }>>> {
+  const out = new Map<string, Array<{ file: string; line: number; method: string; url: string }>>();
+  const { extractHttpCalls, buildHttpEdges, normalizeUrl } = await import('../../analyzer/http-route-parser.js');
+  const { mapFilesBounded } = await import('../../analyzer/bounded-file-scan.js');
+  const routes = ops.flatMap(({ file, op }) => [...new Set([op.path, op.declaredPath])].map(p => ({
+    file, method: op.method, path: p, normalizedPath: normalizeUrl(p), handlerName: op.address,
     framework: 'openapi', line: op.line, contractSource: 'none' as const,
   })));
   const files = await workingFiles(root, CLIENT_EXT);

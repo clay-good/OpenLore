@@ -36,7 +36,7 @@ groups:
 | Workspace manifests as package nodes, no export step | [add-build-graph-ingest](add-build-graph-ingest/) | existing, addendum |
 | MCP 2026-07-28 is published: correct cache-hint scope, deterministic `tools/list`, `subscriptions/listen` | [adopt-mcp-tasks-and-cache-hints](adopt-mcp-tasks-and-cache-hints/) | existing, addendum |
 | Fleet verification records shared across worktrees | [add-fleet-coordination-arc](add-fleet-coordination-arc/) | existing, addendum |
-| `verify_claim` kinds: endpoint implemented / consumed, decision governed, lease current | [add-graph-claim-kinds](add-graph-claim-kinds/) | new |
+| `verify_claim` kinds: endpoint implemented / consumed, decision governed, lease current | [add-graph-claim-kinds](archive/2026-11-01-add-graph-claim-kinds/) | shipped (lease-current moved) |
 | The session's closing receipt (start → end delta, parity, decisions, counts) | [add-change-provenance-certificate](add-change-provenance-certificate/) | existing, addendum |
 
 ## What we do not build, and why

@@ -222,6 +222,13 @@ export interface ParityResult {
 
 const methodMatches = (a: string, b: string) => a === b || a === 'UNKNOWN' || a === 'ALL' || b === 'UNKNOWN';
 
+/** The indexed routes that serve an operation: same method, path with or without the base path. */
+export function routesServing(op: Pick<ContractOperation, 'method' | 'path' | 'declaredPath'>, routes: readonly IndexedRoute[]): IndexedRoute[] {
+  const full = normalizeUrl(op.path);
+  const bare = normalizeUrl(op.declaredPath);
+  return routes.filter(r => { const n = normalizeUrl(r.path); return (n === full || n === bare) && methodMatches(r.method.toUpperCase(), op.method); });
+}
+
 /** The parent of a normalized path (`/v1/orders/:param` → `/v1/orders`). */
 const parentOf = (p: string) => p.replace(/\/[^/]*$/, '') || '/';
 

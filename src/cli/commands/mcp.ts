@@ -690,10 +690,11 @@ export const TOOL_DEFINITIONS = [
     description:
       'USE THIS BEFORE asserting a structural fact ("X is dead", "Y calls Z", "this is safe to change") ' +
       'or citing a decision ("ADR abc12345 governs this"). ' +
-      'Returns a deterministic verdict (confirmed | refuted | unverifiable) + a citation receipt (spans, ' +
-      'content hashes, index commit) — a graph computation, never an LLM guess. kinds: calls, reaches, ' +
+      'Returns a deterministic verdict (confirmed | refuted | unverifiable) + a citation receipt — a ' +
+      'graph computation, never an LLM guess. kinds: calls, reaches, ' +
       'impacts, dead, safe-to-change (structural); decision-current (is a recorded decision still ' +
-      'authoritative, or superseded/rejected?). "unverifiable" is first-class when the claim hits a ' +
+      'authoritative or superseded?); decision-governed (a symbol); endpoint-implemented, ' +
+      'endpoint-consumed ("METHOD /path"). "unverifiable" is first-class when the claim hits a ' +
       'dynamic-dispatch blind spot or names an unknown decision — hedge or read the source. Run ' +
       'analyze_codebase first for structural kinds.',
     inputSchema: {
@@ -703,10 +704,10 @@ export const TOOL_DEFINITIONS = [
         directory: { type: 'string', description: DIR_DESC },
         kind: {
           type: 'string',
-          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'],
-          description: 'The kind of claim to verify (structural, or decision-current for decision authority).',
+          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed'],
+          description: 'The kind of claim to verify.',
         },
-        subject: { type: 'string', description: 'What the claim is about: a function/method name for structural kinds, or an 8-character decision id for decision-current.' },
+        subject: { type: 'string', description: 'A symbol; a decision id for decision-current; "METHOD /path" for endpoint kinds.' },
         object: { type: 'string', description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' },
       },
       required: ['kind', 'subject'],
