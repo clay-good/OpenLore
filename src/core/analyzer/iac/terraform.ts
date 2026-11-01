@@ -85,7 +85,9 @@ function ingestBlock(
       const [type, name] = block.labels;
       if (!type || !name) return;
       const address = `${type}.${name}`;
-      push(makeResource(address, type, 'resource', filePath, block));
+      const r = makeResource(address, type, 'resource', filePath, block);
+      if (type === 'aws_lambda_function') r.deploys = lambdaDeploys(block.body);
+      push(r);
       addRefs(address, block, filePath, graph);
       return;
     }
@@ -145,7 +147,10 @@ function ingestBlock(
       const source = attrValue(block.body, 'source');
       const isLocal = !!source && (source.startsWith('./') || source.startsWith('../'));
       const isExternal = !!source && !isLocal;
-      push(makeResource(address, 'module', 'module', filePath, block, isExternal));
+      const modResource = makeResource(address, 'module', 'module', filePath, block, isExternal);
+      // A handler passed to a module (terraform-aws-modules/lambda) is not followed: disclosed.
+      if (topLevelAttr(block.body, 'handler').present) modResource.deploys = { unresolved: 'the handler is set through a module' };
+      push(modResource);
       const mod: IacModule = {
         address,
         type: 'module',
@@ -188,6 +193,37 @@ function makeResource(
     signature: block.headerLine.trim() + meta,
     language: 'Terraform',
   };
+}
+
+/**
+ * A top-level attribute of a block body (brace depth 0, outside strings and comments): whether it
+ * is set, and its value when that is a plain string literal.
+ */
+function topLevelAttr(body: string, key: string): { present: boolean; literal?: string } {
+  let depth = 0;
+  for (const raw of body.split('\n')) {
+    const line = raw.replace(/"(?:[^"\\]|\\.)*"/g, m => m.replace(/[{}#]/g, ' ')).replace(/(?:#|\/\/).*$/, '');
+    if (depth === 0) {
+      const m = new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`).exec(raw.replace(/\s+(?:#|\/\/).*$/, ''));
+      if (m && new RegExp(`^\\s*${key}\\s*=`).test(line)) {
+        const lit = /^"((?:[^"\\]|\\.)*)"\s*$/.exec(m[1].trim());
+        return { present: true, ...(lit && !/\$\{/.test(lit[1]) ? { literal: lit[1] } : {}) };
+      }
+    }
+    for (const c of line) { if (c === '{') depth++; else if (c === '}') depth = Math.max(0, depth - 1); }
+  }
+  return { present: false };
+}
+
+/** The code an `aws_lambda_function` runs, from its top-level attributes only. */
+function lambdaDeploys(body: string): IacResource['deploys'] {
+  const handler = topLevelAttr(body, 'handler');
+  if (topLevelAttr(body, 'package_type').literal === 'Image' || topLevelAttr(body, 'image_uri').present) return undefined;
+  if (!handler.present) return undefined;
+  if (handler.literal === undefined) return { unresolved: 'the handler is an expression' };
+  const runtime = topLevelAttr(body, 'runtime').literal;
+  const sourceDir = topLevelAttr(body, 'source_dir').literal;
+  return { handler: handler.literal, ...(runtime ? { runtime } : {}), ...(sourceDir ? { codeUri: sourceDir } : {}) };
 }
 
 /** Scan dotted references + depends_on in a block body and emit edges. */
@@ -341,7 +377,13 @@ function ingestTfJson(
     for (const obj of each(named)) {
       for (const [name, body] of Object.entries(obj)) {
         const address = `${type}.${name}`;
-        push({ address, type, kind: 'resource', filePath: file.path, startLine: lineOf(name), signature: `resource "${type}" "${name}"`, language: 'Terraform' });
+        const b = (body ?? {}) as Record<string, unknown>;
+        const handler = type === 'aws_lambda_function' && b.package_type !== 'Image' && b.image_uri === undefined ? b.handler : undefined;
+        const deploys = handler === undefined ? undefined
+          : typeof handler === 'string' && !/\$\{/.test(handler)
+            ? { handler, ...(typeof b.runtime === 'string' ? { runtime: b.runtime } : {}), ...(typeof b.source_dir === 'string' ? { codeUri: b.source_dir } : {}) }
+            : { unresolved: 'the handler is not a literal' };
+        push({ address, type, kind: 'resource', filePath: file.path, startLine: lineOf(name), signature: `resource "${type}" "${name}"`, language: 'Terraform', ...(deploys ? { deploys } : {}) });
         addRefsFrom(address, body);
       }
     }

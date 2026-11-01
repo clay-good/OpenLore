@@ -104,6 +104,27 @@ function extractTemplate(
     const type = (body as Record<string, unknown>).Type;
     const typeStr = typeof type === 'string' ? type : 'AWS::Unknown';
     addNode(id, typeStr, 'resource', ['Resources', id], `${id} (${typeStr})`);
+    // The code a function runs (change: add-iac-deploy-binding); SAM `Globals.Function` supplies defaults.
+    if (typeStr === 'AWS::Lambda::Function' || typeStr === 'AWS::Serverless::Function') {
+      const props = ((body as Record<string, unknown>).Properties ?? {}) as Record<string, unknown>;
+      // SAM `Globals.Function` applies to `AWS::Serverless::Function` only.
+      const globals = typeStr === 'AWS::Serverless::Function'
+        ? (((tpl.Globals ?? {}) as Record<string, unknown>).Function ?? {}) as Record<string, unknown> : {};
+      const pick = (k: string) => props[k] ?? globals[k];
+      if (pick('PackageType') === 'Image' || pick('ImageUri') !== undefined) continue;
+      const handler = pick('Handler');
+      const codeUri = pick('CodeUri');
+      const runtime = pick('Runtime');
+      const code = props.Code as Record<string, unknown> | undefined;
+      const r = graph.resources[graph.resources.length - 1];
+      if (!r || r.address !== id || handler === undefined) continue;
+      if (pick('InlineCode') !== undefined || (code && code.ZipFile !== undefined)) r.deploys = { unresolved: 'the code is inline in the template' };
+      else if (typeof handler !== 'string') r.deploys = { unresolved: 'the handler is an intrinsic function' };
+      else if (codeUri !== undefined && typeof codeUri !== 'string') r.deploys = { unresolved: 'the code location is not a path (an S3 location or intrinsic)' };
+      else if (typeof codeUri === 'string' && /^s3:\/\//i.test(codeUri)) r.deploys = { unresolved: 'the code is in S3' };
+      else if (codeUri === undefined && typeStr === 'AWS::Lambda::Function') r.deploys = { unresolved: 'the code location is not in the repository (Code is an S3 location)' };
+      else r.deploys = { handler, ...(typeof codeUri === 'string' ? { codeUri } : {}), ...(typeof runtime === 'string' ? { runtime } : {}) };
+    }
   }
 
   const outputs = (tpl.Outputs ?? {}) as Record<string, unknown>;

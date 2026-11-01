@@ -40,7 +40,8 @@ export type EdgeKind =
   | 'depends_on'
   | 'affects'        // decision → governed file (spec-16)
   | 'authored_by'    // file → person, from local git history (spec-18)
-  | 'changed_in_pr'; // file → pull request, from local git/gh (spec-18)
+  | 'changed_in_pr'  // file → pull request, from local git/gh (spec-18)
+  | 'deploys_symbol'; // function resource → the code function it runs (add-iac-deploy-binding)
 
 /** Semantic nature of the call at the call site */
 export type CallType =
@@ -560,6 +561,8 @@ export interface CallGraphResult {
    * (undefined) when the graph has no ambiguous sites.
    */
   ambiguousSites?: AmbiguousCallSite[];
+  /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
+  unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
   /**
    * Which lane Pass-1 extraction actually ran on — the worker pool or the serial
    * reference path — and whether anything degraded (change:
@@ -598,4 +601,6 @@ export interface SerializedCallGraph {
   stats: CallGraphResult['stats'];
   /** Unresolved-ambiguous call sites (change: harden-call-resolution-ambiguity). Omitted when empty. */
   ambiguousSites?: AmbiguousCallSite[];
+  /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
+  unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
 }

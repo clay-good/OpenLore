@@ -73,16 +73,16 @@ Work in this order:
 | 5 | [`add-agent-loop-hook-surfaces`](openspec/changes/archive/2026-10-31-add-agent-loop-hook-surfaces) — **shipped** for Claude Code: before-edit, after-edit, before-stop, and after-compact (with item 6) ([docs](docs/install.md#agent-loop-hooks)); sub-agents, task creation, Codex and Pi follow in [`add-agent-loop-hooks-subagents-codex-pi`](openspec/changes/add-agent-loop-hooks-subagents-codex-pi) | Receipts pushed after edits, after compaction, before stop, at sub-agent start, at task creation |
 | 6 | [`add-session-handoff-briefing`](openspec/changes/archive/2026-11-01-add-session-handoff-briefing) — **shipped**: `get_handoff_briefing` (`full`), `openlore handoff`, and the after-compact hook | Compaction no longer loses the in-flight change (promoted from Defer) |
 | 7 | [`add-service-contract-certification`](openspec/changes/archive/2026-11-01-add-service-contract-certification) — **shipped** (OpenAPI phase): `certify_service_contract` (`full`), `openlore certify-service-contract`; graph nodes, briefings, payload check, protobuf, GraphQL follow in [`add-contract-graph-projection`](openspec/changes/add-contract-graph-projection) | Schema ↔ code parity and breaking verdicts joined to callers (promoted from Phase 2) |
-| 8 | [`add-iac-code-binding`](openspec/changes/archive/2026-11-01-add-iac-code-binding) — **shipped** (env half): `declaredBy` in `analyze_env_impact`, `envDeclarations` in `blast_radius`, OpenTofu; resource → handler binding follows in [`add-iac-deploy-binding`](openspec/changes/add-iac-deploy-binding) | Which manifests still set a renamed env var; which code a resource runs |
+| 8 | [`add-iac-code-binding`](openspec/changes/archive/2026-11-01-add-iac-code-binding) — **shipped** (env half): `declaredBy` in `analyze_env_impact`, `envDeclarations` in `blast_radius`, OpenTofu; Lambda handler binding **shipped** in [`add-iac-deploy-binding`](openspec/changes/archive/2026-11-01-add-iac-deploy-binding); commands and Serverless follow in [`add-iac-deploy-binding-commands`](openspec/changes/add-iac-deploy-binding-commands) | Which manifests still set a renamed env var; which code a resource runs |
 | 9 | [`add-peer-footprint-board`](openspec/changes/archive/2026-11-01-add-peer-footprint-board) — **shipped**: `declare_footprint` (`coordination`), `openlore footprint`, board read by `map_in_flight_conflicts` and `fleet_status`; peer change notices follow in [`add-peer-change-notices`](openspec/changes/add-peer-change-notices) | Parallel agents see each other's footprints and are told when a peer changes what they read |
 | 10 | [`add-graph-claim-kinds`](openspec/changes/archive/2026-11-01-add-graph-claim-kinds) — **shipped**: `verify_claim` kinds `decision-governed`, `endpoint-implemented`, `endpoint-consumed`; `lease-current` **shipped** in [`add-session-lease-tokens`](openspec/changes/archive/2026-11-01-add-session-lease-tokens) | `verify_claim` answers "is this endpoint implemented / called?" and "does a decision govern this?" |
 
 **Phase 1b follow-ups** (split from the items above as they shipped; work these next, in this order):
-[`add-iac-deploy-binding`](openspec/changes/add-iac-deploy-binding) ·
 [`add-peer-change-notices`](openspec/changes/add-peer-change-notices) ·
 [`add-agent-loop-hooks-subagents-codex-pi`](openspec/changes/add-agent-loop-hooks-subagents-codex-pi) ·
 [`add-contract-graph-projection`](openspec/changes/add-contract-graph-projection) ·
-[`add-ledger-contract-hashes-and-counts`](openspec/changes/add-ledger-contract-hashes-and-counts)
+[`add-ledger-contract-hashes-and-counts`](openspec/changes/add-ledger-contract-hashes-and-counts) ·
+[`add-iac-deploy-binding-commands`](openspec/changes/add-iac-deploy-binding-commands)
 
 Items 1–3 add findings, not tools, and land in `verify_change` (its 2026-10-31 addenda also add the
 speculative `patch` input, diff-scoped architecture violations, and `secret-added`). The phase adds
