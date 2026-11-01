@@ -281,9 +281,13 @@ interface PanicProvenanceItem {
 
 export function updatePanic(
   tracker: EpistemicTracker,
-  opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string; tool?: string },
+  opts: {
+    density: number; oscillation: number; weight: number; staleDepth: number; directory?: string; tool?: string;
+    /** Symbols that newly returned to an earlier version for the second time (session ledger). */
+    editOscillation?: number;
+  },
 ): void {
-  const { density, oscillation, staleDepth, directory = '', tool = '' } = opts;
+  const { density, oscillation, staleDepth, directory = '', tool = '', editOscillation = 0 } = opts;
   const now = _clock();
   const inRefractory = tracker.panicRecoverySuppressionUntil > now;
 
@@ -329,6 +333,13 @@ export function updatePanic(
       const d = PANIC_OSCILLATION_DELTA;
       delta += d;
       provenance.push({ name: 'oscillation_spike', delta: d, evidence: { oscillation } });
+    }
+    // Edit oscillation (change: add-session-structural-ledger): the same observed loop as tool-call
+    // oscillation, seen in edits instead of tool calls, so it carries the same delta.
+    if (editOscillation > 0) {
+      const d = PANIC_OSCILLATION_DELTA;
+      delta += d;
+      provenance.push({ name: 'edit_oscillation', delta: d, evidence: { symbols: editOscillation } });
     }
     // stale_depth_3 signal gated by localityConfidence: a stale agent doing focused local
     // work (high confidence) is much less risky than a stale agent in behavioral drift.

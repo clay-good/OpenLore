@@ -269,6 +269,12 @@ export interface McpWatcherOptions {
    */
   onBatchFlushed?: (changedAbsPaths: string[]) => void;
   /**
+   * Fired with each re-indexed file's root-relative path and the text it was indexed from, before
+   * the batch releases that text (change: add-session-structural-ledger: the MCP server's session
+   * ledger hashes each symbol's new version). Best-effort; a throw is ignored.
+   */
+  onFilesReindexed?: (files: Array<{ rel: string; content: string }>) => void;
+  /**
    * Call-graph freshness without the commit hook (change: make-index-self-healing).
    * Fired — debounced and coalesced — when the graph has fallen behind in a way an
    * incremental patch cannot repair: a `.git` HEAD ref change (branch switch / pull)
@@ -424,6 +430,7 @@ export class McpWatcher {
   private readonly extraIgnore: string[];
   private readonly debug: boolean;
   private readonly onBatchFlushed?: (changedAbsPaths: string[]) => void;
+  private readonly onFilesReindexed?: (files: Array<{ rel: string; content: string }>) => void;
   private readonly onGraphStale?: (reason: GraphStaleReason) => void;
   private readonly selfRebuild: boolean;
 
@@ -481,6 +488,7 @@ export class McpWatcher {
     this.extraIgnore = options.ignore ?? [];
     this.debug       = !!process.env.OPENLORE_WATCH_DEBUG;
     this.onBatchFlushed = options.onBatchFlushed;
+    this.onFilesReindexed = options.onFilesReindexed;
     this.onGraphStale = options.onGraphStale;
     this.selfRebuild = options.selfRebuild ?? false;
   }
@@ -1759,6 +1767,9 @@ export class McpWatcher {
     // Every downstream lane has consumed the source or copied it into its own
     // queue. Release potentially large batch strings before callbacks retain
     // this frame any longer.
+    try {
+      if (this.onFilesReindexed && changedFiles.length) this.onFilesReindexed(changedFiles.map(f => ({ rel: f.rel, content: f.content })));
+    } catch { /* host lane is best-effort */ }
     for (const file of changedFiles) file.content = '';
     files.length = 0;
     process.stderr.write(

@@ -21,7 +21,7 @@ groups:
 | OpenAPI / protobuf / GraphQL elements as graph nodes, handler ↔ operation edges, two-way parity, breaking verdicts, consumer join | [add-service-contract-certification](add-service-contract-certification/) | existing, widened |
 | Grade a proposed patch in memory before it is written | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
 | `verify_change` as the one landing place for all diff findings, plus new architecture violations and secrets on added lines | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
-| Name the symbol that changed under the agent; detect modify/revert edit loops; name edits made after the last test run | [add-session-structural-ledger](add-session-structural-ledger/) | new |
+| Name the symbol that changed under the agent; detect modify/revert edit loops; name edits made after the last test run | [add-session-structural-ledger](archive/2026-10-31-add-session-structural-ledger/) (shipped; test runs, contract hashes, lease tokens in [add-session-ledger-runs-contracts-tokens](add-session-ledger-runs-contracts-tokens/)) | shipped |
 | IaC resource → the code it runs; IaC sites that set each env var | [add-iac-code-binding](add-iac-code-binding/) | new |
 | Tests deleted, skipped, or emptied; expected values changed; suppressions; swallowed errors; relaxed CI | [add-check-weakening-findings](archive/2026-10-31-add-check-weakening-findings/) | shipped (#634) |
 | Imports, exports, and packages that do not exist or are not declared | [add-phantom-reference-findings](archive/2026-10-31-add-phantom-reference-findings/) | shipped (#632) |
