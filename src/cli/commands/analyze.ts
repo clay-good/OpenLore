@@ -5,6 +5,7 @@
  * Outputs repository map, dependency graph, and file significance scores.
  */
 
+import { setPriority } from 'node:os';
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { mkdir, readFile, open as openFile } from 'node:fs/promises';
@@ -61,6 +62,9 @@ import {
 } from '../../core/analyzer/analysis-indexes.js';
 import { VectorIndexLockContendedError } from '../../core/analyzer/vector-index.js';
 import { readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../../core/runtime/analysis-generation.js';
+
+/** Niceness of the detached local-vector pass (POSIX 0–19; mapped to below-normal on Windows). */
+const BACKGROUND_PRIORITY = 10;
 
 // ============================================================================
 // TYPES
@@ -451,6 +455,9 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       }
 
       if (options.backgroundVectors) {
+        // Nobody waits on this pass, so it yields the CPU to whatever the user is doing. Set
+        // before the embedding pool starts: worker threads inherit it.
+        try { setPriority(BACKGROUND_PRIORITY); } catch { /* not permitted here; run as is */ }
         // Fail-soft and silent: the keyword index keeps serving whatever happens here.
         try {
           await buildBackgroundLocalVectors(rootPath, safeJoin(rootPath, OPENLORE_ANALYSIS_REL_PATH), openloreConfig);

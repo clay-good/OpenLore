@@ -38,9 +38,9 @@ Two problems, one about trust and one about recall.
 
 | Corpus | Queries | recall@5 keyword+vocabulary → local-semantic | MRR | Build |
 |---|---|---|---|---|
-| OpenLore | 26 | 46.2% → 61.5% | 0.369 → 0.467 | 31 s → 438 s |
-| gridprims | 17 | 82.4% → 94.1% | 0.801 → 0.865 | 7 s → 57 s |
-| roughlogic.com | 16 | 43.8% → 50.0% | 0.446 → 0.415 | 19 s → 108 s |
+| OpenLore | 26 | 46.2% → 61.5% | 0.369 → 0.467 (0.442 after the speedup) | 31 s → 438 s (50 s after) |
+| gridprims | 17 | 82.4% → 94.1% | 0.801 → 0.865 | 7 s → 57 s (10 s after) |
+| roughlogic.com | 16 | 43.8% → 50.0% | 0.446 → 0.415 (0.414 after) | 19 s → 108 s (30 s after) |
 | All | 59 | 55.9% → 67.8% (+11.9) | 0.514 → 0.567 | |
 
 Recall@5 is up 11.9 points and up on every corpus, so the threshold is met and the background pass
