@@ -84,7 +84,16 @@ function uniqueTarget(index: TargetIndex, name: string): string | undefined {
   return targets?.size === 1 ? targets.values().next().value : undefined;
 }
 
-function sanitizeForRegex(
+/**
+ * Blank comments — and, unless `preserveStrings`, string and template bodies — while preserving
+ * every character offset and line break, so a regex scan sees only real code and the positions it
+ * reports still refer to the original text. `preserveStrings` keeps double-quoted bodies, which the
+ * scans that must read a quoted path (Go imports) need.
+ *
+ * Exported because the phantom-reference check needs the same notion of "this keyword is really
+ * code, not an example inside a string" (change: add-phantom-reference-findings).
+ */
+export function sanitizeForRegex(
   content: string,
   preserveStrings: boolean,
   nestedBlockComments = false,

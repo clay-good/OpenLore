@@ -33,12 +33,13 @@
  * accounts for.
  */
 
+import { readdir } from 'node:fs/promises';
 import { basename, join, posix, relative, resolve, sep } from 'node:path';
 import {
   ImportExportParser, extractsExports, parseJSImports, parsePythonImports, resolveImport,
   type ImportInfo,
 } from '../analyzer/import-parser.js';
-import { goImportSpecs } from '../analyzer/import-resolver-bridge.js';
+import { goImportSpecs, sanitizeForRegex } from '../analyzer/import-resolver-bridge.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { languageSupport } from '../analyzer/language-support.js';
 import {
@@ -48,6 +49,8 @@ import {
 import { ECOSYSTEM_LOCKFILES, pinnedNames, pinsPackage } from '../analyzer/lockfile-pins.js';
 import { ecosystemOfLanguage, isRelativeSpecifier, isStdlibSpecifier, packageNameOf } from '../analyzer/stdlib-modules.js';
 import { readFileConfined } from '../../utils/path-confinement.js';
+import { validateGitRef } from '../drift/git-diff.js';
+import { readBlobsAtRef, readBlobsPerFile } from '../../utils/git-blobs.js';
 import { execFileGit } from '../../utils/git-exec.js';
 import { emittedText } from './generated-file-guard.js';
 import type { GovernanceFinding } from './mcp-handlers/enforcement-policy.js';
@@ -57,15 +60,42 @@ const SOURCE = 'phantom-references';
 
 /** Bounds. A diff is small; these stop a hostile or generated one from doing unbounded work. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+/** Configuration files are read for alias patterns only; a larger one is not worth scanning. */
+const MAX_CONFIG_BYTES = 256 * 1024;
 const MAX_FILES = 400;
 const MAX_ADDED_REFERENCES = 600;
 const MAX_REEXPORT_DEPTH = 4;
 const MAX_CANDIDATES = 3;
+/** Bounds on workspace-member discovery: a glob is expanded over directories, never the whole tree. */
+const WORKSPACE_SCAN_DEPTH = 3;
+const MAX_WORKSPACE_PATTERNS = 20;
+const MAX_WORKSPACE_MEMBERS = 200;
 /** The shortest shared prefix that makes a name worth offering as a candidate. */
 const MIN_CANDIDATE_PREFIX = 3;
 
 /** A specifier that names an alias the resolver does not read (so it is disclosed, never reported). */
 const BARE_ALIAS_PREFIX = /^(?:@\/|~\/|~$|#)/;
+
+/**
+ * Extensions a JS/TS module specifier may resolve to. The resolver's own default omits `.d.ts`, so
+ * a declaration-only module would read as a missing file. Only this family's list is overridden:
+ * the resolver picks the extensions per language, and passing these for a Python file would stop
+ * `.py` from resolving at all.
+ */
+const JS_MODULE_EXTENSIONS = ['.ts', '.d.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.json'];
+
+/** The extension override for a file, or undefined to leave the resolver's own default in place. */
+function extensionsFor(fromFile: string): string[] | undefined {
+  return /\.(?:[cm]?[jt]sx?)$/i.test(fromFile) ? JS_MODULE_EXTENSIONS : undefined;
+}
+
+/**
+ * A specifier as the resolver should see it: a bundler query or fragment (`./a?raw`, `./w.wasm?url`)
+ * names the same file with a loader attached, so it is dropped before resolution.
+ */
+function resolvableSpecifier(specifier: string): string {
+  return specifier.replace(/[?#].*$/, '');
+}
 
 // ============================================================================
 // ADDED REFERENCES (pure)
@@ -150,6 +180,28 @@ export interface NotAssessed {
   reason: string;
 }
 
+/**
+ * A disclosure is repository content too — it carries specifiers and paths — and it reaches an agent
+ * through `verify_change`'s boundaries exactly as a finding's message does, so it is screened the
+ * same way.
+ */
+function notAssessedEntry(file: string, reason: string): NotAssessed {
+  return { file: emittedText(file), reason: emittedText(reason) };
+}
+
+/**
+ * One unresolved reference as a FACT: the briefing carries these, while the enforcement-classified
+ * findings belong to `verify_change`, which holds the operator's policy.
+ */
+export interface PhantomReferenceFact {
+  code: string;
+  /** The file holding the reference. */
+  path: string;
+  line?: number;
+  /** The specifier, or `specifier#name`, the finding is about. */
+  subject: string;
+}
+
 export interface PhantomReferenceResult {
   findings: GovernanceFinding[];
   /** Files whose references were not checked, each with the reason. */
@@ -160,9 +212,59 @@ export interface PhantomReferenceResult {
   summary: { filesChecked: number; referencesChecked: number };
 }
 
+/** The findings as facts, for a briefing that carries no policy. */
+export function phantomReferenceFacts(result: PhantomReferenceResult): PhantomReferenceFact[] {
+  return result.findings.map(f => ({
+    code: f.code,
+    path: f.location?.path ?? '',
+    ...(f.location?.line ? { line: f.location.line } : {}),
+    subject: f.subject,
+  }));
+}
+
 // ============================================================================
 // FILE READING
 // ============================================================================
+
+/**
+ * Base-revision contents of many paths at once, falling back to per-file reads when the batch read
+ * refuses (an old git, a protocol or size violation). An empty map is a valid answer: every path is
+ * then read individually.
+ */
+async function baseRevisions(root: string, ref: string, paths: readonly string[]): Promise<Map<string, string>> {
+  if (paths.length === 0) return new Map();
+  try {
+    validateGitRef(ref);
+  } catch {
+    return new Map();
+  }
+  try {
+    return await readBlobsAtRef(root, ref, paths);
+  } catch {
+    try {
+      return await readBlobsPerFile(root, ref, paths);
+    } catch {
+      return new Map();
+    }
+  }
+}
+
+/** Directories under `base`, repo-relative to it, to a bounded depth. */
+async function listDirectories(base: string, depth: number): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (dir: string, rel: string, left: number): Promise<void> => {
+    if (left === 0 || out.length > MAX_WORKSPACE_MEMBERS * 4) return;
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue;
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      out.push(childRel);
+      await walk(join(dir, e.name), childRel, left - 1);
+    }
+  };
+  await walk(base, '', depth);
+  return out;
+}
 
 /** Current content of a repository file; null when it cannot be read as text. */
 async function readHead(root: string, rel: string): Promise<string | null> {
@@ -174,10 +276,24 @@ async function readHead(root: string, rel: string): Promise<string | null> {
 }
 
 /**
+ * A file read that tells absent from unreadable. A manifest that exists but cannot be read must not
+ * be mistaken for one that declares nothing — that is how a hostile or merely huge manifest would
+ * turn correct imports into findings.
+ */
+async function readOrFail(root: string, rel: string): Promise<{ kind: 'text'; text: string } | { kind: 'absent' } | { kind: 'unreadable' }> {
+  try {
+    return { kind: 'text', text: await readFileConfined(root, rel, MAX_FILE_BYTES) };
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? { kind: 'absent' } : { kind: 'unreadable' };
+  }
+}
+
+/**
  * Content of a file at a git ref. `absent` means the ref does not have it (an added file);
  * `unreadable` is any other failure, which is a different claim and is disclosed.
  */
 async function readAtRef(root: string, ref: string, repoPath: string): Promise<string | { absent: boolean }> {
+  validateGitRef(ref);
   const spec = `${ref}:${repoPath}`;
   try {
     await execFileGit('git', ['cat-file', '-e', spec], { cwd: root });
@@ -249,10 +365,13 @@ function declaredFrom(manifest: string, text: string, ecosystem: PackageEcosyste
 
 /** Alias patterns a tsconfig/jsconfig declares, plus package.json subpath imports. */
 function aliasesFrom(manifest: string, text: string): string[] {
+  if (text.length > MAX_CONFIG_BYTES) return [];
   try {
-    // Comments and trailing commas are legal in tsconfig; strip them before parsing.
+    // Comments and trailing commas are legal in tsconfig. The comments go through the shared linear
+    // scanner — a regex strip is quadratic on a file full of unterminated `/*`, which is a text file
+    // a repository can simply commit.
     const json = basename(manifest).startsWith('tsconfig') || basename(manifest).startsWith('jsconfig')
-      ? text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/,(\s*[}\]])/g, '$1')
+      ? sanitizeForRegex(text, true).replace(/,(\s*[}\]])/g, '$1')
       : text;
     const doc = JSON.parse(json) as {
       compilerOptions?: { paths?: Record<string, unknown> };
@@ -264,16 +383,38 @@ function aliasesFrom(manifest: string, text: string): string[] {
   }
 }
 
-/** npm workspace globs and the package's own name, from a package.json. */
-function workspaceNamesFrom(text: string): string[] {
+/** A package.json's own name, and the workspace globs it declares members under. */
+export function workspaceDeclaration(text: string): { name: string | null; patterns: string[] } {
   try {
     const doc = JSON.parse(text) as { name?: unknown; workspaces?: unknown };
-    const out: string[] = [];
-    if (typeof doc.name === 'string') out.push(doc.name);
-    return out;
+    const raw = Array.isArray(doc.workspaces)
+      ? doc.workspaces
+      : (doc.workspaces as { packages?: unknown } | undefined)?.packages;
+    return {
+      name: typeof doc.name === 'string' ? doc.name : null,
+      patterns: (Array.isArray(raw) ? raw : []).filter((p): p is string => typeof p === 'string'),
+    };
   } catch {
-    return [];
+    return { name: null, patterns: [] };
   }
+}
+
+/**
+ * Directories a workspace glob names, resolved against the directories that exist. Only the
+ * `packages/*` shape workspaces actually use is expanded — a single trailing `*` or `**`.
+ */
+function expandWorkspacePattern(pattern: string, directories: readonly string[]): string[] {
+  const clean = pattern.replace(/\/+$/, '');
+  const star = clean.indexOf('*');
+  if (star === -1) return [clean];
+  const head = clean.slice(0, star).replace(/\/+$/, '');
+  const deep = clean.slice(star).startsWith('**');
+  return directories.filter(d => {
+    if (head && !d.startsWith(head + '/')) return false;
+    if (!head && d === '') return false;
+    const rest = head ? d.slice(head.length + 1) : d;
+    return deep ? rest.length > 0 : rest.length > 0 && !rest.includes('/');
+  });
 }
 
 /**
@@ -292,6 +433,29 @@ class ScopeReader {
   }>();
 
   constructor(private readonly root: string) {}
+
+  /** The names declared by the member manifests a workspace's globs name. */
+  private async workspaceMembers(dir: string, patterns: readonly string[]): Promise<string[]> {
+    if (patterns.length === 0) return [];
+    const base = dir ? join(this.root, dir) : this.root;
+    let directories: string[];
+    try {
+      directories = await listDirectories(base, WORKSPACE_SCAN_DEPTH);
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    for (const pattern of patterns.slice(0, MAX_WORKSPACE_PATTERNS)) {
+      for (const member of expandWorkspacePattern(pattern, directories).slice(0, MAX_WORKSPACE_MEMBERS)) {
+        const manifest = member ? `${dir ? `${dir}/` : ''}${member}/package.json` : `${dir}/package.json`;
+        const text = await readHead(this.root, manifest);
+        if (text === null) continue;
+        const name = workspaceDeclaration(text).name;
+        if (name) out.push(name);
+      }
+    }
+    return out;
+  }
 
   async scopeFor(fileRel: string): Promise<ManifestScope> {
     const scope: ManifestScope = {
@@ -329,9 +493,16 @@ class ScopeReader {
 
     for (const { name, ecosystem } of MANIFEST_KINDS) {
       const path = at(name);
-      const text = await readHead(this.root, path);
-      if (text === null) continue;
+      const read = await readOrFail(this.root, path);
+      if (read.kind === 'absent') continue;
       entry.manifests.push({ path, ecosystem });
+      if (read.kind === 'unreadable') {
+        // Present but unreadable (over the size bound, not a regular file, permission denied): the
+        // ecosystem cannot be judged, and treating it as "declares nothing" would invent findings.
+        entry.failed.push(path);
+        continue;
+      }
+      const text = read.text;
       try {
         entry.declared.push({ ecosystem, names: declaredFrom(path, text, ecosystem) });
       } catch {
@@ -339,7 +510,13 @@ class ScopeReader {
       }
       if (name === 'package.json') {
         entry.aliasPatterns.push(...aliasesFrom(path, text));
-        entry.workspaceNames.push(...workspaceNamesFrom(text));
+        const declaration = workspaceDeclaration(text);
+        if (declaration.name) entry.workspaceNames.push(declaration.name);
+        // A sibling workspace member's name is internal too, so the members are read here rather
+        // than only on the path from the file to the root.
+        for (const member of await this.workspaceMembers(dir, declaration.patterns)) {
+          entry.workspaceNames.push(member);
+        }
       }
       if (name === 'go.mod') {
         const m = /^module\s+(\S+)/m.exec(text);
@@ -373,6 +550,18 @@ function matchesAlias(specifier: string, patterns: readonly string[]): boolean {
 // ============================================================================
 // EXPORT ORACLE
 // ============================================================================
+
+/**
+ * Export forms `parseJSExports` does not enumerate. A module using one of them may well export the
+ * name asked for, so it is treated as opaque: no missing-name claim is made about it.
+ */
+const UNENUMERABLE_EXPORTS = [
+  /\bmodule\.exports\b/,          // CommonJS object assignment
+  /\bexports\.[A-Za-z_$]/,         // CommonJS property assignment
+  /^export\s*=/m,                  // TypeScript `export =`
+  /^export\s+(?:declare|namespace)\b/m,
+  /^export\s+(?:const|let|var)\s*[{[]/m, // destructured export
+];
 
 /** What a module exports, read from its current content. */
 interface ModuleExports {
@@ -410,7 +599,9 @@ class ExportReader {
     if (text === null) return null;
     const analysis = this.parser.parseContent(join(this.root, rel), text);
     const names = new Set<string>();
-    let opaque = false;
+    // An export form this reader cannot enumerate could be the name's source, so nothing is claimed
+    // missing from this module.
+    let opaque = UNENUMERABLE_EXPORTS.some(re => re.test(text));
     for (const e of analysis.exports) {
       if (!e.isReExport) { names.add(e.name); continue; }
       // `export { a } from './x'` names `a` here; `export * from './x'` names nothing itself.
@@ -429,7 +620,10 @@ class ExportReader {
   /** A re-export's target, as a repo-relative path; null when it is external or unresolvable. */
   private async resolveTarget(fromRel: string, specifier: string): Promise<string | null> {
     if (!isRelativeSpecifier(specifier) && !specifier.startsWith('.')) return null;
-    const abs = await resolveImport(specifier, join(this.root, fromRel), { baseDir: this.root });
+    const extensions = extensionsFor(fromRel);
+    const abs = await resolveImport(resolvableSpecifier(specifier), join(this.root, fromRel), {
+      baseDir: this.root, ...(extensions ? { extensions } : {}),
+    });
     if (!abs) return null;
     const rel = relative(this.root, abs).split(sep).join('/');
     return rel && !rel.startsWith('..') ? rel : null;
@@ -494,6 +688,11 @@ export async function checkPhantomReferences(
   if (sources.length > MAX_FILES) {
     boundaries.push(`Reference checking covered the first ${MAX_FILES} of ${sources.length} changed source files.`);
   }
+  const checked = sources.slice(0, MAX_FILES);
+  // Every base revision in one `git cat-file --batch` rather than two spawns per file: the spawns
+  // dominate the check on a large diff. A path the batch does not return is read on its own below,
+  // where absent and unreadable can still be told apart.
+  const baseBlobs = await baseRevisions(absRoot, baseRef, checked.filter(f => f.status !== 'added').map(f => prefix + f.path));
   const aliasesSkipped = new Set<string>();
   const dynamicSkipped = new Set<string>();
   const ecosystemsWithoutManifest = new Set<PackageEcosystem>();
@@ -501,20 +700,25 @@ export async function checkPhantomReferences(
   let referencesChecked = 0;
   let filesChecked = 0;
 
-  for (const file of sources.slice(0, MAX_FILES)) {
+  let capped = false;
+  for (const file of checked) {
+    if (capped) break;
     const headText = await readHead(absRoot, file.path);
     if (headText === null) {
-      notAssessed.push({ file: file.path, reason: 'the file could not be read as text' });
+      notAssessed.push(notAssessedEntry(file.path, 'the file could not be read as text'));
       continue;
     }
-    const baseText = file.status === 'added' ? { absent: true } : await readAtRef(absRoot, baseRef, prefix + file.path);
+    const batched = baseBlobs.get(prefix + file.path);
+    const baseText = file.status === 'added'
+      ? { absent: true }
+      : batched ?? await readAtRef(absRoot, baseRef, prefix + file.path);
     if (typeof baseText !== 'string' && !baseText.absent) {
-      notAssessed.push({ file: file.path, reason: `the base revision of the file could not be read, so its added references are unknown` });
+      notAssessed.push(notAssessedEntry(file.path, `the base revision of the file could not be read, so its added references are unknown`));
       continue;
     }
     const headImports = extractImports(file.path, headText);
     if (headImports === null) {
-      notAssessed.push({ file: file.path, reason: `this check cannot read ${detectLanguage(file.path)} imports` });
+      notAssessed.push(notAssessedEntry(file.path, `this check cannot read ${detectLanguage(file.path)} imports`));
       continue;
     }
     const baseImports = typeof baseText === 'string' ? extractImports(file.path, baseText) : null;
@@ -522,7 +726,9 @@ export async function checkPhantomReferences(
 
     for (const ref of addedReferences(file.path, baseImports, headImports)) {
       if (referencesChecked >= MAX_ADDED_REFERENCES) {
-        boundaries.push(`Reference checking stopped at ${MAX_ADDED_REFERENCES} added references; later ones were not checked.`);
+        // The cap bounds the whole check, not one file: going on would spend the expensive part on
+        // every remaining file and say so once per file.
+        capped = true;
         break;
       }
       referencesChecked++;
@@ -551,7 +757,7 @@ export async function checkPhantomReferences(
 
       // ── External: a bare specifier ──────────────────────────────────────────
       if (ecosystem === null) {
-        notAssessed.push({ file: ref.file, reason: `'${ref.specifier}': this language has no manifest the check can read` });
+        notAssessed.push(notAssessedEntry(ref.file, `'${ref.specifier}': this language has no manifest the check can read`));
         continue;
       }
       if (isStdlibSpecifier(ecosystem, ref.specifier)) continue;
@@ -567,8 +773,10 @@ export async function checkPhantomReferences(
       if (internalGo !== null) {
         // An import under the module's own path names a directory in this repository.
         if (corpus.size === 0) continue;
-        const present = [...corpus].some(f => posix.dirname(f) === internalGo || f.startsWith(internalGo + '/'))
-          || (await readHead(absRoot, internalGo)) !== null;
+        // `''` is the module root itself, which exists by definition.
+        const present = internalGo === ''
+          || [...corpus].some(f => posix.dirname(f) === internalGo || f.startsWith(internalGo + '/'))
+          || (await readOrFail(absRoot, internalGo)).kind !== 'absent';
         if (!present) {
           findings.push(finding(
             'unresolved-internal-import', 'error', ref.specifier,
@@ -582,11 +790,11 @@ export async function checkPhantomReferences(
       const manifests = scope.manifests.filter(m => m.ecosystem === ecosystem);
       if (manifests.length === 0) {
         ecosystemsWithoutManifest.add(ecosystem);
-        notAssessed.push({ file: ref.file, reason: `'${ref.specifier}': no ${ecosystem} manifest in scope declares dependencies` });
+        notAssessed.push(notAssessedEntry(ref.file, `'${ref.specifier}': no ${ecosystem} manifest in scope declares dependencies`));
         continue;
       }
       if (scope.failed.some(f => manifests.some(m => m.path === f))) {
-        notAssessed.push({ file: ref.file, reason: `'${ref.specifier}': a manifest in scope did not parse` });
+        notAssessed.push(notAssessedEntry(ref.file, `'${ref.specifier}': a manifest in scope did not parse`));
         continue;
       }
       const declared = scope.declared.get(ecosystem) ?? new Set<string>();
@@ -612,6 +820,9 @@ export async function checkPhantomReferences(
     }
   }
 
+  if (capped) {
+    boundaries.push(`Reference checking stopped at ${MAX_ADDED_REFERENCES} added references; later files were not checked.`);
+  }
   if (aliasesSkipped.size) {
     boundaries.push(`Path aliases are not resolved, so these were not checked: ${[...aliasesSkipped].sort().slice(0, 10).map(emittedText).join(', ')}.`);
   }
@@ -619,7 +830,7 @@ export async function checkPhantomReferences(
     boundaries.push(`Dynamic imports with a computed specifier were not checked (${dynamicSkipped.size} file${dynamicSkipped.size === 1 ? '' : 's'}).`);
   }
   if (manifestsFailed.size) {
-    boundaries.push(`These manifests did not parse, so their ecosystem was not judged: ${[...manifestsFailed].sort().map(emittedText).join(', ')}.`);
+    boundaries.push(`These manifests could not be read or parsed, so their ecosystem was not judged: ${[...manifestsFailed].sort().slice(0, 10).map(emittedText).join(', ')}.`);
   }
   if (corpus.size === 0) {
     boundaries.push('The index was not consulted for this check; imports were resolved against the working tree alone.');
@@ -632,15 +843,20 @@ export async function checkPhantomReferences(
     if (ref.wholeModule || ref.names.length === 0) return;
     const available = await exports.exportsOf(target);
     if (!available) {
-      notAssessed.push({ file: ref.file, reason: `'${ref.specifier}': the target module's exports could not be parsed` });
+      notAssessed.push(notAssessedEntry(ref.file, `'${ref.specifier}': the target module's exports could not be parsed`));
       return;
     }
     if (available.opaque) {
-      notAssessed.push({ file: ref.file, reason: `'${ref.specifier}': the target re-exports from somewhere this check cannot follow, so a missing name cannot be proven` });
+      notAssessed.push(notAssessedEntry(ref.file, `'${ref.specifier}': the target re-exports from somewhere this check cannot follow, so a missing name cannot be proven`));
       return;
     }
     for (const name of ref.names) {
       if (available.names.has(name)) continue;
+      // `from pkg import sub` names a MODULE when `pkg/sub.py` exists, not a symbol of `__init__.py`.
+      // `from . import sub` writes the submodule as `.sub`, not `..sub`.
+      const submodule = ref.specifier.endsWith('.') ? `${ref.specifier}${name}` : `${ref.specifier}.${name}`;
+      if (ecosystemOfLanguage(detectLanguage(ref.file)) === 'pypi'
+        && await resolveInternal(absRoot, ref.file, submodule, 'pypi')) continue;
       const candidates = prefixCandidates(name, available.names);
       findings.push(finding(
         'unresolved-internal-symbol', 'error', `${ref.specifier}#${name}`,
@@ -649,6 +865,52 @@ export async function checkPhantomReferences(
       ));
     }
   }
+}
+
+/**
+ * Imports whose statement really is code. The import scanners are regex-based over comment-blanked
+ * text, so example source inside a string or a template literal — a test fixture, a codegen
+ * template, a documentation snippet — is read as an import of its own. Sanitizing blanks string and
+ * template bodies while preserving every line break, so an import whose keyword no longer survives
+ * on its line came from inside a string and is dropped.
+ */
+function realCodeOnly(content: string, imports: ImportInfo[]): ImportInfo[] {
+  if (imports.length === 0) return imports;
+  const masked = sanitizeForRegex(content, false).split('\n');
+  return imports.filter(imp => {
+    const line = masked[imp.line - 1];
+    return line === undefined || /\b(?:import|require|export|from)\b/.test(line);
+  });
+}
+
+/**
+ * Re-export statements as imports: `export { a, b } from './x'` reads `a` and `b` from `./x`, and
+ * `export * from './x'` reads the module as a whole. Written as one scan so the names and the line
+ * come from the same place the import parser would give them.
+ */
+export function reExportsAsImports(content: string): ImportInfo[] {
+  const out: ImportInfo[] = [];
+  const lines = content.split('\n');
+  const push = (source: string, names: string[], wholeModule: boolean, line: number) => {
+    out.push({
+      source, isRelative: source.startsWith('.'), isPackage: !source.startsWith('.'), isBuiltin: false,
+      importedNames: names, importedSourceNames: names,
+      hasDefault: false, hasNamespace: wholeModule, isTypeOnly: false, isDynamic: false, line,
+    });
+  };
+  for (const [index, raw] of lines.entries()) {
+    const line = raw.replace(/\r$/, '');
+    const star = /^\s*export\s+\*(?:\s+as\s+[A-Za-z_$][\w$]*)?\s+from\s*["']([^"']+)["']/.exec(line);
+    if (star) { push(star[1], [], true, index + 1); continue; }
+    const named = /^\s*export\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(line);
+    if (!named) continue;
+    const names = named[1].split(',')
+      // `export { a as b } from` reads `a` from the target, not `b`.
+      .map(part => part.trim().split(/\s+as\s+/)[0].trim())
+      .filter(n => n.length > 0 && n !== 'default');
+    push(named[2], names, names.length === 0, index + 1);
+  }
+  return out;
 }
 
 /** Whether a file's language has import support in the language-support matrix. */
@@ -665,9 +927,11 @@ export function extractImports(filePath: string, content: string): ImportInfo[] 
   switch (detectLanguage(filePath)) {
     case 'TypeScript':
     case 'JavaScript':
-      return parseJSImports(content);
+      // A re-export (`export { x } from './y'`) reads a module exactly as an import does, so it is
+      // one of the references a hallucinated barrel gets wrong.
+      return realCodeOnly(content, [...parseJSImports(content), ...reExportsAsImports(content)]);
     case 'Python':
-      return parsePythonImports(content);
+      return realCodeOnly(content, parsePythonImports(content));
     case 'Go':
       // Go imports a PACKAGE path, so it binds no names this check could verify against a file.
       return goImportSpecs(content).map(spec => ({
@@ -700,7 +964,10 @@ async function resolveInternal(
   if (!isRelativeSpecifier(specifier) && !specifier.startsWith('.') && ecosystem !== 'pypi') return null;
   let abs: string | null;
   try {
-    abs = await resolveImport(specifier, join(absRoot, fromRel), { baseDir: absRoot });
+    const extensions = extensionsFor(fromRel);
+    abs = await resolveImport(resolvableSpecifier(specifier), join(absRoot, fromRel), {
+      baseDir: absRoot, ...(extensions ? { extensions } : {}),
+    });
   } catch {
     return null;
   }
@@ -712,7 +979,7 @@ async function resolveInternal(
 /** Corpus paths near an unresolved relative import: same directory, or the same file name. */
 function pathCandidates(absRoot: string, fromRel: string, specifier: string, corpus: ReadonlySet<string>): string[] {
   if (corpus.size === 0) return [];
-  const attempted = posix.normalize(posix.join(posix.dirname(fromRel), specifier));
+  const attempted = posix.normalize(posix.join(posix.dirname(fromRel), resolvableSpecifier(specifier)));
   const wantedDir = posix.dirname(attempted);
   const wantedBase = basename(attempted).replace(/\.[^.]+$/, '');
   const out = new Set<string>();
@@ -773,6 +1040,10 @@ async function unpinnedIn(
   pkg: string,
 ): Promise<string | null> {
   const dir = posix.dirname(manifest.path);
+  // A repository may hold several lockfiles (a stale `package-lock.json` beside a live
+  // `pnpm-lock.yaml`), and any one of them pinning the package settles it. Only when EVERY
+  // parseable lockfile lacks it is there something to report.
+  const missing: string[] = [];
   for (const name of ECOSYSTEM_LOCKFILES[ecosystem]) {
     const path = dir === '.' || dir === '' ? name : `${dir}/${name}`;
     const text = await readHead(absRoot, path);
@@ -780,9 +1051,9 @@ async function unpinnedIn(
     const pins = pinnedNames(name, text);
     if (pins === null) continue; // unparseable: no claim
     if (pinsPackage(ecosystem, pins, pkg)) return null;
-    return path;
+    missing.push(path);
   }
-  return null;
+  return missing.length ? missing.join(', ') : null;
 }
 
 /** The finding codes this module emits, as registered in the finding-code catalogue. */

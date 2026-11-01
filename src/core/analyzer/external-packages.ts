@@ -39,9 +39,13 @@ export function parseNpmManifest(text: string): ExternalPackage[] {
     optionalDependencies?: Record<string, string>;
   };
   const out: ExternalPackage[] = [];
+  // Membership through a Set: a scan of `out` per entry is quadratic, and a manifest's dependency
+  // count is repository-controlled.
+  const seen = new Set<string>();
   const add = (entries: Record<string, string> | undefined, isDev: boolean, onlyNew = false) => {
     for (const [name, version] of Object.entries(entries ?? {})) {
-      if (onlyNew && out.some(p => p.name === name)) continue;
+      if (onlyNew && seen.has(name)) continue;
+      seen.add(name);
       out.push({ name, version, ecosystem: 'npm', isDev });
     }
   };

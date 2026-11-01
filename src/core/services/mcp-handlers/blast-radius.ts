@@ -20,8 +20,10 @@
 
 import type { ChangedFile } from '../../../types/index.js';
 import { guardDiff, type DiffGuardResult, type GeneratedFileFact } from '../generated-file-guard.js';
-import { checkPhantomReferences, type PhantomReferenceResult } from '../phantom-references.js';
-import type { GovernanceFinding } from './enforcement-policy.js';
+import {
+  checkPhantomReferences, phantomReferenceFacts,
+  type PhantomReferenceFact, type PhantomReferenceResult,
+} from '../phantom-references.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
 import { loadDecisionStore } from '../../decisions/store.js';
@@ -241,7 +243,7 @@ export interface BlastRadiusBriefing {
    * export, an undeclared or unpinned package (change: add-phantom-reference-findings). Absent when
    * every added reference resolved.
    */
-  phantomReferences?: { count: number; findings: GovernanceFinding[]; notAssessed: number };
+  phantomReferences?: { count: number; unresolved: PhantomReferenceFact[]; notAssessed: number };
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -487,7 +489,7 @@ export async function computeBlastRadius(
       new Set((cg.nodes ?? []).map(n => n.filePath).filter((f): f is string => typeof f === 'string')),
     );
     hooks.references?.(references);
-    if (references.boundaries.length) referencesNote = references.boundaries.join(' ');
+    if (references.boundaries.length) referencesNote = [...new Set(references.boundaries)].join(' ');
   } catch (err) {
     referencesNote = `Added references could not be checked: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -629,8 +631,16 @@ export async function computeBlastRadius(
     federation,
     ...memoryInjection,
     ...(generated.length ? { generated } : {}),
+    // Facts, not findings: an operator's enforcement policy is applied by verify_change, which owns
+    // it, so this briefing never reports a code the policy switched off as if it were live.
     ...(references && references.findings.length
-      ? { phantomReferences: { count: references.findings.length, findings: references.findings, notAssessed: references.notAssessed.length } }
+      ? {
+          phantomReferences: {
+            count: references.findings.length,
+            unresolved: phantomReferenceFacts(references),
+            notAssessed: references.notAssessed.length,
+          },
+        }
       : {}),
     headline: '',
     posture: 'advisory',

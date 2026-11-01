@@ -20,7 +20,7 @@
 
 import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js';
 import { handleStructuralDiff } from './structural-diff.js';
-import { validateDirectory } from './utils.js';
+import { validateDirectory, readCachedContext } from './utils.js';
 import { guardDiff, type DiffGuardResult } from '../generated-file-guard.js';
 import { checkPhantomReferences, type PhantomReferenceResult } from '../phantom-references.js';
 import { readOpenLoreConfig } from '../config-manager.js';
@@ -233,6 +233,17 @@ export function projectVerifyReceipt(
   };
 }
 
+/** File paths the index knows, for the reference check's candidates; empty when it is unavailable. */
+async function corpusFiles(directory: string): Promise<string[]> {
+  try {
+    const ctx = await readCachedContext(await validateDirectory(directory));
+    const nodes = (ctx?.callGraph as { nodes?: Array<{ filePath?: unknown }> } | undefined)?.nodes ?? [];
+    return nodes.map(n => n.filePath).filter((f): f is string => typeof f === 'string');
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Build the ordered verification receipt for a diff. Returns a conclusion-shaped object; a failed
  * blast-radius computation (e.g. an unresolvable base) is returned as an error, not a partial pass.
@@ -253,7 +264,12 @@ export async function handleVerifyChange(
   const b = briefing as BlastRadiusBriefing;
   let references: PhantomReferenceResult | { error: string };
   try {
-    references = sharedRefs ?? await checkPhantomReferences(await validateDirectory(input.directory), b.resolvedBaseRef);
+    references = sharedRefs ?? await checkPhantomReferences(
+      await validateDirectory(input.directory), b.resolvedBaseRef, undefined,
+      // The same corpus blast_radius passes, so candidate paths and the Go package check behave the
+      // same on this fallback path as on the shared one.
+      await corpusFiles(input.directory),
+    );
   } catch (err) {
     references = { error: err instanceof Error ? err.message : String(err) };
   }
