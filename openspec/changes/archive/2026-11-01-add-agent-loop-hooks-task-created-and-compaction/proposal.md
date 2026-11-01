@@ -1,6 +1,7 @@
 # Agent-loop hooks, part 6: task creation, Pi compaction, Codex sub-agents
 
-> Status: PROPOSED (2026-11-01). Split from `add-agent-loop-hooks-pi-and-task-created`, which
+> Status: SHIPPED (2026-11-01), Pi compaction only; the rest moved to
+> `add-agent-loop-hooks-task-created`. Split from `add-agent-loop-hooks-pi-and-task-created`, which
 > shipped the Pi after-edit receipt.
 
 ## Why

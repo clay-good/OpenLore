@@ -91,3 +91,62 @@ describe('Pi agent-loop receipt on tool results', () => {
     expect(await quiet({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx(root))).toBeUndefined();
   });
 });
+
+describe('Pi handoff after a compaction', () => {
+  function register(run: (moment: string, payload: Record<string, unknown>, cwd: string, signal?: AbortSignal) => Promise<string | undefined>) {
+    const handlers = new Map<string, Handler>();
+    const pi = { registerTool: vi.fn(), registerCommand: vi.fn(), sendMessage: vi.fn(), on: vi.fn((e: string, h: Handler) => { handlers.set(e, h); }) } as unknown as ExtensionAPI;
+    createPiExtension({ runLoopMoment: run })(pi);
+    return { compact: handlers.get('session_compact')!, start: handlers.get('before_agent_start')!, shutdown: handlers.get('session_shutdown')! };
+  }
+  const startEvent = { type: 'before_agent_start', prompt: 'next', systemPrompt: 'base', messageType: 'user' };
+
+  it('compaction is not held open; the next turn carries the latest briefing once, hidden in the transcript', async () => {
+    const root = repo({ 'a.ts': 'x\n' });
+    let n = 0;
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    const h = register(async (moment, payload) => { seen.push([moment, payload]); n++; return `handoff ${n}`; });
+    expect(h.compact({ type: 'session_compact', reason: 'manual', willRetry: false }, ctx(root))).toBeUndefined();
+    h.compact({ type: 'session_compact', reason: 'manual', willRetry: false }, ctx(root));
+    expect(seen[0]).toEqual(['after-compact', { session_id: 'pi-s1', cwd: root, hook_event_name: 'SessionStart', source: 'compact' }]);
+    const first = await h.start(startEvent, ctx(root)) as { message?: { customType: string; content: string; display: boolean } };
+    // Two compactions before a prompt: only the latest briefing.
+    expect(first.message).toEqual({ customType: 'openlore-handoff', content: 'handoff 2', display: false });
+    expect(await h.start(startEvent, ctx(root))).toBeUndefined();
+  });
+
+  it('a briefing still computing at the next turn is given on a later turn; shutdown stops it', async () => {
+    const root = repo({ 'a.ts': 'x\n' });
+    let release: (v: string) => void = () => {};
+    let aborted = false;
+    const h = register((_m, _p, _c, signal) => { signal?.addEventListener('abort', () => { aborted = true; }); return new Promise<string>(r => { release = r; }); });
+    h.compact({ type: 'session_compact' }, ctx(root));
+    vi.useFakeTimers();
+    const pending = h.start(startEvent, ctx(root));
+    await vi.advanceTimersByTimeAsync(2_500);
+    vi.useRealTimers();
+    expect(await pending).toBeUndefined();
+    release('late briefing');
+    expect((await h.start(startEvent, ctx(root)) as { message: { content: string } }).message.content).toBe('late briefing');
+    h.compact({ type: 'session_compact' }, ctx(root));
+    h.shutdown({ type: 'session_shutdown', reason: 'quit' }, ctx(root));
+    expect(aborted).toBe(true);
+  });
+
+  it('no project, json mode, hooks.after-compact off, or a silent hook: nothing is added', async () => {
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), 'olpi-plain-')));
+    dirs.push(plain);
+    execFileSync('git', ['init', '-q'], { cwd: plain, env: GIT_ENV });
+    const run = vi.fn(async () => 'x');
+    const a = register(run);
+    a.compact({ type: 'session_compact' }, ctx(plain));
+    a.compact({ type: 'session_compact' }, ctx(repo({ 'a.ts': 'x\n' }), 'json'));
+    const off = repo({ '.openlore/config.json': JSON.stringify({ hooks: { 'after-compact': false } }) });
+    a.compact({ type: 'session_compact' }, ctx(off));
+    expect(run).not.toHaveBeenCalled();
+    const b = register(async () => undefined);
+    const root = repo({ 'a.ts': 'x\n' });
+    b.compact({ type: 'session_compact' }, ctx(root));
+    expect(await b.start(startEvent, ctx(root))).toBeUndefined();
+  });
+});

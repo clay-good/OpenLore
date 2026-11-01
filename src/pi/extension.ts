@@ -36,6 +36,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionShutdownEvent,
+  SessionCompactEvent,
   SessionStartEvent,
   ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
@@ -2244,8 +2245,8 @@ export interface PiExtensionRuntime {
   runLoopMoment?: (moment: string, payload: Record<string, unknown>, cwd: string, signal?: AbortSignal) => Promise<string | undefined>;
 }
 
-/** The hook's own after-tools limit, plus node startup and the session reads outside its race. */
-const LOOP_MOMENT_TIMEOUT_MS = 20_000;
+/** Each moment's own limit in the hook, plus node startup and the session reads outside its race. */
+const LOOP_MOMENT_TIMEOUT_MS: Record<string, number> = { 'after-tools': 20_000, 'after-compact': 35_000 };
 const LOOP_MOMENT_MAX_STDOUT = 256 * 1024;
 /** Children at once: a parallel batch of edits must not start one node process per call. */
 const LOOP_MOMENT_CONCURRENCY = 2;
@@ -2315,7 +2316,7 @@ export async function runLoopMomentChild(moment: string, payload: Record<string,
       signal?.removeEventListener('abort', onAbort);
       resolveResult(v);
     };
-    const timer = setTimeout(() => { child?.kill(); done(undefined); }, LOOP_MOMENT_TIMEOUT_MS);
+    const timer = setTimeout(() => { child?.kill(); done(undefined); }, LOOP_MOMENT_TIMEOUT_MS[moment] ?? 20_000);
     timer.unref?.();
     if (signal?.aborted) { done(undefined); return; }
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -2338,6 +2339,17 @@ export async function runLoopMomentChild(moment: string, payload: Record<string,
     child.stdin?.on('error', () => { /* the child exited early */ });
     child.stdin?.end(JSON.stringify(payload));
   }));
+}
+
+/** How long a turn waits for a briefing still being computed (it is otherwise given on a later turn). */
+const HANDOFF_WAIT_MS = 2_000;
+
+/** Whether `hooks.after-compact` is off in this directory's `.openlore/config.json` (no child at all). */
+function handoffDisabled(cwd: string): boolean {
+  try {
+    const cfg = JSON.parse(readFileSync(join(cwd, OPENLORE_DIR, 'config.json'), 'utf8')) as { hooks?: Record<string, unknown> };
+    return cfg?.hooks?.['after-compact'] === false;
+  } catch { return false; }
 }
 
 /** Pi's built-in tools, as the hook payload names them (Claude Code's tool names). */
@@ -2843,6 +2855,9 @@ function registerOpenlore(
     sessionGeneration += 1;
     if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
     if (ctx) setPiStatus(ctx, undefined);
+    // A briefing still computing belongs to this session: stopped, never delivered to the next.
+    pendingHandoff?.abort.abort();
+    pendingHandoff = undefined;
   });
 
   // ── B2: agent-loop receipt after an edit or shell command (change: add-agent-loop-hooks-pi-and-task-created) ──
@@ -2879,11 +2894,44 @@ function registerOpenlore(
     return { content: [...event.content, { type: 'text', text: `\n${text}` }], ...(structured !== undefined ? { structuredContent: structured } : {}) };
   });
 
+  // ── B3: handoff briefing after a compaction (change: add-agent-loop-hooks-task-created-and-compaction) ──
+  // Pi's compaction summary is free text; the in-flight change's computed state is added as a
+  // message for the next turn (custom messages reach the model as context), as Claude Code's
+  // SessionStart `compact` hook does.
+  let pendingHandoff: { text: Promise<string | undefined>; abort: AbortController } | undefined;
+  /** The latest compaction's briefing, when ready within a short wait; kept for a later turn otherwise. */
+  const takeHandoff = async (): Promise<string | undefined> => {
+    const slot = pendingHandoff;
+    if (!slot) return undefined;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<'late'>(r => { timer = setTimeout(() => r('late'), HANDOFF_WAIT_MS); timer.unref?.(); });
+    const text = await Promise.race([slot.text, late]);
+    if (timer) clearTimeout(timer);
+    if (text === 'late') return undefined;
+    if (pendingHandoff === slot) pendingHandoff = undefined;
+    return text;
+  };
+
+  // Pi awaits this handler before it ends the compaction, so the briefing is computed in the
+  // background: one slot, the latest compaction's, delivered by the next before_agent_start.
+  pi.on('session_compact', (_event: SessionCompactEvent, ctx: ExtensionContext): void => {
+    if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    if (!inOpenloreProject(ctx.cwd) || handoffDisabled(ctx.cwd)) return;
+    pendingHandoff?.abort.abort(); // an older compaction's briefing is stale
+    let sessionId: string | undefined;
+    try { sessionId = ctx.sessionManager.getSessionId(); } catch { /* no session id */ }
+    const payload = { ...(sessionId ? { session_id: sessionId } : {}), cwd: ctx.cwd, hook_event_name: 'SessionStart', source: 'compact' };
+    const abort = new AbortController();
+    const text = (runtime.runLoopMoment ?? runLoopMomentChild)('after-compact', payload, ctx.cwd, abort.signal).catch(() => undefined);
+    pendingHandoff = { text, abort };
+  });
+
   // ── C: context injection ──
   // Keep the repository-wide digest opt-in: it is repeated standing context, while the orient tool
   // provides task-specific evidence on demand. Proposal prompts get only a compact instruction.
   pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
     if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    const handoff = await takeHandoff();
 
     const blocks: string[] = [];
     if (await piContextMode(ctx.cwd) === 'full') {
@@ -2908,9 +2956,12 @@ function registerOpenlore(
     const proposalContext = proposalContextForPrompt(proposalPrompt, 'pi');
     if (proposalContext) blocks.push(proposalContext);
 
-    if (blocks.length === 0) return;
+    // The handoff joins the conversation (a custom message reaches the model as context and stays
+    // in the session), not the per-turn system prompt; hidden in the transcript.
+    const message = handoff ? { message: { customType: 'openlore-handoff', content: handoff, display: false } } : {};
+    if (blocks.length === 0) return handoff ? message : undefined;
 
-    return { systemPrompt: event.systemPrompt + '\n\n' + blocks.join('\n\n') };
+    return { systemPrompt: event.systemPrompt + '\n\n' + blocks.join('\n\n'), ...message };
   });
 }
 
