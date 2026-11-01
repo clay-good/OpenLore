@@ -42,10 +42,10 @@ describe('readOpenApi', () => {
     expect(d.basePath).toBe('/v1');
     expect(d.operations.map(o => o.address)).toEqual(['GET /v1/orders', 'GET /v1/orders/{id}', 'POST /v1/orders']);
     const get = d.operations.find(o => o.address === 'GET /v1/orders/{id}')!;
-    expect(get.params).toEqual([{ name: 'id', in: 'path', required: true, type: 'string' }]);
-    expect(get.response?.properties.map(p => `${p.name}:${p.type}`)).toEqual(['id:string', 'status:string{open,shipped}']);
+    expect(get.params).toEqual([{ name: 'id', in: 'path', required: true, type: 'string', hash: expect.any(String) }]);
+    expect(get.response?.properties.map(p => `${p.name}:${p.type}`)).toEqual(['id:string', 'status:string{["\\"open\\"","\\"shipped\\""]}']);
     const post = d.operations.find(o => o.method === 'POST')!;
-    expect(post.body).toEqual({ required: true, assessed: true, properties: [{ name: 'qty', required: false, type: 'integer:int32' }, { name: 'sku', required: true, type: 'string' }] });
+    expect(post.body).toMatchObject({ required: true, assessed: true, properties: [{ name: 'qty', required: false, type: 'integer:int32' }, { name: 'sku', required: true, type: 'string' }] });
     expect(d.operations.find(o => o.address === 'GET /v1/orders')!.params[0].name).toBe('limit'); // path-level parameter
     expect(post.line).toBe(10);
   });
@@ -161,5 +161,104 @@ describe('contractParity', () => {
   it('a path parameter matches whatever the framework names it', () => {
     const p = contractParity([doc(BASE)], [route('GET', '/v1/orders/:orderId'), route('GET', '/orders'), route('POST', '/orders')]);
     expect(p.declaredUnimplemented).toEqual([]);
+  });
+});
+
+describe('adversarial review regressions', () => {
+  const spec = (paths: string, extra = '') => `openapi: 3.0.0\ninfo: {title: T, version: '1'}\n${extra}paths:\n${paths}`;
+  const rules = (a: string, b: string) => diffContracts([doc(a)], [doc(b)]).map(c => `${c.rule}${c.element ? ` ${c.element}` : ''}`);
+  const post = (schema: string) => spec(`  /a:\n    post:\n      requestBody: {content: {application/json: {schema: ${schema}}}}\n      responses: {'200': {description: ok}}\n`);
+  const get = (schema: string) => spec(`  /a:\n    get:\n      responses: {'200': {description: ok, content: {application/json: {schema: ${schema}}}}}\n`);
+
+  it('a change to a schema outside the model is potentially-breaking, never "no change"', () => {
+    expect(rules(post("{oneOf: [{type: object, properties: {a: {type: string}}}]}"), post("{oneOf: [{type: object, required: [b], properties: {b: {type: integer}}}]}"))).toEqual(['schema-unassessed']);
+    expect(rules(post("{$ref: 'a.yaml#/A'}"), post("{$ref: 'b.yaml#/B'}"))).toEqual(['schema-unassessed']);
+    expect(rules(get('{type: array, items: {type: string}}'), get('{type: array, items: {type: integer}}'))).toEqual(['schema-unassessed']);
+    expect(contractBump(diffContracts([doc(get('{type: array, items: {type: string}}'))], [doc(get('{type: array, items: {type: integer}}'))]))).toBeNull();
+  });
+
+  it('nested, constraint, and nullability changes are seen', () => {
+    const nested = (t: string) => post(`{type: object, properties: {addr: {type: object, properties: {zip: {type: ${t}}}}}}`);
+    expect(rules(nested('string'), nested('integer'))).toEqual(['schema-unassessed addr']);
+    expect(rules(post('{type: object, properties: {n: {type: string, maxLength: 100}}}'), post('{type: object, properties: {n: {type: string, maxLength: 5}}}'))).toEqual(['schema-unassessed n']);
+    expect(rules(get('{type: object, properties: {n: {type: string}}}'), get('{type: object, properties: {n: {type: string, nullable: true}}}'))).toEqual(['response-property-type-changed n']);
+    expect(rules(post('{type: object, properties: {n: {type: string}}}'), post('{type: object, additionalProperties: false, properties: {n: {type: string}}}'))).toEqual(['schema-unassessed']);
+  });
+
+  it('documentation-only edits are not changes', () => {
+    expect(rules(post('{type: object, properties: {n: {type: string, description: a}}}'), post('{type: object, properties: {n: {type: string, description: b, example: x}}}'))).toEqual([]);
+  });
+
+  it('a parameter declared with content is compared', () => {
+    const p = (t: string) => spec(`  /a:\n    get:\n      parameters: [{name: f, in: query, content: {application/json: {schema: {type: ${t}}}}}]\n      responses: {'200': {description: ok}}\n`);
+    expect(rules(p('string'), p('integer'))).toEqual(['param-type-changed query:f']);
+  });
+
+  it('unquoted versions are read, and a declared but unreadable document is an error', () => {
+    expect(doc(`swagger: 2.0\ninfo: {title: T, version: '1'}\npaths:\n  /a:\n    get: {responses: {'200': {description: ok}}}\n`).format).toBe('swagger-2');
+    expect(doc(`openapi: 3.0\ninfo: {title: T, version: '1'}\npaths:\n  /a:\n    get: {responses: {'200': {description: ok}}}\n`).operations).toHaveLength(1);
+    expect(readOpenApi('x.yaml', 'openapi: 4.0.0\npaths: {}\n')).toEqual({ file: 'x.yaml', error: expect.stringContaining('unsupported') });
+  });
+
+  it('the sniff finds minified JSON, a BOM, and a key after long comments', () => {
+    expect(looksLikeOpenApi('{"info":{"title":"T"},"openapi":"3.0.0","paths":{}}')).toBe(true);
+    expect(looksLikeOpenApi('\uFEFFopenapi: 3.0.0\npaths: {}\n')).toBe(true);
+    expect(looksLikeOpenApi(`${'# c\n'.repeat(2000)}openapi: 3.0.0\npaths: {}\n`)).toBe(true);
+    expect(doc('\uFEFF' + spec("  /a:\n    get: {responses: {'200': {description: ok}}}\n")).operations).toHaveLength(1);
+  });
+
+  it('reads paths in linear time (8x the paths, well under 64x the time)', () => {
+    const big = (n: number) => spec(Array.from({ length: n }, (_, i) => `  /p${i}:\n    get: {responses: {'200': {description: ok}}}\n`).join(''));
+    const time = (text: string) => { const t = performance.now(); const d = doc(text); return { ms: performance.now() - t, n: d.operations.length }; };
+    const small = big(2000);
+    const large = big(16000);
+    time(small); // warm up
+    const a = Math.min(time(small).ms, time(small).ms);
+    const [b1, b2] = [time(large), time(large)];
+    expect(b1.n).toBe(16000);
+    expect(Math.min(b1.ms, b2.ms) / a).toBeLessThan(24);
+  });
+
+  it('an operation declared in two files is compared as a set', () => {
+    const a = doc(post('{type: object, properties: {n: {type: string}}}'), 'a.yaml');
+    const b1 = doc(post('{type: object, properties: {n: {type: string}}}'), 'b.yaml');
+    const b2 = doc(post('{type: object, properties: {n: {type: integer}}}'), 'b.yaml');
+    expect(diffContracts([a, b1], [a, b2]).map(c => c.rule)).toEqual(['schema-unassessed']);
+    expect(diffContracts([a, b1], [a, b1])).toEqual([]);
+  });
+
+  it('allOf: the parent schema properties and required lists across members count', () => {
+    expect(rules(post('{allOf: [{type: object, properties: {x: {type: string}}}], properties: {p: {type: string}}}'),
+      post('{allOf: [{type: object, properties: {x: {type: string}}}, {required: [x]}], required: [p], properties: {p: {type: integer}}}')))
+      .toEqual(['body-property-made-required p', 'body-property-made-required x', 'body-property-type-changed p']);
+  });
+
+  it('Swagger 2: the operation body wins over a path-level body', () => {
+    const sw = (req: string) => `swagger: '2.0'\ninfo: {title: T, version: '1'}\npaths:\n  /a:\n    parameters: [{name: b, in: body, schema: {type: object, properties: {x: {type: string}}}}]\n    post:\n      parameters: [{name: b, in: body, schema: {type: object, ${req}properties: {x: {type: string}, y: {type: string}}}}]\n      responses: {'200': {description: ok}}\n`;
+    expect(rules(sw(''), sw('required: [y], '))).toEqual(['body-property-made-required y']);
+  });
+
+  it('a duplicated path key is an error, not a silent last-wins', () => {
+    expect(readOpenApi('d.yaml', spec("  /a:\n    get: {responses: {'200': {description: ok}}}\n  /a:\n    post: {responses: {'200': {description: ok}}}\n"))).toEqual({ file: 'd.yaml', error: expect.stringContaining('duplicate path key') });
+  });
+
+  it('YAML merge keys are applied', () => {
+    expect(doc(spec("  /a: {<<: *ops}\n", "x-ops: &ops {get: {responses: {'200': {description: ok}}}}\n")).operations.map(o => o.address)).toEqual(['GET /a']);
+  });
+
+  it('renaming a path parameter is not a change', () => {
+    const p = (n: string) => spec(`  /o/{${n}}:\n    get:\n      parameters: [{name: ${n}, in: path, required: true, schema: {type: string}}]\n      responses: {'200': {description: ok}}\n`);
+    expect(diffContracts([doc(p('id'))], [doc(p('orderId'))]).filter(c => c.class === 'breaking')).toEqual([]);
+  });
+
+  it('base paths from variable schemes, scheme-relative URLs, and operation servers', () => {
+    const ok = "    get: {responses: {'200': {description: ok}}}\n";
+    expect(doc(spec(`  /a:\n${ok}`, "servers: [{url: '{scheme}://api.x.com/v1'}]\n")).operations[0].address).toBe('GET /v1/a');
+    expect(doc(spec(`  /a:\n${ok}`, "servers: [{url: '//api.x.com/v2/'}]\n")).operations[0].address).toBe('GET /v2/a');
+    expect(doc(spec(`  /a:\n    servers: [{url: /v3}]\n${ok}`, "servers: [{url: /v1}]\n")).operations[0].address).toBe('GET /v3/a');
+  });
+
+  it('enum values with commas do not collide', () => {
+    expect(rules(get("{type: object, properties: {e: {type: string, enum: [a, 'b,c']}}}"), get('{type: object, properties: {e: {type: string, enum: [a, b, c]}}}'))).toEqual(['response-property-type-changed e']);
   });
 });

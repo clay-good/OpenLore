@@ -51,10 +51,12 @@ export interface ContractChange {
   line: number;
 }
 
-/** `string{a,b}` → its base type and enum values (empty when it has none). */
+/** `string{["\"a\"","\"b\""]}` → its base type and encoded enum values (empty when it has none). */
 function splitType(t: string | undefined): { base: string; values: string[] } {
   const m = /^([^{]*)(?:\{(.*)\})?$/.exec(t ?? '');
-  return { base: m?.[1] ?? '', values: m?.[2] !== undefined ? m[2].split(',') : [] };
+  let values: string[];
+  try { values = m?.[2] !== undefined ? (JSON.parse(m[2]) as string[]) : []; } catch { values = []; }
+  return { base: m?.[1] ?? '', values };
 }
 
 /** A type change: an enum that only gained values is a widening; anything else is a change. */
@@ -71,19 +73,28 @@ function change(file: string, op: ContractOperation, rule: ContractRule, detail:
   return { file, address: op.address, rule, class: CONTRACT_RULES[rule], ...(element ? { element } : {}), detail, line: op.line };
 }
 
-function diffParams(file: string, before: ContractParam[], after: ContractOperation, out: ContractChange[]): void {
-  const key = (p: ContractParam) => `${p.in}:${p.name}`;
-  const was = new Map(before.map(p => [key(p), p]));
-  const now = new Map(after.params.map(p => [key(p), p]));
+function diffParams(file: string, beforeOp: ContractOperation, after: ContractOperation, out: ContractChange[]): void {
+  // A path parameter is matched by its position in the template: renaming `{id}` is not a wire change.
+  const keyFor = (op: ContractOperation) => {
+    const names = [...op.path.matchAll(/\{([^}]*)\}/g)].map(m => m[1]);
+    return (p: ContractParam) => (p.in === 'path' && names.includes(p.name) ? `path:#${names.indexOf(p.name)}` : `${p.in}:${p.name}`);
+  };
+  const kb = keyFor(beforeOp);
+  const ka = keyFor(after);
+  const was = new Map(beforeOp.params.map(p => [kb(p), p]));
+  const now = new Map(after.params.map(p => [ka(p), p]));
   for (const [k, p] of now) {
     const b = was.get(k);
-    if (!b) out.push(change(file, after, p.required ? 'required-param-added' : 'optional-param-added', `${p.in} parameter \`${p.name}\` added${p.required ? ', required' : ''}`, k));
+    const el = `${p.in}:${p.name}`;
+    if (!b) out.push(change(file, after, p.required ? 'required-param-added' : 'optional-param-added', `${p.in} parameter \`${p.name}\` added${p.required ? ', required' : ''}`, el));
     else {
-      if (p.required && !b.required) out.push(change(file, after, 'param-made-required', `${p.in} parameter \`${p.name}\` is now required`, k));
-      if (typeChange(b.type, p.type) !== 'same') out.push(change(file, after, 'param-type-changed', `${p.in} parameter \`${p.name}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, k));
+      const before = out.length;
+      if (p.required && !b.required) out.push(change(file, after, 'param-made-required', `${p.in} parameter \`${p.name}\` is now required`, el));
+      if (typeChange(b.type, p.type) !== 'same') out.push(change(file, after, 'param-type-changed', `${p.in} parameter \`${p.name}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, el));
+      if (out.length === before && p.required === b.required && p.hash !== b.hash) out.push(change(file, after, 'schema-unassessed', `${p.in} parameter \`${p.name}\` changed outside the model (constraints, nested schema, or style)`, el));
     }
   }
-  for (const [k, p] of was) if (!now.has(k)) out.push(change(file, after, 'param-removed', `${p.in} parameter \`${p.name}\` removed`, k));
+  for (const [k, p] of was) if (!now.has(k)) out.push(change(file, after, 'param-removed', `${p.in} parameter \`${p.name}\` removed`, `${p.in}:${p.name}`));
 }
 
 function diffProps(
@@ -99,6 +110,7 @@ function diffProps(
         if (p.required && !b.required) out.push(change(file, op, 'body-property-made-required', `request property \`${n}\` is now required`, n));
         const t = typeChange(b.type, p.type);
         if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'body-enum-widened' : 'body-property-type-changed', `request property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
+        else if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `request property \`${n}\` changed outside the model (nested schema or constraints)`, n));
       }
     }
   } else {
@@ -108,50 +120,70 @@ function diffProps(
       else {
         const t = typeChange(b.type, p.type);
         if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'response-enum-widened' : 'response-property-type-changed', `response property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
+        else if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `response property \`${n}\` changed outside the model (nested schema or constraints)`, n));
       }
     }
     for (const n of now.keys()) if (!was.has(n)) out.push(change(file, op, 'response-property-added', `response property \`${n}\` added`, n));
   }
 }
 
+/** One operation's comparable content (no file, line, or path-parameter names). */
+const fingerprint = (op: ContractOperation) => JSON.stringify([op.deprecated, op.params, op.body ?? null, op.response ?? null]);
+
+function diffOperation(file: string, b: ContractOperation, op: ContractOperation, out: ContractChange[]): void {
+  if (op.deprecated && !b.deprecated) out.push(change(file, op, 'operation-deprecated', `operation ${op.address} is now deprecated`));
+  diffParams(file, b, op, out);
+  // Request body.
+  const bodyStart = out.length;
+  if (op.body && !b.body && op.body.required) out.push(change(file, op, 'body-added-required', 'a required request body was added'));
+  else if (op.body && b.body) {
+    if (op.body.required && !b.body.required) out.push(change(file, op, 'body-made-required', 'the request body is now required'));
+    if (op.body.assessed && b.body.assessed) diffProps(file, op, b.body.properties, op.body.properties, 'body', out);
+    if (out.length === bodyStart && op.body.hash !== b.body.hash) {
+      out.push(change(file, op, 'schema-unassessed', 'the request body schema changed outside the model (oneOf/anyOf, an external $ref, arrays, or constraints)'));
+    }
+  }
+  // Success response.
+  const resStart = out.length;
+  if (b.response && op.response) {
+    if (op.response.assessed && b.response.assessed) diffProps(file, op, b.response.properties, op.response.properties, 'response', out);
+    if (out.length === resStart && op.response.hash !== b.response.hash) {
+      out.push(change(file, op, 'schema-unassessed', 'the response schema changed outside the model (oneOf/anyOf, an external $ref, arrays, or constraints)'));
+    }
+  } else if (b.response && !op.response) {
+    out.push(change(file, op, 'schema-unassessed', 'the success response schema was removed or is no longer readable'));
+  }
+}
+
 /**
- * Compare the operations of two revisions of the specifications. Operations are matched by
- * address across all files (an operation moved between files is not removed).
+ * Compare the operations of two revisions of the specifications. Operations are matched by method
+ * and path template with parameter names erased (renaming `{id}` is not a wire change), across all
+ * files (an operation moved between files is not removed). An operation declared in more than one
+ * file is compared as a set: any difference is `schema-unassessed`.
  */
 export function diffContracts(base: readonly ContractDocument[], head: readonly ContractDocument[]): ContractChange[] {
   const index = (docs: readonly ContractDocument[]) => {
-    const m = new Map<string, { file: string; op: ContractOperation }>();
-    for (const d of docs) for (const op of d.operations) if (!m.has(op.address)) m.set(op.address, { file: d.file, op });
+    const m = new Map<string, Array<{ file: string; op: ContractOperation }>>();
+    for (const d of docs) for (const op of d.operations) m.set(op.key, [...(m.get(op.key) ?? []), { file: d.file, op }]);
     return m;
   };
   const was = index(base);
   const now = index(head);
   const out: ContractChange[] = [];
-  for (const [addr, b] of was) {
-    const n = now.get(addr);
-    if (!n) { out.push(change(b.file, b.op, 'operation-removed', `operation ${addr} removed`)); continue; }
-    const { file, op } = n;
-    if (op.deprecated && !b.op.deprecated) out.push(change(file, op, 'operation-deprecated', `operation ${addr} is now deprecated`));
-    diffParams(file, b.op.params, op, out);
-    // Request body.
-    if (op.body && !b.op.body && op.body.required) out.push(change(file, op, 'body-added-required', 'a required request body was added'));
-    else if (op.body && b.op.body) {
-      if (op.body.required && !b.op.body.required) out.push(change(file, op, 'body-made-required', 'the request body is now required'));
-      if (!op.body.assessed || !b.op.body.assessed) {
-        if (JSON.stringify(op.body) !== JSON.stringify(b.op.body)) out.push(change(file, op, 'schema-unassessed', 'the request body schema changed and is outside the model (oneOf/anyOf or an external $ref)'));
-      } else diffProps(file, op, b.op.body.properties, op.body.properties, 'body', out);
+  for (const [key, bs] of was) {
+    const ns = now.get(key);
+    const b = bs[0];
+    if (!ns) { out.push(change(b.file, b.op, 'operation-removed', `operation ${b.op.address} removed`)); continue; }
+    if (bs.length > 1 || ns.length > 1) {
+      const set = (l: typeof bs) => l.map(x => fingerprint(x.op)).sort().join('\n');
+      if (set(bs) !== set(ns)) out.push(change(ns[0].file, ns[0].op, 'schema-unassessed', `operation ${ns[0].op.address} is declared in more than one file and changed`));
+      continue;
     }
-    // Success response.
-    if (b.op.response && op.response) {
-      if (!op.response.assessed || !b.op.response.assessed) {
-        if (JSON.stringify(op.response) !== JSON.stringify(b.op.response)) out.push(change(file, op, 'schema-unassessed', 'the response schema changed and is outside the model'));
-      } else diffProps(file, op, b.op.response.properties, op.response.properties, 'response', out);
-    } else if (b.op.response && !op.response && b.op.response.properties.length) {
-      out.push(change(file, op, 'schema-unassessed', 'the success response schema was removed or is no longer readable'));
-    }
+    diffOperation(ns[0].file, b.op, ns[0].op, out);
   }
-  for (const [addr, n] of now) if (!was.has(addr)) out.push(change(n.file, n.op, 'operation-added', `operation ${addr} added`));
-  return out.sort((a, b) => (`${a.address}\0${a.rule}\0${a.element ?? ''}` < `${b.address}\0${b.rule}\0${b.element ?? ''}` ? -1 : 1));
+  for (const [key, ns] of now) if (!was.has(key)) out.push(change(ns[0].file, ns[0].op, 'operation-added', `operation ${ns[0].op.address} added`));
+  const sortKey = (c: ContractChange) => `${c.address}\0${c.rule}\0${c.element ?? ''}\0${c.detail}`;
+  return out.sort((x, y) => (sortKey(x) < sortKey(y) ? -1 : sortKey(x) > sortKey(y) ? 1 : 0));
 }
 
 /** A server route as the route inventory records it. */

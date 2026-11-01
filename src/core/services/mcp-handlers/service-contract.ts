@@ -59,42 +59,74 @@ async function workingFiles(root: string, ext: RegExp): Promise<string[]> {
   return [...new Set(out.split('\0').filter(f => f && ext.test(f) && !SKIP_DIR.test(f)))].sort(sortStr);
 }
 
-/** Read and parse the specifications among `texts` (path → text). */
-function parseSpecs(texts: Map<string, string>): { docs: ContractDocument[]; unreadable: Array<{ file: string; reason: string }> } {
-  const docs: ContractDocument[] = [];
-  const unreadable: Array<{ file: string; reason: string }> = [];
-  for (const [file, text] of [...texts].sort((a, b) => sortStr(a[0], b[0]))) {
-    if (!looksLikeOpenApi(text)) continue;
-    const r = readOpenApi(file, text);
-    if (!r) continue;
-    if ('error' in r) unreadable.push({ file, reason: r.error });
-    else docs.push(r);
-  }
-  return { docs, unreadable };
+const MAX_CANDIDATES = MAX_SPEC_FILES * 10;
+
+/** One revision's specifications, with what was and was not examined. */
+interface SpecSide {
+  docs: ContractDocument[];
+  /** Specifications that could not be parsed. */
+  unreadable: Array<{ file: string; reason: string }>;
+  /** Every YAML/JSON candidate at this revision (examined or not). */
+  candidates: Set<string>;
+  /** Candidates whose text was examined. */
+  examined: Set<string>;
+  /** Candidates that could not be read at all (size, a link outside the repository, I/O). */
+  unread: Array<{ file: string; reason: string }>;
+  /** Whether a cap left candidates unexamined. */
+  capped: boolean;
 }
 
-async function headSpecs(root: string): Promise<{ docs: ContractDocument[]; unreadable: Array<{ file: string; reason: string }>; capped: number }> {
+/** Sniff and parse candidate texts, in path order, up to the specification cap. */
+function parseSide(candidates: string[], texts: Map<string, string>, unread: SpecSide['unread']): SpecSide {
+  const side: SpecSide = { docs: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_CANDIDATES };
+  let specs = 0;
+  for (const file of candidates.slice(0, MAX_CANDIDATES)) {
+    if (specs >= MAX_SPEC_FILES) { side.capped = true; break; }
+    const text = texts.get(file);
+    if (text === undefined) continue;
+    side.examined.add(file);
+    if (!looksLikeOpenApi(text)) continue;
+    specs++;
+    const r = readOpenApi(file, text); // a text over the size cap is an error here, never dropped
+    if (!r) continue;
+    if ('error' in r) side.unreadable.push({ file, reason: r.error });
+    else side.docs.push(r);
+  }
+  return side;
+}
+
+async function headSpecs(root: string): Promise<SpecSide> {
   const candidates = await workingFiles(root, SPEC_EXT);
   const texts = new Map<string, string>();
-  for (const f of candidates.slice(0, MAX_SPEC_FILES * 10)) {
-    if (texts.size >= MAX_SPEC_FILES) break;
+  const unread: SpecSide['unread'] = [];
+  for (const f of candidates.slice(0, MAX_CANDIDATES)) {
     try {
-      const t = await readFileConfined(root, f, MAX_SPEC_BYTES);
-      if (looksLikeOpenApi(t)) texts.set(f, t);
-    } catch { /* unreadable or over the size cap: not a specification we can read */ }
+      // An oversized file, or a link out of the repository, throws: it is listed as unread.
+      texts.set(f, await readFileConfined(root, f, MAX_SPEC_BYTES));
+    } catch (e) {
+      unread.push({ file: f, reason: e instanceof Error ? e.message.split('\n')[0] : String(e) });
+    }
   }
-  return { ...parseSpecs(texts), capped: Math.max(0, candidates.length - MAX_SPEC_FILES * 10) };
+  return parseSide(candidates, texts, unread);
 }
 
-async function baseSpecs(root: string, commit: string): Promise<ReturnType<typeof parseSpecs>> {
-  const listing = await git(root, gitPathArgs('ls-tree', '-r', '-z', '--name-only', commit));
+async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
+  // --full-tree: from a subdirectory, ls-tree otherwise lists only that directory, relative to it.
+  const listing = await git(root, gitPathArgs('ls-tree', '-r', '-z', '--full-tree', '--name-only', commit));
   const { getRepoPrefix } = await import('../../drift/git-diff.js');
   const prefix = (await getRepoPrefix(root)) ?? '';
-  const paths = listing.split('\0').filter(f => f.startsWith(prefix) && SPEC_EXT.test(f) && !SKIP_DIR.test(f)).slice(0, MAX_SPEC_FILES * 10);
-  const blobs = await readBlobsAtRef(root, commit, paths).catch(() => readBlobsPerFile(root, commit, paths));
+  const full = listing.split('\0').filter(f => f && f.startsWith(prefix) && SPEC_EXT.test(f.slice(prefix.length)) && !SKIP_DIR.test(f.slice(prefix.length)))
+    .sort((x, y) => sortStr(x.slice(prefix.length), y.slice(prefix.length)));
+  const window = full.slice(0, MAX_CANDIDATES);
+  const blobs = await readBlobsAtRef(root, commit, window).catch(() => readBlobsPerFile(root, commit, window));
   const texts = new Map<string, string>();
-  for (const [p, t] of blobs) if (t.length <= MAX_SPEC_BYTES && looksLikeOpenApi(t) && texts.size < MAX_SPEC_FILES) texts.set(p.slice(prefix.length), t);
-  return parseSpecs(texts);
+  const unread: SpecSide['unread'] = [];
+  for (const p of window) {
+    const t = blobs.get(p);
+    if (t === undefined) unread.push({ file: p.slice(prefix.length), reason: 'could not be read at the base revision' });
+    else texts.set(p.slice(prefix.length), t);
+  }
+  return parseSide(full.map(p => p.slice(prefix.length)), texts, unread);
 }
 
 /** The route inventory written by `analyze` (undefined when absent). */
@@ -123,7 +155,7 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
   for (const addr of addresses) {
     if (ops.some(o => o.op.address === addr)) continue;
     const [method, path] = [addr.slice(0, addr.indexOf(' ')), addr.slice(addr.indexOf(' ') + 1)];
-    ops.push({ d: { file: '', format: 'openapi-3', basePath: '', operations: [], unassessed: [] }, op: { address: addr, method, path, declaredPath: path, line: 0, deprecated: false, params: [] } });
+    ops.push({ d: { file: '', format: 'openapi-3', basePath: '', operations: [], unassessed: [] }, op: { address: addr, key: addr, method, path, declaredPath: path, line: 0, deprecated: false, params: [] } });
   }
   const routes = ops.flatMap(({ d, op }) => [...new Set([op.path, op.declaredPath])].map(p => ({
     file: d.file, method: op.method, path: p, normalizedPath: normalizeUrl(p), handlerName: op.address,
@@ -134,7 +166,7 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
   const calls = (await mapFilesBounded(files.slice(0, MAX_CLIENT_FILES), f => extractHttpCalls(join(root, f)).catch(() => []), 8)).flat();
   for (const e of buildHttpEdges(calls, routes)) {
     const list = out.get(e.route.handlerName) ?? [];
-    const file = e.call.file.startsWith(root) ? e.call.file.slice(root.length + 1).split('\\').join('/') : e.call.file;
+    const file = emittedText(e.call.file.startsWith(root) ? e.call.file.slice(root.length + 1).split('\\').join('/') : e.call.file);
     if (!list.some(c => c.file === file && c.line === e.call.line)) list.push({ file, line: e.call.line, method: e.call.method, url: emittedText(e.call.url) });
     out.set(e.route.handlerName, list);
   }
@@ -145,18 +177,20 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
 
 export async function handleCertifyServiceContract(input: CertifyServiceContractInput): Promise<Record<string, unknown>> {
   const root = await validateDirectory(input.directory);
-  const limit = Math.max(1, Math.min(input.maxResults ?? 100, 1000));
+  const requested = Number(input.maxResults);
+  const limit = Number.isFinite(requested) ? Math.max(1, Math.min(Math.floor(requested), 1000)) : 100;
   const { isGitRepository } = await import('../../drift/git-diff.js');
   if (!(await isGitRepository(root))) return { error: 'Not a git repository: specifications are listed through git.' };
 
   const boundaries: string[] = [];
   const head = await headSpecs(root);
-  if (head.capped) boundaries.push(`${head.capped} candidate YAML/JSON file(s) past the scan cap were not checked for a specification.`);
-  const notAssessed = head.unreadable.map(u => ({ file: u.file, reason: emittedText(u.reason) }));
-  for (const d of head.docs) if (d.unassessed.length) notAssessed.push({ file: d.file, reason: `outside the model: ${d.unassessed.join(', ')}` });
+  if (head.capped) boundaries.push(`Past the scan cap (${MAX_CANDIDATES} YAML/JSON files or ${MAX_SPEC_FILES} specifications), ${head.candidates.size - head.examined.size} file(s) were not checked for a specification.`);
+  if (head.unread.length) boundaries.push(`${head.unread.length} YAML/JSON file(s) could not be read (over ${MAX_SPEC_BYTES / 1024 / 1024} MB, a link out of the repository, or an I/O error); a specification among them is not assessed.`);
+  const notAssessed = head.unreadable.map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
+  for (const d of head.docs) if (d.unassessed.length) notAssessed.push({ file: emittedText(d.file), reason: `outside the model: ${d.unassessed.join(', ')}` });
 
   const findings: GovernanceFinding[] = [];
-  const specs = head.docs.map(d => ({ file: d.file, format: d.format, basePath: d.basePath || '/', operations: d.operations.length }));
+  const specs = head.docs.map(d => ({ file: emittedText(d.file), format: d.format, basePath: d.basePath || '/', operations: d.operations.length }));
 
   // ── Parity against the indexed route handlers ──
   const routes = await indexedRoutes(root);
@@ -193,10 +227,18 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     let commit = res.resolved;
     try { commit = (await git(root, ['merge-base', res.resolved, 'HEAD'])).trim() || res.resolved; } catch { /* unrelated histories: the base tip */ }
     const base = await baseSpecs(root, commit);
-    for (const u of base.unreadable) notAssessed.push({ file: u.file, reason: `at the base revision: ${emittedText(u.reason)}` });
-    // A specification unreadable on either side: its operations cannot be compared.
-    const unreadable = new Set([...head.unreadable, ...base.unreadable].map(u => u.file));
-    const changes = diffContracts(base.docs.filter(d => !unreadable.has(d.file)), head.docs.filter(d => !unreadable.has(d.file)));
+    for (const u of base.unreadable) notAssessed.push({ file: emittedText(u.file), reason: `at the base revision: ${emittedText(u.reason)}` });
+    if (base.capped && !head.capped) boundaries.push(`At the base revision, files past the scan cap were not checked for a specification.`);
+    // A file is compared only when each side either examined it or does not have it at all: a
+    // specification unparseable, unread, or past a cap on one side would otherwise read as
+    // operations removed or added.
+    const unparsed = new Set([...head.unreadable, ...base.unreadable, ...head.unread, ...base.unread].map(u => u.file));
+    const comparable = (file: string) => !unparsed.has(file)
+      && (head.examined.has(file) || !head.candidates.has(file)) && (base.examined.has(file) || !base.candidates.has(file));
+    const docFiles = new Set([...head.docs, ...base.docs].map(d => d.file));
+    for (const u of [...head.unread, ...base.unread]) if (docFiles.has(u.file)) notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
+    for (const f of docFiles) if (!unparsed.has(f) && !comparable(f)) notAssessed.push({ file: emittedText(f), reason: 'past the scan cap on one side, so it is not compared' });
+    const changes = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file)));
     const consumers = await consumersOf(root, changes, [...head.docs, ...base.docs], boundaries);
     for (const c of changes.filter(x => x.class === 'breaking' || x.class === 'dangerous')) {
       const who = consumers.get(c.address) ?? [];
@@ -210,7 +252,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     changesOut = {
       baseRef: input.baseRef, resolvedBaseRef: res.resolved, ...(res.fellBack ? { baseRefFallback: { requested: res.requested, resolved: res.resolved } } : {}),
       total: changes.length,
-      items: changes.slice(0, limit).map(c => ({ ...c, address: emittedText(c.address), detail: emittedText(c.detail), consumers: consumers.get(c.address) ?? [] })),
+      items: changes.slice(0, limit).map(c => ({ ...c, file: emittedText(c.file), address: emittedText(c.address), detail: emittedText(c.detail), ...(c.element ? { element: emittedText(c.element) } : {}), consumers: consumers.get(c.address) ?? [] })),
       ...(changes.length > limit ? { omitted: changes.length - limit } : {}),
       suggestedBump: contractBump(changes),
       ...(contractBump(changes) === null ? { suggestedBumpWithheld: 'a change is outside the model, so compatibility is not proven' } : {}),
@@ -227,15 +269,17 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   }
   const gate = classifyFindings(findings, policy);
   const kept = gate.classified.filter(f => f.enforcementClass !== 'off');
+  // Blocking findings are always listed, whatever the cap.
+  const shown = [...gate.blocking, ...kept.filter(f => f.enforcementClass !== 'blocking').slice(0, Math.max(0, limit - gate.blocking.length))];
   return {
     tool: 'certify_service_contract',
     posture: 'advisory',
     specs,
-    surface: head.docs.flatMap(d => d.operations.map(o => ({ file: d.file, address: emittedText(o.address), line: o.line, ...(o.operationId ? { operationId: emittedText(o.operationId) } : {}), ...(o.deprecated ? { deprecated: true } : {}) }))).slice(0, limit),
+    surface: head.docs.flatMap(d => d.operations.map(o => ({ file: emittedText(d.file), address: emittedText(o.address), line: o.line, ...(o.operationId ? { operationId: emittedText(o.operationId) } : {}), ...(o.deprecated ? { deprecated: true } : {}) }))).slice(0, limit),
     parity,
     ...(changesOut ? { changes: changesOut } : {}),
-    findings: kept.slice(0, Math.max(limit, gate.blocking.length)),
-    ...(kept.length > limit ? { findingsOmitted: kept.length - limit } : {}),
+    findings: shown,
+    ...(kept.length > shown.length ? { findingsOmitted: kept.length - shown.length } : {}),
     gated: gate.gated,
     ...(notAssessed.length ? { notAssessed: notAssessed.sort((a, b) => sortStr(a.file, b.file)) } : {}),
     ...(boundaries.length ? { boundaries } : {}),

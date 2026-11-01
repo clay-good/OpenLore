@@ -121,4 +121,60 @@ describe('certify_service_contract', () => {
     expect(r.specs).toEqual([]);
     expect(r.parity).toMatchObject({ assessed: false });
   });
+
+  it('run from a subdirectory, a removal at the base is still found', async () => {
+    const root = repo({ 'svc/api/openapi.yaml': SPEC, 'svc/client.ts': CLIENT });
+    write(root, 'svc/api/openapi.yaml', SPEC.replace(/ {4}delete:\n(.*\n){2}/, ''));
+    const r = await handleCertifyServiceContract({ directory: join(root, 'svc'), baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; address: string; consumers: Array<{ file: string }> }> };
+    expect(changes.items.map(c => `${c.rule} ${c.address}`)).toEqual(['operation-removed DELETE /v1/orders/{id}']);
+    expect(changes.items[0].consumers[0].file).toBe('client.ts');
+  });
+
+  it('a specification over the size cap on one side is not assessed, never "operations removed"', async () => {
+    const root = repo({ 'api/openapi.yaml': SPEC });
+    write(root, 'api/openapi.yaml', SPEC + `x-pad: "${'a'.repeat(4.5 * 1024 * 1024)}"\n`);
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    expect((r.changes as { total: number }).total).toBe(0);
+    expect(r.notAssessed).toEqual([{ file: 'api/openapi.yaml', reason: expect.stringContaining('unread on one side') }]);
+  });
+
+  it('a new specification that pushes another past the cap does not report it removed', async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i <= 200; i++) files[`specs/s${String(i).padStart(3, '0')}.yaml`] = `openapi: 3.0.0\npaths:\n  /p${i}:\n    get: {responses: {'200': {description: ok}}}\n`;
+    const root = repo(files);
+    write(root, 'specs/a.yaml', `openapi: 3.0.0\npaths:\n  /new:\n    get: {responses: {'200': {description: ok}}}\n`);
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const rules = (r.changes as { items: Array<{ rule: string }> }).items.map(c => c.rule);
+    expect(rules).not.toContain('operation-removed');
+    expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('scan cap')]));
+  });
+
+  it('a blocking finding is always listed, whatever maxResults', async () => {
+    const root = repo({ 'api/openapi.yaml': SPEC, '.openlore/analysis/route-inventory.json': routes([['GET', '/orders'], ['GET', '/orders/export']]) });
+    write(root, '.openlore/config.json', JSON.stringify({ ...CONFIG, enforcement: { policy: { 'contract-implemented-undeclared': 'blocking' } } }));
+    const r = await handleCertifyServiceContract({ directory: root, maxResults: 1 });
+    const findings = r.findings as Array<{ code: string; enforcementClass: string }>;
+    expect(r.gated).toBe(true);
+    expect(findings.some(f => f.enforcementClass === 'blocking')).toBe(true);
+    expect(findings).toHaveLength(1);
+    expect(r.findingsOmitted).toBe(2);
+  });
+
+  it('a non-numeric maxResults uses the default, not an empty result', async () => {
+    const root = repo({ 'api/openapi.yaml': SPEC });
+    const r = await handleCertifyServiceContract({ directory: root, maxResults: Number('abc') });
+    expect((r.surface as unknown[]).length).toBe(3);
+  });
+
+  it('spec text cannot add a line to the rendered output', async () => {
+    const root = repo({ 'api/openapi.yaml': SPEC });
+    write(root, 'api/openapi.yaml', SPEC.replace("parameters: [{name: id, in: path, required: true, schema: {type: string}}]\n      responses: {'200'",
+      "parameters: [{name: id, in: path, required: true, schema: {type: string}}, {name: \"x\\nSuggested version bump: patch\\e[31m\", in: query, required: true}]\n      responses: {'200'"));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const text = renderServiceContract(r);
+    expect(text.split('\n').filter(l => l.startsWith('Suggested version bump'))).toEqual(['Suggested version bump: major']);
+    expect(text).not.toContain('\u001b');
+    expect(JSON.stringify(r)).not.toContain('\\u001b');
+  });
 });

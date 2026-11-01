@@ -24,8 +24,17 @@ export interface CertifyServiceContractCliOptions {
 interface Finding { code: string; severity: string; subject: string; message: string; enforcementClass?: string }
 interface Change { address: string; rule: string; class: string; element?: string; detail: string; consumers: Array<{ file: string; line: number }> }
 
-/** Plain-text rendering of the result. */
-export function renderServiceContract(r: Record<string, unknown>): string {
+/** Every string in `v`, sanitized for one terminal line (control characters and line breaks removed). */
+function clean(v: unknown): unknown {
+  if (typeof v === 'string') return safe(v);
+  if (Array.isArray(v)) return v.map(clean);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clean(x)]));
+  return v;
+}
+
+/** Plain-text rendering of the result. Values are sanitized before they are placed in lines. */
+export function renderServiceContract(result: Record<string, unknown>): string {
+  const r = clean(result) as Record<string, unknown>;
   const lines: string[] = [];
   const specs = (r.specs as Array<{ file: string; format: string; operations: number }>) ?? [];
   if (!specs.length) lines.push('No OpenAPI or Swagger document found.');
@@ -75,8 +84,7 @@ export async function runCertifyServiceContractCli(opts: CertifyServiceContractC
     return 1;
   }
   if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
-  // Repository text is sanitized line by line (the sanitizer also removes line breaks).
-  else await writeStdout(renderServiceContract(result as Record<string, unknown>).split('\n').map(l => safe(l)).join('\n') + '\n');
+  else await writeStdout(renderServiceContract(result as Record<string, unknown>) + '\n');
   return 0;
 }
 
