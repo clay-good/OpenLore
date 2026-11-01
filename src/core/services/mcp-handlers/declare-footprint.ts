@@ -12,8 +12,9 @@
  * branches, PRs, and these live entries; `fleet_status` lists them with the verification arc.
  */
 
-import { basename, join } from 'node:path';
+import { basename, join, relative, posix } from 'node:path';
 import { existsSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { computeFootprint, classifyHazard, type Footprint, type WriteMode } from './change-footprint.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -49,9 +50,9 @@ const ACTOR_RE = /^[\w.@:/+-]{1,128}$/;
  * `normalizeUrl` are the same intent), or the file path for a file.
  */
 const SOURCE_EXT = /\.(?:[cm]?[jt]sx?|py|go|rb|rs|java|kt|cs|php|swift|c|h|cpp|json|ya?ml|toml|md|sql|sh)$/i;
-const normPath = (p: string) => p.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+const normPath = (p: string) => posix.normalize(p.replace(/\\/g, '/')).replace(/^(?:\.\/)+/, '');
 const looksLikeFile = (s: string) => s.includes('/') || SOURCE_EXT.test(s);
-const existingFile = (root: string, seed: string) => !seed.includes('::') && looksLikeFile(seed) && existsSync(join(root, normPath(seed)));
+const existingFile = (root: string, seed: string) => !seed.includes('::') && looksLikeFile(seed) && !normPath(seed).startsWith('..') && existsSync(join(root, normPath(seed)));
 const creationKey = (seed: string): string => {
   if (seed.includes('::')) return `name:${seed.slice(seed.lastIndexOf('::') + 2)}`;
   return looksLikeFile(seed) ? `file:${normPath(seed)}` : `name:${seed}`;
@@ -106,7 +107,8 @@ const peerView = (e: BoardEntry, moved: string[]) => ({
 });
 
 export async function handleDeclareFootprint(input: DeclareFootprintInput): Promise<Record<string, unknown>> {
-  const root = await validateDirectory(input.directory);
+  // Canonical, so it compares with the paths git reports (macOS /var → /private/var, Windows slashes).
+  const root = await realpath(await validateDirectory(input.directory));
   const action = input.action ?? 'declare';
   let identity: Awaited<ReturnType<typeof worktreeIdentity>>;
   try { identity = await worktreeIdentity(root); } catch { return { error: 'Not a git work tree: the board lives in the git common directory.' }; }
@@ -163,7 +165,8 @@ export async function handleDeclareFootprint(input: DeclareFootprintInput): Prom
     // An unresolved seed that names an existing file (a JSON or config file with no symbols) is a
     // file write, not a creation.
     creates: writeFp ? writeFp.unresolvedSeeds.filter(s => !existingFile(root, s)) : [],
-    fileWrites: writeFp ? writeFp.unresolvedSeeds.filter(s => existingFile(root, s)).map(normPath) : [],
+    // Relative to the worktree, so agents analyzing different packages compare the same path.
+    fileWrites: writeFp ? writeFp.unresolvedSeeds.filter(s => existingFile(root, s)).map(s => relative(identity.worktree, join(root, normPath(s))).split('\\').join('/')) : [],
     root,
     ...(identity.baseAtDeclare ? { baseAtDeclare: identity.baseAtDeclare } : {}),
     ...(input.writeMode ? { writeMode: input.writeMode } : {}),
@@ -174,13 +177,13 @@ export async function handleDeclareFootprint(input: DeclareFootprintInput): Prom
 
   // ── Hazards against every live peer ──
   const name = new Map(cg.nodes.map(n => [n.id, `${n.name} (${n.filePath})`] as const));
-  const mine = footprintOf(cg, entry);
+  const mine = footprintOf(cg, { ...entry, writeSeeds: entry.writes.map(w => w.id) });
   const myCreates = new Map(entry.creates.map(c => [creationKey(c), c] as const));
   const findings: GovernanceFinding[] = [];
   const peers = [];
   for (const { entry: p, moved } of board.live) {
     if (p.actorId === actorId) continue;
-    const v = classifyHazard(mine, footprintOf(cg, p));
+    const v = classifyHazard(mine, footprintOf(cg, { ...p, writeSeeds: p.writes.map(w => w.id) }));
     const dup = p.creates.filter(c => myCreates.has(creationKey(c)));
     // Two agents writing the same file that holds no symbols (a JSON or config file).
     const sharedFiles = (p.fileWrites ?? []).filter(f => (entry.fileWrites ?? []).includes(f));

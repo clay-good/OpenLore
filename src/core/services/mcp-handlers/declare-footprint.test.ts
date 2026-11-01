@@ -203,4 +203,20 @@ describe('declare_footprint', () => {
     await handleDeclareFootprint({ directory: pkg, actorId: 'pkg-agent', writeSet: ['parseConfig'] });
     expect((await readBoard(a)).live.find(l => l.entry.actorId === 'pkg-agent')?.moved).toEqual([]);
   });
+
+  it('a symlinked or non-canonical path still sees peers (no false worktree-removed)', async () => {
+    const raw = mkdtempSync(join(tmpdir(), 'olboard-raw-')); // macOS: /var → /private/var
+    dirs.push(raw);
+    write(raw, 'src/config.ts', CONFIG_TS);
+    write(raw, '.gitignore', '.openlore/\n');
+    git(raw, 'init', '-q', '-b', 'main'); git(raw, 'add', '-A'); git(raw, 'commit', '-qm', 'init');
+    const other = `${raw}-b`;
+    dirs.push(other);
+    git(raw, 'worktree', 'add', '-q', '-b', 'feat-b', other, 'main');
+    index(raw); index(other);
+    await handleDeclareFootprint({ directory: raw, actorId: 'agent-a', writeSet: ['parseConfig'] });
+    const r = await handleDeclareFootprint({ directory: other, actorId: 'agent-b', writeSet: ['parseConfig'] });
+    expect((r.conflicts as Array<{ hazard: string }>).map(c => c.hazard)).toEqual(['WAW']);
+    expect((await readBoard(raw)).live.map(l => l.entry.actorId)).toEqual(['agent-a', 'agent-b']);
+  });
 });

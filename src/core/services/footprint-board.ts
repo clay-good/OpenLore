@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readdir, realpath, rm } from 'node:fs/promises';
-import { join, isAbsolute, resolve, dirname, basename } from 'node:path';
+import { join, isAbsolute, resolve, dirname, basename, relative } from 'node:path';
 import { execFileGit } from '../../utils/git-exec.js';
 import { readFileConfined } from '../../utils/path-confinement.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
@@ -90,7 +90,8 @@ export async function boardDir(root: string): Promise<string | null> {
   try {
     const common = await git(root, ['rev-parse', '--git-common-dir']);
     const abs = isAbsolute(common) ? common : resolve(root, common);
-    return join(abs, 'openlore', 'board');
+    // Canonical: a symlinked path (macOS /var → /private/var) would fail the confined reads.
+    return join(await realpath(abs).catch(() => abs), 'openlore', 'board');
   } catch {
     return null;
   }
@@ -136,8 +137,13 @@ async function endReason(root: string, e: BoardEntry, now: number, main: string 
   const seen = Date.parse(e.lastSeenAt);
   if (!Number.isFinite(seen) || now - seen > PANIC_SESSION_EXPIRY_MS) return 'expired';
   // Only a worktree of this clone counts (a crafted path elsewhere is not one).
-  if (!existsSync(e.worktree) || (worktrees && !worktrees.has(e.worktree))) return 'worktree-removed';
-  if (e.root && e.root !== e.worktree && !e.root.startsWith(`${e.worktree}/`)) return 'worktree-removed';
+  if (!existsSync(e.worktree)) return 'worktree-removed';
+  const wt = await realpath(e.worktree).catch(() => e.worktree);
+  if (worktrees && !worktrees.has(e.worktree) && !worktrees.has(wt)) return 'worktree-removed';
+  if (e.root) {
+    const rel = relative(wt, await realpath(e.root).catch(() => e.root!));
+    if (rel.startsWith('..') || isAbsolute(rel)) return 'worktree-removed';
+  }
   if (!e.branch) return null; // a detached HEAD: only expiry and release end it
   let tip: string;
   try {
@@ -160,8 +166,9 @@ async function endReason(root: string, e: BoardEntry, now: number, main: string 
 /** The worktrees of this clone (absolute, real paths), or null when git cannot list them. */
 async function worktreePaths(root: string): Promise<Set<string> | null> {
   try {
-    const out = await git(root, ['worktree', 'list', '--porcelain']);
-    const paths = out.split('\n').filter(l => l.startsWith('worktree ')).map(l => l.slice('worktree '.length));
+    // -z: a path may hold a newline.
+    const { stdout } = await execFileGit('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: root });
+    const paths = String(stdout).split('\0').filter(l => l.startsWith('worktree ')).map(l => l.slice('worktree '.length));
     const real = await Promise.all(paths.map(p => realpath(p).catch(() => p)));
     return new Set([...paths, ...real]);
   } catch {

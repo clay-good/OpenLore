@@ -471,6 +471,8 @@ export interface RawChange {
   title?: string;
   /** The change's tip commit id, when it exists locally (drives the textual merge simulation). */
   tip?: string;
+  /** The branch the change is on (a PR's head branch); used to match peer-board entries. */
+  headBranch?: string;
   /** Parsed diff hunks (empty when fetchError is set). */
   files: FileHunks[];
   /** Base-snapshot symbols by changed-file path (the provider does the re-parse I/O). */
@@ -764,12 +766,13 @@ export async function defaultEnumeratePullRequests(
   const out: RawChange[] = [];
   for (const pr of prs.sort((a, b) => a.number - b.number)) {
     const ref = `PR #${pr.number}`;
+    const headBranch = pr.headRefName;
     const actor = pr.author?.login || 'unknown';
     let patch: string;
     try {
       patch = await runGh(repoPath, ['pr', 'diff', String(pr.number), '--patch']);
     } catch {
-      out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', files: [], baseSymbolsByFile: new Map(), fetchError: `gh pr diff ${pr.number} failed` });
+      out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', headBranch, files: [], baseSymbolsByFile: new Map(), fetchError: `gh pr diff ${pr.number} failed` });
       continue;
     }
     const files = parseUnifiedDiff(patch);
@@ -780,7 +783,7 @@ export async function defaultEnumeratePullRequests(
         ref,
         title: pr.title,
         repo: repoName,
-        kind: 'pull-request',
+        kind: 'pull-request', headBranch,
         files: [],
         baseSymbolsByFile: new Map(),
         assessmentError: `diff contains ${files.length} changed files, exceeding the ${MAX_FILES_PER_CHANGE}-file assessment cap`,
@@ -791,7 +794,7 @@ export async function defaultEnumeratePullRequests(
     // has advanced past local) — disclosed in the caveats.
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, baseRef, files);
     const tip = await localCommit(repoPath, pr.headRefOid, runGit);
-    out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', ...(tip ? { tip } : {}), files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
+    out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', headBranch, ...(tip ? { tip } : {}), files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return { changes: out, caveats };
 }
@@ -988,6 +991,8 @@ export async function computeInterferenceMap(
     notAssessed.push({ actor: '—', ref: '(all changes)', repo: u.name, kind: 'branch', provenance: 'foreign-actor', assessed: false, reason: u.reason, detail: u.detail });
   }
 
+  // Branch name → the symbols its assessed change writes (home repo), to match peer-board entries.
+  const branchWrites = new Map<string, Set<string>>();
   for (const rc of raw) {
     if (assessed.length + notAssessed.length >= maxChanges) {
       caveats.push(`Assessment capped at ${maxChanges} changes; further in-flight changes were not assessed (raise maxChanges to widen).`);
@@ -1018,6 +1023,12 @@ export async function computeInterferenceMap(
       continue;
     }
     const footprint = footprintForChange(repo.cg, rc.ref, writeMembers, fpOptsFor(repo));
+    const branch = rc.headBranch ?? (rc.kind === 'branch' ? rc.ref : undefined);
+    if (branch && rc.repo === repos[0]?.name) {
+      const set = branchWrites.get(branch) ?? new Set<string>();
+      for (const w of writeMembers) set.add(w.id);
+      branchWrites.set(branch, set);
+    }
     const stableByNodeId = new Map<string, string>();
     for (const w of writeMembers) if (w.stableId) stableByNodeId.set(w.id, w.stableId);
     assessed.push({
@@ -1039,12 +1050,14 @@ export async function computeInterferenceMap(
   try {
     const { liveTaskDescriptors } = await import('../footprint-board.js');
     const ids = new Set(supplied.map(t => t?.id));
-    // An entry whose branch is already a harvested branch change is that same work: adding it would
-    // pair the agent with its own branch.
-    const harvested = new Set([...assessed, ...notAssessed].filter(x => ('node' in x ? x.node.kind : x.kind) === 'branch' && ('node' in x ? x.node.repo : x.repo) === home.name)
-      .map(x => ('node' in x ? x.node.ref : x.ref)));
+    // An entry whose declared writes its own branch's (or PR's) assessed change already covers is
+    // that same work: adding it would pair the agent with itself. Declared work beyond the
+    // committed change still joins.
     const live = (await liveTaskDescriptors(absDir)).filter(t => !ids.has(t.id));
-    const covered = live.filter(t => t.branch && harvested.has(t.branch));
+    const covered = live.filter(t => {
+      const done = t.branch ? branchWrites.get(t.branch) : undefined;
+      return !!done && t.seedSymbols.every(s => done.has(s));
+    });
     if (covered.length) caveats.push(`${covered.length} live peer-board entr${covered.length === 1 ? 'y is' : 'ies are'} already represented by ${covered.length === 1 ? 'its' : 'their'} branch change.`);
     boardTasks = live.filter(t => !covered.includes(t)).map(({ branch: _b, ...t }) => t);
   } catch { /* the board is optional: unreadable means no board tasks */ }
