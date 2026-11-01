@@ -36,6 +36,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionShutdownEvent,
+  SessionCompactEvent,
   SessionStartEvent,
   ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
@@ -2244,8 +2245,8 @@ export interface PiExtensionRuntime {
   runLoopMoment?: (moment: string, payload: Record<string, unknown>, cwd: string, signal?: AbortSignal) => Promise<string | undefined>;
 }
 
-/** The hook's own after-tools limit, plus node startup and the session reads outside its race. */
-const LOOP_MOMENT_TIMEOUT_MS = 20_000;
+/** Each moment's own limit in the hook, plus node startup and the session reads outside its race. */
+const LOOP_MOMENT_TIMEOUT_MS: Record<string, number> = { 'after-tools': 20_000, 'after-compact': 35_000 };
 const LOOP_MOMENT_MAX_STDOUT = 256 * 1024;
 /** Children at once: a parallel batch of edits must not start one node process per call. */
 const LOOP_MOMENT_CONCURRENCY = 2;
@@ -2315,7 +2316,7 @@ export async function runLoopMomentChild(moment: string, payload: Record<string,
       signal?.removeEventListener('abort', onAbort);
       resolveResult(v);
     };
-    const timer = setTimeout(() => { child?.kill(); done(undefined); }, LOOP_MOMENT_TIMEOUT_MS);
+    const timer = setTimeout(() => { child?.kill(); done(undefined); }, LOOP_MOMENT_TIMEOUT_MS[moment] ?? 20_000);
     timer.unref?.();
     if (signal?.aborted) { done(undefined); return; }
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -2877,6 +2878,21 @@ function registerOpenlore(
     // Replacing content alone would drop the tool's machine-readable result: it is passed through.
     const structured = event.structuredContent;
     return { content: [...event.content, { type: 'text', text: `\n${text}` }], ...(structured !== undefined ? { structuredContent: structured } : {}) };
+  });
+
+  // ── B3: handoff briefing after a compaction (change: add-agent-loop-hooks-task-created-and-compaction) ──
+  // Pi's compaction summary is free text; the in-flight change's computed state is added as a
+  // message for the next turn (custom messages reach the model as context), as Claude Code's
+  // SessionStart `compact` hook does.
+  pi.on('session_compact', async (_event: SessionCompactEvent, ctx: ExtensionContext): Promise<void> => {
+    if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    if (!inOpenloreProject(ctx.cwd)) return;
+    let sessionId: string | undefined;
+    try { sessionId = ctx.sessionManager.getSessionId(); } catch { /* no session id */ }
+    const payload = { ...(sessionId ? { session_id: sessionId } : {}), cwd: ctx.cwd, hook_event_name: 'SessionStart', source: 'compact' };
+    const text = await (runtime.runLoopMoment ?? runLoopMomentChild)('after-compact', payload, ctx.cwd).catch(() => undefined);
+    if (!text) return;
+    pi.sendMessage({ customType: 'openlore-handoff', content: text, display: true }, { deliverAs: 'nextTurn' });
   });
 
   // ── C: context injection ──

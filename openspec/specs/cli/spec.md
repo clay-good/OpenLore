@@ -3407,6 +3407,19 @@ silent hook, a failure, an abort, or a 20-second timeout SHALL leave the tool re
 - **WHEN** the extension sees it
 - **THEN** the result is unchanged and no child process runs
 
+### Requirement: PiResumesFromTheHandoffAfterCompaction
+
+After Pi compacts a session in an OpenLore project, the Pi extension SHALL compute the handoff
+briefing with `openlore hook after-compact` in a node child process and queue it as a message for
+the next turn, so the agent resumes from the change's computed state. A silent hook, a failure,
+`json` or `print` mode, or a directory outside an OpenLore project SHALL send nothing.
+
+#### Scenario: Pi compacts a session
+
+- **GIVEN** a Pi session in an OpenLore project with an in-flight change
+- **WHEN** Pi compacts the session
+- **THEN** the handoff briefing is queued as a message for the next turn
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts

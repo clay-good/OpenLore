@@ -91,3 +91,37 @@ describe('Pi agent-loop receipt on tool results', () => {
     expect(await quiet({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx(root))).toBeUndefined();
   });
 });
+
+describe('Pi handoff after a compaction', () => {
+  function compactHandler(run: (moment: string, payload: Record<string, unknown>, cwd: string) => Promise<string | undefined>) {
+    const handlers = new Map<string, Handler>();
+    const sendMessage = vi.fn();
+    const pi = { registerTool: vi.fn(), registerCommand: vi.fn(), sendMessage, on: vi.fn((e: string, h: Handler) => { handlers.set(e, h); }) } as unknown as ExtensionAPI;
+    createPiExtension({ runLoopMoment: run })(pi);
+    return { handler: handlers.get('session_compact')!, sendMessage };
+  }
+
+  it('the handoff briefing is queued as a message for the next turn', async () => {
+    const root = repo({ 'a.ts': 'x\n' });
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    const { handler, sendMessage } = compactHandler(async (moment, payload) => { seen.push([moment, payload]); return 'handoff briefing'; });
+    await handler({ type: 'session_compact', reason: 'threshold', willRetry: false }, ctx(root));
+    expect(seen).toEqual([['after-compact', { session_id: 'pi-s1', cwd: root, hook_event_name: 'SessionStart', source: 'compact' }]]);
+    expect(sendMessage).toHaveBeenCalledWith({ customType: 'openlore-handoff', content: 'handoff briefing', display: true }, { deliverAs: 'nextTurn' });
+  });
+
+  it('no project, json mode, or a silent hook: nothing is sent', async () => {
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), 'olpi-plain-')));
+    dirs.push(plain);
+    execFileSync('git', ['init', '-q'], { cwd: plain, env: GIT_ENV });
+    const run = vi.fn(async () => 'x');
+    const a = compactHandler(run);
+    await a.handler({ type: 'session_compact' }, ctx(plain));
+    await a.handler({ type: 'session_compact' }, ctx(repo({ 'a.ts': 'x\n' }), 'json'));
+    expect(run).not.toHaveBeenCalled();
+    expect(a.sendMessage).not.toHaveBeenCalled();
+    const b = compactHandler(async () => undefined);
+    await b.handler({ type: 'session_compact' }, ctx(repo({ 'a.ts': 'x\n' })));
+    expect(b.sendMessage).not.toHaveBeenCalled();
+  });
+});

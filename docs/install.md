@@ -345,8 +345,9 @@ tool's machine-readable result is kept). In an OpenLore project only, it runs
 `openlore hook after-tools` in a node child process (about a second and a half; at most two at
 once, 20 s each, stopped on Esc), so no analyzer loads in the Pi process. A shell result's exit
 code is Pi's own; an aborted or timed-out command is an interrupted run. Calls a codemode script
-makes are skipped. Pi has no before-edit or before-stop moment, so test runs recorded there are
-not yet stated at stop.
+makes are skipped. After Pi compacts a session, the extension runs `openlore hook after-compact`
+the same way and queues the handoff briefing as a message for the next turn. Pi has no before-edit
+or before-stop moment, so test runs recorded there are not yet stated at stop.
 
 - **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
   hook ran, so work committed earlier is not raised again in every session.
