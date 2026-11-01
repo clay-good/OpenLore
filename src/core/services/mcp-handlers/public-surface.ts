@@ -194,7 +194,7 @@ function hasClosingSlashOnLine(s: string, from: number, n: number): boolean {
 const RESERVED_NAMES = new Set(['enum', 'interface', 'class', 'function', 'const', 'let', 'var', 'type', 'default', 'async', 'abstract', 'declare']);
 
 /** Top-level exported names for a file's content, per language. Fail-soft (empty set) for unsupported. */
-function exportedNames(rawContent: string, language: string): Set<string> {
+export function exportedNames(rawContent: string, language: string): Set<string> {
   const content = blankLiterals(rawContent);
   if (language === 'TypeScript' || language === 'JavaScript') {
     // Skip RE-EXPORTS (`export { x } from './a'`): their identity and breaking-ness are governed at
