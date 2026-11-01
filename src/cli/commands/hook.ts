@@ -78,6 +78,8 @@ export interface HookPayload {
   subagentType?: string;
   /** A SubagentStart event: the starting sub-agent's type. */
   agentType?: string;
+  /** An edit tool call's pending change: Write's content, or Edit/MultiEdit's replacements. */
+  edit?: { content?: string; edits?: Array<{ oldString: string; newString: string; replaceAll: boolean }> };
 }
 
 /** Read the fields OpenLore uses from a harness hook payload (Claude Code's shape). */
@@ -108,7 +110,41 @@ export function parseHookPayload(raw: string): HookPayload {
     ...(typeof input.prompt === 'string' && input.prompt ? { agentPrompt: input.prompt } : {}),
     ...(typeof input.subagent_type === 'string' && input.subagent_type ? { subagentType: input.subagent_type } : {}),
     ...(typeof p.agent_type === 'string' && p.agent_type ? { agentType: p.agent_type } : {}),
+    ...pendingEdit(input),
   };
+}
+
+/** The pending change an edit tool call carries (Claude Code's Write, Edit, and MultiEdit inputs). */
+function pendingEdit(input: Record<string, unknown>): Pick<HookPayload, 'edit'> {
+  if (typeof input.content === 'string') return { edit: { content: input.content } };
+  const one = (e: unknown) => {
+    const x = e as Record<string, unknown> | null;
+    return x && typeof x.old_string === 'string' && typeof x.new_string === 'string'
+      ? { oldString: x.old_string, newString: x.new_string, replaceAll: x.replace_all === true } : null;
+  };
+  const list = Array.isArray(input.edits) ? input.edits.map(one) : [one(input)];
+  if (!list.length || list.some(e => e === null)) return {};
+  return { edit: { edits: list as Array<{ oldString: string; newString: string; replaceAll: boolean }> } };
+}
+
+/**
+ * The text a pending edit would produce from `current` (null: the file does not exist), or undefined
+ * when it cannot be told exactly — an old string that is absent or (without replace-all) not unique,
+ * as the edit tool itself would refuse it.
+ */
+export function applyPendingEdit(current: string | null, edit: NonNullable<HookPayload['edit']>): string | undefined {
+  if (edit.content !== undefined) return edit.content;
+  if (current === null || !edit.edits) return undefined;
+  let text = current;
+  for (const e of edit.edits) {
+    if (!e.oldString) return undefined;
+    const at = text.indexOf(e.oldString);
+    if (at === -1) return undefined;
+    if (e.replaceAll) { text = text.split(e.oldString).join(e.newString); continue; }
+    if (text.indexOf(e.oldString, at + 1) !== -1) return undefined;
+    text = text.slice(0, at) + e.newString + text.slice(at + e.oldString.length);
+  }
+  return text;
 }
 
 /**
@@ -238,15 +274,39 @@ async function repoPrefix(root: string): Promise<string> {
 }
 
 /** `before-edit`: the target is generated, vendored, or a lockfile. Reads headers; writes nothing. */
-async function beforeEdit(root: string, files: string[]): Promise<HookItem[]> {
+async function beforeEdit(root: string, files: string[], edit?: HookPayload['edit']): Promise<HookItem[]> {
   const { classifyGeneratedFiles } = await import('../../core/services/generated-file-guard.js');
   const { facts } = await classifyGeneratedFiles(root, files);
-  return [...facts.values()].map(f => ({
+  const items: HookItem[] = [...facts.values()].map(f => ({
     key: `generated:${f.file}`,
     severity: 'warning',
     text: generatedText(f),
     ...(f.kind !== 'lockfile' ? { next: f.regenerateWith !== 'unknown' ? `regenerate with \`${f.regenerateWith}\`` : 'edit the source and regenerate' } : {}),
   }));
+  if (edit && files.length === 1) items.push(...(await pendingReferences(root, files[0], edit)));
+  return items;
+}
+
+/**
+ * The references a pending edit would add that do not resolve, graded on the pending text in memory
+ * before the tool writes it. Same finding keys as after-tools, so a fact is stated once.
+ */
+async function pendingReferences(root: string, file: string, edit: NonNullable<HookPayload['edit']>): Promise<HookItem[]> {
+  const { readFileConfined } = await import('../../utils/path-confinement.js');
+  let current: string | null;
+  try { current = await readFileConfined(root, file, 4 * 1024 * 1024); } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') return [];
+    current = null;
+  }
+  const next = applyPendingEdit(current, edit);
+  if (next === undefined || next === current) return [];
+  const prefix = await repoPrefix(root);
+  const { classifyFile } = await import('../../core/drift/git-diff.js');
+  const path = prefix + file;
+  const changed = [{ path, status: current === null ? 'added' as const : 'modified' as const, additions: 0, deletions: 0, ...classifyFile(path) }];
+  const { checkPhantomReferences } = await import('../../core/services/phantom-references.js');
+  const r = await checkPhantomReferences(root, 'HEAD', changed, undefined, { head: new Map([[file, next]]), base: new Map([[file, current]]) }).catch(() => undefined);
+  return (r?.findings ?? []).map(f => ({ key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: f.severity, text: `Before the write: ${f.message}`, ...(f.remediation ? { next: f.remediation } : {}) }));
 }
 
 function generatedText(f: { file: string; kind: string; generatedFrom: string[] | 'unknown'; matched: string }): string {
@@ -542,7 +602,7 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
       const runs = await import('../../core/services/test-run-ledger.js');
       if (moment === 'before-edit') {
         if (payload.sessionId) await runs.recordEditIntent(root, payload.sessionId, files).catch(() => undefined);
-        return { items: await beforeEdit(root, files) };
+        return { items: await beforeEdit(root, files, payload.edit) };
       }
       if (moment === 'after-tools') {
         if (payload.sessionId) await runs.recordEdits(root, payload.sessionId, files).catch(() => undefined);

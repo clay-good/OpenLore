@@ -289,3 +289,36 @@ describe('wording', () => {
     expect(out).toBe('[openlore after-tools]\n- A fact. (next action: the check concerned)');
   });
 });
+
+describe('before-edit: references in the pending text (change: add-agent-loop-hooks-codex-pi-and-pending-edits)', () => {
+  const UTILS = 'export function parseDate(s: string) { return new Date(s); }\n';
+  const MAIN = "import { parseDate } from './utils';\nexport const d = parseDate('2026-01-01');\n";
+
+  it('applyPendingEdit applies Write, Edit, and MultiEdit exactly, and refuses what the tool would refuse', async () => {
+    const { applyPendingEdit } = await import('./hook.js');
+    expect(applyPendingEdit(null, { content: 'x' })).toBe('x');
+    expect(applyPendingEdit('a b a', { edits: [{ oldString: 'b', newString: 'c', replaceAll: false }] })).toBe('a c a');
+    expect(applyPendingEdit('a b a', { edits: [{ oldString: 'a', newString: 'c', replaceAll: false }] })).toBeUndefined();
+    expect(applyPendingEdit('a b a', { edits: [{ oldString: 'a', newString: 'c', replaceAll: true }] })).toBe('c b c');
+    expect(applyPendingEdit('a b', { edits: [{ oldString: 'a', newString: 'x', replaceAll: false }, { oldString: 'b', newString: 'y', replaceAll: false }] })).toBe('x y');
+    expect(applyPendingEdit('a b', { edits: [{ oldString: 'z', newString: 'x', replaceAll: false }] })).toBeUndefined();
+    expect(applyPendingEdit(null, { edits: [{ oldString: 'a', newString: 'x', replaceAll: false }] })).toBeUndefined();
+  });
+
+  it('an invented import in an Edit is stated before the write; the file is unchanged', async () => {
+    const root = repo({ 'src/utils.ts': UTILS, 'src/main.ts': MAIN });
+    const edit = { old_string: "import { parseDate } from './utils';", new_string: "import { parseDate, formatDate } from './utils';" };
+    const out = context((await runHook('before-edit', payload(root, 'src/main.ts', { tool_input: { file_path: join(root, 'src/main.ts'), ...edit } }))).stdout);
+    expect(out?.additionalContext).toContain('Before the write');
+    expect(out?.additionalContext).toContain('formatDate');
+    expect(readFileSync(join(root, 'src/main.ts'), 'utf-8')).toBe(MAIN);
+  });
+
+  it('a Write of a new file importing a missing module is stated; a valid edit is quiet', async () => {
+    const root = repo({ 'src/utils.ts': UTILS, 'src/main.ts': MAIN });
+    const write = context((await runHook('before-edit', payload(root, 'src/new.ts', { tool_input: { file_path: join(root, 'src/new.ts'), content: "import { x } from './nowhere';\n" } }))).stdout);
+    expect(write?.additionalContext).toContain('./nowhere');
+    const ok = await runHook('before-edit', payload(root, 'src/main.ts', { session_id: 's2', tool_input: { file_path: join(root, 'src/main.ts'), old_string: "'2026-01-01'", new_string: "'2026-02-01'" } }));
+    expect(ok.stdout).toBe('');
+  });
+});

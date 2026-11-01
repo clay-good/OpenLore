@@ -667,12 +667,18 @@ function finding(
  *
  * `prefetched` is the diff already read by a caller (blast_radius reads it with lockfiles kept), so
  * the check costs no second git diff.
+ *
+ * `pending` grades an edit before it is written (the before-edit hook): for each root-relative path
+ * it names, `head` is the text the edit would produce and `base` the file's text now (null when the
+ * file does not exist yet), so only the references this edit adds are checked and nothing is
+ * written (change: add-agent-loop-hooks-codex-pi-and-pending-edits).
  */
 export async function checkPhantomReferences(
   root: string,
   baseRef: string,
   prefetched?: readonly ChangedFile[],
   corpusFiles?: Iterable<string>,
+  pending?: { head: ReadonlyMap<string, string>; base: ReadonlyMap<string, string | null> },
 ): Promise<PhantomReferenceResult> {
   const findings: GovernanceFinding[] = [];
   const notAssessed: NotAssessed[] = [];
@@ -702,7 +708,7 @@ export async function checkPhantomReferences(
   // Every base revision in one `git cat-file --batch` rather than two spawns per file: the spawns
   // dominate the check on a large diff. A path the batch does not return is read on its own below,
   // where absent and unreadable can still be told apart.
-  const baseBlobs = await baseRevisions(absRoot, baseRef, checked.filter(f => f.status !== 'added').map(f => prefix + f.path));
+  const baseBlobs = await baseRevisions(absRoot, baseRef, checked.filter(f => f.status !== 'added' && !pending?.base.has(f.path)).map(f => prefix + f.path));
   const pythonPackages = new Map<string, string | null>();
   const aliasesSkipped = new Set<string>();
   const dynamicSkipped = new Set<string>();
@@ -714,15 +720,18 @@ export async function checkPhantomReferences(
   let capped = false;
   for (const file of checked) {
     if (capped) break;
-    const headText = await readHead(absRoot, file.path);
+    const headText = pending?.head.get(file.path) ?? await readHead(absRoot, file.path);
     if (headText === null) {
       notAssessed.push(notAssessedEntry(file.path, 'the file could not be read as text'));
       continue;
     }
     const batched = baseBlobs.get(prefix + file.path);
-    const baseText = file.status === 'added'
-      ? { absent: true }
-      : batched ?? await readAtRef(absRoot, baseRef, prefix + file.path);
+    const pendingBase = pending?.base.get(file.path);
+    const baseText = pendingBase !== undefined
+      ? (pendingBase === null ? { absent: true } : pendingBase)
+      : file.status === 'added'
+        ? { absent: true }
+        : batched ?? await readAtRef(absRoot, baseRef, prefix + file.path);
     if (typeof baseText !== 'string' && !baseText.absent) {
       notAssessed.push(notAssessedEntry(file.path, `the base revision of the file could not be read, so its added references are unknown`));
       continue;

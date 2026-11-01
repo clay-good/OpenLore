@@ -339,7 +339,7 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 
 | Key | Moment |
 |-----|--------|
-| `before-edit` | before an edit tool runs: generated, vendored, or lockfile target |
+| `before-edit` | before an edit tool runs: generated, vendored, or lockfile target; unresolved references in the pending text |
 | `after-tools` | after an edit: session-ledger record and facts, check weakening, phantom references, peer changes to declared or served symbols |
 | `before-stop` | before the agent stops: the `verify_change` receipt (blocks only on policy-blocking findings) |
 | `after-compact` | after the conversation is compacted: the handoff briefing of the in-flight change |
