@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { createPiExtension } from './extension.js';
+import { createPiExtension, piShellResponse, piToolPath } from './extension.js';
+import { homedir } from 'node:os';
 import { runHook } from '../cli/commands/hook.js';
 
 const dirs: string[] = [];
@@ -30,7 +31,7 @@ function toolResult(run: (moment: string, payload: Record<string, unknown>, cwd:
   createPiExtension({ runLoopMoment: run })(pi);
   return handlers.get('tool_result')!;
 }
-const ctx = (cwd: string, mode = 'interactive') => ({ cwd, mode, sessionManager: { getSessionId: () => 'pi-s1' } });
+const ctx = (cwd: string, mode = 'tui') => ({ cwd, mode, signal: undefined, sessionManager: { getSessionId: () => 'pi-s1' } });
 const content = [{ type: 'text', text: 'Successfully replaced text in src/gen.ts.' }];
 
 describe('Pi agent-loop receipt on tool results', () => {
@@ -40,20 +41,34 @@ describe('Pi agent-loop receipt on tool results', () => {
       const r = await runHook(moment as 'after-tools', JSON.stringify(payload));
       return r.stdout ? (JSON.parse(r.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext : undefined;
     });
-    const out = await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 't1', input: { path: join(root, 'src/gen.ts'), edits: [] }, content, isError: false, details: undefined }, ctx(root)) as { content: Array<{ type: string; text: string }> };
+    // `@path` is how Pi's tools accept a path too.
+    const structuredContent = { ok: true };
+    const out = await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 't1', input: { path: '@src/gen.ts', edits: [] }, content, structuredContent, isError: false, details: undefined }, ctx(root)) as { content: Array<{ type: string; text: string }>; structuredContent: unknown };
     expect(out.content[0]).toEqual(content[0]);
     expect(out.content[1].text).toContain('src/gen.ts is generated');
+    // The tool's machine-readable result is kept.
+    expect(out.structuredContent).toEqual(structuredContent);
   });
 
-  it('builds a Claude-shaped payload: edit/write as file_path, bash as command with its outcome', async () => {
+  it('builds a Claude-shaped payload: edit/write as file_path, bash as command with its real outcome', async () => {
+    const root = repo({ 'a.ts': 'x\n' });
     const seen: Array<Record<string, unknown>> = [];
     const handler = toolResult(async (_m, payload) => { seen.push(payload); return undefined; });
-    await handler({ type: 'tool_result', toolName: 'write', toolCallId: 't', input: { path: 'a.ts', content: 'x' }, content, isError: false }, ctx('/r'));
-    await handler({ type: 'tool_result', toolName: 'bash', toolCallId: 't', input: { command: 'npm test' }, content, isError: true }, ctx('/r'));
+    await handler({ type: 'tool_result', toolName: 'write', toolCallId: 't', input: { path: 'a.ts', content: 'x' }, content, isError: false }, ctx(root));
+    await handler({ type: 'tool_result', toolName: 'bash', toolCallId: 't', input: { command: 'npm test' }, content, structuredContent: { exit_code: 2 }, isError: true }, ctx(root));
     expect(seen).toEqual([
-      { session_id: 'pi-s1', cwd: '/r', hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: 'a.ts' } },
-      { session_id: 'pi-s1', cwd: '/r', hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_response: { exit_code: 1 } },
+      { session_id: 'pi-s1', cwd: root, hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: 'a.ts' } },
+      { session_id: 'pi-s1', cwd: root, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_response: { exit_code: 2 } },
     ]);
+  });
+
+  it('a shell result maps to its exit code, an interrupted run, or nothing known; Pi paths resolve like Pi', () => {
+    expect(piShellResponse({ isError: false, structuredContent: { exit_code: 0 }, content: [] })).toEqual({ exit_code: 0 });
+    expect(piShellResponse({ isError: true, content: [{ type: 'text', text: 'partial\n\nCommand aborted' }] })).toEqual({ interrupted: true });
+    expect(piShellResponse({ isError: true, content: [{ type: 'text', text: 'x\n\nCommand timed out after 30 seconds' }] })).toEqual({ interrupted: true });
+    expect(piShellResponse({ isError: true, content: [{ type: 'text', text: 'boom' }] })).toBeUndefined();
+    expect(piToolPath('@src/a.ts')).toBe('src/a.ts');
+    expect(piToolPath('~/a.ts')).toBe(join(homedir(), 'a.ts'));
   });
 
   it('other tools, a refused edit, json/print modes, and a silent hook leave the result unchanged', async () => {
@@ -61,9 +76,18 @@ describe('Pi agent-loop receipt on tool results', () => {
     const handler = toolResult(run);
     expect(await handler({ type: 'tool_result', toolName: 'read', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx('/r'))).toBeUndefined();
     expect(await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: true }, ctx('/r'))).toBeUndefined();
-    expect(await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx('/r', 'json'))).toBeUndefined();
+    const root = repo({ 'a.ts': 'x\n' });
+    expect(await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx(root, 'json'))).toBeUndefined();
+    expect(await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx(root, 'print'))).toBeUndefined();
+    // A call a codemode script made: its result goes to the script.
+    expect(await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 'p/1', parentToolCallId: 'p', input: { path: 'a.ts' }, content, isError: false }, ctx(root))).toBeUndefined();
+    // Not an OpenLore project: no child process.
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), 'olpi-plain-')));
+    dirs.push(plain);
+    execFileSync('git', ['init', '-q'], { cwd: plain, env: GIT_ENV });
+    expect(await handler({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx(plain))).toBeUndefined();
     expect(run).not.toHaveBeenCalled();
     const quiet = toolResult(async () => undefined);
-    expect(await quiet({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx('/r'))).toBeUndefined();
+    expect(await quiet({ type: 'tool_result', toolName: 'edit', toolCallId: 't', input: { path: 'a.ts' }, content, isError: false }, ctx(root))).toBeUndefined();
   });
 });

@@ -340,9 +340,13 @@ from the `Exit code:` line Codex puts at the head of its output; without one, a 
 is not known. The pending-edit check and the sub-agent moments are Claude Code only.
 
 **Pi.** OpenLore's Pi extension appends the `after-tools` receipt to the result of Pi's `edit`,
-`write`, and `bash` tools, so the agent reads it with the tool's own output. It runs
-`openlore hook after-tools` in a child process (about a second; at most 15 s), so no analyzer loads
-in the Pi process. Pi reports a failed shell command as an error result, which counts as exit 1.
+`write`, `bash`, and `powershell` tools, so the agent reads it with the tool's own output (the
+tool's machine-readable result is kept). In an OpenLore project only, it runs
+`openlore hook after-tools` in a node child process (about a second and a half; at most two at
+once, 20 s each, stopped on Esc), so no analyzer loads in the Pi process. A shell result's exit
+code is Pi's own; an aborted or timed-out command is an interrupted run. Calls a codemode script
+makes are skipped. Pi has no before-edit or before-stop moment, so test runs recorded there are
+not yet stated at stop.
 
 - **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
   hook ran, so work committed earlier is not raised again in every session.

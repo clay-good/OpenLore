@@ -48,7 +48,7 @@ const EXEMPT: { file: string; line: number; why: string }[] = [
   { file: 'src/api/health.ts', line: 115, why: 'loopback http:// watcher-state probe of an announced daemon' },
   { file: 'src/pi/extension.ts', line: 765, why: 'loopback http:// health probe' },
   { file: 'src/pi/extension.ts', line: 1092, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 2438, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 2509, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
     line: 341,

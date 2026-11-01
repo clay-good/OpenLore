@@ -3389,10 +3389,11 @@ its patch touches, never as a shell command.
 
 ### Requirement: PiToolResultsCarryTheAfterEditReceipt
 
-The Pi extension SHALL append the after-edit receipt to the result of Pi's `edit`, `write`, and
-`bash` tools, computed by `openlore hook after-tools` in a child process so that no analyzer loads
-in the Pi process. A refused edit, another tool, a non-interactive mode, a silent hook, a failure,
-or a 15-second timeout SHALL leave the tool result unchanged.
+The Pi extension SHALL append the after-edit receipt to the result of Pi's `edit`, `write`,
+`bash`, and `powershell` tools in an OpenLore project, computed by `openlore hook after-tools` in a
+node child process so that no analyzer loads in the Pi process, and SHALL keep the tool's
+machine-readable result. A refused edit, another tool, a nested call, `json` or `print` mode, a
+silent hook, a failure, an abort, or a 20-second timeout SHALL leave the tool result unchanged.
 
 #### Scenario: A Pi edit of a generated file
 
