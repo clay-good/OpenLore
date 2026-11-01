@@ -31,6 +31,7 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 | Review a diff structurally | [structural-diff.md](structural-diff.md) |
 | Know which files are generated, and their source | [generated-files.md](generated-files.md) |
 | Catch invented imports, exports, and packages | [phantom-references.md](phantom-references.md) |
+| See when a diff weakens a test, a suppression, or a check config | [check-weakening.md](check-weakening.md) |
 | Trace impact across code ↔ infrastructure | [cross-domain-impact.md](cross-domain-impact.md) |
 | Map cross-service API topology | [cross-service-topology.md](cross-service-topology.md) |
 

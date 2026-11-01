@@ -370,6 +370,50 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A diff edits a generated or vendored file (recognized header marker, .gitattributes linguist attribute, or excluded path pattern) without also changing its known source or the config entry that regenerates it, or changes a lockfile without a manifest of its ecosystem. A newly added generated file does not fire it.',
     remediation: 'Generated file {subject} was edited without its source; edit the source and regenerate, or record why the hand edit is intended.',
   },
+  // ── check weakening (add-check-weakening-findings) ──
+  // Returned by structural_diff and verify_change, listed by `openlore review`; `openlore enforce` does not collect them.
+  'test-removed': {
+    defaultClass: 'advisory',
+    source: 'check-weakening',
+    description: 'A test case or test file present at the baseline (the merge-base) is gone, and no test with the same body appears under a new name.',
+    remediation: 'Test {subject} was removed; confirm the behavior it checked is still tested, or restore it.',
+  },
+  'test-disabled': {
+    defaultClass: 'advisory',
+    source: 'check-weakening',
+    description: 'A skip, ignore, or disable marker (`it.skip`, `xit`, `@pytest.mark.skip`, `t.Skip`, `@Disabled`) was added to a test, or a focus marker (`.only`, `fit`) that stops the file\'s other tests from running.',
+    remediation: 'Test {subject} no longer runs; re-enable it, or record why it is off.',
+  },
+  'assertions-reduced': {
+    defaultClass: 'advisory',
+    source: 'check-weakening',
+    description: 'A test has fewer assertion calls than at the baseline (closed per-framework assertion-call list).',
+    remediation: 'Test {subject} lost assertions; confirm it still checks the behavior it is named for.',
+  },
+  'expected-value-changed': {
+    defaultClass: 'advisory',
+    source: 'check-weakening',
+    description: 'A literal argument of a test\'s assertions changed while no production symbol the test file reaches changed.',
+    remediation: 'An expected value in {subject} changed without a change to the code it checks; confirm the new value is correct.',
+  },
+  'suppression-added': {
+    defaultClass: 'advisory',
+    source: 'check-weakening',
+    description: 'A suppression comment or annotation was added (`@ts-ignore`, `eslint-disable`, `# noqa`, `# type: ignore`, `//nolint`, `@SuppressWarnings`, …).',
+    remediation: 'A suppression was added at {subject}; fix the reported issue, or record why it is suppressed.',
+  },
+  'error-swallowed': {
+    defaultClass: 'advisory',
+    source: 'check-weakening',
+    description: 'A new catch/except block (or Go `if err != nil`) that is empty or only logs (closed per-language logging list) and returns at most a constant, around a call the baseline did not so wrap.',
+    remediation: 'An error at {subject} is now discarded; handle or rethrow it, or record why it is safe to ignore.',
+  },
+  'check-config-relaxed': {
+    defaultClass: 'advisory',
+    source: 'check-weakening',
+    description: 'A test-runner, coverage, lint, or CI config was relaxed: an added exclude/ignore entry, a lint rule turned off, a lowered coverage threshold, an added `continue-on-error`/`allow_failure` or `if: false`, a removed or changed CI step that ran tests, a deleted check config, or a lowered enforcement class for one of these codes in `.openlore/config.json`.',
+    remediation: 'A check config was relaxed at {subject}; confirm the relaxation is intended.',
+  },
   // ── deprecation propagation (add-deprecation-propagation) ──
   'deprecated-symbol-use': {
     defaultClass: 'advisory',

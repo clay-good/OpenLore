@@ -68,7 +68,7 @@ Work in this order:
 |---|--------|----------------------------|
 | 1 | [`add-generated-file-guard`](openspec/changes/archive/2026-10-31-add-generated-file-guard) — **shipped** (#629, [docs](docs/generated-files.md)) | "This file is generated from `order.proto`; regenerate with …" |
 | 2 | [`add-phantom-reference-findings`](openspec/changes/archive/2026-10-31-add-phantom-reference-findings) — **shipped** (#632, [docs](docs/phantom-references.md)) | Invented imports, exports, and packages caught; pre-write once `verify_change` gains its `patch` input |
-| 3 | [`add-check-weakening-findings`](openspec/changes/add-check-weakening-findings) | Skipped/deleted tests, removed assertions, suppressions, relaxed CI — joined to the code they guarded |
+| 3 | [`add-check-weakening-findings`](openspec/changes/archive/2026-10-31-add-check-weakening-findings) — **shipped** ([docs](docs/check-weakening.md)) | Skipped/deleted tests, removed assertions, suppressions, relaxed CI — joined to the code they guarded |
 | 4 | [`add-session-structural-ledger`](openspec/changes/add-session-structural-ledger) | Names the symbol that changed under the agent; sees modify/revert loops; edits after the last test run |
 | 5 | [`add-agent-loop-hook-surfaces`](openspec/changes/add-agent-loop-hook-surfaces) | Receipts pushed after edits, after compaction, before stop, at sub-agent start, at task creation |
 | 6 | [`add-session-handoff-briefing`](openspec/changes/add-session-handoff-briefing) | Compaction no longer loses the in-flight change (promoted from Defer) |

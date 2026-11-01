@@ -1,7 +1,8 @@
 # Check-weakening findings: say when a diff makes checks pass by weakening the checks
 
-> Status: PROPOSED (2026-10-31, `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`). Registered advisory
-> findings in `verify_change` and `structural_diff`. No new tool.
+> Status: SHIPPED (2026-10-31). Registered advisory findings in `verify_change` and
+> `structural_diff`. No new tool. Rust and RSpec are outside the closed table in this cut and are
+> reported `not-assessed`. See [docs/check-weakening.md](../../../../docs/check-weakening.md).
 
 ## The gap
 
