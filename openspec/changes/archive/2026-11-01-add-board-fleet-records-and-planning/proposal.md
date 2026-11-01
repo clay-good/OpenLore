@@ -1,6 +1,6 @@
 # Fleet records on the board; plan against the board
 
-> Status: PROPOSED (2026-11-01). Split from `add-peer-notices-served-set-and-fleet-records`, which
+> Status: SHIPPED (2026-11-01). Split from `add-peer-notices-served-set-and-fleet-records`, which
 > shipped peer notices for served functions.
 
 ## Why

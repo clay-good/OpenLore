@@ -86,6 +86,8 @@ export interface PlanParallelWorkInput {
   affectedMaxDepth?: number;
   /** Forwarded to the footprint projection (ambient fan-in percentile). */
   ambientFanInPercentile?: number;
+  /** Also plan the live agents on the clone's peer board, as tasks `board:<actorId>` (change: add-board-fleet-records-and-planning). */
+  includeBoard?: boolean;
 }
 
 /** A task's footprint, rendered for the plan. Every region list is capped to
@@ -629,5 +631,21 @@ function renderFootprint(f: Footprint): RenderedFootprint {
 
 /** MCP dispatch entry. */
 export async function handlePlanParallelWork(input: PlanParallelWorkInput): Promise<unknown> {
-  return computePlanParallelWork(input);
+  if (!input.includeBoard) return computePlanParallelWork(input);
+  // The live board entries join as tasks: their write seeds are the symbol ids resolved at declaration.
+  const { liveTaskDescriptors } = await import('../footprint-board.js');
+  const absDir = await validateDirectory(input.directory);
+  const given = new Set((Array.isArray(input.tasks) ? input.tasks : []).map(t => t?.id));
+  const board = (await liveTaskDescriptors(absDir).catch(() => []))
+    .map(d => ({ id: `board:${d.id}`, seedSymbols: d.seedSymbols, ...(d.writeMode ? { writeMode: d.writeMode } : {}) }))
+    .filter(t => !given.has(t.id));
+  const plan = await computePlanParallelWork({ ...input, tasks: [...(input.tasks ?? []), ...board] });
+  if ('error' in plan) return plan;
+  return {
+    ...plan,
+    boardTasks: board.map(t => t.id),
+    boardNote: board.length
+      ? 'Tasks named board:<actorId> are live peer-board entries (declare_footprint), planned on the write-sets they declared; their entries are peer-written (local-unreviewed).'
+      : 'No live peer-board entry declares a write-set; only the given tasks are planned.',
+  };
 }

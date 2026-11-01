@@ -8,6 +8,9 @@ import { readBoard, liveTaskDescriptors, pruneEnded, boardDir } from '../footpri
 import { renderFootprint } from '../../../cli/commands/footprint.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
 import { PANIC_SESSION_EXPIRY_MS } from './panic-constants.js';
+import { recordVerification, handleFleetStatus } from './fleet-coordination.js';
+import { handlePlanParallelWork } from './plan-parallel-work.js';
+import { existsSync } from 'node:fs';
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
@@ -129,6 +132,32 @@ describe('declare_footprint', () => {
     const { a } = clone();
     await handleDeclareFootprint({ directory: a, actorId: 'agent-a', writeSet: ['parseConfig'], writeMode: 'append' });
     expect(await liveTaskDescriptors(a)).toEqual([{ id: 'agent-a', branch: 'feat-a', seedSymbols: ['src/config.ts::parseConfig'], writeMode: 'append' }]);
+  });
+
+  it('plan_parallel_work with includeBoard plans the live board agents as tasks', async () => {
+    const { a, b } = clone();
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['parseConfig'] });
+    const plain = await handlePlanParallelWork({ directory: a, tasks: [{ id: 'mine', seedSymbols: ['loadConfig'] }] }) as { taskCount: number };
+    expect(plain.taskCount).toBe(1);
+    const plan = await handlePlanParallelWork({ directory: a, tasks: [{ id: 'mine', seedSymbols: ['parseConfig'] }], includeBoard: true }) as { taskCount: number; boardTasks: string[]; conflicts: Array<{ a: string; b: string; hazard: string }> };
+    expect(plan.boardTasks).toEqual(['board:agent-b']);
+    expect(plan.taskCount).toBe(2);
+    expect(JSON.stringify(plan.conflicts)).toContain('board:agent-b');
+  });
+
+  it('a fleet verdict recorded in one worktree is visible in its sibling; a legacy record is folded in', async () => {
+    const { a, b } = clone();
+    write(b, join(OPENLORE_DIR, 'coordination', 'verification-records.json'), JSON.stringify([
+      { id: 'legacy', verdict: 'surface-stable', branch: 'feat-b', baseCommit: 'abc', producedBy: 'certify_public_surface', anchors: [] },
+      { id: 'junk', verdict: 'not-a-verdict' },
+    ]));
+    await recordVerification(a, { id: 'v1', verdict: 'merge-compatible', branch: 'feat-a', baseCommit: git(a, 'rev-parse', 'HEAD'), producedBy: 'certify_merge', anchors: [] });
+    const ids = async (dir: string) => ((await handleFleetStatus({ directory: dir })).verificationMemory as { records: Array<{ id: string }> }).records.map(r => r.id).sort();
+    expect(await ids(b)).toEqual(['legacy', 'v1']);
+    expect(await ids(a)).toEqual(['v1']);
+    await recordVerification(b, { id: 'v2', verdict: 'blast-radius-clean', branch: 'feat-b', baseCommit: 'abc', producedBy: 'blast_radius', anchors: [] });
+    expect(existsSync(join(b, OPENLORE_DIR, 'coordination', 'verification-records.json'))).toBe(false);
+    expect(await ids(a)).toEqual(['legacy', 'v1', 'v2']);
   });
 
   it('rejects bad input without writing', async () => {

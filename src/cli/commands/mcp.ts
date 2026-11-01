@@ -1822,6 +1822,7 @@ export const TOOL_DEFINITIONS = [
             required: ['id'],
           },
         },
+        includeBoard: { type: 'boolean', description: 'Also plan the live peer-board agents (declare_footprint) as tasks board:<actorId>.' },
       },
       required: ['tasks'],
     },

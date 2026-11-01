@@ -21,8 +21,10 @@ import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import type { StructuralAnchor } from '../../../types/index.js';
 import { validateDirectory, safeJoin } from './utils.js';
 import { OPENLORE_DIR } from '../../../constants.js';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdir, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { readFileConfined } from '../../../utils/path-confinement.js';
+import { atomicWriteFile } from '../../decisions/atomic-store.js';
 
 /** The coordination verdicts whose currency the fleet tracks. */
 export type CoordinationVerdict = 'blast-radius-clean' | 'surface-stable' | 'merge-compatible';
@@ -52,7 +54,11 @@ export interface ClassifiedRecord {
   reason: string;
 }
 
-const RECORDS_REL = `${OPENLORE_DIR}/coordination/verification-records.json`;
+/** The pre-board, per-worktree location: read once and folded into the shared file on the next write. */
+const LEGACY_RECORDS_REL = `${OPENLORE_DIR}/coordination/verification-records.json`;
+const RECORDS_FILE = 'verification-records.json';
+const MAX_RECORDS_BYTES = 4 * 1024 * 1024;
+const MAX_RECORDS = 1000;
 
 /**
  * Map a memory-freshness aggregate to a record state. Pure. The anchor system carries a
@@ -95,22 +101,53 @@ export function classifyRecords(
   });
 }
 
-async function loadRecords(absDir: string): Promise<VerificationRecord[]> {
+const VERDICTS = new Set<string>(['blast-radius-clean', 'surface-stable', 'merge-compatible']);
+/** Records are written by any worktree of the clone: only well-formed ones are read. */
+const isRecord = (v: unknown): v is VerificationRecord => {
+  const r = v as Partial<VerificationRecord> | null;
+  return !!r && typeof r === 'object' && typeof r.id === 'string' && r.id.length <= 256 && VERDICTS.has(r.verdict as string)
+    && typeof r.branch === 'string' && typeof r.baseCommit === 'string' && typeof r.producedBy === 'string'
+    && Array.isArray(r.anchors) && r.anchors.every(a => !!a && typeof a === 'object');
+};
+
+/**
+ * The clone's shared records file, next to the peer board in the git common directory, so a verdict
+ * one worktree proved is visible to its siblings (change: add-board-fleet-records-and-planning).
+ * Null outside a git work tree: records then stay in the worktree's own `.openlore/`.
+ */
+async function sharedRecordsDir(absDir: string): Promise<string | null> {
+  const { boardDir } = await import('../footprint-board.js');
+  const board = await boardDir(absDir);
+  return board ? dirname(board) : null;
+}
+
+async function readRecordsAt(dir: string, name: string): Promise<VerificationRecord[]> {
   try {
-    const raw = await readFile(safeJoin(absDir, RECORDS_REL), 'utf-8');
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as VerificationRecord[]) : [];
+    const parsed: unknown = JSON.parse(await readFileConfined(dir, name, MAX_RECORDS_BYTES));
+    return Array.isArray(parsed) ? parsed.filter(isRecord).slice(0, MAX_RECORDS) : [];
   } catch { return []; }
 }
 
-/** Record a verification verdict (coordination-scoped). Advisory, best-effort. */
+/** The shared records, plus any legacy per-worktree record the shared file does not hold yet. */
+async function loadRecords(absDir: string): Promise<VerificationRecord[]> {
+  const shared = await sharedRecordsDir(absDir);
+  const records = shared ? await readRecordsAt(shared, RECORDS_FILE) : [];
+  const ids = new Set(records.map(r => r.id));
+  for (const r of await readRecordsAt(absDir, LEGACY_RECORDS_REL)) if (!ids.has(r.id)) records.push(r);
+  return records;
+}
+
+/** Record a verification verdict (coordination-scoped), shared by the clone's worktrees. Advisory, best-effort. */
 export async function recordVerification(absDir: string, record: VerificationRecord): Promise<void> {
   const records = await loadRecords(absDir);
   const next = records.filter(r => r.id !== record.id);
   next.push(record);
-  const path = safeJoin(absDir, RECORDS_REL);
+  const shared = await sharedRecordsDir(absDir);
+  const path = shared ? join(shared, RECORDS_FILE) : safeJoin(absDir, LEGACY_RECORDS_REL);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(next, null, 2), 'utf-8');
+  await atomicWriteFile(path, JSON.stringify(next.slice(-MAX_RECORDS), null, 2));
+  // Folded into the shared file: the legacy copy is this tool's own artifact and is retired.
+  if (shared) await rm(safeJoin(absDir, LEGACY_RECORDS_REL), { force: true }).catch(() => {});
 }
 
 export interface FleetStatusInput {
@@ -134,7 +171,9 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
     if (ctx) view = ctx.freshnessView();
   } catch { /* no graph available — view stays null, so every record is needs-reverification */ }
 
-  const classified = classifyRecords(records, view);
+  // Any worktree of the clone may have written a record: its text is screened before it is served.
+  const { emittedText } = await import('../generated-file-guard.js');
+  const classified = classifyRecords(records, view).map(c => ({ ...c, id: emittedText(c.id), branch: emittedText(c.branch), producedBy: emittedText(c.producedBy), baseCommit: emittedText(c.baseCommit) }));
   const counts = classified.reduce<Record<RecordState, number>>((acc, c) => {
     acc[c.state] = (acc[c.state] ?? 0) + 1; return acc;
   }, { 'still-valid': 0, 'carried': 0, 'invalidated': 0, 'needs-reverification': 0 });
@@ -159,6 +198,7 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
     // Live agent footprints on the clone's board (change: add-peer-footprint-board).
     board: await boardSummary(absDir),
     boundaries: [
+      'Verification records are shared by every worktree of this clone (next to the peer board in the git common directory); outside a git work tree they stay in this directory.',
       'Advisory and read-only. Live PR/branch harvesting, expire-on-land record lifecycle, and the CLI are follow-ups; today the arc tools are referenced per branch, not executed here.',
     ],
   };
