@@ -41,7 +41,9 @@ export type EdgeKind =
   | 'affects'        // decision → governed file (spec-16)
   | 'authored_by'    // file → person, from local git history (spec-18)
   | 'changed_in_pr'  // file → pull request, from local git/gh (spec-18)
-  | 'deploys_symbol'; // function resource → the code function it runs (add-iac-deploy-binding)
+  | 'deploys_symbol'   // function resource → the code function it runs (add-iac-deploy-binding)
+  | 'implements_endpoint' // route handler → the declared operation it serves (add-contract-node-projection)
+  | 'consumes_endpoint';  // the function enclosing a client call → the operation it calls
 
 /** Semantic nature of the call at the call site */
 export type CallType =
@@ -563,6 +565,8 @@ export interface CallGraphResult {
   ambiguousSites?: AmbiguousCallSite[];
   /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
   unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
+  contracts?: import('./contract/project.js').ContractDisclosure;
   /**
    * Which lane Pass-1 extraction actually ran on — the worker pool or the serial
    * reference path — and whether anything degraded (change:
@@ -603,4 +607,6 @@ export interface SerializedCallGraph {
   ambiguousSites?: AmbiguousCallSite[];
   /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
   unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
+  contracts?: import('./contract/project.js').ContractDisclosure;
 }

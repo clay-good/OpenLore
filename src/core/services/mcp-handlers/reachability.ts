@@ -43,7 +43,7 @@ import {
   buildQualifier,
   qualificationReason,
 } from './dynamic-boundary-disclosure.js';
-import { isIacLanguage } from '../../analyzer/iac/types.js';
+import { isProjectedLanguage } from '../../analyzer/projected-language.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -117,7 +117,7 @@ export function wiringKey(filePath: string): string {
 
 /** A code node we can reason about (not external, not infrastructure). */
 function isCodeNode(n: FunctionNode): boolean {
-  return !n.isExternal && !isIacLanguage(n.language);
+  return !n.isExternal && !isProjectedLanguage(n.language);
 }
 
 /**
@@ -135,6 +135,10 @@ function externallyInvokedHandlerIds(cg: SerializedCallGraph, includeSynthesized
     if (e.confidence === 'http_endpoint') ids.add(e.calleeId);
     // A function a resource deploys (a Lambda handler) is invoked from outside the code (add-iac-deploy-binding).
     else if (e.kind === 'deploys_symbol') ids.add(e.calleeId);
+    // A handler that serves a DECLARED operation is invoked by whoever calls that endpoint, in
+    // this repository or outside it (change: add-contract-node-projection). The edge runs
+    // handler → operation, so the handler is the CALLER side.
+    else if (e.kind === 'implements_endpoint') ids.add(e.callerId);
     else if (includeSynthesizedRoutes && e.confidence === 'synthesized' && e.synthesizedBy === 'route-handler') {
       ids.add(e.calleeId);
     }

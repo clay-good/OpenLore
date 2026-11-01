@@ -17,6 +17,7 @@
  *   - `cfgOverlay`     ← {@link cfgSupportsLanguage}        (cfg.ts)
  *   - `typeInference`  ← {@link TYPE_INFERENCE_LANGUAGES}   (type-inference-engine.ts)
  *   - `iacProjection`  ← {@link isIacLanguage}              (iac/types.ts)
+ *   - `contractSchemas`← {@link isContractLanguage}         (contract/types.ts)
  *   - `styleFingerprint`← {@link STYLE_FINGERPRINT_LANGUAGES} (style-fingerprint.ts)
  *   - `dynamicBoundary`← {@link supportsDynamicBoundary}    (dynamic-boundary.ts)
  *   - `messageTopology`← {@link MESSAGE_TOPOLOGY_LANGUAGES} (message-topology.ts)
@@ -34,6 +35,7 @@
 
 import { cfgSupportsLanguage } from './cfg.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
+import { isContractLanguage, CONTRACT_LANGUAGES } from './contract/types.js';
 import { CALLGRAPH_LANGUAGES } from './call-graph.js';
 import { SIGNATURE_LANGUAGES } from './signature-extractor.js';
 import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
@@ -67,6 +69,7 @@ export const CAPABILITIES = [
   'receiverResolution',
   'styleFingerprint',
   'iacProjection',
+  'contractSchemas',
   'crossServiceHttp',
   'errorPropagation',
   'dynamicBoundary',
@@ -89,6 +92,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   receiverResolution: 'Chained intra-object receiver resolution (`this.<field>.m()` / `self.<field>.m()`) through a per-file registry of declared field and return types, with the residue disclosed as a boundary by `analyze_error_propagation` rather than left silent (that tool is the only surface that discloses it). A language WITHOUT this does NOT bind that call shape; what it does instead varies by that language\'s own call query — Java, C# and Ruby capture the chained receiver and fall through to their ordinary member-call handling, while Go captures no chained receiver at all and so records nothing for it.',
   styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
+  contractSchemas: 'Interface-schema reading and projection: declared operations become graph nodes bound to the route handler that serves each (`implements_endpoint`) and the client call that consumes it (`consumes_endpoint`), matched literally by method and normalized path. A format WITHOUT this is not read, so it declares no operation — never "this repository declares none".',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
   errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
   dynamicBoundary: 'Dynamic-boundary site recording: reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition and DI-container resolution are recorded as disclosed boundaries. A language WITHOUT this reports no site because none is looked for — never because it contains no dynamic dispatch.',
@@ -120,8 +124,19 @@ export const IAC_TAG_LANGUAGES: readonly string[] = IAC_LANGUAGES.filter(
   l => !CODE_LANGUAGES.includes(l),
 );
 
+/**
+ * Interface-schema format tags a contract node can carry (change: add-contract-node-projection).
+ * Derived from the projector's authoritative {@link CONTRACT_LANGUAGES}: a specification is not
+ * an extension-detected code language, but the projector tags the operation nodes it derives with
+ * the format name, so a node CAN have this language and the registry must represent it (its only
+ * backed capability is `contractSchemas`).
+ */
+export const CONTRACT_TAG_LANGUAGES: readonly string[] = CONTRACT_LANGUAGES.filter(
+  l => !CODE_LANGUAGES.includes(l),
+);
+
 /** Every language a node can be tagged with — the registry's complete key universe (sorted). */
-export const ALL_LANGUAGES: readonly string[] = [...CODE_LANGUAGES, ...IAC_TAG_LANGUAGES]
+export const ALL_LANGUAGES: readonly string[] = [...CODE_LANGUAGES, ...IAC_TAG_LANGUAGES, ...CONTRACT_TAG_LANGUAGES]
   .slice()
   .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
@@ -163,6 +178,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (RECEIVER_REGISTRY_LANGUAGES.has(language)) out.push('receiverResolution');
   if (STYLE_FINGERPRINT_LANGUAGES.has(language)) out.push('styleFingerprint');
   if (isIacLanguage(language)) out.push('iacProjection');
+  if (isContractLanguage(language)) out.push('contractSchemas');
   if (CROSS_SERVICE_HTTP_LANGUAGES.has(language)) out.push('crossServiceHttp');
   if (ERROR_PROPAGATION_LANGUAGES.has(language)) out.push('errorPropagation');
   if (supportsDynamicBoundary(language)) out.push('dynamicBoundary');

@@ -19,7 +19,7 @@ import { assembleBoundary, computeStaleness, type KnownUnknowableCrossing } from
 import { readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import type { PendingDecision, StructuralAnchor } from '../../../types/index.js';
-import type { ContractDocument, ContractOperation } from '../contract/openapi.js';
+import type { ContractDocument, ContractOperation } from '../../analyzer/contract/openapi.js';
 
 export type GraphClaimKind = 'endpoint-implemented' | 'endpoint-consumed' | 'decision-governed' | 'lease-current';
 type Verdict = 'confirmed' | 'refuted' | 'unverifiable';

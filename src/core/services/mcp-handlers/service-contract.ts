@@ -25,7 +25,7 @@ import { readFileConfined } from '../../../utils/path-confinement.js';
 import { readBlobsAtRef, readBlobsPerFile } from '../../../utils/git-blobs.js';
 import { readArtifactBounded, ANALYSIS_ARTIFACT_MAX_BYTES } from '../../../utils/bounded-artifact-read.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ROUTE_INVENTORY } from '../../../constants.js';
-import { readOpenApi, looksLikeOpenApi, MAX_SPEC_BYTES, type ContractDocument, type ContractOperation } from '../contract/openapi.js';
+import { readOpenApi, looksLikeOpenApi, MAX_SPEC_BYTES, type ContractDocument, type ContractOperation } from '../../analyzer/contract/openapi.js';
 import { diffContracts, contractParity, contractBump, type ContractChange, type IndexedRoute } from '../contract/contract-diff.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { classifyFindings, effectivePolicy, type GovernanceFinding } from './enforcement-policy.js';

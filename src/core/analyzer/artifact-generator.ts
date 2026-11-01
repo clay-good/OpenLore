@@ -1485,6 +1485,8 @@ export class AnalysisArtifactGenerator {
     const { detectDuplicates } = await import('./duplicate-detector.js');
     const { analyzeForRefactoring } = await import('./refactor-analyzer.js');
     const { classifyYaml, isDockerfilePath } = await import('./iac/index.js');
+    const { looksLikeOpenApi, MAX_SPEC_BYTES } = await import('./contract/openapi.js');
+    const { MAX_CONTRACT_FILES } = await import('./contract/project.js');
 
     const CALL_GRAPH_LANGS = new Set([
       'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
@@ -1528,6 +1530,10 @@ export class AnalysisArtifactGenerator {
     };
     const signatures: import('./signature-extractor.js').FileSignatureMap[] = [];
     const callGraphFiles: Array<{ path: string; content: string; language: string }> = [];
+    /** OpenAPI/Swagger candidates, projected onto graph nodes after the call graph is built. */
+    const contractFiles: Array<{ path: string; content: string }> = [];
+    /** Candidates past the retention cap: counted so the projection can disclose the cap. */
+    let contractFilesOmitted = 0;
     // Files whose UTF-8 decode was lossy (contained U+FFFD) — a parse-health signal captured at the
     // one central read, since the call-graph extractors never see the raw bytes (change:
     // add-parse-health-boundary-disclosure).
@@ -1561,6 +1567,25 @@ export class AnalysisArtifactGenerator {
             scriptBlockCount: scriptContainer.scriptBlockCount,
             extractedScriptBlockCount: scriptContainer.extractedScriptBlockCount,
           });
+        }
+
+        // Interface specifications (change: add-contract-node-projection): an OpenAPI/Swagger
+        // document is not source code — no grammar parses it and it never enters Pass 1 — so it
+        // rides beside the call-graph files. A document past the reader's byte cap is carried
+        // TRUNCATED rather than dropped, so the reader reports its size as the reason it is
+        // unread instead of the file reading as absent.
+        if (/\.(ya?ml|json)$/i.test(file.path) && looksLikeOpenApi(content)) {
+          if (contractFiles.length < MAX_CONTRACT_FILES) {
+            contractFiles.push({
+              path: file.path,
+              content: content.length > MAX_SPEC_BYTES ? content.slice(0, MAX_SPEC_BYTES + 1) : content,
+            });
+          } else {
+            // Past the cap nothing more is RETAINED — one specification can be 4 MB, so holding
+            // every candidate of a specification-heavy monorepo is the memory hazard. The count
+            // still travels, so the projection discloses the cap it hit.
+            contractFilesOmitted++;
+          }
         }
 
         // Signatures: exclude test files
@@ -1640,6 +1665,8 @@ export class AnalysisArtifactGenerator {
       const builder = new CallGraphBuilder({
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
+        ...(contractFiles.length ? { contractFiles } : {}),
+        ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
       });
       // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the
       // WHOLE build via a build-scoped async-context store, and forwarded to each extraction worker

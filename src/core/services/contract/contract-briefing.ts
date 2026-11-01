@@ -61,7 +61,7 @@ export async function contractsForFiles(root: string, files: readonly string[], 
   if (!routes?.length) return undefined;
   const inScope = new Set(files);
   const { normalizeUrl } = await import('../../analyzer/http-route-parser.js');
-  const { HTTP_METHODS } = await import('./openapi.js');
+  const { HTTP_METHODS } = await import('../../analyzer/contract/openapi.js');
   const concrete = new Set<string>(HTTP_METHODS.map(m => m.toUpperCase()));
   // A route file outside the scope joins it when it names a function in scope: inline handlers
   // (`router.post('/', (req, res) => svc.createTask(…))`) are not call-graph nodes, so the call

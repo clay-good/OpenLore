@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readOpenApi, looksLikeOpenApi, type ContractDocument } from './openapi.js';
+import { readOpenApi, looksLikeOpenApi, type ContractDocument } from '../../analyzer/contract/openapi.js';
 import { diffContracts, contractParity, contractBump, CONTRACT_RULES } from './contract-diff.js';
 
 const doc = (text: string, file = 'api.yaml'): ContractDocument => {

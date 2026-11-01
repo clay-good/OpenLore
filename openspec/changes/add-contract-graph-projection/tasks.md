@@ -1,11 +1,12 @@
 # Tasks — add-contract-graph-projection
 
 ## Graph (OpenAPI)
-- [ ] Project operations, params, and fields onto graph nodes (`language: OpenAPI`), stable addresses, `$ref` edges
-- [ ] `implements_endpoint` edges from indexed route handlers by method + normalized path template
-- [ ] `consumes_endpoint` edges from HTTP-projection client calls, including operations with no in-repo handler
+- [x] Project operations onto graph nodes (`language: OpenAPI`), stable addresses — shipped in `add-contract-node-projection`
+- [ ] Params, fields, messages, and types as nodes, with `$ref` edges
+- [x] `implements_endpoint` edges from indexed route handlers by method + normalized path template — shipped in `add-contract-node-projection`
+- [x] `consumes_endpoint` edges from HTTP-projection client calls, including operations with no in-repo handler — shipped in `add-contract-node-projection`
 - [ ] Generated-client calls bound via `operationId` when the module is a generated file sourced from the spec
-- [ ] Language-support capability `contractSchemas`
+- [x] Language-support capability `contractSchemas` — shipped in `add-contract-node-projection`
 
 ## Briefings and consumers
 - [x] `orient` / `blast_radius`: operations served by routes in scope — shipped in `add-contract-briefings`

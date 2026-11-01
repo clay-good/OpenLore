@@ -11,7 +11,7 @@
  */
 
 import { normalizeUrl } from '../../analyzer/http-route-parser.js';
-import type { ContractDocument, ContractOperation, ContractParam, ContractProperty } from './openapi.js';
+import type { ContractDocument, ContractOperation, ContractParam, ContractProperty } from '../../analyzer/contract/openapi.js';
 
 export type ContractChangeClass = 'breaking' | 'dangerous' | 'non-breaking' | 'potentially-breaking';
 
