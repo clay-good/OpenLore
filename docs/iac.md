@@ -113,12 +113,18 @@ change this?".
 - **File-scoped resolution:** Bicep resolves bare identifiers against a flat **per-file** symbol table (no `var.`/`type.name` prefixes), so the same name (`location`, `vnet`) recurs across files. Addresses are scoped by file (`<file>::<symbol>`) and references resolve **within the declaring file only** — two files each declaring `param location` never cross-link. The single cross-file edge is the local-`module` link above.
 - **Notes:** parsed with a tolerant, hand-rolled scanner (no Bicep compiler, no native dependency). Static only — no `bicep build`, no ARM emit, no Azure/registry access. A multi-line ternary value (`= cond\n ? a\n : b`) resolves only the first line's symbols; the others are dropped rather than guessed.
 
+### Serverless Framework  (`serverless.yml`, `.yaml`, `.json`)
+- **Nodes:** the service, and one resource per `functions.<name>` grouped under it. The file name is the signal; a `service:` key, or `provider:` + `functions:`, corroborates it, so a same-named file is not misclassified.
+- **Edges:** each function → its service (`depends_on`).
+- **Handlers:** `functions.<name>.handler` binds like a Lambda's (below), with the function's own `runtime` overriding the provider's. A function that runs a container `image`, declares no handler, or builds its handler from a `${...}` variable is a disclosed unresolved binding.
+- **Notes:** static only — no plugin execution, no `${...}` resolution, no `sls package`. A `resources.Resources` block is CloudFormation and is read by that extractor, not here.
+
 ## The code a function resource runs
 
 A Lambda names its code as `<module>.<export>`. A Terraform `aws_lambda_function` with a literal
-top-level `handler`, or a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function`
-with a string `Handler`, gets a `deploys_symbol` edge to the one indexed top-level function it
-names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handler` with
+top-level `handler`, a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function`
+with a string `Handler`, or a Serverless `functions.<name>.handler`, gets a `deploys_symbol` edge
+to the one indexed top-level function it names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handler` with
 `CodeUri: functions/` → `lambda_handler` in `functions/app.py` (relative to the template).
 
 - **Where the module is looked for:** under the code location only when one is known (SAM
@@ -128,6 +134,12 @@ names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handle
   applies to `AWS::Serverless::Function` only.
 - **Which files:** the runtime picks them (`nodejs*` → TypeScript/JavaScript, `python*` → `.py`, a
   Python module path uses `/`); other runtimes (Java, Go, .NET, custom) are not bound.
+- **Built output:** a handler that names the built file (`dist/orders.handler` — the common case
+  once a project compiles) reaches its source through a mapping the **project itself declares**:
+  TypeScript's `compilerOptions.outDir` with `rootDir`, or a package manifest's `main` paired with
+  `source`. A path under a declared `outDir` the project maps to no input stays unresolved and says
+  so: an output path says nothing about where its input lives, and a same-basename file elsewhere
+  would be a similarity match, which this substrate does not make.
 - **Exactly one:** a module that matches more than one file, or a name with no single top-level
   function in it (class methods do not count), is not bound.
 - `find_dead_code` counts a bound function as deployed (live): `rootKinds.deployed`.
@@ -150,6 +162,7 @@ the value itself. The scan runs at query time over the working tree.
 | Docker Compose | a service's `environment` (map or `KEY=value` list) |
 | Dockerfile | `ENV KEY=value` and `ENV KEY value` |
 | Terraform / OpenTofu | `environment { variables = { … } }`; the kubernetes provider's `env { name = … }` |
+| Serverless | `provider.environment` (service-wide) and each `functions.<name>.environment` |
 | CloudFormation / SAM | `Environment.Variables` on a resource and in `Globals.Function`; ECS `ContainerDefinitions[].Environment` |
 | GitHub Actions | `env` on the workflow, a job, a job container or service, and a step |
 

@@ -8,14 +8,20 @@
  * function indexed in that file. The result is a `deploys_symbol` edge from the resource to the
  * function, so impact reaches the infrastructure and the function counts as deployed (live).
  *
- * Nothing is matched by similarity. A handler that is not a literal, names no indexed file (a
- * build-output path such as `dist/…`, a package outside the repository), or names no indexed
- * function in it is returned as an unresolved binding with the reason, never dropped silently.
+ * A handler that names the BUILT file (`dist/orders.handler`) is mapped to its source through the
+ * project's own declared mapping — `tsconfig`'s `outDir`/`rootDir`, or a package's `main`/`source`
+ * pair (change: add-iac-deploy-binding-commands). An `outDir` the project maps to no input stays
+ * unresolved: an output path says nothing about where its input lives.
+ *
+ * Nothing is matched by similarity. A handler that is not a literal, names no indexed file, or
+ * names no indexed function in it is returned as an unresolved binding with the reason, never
+ * dropped silently.
  */
 
 import { posix } from 'node:path';
 import type { CallEdge, FunctionNode } from '../call-graph-types.js';
 import type { IacGraph } from './types.js';
+import { sourceStems, isUnmappedBuildOutput, type BuildOutputMap } from './build-output.js';
 
 export interface UnresolvedDeployBinding {
   resource: string;
@@ -24,6 +30,16 @@ export interface UnresolvedDeployBinding {
   handler?: string;
   reason: string;
 }
+
+/**
+ * The ecosystems whose extractor populates `IacResource.deploys` — the authoritative source of
+ * the `iacCodeBinding` capability, so the matrix cannot claim an ecosystem no reader binds
+ * (change: add-iac-deploy-binding-commands). A resource in any other ecosystem names no code, so
+ * no binding is looked for and none is reported.
+ */
+export const IAC_CODE_BINDING_LANGUAGES: ReadonlySet<string> = new Set([
+  'Terraform', 'CloudFormation', 'Serverless',
+]);
 
 const NODE_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs'];
 const PY_EXT = ['.py'];
@@ -39,10 +55,12 @@ function runtimeExtensions(runtime: string | undefined): { ext: string[]; python
   return { reason: `the ${runtime} runtime is not bound (only Node.js and Python handlers are)` };
 }
 
-/** Every indexed file a module path can name, across the bases and extensions. */
-function moduleFiles(module: string, bases: readonly string[], ext: readonly string[], python: boolean | undefined, files: ReadonlySet<string>): string[] {
+/** Every indexed file a module path can name, across the bases, the build mapping, and the extensions. */
+function moduleFiles(module: string, bases: readonly string[], ext: readonly string[], python: boolean | undefined, files: ReadonlySet<string>, build?: BuildOutputMap): string[] {
   // Python imports `pkg.mod` from `pkg/mod.py`; a Node module path is a file path.
-  const variants = python ? [module.replace(/\./g, '/')] : [...new Set([module, module.replace(/\./g, '/')])];
+  const paths = python ? [module.replace(/\./g, '/')] : [...new Set([module, module.replace(/\./g, '/')])];
+  // A built path is also every source path the project's own mapping says it came from.
+  const variants = [...new Set(paths.flatMap(p => sourceStems(p, build)))];
   const out = new Set<string>();
   for (const base of bases) {
     for (const v of variants) {
@@ -60,6 +78,7 @@ function moduleFiles(module: string, bases: readonly string[], ext: readonly str
 export function bindDeployHandlers(
   graph: IacGraph,
   codeNodes: readonly FunctionNode[],
+  build?: BuildOutputMap,
 ): { edges: CallEdge[]; unresolved: UnresolvedDeployBinding[] } {
   const byFile = new Map<string, FunctionNode[]>();
   for (const n of codeNodes) (byFile.get(n.filePath) ?? byFile.set(n.filePath, []).get(n.filePath)!).push(n);
@@ -86,17 +105,24 @@ export function bindDeployHandlers(
     if (codeUri !== undefined) {
       // A known code location is the only place the module can be (relative to the template).
       bases = [...new Set([clean(templateDir === '.' ? codeUri || '.' : `${templateDir}/${codeUri}`), codeUri])].map(b => (b === '.' ? '' : b));
-    } else if (r.language === 'CloudFormation') {
-      bases = [templateDir === '.' ? '' : templateDir];
+    } else if (r.language === 'CloudFormation' || r.language === 'Serverless') {
+      // A handler is relative to the template/manifest's own directory (and, for a manifest in a
+      // subdirectory of a monorepo, to the repository root).
+      bases = [...new Set([templateDir === '.' ? '' : templateDir, ''])];
     } else {
       // Terraform without a source directory names a path inside a package built elsewhere: only a
       // module path specific enough to name one file (a directory in it) is bound.
       if (!module.includes('/')) { unresolved.push({ ...at, handler, reason: 'no code location (source_dir) and the module path names no directory' }); continue; }
       bases = ['', templateDir === '.' ? '' : templateDir];
     }
-    const candidates = moduleFiles(module, [...new Set(bases)], rt.ext, rt.python, files);
+    const candidates = moduleFiles(module, [...new Set(bases)], rt.ext, rt.python, files, build);
     if (!candidates.length) {
-      unresolved.push({ ...at, handler, reason: /^(?:dist|build|out|lib|\.aws-sam)\//.test(module) ? 'a build-output path with no indexed source' : `no indexed source file for module "${module}"${codeUri !== undefined ? ` under ${codeUri || '.'}` : ''}` });
+      const reason = isUnmappedBuildOutput(module, build)
+        ? `a build-output path under "${build?.outDir ?? ''}" that the project maps to no source (no tsconfig rootDir, no package main/source pair)`
+        : /^(?:dist|build|out|lib|\.aws-sam)\//.test(module)
+          ? 'a build-output path with no indexed source'
+          : `no indexed source file for module "${module}"${codeUri !== undefined ? ` under ${codeUri || '.'}` : ''}`;
+      unresolved.push({ ...at, handler, reason });
       continue;
     }
     if (candidates.length > 1) { unresolved.push({ ...at, handler, reason: `the module matches more than one file (${candidates.slice(0, 3).join(', ')})` }); continue; }

@@ -10,6 +10,7 @@
 
 import type { IacLanguage } from './types.js';
 import { isWorkflowPath, isActionMetadataPath } from './github-actions.js';
+import { isServerlessPath, looksLikeServerless } from './serverless.js';
 
 /*
  * A NOTE ON THE INDENT CLASS, which every probe below depends on.
@@ -62,6 +63,10 @@ export function classifyYaml(path: string, content: string): IacLanguage | null 
   if (/^(docker-compose|compose)(\.[^/]+)?\.ya?ml$/.test(fileName) && /(^|\n)services[ \t]*:/.test(content)) {
     return 'Docker Compose';
   }
+
+  // Serverless Framework service manifest: the framework reads exactly these file names, and the
+  // content corroborates (change: add-iac-deploy-binding-commands).
+  if (isServerlessPath(posix) && looksLikeServerless(content)) return 'Serverless';
 
   // Helm template: a Go-template expression inside a templates/ directory.
   const inTemplatesDir = /(^|\/)templates\//.test(posix);

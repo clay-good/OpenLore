@@ -215,3 +215,41 @@ describe('second review regressions', () => {
     expect(performance.now() - t).toBeLessThan(2000);
   });
 });
+
+describe('Serverless (change: add-serverless-and-build-output-binding)', () => {
+  const scan = (content: string) => extractEnvDeclarations({ path: 'serverless.yml', content, language: 'Serverless' });
+
+  it('reads provider-wide and per-function environment blocks', () => {
+    const out = scan(`service: orders
+provider:
+  name: aws
+  environment:
+    TABLE_NAME: orders-table
+functions:
+  createOrder:
+    handler: src/orders.create
+    environment:
+      QUEUE_URL: https://example.com/q
+`);
+    expect(out.declarations).toEqual([
+      { name: 'TABLE_NAME', ecosystem: 'Serverless', resource: 'provider', file: 'serverless.yml', line: 5, literalValue: true },
+      { name: 'QUEUE_URL', ecosystem: 'Serverless', resource: 'function.createOrder', file: 'serverless.yml', line: 10, literalValue: true },
+    ]);
+  });
+
+  it('reports a value built from a Serverless variable as not literal', () => {
+    const out = scan('service: s\nprovider:\n  environment:\n    TABLE_NAME: ${self:custom.table}\n');
+    expect(out.declarations[0]).toMatchObject({ name: 'TABLE_NAME', literalValue: false });
+  });
+
+  it('reports an environment map built by an expression as opaque, not empty', () => {
+    const out = scan('service: s\nprovider:\n  environment: ${file(./env.yml)}\n');
+    expect(out.declarations).toEqual([]);
+    expect(out.opaque[0]).toMatchObject({ ecosystem: 'Serverless', resource: 'provider', reason: 'an environment map built by an expression' });
+  });
+
+  it('reads nothing from a manifest with no environment block', () => {
+    expect(scan('service: s\nfunctions:\n  a:\n    handler: h.x\n').declarations).toEqual([]);
+  });
+});
+

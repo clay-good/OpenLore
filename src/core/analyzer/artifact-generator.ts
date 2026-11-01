@@ -1487,6 +1487,7 @@ export class AnalysisArtifactGenerator {
     const { classifyYaml, isDockerfilePath } = await import('./iac/index.js');
     const { looksLikeOpenApi, MAX_SPEC_BYTES } = await import('./contract/openapi.js');
     const { MAX_CONTRACT_FILES } = await import('./contract/project.js');
+    const { readBuildOutputMap } = await import('./iac/build-output.js');
     /** Total specification bytes retained across the walk. */
     const MAX_CONTRACT_BYTES = 64 * 1024 * 1024;
 
@@ -1502,6 +1503,8 @@ export class AnalysisArtifactGenerator {
       'GitHub Actions',
       // Azure IaC DSL (add-bicep-iac-graph).
       'Bicep',
+      // Serverless service manifests (add-iac-deploy-binding-commands).
+      'Serverless',
     ]);
     // Helm charts: every file under a directory containing Chart.yaml is Helm.
     const chartDirs = repoMap.allFiles
@@ -1534,6 +1537,8 @@ export class AnalysisArtifactGenerator {
     const callGraphFiles: Array<{ path: string; content: string; language: string }> = [];
     /** OpenAPI/Swagger candidates, projected onto graph nodes after the call graph is built. */
     const contractFiles: Array<{ path: string; content: string }> = [];
+    /** The configs that declare where built output comes from (add-iac-deploy-binding-commands). */
+    const buildOutputConfigs = new Map<string, string>();
     /** Candidates past a retention bound: counted so the projection can disclose the cap. */
     let contractFilesOmitted = 0;
     /** Retained specification bytes, bounded alongside the file count. */
@@ -1600,6 +1605,10 @@ export class AnalysisArtifactGenerator {
             contractFilesOmitted++;
           }
         }
+
+        // The project's own build-output mapping, for binding a deployed `dist/…` handler to its
+        // source (change: add-iac-deploy-binding-commands).
+        if (file.path === 'tsconfig.json' || file.path === 'package.json') buildOutputConfigs.set(file.path, content);
 
         // Signatures: exclude test files
         if (!isTest) {
@@ -1680,6 +1689,7 @@ export class AnalysisArtifactGenerator {
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
         ...(contractFiles.length ? { contractFiles } : {}),
         ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
+        ...(buildOutputConfigs.size ? { buildOutput: readBuildOutputMap(buildOutputConfigs) } : {}),
       });
       // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the
       // WHOLE build via a build-scoped async-context store, and forwarded to each extraction worker

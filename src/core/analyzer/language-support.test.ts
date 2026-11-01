@@ -522,6 +522,7 @@ describe('completeness + fail-soft + determinism', () => {
       'Docker Compose': [{ path: 'docker-compose.yml', content: compose, language: 'Docker Compose' }],
       'GitHub Actions': [{ path: '.github/workflows/ci.yml', content: workflow, language: 'GitHub Actions' }],
       Bicep: [fx('bicep/main.bicep', 'Bicep')],
+      Serverless: [fx('serverless/serverless.yml', 'Serverless')],
     };
 
     it('every IAC_LANGUAGES member has a fixture contributor wired (guard cannot rot)', () => {
