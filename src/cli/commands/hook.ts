@@ -261,16 +261,17 @@ async function afterTools(root: string, files: string[], baseline: string | unde
       items.push({ key: `loop:${o.id}#${o.returns}`, severity: 'warning', text: `${o.name} (${o.file}) returned to an earlier version ${o.returns} times this session.` });
     }
   }
-  // A peer changed a symbol this worktree's agent declared it reads (change: add-peer-change-notices).
+  // A peer changed a symbol this worktree's agent declared it reads or was served (changes:
+  // add-peer-change-notices, add-peer-notices-served-set-and-fleet-records).
   try {
     const { peerChangeNotices } = await import('../../core/services/peer-notices.js');
     const { emittedText: t } = await import('../../core/services/generated-file-guard.js');
     for (const n of await peerChangeNotices(root)) {
       items.push({
-        key: `peer:${n.peer.actorId}:${n.id}`,
+        key: `peer:${n.peer.actorId}:${n.repoPath}#${n.symbol}`,
         severity: 'warning',
         // Board fields are peer-written: screened before they reach the agent.
-        text: sanitizeForTerminal(`Peer ${t(n.peer.actorId)} (${t(n.peer.branch || 'detached')} in ${t(n.peer.worktree)}) changed ${t(n.symbol)} (${t(n.file)}), which an agent in this worktree declared reading at ${t(n.declaredAt).slice(11, 16)} UTC.`),
+        text: sanitizeForTerminal(`Peer ${t(n.peer.actorId)} (${t(n.peer.branch || 'detached')} in ${t(n.peer.worktree)}) changed ${t(n.symbol)} (${t(n.file)}), which ${n.via === 'served' ? 'was served in this worktree' : 'an agent in this worktree declared reading'} at ${t(n.at).slice(11, 16)} UTC.`),
         next: `re-read ${t(n.symbol)} before relying on it`,
       });
     }

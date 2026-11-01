@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, symlinkSync, utimesSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { handleDeclareFootprint } from './mcp-handlers/declare-footprint.js';
 import { peerChangeNotices } from './peer-notices.js';
 import { boardDir, readBoard } from './footprint-board.js';
+import { issueLeaseToken } from './lease-tokens.js';
 import { runHook } from '../../cli/commands/hook.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../constants.js';
 
@@ -109,6 +110,60 @@ describe('peer change notices', () => {
     const board = await readBoard(a);
     expect(board.unreadable).toBe(2);
     expect(board.live.map(l => l.entry.actorId)).toEqual(['agent-a']);
+  });
+
+  it('a peer editing a function orient served here is named, without any declared read-set', async () => {
+    const { a, b } = clone();
+    expect(await issueLeaseToken(a, [{ file: 'src/config.ts', name: 'parseConfig', startLine: 1 }])).toMatch(/^lt_/);
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['parseConfig'] });
+    write(b, 'src/config.ts', CONFIG_TS.replace('JSON.parse(s)', 'JSON.parse(s.trim())'));
+    expect(await peerChangeNotices(a)).toEqual([expect.objectContaining({ symbol: 'parseConfig', via: 'served', peer: expect.objectContaining({ actorId: 'agent-b' }) })]);
+    expect(await afterEdit(a, 'src/other.ts')).toContain('changed parseConfig (src/config.ts), which was served in this worktree at');
+  });
+
+  it('a symbol both declared and served is named once, as declared', async () => {
+    const { a, b } = clone();
+    await issueLeaseToken(a, [{ file: 'src/config.ts', name: 'parseConfig', startLine: 1 }]);
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', readSet: ['parseConfig'] });
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['parseConfig'] });
+    write(b, 'src/config.ts', CONFIG_TS.replace('JSON.parse(s)', 'JSON.parse(s.trim())'));
+    expect((await peerChangeNotices(a)).map(n => n.via)).toEqual(['declared']);
+  });
+
+  it('a served function a peer did not change, or an old serve, is quiet', async () => {
+    const { a, b } = clone();
+    await issueLeaseToken(a, [{ file: 'src/config.ts', name: 'parseConfig', startLine: 1 }]);
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['loadConfig'] });
+    write(b, 'src/config.ts', CONFIG_TS.replace('parseConfig("{}")', 'parseConfig("[]")'));
+    expect(await peerChangeNotices(a)).toEqual([]);
+    // The same served function changed, but served longer ago than a board entry lives.
+    write(b, 'src/config.ts', CONFIG_TS.replace('JSON.parse(s)', 'JSON.parse(s.trim())'));
+    const { recentServedFunctions } = await import('./lease-tokens.js');
+    expect(await recentServedFunctions(a, 60_000, Date.now() + 2 * 60_000)).toEqual([]);
+  });
+
+  it('a symbol declared, then served again after lines were added above it, is named once', async () => {
+    const { a, b } = clone();
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', readSet: ['parseConfig'] });
+    write(a, 'src/config.ts', `// header\n${CONFIG_TS}`);
+    write(a, join(OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph: { nodes: nodes.map(n => ({ ...n, startIndex: n.startIndex + 10, endIndex: n.endIndex + 10 })), edges: [] } }));
+    await issueLeaseToken(a, [{ file: 'src/config.ts', name: 'parseConfig' }]);
+    await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['parseConfig'] });
+    write(b, 'src/config.ts', CONFIG_TS.replace('JSON.parse(s)', 'JSON.parse(s.trim())'));
+    expect((await peerChangeNotices(a)).map(n => n.via)).toEqual(['declared']);
+  });
+
+  it('a token dated in the future, or a broken link among the tokens, does not distort the served set', async () => {
+    const { a } = clone();
+    await issueLeaseToken(a, [{ file: 'src/config.ts', name: 'parseConfig' }]);
+    const dir = join(a, OPENLORE_DIR, 'session-ledger', 'tokens');
+    try { symlinkSync(join(dir, 'missing.json'), join(dir, 'lt_00000000000000000000.json')); } catch { /* no symlink right (Windows) */ }
+    const { recentServedFunctions } = await import('./lease-tokens.js');
+    expect((await recentServedFunctions(a, 60_000)).map(f => f.name)).toEqual(['parseConfig']);
+    const token = readdirSync(dir).find(n => n !== 'lt_00000000000000000000.json')!;
+    const future = new Date(Date.now() + 24 * 3600_000);
+    utimesSync(join(dir, token), future, future);
+    expect(await recentServedFunctions(a, 60_000)).toEqual([]);
   });
 
   it('no board, or no peers: nothing', async () => {

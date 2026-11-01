@@ -1,6 +1,7 @@
 # Peer notices for the served set; fleet records on the board
 
-> Status: PROPOSED (2026-11-01). Split from `add-peer-change-notices`, which shipped notices for
+> Status: SHIPPED (2026-11-01), served-set notices only; fleet records and the planning option
+> moved to `add-board-fleet-records-and-planning`. Split from `add-peer-change-notices`, which shipped notices for
 > the declared read-set.
 
 ## Why
