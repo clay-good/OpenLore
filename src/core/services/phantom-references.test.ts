@@ -866,3 +866,38 @@ describe('round-5 regressions', () => {
     expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
   });
 });
+
+describe('final regressions', () => {
+  it('reports a missing module of the distribution this repository builds', async () => {
+    const d = repo(
+      {
+        'pyproject.toml': '[project]\nname = "mypkg"\ndependencies = []\n',
+        'src/mypkg/__init__.py': '', 'src/mypkg/real.py': 'VALUE = 1\n',
+      },
+      { 'src/mypkg/real.py': 'from mypkg.nope import gone\nVALUE = gone\n' },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => [f.code, f.subject])).toEqual([['unresolved-internal-import', 'mypkg.nope']]);
+  });
+
+  it('reports a missing local module in a repository with no manifest at all', async () => {
+    const d = repo(
+      { 'mypkg/__init__.py': '', 'mypkg/real.py': 'VALUE = 1\n' },
+      { 'mypkg/real.py': 'from mypkg.nope import gone\nVALUE = gone\n' },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => [f.code, f.subject])).toEqual([['unresolved-internal-import', 'mypkg.nope']]);
+  });
+
+  it('keeps every other answer the same', async () => {
+    const base = {
+      'pyproject.toml': '[project]\nname = "app"\ndependencies = ["requests>=2.0"]\n',
+      'json/helper.py': 'x = 1\n', 'app/__init__.py': '', 'main.py': 'x = 1\n',
+    };
+    // stdlib with a colliding directory, a declared dependency, a real local module: all silent.
+    expect((await checkPhantomReferences(repo(base, { 'main.py': 'import json\nimport requests\nx = 1\n' }), 'HEAD')).findings).toEqual([]);
+    // a genuinely undeclared package is still a dependency to declare.
+    const r = await checkPhantomReferences(repo(base, { 'main.py': 'import totally_made_up\nx = 1\n' }), 'HEAD');
+    expect(r.findings.map(f => f.code)).toEqual(['undeclared-dependency']);
+  });
+});

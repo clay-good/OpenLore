@@ -798,6 +798,22 @@ export async function checkPhantomReferences(
         }
         continue;
       }
+      // A Python specifier nothing declares, whose top level is a package in THIS repository, names
+      // a module here — including the distribution this repository itself builds, and a repository
+      // with no manifest at all. Decided before the internal-name and no-manifest exits, which
+      // would otherwise drop the case, and after the standard-library and declared-package checks,
+      // which answer first.
+      if (ecosystem === 'pypi' && !declares(ecosystem, scope.declared.get('pypi') ?? new Set<string>(), pkg)) {
+        const localPython = await pythonPackageRoot(absRoot, ref.specifier, pythonPackages);
+        if (localPython !== null) {
+          findings.push(finding(
+            'unresolved-internal-import', 'error', ref.specifier,
+            `${ref.file} imports '${ref.specifier}', whose package is ${localPython} in this repository, which has no such module.`,
+            { path: ref.file, line: ref.line },
+          ));
+          continue;
+        }
+      }
       if (isInternalPackage(ecosystem, ref.specifier, pkg, scope)) continue;
       const manifests = scope.manifests.filter(m => m.ecosystem === ecosystem);
       if (manifests.length === 0) {
@@ -811,24 +827,11 @@ export async function checkPhantomReferences(
       }
       const declared = scope.declared.get(ecosystem) ?? new Set<string>();
       if (!declares(ecosystem, declared, pkg)) {
-        // Nothing declares it. A Python specifier whose top level is a package in THIS repository
-        // names a module here, so the miss is a missing module, not a dependency to install. This
-        // sits after the standard-library and manifest checks on purpose: a declared dependency or
-        // a standard-library module that happens to share a local directory's name is neither.
-        const internalPython = ecosystem === 'pypi'
-          ? await pythonPackageRoot(absRoot, ref.specifier, pythonPackages)
-          : null;
-        findings.push(internalPython !== null
-          ? finding(
-              'unresolved-internal-import', 'error', ref.specifier,
-              `${ref.file} imports '${ref.specifier}', whose package is ${internalPython} in this repository, which has no such module.`,
-              { path: ref.file, line: ref.line },
-            )
-          : finding(
-              'undeclared-dependency', 'error', pkg,
-              `${ref.file} imports '${ref.specifier}', which no manifest in scope declares (${manifests.map(m => m.path).join(', ')}).`,
-              { path: ref.file, line: ref.line },
-            ));
+        findings.push(finding(
+          'undeclared-dependency', 'error', pkg,
+          `${ref.file} imports '${ref.specifier}', which no manifest in scope declares (${manifests.map(m => m.path).join(', ')}).`,
+          { path: ref.file, line: ref.line },
+        ));
         continue;
       }
       // ── Declared: is it pinned, when the diff changed the declaring manifest? ──
