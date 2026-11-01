@@ -175,7 +175,7 @@ Large monorepos take minutes rather than seconds, stated plainly in [Known limit
 
 **Infrastructure-as-Code**: Terraform/HCL · Kubernetes · Helm · CloudFormation · Ansible · Pulumi · AWS CDK · CDKTF · Dockerfile · Docker Compose · GitHub Actions · Azure Bicep — IaC resources project onto the **same graph** as application code, so `orient`, `search_code`, and `analyze_impact` answer "what's the blast radius of changing this security group / IAM role / base image / CI job?" with zero new tooling. → [docs/iac.md](docs/iac.md)
 
-**Interface contracts**: OpenAPI 3.x · Swagger 2.0 — each declared operation projects onto the **same graph**, bound to the route handler that serves it and the function that calls it, so `orient`, `analyze_impact` and `find_path` cross the API boundary. Matching is literal, and everything unbound is disclosed. → [docs/contracts.md](docs/contracts.md)
+**Interface contracts**: OpenAPI 3.x · Swagger 2.0 — each declared operation projects onto the **same graph**, bound to the route handler that serves it and the function that calls it, so `orient` and `analyze_impact` cross the API boundary. Matching is literal, and everything unbound is disclosed. → [docs/contracts.md](docs/contracts.md)
 
 ---
 

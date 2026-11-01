@@ -1487,6 +1487,8 @@ export class AnalysisArtifactGenerator {
     const { classifyYaml, isDockerfilePath } = await import('./iac/index.js');
     const { looksLikeOpenApi, MAX_SPEC_BYTES } = await import('./contract/openapi.js');
     const { MAX_CONTRACT_FILES } = await import('./contract/project.js');
+    /** Total specification bytes retained across the walk. */
+    const MAX_CONTRACT_BYTES = 64 * 1024 * 1024;
 
     const CALL_GRAPH_LANGS = new Set([
       'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
@@ -1532,8 +1534,10 @@ export class AnalysisArtifactGenerator {
     const callGraphFiles: Array<{ path: string; content: string; language: string }> = [];
     /** OpenAPI/Swagger candidates, projected onto graph nodes after the call graph is built. */
     const contractFiles: Array<{ path: string; content: string }> = [];
-    /** Candidates past the retention cap: counted so the projection can disclose the cap. */
+    /** Candidates past a retention bound: counted so the projection can disclose the cap. */
     let contractFilesOmitted = 0;
+    /** Retained specification bytes, bounded alongside the file count. */
+    let contractBytes = 0;
     // Files whose UTF-8 decode was lossy (contained U+FFFD) — a parse-health signal captured at the
     // one central read, since the call-graph extractors never see the raw bytes (change:
     // add-parse-health-boundary-disclosure).
@@ -1575,15 +1579,24 @@ export class AnalysisArtifactGenerator {
         // TRUNCATED rather than dropped, so the reader reports its size as the reason it is
         // unread instead of the file reading as absent.
         if (/\.(ya?ml|json)$/i.test(file.path) && looksLikeOpenApi(content)) {
-          if (contractFiles.length < MAX_CONTRACT_FILES) {
-            contractFiles.push({
-              path: file.path,
-              content: content.length > MAX_SPEC_BYTES ? content.slice(0, MAX_SPEC_BYTES + 1) : content,
-            });
-          } else {
-            // Past the cap nothing more is RETAINED — one specification can be 4 MB, so holding
-            // every candidate of a specification-heavy monorepo is the memory hazard. The count
-            // still travels, so the projection discloses the cap it hit.
+          // `looksLikeOpenApi` matches an `openapi`/`swagger` key ANYWHERE, so a dependency entry
+          // named `swagger` matches too. `readOpenApi` settles it by reading the top-level key —
+          // except past its byte cap, where it answers "too large" without ever looking. So an
+          // OVERSIZED candidate is retained only when the key is written at the top level (a
+          // nested one is indented further), or a big lockfile would be reported to the user as a
+          // specification OpenLore could not read.
+          const oversized = content.length > MAX_SPEC_BYTES;
+          const retainable = !oversized || /(?:^|\n)[ \t]{0,2}["']?(?:openapi|swagger)["']?[ \t]*:/.test(content.slice(0, 1 << 16));
+          // Two bounds, not one: a count (50) and a total (64 MB). One specification can be 4 MB,
+          // so a count alone let a specification-heavy monorepo hold ~200 MB of strings from the
+          // walk until the build returned.
+          const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (retainable && contractFiles.length < MAX_CONTRACT_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+            contractBytes += retained;
+            contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
+          } else if (retainable) {
+            // Past a bound nothing more is retained, but the count travels, so the projection
+            // discloses the cap instead of reading as "this repository declares no operations".
             contractFilesOmitted++;
           }
         }

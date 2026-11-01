@@ -510,6 +510,22 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         note: 'These function resources name a handler that binds to no indexed function (an expression, a build-output path, or a missing file); the code they run can appear dead.',
       },
     } : {}),
+    // A declared operation whose handler could not be pinned to one node keeps NO function live,
+    // so a handler that really does serve a declared endpoint can appear dead; an unread
+    // specification, or a projection that was not assessed, has the same effect
+    // (change: add-contract-node-projection).
+    ...((cg.contracts?.unresolvedBindings.total || cg.contracts?.unreadSpecifications.total || cg.contracts?.notAssessed?.length) ? {
+      contractRootsNotAssessed: {
+        unresolvedBindings: cg.contracts.unresolvedBindings.total,
+        unresolvedBindingItems: cg.contracts.unresolvedBindings.items.slice(0, 10).map(u => ({
+          file: emittedText(u.file), line: u.line, method: emittedText(u.method),
+          path: emittedText(u.path), operation: emittedText(u.operation),
+        })),
+        unreadSpecifications: cg.contracts.unreadSpecifications.items.slice(0, 5).map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) })),
+        ...(cg.contracts.notAssessed?.length ? { notAssessed: cg.contracts.notAssessed.map(emittedText) } : {}),
+        note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',
+      },
+    } : {}),
     // Receipts for every config-wired file that kept code live, and every config reference that
     // could not be resolved (change: add-framework-entry-point-adapters).
     externalWiring: externalWiringBlock(wiring.report, roots.filter(isWired)),

@@ -81,13 +81,13 @@ describe('contract projection through the builder', () => {
 
   it('discloses the operation no route serves', async () => {
     const result = await build();
-    expect(result.contracts?.unmatchedOperations).toEqual(['POST /v1/orders']);
+    expect(result.contracts?.unmatchedOperations.items).toEqual(['POST /v1/orders (openapi.yaml:11)']);
   });
 
   it('discloses a specification that cannot be read instead of reporting no operations', async () => {
     const result = await build('openapi: 3.0.0\npaths:\n  - [\n');
     expect([...result.nodes.values()].some(n => n.language === 'OpenAPI')).toBe(false);
-    expect(result.contracts?.unreadSpecifications?.[0]?.file).toBe('openapi.yaml');
+    expect(result.contracts?.unreadSpecifications.items[0]?.file).toBe('openapi.yaml');
   });
 
   it('projects nothing when the build is given no specification', async () => {

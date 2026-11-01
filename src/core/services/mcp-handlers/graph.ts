@@ -49,6 +49,7 @@ import { recordPerfWork } from '../../analyzer/perf-counters.js';
 import type { DecisionNode } from '../../decisions/project.js';
 import { decisionContentProvenance } from '../served-content.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
+import { isContractLanguage } from '../../analyzer/contract/types.js';
 import { getFileGodFunctions, extractSubgraph } from '../../analyzer/subgraph-extractor.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import {
@@ -494,6 +495,32 @@ export function isInfraNode(n: FunctionNode | undefined): boolean {
   return !!n && isIacLanguage(n.language);
 }
 
+/**
+ * Whether a node is a declared interface element (change: add-contract-node-projection). Like an
+ * infrastructure resource, it rides on the code graph's primitives but is NOT code: it must reach
+ * the agent as a typed cross-domain neighbour, never in a list of functions it could edit or test.
+ */
+export function isContractNode(n: FunctionNode | undefined): boolean {
+  return !!n && isContractLanguage(n.language);
+}
+
+/** Render a declared operation as a typed cross-domain neighbor. */
+export function contractToNeighbor(
+  n: FunctionNode,
+  direction: 'upstream' | 'downstream',
+  depth: number,
+) {
+  return {
+    nodeType: 'contract' as const,
+    name: n.name,
+    file: n.filePath,
+    format: n.language,
+    ...(n.startLine !== undefined ? { line: n.startLine } : {}),
+    direction,
+    depth,
+  };
+}
+
 /** Render an IaC resource node as a typed cross-domain neighbor (spec-17). */
 export function infraToNeighbor(
   n: FunctionNode,
@@ -860,14 +887,14 @@ export async function handleAnalyzeImpact(
   };
 
   const upstreamNodes = upstreamResolved
-    .filter(x => !isInfraNode(x.node))
+    .filter(x => !isInfraNode(x.node) && !isContractNode(x.node))
     .map(x => {
       const { items, ...receipt } = impactCallSites(x.node.id, 'upstream');
       return { ...nodeToSummary(x.node), depth: x.depth, ...(items.length > 0
         ? { callSites: items, callSitesReceipt: receipt } : {}) };
     });
   const downstreamNodes = downstreamResolved
-    .filter(x => !isInfraNode(x.node))
+    .filter(x => !isInfraNode(x.node) && !isContractNode(x.node))
     .map(x => {
       const { items, ...receipt } = impactCallSites(x.node.id, 'downstream');
       return { ...nodeToSummary(x.node), depth: x.depth, ...(items.length > 0
@@ -879,15 +906,26 @@ export async function handleAnalyzeImpact(
     ...upstreamResolved.filter(x => isInfraNode(x.node)).map(x => infraToNeighbor(x.node, 'upstream', x.depth)),
     ...downstreamResolved.filter(x => isInfraNode(x.node)).map(x => infraToNeighbor(x.node, 'downstream', x.depth)),
   ];
-  const crossDomain = infraNeighbors.length > 0
+  // Declared operations the seed serves or calls — the same lane, typed as contract.
+  const contractNeighbors = [
+    ...upstreamResolved.filter(x => isContractNode(x.node)).map(x => contractToNeighbor(x.node, 'upstream', x.depth)),
+    ...downstreamResolved.filter(x => isContractNode(x.node)).map(x => contractToNeighbor(x.node, 'downstream', x.depth)),
+  ];
+  const crossDomain = infraNeighbors.length > 0 || contractNeighbors.length > 0
     ? {
-        reachesInfrastructure: true,
-        ecosystems: [...new Set(infraNeighbors.map(n => n.ecosystem))].sort(),
-        infrastructure: infraNeighbors,
+        ...(infraNeighbors.length > 0 ? {
+          reachesInfrastructure: true as const,
+          ecosystems: [...new Set(infraNeighbors.map(n => n.ecosystem))].sort(),
+          infrastructure: infraNeighbors,
+        } : {}),
+        ...(contractNeighbors.length > 0 ? {
+          reachesContract: true as const,
+          operations: contractNeighbors,
+        } : {}),
       }
     : undefined;
 
-  const blastRadius = upstreamNodes.length + downstreamNodes.length + infraNeighbors.length;
+  const blastRadius = upstreamNodes.length + downstreamNodes.length + infraNeighbors.length + contractNeighbors.length;
 
   // Governing decisions (spec-16): decisions whose `affects` edges intersect the
   // seed plus its blast radius — the deterministic join that answers "what
@@ -897,6 +935,7 @@ export async function handleAnalyzeImpact(
   for (const n of upstreamNodes) if (n.file) involvedFiles.add(n.file);
   for (const n of downstreamNodes) if (n.file) involvedFiles.add(n.file);
   for (const n of infraNeighbors) if (n.file) involvedFiles.add(n.file);
+  for (const n of contractNeighbors) if (n.file) involvedFiles.add(n.file);
   const governingDecisions = ctx.edgeStore.getDecisionsForFiles([...involvedFiles]).map(decisionToNeighbor);
 
   // Confidence boundary: the blast radius rests on the edges traversed within the
@@ -974,6 +1013,7 @@ export async function handleAnalyzeImpact(
         upstream: upstreamNodes.length,
         downstream: downstreamNodes.length,
         ...(infraNeighbors.length > 0 ? { infrastructure: infraNeighbors.length } : {}),
+        ...(contractNeighbors.length > 0 ? { contract: contractNeighbors.length } : {}),
       },
       riskScore,
       riskLevel: riskScore <= 20 ? 'low' : riskScore <= 45 ? 'medium' : riskScore <= 70 ? 'high' : 'critical',

@@ -11,6 +11,7 @@ import {
   type ExportInfo, type FileAnalysis, type JvmFileFacts, type JvmImportReceipt, type JvmPackageIndex,
 } from './import-parser.js';
 import { extractAllHttpEdges, type HttpEdge } from './http-route-parser.js';
+import { isContractEdgeKind } from './contract/project.js';
 import { deriveDomainFromPath } from './domain-naming.js';
 import { escapeDotString } from '../../utils/misc.js';
 import type { ScoredFile } from '../../types/index.js';
@@ -966,7 +967,7 @@ const SAME_PACKAGE_IMPLICIT_LANGS = new Set(['Java', 'Kotlin']);
  */
 export function injectCallGraphEdges(
   depGraph: DependencyGraphResult,
-  callEdges: Array<{ callerId: string; calleeId: string; confidence?: string }>,
+  callEdges: Array<{ callerId: string; calleeId: string; confidence?: string; kind?: string }>,
   nodeFilePath: (id: string) => string | undefined,
 ): void {
   // Build a Set of node IDs for quick membership test
@@ -981,6 +982,10 @@ export function injectCallGraphEdges(
   const newEdges: DependencyEdge[] = [];
 
   for (const ce of callEdges) {
+    // A declaration is not a file dependency: an `implements_endpoint` / `consumes_endpoint` edge
+    // into a specification must not enter the file-level degrees, PageRank, betweenness or
+    // clustering that rank SOURCE files (change: add-contract-node-projection).
+    if (isContractEdgeKind(ce.kind)) continue;
     const callerFile = nodeFilePath(ce.callerId);
     const calleeFile = nodeFilePath(ce.calleeId);
     if (!callerFile || !calleeFile || callerFile === calleeFile) continue;

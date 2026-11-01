@@ -5,9 +5,11 @@ graph: an operation is a thing code serves and calls, so it becomes a node with 
 code on both sides.
 
 Because contract elements are **projected onto the existing graph primitives**
-(`FunctionNode` / `CallEdge`), every graph tool sees them with no change of its own: `orient`,
-`search_code`, `get_subgraph`, `analyze_impact`, `find_path`, `trace_execution_path`, the SCIP
-export, and the federation manifest.
+(`FunctionNode` / `CallEdge`), the graph tools see them with no change of their own: `orient`,
+`search_code`, `get_subgraph`, `analyze_impact`, the SCIP export, and the federation manifest. An
+operation reaches you as a typed *cross-domain neighbour* (`crossDomain.operations`), never inside
+the list of code functions — it is a declaration, not something you can edit or test. `find_path`
+and `trace_execution_path` walk call edges only, so they do not route through an operation.
 
 ## The mapping
 
@@ -59,23 +61,34 @@ The projection never implies absence. The build result carries:
 
 | Disclosure | Means |
 |---|---|
-| `unmatchedOperations` | Declared, but no indexed route serves it |
-| `unmatchedRoutes` | Registered, but no specification declares it |
+| `unmatchedOperations` | Declared, but no indexed route serves it and no indexed call consumes it |
+| `unmatchedRoutes` | Registered, but no declared operation matched it |
+| `unresolvedBindings` | A route or call that *did* match an operation, whose handler or caller resolved to no single indexed function |
 | `unreadSpecifications` | The file declared itself a specification and could not be read, with the reason |
-| `unboundClientCalls` | The call's method or path is not literal, or no operation declares it |
-| `truncated` | A cap stopped the projection, naming the cap and what it saw |
+| `unboundClientCalls` | The call's method or path is not literal, its host is not one this specification declares, its address is ambiguous, or no operation declares it |
+| `ambiguousAddresses` | A method and path that name more than one declared operation, so nothing binds to them |
+| `notAssessed` | Why an "unmatched" conclusion is **withheld** rather than drawn |
+| `truncations` | Every cap the projection stopped at, with what it saw |
 
-A specification that fails to parse is therefore *unread*, never read as "declares nothing".
+Each list is bounded and carries its exact `total`, so a disclosure never becomes the thing that
+blows up the artifact carrying it.
+
+A specification that fails to parse is therefore *unread*, never read as "declares nothing" — and
+while anything is unread, degraded, or past a cap, nothing is called unmatched at all:
+`notAssessed` says why. `find_dead_code` repeats the part that bears on liveness, because an
+unresolved binding means a declared handler can still look dead.
 `certify_service_contract` is the conclusion-shaped view of the same parity, with breaking-change
 verdicts; the `contracts` line in `orient` and `blast_radius` names the operation a handler in
 scope serves.
 
 ## When it is computed
 
-The projection runs during `openlore analyze`, with the rest of the graph. Editing a
-specification does not re-project it incrementally — a specification is not source code, so the
-watcher's per-file rebuild skips it, exactly as it skips an infrastructure manifest. Run
-`openlore analyze` to refresh the operations after a specification changes.
+The projection runs during `openlore analyze`, with the rest of the graph. A specification is not
+source code, so a subset rebuild — the watcher's per-file pass, or a shard-scoped re-analysis —
+does not re-project it, exactly as it does not re-project an infrastructure manifest. Contract
+edges are therefore **preserved**, not deleted, when a bound handler's own file is rebuilt: a save
+cannot silently drop the binding. Run `openlore analyze` to refresh the operations after a
+specification changes.
 
 ## Not read
 

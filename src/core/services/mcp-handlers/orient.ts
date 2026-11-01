@@ -25,6 +25,7 @@ import { expandHandle, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
+import { isContractLanguage } from '../../analyzer/contract/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
 import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
 import { fitPayloadToBudget } from './budget-fit.js';
@@ -154,8 +155,9 @@ interface OrientFunction {
 interface CallNeighbour {
   name: string;
   filePath: string;
-  /** Present only for infrastructure neighbors (IaC resources) — spec-17 cross-domain. */
-  domain?: 'infra';
+
+  /** Set when the neighbour is a projected declaration, not code: infrastructure or a contract. */
+  domain?: 'infra' | 'contract';
   /** The synthesis rule, when only a synthesized edge links this neighbour (a message or event hop, not a call). */
   via?: string;
   provenance: AnalysisContentProvenance;
@@ -386,6 +388,9 @@ export async function handleOrient(
         ? {
           name: n.name, filePath: n.filePath, provenance: analysisProvenance,
           ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}),
+          // A declared operation is not code the agent can edit; say which domain it is
+          // (change: add-contract-node-projection).
+          ...(isContractLanguage(n.language) ? { domain: 'contract' as const } : {}),
           ...(via ? { via } : {}),
         }
         : null;
