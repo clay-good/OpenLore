@@ -63,7 +63,34 @@ async function parseNpm(rootDir: string): Promise<ExternalPackage[]> {
   } catch { return []; }
 }
 
-/** Dependencies a `pyproject.toml` declares (PEP 621 and Poetry sections). */
+/**
+ * The body of a TOML table: the lines after its `[header]` line, up to the next line that opens a
+ * table. Found without a regex over the content, so no section shape can make it backtrack.
+ */
+function tomlSection(raw: string, header: string): string {
+  const lines = raw.split('\n');
+  const start = lines.findIndex(l => l.trim() === `[${header}]`);
+  if (start === -1) return '';
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex(l => l.trimStart().startsWith('['));
+  return (end === -1 ? rest : rest.slice(0, end)).join('\n');
+}
+
+/**
+ * The distribution name a `pyproject.toml` declares, from PEP 621 `[project]` or Poetry's
+ * `[tool.poetry]`. A repository importing its own distribution is importing itself, not a
+ * dependency.
+ */
+export function parsePyprojectName(raw: string): string | null {
+  for (const section of [/^\[project\]([\s\S]*?)(?=^\[|$)/m, /^\[tool\.poetry\]([\s\S]*?)(?=^\[|$)/m]) {
+    const block = section.exec(raw);
+    const name = block && /^name\s*=\s*["']([^"']+)["']/m.exec(block[1]);
+    if (name) return name[1];
+  }
+  return null;
+}
+
+/** Dependencies a `pyproject.toml` declares (PEP 621, extras, dependency groups, Poetry). */
 export function parsePyprojectManifest(raw: string): ExternalPackage[] {
   {
     const out: ExternalPackage[] = [];
@@ -77,6 +104,17 @@ export function parsePyprojectManifest(raw: string): ExternalPackage[] {
       for (const line of depsMatch[1].split('\n')) {
         const m = line.match(/["']([a-zA-Z0-9_.-]+)([^"']*)?["']/);
         if (m) out.push({ name: m[1], version: m[2]?.trim() ?? '*', ecosystem: 'pypi', isDev: false });
+      }
+    }
+
+    // PEP 621 extras ([project.optional-dependencies]) and PEP 735 groups ([dependency-groups]):
+    // each holds one array of requirements per extra or group name.
+    for (const [header, isDev] of [['project.optional-dependencies', false], ['dependency-groups', true]] as const) {
+      // `{ include-group = "tests" }` names another group, not a distribution, so it is removed
+      // before the requirement strings are read.
+      const body = tomlSection(raw, header).replace(/include-group\s*=\s*["'][^"']*["']/g, '');
+      for (const m of body.matchAll(/["']([a-zA-Z0-9_.-]+)([^"']*)?["']/g)) {
+        out.push({ name: m[1], version: m[2]?.trim() ?? '*', ecosystem: 'pypi', isDev });
       }
     }
 

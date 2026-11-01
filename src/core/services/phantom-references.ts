@@ -45,9 +45,9 @@ import { detectLanguage } from '../analyzer/language-detection.js';
 import { languageSupport } from '../analyzer/language-support.js';
 import {
   parseCargoManifest, parseGoModManifest, parseNpmManifest, parsePyprojectManifest,
-  parseRequirementsManifest, REQUIREMENTS_CANDIDATES, type PackageEcosystem,
+  parsePyprojectName, parseRequirementsManifest, REQUIREMENTS_CANDIDATES, type PackageEcosystem,
 } from '../analyzer/external-packages.js';
-import { ECOSYSTEM_LOCKFILES, pinnedNames, pinsPackage } from '../analyzer/lockfile-pins.js';
+import { ECOSYSTEM_LOCKFILES, normalizePackageName, pinnedNames, pinsPackage } from '../analyzer/lockfile-pins.js';
 import { ecosystemOfLanguage, isRelativeSpecifier, isStdlibSpecifier, packageNameOf } from '../analyzer/stdlib-modules.js';
 import { readFileConfined } from '../../utils/path-confinement.js';
 import { validateGitRef } from '../drift/git-diff.js';
@@ -523,6 +523,11 @@ class ScopeReader {
           entry.workspaceNames.push(member);
         }
       }
+      if (name === 'pyproject.toml') {
+        const own = parsePyprojectName(text);
+        // Importing the distribution this repository builds is importing itself.
+        if (own) entry.workspaceNames.push(own);
+      }
       if (name === 'go.mod') {
         const m = /^module\s+(\S+)/m.exec(text);
         if (m) entry.goModules.push({ module: m[1], dir });
@@ -893,12 +898,13 @@ export function reExportsAsImports(content: string): ImportInfo[] {
       line: lineOf(offset),
     });
   };
-  // Both forms are matched across lines: a long barrel is formatted with one name per line.
-  // `[^}]*` cannot run past the closing brace, so neither pattern backtracks across the file.
+  // Both forms are matched across lines: a long barrel is formatted with one name per line. The
+  // brace body is BOUNDED, because `[^}]*` with no closing brace in the file re-scans to the end
+  // from every `export {` — quadratic over a file of them, and a barrel body that long is not real.
   for (const m of content.matchAll(/\bexport\s+\*(?:\s+as\s+[A-Za-z_$][\w$]*)?\s+from\s*["']([^"'\n]+)["']/g)) {
     push(m[1], [], true, m.index);
   }
-  for (const m of content.matchAll(/\bexport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"'\n]+)["']/g)) {
+  for (const m of content.matchAll(/\bexport\s+(?:type\s+)?\{([^}]{0,4000})\}\s*from\s*["']([^"'\n]+)["']/g)) {
     const names = m[1].split(',')
       // `export { a as b } from` reads `a` from the target, not `b`; an inline `type` modifier
       // (`export { type Foo }`) is part of the syntax, not part of the name.
@@ -954,6 +960,13 @@ export function extractImports(filePath: string, content: string): ImportInfo[] 
   }
 }
 
+/**
+ * Directories a Python project's importable packages may sit under. A `src` layout puts
+ * `itsdangerous/` inside `src/`, so `from itsdangerous.exc import X` inside that repository
+ * resolves there, not at the root.
+ */
+const PYTHON_PACKAGE_ROOTS = ['', 'src', 'lib', 'app'] as const;
+
 /** The target of an internal import, repo-relative; null when it is not a file in this repository. */
 async function resolveInternal(
   absRoot: string,
@@ -964,18 +977,26 @@ async function resolveInternal(
   if (specifier === '') return null;
   // Python's absolute intra-project imports look like packages, so the resolver tries both.
   if (!isRelativeSpecifier(specifier) && !specifier.startsWith('.') && ecosystem !== 'pypi') return null;
-  let abs: string | null;
-  try {
-    const extensions = extensionsFor(fromRel);
-    abs = await resolveImport(resolvableSpecifier(specifier), join(absRoot, fromRel), {
-      baseDir: absRoot, ...(extensions ? { extensions } : {}),
-    });
-  } catch {
-    return null;
+  const extensions = extensionsFor(fromRel);
+  // A Python absolute import is resolved from the project root, and a `src` layout moves that root
+  // down one directory, so each candidate root is tried.
+  const roots = ecosystem === 'pypi' && !specifier.startsWith('.')
+    ? PYTHON_PACKAGE_ROOTS.map(r => (r ? join(absRoot, r) : absRoot))
+    : [absRoot];
+  for (const baseDir of roots) {
+    let abs: string | null;
+    try {
+      abs = await resolveImport(resolvableSpecifier(specifier), join(absRoot, fromRel), {
+        baseDir, ...(extensions ? { extensions } : {}),
+      });
+    } catch {
+      return null;
+    }
+    if (!abs) continue;
+    const rel = relative(absRoot, abs).split(sep).join('/');
+    if (rel && !rel.startsWith('..')) return rel;
   }
-  if (!abs) return null;
-  const rel = relative(absRoot, abs).split(sep).join('/');
-  return rel && !rel.startsWith('..') ? rel : null;
+  return null;
 }
 
 /** Corpus paths near an unresolved relative import: same directory, or the same file name. */
@@ -1016,6 +1037,11 @@ function isInternalPackage(
   scope: ManifestScope,
 ): boolean {
   if (scope.workspaceNames.has(pkg)) return true;
+  // A distribution name is compared the way its ecosystem compares names (`Flask-Caching` is
+  // imported as `flask_caching`).
+  for (const own of scope.workspaceNames) {
+    if (normalizePackageName(ecosystem, own) === normalizePackageName(ecosystem, pkg)) return true;
+  }
   if (ecosystem === 'go') {
     return scope.goModules.some(m => specifier === m.module || specifier.startsWith(m.module + '/'));
   }

@@ -106,6 +106,49 @@ describe('flavor selection', () => {
   });
 });
 
+describe('round-3 regressions', () => {
+  it('reads a regex literal that follows a keyword, not as division', () => {
+    const src = "export function f(s: string) { return /import y from 'phantom-pkg'/.test(s); }\n";
+    expect(invariant(src, 'js')).not.toContain('phantom-pkg');
+    for (const keyword of ['typeof', 'case', 'new', 'delete', 'void', 'yield', 'do', 'throw', 'await', 'in', 'of']) {
+      expect(maskNonCode(`x = ${keyword} /'ghost-pkg'/;\n`, 'js')).not.toContain('ghost-pkg');
+    }
+  });
+
+  it('still reads a slash after a value as division', () => {
+    for (const src of ['const r = a / b / c;\n', 'const r = (x) / 2;\n', 'const r = arr[0] / 2;\n']) {
+      expect(invariant(src, 'js')).toBe(src);
+    }
+  });
+
+  it('blanks a template nested inside an interpolation', () => {
+    const src = "const t = `wrap ${`import y from 'phantom-pkg'`} end`;\nimport { real } from './real';\n";
+    const masked = invariant(src, 'js');
+    expect(masked).not.toContain('phantom-pkg');
+    expect(masked).toContain("import { real } from './real';");
+  });
+
+  it('blanks a template whose interpolation holds braces and quotes', () => {
+    const src = "const t = `a ${ { k: '}' } } b ${ \"}\" } c`;\nimport { real } from './real';\n";
+    const masked = invariant(src, 'js');
+    expect(masked).toContain("import { real } from './real';");
+  });
+
+  it('is linear on an unterminated regex character class', () => {
+    for (const n of [25_000, 200_000]) {
+      const started = Date.now();
+      maskNonCode('/['.repeat(n), 'js');
+      expect(Date.now() - started, `n=${n}`).toBeLessThan(2_000);
+    }
+  });
+
+  it('is linear on deeply nested templates', () => {
+    const started = Date.now();
+    maskNonCode('`${`'.repeat(100_000), 'js');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
 describe('cost', () => {
   it('is linear on adversarial input', () => {
     for (const src of ['/*a'.repeat(200_000), "'".repeat(400_000), '`'.repeat(200_000), 'x'.repeat(600_000)]) {

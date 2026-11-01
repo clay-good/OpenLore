@@ -11,7 +11,7 @@ them for the references a diff **adds**. No network request is made on any path.
 | `unresolved-internal-import` | a relative import whose target is not a file in this repository (or, in Go, a path under the module's own path that names no package directory) |
 | `unresolved-internal-symbol` | a named import the target module does not export |
 | `undeclared-dependency` | a bare specifier that no manifest in scope declares and that is not the standard library |
-| `unpinned-dependency` | declared in a manifest the diff changed, but absent from the lockfile beside it |
+| `unpinned-dependency` | imported, declared in a manifest the diff changed, but absent from the lockfile beside it |
 
 All four are advisory. `verify_change` classifies them with
 [`enforcement.policy`](configuration.md), so `blocking` sets `gated: true` and `off` drops them;
@@ -43,7 +43,7 @@ survive the mask, because a specifier is the one string the statement needs.
 |----------|----------|
 | Is the target a real module? | The import is resolved against the working tree, so a file the same diff creates resolves. A bundler query or fragment (`./a?raw`) is dropped first, and `.d.ts` counts. Candidate paths offered on a miss come from the index, when the caller has one. |
 | Does the target export the name? | The target's **current** content is parsed, never the index, so an export the same diff adds resolves. A barrel is followed to the module that really exports the name. |
-| Is the package declared? | Every manifest between the file and the repository root: `package.json` (including `optionalDependencies`), `pyproject.toml`, `requirements*.txt`, `go.mod`, `Cargo.toml`. Internal, so never reported: a name declared by any workspace member a `workspaces` glob names (including a sibling package), and a Go import under the declared module path. |
+| Is the package declared? | Every manifest between the file and the repository root: `package.json` (including `optionalDependencies`), `pyproject.toml` (PEP 621 dependencies and extras, PEP 735 dependency groups, Poetry sections), `requirements*.txt`, `go.mod`, `Cargo.toml`. Internal, so never reported: a name declared by any workspace member a `workspaces` glob names (including a sibling package), a Go import under a declared module path (resolved against the directory of the `go.mod` that declares it), and a Python import of the distribution this repository itself builds, including under a `src/` layout. |
 | Is it pinned? | Every lockfile beside the changed manifest: `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock`, `Cargo.lock`, `go.sum`. Any one of them pinning the package settles it, so a stale lockfile beside a live one reports nothing. Python names compare by PEP 503 normalization, Cargo names across `-` and `_`, Go by module prefix. |
 
 Standard-library modules are a closed per-language rule: Node's own `builtinModules` list plus the

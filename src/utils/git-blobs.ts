@@ -83,8 +83,14 @@ export function readBlobsAtRef(absDir: string, ref: string, paths: readonly stri
         fail(e instanceof Error ? e : new Error(String(e)));
       }
     });
-    // Git closes stdout when stdin ends; resolve with whatever was parsed (partial is fail-soft).
-    child.stdout.on('end', () => finish(() => resolve(out)));
+    // Git closes stdout when stdin ends. A stream that ended before every path was answered is a
+    // TRUNCATED read, not an empty one: resolving the partial map would hand the caller "this file
+    // did not exist at the base", which reads as a change the diff made. Reject so the per-file
+    // reader answers instead.
+    child.stdout.on('end', () => finish(() => {
+      if (idx < paths.length) reject(new Error(`git cat-file --batch answered ${idx} of ${paths.length} paths`));
+      else resolve(out);
+    }));
     child.stdin.end(paths.map(p => `${ref}:${p}`).join('\n') + '\n');
   });
 }

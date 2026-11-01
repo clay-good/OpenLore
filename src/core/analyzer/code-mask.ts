@@ -14,7 +14,8 @@
  * rest. Every character offset and line break is preserved, so the scanners' reported positions
  * still refer to the original text.
  *
- * It is one linear pass with no regex over the content, so a hostile file cannot make it quadratic.
+ * It is one pass with no regex over the content, and every lookahead is bounded by a constant, so a
+ * hostile file cannot make it quadratic.
  *
  * Deliberately NOT a parser: it recognizes comments, strings, template literals, and regex
  * literals, which is what it takes to tell code from text. JSX is not parsed; the rule that a
@@ -29,13 +30,72 @@ export type MaskFlavor = 'js' | 'python';
 const SPECIFIER_POSITION = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*$/;
 /** How much preceding code is kept to decide specifier position. */
 const TAIL = 32;
+/** Longest regex literal recognized; past this the slash is read as division, which blanks nothing. */
+const MAX_REGEX_LITERAL = 1_024;
+/** How deep template interpolation is followed before the simple "next backtick" rule is used. */
+const MAX_TEMPLATE_DEPTH = 16;
+
+/** Keywords after which a `/` can only begin a regex literal, never divide. */
+const REGEX_AFTER_KEYWORD = /\b(?:return|typeof|case|in|of|new|delete|void|yield|do|else|instanceof|throw|await)$/;
 
 /** True when a `/` at this point opens a regex literal rather than being a division operator. */
 function opensRegex(tail: string): boolean {
-  const prev = tail.replace(/\s+$/, '').slice(-1);
-  if (prev === '') return true;
+  const code = tail.replace(/\s+$/, '');
+  if (code === '') return true;
+  // `return /re/` divides nothing: the last character is a keyword's, not a value's.
+  if (REGEX_AFTER_KEYWORD.test(code)) return true;
   // After a value (identifier, number, closing bracket) a slash divides; anywhere else it is a regex.
-  return !/[\w$)\]]/.test(prev);
+  return !/[\w$)\]]/.test(code.slice(-1));
+}
+
+/** Index just past a single-line quoted string opening at `start`; `start + 1` when it never closes. */
+function skipQuoted(content: string, start: number): number {
+  const quote = content[start];
+  let i = start + 1;
+  while (i < content.length) {
+    const c = content[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '\n') return start + 1; // unterminated on its line: not a string at all
+    if (c === quote) return i + 1;
+    i++;
+  }
+  return start + 1;
+}
+
+/**
+ * Index just past the template literal whose opening backtick is at `start`. Interpolations are
+ * followed, so a template nested inside `${…}` is consumed as part of the outer one rather than
+ * ending it early — the shape that would otherwise leak a fixture's body as code.
+ */
+function skipTemplate(content: string, start: number, depth = 0): number {
+  let i = start + 1;
+  while (i < content.length) {
+    const c = content[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') return i + 1;
+    if (c === '$' && content[i + 1] === '{' && depth < MAX_TEMPLATE_DEPTH) {
+      i = skipInterpolation(content, i + 2, depth + 1);
+      continue;
+    }
+    i++;
+  }
+  return content.length;
+}
+
+/** Index just past the `}` that closes an interpolation whose body starts at `start`. */
+function skipInterpolation(content: string, start: number, depth: number): number {
+  let i = start;
+  let braces = 1;
+  while (i < content.length && braces > 0) {
+    const c = content[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') { i = skipTemplate(content, i, depth); continue; }
+    if (c === '"' || c === "'") { i = skipQuoted(content, i); continue; }
+    if (c === '{') braces++;
+    else if (c === '}') braces--;
+    i++;
+  }
+  return i;
 }
 
 /**
@@ -96,19 +156,14 @@ export function maskNonCode(content: string, flavor: MaskFlavor): string {
 
     // ── template literals ───────────────────────────────────────────────────
     if (flavor === 'js' && ch === '`') {
-      let j = i + 1;
-      let closed = false;
-      while (j < length) {
-        if (content[j] === '\\') { j += 2; continue; }
-        if (content[j] === '`') { closed = true; break; }
-        j++;
-      }
-      // The body is text; an interpolation inside it is not read either, which is the safe
-      // direction: a reference the mask hides is a reference not reported.
+      // The body is text, interpolations included: a reference the mask hides is a reference not
+      // reported, which is the safe direction.
+      const end = skipTemplate(content, i);
+      const closed = end <= length && content[end - 1] === '`';
       emitCode('`');
-      blank(content.slice(i + 1, Math.min(j, length)));
+      blank(content.slice(i + 1, closed ? end - 1 : end));
       if (closed) emitCode('`');
-      i = closed ? j + 1 : j;
+      i = end;
       continue;
     }
 
@@ -117,7 +172,10 @@ export function maskNonCode(content: string, flavor: MaskFlavor): string {
       let j = i + 1;
       let inClass = false;
       let closed = false;
-      while (j < length) {
+      // Bounded: an unterminated character class would otherwise make every later slash on the line
+      // re-scan to its end, which is quadratic over a file of them.
+      const limit = Math.min(length, i + MAX_REGEX_LITERAL);
+      while (j < limit) {
         const c = content[j];
         if (c === '\\') { j += 2; continue; }
         if (c === '\n') break; // a regex literal cannot span a line: it was a division after all

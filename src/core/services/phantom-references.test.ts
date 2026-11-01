@@ -697,3 +697,81 @@ describe('round-2 regressions', () => {
     expect(r.findings.map(f => f.location?.line)).toEqual([1, 2, 3]);
   });
 });
+
+describe('round-3 regressions', () => {
+  it('does not read a regex literal after a keyword as an import', async () => {
+    const d = repo(
+      { 'package.json': PKG(), 'src/x.ts': 'export const x = 1;\n' },
+      { 'src/x.ts': "export function f(s: string) { return /import y from 'phantom-pkg'/.test(s); }\n" },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('does not read a nested template literal as an import', async () => {
+    const d = repo(
+      { 'package.json': PKG(), 'src/x.ts': 'export const x = 1;\n' },
+      { 'src/x.ts': "export const t = `wrap ${`import y from 'phantom-pkg'`} end`;\n" },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('finishes quickly on a file of unterminated export braces', async () => {
+    const d = repo(
+      { 'package.json': PKG(), 'src/x.ts': 'export const x = 1;\n' },
+      { 'src/x.ts': 'export {\n'.repeat(50_000) },
+    );
+    const started = Date.now();
+    await checkPhantomReferences(d, 'HEAD');
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('treats a Python src-layout package as internal', async () => {
+    const d = repo(
+      {
+        'pyproject.toml': '[project]\nname = "itsdangerous"\nversion = "1.0"\ndependencies = []\n',
+        'src/itsdangerous/__init__.py': '',
+        'src/itsdangerous/exc.py': 'class BadSignature(Exception): pass\n',
+        'tests/test_x.py': 'x = 1\n',
+      },
+      { 'tests/test_x.py': 'from itsdangerous.exc import BadSignature\nimport itsdangerous\nx = BadSignature\n' },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+
+  it('reads PEP 621 extras and PEP 735 dependency groups as declared', async () => {
+    const pyproject = [
+      '[project]', 'name = "app"', 'dependencies = ["requests>=2.0"]', '',
+      '[project.optional-dependencies]', 'extra = ["httpx>=0.27"]', '',
+      '[dependency-groups]', 'tests = ["freezegun>=1.0"]', '',
+    ].join('\n');
+    const d = repo(
+      { 'pyproject.toml': pyproject, 'app.py': 'x = 1\n' },
+      { 'app.py': 'import requests\nimport httpx\nimport freezegun\nimport nope_pkg\nx = 1\n' },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => f.subject)).toEqual(['nope_pkg']);
+  });
+
+  it('compares a distribution name the way its ecosystem does', async () => {
+    const d = repo(
+      { 'pyproject.toml': '[project]\nname = "app"\ndependencies = ["Flask-Caching>=2.0"]\n', 'app.py': 'x = 1\n' },
+      { 'app.py': 'import flask_caching\nx = 1\n' },
+    );
+    expect((await checkPhantomReferences(d, 'HEAD')).findings).toEqual([]);
+  });
+});
+
+describe('dependency groups', () => {
+  it('does not read an include-group reference as a declared package', async () => {
+    const pyproject = [
+      '[project]', 'name = "app"', 'dependencies = []', '',
+      '[dependency-groups]', 'lint = ["ruff>=0.5"]', 'dev = [{include-group = "lint"}, "pytest>=8"]', '',
+    ].join('\n');
+    const d = repo(
+      { 'pyproject.toml': pyproject, 'app.py': 'x = 1\n' },
+      { 'app.py': 'import ruff\nimport pytest\nimport lint\nx = 1\n' },
+    );
+    const r = await checkPhantomReferences(d, 'HEAD');
+    expect(r.findings.map(f => f.subject)).toEqual(['lint']);
+  });
+});
