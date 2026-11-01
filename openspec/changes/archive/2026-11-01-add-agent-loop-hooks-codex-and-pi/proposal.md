@@ -1,6 +1,7 @@
 # Agent-loop hooks, part 4: Codex, Pi, task creation
 
-> Status: PROPOSED (2026-11-01). Split from `add-agent-loop-hooks-codex-pi-and-pending-edits`,
+> Status: SHIPPED (2026-11-01), Codex only; Pi and the rest moved to
+> `add-agent-loop-hooks-pi-and-task-created`. Split from `add-agent-loop-hooks-codex-pi-and-pending-edits`,
 > which shipped pending-edit reference grading.
 
 ## Why

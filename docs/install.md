@@ -145,7 +145,7 @@ the block we refuse to overwrite unless you pass `--force`.
 | `cline` | `.clinerules` or `.vscode/settings.json` (`cline.*`) | append block to `.clinerules` |
 | `continue` | `.continue/` | add `/orient` entry to `.continue/config.json` (MCP server registration is TODO — see below) |
 | `pi` | `.pi/` (or `~/.pi/` when the tree has no marker at all) | write `.pi/extensions/openlore.js` — a fingerprinted re-export shim pointing at the extension inside the openlore package. No markdown block or MCP entry; the extension starts `openlore serve` on demand. See [Pi](#pi-pidev). |
-| `codex` | `.codex/` | add OpenLore MCP server to `.codex/config.toml` and proposal hook to `.codex/hooks.json` (or `config.toml` when it already defines hooks); user scope uses `~/.codex/`. See [Codex](#codex). |
+| `codex` | `.codex/` | add OpenLore MCP server to `.codex/config.toml` and proposal hook to `.codex/hooks.json` (or `config.toml` when it already defines hooks); in repository scope, the [agent-loop moments](#agent-loop-hooks) in `.codex/hooks.json`; user scope uses `~/.codex/`. See [Codex](#codex). |
 | `agents-md` | always applies | append block to `AGENTS.md` (creates if absent) |
 
 Plus, in any git repository, `openlore install` writes `.git/hooks/pre-commit` (the decisions gate,
@@ -330,6 +330,13 @@ event's `additionalContext` — or nothing, when there is nothing new.
 | `after-compact` | `SessionStart` (matcher `compact`) | the [handoff briefing](mcp-tools.md) of the in-flight change, so the agent resumes from computed state, not only the compaction summary (stated after every compaction) |
 | `before-subagent` | `PreToolUse` on `Agent\|Task` | nothing: it queues the sub-agent's task (credentials redacted, kept in `.openlore/session-ledger/` for at most 2 minutes), because `SubagentStart` does not carry it; nothing is stored when `subagent-start` or `contextInjection` is off |
 | `subagent-start` | `SubagentStart` | the sub-agent itself gets the task-scoped `orient` briefing for its own task, when that task is the only one queued for its session and agent type (two parallel calls of one type, or a sub-agent no `Agent` call started, get no task briefing rather than a wrong one), and the live peers of other worktrees on the board (`declare_footprint`) |
+
+**Codex.** A repository install also writes four of these moments into `.codex/hooks.json` (Codex's
+hooks follow the same protocol): `before-edit` on `PreToolUse` and `after-tools` on `PostToolUse`
+for `apply_patch` (every file the patch touches) and `Bash`, `before-stop` on `Stop`, and
+`after-compact` on `SessionStart` (`compact`). Codex runs a new hook only after you review and trust
+it. Codex does not report a shell command's exit code to hooks, so a test run's outcome is not
+known there; the pending-edit check and the sub-agent moments are Claude Code only.
 
 - **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
   hook ran, so work committed earlier is not raised again in every session.

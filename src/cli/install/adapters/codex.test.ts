@@ -49,6 +49,37 @@ describe('Codex install adapter', () => {
     expect(await codexAdapter.isConnected(ctx.root)).toBe(true);
   });
 
+  it('wires the agent-loop moments in hooks.json, idempotently, and removes only them on uninstall', async () => {
+    const ctx = await context();
+    await mkdir(join(ctx.root, '.codex'), { recursive: true });
+    const userPre = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo pre' }] };
+    await writeFile(join(ctx.root, '.codex', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [userPre] } }));
+    await codexAdapter.apply(ctx);
+    await codexAdapter.apply(ctx);
+    const hooks = JSON.parse(await readFile(join(ctx.root, '.codex', 'hooks.json'), 'utf8')).hooks;
+    expect(hooks.PreToolUse).toHaveLength(2);
+    expect(hooks.PreToolUse[0]).toEqual(userPre);
+    expect(hooks.PreToolUse[1]).toMatchObject({ matcher: 'apply_patch', hooks: [{ type: 'command', timeout: 15 }] });
+    expect(hooks.PreToolUse[1].hooks[0].command).toMatch(/hook before-edit --harness codex$/);
+    expect(hooks.PostToolUse[0]).toMatchObject({ matcher: 'apply_patch|Bash' });
+    expect(hooks.Stop[0].hooks[0].command).toMatch(/hook before-stop --harness codex$/);
+    expect(hooks.SessionStart[0]).toMatchObject({ matcher: 'compact' });
+
+    await codexAdapter.uninstall(ctx);
+    const after = JSON.parse(await readFile(join(ctx.root, '.codex', 'hooks.json'), 'utf8')).hooks;
+    expect(after).toEqual({ PreToolUse: [userPre] });
+  });
+
+  it('a hooks.json event that is not a list is left alone with a warning', async () => {
+    const ctx = await context();
+    await mkdir(join(ctx.root, '.codex'), { recursive: true });
+    await writeFile(join(ctx.root, '.codex', 'hooks.json'), JSON.stringify({ hooks: { Stop: { odd: true } } }));
+    const result = await codexAdapter.apply(ctx);
+    const hooks = JSON.parse(await readFile(join(ctx.root, '.codex', 'hooks.json'), 'utf8')).hooks;
+    expect(hooks.Stop).toEqual({ odd: true });
+    expect(result.warnings.join('\n')).toContain('hooks.Stop is not a list');
+  });
+
   it('removes only OpenLore-owned entries on uninstall', async () => {
     const ctx = await context();
     await mkdir(join(ctx.root, '.codex'), { recursive: true });
@@ -102,7 +133,8 @@ describe('Codex install adapter', () => {
 
     const config = await readFile(join(project, '.codex', 'config.toml'), 'utf8');
     expect(config).toContain('[mcp_servers.openlore]');
-    await expect(readFile(join(project, '.codex', 'hooks.json'), 'utf8')).rejects.toThrow();
+    // Only the agent-loop moments: no second proposal hook.
+    expect(JSON.parse(await readFile(join(project, '.codex', 'hooks.json'), 'utf8')).hooks.UserPromptSubmit).toBeUndefined();
   });
 
   it.each([
@@ -134,7 +166,8 @@ describe('Codex install adapter', () => {
     expect(config).not.toContain('[[hooks.UserPromptSubmit]]');
     expect(config).toContain('[mcp_servers.openlore]');
     expect(result.warnings.join('\n')).toContain('defines hooks.UserPromptSubmit inline');
-    await expect(readFile(join(ctx.root, '.codex', 'hooks.json'), 'utf8')).rejects.toThrow();
+    // Only the agent-loop moments: no second proposal hook.
+    expect(JSON.parse(await readFile(join(ctx.root, '.codex', 'hooks.json'), 'utf8')).hooks.UserPromptSubmit).toBeUndefined();
   });
 
   it('moves the managed hook out of hooks.json when config.toml gains hooks, so it fires once', async () => {
@@ -176,6 +209,7 @@ describe('Codex install adapter', () => {
 
     await runInstall({ cwd: project, agent: 'codex', repoOnly: true, home: user, analyze: false });
 
-    await expect(readFile(join(project, '.codex', 'hooks.json'), 'utf8')).rejects.toThrow();
+    // Only the agent-loop moments: no second proposal hook.
+    expect(JSON.parse(await readFile(join(project, '.codex', 'hooks.json'), 'utf8')).hooks.UserPromptSubmit).toBeUndefined();
   });
 });
