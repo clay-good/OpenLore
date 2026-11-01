@@ -583,21 +583,23 @@ describe('check weakening — review round 2 (git)', () => {
   });
 
   it('a 1 MB+ file, a quoted path, and a relaxed enforcement policy', async () => {
+    // git C-quotes a `"` in a path; Windows forbids the character, so a space stands in there.
+    const odd = process.platform === 'win32' ? 'src/we ird.test.ts' : 'src/we"ird.test.ts';
     const dir = init('main');
     write(dir, 'src/big.test.ts', JS_BASE);
-    write(dir, 'src/we"ird.test.ts', JS_BASE);
+    write(dir, odd, JS_BASE);
     write(dir, '.openlore/config.json', JSON.stringify({ enforcement: { policy: { 'test-removed': 'blocking' } } }));
     git(dir, 'add', '-A');
     git(dir, 'commit', '-qm', 'one');
     git(dir, 'checkout', '-qb', 'f');
     write(dir, 'src/big.test.ts', JS_BASE + '// ' + 'x'.repeat(1.1 * 1024 * 1024) + '\n');
-    unlinkSync(join(dir, 'src/we"ird.test.ts'));
+    unlinkSync(join(dir, odd));
     write(dir, '.openlore/config.json', JSON.stringify({ enforcement: { policy: { 'test-removed': 'off' } } }));
     const r = await checkWeakening({ root: dir });
     expect(r.notAssessed.map(n => n.file)).toContain('src/big.test.ts');
     expect(r.findings.map(f => [f.code, f.subject]).sort()).toEqual([
       ['check-config-relaxed', '.openlore/config.json'],
-      ['test-removed', 'src/we"ird.test.ts'],
+      ['test-removed', odd],
     ]);
   });
 });
