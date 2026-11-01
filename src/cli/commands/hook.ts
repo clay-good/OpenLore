@@ -97,6 +97,11 @@ export function parseHookPayload(raw: string): HookPayload {
     : [input.file_path, input.path, input.notebook_path].filter((f): f is string => typeof f === 'string' && f.length > 0);
   const response = p.tool_response && typeof p.tool_response === 'object' ? (p.tool_response as Record<string, unknown>) : {};
   let exit = [response.exit_code, response.exitCode, response.returncode, response.code].find((x): x is number => typeof x === 'number' && Number.isInteger(x));
+  // Codex sends a shell result as text: its exit status line, when present, heads the text.
+  if (exit === undefined && typeof p.tool_response === 'string') {
+    const m = /^(?:Exit code: |Process exited with code )(\d+)\b/m.exec(p.tool_response.split('\n', 3).join('\n'));
+    if (m) exit = Number(m[1]);
+  }
   // Claude Code reports a non-zero shell exit as a tool failure (PostToolUseFailure, `error` text).
   if (exit === undefined && p.hook_event_name === 'PostToolUseFailure') {
     const m = typeof p.error === 'string' ? /exit code (\d+)/i.exec(p.error) : null;
@@ -118,13 +123,14 @@ export function parseHookPayload(raw: string): HookPayload {
   };
 }
 
-const MAX_PATCH_FILES = 20;
+/** Files of one patch recorded and checked (a larger patch is a bulk change). */
+const MAX_PATCH_FILES = 200;
 
 /** The files a Codex `apply_patch` patch adds, updates, deletes, or moves to, in order, once each. */
 export function patchFiles(patch: string): string[] {
   const out = new Set<string>();
   for (const line of patch.split(/\r?\n/)) {
-    const m = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$/.exec(line);
+    const m = /^\s*\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$/.exec(line);
     if (m && m[1]) out.add(m[1]);
   }
   return [...out];
@@ -616,7 +622,8 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
     return silent; // only queues: the parent's tool call gets no output
   }
   if (moment === 'subagent-start') return subagentStart(root, payload, opts.timeoutMs ?? TIMEOUT_MS[moment]);
-  const files = payload.files.map(f => repoPath(root, f)).filter((f): f is string => !!f);
+  // A relative path is the harness's, from its working directory (Codex patches), not the root's.
+  const files = payload.files.map(f => repoPath(root, resolve(start, f))).filter((f): f is string => !!f);
   // A shell command (after-tools sees them too): count it and record a test run, nothing else, so a
   // shell call stays cheap.
   if (moment === 'after-tools' && payload.command !== undefined && !files.length) {

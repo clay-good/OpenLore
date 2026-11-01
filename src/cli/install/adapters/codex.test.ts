@@ -70,6 +70,24 @@ describe('Codex install adapter', () => {
     expect(after).toEqual({ PreToolUse: [userPre] });
   });
 
+  it('a user hook added inside an OpenLore group survives uninstall; a hooks file only OpenLore wrote is removed', async () => {
+    const ctx = await context();
+    await codexAdapter.apply(ctx);
+    const path = join(ctx.root, '.codex', 'hooks.json');
+    const doc = JSON.parse(await readFile(path, 'utf8'));
+    const mine = { type: 'command', command: 'echo mine' };
+    doc.hooks.Stop[0].hooks.push(mine);
+    await writeFile(path, JSON.stringify(doc));
+    await codexAdapter.uninstall(ctx);
+    expect(JSON.parse(await readFile(path, 'utf8')).hooks).toEqual({ Stop: [{ hooks: [mine] }] });
+
+    const other = await context();
+    await codexAdapter.apply(other);
+    const result = await codexAdapter.uninstall(other);
+    await expect(readFile(join(other.root, '.codex', 'hooks.json'), 'utf8')).rejects.toThrow();
+    expect(result.changes.some(c => c.kind === 'delete')).toBe(true);
+  });
+
   it('a hooks.json event that is not a list is left alone with a warning', async () => {
     const ctx = await context();
     await mkdir(join(ctx.root, '.codex'), { recursive: true });

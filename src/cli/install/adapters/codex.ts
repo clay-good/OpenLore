@@ -29,11 +29,24 @@ const LOOP_HOOKS: ReadonlyArray<{ event: string; moment: string; matcher?: strin
 ];
 const LOOP_COMMAND = /\bhook (?:before-edit|after-tools|before-stop|after-compact) --harness codex$/;
 
-/** Whether a hooks.json group is one of OpenLore's loop moments. */
-function isLoopGroup(group: unknown): boolean {
-  const hooks = asObject(group)?.hooks;
-  return Array.isArray(hooks) && hooks.length > 0
-    && hooks.every((h) => typeof asObject(h)?.command === 'string' && LOOP_COMMAND.test(asObject(h)!.command as string));
+const isLoopHook = (h: unknown) => typeof asObject(h)?.command === 'string' && LOOP_COMMAND.test(asObject(h)!.command as string);
+
+/**
+ * A hooks.json event list without OpenLore's loop hooks: each managed hook is dropped, and a group
+ * left with no hook is dropped with it (a user's own hook added to the group stays). Also reports
+ * whether anything was removed.
+ */
+function withoutLoopHooks(groups: unknown[]): { kept: unknown[]; removed: boolean } {
+  let removed = false;
+  const kept: unknown[] = [];
+  for (const g of groups) {
+    const hooks = asObject(g)?.hooks;
+    if (!Array.isArray(hooks) || !hooks.some(isLoopHook)) { kept.push(g); continue; }
+    removed = true;
+    const rest = hooks.filter((h) => !isLoopHook(h));
+    if (rest.length) kept.push({ ...asObject(g)!, hooks: rest });
+  }
+  return { kept, removed };
 }
 
 interface CodexHookGroup {
@@ -343,13 +356,23 @@ async function applyLoopHooks(ctx: ApplyContext, changes: PlannedChange[], warni
     return;
   }
   const hooks: Record<string, unknown> = { ...(asObject(doc.hooks) ?? {}) };
+  // Every event, not only today's: a moment an earlier version wired elsewhere is removed too.
+  let removedAny = false;
+  for (const [event, current] of Object.entries(hooks)) {
+    if (!Array.isArray(current)) continue;
+    const { kept, removed } = withoutLoopHooks(current);
+    if (!removed) continue;
+    removedAny = true;
+    if (kept.length) hooks[event] = kept;
+    else delete hooks[event];
+  }
   for (const { event, moment, matcher, timeout } of LOOP_HOOKS) {
     const current = hooks[event];
     if (current !== undefined && !Array.isArray(current)) {
-      warnings.push(`codex: ${HOOKS_REL} hooks.${event} is not a list; OpenLore did not add its ${moment} hook.`);
+      if (!remove) warnings.push(`codex: ${HOOKS_REL} hooks.${event} is not a list; OpenLore did not add its ${moment} hook.`);
       continue;
     }
-    const kept = ((current ?? []) as unknown[]).filter((g) => !isLoopGroup(g));
+    const kept = [...((current ?? []) as unknown[])];
     if (!remove) {
       let command: string;
       try {
@@ -366,10 +389,12 @@ async function applyLoopHooks(ctx: ApplyContext, changes: PlannedChange[], warni
   const next = { ...doc };
   if (Object.keys(hooks).length) next.hooks = hooks;
   else delete next.hooks;
+  if (remove && !removedAny) return;
   const serialized = Object.keys(next).length ? JSON.stringify(next, null, 2) + '\n' : '';
+  // The file held only OpenLore's loop hooks: it goes, as it came.
   if (remove && !serialized) {
     if (!ctx.dryRun) await rm(hooksPath, { force: true });
-    changes.push({ path: hooksPath, kind: 'update', summary: `${HOOKS_REL} — removed OpenLore agent-loop hooks` });
+    changes.push({ path: hooksPath, kind: 'delete', summary: `${HOOKS_REL} — removed OpenLore agent-loop hooks` });
     return;
   }
   await writeManagedText(ctx, hooksPath, raw, serialized, `${HOOKS_REL} — ${remove ? 'removed OpenLore agent-loop hooks' : 'Codex agent-loop hooks (review/trust in Codex)'}`, changes);

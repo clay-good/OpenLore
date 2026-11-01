@@ -335,8 +335,9 @@ event's `additionalContext` — or nothing, when there is nothing new.
 hooks follow the same protocol): `before-edit` on `PreToolUse` and `after-tools` on `PostToolUse`
 for `apply_patch` (every file the patch touches) and `Bash`, `before-stop` on `Stop`, and
 `after-compact` on `SessionStart` (`compact`). Codex runs a new hook only after you review and trust
-it. Codex does not report a shell command's exit code to hooks, so a test run's outcome is not
-known there; the pending-edit check and the sub-agent moments are Claude Code only.
+it. A patch's paths are read from Codex's working directory. A shell result's exit code is read
+from the `Exit code:` line Codex puts at the head of its output; without one, a test run's outcome
+is not known. The pending-edit check and the sub-agent moments are Claude Code only.
 
 - **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
   hook ran, so work committed earlier is not raised again in every session.
