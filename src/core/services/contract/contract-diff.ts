@@ -31,11 +31,12 @@ export const CONTRACT_RULES = {
   'optional-body-property-added': 'non-breaking',
   'body-property-made-required': 'breaking',
   'body-property-type-changed': 'breaking',
-  'body-enum-widened': 'non-breaking',
+  'body-property-widened': 'non-breaking',
   'response-property-removed': 'breaking',
+  'response-property-made-optional': 'breaking',
   'response-property-added': 'non-breaking',
   'response-property-type-changed': 'breaking',
-  'response-enum-widened': 'dangerous',
+  'response-property-widened': 'dangerous',
   'schema-unassessed': 'potentially-breaking',
 } as const satisfies Record<string, ContractChangeClass>;
 export type ContractRule = keyof typeof CONTRACT_RULES;
@@ -59,14 +60,21 @@ function splitType(t: string | undefined): { base: string; values: string[] } {
   return { base: m?.[1] ?? '', values };
 }
 
-/** A type change: an enum that only gained values is a widening; anything else is a change. */
+/**
+ * A type change. A widening accepts every value the old type accepted: the same types (plus
+ * possibly `null` or others) and format, with an enum that only gained values or was dropped.
+ */
 function typeChange(before: string | undefined, after: string | undefined): 'same' | 'widened' | 'changed' {
   if (before === after) return 'same';
   if (before === undefined || after === undefined) return 'changed';
   const b = splitType(before);
   const a = splitType(after);
-  if (b.base === a.base && b.values.length && b.values.every(v => a.values.includes(v))) return 'widened';
-  return 'changed';
+  const [bTypes, bFmt = ''] = b.base.split(':');
+  const [aTypes, aFmt = ''] = a.base.split(':');
+  const aSet = new Set(aTypes.split('|'));
+  if (bFmt !== aFmt || !bTypes.split('|').every(t => aSet.has(t))) return 'changed';
+  if (a.values.length && !(b.values.length && b.values.every(v => a.values.includes(v)))) return 'changed';
+  return 'widened';
 }
 
 function change(file: string, op: ContractOperation, rule: ContractRule, detail: string, element?: string): ContractChange {
@@ -77,7 +85,8 @@ function diffParams(file: string, beforeOp: ContractOperation, after: ContractOp
   // A path parameter is matched by its position in the template: renaming `{id}` is not a wire change.
   const keyFor = (op: ContractOperation) => {
     const names = [...op.path.matchAll(/\{([^}]*)\}/g)].map(m => m[1]);
-    return (p: ContractParam) => (p.in === 'path' && names.includes(p.name) ? `path:#${names.indexOf(p.name)}` : `${p.in}:${p.name}`);
+    // Header names are case-insensitive on the wire.
+    return (p: ContractParam) => (p.in === 'path' && names.includes(p.name) ? `path:#${names.indexOf(p.name)}` : p.in === 'header' ? `header:${p.name.toLowerCase()}` : `${p.in}:${p.name}`);
   };
   const kb = keyFor(beforeOp);
   const ka = keyFor(after);
@@ -88,10 +97,10 @@ function diffParams(file: string, beforeOp: ContractOperation, after: ContractOp
     const el = `${p.in}:${p.name}`;
     if (!b) out.push(change(file, after, p.required ? 'required-param-added' : 'optional-param-added', `${p.in} parameter \`${p.name}\` added${p.required ? ', required' : ''}`, el));
     else {
-      const before = out.length;
       if (p.required && !b.required) out.push(change(file, after, 'param-made-required', `${p.in} parameter \`${p.name}\` is now required`, el));
-      if (typeChange(b.type, p.type) !== 'same') out.push(change(file, after, 'param-type-changed', `${p.in} parameter \`${p.name}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, el));
-      if (out.length === before && p.required === b.required && p.hash !== b.hash) out.push(change(file, after, 'schema-unassessed', `${p.in} parameter \`${p.name}\` changed outside the model (constraints, nested schema, or style)`, el));
+      // A parameter only accepts a wider type safely; any other change breaks some caller.
+      if (typeChange(b.type, p.type) === 'changed') out.push(change(file, after, 'param-type-changed', `${p.in} parameter \`${p.name}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, el));
+      if (p.hash !== b.hash) out.push(change(file, after, 'schema-unassessed', `${p.in} parameter \`${p.name}\` changed outside the model (constraints, nested schema, or style)`, el));
     }
   }
   for (const [k, p] of was) if (!now.has(k)) out.push(change(file, after, 'param-removed', `${p.in} parameter \`${p.name}\` removed`, `${p.in}:${p.name}`));
@@ -109,8 +118,8 @@ function diffProps(
       else {
         if (p.required && !b.required) out.push(change(file, op, 'body-property-made-required', `request property \`${n}\` is now required`, n));
         const t = typeChange(b.type, p.type);
-        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'body-enum-widened' : 'body-property-type-changed', `request property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
-        else if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `request property \`${n}\` changed outside the model (nested schema or constraints)`, n));
+        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'body-property-widened' : 'body-property-type-changed', `request property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
+        if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `request property \`${n}\` changed outside the model (nested schema or constraints)`, n));
       }
     }
   } else {
@@ -119,8 +128,9 @@ function diffProps(
       if (!p) out.push(change(file, op, 'response-property-removed', `response property \`${n}\` removed`, n));
       else {
         const t = typeChange(b.type, p.type);
-        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'response-enum-widened' : 'response-property-type-changed', `response property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
-        else if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `response property \`${n}\` changed outside the model (nested schema or constraints)`, n));
+        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'response-property-widened' : 'response-property-type-changed', `response property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
+        if (b.required && !p.required) out.push(change(file, op, 'response-property-made-optional', `response property \`${n}\` may now be absent`, n));
+        if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `response property \`${n}\` changed outside the model (nested schema or constraints)`, n));
       }
     }
     for (const n of now.keys()) if (!was.has(n)) out.push(change(file, op, 'response-property-added', `response property \`${n}\` added`, n));
@@ -134,20 +144,19 @@ function diffOperation(file: string, b: ContractOperation, op: ContractOperation
   if (op.deprecated && !b.deprecated) out.push(change(file, op, 'operation-deprecated', `operation ${op.address} is now deprecated`));
   diffParams(file, b, op, out);
   // Request body.
-  const bodyStart = out.length;
   if (op.body && !b.body && op.body.required) out.push(change(file, op, 'body-added-required', 'a required request body was added'));
   else if (op.body && b.body) {
     if (op.body.required && !b.body.required) out.push(change(file, op, 'body-made-required', 'the request body is now required'));
     if (op.body.assessed && b.body.assessed) diffProps(file, op, b.body.properties, op.body.properties, 'body', out);
-    if (out.length === bodyStart && op.body.hash !== b.body.hash) {
+    // The hash covers what the property rules do not compare: any difference there is unassessed.
+    if (op.body.hash !== b.body.hash) {
       out.push(change(file, op, 'schema-unassessed', 'the request body schema changed outside the model (oneOf/anyOf, an external $ref, arrays, or constraints)'));
     }
   }
   // Success response.
-  const resStart = out.length;
   if (b.response && op.response) {
     if (op.response.assessed && b.response.assessed) diffProps(file, op, b.response.properties, op.response.properties, 'response', out);
-    if (out.length === resStart && op.response.hash !== b.response.hash) {
+    if (op.response.hash !== b.response.hash) {
       out.push(change(file, op, 'schema-unassessed', 'the response schema changed outside the model (oneOf/anyOf, an external $ref, arrays, or constraints)'));
     }
   } else if (b.response && !op.response) {
@@ -162,6 +171,12 @@ function diffOperation(file: string, b: ContractOperation, op: ContractOperation
  * file is compared as a set: any difference is `schema-unassessed`.
  */
 export function diffContracts(base: readonly ContractDocument[], head: readonly ContractDocument[]): ContractChange[] {
+  // Paths whose operations a side cannot read (behind an external or unresolved ref): an operation
+  // missing there is not known to be removed or added.
+  const opaque = (docs: readonly ContractDocument[]) => new Set(docs.flatMap(d => d.opaquePaths));
+  const opaqueBase = opaque(base);
+  const opaqueHead = opaque(head);
+  const pathOf = (key: string) => key.slice(key.indexOf(' ') + 1);
   const index = (docs: readonly ContractDocument[]) => {
     const m = new Map<string, Array<{ file: string; op: ContractOperation }>>();
     for (const d of docs) for (const op of d.operations) m.set(op.key, [...(m.get(op.key) ?? []), { file: d.file, op }]);
@@ -173,15 +188,23 @@ export function diffContracts(base: readonly ContractDocument[], head: readonly 
   for (const [key, bs] of was) {
     const ns = now.get(key);
     const b = bs[0];
-    if (!ns) { out.push(change(b.file, b.op, 'operation-removed', `operation ${b.op.address} removed`)); continue; }
+    if (!ns) {
+      if (opaqueHead.has(pathOf(key))) out.push(change(b.file, b.op, 'schema-unassessed', `operation ${b.op.address} is now behind a reference the model does not read`));
+      else out.push(change(b.file, b.op, 'operation-removed', `operation ${b.op.address} removed`));
+      continue;
+    }
     if (bs.length > 1 || ns.length > 1) {
       const set = (l: typeof bs) => l.map(x => fingerprint(x.op)).sort().join('\n');
-      if (set(bs) !== set(ns)) out.push(change(ns[0].file, ns[0].op, 'schema-unassessed', `operation ${ns[0].op.address} is declared in more than one file and changed`));
+      if (set(bs) !== set(ns)) out.push(change(ns[0].file, ns[0].op, 'schema-unassessed', `operation ${ns[0].op.address} is declared more than once and changed`));
       continue;
     }
     diffOperation(ns[0].file, b.op, ns[0].op, out);
   }
-  for (const [key, ns] of now) if (!was.has(key)) out.push(change(ns[0].file, ns[0].op, 'operation-added', `operation ${ns[0].op.address} added`));
+  for (const [key, ns] of now) {
+    if (was.has(key)) continue;
+    if (opaqueBase.has(pathOf(key))) out.push(change(ns[0].file, ns[0].op, 'schema-unassessed', `operation ${ns[0].op.address} was behind a reference the model does not read`));
+    else out.push(change(ns[0].file, ns[0].op, 'operation-added', `operation ${ns[0].op.address} added`));
+  }
   const sortKey = (c: ContractChange) => `${c.address}\0${c.rule}\0${c.element ?? ''}\0${c.detail}`;
   return out.sort((x, y) => (sortKey(x) < sortKey(y) ? -1 : sortKey(x) > sortKey(y) ? 1 : 0));
 }

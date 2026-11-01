@@ -76,7 +76,8 @@ describe('readOpenApi', () => {
 
   it('a $ref cycle ends within the hop bound', () => {
     const d = doc(`openapi: 3.0.0\ninfo: {title: T, version: '1'}\npaths:\n  /a:\n    get:\n      responses: {'200': {$ref: '#/components/responses/A'}}\ncomponents:\n  responses:\n    A: {$ref: '#/components/responses/B'}\n    B: {$ref: '#/components/responses/A'}\n`);
-    expect(d.operations[0].response).toBeUndefined();
+    expect(d.operations[0].response).toMatchObject({ assessed: false, properties: [] });
+    expect(d.unassessed).toContain('unresolved $ref');
   });
 
   it('YAML alias bombs are refused, not expanded', () => {
@@ -117,7 +118,7 @@ describe('diffContracts', () => {
       'POST /v1/orders|required-body-property-added|code2',
       'GET /v1/orders/{id}|response-property-removed|id',
       'GET /v1/orders/{id}|response-property-added|total',
-      'GET /v1/orders/{id}|response-enum-widened|status',
+      'GET /v1/orders/{id}|response-property-widened|status',
     ]));
     for (const c of changes) expect(c.class).toBe(CONTRACT_RULES[c.rule]);
     expect(contractBump(changes)).toBe('major');
@@ -181,7 +182,7 @@ describe('adversarial review regressions', () => {
     const nested = (t: string) => post(`{type: object, properties: {addr: {type: object, properties: {zip: {type: ${t}}}}}}`);
     expect(rules(nested('string'), nested('integer'))).toEqual(['schema-unassessed addr']);
     expect(rules(post('{type: object, properties: {n: {type: string, maxLength: 100}}}'), post('{type: object, properties: {n: {type: string, maxLength: 5}}}'))).toEqual(['schema-unassessed n']);
-    expect(rules(get('{type: object, properties: {n: {type: string}}}'), get('{type: object, properties: {n: {type: string, nullable: true}}}'))).toEqual(['response-property-type-changed n']);
+    expect(rules(get('{type: object, properties: {n: {type: string}}}'), get('{type: object, properties: {n: {type: string, nullable: true}}}'))).toEqual(['response-property-widened n']);
     expect(rules(post('{type: object, properties: {n: {type: string}}}'), post('{type: object, additionalProperties: false, properties: {n: {type: string}}}'))).toEqual(['schema-unassessed']);
   });
 
@@ -239,7 +240,7 @@ describe('adversarial review regressions', () => {
   });
 
   it('a duplicated path key is an error, not a silent last-wins', () => {
-    expect(readOpenApi('d.yaml', spec("  /a:\n    get: {responses: {'200': {description: ok}}}\n  /a:\n    post: {responses: {'200': {description: ok}}}\n"))).toEqual({ file: 'd.yaml', error: expect.stringContaining('duplicate path key') });
+    expect(readOpenApi('d.yaml', spec("  /a:\n    get: {responses: {'200': {description: ok}}}\n  /a:\n    post: {responses: {'200': {description: ok}}}\n"))).toEqual({ file: 'd.yaml', error: expect.stringContaining('duplicate key: /a') });
   });
 
   it('YAML merge keys are applied', () => {
@@ -260,5 +261,80 @@ describe('adversarial review regressions', () => {
 
   it('enum values with commas do not collide', () => {
     expect(rules(get("{type: object, properties: {e: {type: string, enum: [a, 'b,c']}}}"), get('{type: object, properties: {e: {type: string, enum: [a, b, c]}}}'))).toEqual(['response-property-type-changed e']);
+  });
+});
+
+describe('second review regressions', () => {
+  const spec = (paths: string, extra = '', v = '3.0.0') => `openapi: ${v}\ninfo: {title: T, version: '1'}\n${extra}paths:\n${paths}`;
+  const post = (schema: string, extra = '', v?: string) => spec(`  /a:\n    post:\n      requestBody: {content: {application/json: {schema: ${schema}}}}\n      responses: {'200': {description: ok}}\n`, extra, v);
+  const get = (responses: string) => spec(`  /a:\n    get:\n      responses: ${responses}\n`);
+  const diff = (a: string, b: string) => diffContracts([doc(a)], [doc(b)]);
+  const rules = (a: string, b: string) => diff(a, b).map(c => `${c.rule}${c.element ? ` ${c.element}` : ''}`);
+  const bump = (a: string, b: string) => contractBump(diff(a, b));
+
+  it('no-op edits are not changes: set order, duplicates, inline vs $ref', () => {
+    expect(rules(post('{type: object, required: [a, b], properties: {a: {type: string}, b: {type: string, enum: [x, y]}}}'),
+      post('{type: object, required: [b, a, a], properties: {a: {type: string}, b: {type: string, enum: [y, x]}}}'))).toEqual([]);
+    const comp = "components: {schemas: {N: {type: object, properties: {a: {type: string, maxLength: 3}}}}}\n";
+    expect(rules(post('{type: object, properties: {a: {type: string, maxLength: 3}}}', comp), post("{$ref: '#/components/schemas/N'}", comp))).toEqual([]);
+  });
+
+  it('an unexplained difference is reported even when another rule fires', () => {
+    expect(bump(post('{type: object, properties: {a: {type: string}}}'), post('{type: object, additionalProperties: false, properties: {a: {type: string}, b: {type: string}}}'))).toBeNull();
+    const q = (extra: string) => spec(`  /a:\n    get:\n      parameters: [{name: q, in: query, ${extra}schema: {type: string${extra ? ', maxLength: 3' : ''}}}]\n      responses: {'200': {description: ok}}\n`);
+    expect(bump(q('required: true, '), q(''))).toBeNull();
+    expect(rules(get("{'200': {description: ok, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}}}}}}"),
+      get("{'200': {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}, n: {type: string}}}}}}}"))).toEqual(['response-property-added n', 'response-property-made-optional id']);
+  });
+
+  it('a change deep inside a large schema is seen', () => {
+    const big = (t: string) => post(`{type: array, items: {type: object, properties: {${Array.from({ length: 3000 }, (_, i) => `p${i}: {type: ${i === 999 ? t : 'string'}}`).join(', ')}}}}`);
+    expect(bump(big('string'), big('integer'))).toBeNull();
+    expect(diff(big('string'), big('string'))).toEqual([]);
+  });
+
+  it('hashes do not depend on which operation is read first (reference cycles)', () => {
+    const comp = "components: {schemas: {A: {type: object, properties: {b: {$ref: '#/components/schemas/B'}}}, B: {type: object, properties: {a: {$ref: '#/components/schemas/A'}}}}}\n";
+    const z = "  /z:\n    get: {responses: {'200': {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/A'}}}}}}\n";
+    const a = "  /a:\n    get: {responses: {'200': {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/B'}}}}}}\n";
+    expect(rules(spec(z, comp), spec(a + z, comp))).toEqual(['operation-added']);
+  });
+
+  it('OpenAPI 3.1 keywords beside a $ref count', () => {
+    const comp = "components: {schemas: {B: {type: object, properties: {a: {type: string}}}}}\n";
+    expect(rules(post("{$ref: '#/components/schemas/B'}", comp, '3.1.0'), post("{$ref: '#/components/schemas/B', required: [a]}", comp, '3.1.0'))).toEqual(['body-property-made-required a']);
+  });
+
+  it('every 2xx response counts: 2XX, a second 2xx, and a changed status code', () => {
+    const r = (code: string, props: string) => `{'${code}': {description: ok, content: {application/json: {schema: {type: object, properties: {${props}}}}}}}`;
+    expect(rules(get(r('2XX', 'a: {type: string}')), get(r('2XX', 'b: {type: string}')))).toContain('response-property-removed a');
+    expect(bump(get(r('200', 'a: {type: string}')), get(r('201', 'a: {type: string}')))).toBeNull();
+    expect(bump(get("{'200': {description: ok}, '202': {description: ok, content: {text/plain: {schema: {type: string}}}}}"),
+      get("{'200': {description: ok}, '202': {description: ok, content: {text/plain: {schema: {type: integer}}}}}"))).toBeNull();
+  });
+
+  it('request-side widening is not breaking; header case and server order are not changes', () => {
+    expect(bump(post('{type: object, properties: {a: {type: string, enum: [x]}}}'), post('{type: object, properties: {a: {type: string}}}'))).toBe('minor');
+    expect(bump(post('{type: object, properties: {a: {type: string}}}'), post('{type: object, properties: {a: {type: string, nullable: true}}}'))).toBe('minor');
+    const h = (n: string) => spec(`  /a:\n    get:\n      parameters: [{name: ${n}, in: header, required: true, schema: {type: string}}]\n      responses: {'200': {description: ok}}\n`);
+    expect(diff(h('X-Id'), h('x-id'))).toEqual([]);
+    const ok = "  /a:\n    get: {responses: {'200': {description: ok}}}\n";
+    expect(diff(spec(ok, "servers: [{url: 'https://api.x.com/v1'}]\n"), spec(ok, "servers: [{url: 'http://localhost:8080'}, {url: 'https://api.x.com/v1'}]\n"))).toEqual([]);
+  });
+
+  it('operations moved behind an external path $ref are not reported removed', () => {
+    const before = spec("  /a:\n    get: {responses: {'200': {description: ok}}}\n");
+    const after = spec("  /a: {$ref: './paths/a.yaml'}\n");
+    expect(diff(before, after).map(c => `${c.rule} ${c.class}`)).toEqual(['schema-unassessed potentially-breaking']);
+  });
+
+  it('duplicate method keys and unresolved $ref retargets are not silent', () => {
+    expect(readOpenApi('d.yaml', spec("  /a:\n    get: {responses: {'200': {description: ok}}}\n    get: {responses: {'201': {description: ok}}}\n"))).toEqual({ file: 'd.yaml', error: 'duplicate key: get' });
+    expect(bump(post("{type: object, properties: {p: {$ref: '#/components/schemas/Gone1'}}}"), post("{type: object, properties: {p: {$ref: '#/components/schemas/Gone2'}}}"))).toBeNull();
+  });
+
+  it('the sniff accepts indented and flow-style YAML', () => {
+    expect(looksLikeOpenApi('  openapi: 3.0.0\n  paths: {}\n')).toBe(true);
+    expect(looksLikeOpenApi('{openapi: 3.0.0, paths: {}}')).toBe(true);
   });
 });

@@ -155,7 +155,7 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
   for (const addr of addresses) {
     if (ops.some(o => o.op.address === addr)) continue;
     const [method, path] = [addr.slice(0, addr.indexOf(' ')), addr.slice(addr.indexOf(' ') + 1)];
-    ops.push({ d: { file: '', format: 'openapi-3', basePath: '', operations: [], unassessed: [] }, op: { address: addr, key: addr, method, path, declaredPath: path, line: 0, deprecated: false, params: [] } });
+    ops.push({ d: { file: '', format: 'openapi-3', basePath: '', operations: [], unassessed: [], opaquePaths: [] }, op: { address: addr, key: addr, method, path, declaredPath: path, line: 0, deprecated: false, params: [] } });
   }
   const routes = ops.flatMap(({ d, op }) => [...new Set([op.path, op.declaredPath])].map(p => ({
     file: d.file, method: op.method, path: p, normalizedPath: normalizeUrl(p), handlerName: op.address,
@@ -233,12 +233,25 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     // specification unparseable, unread, or past a cap on one side would otherwise read as
     // operations removed or added.
     const unparsed = new Set([...head.unreadable, ...base.unreadable, ...head.unread, ...base.unread].map(u => u.file));
-    const comparable = (file: string) => !unparsed.has(file)
+    // A file that is a specification on one side and read but not a specification on the other
+    // (reformatted past the sniff, a version key removed) cannot be compared either.
+    const specFiles = (side: SpecSide) => new Set([...side.docs.map(d => d.file), ...side.unreadable.map(u => u.file)]);
+    const headSpec = specFiles(head);
+    const baseSpec = specFiles(base);
+    const lostSpec = (f: string) => (headSpec.has(f) && base.examined.has(f) && !baseSpec.has(f)) || (baseSpec.has(f) && head.examined.has(f) && !headSpec.has(f));
+    const comparable = (file: string) => !unparsed.has(file) && !lostSpec(file)
       && (head.examined.has(file) || !head.candidates.has(file)) && (base.examined.has(file) || !base.candidates.has(file));
     const docFiles = new Set([...head.docs, ...base.docs].map(d => d.file));
     for (const u of [...head.unread, ...base.unread]) if (docFiles.has(u.file)) notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
-    for (const f of docFiles) if (!unparsed.has(f) && !comparable(f)) notAssessed.push({ file: emittedText(f), reason: 'past the scan cap on one side, so it is not compared' });
-    const changes = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file)));
+    for (const f of docFiles) {
+      if (unparsed.has(f) || comparable(f)) continue;
+      notAssessed.push({ file: emittedText(f), reason: lostSpec(f) ? 'reads as a specification on one side only, so it is not compared' : 'past the scan cap on one side, so it is not compared' });
+    }
+    // With a cap reached, an operation missing on the capped side may only have moved past the cap.
+    const changes = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file))).map(c =>
+      (c.rule === 'operation-removed' && head.capped) || (c.rule === 'operation-added' && base.capped)
+        ? { ...c, rule: 'schema-unassessed' as const, class: 'potentially-breaking' as const, detail: `${c.detail} (a scan cap was reached, so it may only have moved)` }
+        : c);
     const consumers = await consumersOf(root, changes, [...head.docs, ...base.docs], boundaries);
     for (const c of changes.filter(x => x.class === 'breaking' || x.class === 'dangerous')) {
       const who = consumers.get(c.address) ?? [];

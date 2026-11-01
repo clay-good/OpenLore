@@ -177,4 +177,24 @@ describe('certify_service_contract', () => {
     expect(text).not.toContain('\u001b');
     expect(JSON.stringify(r)).not.toContain('\\u001b');
   });
+
+  it('a specification that stops reading as one on a side is not assessed, not "removed"', async () => {
+    const root = repo({ 'api/openapi.yaml': SPEC });
+    write(root, 'api/openapi.yaml', 'info: {title: x}\n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    expect((r.changes as { total: number }).total).toBe(0);
+    expect(r.notAssessed).toEqual([{ file: 'api/openapi.yaml', reason: expect.stringContaining('one side only') }]);
+  });
+
+  it('a specification moved past the scan cap is not reported removed', async () => {
+    const files: Record<string, string> = { 'a/spec.yaml': SPEC };
+    for (let i = 0; i < 2000; i++) files[`m/f${String(i).padStart(4, '0')}.json`] = '{}';
+    const root = repo(files);
+    write(root, 'z/spec.yaml', SPEC);
+    rmSync(join(root, 'a/spec.yaml'));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = (r.changes as { items: Array<{ rule: string }> }).items.map(c => c.rule);
+    expect(changes).not.toContain('operation-removed');
+    expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('scan cap')]));
+  }, 60_000);
 });

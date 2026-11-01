@@ -25,10 +25,10 @@ New tool `certify_service_contract` (`full` preset, family `change`) and CLI
 
 | Class | Rules |
 |-------|-------|
-| `breaking` | removed operation; added required param or request property; param, body, or property made required; changed param or property type; removed response property |
-| `dangerous` | deprecated operation; widened response enum |
-| `non-breaking` | added operation, optional param or property, response property; removed param; widened request enum |
-| `potentially-breaking` | a changed schema outside the model (`oneOf`/`anyOf`, external `$ref`) |
+| `breaking` | removed operation; added required param or request property; param, body, or property made required; changed param or property type; response property removed or made optional |
+| `dangerous` | deprecated operation; widened response property type (new enum value, `null`) |
+| `non-breaking` | added operation, optional param or property, response property; removed param; widened request property type |
+| `potentially-breaking` | any other schema difference (constraints, nested schemas, `oneOf`/`anyOf`, external `$ref`, status codes), found by hashing what the rules do not compare |
 
 Findings, advisory by default: `contract-breaking`, `contract-declared-unimplemented`,
 `contract-implemented-undeclared`.
