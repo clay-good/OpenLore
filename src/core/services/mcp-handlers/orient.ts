@@ -1047,6 +1047,17 @@ export async function handleOrient(
     }
   }
 
+  // ── The OpenAPI contract of route handlers in scope (change: add-contract-graph-projection) ──
+  // An agent editing a handler sees, unasked, the operation it serves and what that declares.
+  // Read only when a file in scope has an indexed route. Additive + fail-open.
+  let contracts: import('../contract/contract-briefing.js').ContractBriefing | undefined;
+  if (!lean && relevantFunctions.length > 0) {
+    try {
+      const { contractsForFiles } = await import('../contract/contract-briefing.js');
+      contracts = await contractsForFiles(absDir, [...new Set(relevantFunctions.map(f => f.filePath))], relevantFunctions.map(f => f.name));
+    } catch { /* never fail orient over the contract summary */ }
+  }
+
   // ReadyOrHonestFirstUse (change: make-index-self-healing): distinguish *repairing*
   // from *absent* (the not-ready result above) and plain *stale*. readCachedContext,
   // awaited above, fires the background repair for a stale/mismatched index; surface
@@ -1151,6 +1162,7 @@ export async function handleOrient(
     ...(landmarks !== undefined ? { landmarks } : {}),
     ...(behavioralHotspots !== undefined ? { behavioralHotspots } : {}),
     ...(regionStyle !== undefined ? { regionStyle } : {}),
+    ...(contracts !== undefined ? { contracts } : {}),
     nextSteps,
   };
   return tokenBudget
@@ -1207,7 +1219,7 @@ async function evaluatePushedMemories(
  * synced decisions), the file scope the answer was computed for, and next steps.
  */
 const ORIENT_BUDGET_TRIM_ORDER = [
-  'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
+  'contracts', 'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
   'insertionPoints', 'staleTriggeredMemories', 'injectedMemories', 'specDomains', 'relevantFunctions',
 ] as const;
 

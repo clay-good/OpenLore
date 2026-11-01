@@ -8,8 +8,8 @@
 - [ ] Language-support capability `contractSchemas`
 
 ## Briefings and consumers
-- [ ] `orient`: the contract element of a handler in scope (required params/properties, type, enum, format, bounds), budgeted
-- [ ] `blast_radius`: contract elements touched by the diff, budgeted
+- [x] `orient` / `blast_radius`: operations served by routes in scope — shipped in `add-contract-briefings`
+- [ ] `blast_radius`: contract elements a changed specification file touches
 - [ ] `certify_service_contract`: reaching tests per consumer; federated consumers by stable id
 - [ ] `contract-payload-missing-required` registered (advisory); non-literal bodies disclosed
 
@@ -21,5 +21,5 @@
 - [ ] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL)
 - [ ] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers
 - [ ] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume
-- [ ] `mcp-handlers` delta: ADD ContractElementsSurfaceInTheBriefings
+- [ ] `mcp-handlers` delta: ADD ContractConsumersCarryTheirTestsAndFederatedPeers
 - [ ] `mcp-handlers` delta: ADD LiteralPayloadsAreCheckedAgainstRequiredProperties

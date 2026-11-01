@@ -2,20 +2,17 @@
 
 ## ADDED Requirements
 
-### Requirement: ContractElementsSurfaceInTheBriefings
+### Requirement: ContractConsumersCarryTheirTestsAndFederatedPeers
 
-`orient` SHALL include the bound contract element for a handler in its scope, and `blast_radius`
-SHALL list the contract elements a diff touches (a changed schema file, or a changed bound handler),
-both as budgeted additive fields. Each `breaking` or `dangerous` element reported by
-`certify_service_contract` SHALL also carry the tests that reach each consumer, and consumers in
-indexed federated repositories, matched by stable id.
+`blast_radius` SHALL also list contract elements a changed specification file touches, and each
+`breaking` or `dangerous` element reported by `certify_service_contract` SHALL carry the tests that
+reach each consumer, and consumers in indexed federated repositories, matched by stable id.
 
-#### Scenario: orient shows the contract of the handler being edited
+#### Scenario: A breaking change names the tests to run
 
-- **GIVEN** a task that orients on a handler bound to `POST /v1/checkout`
-- **WHEN** `orient` returns
-- **THEN** the briefing names the operation address, its required parameters, and the spec
-  file:line
+- **GIVEN** a breaking change to `GET /v1/orders/{id}` with an in-repo client call site
+- **WHEN** `certify_service_contract` runs with a base ref
+- **THEN** the call site carries the tests that reach it
 
 ### Requirement: LiteralPayloadsAreCheckedAgainstRequiredProperties
 

@@ -16,7 +16,7 @@
  * the paths a change opens into declared surfaces.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateDirectory } from './utils.js';
 import { execFileGit } from '../../../utils/git-exec.js';
@@ -95,8 +95,25 @@ function parseSide(candidates: string[], texts: Map<string, string>, unread: Spe
   return side;
 }
 
-export async function headSpecs(root: string): Promise<SpecSide> {
+let headCache: { root: string; stamps: string; side: SpecSide } | undefined;
+
+/**
+ * {@link headSpecs} for the briefings' hot path: the candidates are listed (one git call) and
+ * stat-stamped, and their texts are read and parsed again only when a stamp changed.
+ */
+export async function headSpecsCached(root: string): Promise<SpecSide> {
   const candidates = await workingFiles(root, SPEC_EXT);
+  const stamps = candidates.slice(0, MAX_CANDIDATES).map(f => {
+    try { const s = statSync(join(root, f)); return `${f}:${s.size}:${s.mtimeMs}:${s.ino}`; } catch { return `${f}:-`; }
+  }).join('\0');
+  if (headCache && headCache.root === root && headCache.stamps === stamps) return headCache.side;
+  const side = await headSpecs(root, candidates);
+  headCache = { root, stamps, side };
+  return side;
+}
+
+export async function headSpecs(root: string, listed?: string[]): Promise<SpecSide> {
+  const candidates = listed ?? await workingFiles(root, SPEC_EXT);
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
   for (const f of candidates.slice(0, MAX_CANDIDATES)) {
@@ -136,7 +153,8 @@ export async function indexedRoutes(root: string): Promise<IndexedRoute[] | unde
   try {
     const inv = JSON.parse(read.text) as { routes?: Array<Record<string, unknown>> };
     return (inv.routes ?? []).filter(r => typeof r.path === 'string' && typeof r.method === 'string')
-      .map(r => ({ method: String(r.method), path: String(r.path), file: String(r.file ?? ''), handler: String(r.handler ?? '') }));
+      // Forward slashes: the inventory is written with the platform's separator.
+      .map(r => ({ method: String(r.method), path: String(r.path), file: String(r.file ?? '').split('\\').join('/'), handler: String(r.handler ?? '') }));
   } catch {
     return undefined;
   }

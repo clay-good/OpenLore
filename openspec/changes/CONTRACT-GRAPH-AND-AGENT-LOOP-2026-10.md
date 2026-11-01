@@ -19,7 +19,8 @@ groups:
 | Item | Where | New or existing |
 |---|---|---|
 | OpenAPI two-way parity, breaking verdicts, consumer join | [add-service-contract-certification](archive/2026-11-01-add-service-contract-certification/) | shipped (OpenAPI phase) |
-| Contract elements as graph nodes, handler ↔ operation edges, briefings, payload check, protobuf, GraphQL | [add-contract-graph-projection](add-contract-graph-projection/) | split from the above |
+| Contract operations in the `orient` and `blast_radius` briefings | [add-contract-briefings](archive/2026-11-01-add-contract-briefings/) | shipped |
+| Contract elements as graph nodes, handler ↔ operation edges, payload check, protobuf, GraphQL | [add-contract-graph-projection](add-contract-graph-projection/) | split from the above |
 | Grade a proposed patch in memory before it is written | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
 | `verify_change` as the one landing place for all diff findings, plus new architecture violations and secrets on added lines | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
 | Name the symbol that changed under the agent; detect modify/revert edit loops; name edits made after the last test run | [add-session-structural-ledger](archive/2026-10-31-add-session-structural-ledger/) (shipped; edits after the last test run in [add-session-ledger-runs-contracts-tokens](archive/2026-11-01-add-session-ledger-runs-contracts-tokens/); contract hashes and lease tokens in [add-session-lease-tokens](add-session-lease-tokens/)) | shipped |

@@ -252,6 +252,8 @@ export interface BlastRadiusBriefing {
     filesChecked: number;
     referencesChecked: number;
   };
+  /** OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection). */
+  contracts?: import('../contract/contract-briefing.js').ContractBriefing;
   /**
    * Env vars the diff stops reading anywhere, each with the infrastructure sites that still set the
    * old name (change: add-iac-code-binding). Absent when the diff removes no env-var read.
@@ -521,6 +523,16 @@ export async function computeBlastRadius(
     envNote = `Env-var reads the diff removed could not be checked: ${err instanceof Error ? err.message : String(err)}`;
   }
 
+  // ── 4f. OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection) ──
+  let contracts: import('../contract/contract-briefing.js').ContractBriefing | undefined;
+  try {
+    const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const prefix = (await getRepoPrefix(absDir)) ?? '';
+    const files = diffEntries.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
+    const { contractsForFiles } = await import('../contract/contract-briefing.js');
+    contracts = await contractsForFiles(absDir, files);
+  } catch { /* additive: the briefing never fails over it */ }
+
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
   const caveats: string[] = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
@@ -672,6 +684,7 @@ export async function computeBlastRadius(
           },
         }
       : {}),
+    ...(contracts ? { contracts } : {}),
     ...(envRenames?.removedReads.length
       ? { envDeclarations: { removedReads: envRenames.removedReads, stillSet: envRenames.stillSet } }
       : {}),

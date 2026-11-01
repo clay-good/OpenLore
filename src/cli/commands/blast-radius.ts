@@ -194,6 +194,12 @@ function renderHuman(b: BlastRadiusBriefing): string {
     const more = e.sites.length > ENV_SITES_SHOWN ? ` and ${e.sites.length - ENV_SITES_SHOWN} more` : '';
     lines.push(sanitizeForTerminal(`   ⚠ env ${e.name} is no longer read, but is still set in ${shown}${more}`));
   }
+  // OpenAPI operations served by routes in the changed files (add-contract-graph-projection).
+  for (const c of b.contracts?.contracts ?? []) {
+    const req = [...c.requiredParams, ...c.requiredBody];
+    lines.push(sanitizeForTerminal(`   · contract ${c.operation} (${c.spec}), served by ${c.route.method} ${c.route.path} in ${c.route.file}${c.deprecated ? '; deprecated' : ''}${req.length ? `; requires ${req.join(', ')}` : ''}`));
+  }
+  if (b.contracts?.omitted) lines.push(`   … and ${b.contracts.omitted} more contract operation(s)`);
   for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;
