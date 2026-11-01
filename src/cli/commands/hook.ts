@@ -322,7 +322,7 @@ async function afterCompact(root: string, timeoutMs: number): Promise<HookRunRes
     });
     const text = await Promise.race([work, timeout]);
     if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
-    return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text.slice(0, BUDGET_CHARS['after-compact']) } }), exitCode: 0 };
+    return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text.slice(0, BUDGET_CHARS['after-compact']).replace(/[\uD800-\uDBFF]$/, '') } }), exitCode: 0 };
   } catch {
     return { stdout: '', exitCode: 0 };
   } finally {
