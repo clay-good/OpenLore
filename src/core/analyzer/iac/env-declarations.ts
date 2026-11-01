@@ -88,11 +88,14 @@ function dockerfile(file: { path: string; content: string }, out: EnvDeclaration
     }
     parts.push(cur.trimEnd().endsWith('\\') ? cur.trimEnd().slice(0, -1) : cur);
     const text = parts.join(' ');
-    // A heredoc body (`RUN <<EOF … EOF`) is data, not instructions.
-    const heredoc = /<<-?\s*["']?([A-Za-z_]\w*)["']?/.exec(text);
-    if (heredoc && /^\s*[A-Za-z]+\s/.test(text)) {
-      while (i + 1 < lines.length && lines[i + 1].trim() !== heredoc[1]) i++;
-      i++;
+    // A heredoc body (`RUN <<EOF … EOF`) is data, not instructions. Only RUN, COPY, and ADD take
+    // heredocs; `<<` inside quotes or `$(( ))` arithmetic is not one. Bodies are skipped in order.
+    if (/^\s*(?:RUN|COPY|ADD)\s/i.test(text)) {
+      const code = text.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '').replace(/\$\(\([^)]*\)\)/g, '');
+      for (const tag of [...code.matchAll(/(?:^|\s)<<-?\s*["']?([A-Za-z_]\w*)["']?/g)].map(m => m[1])) {
+        while (i + 1 < lines.length && lines[i + 1].trim() !== tag) i++;
+        i++;
+      }
     }
     const from = /^\s*FROM\s+(?:--\S+\s+)*\S+(?:\s+AS\s+(\S+))?/i.exec(text);
     if (from) { stage = from[1] ? `stage/${from[1]}` : 'Dockerfile'; continue; }
@@ -110,7 +113,11 @@ function dockerfile(file: { path: string; content: string }, out: EnvDeclaration
         while (at < body.length && /\s/.test(body[at])) at++;
         pair.lastIndex = at;
         const m = pair.exec(body);
-        if (!m) break;
+        if (!m) {
+          // Not a pair: skip this word and keep reading.
+          while (at < body.length && !/\s/.test(body[at])) at++;
+          continue;
+        }
         add(m[1], m[2].replace(/^(["'])([\s\S]*)\1$/, '$2'));
         at = pair.lastIndex;
       }
@@ -128,6 +135,31 @@ function dockerfile(file: { path: string; content: string }, out: EnvDeclaration
  * The HCL text with comments, string contents, and heredoc bodies blanked (same length, newlines
  * kept), so structure is read only from code. Quotes stay, so a quoted key keeps its position.
  */
+/**
+ * The index of the `"` that closes the HCL string opened at `open` (or of the newline or end that
+ * cuts it short). Template interpolations (`${ … }`, `%{ … }`) may hold braces and quoted strings of
+ * their own, so they are stepped over as a unit.
+ */
+function stringEnd(src: string, open: number): number {
+  // Frames: a string (-1) or a template interpolation (its brace depth, from 0).
+  const frames: number[] = [-1];
+  let k = open + 1;
+  while (k < src.length) {
+    const ch = src[k];
+    const top = frames[frames.length - 1];
+    if (top === -1) {
+      if (ch === '\\') { k += 2; continue; }
+      if (ch === '"') { frames.pop(); if (!frames.length) return k; k++; continue; }
+      if (ch === '\n' && frames.length === 1) return k;
+      if ((ch === '$' || ch === '%') && src[k + 1] === '{') { frames.push(0); k += 2; continue; }
+    } else if (ch === '"') frames.push(-1);
+    else if (ch === '{') frames[frames.length - 1]++;
+    else if (ch === '}') { if (top === 0) frames.pop(); else frames[frames.length - 1]--; }
+    k++;
+  }
+  return k;
+}
+
 function maskHcl(src: string): string {
   const out = src.split('');
   const blank = (from: number, to: number) => { for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' '; };
@@ -145,15 +177,15 @@ function maskHcl(src: string): string {
       blank(i, stop);
       i = stop;
     } else if (c === '"') {
-      let k = i + 1;
-      while (k < src.length && src[k] !== '"' && src[k] !== '\n') k += src[k] === '\\' ? 2 : 1;
+      const k = stringEnd(src, i);
       blank(i + 1, Math.min(k, src.length));
       i = k + 1;
     } else if (c === '<' && src[i + 1] === '<') {
       const m = /^<<-?([A-Za-z_]\w*)\r?\n/.exec(src.slice(i, i + 80));
       if (!m) { i += 2; continue; }
       const bodyStart = i + m[0].length;
-      const endRe = new RegExp(`\\n[ \\t]*${m[1]}\\b`, 'g');
+      // The terminator is the tag alone on its line.
+      const endRe = new RegExp(`\\n[ \\t]*${m[1]}[ \\t]*\\r?(?=\\n|$)`, 'g');
       endRe.lastIndex = bodyStart - 1;
       const em = endRe.exec(src);
       const stop = em ? em.index + 1 : src.length;
@@ -189,9 +221,16 @@ function terraform(file: { path: string; content: string }, out: EnvDeclarationS
     while (k < end) {
       const ch = masked[k];
       if (ch === '{') { k = (close.get(k) ?? end) + 1; continue; }
-      const m = /^([A-Za-z_][\w-]*)((?:[ \t]+"[^"\n]*")*)[ \t]*(=(?!=)|\{)/.exec(masked.slice(k, k + 512));
       const atBoundary = k === open + 1 || /[\s{]/.test(masked[k - 1]);
-      if (m && atBoundary) {
+      if (!atBoundary || !/[A-Za-z_]/.test(ch)) { k++; continue; }
+      const m = /^([A-Za-z_][\w-]*)((?:[ \t]+"[^"\n]*")*)[ \t]*(=(?![=>])|\{)/.exec(masked.slice(k, k + 4096));
+      if (!m) {
+        // Skip the rest of this word: retrying inside it was quadratic.
+        k++;
+        while (k < end && /[\w-]/.test(masked[k])) k++;
+        continue;
+      }
+      {
         const opIdx = k + m[0].length - 1;
         if (m[3] === '{') { found.push({ kind: 'block', name: m[1], labels: m[2], at: k, open: opIdx }); k = (close.get(opIdx) ?? end) + 1; }
         else { found.push({ kind: 'attr', name: m[1], labels: '', at: k, valueAt: opIdx + 1 }); k = opIdx + 1; }
@@ -216,6 +255,7 @@ function terraform(file: { path: string; content: string }, out: EnvDeclarationS
     let depth = 0;
     for (; k < end; k++) {
       const ch = masked[k];
+      if (ch === '{') { k = close.get(k) ?? end; continue; }
       if (ch === '[' || ch === '(') depth++;
       else if (ch === ']' || ch === ')') depth--;
       else if (depth <= 0 && (ch === '\n' || ch === ',' || ch === '}')) break;
@@ -234,7 +274,7 @@ function terraform(file: { path: string; content: string }, out: EnvDeclarationS
   /** The labels of a block header at `at`, read from the original text. */
   function labelsAt(at: number): string[] {
     const header = src.slice(at, masked.indexOf('{', at));
-    return [...header.matchAll(/"([^"\n]*)"/g)].map(m => m[1]);
+    return [...header.matchAll(/"((?:[^"\\\n]|\\.)*)"/g)].map(m => m[1].replace(/\\(.)/g, '$1'));
   }
 
   function visit(open: number, end: number, resource: string): void {
@@ -244,8 +284,8 @@ function terraform(file: { path: string; content: string }, out: EnvDeclarationS
         const cEnd = close.get(c.open) ?? end;
         if (c.name === 'environment') environment(c.open, cEnd, resource);
         else if (c.name === 'env') envBlock(c.at, c.open, cEnd, resource);
-        else if (c.name === 'env_from' || (c.name === 'dynamic' && /^"env(?:_from)?"$/.test(src.slice(c.at, c.open).replace(/^dynamic\s*/, '').trim()))) {
-          out.opaque.push({ ecosystem: 'Terraform', resource, file: file.path, line: lineOf(c.at), reason: c.name === 'env_from' ? 'env_from (a ConfigMap or Secret whose keys are not read here)' : 'a dynamic env block' });
+        else if (c.name === 'env_from' || (c.name === 'dynamic' && /^"(?:env|env_from|environment)"$/.test(src.slice(c.at, c.open).replace(/^dynamic\s*/, '').trim()))) {
+          out.opaque.push({ ecosystem: 'Terraform', resource, file: file.path, line: lineOf(c.at), reason: c.name === 'env_from' ? 'env_from (a ConfigMap or Secret whose keys are not read here)' : `a dynamic ${src.slice(c.at, c.open).replace(/^dynamic\s*/, '').trim().replace(/"/g, '')} block` });
         } else visit(c.open, cEnd, resource);
       }
     }
@@ -262,11 +302,20 @@ function terraform(file: { path: string; content: string }, out: EnvDeclarationS
         continue;
       }
       const mapEnd = close.get(k) ?? end;
+      // A `for` expression builds the map: its keys are not written here.
+      if (/^\s*for\s/.test(masked.slice(k + 1, k + 64))) {
+        out.opaque.push({ ecosystem: 'Terraform', resource, file: file.path, line: lineOf(c.at), reason: 'an environment map built by a for expression' });
+        continue;
+      }
       let p = k + 1;
+      let expressionKey = false;
       while (p < mapEnd) {
         // A key is a bare identifier or a quoted string (blanked by the mask: its name is read from `src`).
-        const m = /^[\s,]*(?:"([^"\n]*)"|([A-Za-z_][\w.-]*))[ \t]*=(?!=)/.exec(masked.slice(p, p + 300));
-        if (!m) {
+        const m = /^[\s,]*(?:"([^"\n]*)"|([A-Za-z_][\w.-]*))[ \t]*=(?![=>])/.exec(masked.slice(p, p + 300));
+        const quotedKey = m?.[1] !== undefined ? src.slice(p + m[0].indexOf('"') + 1, p + m[0].indexOf('"') + 1 + m[1].length) : undefined;
+        if (!m || (quotedKey !== undefined && /\$\{|%\{/.test(quotedKey))) {
+          // An interpolated or parenthesized key (`"${var.p}_X"`, `(var.k)`) is set but not readable.
+          if (m || /^[\s,]*[("]/.test(masked.slice(p, p + 300))) expressionKey = true;
           // Not a key here: move past this element.
           const next = valueEnd(p, mapEnd);
           p = next > p ? next + 1 : p + 1;
@@ -274,12 +323,13 @@ function terraform(file: { path: string; content: string }, out: EnvDeclarationS
         }
         const quoted = m[1] !== undefined;
         const keyAt = p + (quoted ? m[0].indexOf('"') + 1 : m[0].indexOf(m[2]));
-        const name = quoted ? src.slice(keyAt, keyAt + m[1].length) : m[2];
+        const name = quoted ? quotedKey! : m[2];
         const vStart = p + m[0].length;
         const vEnd = valueEnd(vStart, mapEnd);
         if (ENV_NAME.test(name)) out.declarations.push({ name, ecosystem: 'Terraform', resource, file: file.path, line: lineOf(keyAt), literalValue: isLiteral(vStart, vEnd) });
         p = vEnd + 1;
       }
+      if (expressionKey) out.opaque.push({ ecosystem: 'Terraform', resource, file: file.path, line: lineOf(c.at), reason: 'an environment key built by an expression' });
     }
   }
 
@@ -328,18 +378,28 @@ function makeReader(doc: Document, lc: LineCounter, file: string, eco: EnvEcosys
   const keyOf = (p: Pair): string | undefined => { const k = deref(p.key); return isScalar(k) && typeof k.value === 'string' ? k.value : undefined; };
   const isMerge = (p: Pair) => isScalar(p.key) && typeof p.key.value === 'symbol';
   /** A mapping's pairs with `<<` merges applied (explicit keys win). */
+  const pairsMemo = new Map<unknown, Pair[]>();
   const pairsOf = (n: unknown, depth = 0): Pair[] => {
     const m = deref(n);
     if (!isMap(m) || depth > 8) return [];
+    const memo = pairsMemo.get(m);
+    if (memo) return memo;
+    pairsMemo.set(m, []); // a merge cycle reads as empty
     const own = (m.items as Pair[]).filter(p => !isMerge(p));
-    const merged: Pair[] = [];
+    // YAML merge: explicit keys win, then the first merge source that has the key. Each list is
+    // bounded by its distinct keys, and each node is expanded once.
+    const byKey = new Map<string | undefined, Pair>();
+    for (const p of own) byKey.set(keyOf(p), p);
     for (const p of m.items as Pair[]) {
       if (!isMerge(p)) continue;
       const v = deref(p.value);
-      for (const src of isSeq(v) ? v.items : [v]) merged.push(...pairsOf(src, depth + 1));
+      for (const src of isSeq(v) ? v.items : [v]) {
+        for (const q of pairsOf(src, depth + 1)) { const k = keyOf(q); if (!byKey.has(k)) byKey.set(k, q); }
+      }
     }
-    const ownKeys = new Set(own.map(keyOf));
-    return [...merged.filter(p => !ownKeys.has(keyOf(p))), ...own];
+    const result = [...byKey.values()];
+    pairsMemo.set(m, result);
+    return result;
   };
   const get = (n: unknown, key: string): unknown => deref(pairsOf(n).find(p => keyOf(p) === key)?.value);
   const keyNode = (n: unknown, key: string): unknown => pairsOf(n).find(p => keyOf(p) === key)?.key;

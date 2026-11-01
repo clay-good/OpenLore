@@ -57,7 +57,9 @@ export async function checkEnvRenames(root: string, baseRef: string, entries: Re
   try {
     const { stdout } = await execFileGit('git', ['merge-base', baseRef, 'HEAD'], { cwd: root });
     baseCommit = String(stdout).trim() || baseRef;
-  } catch { /* unrelated histories: the base tip */ }
+  } catch {
+    boundaries.push(`No merge-base with ${baseRef} (a shallow clone or unrelated histories): the base side was read at its tip, so a read added there may show as removed.`);
+  }
 
   // Diff paths are repository-relative; the working tree is read relative to `root`.
   const basePaths = files.map(e => e.oldPath ?? e.path);

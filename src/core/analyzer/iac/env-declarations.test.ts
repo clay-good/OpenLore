@@ -166,3 +166,52 @@ describe('adversarial review regressions', () => {
     }
   });
 });
+
+describe('second review regressions', () => {
+  const names = (path: string, language: string, content: string) => scan(path, language, content).declarations.map(d => d.name);
+  const lambda = (body: string, name = 'f') => `resource "aws_lambda_function" "${name}" {\n  environment {\n    variables = {\n${body}\n    }\n  }\n}\n`;
+
+  it('YAML merge keys stay linear and do not duplicate', () => {
+    const lines = ['x0: &x0 {A: "1"}'];
+    for (let d = 1; d <= 8; d++) lines.push(`x${d}: &x${d} {<<: [${Array(10).fill(`*x${d - 1}`).join(', ')}]}`);
+    lines.push('services:', '  web:', '    environment: *x8');
+    const t = performance.now();
+    expect(names('docker-compose.yml', 'Docker Compose', lines.join('\n'))).toEqual(['A']);
+    expect(performance.now() - t).toBeLessThan(2000);
+  });
+
+  it('HCL template interpolations may hold quotes and braces', () => {
+    expect(names('m.tf', 'Terraform', lambda('      A = "${format("%s, DB_HOST = %s", a, b)}"\n      B = "${replace(var.s, "}", "")}"\n      C = "x"'))).toEqual(['A', 'B', 'C']);
+    const two = lambda('      A = "${replace(var.s, "{", "")}"') + lambda('      G = "1"', 'g');
+    expect(scan('m.tf', 'Terraform', two).declarations.map(d => `${d.name} ${d.resource}`)).toEqual(['A aws_lambda_function.f', 'G aws_lambda_function.g']);
+  });
+
+  it('for expressions, ternary maps, and expression keys are not read as keys', () => {
+    const r = scan('m.tf', 'Terraform', lambda('      for k, v in var.m :\n      k => v'));
+    expect(r.declarations).toEqual([]);
+    expect(r.opaque.map(o => o.reason)).toEqual([expect.stringContaining('for expression')]);
+    expect(names('m.tf', 'Terraform', lambda('      A = var.x ? {\n        Z = 1\n      } : {}\n      B = "x"'))).toEqual(['A', 'B']);
+    const k = scan('m.tf', 'Terraform', lambda('      "${var.p}_X" = 1\n      B = "x"'));
+    expect(k.declarations.map(d => d.name)).toEqual(['B']);
+    expect(k.opaque.map(o => o.reason)).toEqual([expect.stringContaining('key built by an expression')]);
+  });
+
+  it('a heredoc ends only at its tag alone on a line; dynamic environment is opaque', () => {
+    expect(names('m.tf', 'Terraform', lambda('      A = <<EOT\nEOT is done\nFAKE = 1\nEOT\n      B = "x"'))).toEqual(['A', 'B']);
+    expect(scan('m.tf', 'Terraform', 'resource "a" "b" {\n  dynamic "environment" {\n    content { variables = { X = 1 } }\n  }\n}\n').opaque.map(o => o.reason)).toEqual(['a dynamic environment block']);
+  });
+
+  it('Dockerfile: << in quotes, shifts, and non-heredoc instructions skips nothing; every heredoc body is skipped', () => {
+    expect(names('Dockerfile', 'Dockerfile', 'ENV MSG="a<<b"\nENV B=1\nENV C=2\n')).toEqual(['MSG', 'B', 'C']);
+    expect(names('Dockerfile', 'Dockerfile', 'LABEL d="use <<EOF"\nENV B=1\n')).toEqual(['B']);
+    expect(names('Dockerfile', 'Dockerfile', 'RUN echo $((x<<y))\nENV B=1\ny\nENV C=2\n')).toEqual(['B', 'C']);
+    expect(names('Dockerfile', 'Dockerfile', 'RUN <<A cat - <<B\nbody\nA\nENV Y=1\nB\nENV Z=1\n')).toEqual(['Z']);
+    expect(names('Dockerfile', 'Dockerfile', 'ENV A=1 =bad B=2\n')).toEqual(['A', 'B']);
+  });
+
+  it('a long identifier run stays fast', () => {
+    const t = performance.now();
+    scan('m.tf', 'Terraform', `resource "a" "b" {\n  ${'a'.repeat(1_000_000)}\n}\n`);
+    expect(performance.now() - t).toBeLessThan(2000);
+  });
+});
