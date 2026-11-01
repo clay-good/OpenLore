@@ -36,6 +36,7 @@ import type {
   LLMConfig,
   OpenLoreConfig,
   PiConfig,
+  HooksConfig,
   RetrievalConfig,
   SpecStoreConfig,
   WorkspaceConfig,
@@ -285,6 +286,17 @@ const piRule: ConfigRule = {
   required: requiredFor<PiConfig>({}),
 };
 
+const hooksRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<HooksConfig>({
+    'before-edit': booleanRule,
+    'after-tools': booleanRule,
+    'before-stop': booleanRule,
+  }),
+  required: requiredFor<HooksConfig>({}),
+};
+
 const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
@@ -310,6 +322,7 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
     bundle: bundleRule,
     workspace: workspaceRule,
     pi: piRule,
+    hooks: hooksRule,
   }),
   required: requiredFor<OpenLoreConfig>({
     version: true,
@@ -350,6 +363,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   bundle: 'object',
   workspace: 'object',
   pi: 'object',
+  hooks: 'object',
 };
 
 /** The known top-level config keys, derived from the type-bound field map. */

@@ -51,6 +51,7 @@ describe('user-scope wiring', () => {
 
     const settings = await readJson(join(home, '.claude', 'settings.json'));
     const hooks = settings.hooks as Record<string, unknown[]>;
+    // Agent-loop moments run on every edit, so they are wired per repository, never user-wide.
     expect(Object.keys(hooks).sort()).toEqual(['SessionStart', 'UserPromptSubmit']);
     const permissions = settings.permissions as { allow: string[] };
     // The user scope grants ONLY the read-only orientation command: a permission written

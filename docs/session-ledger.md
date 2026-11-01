@@ -30,11 +30,9 @@ A session is one MCP server process. Its ledger is
 
 A change the agent made is not a background change. OpenLore learns of the agent's edits from the
 harness's after-edit hook, which appends each edited file's path and time to
-`.openlore/session-ledger/agent-edits.jsonl`. For Claude Code:
-
-```bash
-openlore setup --check-edit-hook claude
-```
+`.openlore/session-ledger/agent-edits.jsonl`. For Claude Code, `openlore install` in the repository
+wires one (the [`after-tools` moment](install.md#agent-loop-hooks)); the opt-in
+`openlore setup --check-edit-hook claude` records edits too.
 
 Until an after-edit hook reports an edit in a session, background-change notes are withheld,
 because an edit cannot be told apart from another process's. `openlore status` says so. Edit loops

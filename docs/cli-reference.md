@@ -49,6 +49,7 @@
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore statusline` | Print the current search-index state for Claude Code's status line | No |
+| `openlore hook <moment>` | Print one agent-loop receipt from a hook payload on stdin (`before-edit`, `after-tools`, `before-stop`); wired by `install` — see [agent-loop hooks](install.md#agent-loop-hooks) | No |
 | `openlore doctor` | Check environment and configuration for common issues | No |
 | `openlore features` | List opt-in features, which are active, and the one command/snippet to turn on each (`--json`, `--inactive`) | No |
 | `openlore update` | Upgrade openlore to the latest published version (detects npm-global / Homebrew / npx); `--check` reports availability, `--dry-run` prints the command without running it | No |

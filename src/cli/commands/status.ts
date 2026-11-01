@@ -16,6 +16,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
+import { HOOK_MOMENTS } from './hook.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
 import { readLiveLedger, type LedgerSnapshot } from '../../core/services/session-ledger.js';
@@ -79,6 +80,12 @@ export interface IndexStatus {
   /** Decision autopilot mode and its trail (change: default-decision-autopilot-with-visible-trace). */
   governance?: GovernanceStatus;
   /**
+   * Agent-loop hook moments (change: add-agent-loop-hook-surfaces): each moment, whether this
+   * repository's `.claude/settings.json` wires it, and whether `hooks.<moment>` leaves it on.
+   * Set by `openlore status` only.
+   */
+  hookMoments?: Array<{ moment: string; wired: boolean; enabled: boolean }>;
+  /**
    * The live MCP session's ledger (change: add-session-structural-ledger): raw counts, named
    * background changes and edit loops — or why they are withheld. Set by `openlore status` only.
    */
@@ -90,6 +97,25 @@ export type SessionStatus =
       counts: LedgerSnapshot['counts']; bulkBatches?: number; backgroundChanges: LedgerSnapshot['backgroundChanges'];
       editOscillation: LedgerSnapshot['editOscillation']; withheld?: string }
   | { withheld: string };
+
+/** The loop moments wired in this repository's Claude Code settings, and the config opt-outs. */
+function collectHookMoments(rootPath: string): Array<{ moment: string; wired: boolean; enabled: boolean }> {
+  const wired = new Set<string>();
+  try {
+    const settings = JSON.parse(readFileSync(join(rootPath, '.claude', 'settings.json'), 'utf-8')) as { hooks?: Record<string, unknown> };
+    for (const groups of Object.values(settings?.hooks ?? {})) {
+      for (const g of Array.isArray(groups) ? groups : []) {
+        const m = g && typeof g === 'object' ? (g as Record<string, unknown>)._openloreHook : undefined;
+        if (typeof m === 'string') wired.add(m);
+      }
+    }
+  } catch { /* no settings: nothing wired */ }
+  let off: Record<string, unknown> = {};
+  try {
+    off = (JSON.parse(readFileSync(join(rootPath, OPENLORE_DIR, 'config.json'), 'utf-8')) as { hooks?: Record<string, unknown> })?.hooks ?? {};
+  } catch { /* unreadable config: every moment on */ }
+  return HOOK_MOMENTS.map(moment => ({ moment, wired: wired.has(moment), enabled: off[moment] !== false }));
+}
 
 function collectSessionStatus(rootPath: string): SessionStatus {
   const live = readLiveLedger(rootPath);
@@ -289,6 +315,7 @@ Read-only: this never builds, rebuilds, or locks the index.
       ...(governance ? { governance } : {}),
       wiringScope: await collectWiringScope(rootPath),
       session: collectSessionStatus(rootPath),
+      hookMoments: collectHookMoments(rootPath),
     };
 
     if (options.json) {
@@ -305,6 +332,10 @@ Read-only: this never builds, rebuilds, or locks the index.
       ? c.green(scope)
       : c.yellow(`${scope} — run "openlore ${scope === 'none' ? 'install' : 'doctor --fix'}"`);
     console.log(`  ${label('Wiring scope')} ${wiringText}`);
+    const moments = (status.hookMoments ?? []).filter(m => m.wired);
+    if (moments.length) {
+      console.log(`  ${label('Loop hooks')} ${safe(moments.map(m => m.enabled ? m.moment : `${m.moment} (off)`).join(', '))}`);
+    }
     const session = status.session;
     if (session && 'pid' in session) {
       // The ledger is a file in the repository: every value is sanitized before it reaches the terminal.
