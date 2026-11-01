@@ -19,7 +19,7 @@ import { assembleBoundary, computeStaleness, type KnownUnknowableCrossing } from
 import { readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import type { PendingDecision, StructuralAnchor } from '../../../types/index.js';
-import type { ContractDocument, ContractOperation } from '../contract/openapi.js';
+import type { ContractDocument, ContractOperation } from '../../analyzer/contract/openapi.js';
 
 export type GraphClaimKind = 'endpoint-implemented' | 'endpoint-consumed' | 'decision-governed' | 'lease-current';
 type Verdict = 'confirmed' | 'refuted' | 'unverifiable';
@@ -76,6 +76,35 @@ async function findOperations(root: string, subject: string): Promise<
   };
 }
 
+/**
+ * The graph's own answer to the same question, as a second witness (change:
+ * add-contract-node-projection). The analyzer projects declared operations as nodes with
+ * `implements_endpoint` / `consumes_endpoint` edges, matched by a STRICTER rule than the scan
+ * below (a non-unique address binds nothing) and against the WORKING TREE rather than git HEAD.
+ * So the two can disagree. When they do, the honest verdict is `unverifiable` naming the
+ * disagreement — never a confident "no" over an edge the same substrate already published.
+ */
+async function graphBinding(
+  root: string,
+  kind: 'endpoint-implemented' | 'endpoint-consumed',
+  matches: Match[],
+): Promise<{ edges: number; callers: string[] } | null> {
+  const ctx = await readCachedContext(root).catch(() => null);
+  const cg = ctx?.callGraph;
+  if (!cg) return null;
+  const wanted = kind === 'endpoint-implemented' ? 'implements_endpoint' : 'consumes_endpoint';
+  const ids = new Set(matches.map(({ op, doc }) => `${doc.file}::${op.address}`));
+  const callers = new Set<string>();
+  let edges = 0;
+  for (const e of cg.edges) {
+    if (e.kind !== wanted || !ids.has(e.calleeId)) continue;
+    edges++;
+    const caller = cg.nodes.find(n => n.id === e.callerId);
+    if (caller) callers.add(`${caller.name} (${caller.filePath})`);
+  }
+  return edges ? { edges, callers: [...callers].sort().slice(0, 5) } : null;
+}
+
 async function endpointClaim(root: string, kind: 'endpoint-implemented' | 'endpoint-consumed', subject: string): Promise<unknown> {
   const { emittedText } = await import('../generated-file-guard.js');
   const claim = { kind, subject: emittedText(subject) };
@@ -124,6 +153,10 @@ async function endpointClaim(root: string, kind: 'endpoint-implemented' | 'endpo
     if (found.matches.some(({ op }) => erase(op.path).slice(0, erase(op.path).length - erase(op.declaredPath).length).includes('{}'))) {
       return unverifiable(`${where} sits under a base path with a server variable, which the route index cannot resolve.`);
     }
+    const binding = await graphBinding(root, kind, found.matches);
+    if (binding) {
+      return unverifiable(`No route handler matches ${where} literally, but the graph holds ${binding.edges} \`implements_endpoint\` edge(s) to it (from ${binding.callers.map(emittedText).join(', ')}). The two were computed from different snapshots — the graph from the last \`openlore analyze\`, this check from git HEAD — so the disagreement, not either answer, is the fact.`);
+    }
     const evidence = `${where} ${found.matches.length > 1 ? 'are' : 'is'} declared, and no indexed route handler has ${found.matches.length > 1 ? 'their' : 'its'} method and path`;
     return {
       claim, verdict: 'refuted' as Verdict, reason: `${evidence}. A handler whose path is built dynamically is not visible to the route index.`,
@@ -148,6 +181,10 @@ async function endpointClaim(root: string, kind: 'endpoint-implemented' | 'endpo
   }
   if (stats.capped) {
     return unverifiable(`No client call site was found for ${where} in the files read, but the scan stopped at its file cap, so an unread file may call it.`, crossings([]));
+  }
+  const binding = await graphBinding(root, kind, found.matches);
+  if (binding) {
+    return unverifiable(`No client call site was found for ${where} in the files read, but the graph holds ${binding.edges} \`consumes_endpoint\` edge(s) to it (from ${binding.callers.map(emittedText).join(', ')}). The two were computed from different snapshots — the graph from the last \`openlore analyze\`, this check from git HEAD — so the disagreement, not either answer, is the fact.`, crossings([]));
   }
   const evidence = `no client call site in this repository calls ${where}`;
   return {

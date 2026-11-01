@@ -85,6 +85,19 @@ describe('endpoint-implemented', () => {
     expect(r.reason).toContain('api/openapi.yaml:11');
   });
 
+  it('unverifiable, not refuted, when the graph holds an implements_endpoint edge', async () => {
+    const root = repo();
+    write(root, join(OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT), JSON.stringify({
+      callGraph: {
+        nodes: [...nodes, { id: 'src/server.ts::drop', name: 'drop', filePath: 'src/server.ts', startIndex: 0, endIndex: 10, startLine: 1, endLine: 1, language: 'TypeScript' }],
+        edges: [{ callerId: 'src/server.ts::drop', calleeId: 'api/openapi.yaml::DELETE /v1/orders/{id}', calleeName: 'DELETE /v1/orders/{id}', confidence: 'import', kind: 'implements_endpoint' }],
+      },
+    }));
+    const r = await claim(root, 'endpoint-implemented', 'DELETE /v1/orders/{id}');
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.reason).toContain('implements_endpoint');
+  });
+
   it('unverifiable when no specification declares it, or no handler is indexed', async () => {
     const root = repo();
     expect((await claim(root, 'endpoint-implemented', 'PUT /v1/other')).verdict).toBe('unverifiable');
@@ -110,6 +123,23 @@ describe('endpoint-consumed', () => {
     expect(r.reason).toMatch(/not "no caller"/);
     expect(r.reason).toContain('other repositories');
     expect(r.receipt).toMatchObject({ scope: 'this repository', consumers: [] });
+  });
+
+  // The graph is the second witness: the projection matches against the working tree with a
+  // stricter rule than this scan, so a disagreement is the fact — not a confident "no" over an
+  // edge the same substrate published (change: add-contract-node-projection).
+  it('unverifiable, not refuted, when the graph holds a consumes_endpoint edge', async () => {
+    const root = repo();
+    write(root, join(OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT), JSON.stringify({
+      callGraph: {
+        nodes: [...nodes, { id: 'src/client.ts::create', name: 'create', filePath: 'src/client.ts', startIndex: 0, endIndex: 10, startLine: 1, endLine: 1, language: 'TypeScript' }],
+        edges: [{ callerId: 'src/client.ts::create', calleeId: 'api/openapi.yaml::POST /v1/orders', calleeName: 'POST /v1/orders', confidence: 'import', kind: 'consumes_endpoint' }],
+      },
+    }));
+    const r = await claim(root, 'endpoint-consumed', 'POST /v1/orders');
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.reason).toContain('consumes_endpoint');
+    expect(r.reason).toContain('create (src/client.ts)');
   });
 
   it('unverifiable when the specification cannot be read', async () => {

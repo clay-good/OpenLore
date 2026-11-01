@@ -23,7 +23,8 @@ groups:
 | Literal request bodies against required properties | [add-contract-payload-check](archive/2026-11-01-add-contract-payload-check/) | shipped |
 | verify_change carries request-body findings | [add-verify-change-payload-findings](archive/2026-11-01-add-verify-change-payload-findings/) | shipped |
 | Contract consumers name the tests to run | [add-contract-consumer-tests](archive/2026-11-01-add-contract-consumer-tests/) | shipped |
-| Contract elements as graph nodes, handler ↔ operation edges, protobuf, GraphQL | [add-contract-graph-projection](add-contract-graph-projection/) | split from the above |
+| Operations as graph nodes, handler ↔ operation edges | [add-contract-node-projection](archive/2026-11-01-add-contract-node-projection/) | shipped |
+| The rest of the element model, protobuf, GraphQL | [add-contract-graph-projection](add-contract-graph-projection/) | split from the above |
 | Grade a proposed patch in memory before it is written | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
 | `verify_change` as the one landing place for all diff findings, plus new architecture violations and secrets on added lines | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
 | Name the symbol that changed under the agent; detect modify/revert edit loops; name edits made after the last test run | [add-session-structural-ledger](archive/2026-10-31-add-session-structural-ledger/) (shipped; edits after the last test run in [add-session-ledger-runs-contracts-tokens](archive/2026-11-01-add-session-ledger-runs-contracts-tokens/); contract hashes and lease tokens in [add-session-lease-tokens](add-session-lease-tokens/)) | shipped |

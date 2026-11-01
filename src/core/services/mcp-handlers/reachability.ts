@@ -43,7 +43,7 @@ import {
   buildQualifier,
   qualificationReason,
 } from './dynamic-boundary-disclosure.js';
-import { isIacLanguage } from '../../analyzer/iac/types.js';
+import { isProjectedLanguage } from '../../analyzer/projected-language.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -117,7 +117,7 @@ export function wiringKey(filePath: string): string {
 
 /** A code node we can reason about (not external, not infrastructure). */
 function isCodeNode(n: FunctionNode): boolean {
-  return !n.isExternal && !isIacLanguage(n.language);
+  return !n.isExternal && !isProjectedLanguage(n.language);
 }
 
 /**
@@ -135,6 +135,10 @@ function externallyInvokedHandlerIds(cg: SerializedCallGraph, includeSynthesized
     if (e.confidence === 'http_endpoint') ids.add(e.calleeId);
     // A function a resource deploys (a Lambda handler) is invoked from outside the code (add-iac-deploy-binding).
     else if (e.kind === 'deploys_symbol') ids.add(e.calleeId);
+    // A handler that serves a DECLARED operation is invoked by whoever calls that endpoint, in
+    // this repository or outside it (change: add-contract-node-projection). The edge runs
+    // handler → operation, so the handler is the CALLER side.
+    else if (e.kind === 'implements_endpoint') ids.add(e.callerId);
     else if (includeSynthesizedRoutes && e.confidence === 'synthesized' && e.synthesizedBy === 'route-handler') {
       ids.add(e.calleeId);
     }
@@ -504,6 +508,22 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         count: cg.unresolvedDeployBindings.length,
         items: cg.unresolvedDeployBindings.slice(0, 20).map(u => ({ ...u, resource: emittedText(u.resource), file: emittedText(u.file), ...(u.handler ? { handler: emittedText(u.handler) } : {}), reason: emittedText(u.reason) })),
         note: 'These function resources name a handler that binds to no indexed function (an expression, a build-output path, or a missing file); the code they run can appear dead.',
+      },
+    } : {}),
+    // A declared operation whose handler could not be pinned to one node keeps NO function live,
+    // so a handler that really does serve a declared endpoint can appear dead; an unread
+    // specification, or a projection that was not assessed, has the same effect
+    // (change: add-contract-node-projection).
+    ...((cg.contracts?.unresolvedBindings.total || cg.contracts?.unreadSpecifications.total || cg.contracts?.notAssessed?.length) ? {
+      contractRootsNotAssessed: {
+        unresolvedBindings: cg.contracts.unresolvedBindings.total,
+        unresolvedBindingItems: cg.contracts.unresolvedBindings.items.slice(0, 10).map(u => ({
+          file: emittedText(u.file), line: u.line, method: emittedText(u.method),
+          path: emittedText(u.path), operation: emittedText(u.operation),
+        })),
+        unreadSpecifications: cg.contracts.unreadSpecifications.items.slice(0, 5).map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) })),
+        ...(cg.contracts.notAssessed?.length ? { notAssessed: cg.contracts.notAssessed.map(emittedText) } : {}),
+        note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',
       },
     } : {}),
     // Receipts for every config-wired file that kept code live, and every config reference that

@@ -43,6 +43,9 @@ import type { CfgSpill } from './cfg-spill.js';
 import { buildIacGraph } from './iac/index.js';
 import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
+import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
+import { isContractLanguage } from './contract/types.js';
+import { isContractEdgeKind } from './contract/project.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
@@ -5648,6 +5651,15 @@ export interface CallGraphBuilderOptions {
    * field left undefined is on, so production is unchanged).
    */
   resolution?: CallGraphResolutionToggles;
+  /**
+   * Interface-specification candidates (change: add-contract-node-projection): the repository's
+   * OpenAPI/Swagger documents, path + content. They are NOT source files — no grammar parses
+   * them and they never enter Pass 1 — so they ride beside `files` rather than in it. Absent
+   * (the watcher's per-file rebuilds, tests, any embedded caller) means no contract projection.
+   */
+  contractFiles?: ReadonlyArray<{ path: string; content: string }>;
+  /** Specification candidates the caller did not retain, so the projection discloses the cap. */
+  contractFilesOmitted?: number;
 }
 
 export class CallGraphBuilder {
@@ -5657,12 +5669,16 @@ export class CallGraphBuilder {
   private readonly legacyLatePassesForTesting: boolean;
   /** Every mechanism on unless a test/calibration caller explicitly turned one off. */
   private readonly resolution: Required<CallGraphResolutionToggles>;
+  private readonly contractFiles: ReadonlyArray<{ path: string; content: string }>;
+  private readonly contractFilesOmitted: number;
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
     this.pass1Cache = options.pass1Cache;
     this.cfgSpill = options.cfgSpill;
     this.legacyLatePassesForTesting = options.legacyLatePassesForTesting === true;
+    this.contractFiles = options.contractFiles ?? [];
+    this.contractFilesOmitted = options.contractFilesOmitted ?? 0;
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
       reExport: options.resolution?.reExport !== false,
@@ -6507,8 +6523,21 @@ export class CallGraphBuilder {
 
     // Pass 2b: HTTP cross-language edges (JS/TS caller → Python handler)
     const httpClientDegradations: HttpExtractionDegradation[] = [...pass1HttpDegradations];
+    // The same registrations and call sites the contract projection binds to declared operations
+    // (change: add-contract-node-projection) — extracted once, here. Retained only when a
+    // specification exists: on a repository with none, holding the whole route and call list
+    // across Passes 3-8 would be memory spent for nothing.
+    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0;
+    let httpRoutes: RouteDefinition[] = [];
+    let httpCalls: HttpCall[] = [];
+    /** Why the route/call extraction is not complete — withholds every "unmatched" conclusion. */
+    const extractionNotAssessed = new Set<string>();
     try {
-      const { edges: httpEdges, degradations } = await extractAllHttpEdges(structuralFiles, httpCallFacts);
+      const { edges: httpEdges, routes, calls, degradations } = await extractAllHttpEdges(structuralFiles, httpCallFacts);
+      if (projectContractsFor) {
+        httpRoutes = routes;
+        httpCalls = calls;
+      }
       httpClientDegradations.push(...degradations);
       // Group once, then look up per edge. Rebuilt per edge this was an O(edges × nodes) scan.
       const httpNodesByFile = new Map<string, FunctionNode[]>();
@@ -6566,7 +6595,12 @@ export class CallGraphBuilder {
         });
       }
     } catch {
-      // HTTP edge extraction is best-effort; don't fail the whole build
+      // HTTP edge extraction is best-effort; don't fail the whole build. The contract projection
+      // reads the same routes and calls, so a failure here is not "nothing serves this operation".
+      extractionNotAssessed.add('the route and client-call extraction failed, so no registration or call site was assessed');
+    }
+    if (projectContractsFor && httpClientDegradations.length) {
+      extractionNotAssessed.add(`${httpClientDegradations.length} file(s) hit a parse budget or failed to parse, so their routes and call sites were not assessed`);
     }
 
     // Pass 2c: Infrastructure-as-Code projection (spec-07).
@@ -6642,6 +6676,73 @@ export class CallGraphBuilder {
       const callee = allNodes.get(edge.calleeId);
       if (caller) caller.fanOut++;
       if (callee) callee.fanIn++;
+    }
+
+    // Pass 3c: interface-contract projection (change: add-contract-node-projection).
+    //
+    // Declared operations become ordinary graph nodes, bound to the handler that serves each and
+    // to the function that calls it. Deliberately AFTER Pass 3: a contract edge is not a call, so
+    // it must not change any function's fan-in or fan-out (the metrics every hub/entry-point/
+    // significance ranking rests on). The nodes still land in `allNodes` before Pass 4 reads it.
+    let contractProjection: ProjectedContracts | undefined;
+    if (projectContractsFor) {
+      try {
+        // Code nodes by file, for the enclosing-function lookup a client call needs.
+        const codeNodesByFile = new Map<string, FunctionNode[]>();
+        for (const n of allNodes.values()) {
+          if (n.isExternal) continue;
+          const at = codeNodesByFile.get(n.filePath);
+          if (at) at.push(n); else codeNodesByFile.set(n.filePath, [n]);
+        }
+        const projection = projectContracts({
+          files: this.contractFiles,
+          filesOmitted: this.contractFilesOmitted,
+          ...(extractionNotAssessed.size ? { extractionNotAssessed: [...extractionNotAssessed] } : {}),
+          routes: httpRoutes,
+          calls: httpCalls,
+          // The same handler rule the http_endpoint edges use: the route's own file first, then a
+          // UNIQUE non-external match elsewhere (a routes file separate from its handlers). A name
+          // colliding across files stays unresolved — never guessed.
+          resolveHandler: route => {
+            const simple = route.handlerName.split('.').pop() ?? route.handlerName;
+            const candidates = trie.findBySimpleName(simple).filter(n => !n.isExternal);
+            return candidates.find(n => n.filePath === route.file)
+              ?? (candidates.length === 1 ? candidates[0] : undefined);
+          },
+          resolveCaller: call => {
+            const inFile = codeNodesByFile.get(call.file);
+            if (!inFile) return undefined;
+            if (call.offset !== undefined) return findEnclosingFunction(inFile, call.offset);
+            const content = fileContents.get(call.file);
+            if (!content) return undefined;
+            let offset = 0;
+            const lines = content.split('\n');
+            for (let i = 0; i < call.line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+            return findEnclosingFunction(inFile, offset);
+          },
+        });
+        // Edges first, then nodes: a loop, not a spread — a large repository's edge list exceeds
+        // the engine's argument limit, and a throw mid-spread would leave orphan operation nodes
+        // in the graph with no edges and no disclosure (the same lesson as Pass 7a). Operation ids
+        // are `<spec file>::<METHOD path>`, so a collision with a code node is not reachable; the
+        // filter below keeps the invariant explicit rather than assumed.
+        const operationIds = new Set(projection.nodes.map(n => n.id));
+        const projected: CallEdge[] = [];
+        for (const e of projection.edges) {
+          if (!operationIds.has(e.calleeId) || !allNodes.has(e.callerId)) continue;
+          projected.push(e);
+        }
+        for (const n of projection.nodes) if (!allNodes.has(n.id)) allNodes.set(n.id, n);
+        for (const e of projected) edges.push(e);
+        contractProjection = projection;
+      } catch (err) {
+        // Best-effort: never fail the whole build — but a crash must not read as "this repository
+        // declares no operations", so the failure itself is the disclosure.
+        contractProjection = {
+          ...emptyContractProjection(),
+          notAssessed: [`the contract projection failed: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`],
+        };
+      }
     }
 
     // Pass 4 (prep): Mark test-file nodes before tested_by derivation
@@ -6763,7 +6864,9 @@ export class CallGraphBuilder {
 
     // Pass 4: Derive hub functions, entry points, layer violations
     // External and test nodes are excluded from structural stats
-    const internalNodes = nodes.filter(n => !n.isExternal && !n.isTest);
+    // A contract element is a DECLARATION, not a code unit: it is never a hub, an entry point,
+    // or a term in the average fan-in/fan-out (change: add-contract-node-projection).
+    const internalNodes = nodes.filter(n => !n.isExternal && !n.isTest && !isContractLanguage(n.language));
 
     const hubFunctions = internalNodes
       .filter(n => n.fanIn >= HUB_THRESHOLD)
@@ -6775,7 +6878,10 @@ export class CallGraphBuilder {
       .sort((a, b) => b.fanOut - a.fanOut);
 
     const layerViolations = layers
-      ? this.detectLayerViolations(edges, allNodes, layers)
+      // A declaration is not a layer member: a contract edge into a specification file that
+      // happens to sit inside a configured layer is not an architecture violation
+      // (change: add-contract-node-projection).
+      ? this.detectLayerViolations(edges.filter(e => !isContractEdgeKind(e.kind)), allNodes, layers)
       : [];
 
     const totalFanIn = internalNodes.reduce((s, n) => s + n.fanIn, 0);
@@ -6979,6 +7085,7 @@ export class CallGraphBuilder {
         : undefined,
       ambiguousSites: ambiguousSites.length > 0 ? ambiguousSites : undefined,
       unresolvedDeployBindings: unresolvedDeployBindings.length > 0 ? unresolvedDeployBindings : undefined,
+      ...(contractProjection ? { contracts: contractDisclosure(contractProjection) } : {}),
       extractionLane,
       pass1Cache,
     };
@@ -7343,6 +7450,7 @@ export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph
     ...(result.ambiguousSites && result.ambiguousSites.length > 0
       ? { ambiguousSites: result.ambiguousSites }
       : {}),
+    ...(result.contracts ? { contracts: result.contracts } : {}),
     ...(result.unresolvedDeployBindings && result.unresolvedDeployBindings.length > 0
       ? { unresolvedDeployBindings: result.unresolvedDeployBindings }
       : {}),

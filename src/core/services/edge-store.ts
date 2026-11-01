@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
 import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
+import { CONTRACT_EDGE_KINDS } from '../analyzer/contract/project.js';
+import { CONTRACT_LANGUAGES } from '../analyzer/contract/types.js';
 import { MAX_DEPRECATION_HINT } from '../analyzer/call-graph-extract.js';
 import { recordPerfWork } from '../analyzer/perf-counters.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
@@ -671,8 +673,21 @@ export class EdgeStore {
   // ── Edge mutations ────────────────────────────────────────────────────────────
 
   /** Remove all edges where this file is caller or callee. */
+  /**
+   * Remove this file's edges before its subset rebuild re-inserts them.
+   *
+   * A contract edge is KEPT: it is derived from the specification corpus, which only a full
+   * `analyze` projects, so a subset rebuild cannot re-create it (change:
+   * add-contract-node-projection). Deleting it on every save of a route-handler or client file —
+   * the files edited most often — would silently drop the binding, and with it the handler's
+   * liveness-root status. It is refreshed, like an infrastructure projection, by `openlore
+   * analyze`.
+   */
   deleteEdgesForFile(file: string): void {
-    this.db.prepare('DELETE FROM edges WHERE caller_file = ? OR callee_file = ?').run(file, file);
+    this.db.prepare(
+      `DELETE FROM edges WHERE (caller_file = ? OR callee_file = ?)
+         AND (kind IS NULL OR kind NOT IN (${CONTRACT_EDGE_KIND_SQL}))`,
+    ).run(file, file);
   }
 
   /** Remove only outgoing edges from this file (incoming edges remain). */
@@ -922,23 +937,31 @@ export class EdgeStore {
 
   /** Recompute graph-derived node/class degrees and classifications after a partial edge swap. */
   recomputeStructuralMetrics(): void {
+    // The in-memory build computes these metrics over CALL-shaped edges only and classifies
+    // projected declarations out of the rankings (call-graph.ts Pass 3/Pass 4). This recompute is
+    // the serving copy of the same measurement, so it applies the same two exclusions: a contract
+    // edge is not a call, so it changes no function's degree, and a contract node is a
+    // declaration, so it is never a hub or an entry point of the code
+    // (change: add-contract-node-projection).
+    const notContract = `kind IS NULL OR kind NOT IN (${CONTRACT_EDGE_KIND_SQL})`;
+    const notProjected = `language IS NULL OR language NOT IN (${CONTRACT_LANGUAGE_SQL})`;
     this.db.exec(`
       UPDATE nodes SET
         fan_in = (
           SELECT COUNT(*) FROM (
             SELECT DISTINCT caller_id FROM edges
-            WHERE callee_id = nodes.id AND confidence <> 'synthesized'
+            WHERE callee_id = nodes.id AND confidence <> 'synthesized' AND (${notContract})
           )
         ),
         fan_out = (
           SELECT COUNT(*) FROM (
             SELECT DISTINCT callee_id FROM edges
-            WHERE caller_id = nodes.id AND confidence <> 'synthesized'
+            WHERE caller_id = nodes.id AND confidence <> 'synthesized' AND (${notContract})
           )
         );
       UPDATE nodes SET
-        is_hub = CASE WHEN is_external = 0 AND fan_in >= ${HUB_THRESHOLD} THEN 1 ELSE 0 END,
-        is_entry_point = CASE WHEN is_external = 0 AND NOT EXISTS (
+        is_hub = CASE WHEN is_external = 0 AND (${notProjected}) AND fan_in >= ${HUB_THRESHOLD} THEN 1 ELSE 0 END,
+        is_entry_point = CASE WHEN is_external = 0 AND (${notProjected}) AND NOT EXISTS (
           SELECT 1 FROM edges WHERE callee_id = nodes.id
         ) THEN 1 ELSE 0 END;
       UPDATE classes SET
@@ -1906,10 +1929,15 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
   };
 }
 
+/** The contract projection's edge kinds / node languages, as SQL literal lists. */
+const CONTRACT_EDGE_KIND_SQL = CONTRACT_EDGE_KINDS.map(k => `'${k}'`).join(', ');
+const CONTRACT_LANGUAGE_SQL = CONTRACT_LANGUAGES.map(l => `'${l}'`).join(', ');
+
 const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
   'calls', 'overrides', 'tested_by', 'references', 'depends_on',
   'affects', 'authored_by', 'changed_in_pr', 'deploys_symbol',
+  'implements_endpoint', 'consumes_endpoint',
 ]);
 const CALL_TYPES = new Set<NonNullable<CallEdge['callType']>>([
   'direct', 'method', 'awaited', 'constructor',

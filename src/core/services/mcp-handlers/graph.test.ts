@@ -1392,6 +1392,31 @@ describe('cross-domain impact — analyze_impact', () => {
     expect(result.crossDomain).toBeUndefined();
   });
 
+  it('surfaces a declared operation as a typed contract neighbor, never as code', async () => {
+    store.clearAll();
+    store.insertNodes([
+      makeNode({ id: 'src/handlers.ts::getOrder', fanOut: 0 }),
+      makeNode({ id: 'openapi.yaml::GET /v1/orders/{id}', language: 'OpenAPI', startLine: 7 }),
+    ]);
+    store.insertEdges([{
+      callerId: 'src/handlers.ts::getOrder', calleeId: 'openapi.yaml::GET /v1/orders/{id}',
+      calleeName: 'GET /v1/orders/{id}', confidence: 'import', kind: 'implements_endpoint',
+    }]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    const result = await handleAnalyzeImpact(dir, 'getOrder', 2) as {
+      crossDomain?: { reachesContract?: boolean; operations?: Array<{ nodeType: string; name: string; format: string; direction: string; line?: number }> };
+      downstreamCriticalPath: Array<{ name: string }>;
+      blastRadius: { contract?: number };
+    };
+    expect(result.crossDomain?.reachesContract).toBe(true);
+    expect(result.crossDomain?.operations).toEqual([
+      { nodeType: 'contract', name: 'GET /v1/orders/{id}', file: 'openapi.yaml', format: 'OpenAPI', direction: 'downstream', depth: 1 },
+    ]);
+    expect(result.blastRadius.contract).toBe(1);
+    // A specification line range is not a function the agent can edit or test.
+    expect(result.downstreamCriticalPath.map(n => n.name)).not.toContain('GET /v1/orders/{id}');
+  });
+
   it('omits crossDomain entirely for a pure-code impact', async () => {
     store.clearAll();
     store.insertNodes([

@@ -51,6 +51,12 @@ export interface ContractDocument {
   file: string;
   format: 'openapi-3' | 'swagger-2';
   basePath: string;
+  /**
+   * Lower-cased hosts the document's `servers` (or Swagger `host`) name, without port or scheme.
+   * Empty when the document declares none — then a host cannot be checked, and a consumer must
+   * say so rather than assume a call to any host is a call to this service.
+   */
+  serverHosts: string[];
   operations: ContractOperation[];
   /** Element classes present in the file but outside the model (`callbacks`, `webhooks`, external `$ref`). */
   unassessed: string[];
@@ -76,6 +82,27 @@ const TYPE_KEYS = ['type', 'format', 'enum', 'nullable'];
 const SET_KEYS = new Set(['required', 'enum', 'type']);
 const omit = (o: Json, keys: readonly string[]): Json => Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
 const sha = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 16);
+
+/**
+ * The hosts a server list names (`https://api.example.com/v1` → `api.example.com`), lower-cased
+ * and without the port. A templated host (`https://{region}.example.com`) is left out: it matches
+ * no literal host, and guessing one is the error this list exists to prevent.
+ */
+function serverHosts(servers: unknown, swaggerHost: unknown): string[] {
+  const hosts = new Set<string>();
+  if (typeof swaggerHost === 'string' && swaggerHost && !swaggerHost.includes('{')) {
+    hosts.add(swaggerHost.split('/')[0].split(':')[0].toLowerCase());
+  }
+  if (Array.isArray(servers)) {
+    for (const s of servers.filter(isObj)) {
+      if (typeof s.url !== 'string') continue;
+      const m = /^(?:[^:/?#]+:)?\/\/([^/?#]+)/.exec(s.url);
+      if (!m || m[1].includes('{')) continue;
+      hosts.add(m[1].split('@').pop()!.split(':')[0].toLowerCase());
+    }
+  }
+  return [...hosts].sort();
+}
 
 /** The base path of a server list, independent of the servers' order (`https://{host}/v1/` → `/v1`). */
 function serverPath(servers: unknown): string | undefined {
@@ -383,7 +410,8 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
   }
   operations.sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
   return {
-    file, format: swagger ? 'swagger-2' : 'openapi-3', basePath: docBase, operations,
+    file, format: swagger ? 'swagger-2' : 'openapi-3', basePath: docBase,
+    serverHosts: serverHosts(root.servers, root.host), operations,
     unassessed: [...unassessed].sort(), opaquePaths: [...opaquePaths].sort(),
   };
   }
