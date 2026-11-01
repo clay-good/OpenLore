@@ -29,7 +29,6 @@ import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { OPENLORE_DIR } from '../../constants.js';
-import { execFileGit } from '../../utils/git-exec.js';
 import { emittedText } from './generated-file-guard.js';
 
 /** Where ledgers live, under `.openlore/`. */
@@ -51,6 +50,8 @@ const MAX_FILES_PER_BATCH = 20;
 const REFRESH_BUDGET_MS = 300;
 /** An agent edit and the watcher's record of it land within this much of each other. */
 const OWN_EDIT_WINDOW_MS = 5000;
+/** How far before the watcher's record an agent edit may lie (debounce plus a slow re-index). */
+const OWN_EDIT_LAG_MS = 30_000;
 const MAX_NAMED = 3;
 const NO_AGENT_EDITS = 'No after-edit hook has reported an edit this session, so the agent\'s own edits cannot be told apart from other processes\' edits; background-change notes are withheld. `openlore setup --check-edit-hook claude` installs one for Claude Code.';
 /** Returns to an earlier version before a loop is reported (A → B → A → B: two). */
@@ -79,6 +80,8 @@ export interface LedgerSnapshot {
   /** True once an after-edit hook reported an agent edit this session. */
   agentEditsReported: boolean;
   counts: { served: number; edited: number; untracked: number; dropped: number };
+  /** Watcher batches of more than 20 files (a branch switch, a stash), which record no versions. */
+  bulkBatches?: number;
   backgroundChanges: BackgroundChange[];
   editOscillation: EditOscillation[];
   /** Why background-change notes are withheld, when they are. */
@@ -121,6 +124,11 @@ const WHOLE_FILE = /\.(?:md|ya?ml|json)$/i;
 
 export const defaultHasher: FileHasher = async (file, content) =>
   (await hashFileSymbols(file, content)) ?? (WHOLE_FILE.test(file) ? hashWholeFile(file, content) : undefined);
+
+/** Keep a bookkeeping set bounded on a long session (oldest first out). */
+function trimSet(set: Set<string>): void {
+  for (const v of set) { if (set.size <= MAX_ENTRIES * 5) break; set.delete(v); }
+}
 
 function hhmm(ms: number): string {
   const d = new Date(ms);
@@ -185,6 +193,10 @@ export class SessionLedger {
   /** Last seen mtime of each tracked file, so unchanged files are not re-hashed. */
   private seenMtime = new Map<string, number>();
   private untracked = new Set<string>();
+  /** Watcher batches too large to be edits, recorded as no versions. */
+  private bulkBatches = 0;
+  /** Names being hashed by resolveServed, so a serve arriving meanwhile keeps them. */
+  private resolving = new Map<string, Set<string> | 'all'>();
   private dropped = 0;
   /** Facts already stated in a note: `id@hash` for background changes, `id#returns` for loops. */
   private delivered = new Set<string>();
@@ -272,9 +284,11 @@ export class SessionLedger {
         // Re-serving shows the agent the current text: it becomes the version the agent read, for
         // the names served now and before.
         const before = this.pending.get(file);
+        const inFlight = this.resolving.get(file);
         const earlier = [...this.served.values()].filter(e => e.file === file).map(e => e.name);
-        const merged: Set<string> | 'all' = names === 'all' || before?.names === 'all'
-          ? 'all' : new Set([...names, ...(before?.names ?? []), ...earlier]);
+        const merged: Set<string> | 'all' = names === 'all' || before?.names === 'all' || inFlight === 'all'
+          ? 'all' : new Set([...names, ...(before?.names ?? []), ...(inFlight ?? []), ...earlier]);
+        this.untracked.delete(file); // tracked again
         if (before) this.pendingBytes -= before.content.length;
         this.pending.delete(file);
         this.pending.set(file, { content, servedAt: at, names: merged });
@@ -301,7 +315,8 @@ export class SessionLedger {
     if (!p) return;
     this.pending.delete(file);
     this.pendingBytes -= p.content.length;
-    const hashes = await this.hasher(file, p.content);
+    this.resolving.set(file, p.names);
+    const hashes = await this.hasher(file, p.content).finally(() => this.resolving.delete(file));
     if (!hashes) { this.untracked.add(file); return; }
     const found = new Set<string>();
     for (const [id, h] of hashes) {
@@ -320,10 +335,14 @@ export class SessionLedger {
    * batch. A bulk batch hashes the files this session tracks first and counts the rest untracked.
    */
   recordReindexed(files: ReadonlyArray<{ rel: string; content: string }>, at = this.now()): Promise<void> {
-    const tracked = (f: { rel: string }) => this.seenMtime.has(f.rel);
-    const ordered = [...files.filter(tracked), ...files.filter(f => !tracked(f))];
-    const kept = ordered.slice(0, MAX_FILES_PER_BATCH);
-    for (const f of ordered.slice(MAX_FILES_PER_BATCH)) this.untracked.add(f.rel);
+    // A bulk batch (a branch switch, a stash, a formatter run) is not an edit: switching back and
+    // forth would read as a loop. Its files record no version; they are counted untracked.
+    if (files.length > MAX_FILES_PER_BATCH) {
+      for (const f of files) this.untracked.add(f.rel);
+      this.bulkBatches++;
+      return this.queue;
+    }
+    const kept = files;
     return this.enqueue(async () => {
       for (const f of kept) {
         await this.observe(f.rel, f.content, at, false);
@@ -337,32 +356,14 @@ export class SessionLedger {
     try { return (await stat(safeJoin(this.root, file))).mtimeMs; } catch { return -1; }
   }
 
-  /** The committed version of a file, as the starting point of a file first seen edited. */
-  private async headVersion(file: string): Promise<Map<string, { name: string; hash: string }> | undefined> {
-    try {
-      const { stdout } = await execFileGit('git', ['show', `HEAD:./${file}`], { cwd: this.root, maxBuffer: MAX_FILE_BYTES + 1024 });
-      const text = String(stdout);
-      return Buffer.byteLength(text) > MAX_FILE_BYTES ? undefined : await this.hasher(file, text);
-    } catch {
-      return undefined; // a new or untracked file has no committed version
-    }
-  }
-
   private async observe(file: string, content: string, at: number, sampled: boolean): Promise<void> {
     if (Buffer.byteLength(content) > MAX_FILE_BYTES) { this.untracked.add(file); return; }
     const kept = this.pending.get(file);
     if (kept && kept.content === content) { this.seenMtime.set(file, await this.mtime(file)); return; } // unchanged since served
     await this.servedQueue; // a serve still being read lands first
     await this.resolveServed(file);
-    const firstSeen = !this.seenMtime.has(file);
     const hashes = await this.hasher(file, content);
     if (!hashes) { this.untracked.add(file); return; }
-    // A file first seen when it is already edited starts from its committed version, so a return
-    // to it counts: the edit after which the watcher first saw it had a "before".
-    if (firstSeen) {
-      const head = await this.headVersion(file);
-      for (const [id, h] of head ?? []) if (!this.edited.has(id)) this.noteVersion(id, h.name, file, { hash: h.hash, at: this.startedAt, sampled: true });
-    }
     for (const [id, h] of hashes) this.noteVersion(id, h.name, file, { hash: h.hash, at, sampled });
     this.seenMtime.set(file, await this.mtime(file));
   }
@@ -387,7 +388,6 @@ export class SessionLedger {
    * for queued work, then answers with what is known.
    */
   async refresh(budgetMs = REFRESH_BUDGET_MS): Promise<void> {
-    const at = this.now();
     const work = this.enqueue(async () => {
       const files = new Set<string>([...this.served.values()].map(s => s.file));
       for (const file of this.pending.keys()) files.add(file);
@@ -395,6 +395,7 @@ export class SessionLedger {
       for (const file of files) {
         const m = await this.mtime(file);
         if (m === this.seenMtime.get(file)) continue;
+        const at = this.now(); // when this file was read: an edit after it is a later version
         const content = await this.readCurrent(file, MAX_SERVED_FILE_BYTES);
         if (content === undefined) { this.untracked.add(file); this.seenMtime.set(file, m); continue; }
         await this.observe(file, content, at, true);
@@ -415,7 +416,8 @@ export class SessionLedger {
   private ownVersion(file: string, prev: Version | undefined, v: Version, agentEdits: ReadonlyArray<{ file: string; at: number }>): boolean {
     return agentEdits.some(a => a.file === file && (v.sampled
       ? a.at > (prev?.at ?? -Infinity) && a.at <= v.at
-      : Math.abs(a.at - v.at) <= OWN_EDIT_WINDOW_MS));
+      // The watcher records a version after its debounce and re-index, which can lag the edit.
+      : a.at > (prev?.at ?? -Infinity) && a.at >= v.at - OWN_EDIT_LAG_MS && a.at <= v.at + OWN_EDIT_WINDOW_MS));
   }
 
   /** The current facts. `agentEdits` defaults to the worktree's agent-edit log since the session began. */
@@ -431,6 +433,9 @@ export class SessionLedger {
       const e = this.edited.get(s.id);
       const k = e ? e.versions.length - 1 : -1;
       if (!e || k < 0 || e.versions[k].hash === s.hash) continue;
+      // Read again since: the agent holds the current text, so nothing changed under it.
+      const again = this.pending.get(s.file);
+      if (again && again.servedAt >= e.versions[k].at && (again.names === 'all' || again.names.has(s.name))) continue;
       if (this.ownVersion(s.file, e.versions[k - 1], e.versions[k], agentEdits)) continue;
       backgroundChanges.push({
         id: emittedText(s.id), name: emittedText(s.name), file: emittedText(s.file),
@@ -465,12 +470,14 @@ export class SessionLedger {
       lines.push(`Served earlier: ${named.join('; ')}${fresh.length > MAX_NAMED ? `; and ${fresh.length - MAX_NAMED} more` : ''}.`);
       for (const c of fresh) this.delivered.add(key(c));
     }
-    for (const o of f.editOscillation) {
-      const k = `${o.id}#${o.returns}`;
-      if (this.delivered.has(k)) continue;
-      this.delivered.add(k);
+    const loops = f.editOscillation.filter(o => !this.delivered.has(`${o.id}#${o.returns}`));
+    for (const o of loops.slice(0, MAX_NAMED)) {
       lines.push(`${o.name} (${o.file}) returned to an earlier version ${o.returns === 2 ? 'twice' : `${o.returns} times`} this session.`);
     }
+    if (loops.length > MAX_NAMED) lines.push(`${loops.length - MAX_NAMED} more symbol(s) returned to an earlier version again.`);
+    for (const o of loops) this.delivered.add(`${o.id}#${o.returns}`);
+    trimSet(this.delivered);
+    trimSet(this.untracked);
     if (!lines.length) return null;
     return `[openlore freshness] ${lines.join(' ')} Informational signal.`;
   }
@@ -496,6 +503,7 @@ export class SessionLedger {
       updatedAt: new Date(this.now()).toISOString(),
       editSource: this.editSource,
       agentEditsReported: f.agentEditsReported,
+      ...(this.bulkBatches ? { bulkBatches: this.bulkBatches } : {}),
       counts: { served: this.served.size + [...this.pending.values()].reduce((n, p) => n + (p.names === 'all' ? 1 : p.names.size), 0), edited: [...this.edited.values()].filter(e => e.versions.length > 1).length, untracked: this.untracked.size, dropped: this.dropped },
       backgroundChanges: f.backgroundChanges,
       editOscillation: f.editOscillation,
@@ -584,6 +592,7 @@ function validSnapshot(v: unknown, root: string, filePid: number, now: number): 
     editSource: s.editSource === 'watcher' ? 'watcher' : 'sampled',
     agentEditsReported: s.agentEditsReported === true,
     counts: { served: num(counts?.served), edited: num(counts?.edited), untracked: num(counts?.untracked), dropped: num(counts?.dropped) },
+    ...(num(s.bulkBatches) ? { bulkBatches: num(s.bulkBatches) } : {}),
     backgroundChanges: list(s.backgroundChanges, e => {
       const [id, name, file, servedAt, changedAt] = [str(e.id), str(e.name), str(e.file), str(e.servedAt), str(e.changedAt)];
       return id && name && file && servedAt && changedAt ? { id, name, file, servedAt, changedAt } : undefined;

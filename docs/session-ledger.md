@@ -53,15 +53,19 @@ facts are withheld and the reason is given: OpenLore never picks a session.
 
 ## Limits
 
-- The agent's own edit is matched to the version the watcher observed within 5 seconds of the
-  hook's report (any time since the previous version, when versions are sampled at tool calls). Two
+- When versions are sampled at tool calls, an agent edit any time since the previous version makes
+  the new version the agent's own. Two
   agents editing the same worktree, each with an after-edit hook, cannot be told apart: one agent's
   edit counts as the other's own, so it is withheld, never misreported. Give each agent its own
   worktree.
-- A watcher batch of more than 20 files (a branch switch, a formatter run) hashes the files this
-  session tracks first; the rest are counted as `untracked`, not treated as edits.
-- A file first seen already edited starts from its committed (`HEAD`) version, so a return to it
-  counts as a return.
+- A watcher batch of more than 20 files (a branch switch, a stash, a formatter run) is not an edit:
+  it records no versions, its files are counted as `untracked`, and `bulkBatches` counts it.
+- A symbol that was never served starts at the first version observed after an edit, so its loop is
+  reported one return later than a served symbol's.
+- A served file whose kept text is dropped at the 16 MB bound is counted in `dropped` and
+  `untracked`; a change to it is not named until it is served again.
+- The agent's own edit is matched to the watcher's version when the hook's report lies up to 30
+  seconds before it (or 5 seconds after); a later version by another process is still named.
 
 - A file OpenLore cannot hash (an unsupported language, over 1 MB) is counted as `untracked`, never
   treated as unchanged.

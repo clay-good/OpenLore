@@ -87,7 +87,7 @@ export interface IndexStatus {
 
 export type SessionStatus =
   | { pid: number; startedAt: string; updatedAt: string; editSource: 'watcher' | 'sampled'; agentEditsReported: boolean;
-      counts: LedgerSnapshot['counts']; backgroundChanges: LedgerSnapshot['backgroundChanges'];
+      counts: LedgerSnapshot['counts']; bulkBatches?: number; backgroundChanges: LedgerSnapshot['backgroundChanges'];
       editOscillation: LedgerSnapshot['editOscillation']; withheld?: string }
   | { withheld: string };
 
@@ -97,7 +97,7 @@ function collectSessionStatus(rootPath: string): SessionStatus {
   const l = live.ledger;
   return {
     pid: l.pid, startedAt: l.startedAt, updatedAt: l.updatedAt, editSource: l.editSource,
-    agentEditsReported: l.agentEditsReported, counts: l.counts,
+    agentEditsReported: l.agentEditsReported, counts: l.counts, ...(l.bulkBatches ? { bulkBatches: l.bulkBatches } : {}),
     backgroundChanges: l.backgroundChanges, editOscillation: l.editOscillation,
     ...(l.withheld ? { withheld: l.withheld } : {}),
   };

@@ -247,14 +247,16 @@ describe('SessionLedger — review round 1', () => {
     expect(Date.now() - t0).toBeLessThan(300);
   });
 
-  it('a bulk watcher batch hashes at most 20 files and counts the rest untracked', async () => {
+  it('a bulk watcher batch (a branch switch) records no versions, so switching back and forth is no loop', async () => {
     const root = repo();
     let hashed = 0;
-    const counting: FileHasher = async () => { hashed++; return new Map(); };
+    const counting: FileHasher = async (_f, c) => { hashed++; return new Map([['f::x', { name: 'x', hash: c }]]); };
     const ledger = new SessionLedger(root, counting);
-    await ledger.recordReindexed(Array.from({ length: 30 }, (_, i) => ({ rel: `src/f${i}.ts`, content: 'x' })));
-    expect(hashed).toBeLessThanOrEqual(40); // 20 files, each possibly with its committed version
-    expect(ledger.snapshot().counts.untracked).toBeGreaterThanOrEqual(10);
+    ledger.setWatcherActive(true);
+    for (const v of ['1', '2', '1', '2', '1']) await ledger.recordReindexed(Array.from({ length: 25 }, (_, i) => ({ rel: `src/f${i}.ts`, content: v })));
+    expect(hashed).toBe(0);
+    expect(ledger.takeNewOscillations()).toEqual([]);
+    expect(ledger.snapshot()).toMatchObject({ bulkBatches: 5, counts: { untracked: 25 } });
   });
 
   it('an edit by another process after the agent\'s own edit is still named (watcher versions)', async () => {
@@ -297,18 +299,54 @@ describe('SessionLedger — review round 1', () => {
     expect(note).not.toContain('\n');
   });
 
-  it('a symbol never served starts from its committed version, so A → B → A → B is two returns', async () => {
+  it('a symbol never served starts at its first observed version: A → B → A → B is one return there', async () => {
     const root = repo();
-    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e' };
-    const { execFileSync } = await import('node:child_process');
-    write(root, 'src/config.ts', A);
-    execFileSync('git', ['init', '-q'], { cwd: root, env });
-    execFileSync('git', ['add', '-A'], { cwd: root, env });
-    execFileSync('git', ['commit', '-qm', 'a'], { cwd: root, env });
     const ledger = new SessionLedger(root);
     ledger.setWatcherActive(true);
     for (const v of [B, A, B]) await ledger.recordReindexed([{ rel: 'src/config.ts', content: v }]);
-    expect(ledger.facts([]).editOscillation.map(o => [o.name, o.returns])).toEqual([['parseConfig', 2]]);
+    expect(ledger.facts([]).editOscillation).toEqual([]);
+    await ledger.recordReindexed([{ rel: 'src/config.ts', content: A }]);
+    expect(ledger.facts([]).editOscillation.map(o => o.returns)).toEqual([2]);
+  });
+
+  it('a late sampled read is stamped when the file is read, not when the call began', async () => {
+    const root = repo();
+    write(root, 'src/config.ts', A);
+    let clock = 1_000_000;
+    const ledger = new SessionLedger(root, undefined, () => clock);
+    await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
+    clock += 1000;
+    write(root, 'src/config.ts', B);
+    const agent = [{ file: 'src/config.ts', at: clock + 500 }];
+    clock += 2000; // the read happens after the agent's edit
+    await ledger.refresh(5000);
+    expect(ledger.takeNote(agent)).toBeNull();
+  });
+
+  it('reading a changed symbol again clears its background change', async () => {
+    const root = repo();
+    write(root, 'src/config.ts', A);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
+    write(root, 'src/config.ts', B);
+    await ledger.refresh(5000);
+    const other = [{ file: 'x', at: 1 }];
+    expect(ledger.facts(other).backgroundChanges).toHaveLength(1);
+    await new Promise(r => setTimeout(r, 5));
+    await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
+    expect(ledger.facts(other).backgroundChanges).toEqual([]);
+  });
+
+  it('an agent edit up to 30 s before the watcher\'s record is the agent\'s own', async () => {
+    const root = repo();
+    write(root, 'src/config.ts', A);
+    let clock = 1_000_000;
+    const ledger = new SessionLedger(root, undefined, () => clock);
+    ledger.setWatcherActive(true);
+    await ledger.recordServed([{ file: 'src/config.ts', name: 'parseConfig' }]);
+    clock += 60_000;
+    await ledger.recordReindexed([{ rel: 'src/config.ts', content: B }], clock);
+    expect(ledger.takeNote([{ file: 'src/config.ts', at: clock - 8000 }])).toBeNull();
   });
 
   it('counts a requested symbol the hasher does not return as untracked', async () => {
