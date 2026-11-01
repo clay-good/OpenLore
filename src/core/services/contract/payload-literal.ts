@@ -17,38 +17,69 @@ export type BodyRead =
 /** The longest argument list scanned. */
 const MAX_SCAN = 20_000;
 
-/** Index just past the string, template, or comment opening at `i`, or -1 when none opens there. */
-function skipQuoted(text: string, i: number): number {
+/** Template nesting followed before a call is given up on (adversarial input stays bounded). */
+const MAX_DEPTH = 64;
+
+/**
+ * Index just past the string, template, or comment opening at `i` (never past `end`), or -1 when
+ * none opens there. A template nested deeper than {@link MAX_DEPTH} runs to `end`.
+ */
+function skipQuoted(text: string, i: number, end = text.length, depth = 0): number {
   const c = text[i];
-  if (c === '/' && text[i + 1] === '/') { const e = text.indexOf('\n', i); return e === -1 ? text.length : e; }
-  if (c === '/' && text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); return e === -1 ? text.length : e + 2; }
+  if (c === '/' && text[i + 1] === '/') { const e = text.indexOf('\n', i); return e === -1 || e > end ? end : e; }
+  if (c === '/' && text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); return e === -1 || e + 2 > end ? end : e + 2; }
   if (c !== '"' && c !== "'" && c !== '`') return -1;
-  for (let j = i + 1; j < text.length; j++) {
+  for (let j = i + 1; j < end; j++) {
     if (text[j] === '\\') { j++; continue; }
     if (c === '`' && text[j] === '$' && text[j + 1] === '{') {
-      const end = matchClose(text, j + 1);
-      if (end === -1) return text.length;
-      j = end;
+      if (depth >= MAX_DEPTH) return end;
+      const close = matchClose(text, j + 1, end, depth + 1);
+      if (close === -1) return end;
+      j = close;
       continue;
     }
     if (text[j] === c) return j + 1;
   }
-  return text.length;
+  return end;
 }
 
-/** Index of the bracket closing the one at `open`, or -1. */
-function matchClose(text: string, open: number): number {
+/** Index of the bracket closing the one at `open` (before `end`), or -1. */
+function matchClose(text: string, open: number, end = text.length, depth = 0): number {
   const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
   const stack = [pairs[text[open]]];
-  const end = Math.min(text.length, open + MAX_SCAN);
-  for (let i = open + 1; i < end; i++) {
-    const q = skipQuoted(text, i);
+  const stop = Math.min(end, open + MAX_SCAN);
+  for (let i = open + 1; i < stop; i++) {
+    const q = skipQuoted(text, i, stop, depth);
     if (q !== -1) { i = q - 1; continue; }
     const ch = text[i];
     if (pairs[ch]) stack.push(pairs[ch]);
     else if (ch === stack[stack.length - 1]) { stack.pop(); if (!stack.length) return i; }
   }
   return -1;
+}
+
+/**
+ * Whether `text` holds a comment outside its strings. A `//` or `/*` the scan cannot tell from a
+ * regular-expression literal is counted too, so such text is never read as keys (conservative).
+ */
+function hasComment(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '/' && (text[i + 1] === '/' || text[i + 1] === '*')) return true;
+    const q = skipQuoted(text, i);
+    if (q !== -1) i = q - 1;
+  }
+  return false;
+}
+
+/** Whether `offset` lies inside a string, template, or comment of `text` (a call written as text). */
+export function insideLiteral(text: string, offset: number): boolean {
+  for (let i = 0; i < offset && i < text.length; i++) {
+    const q = skipQuoted(text, i, text.length);
+    if (q === -1) continue;
+    if (q > offset) return true;
+    i = q - 1;
+  }
+  return false;
 }
 
 /** The top-level comma-separated parts of `text` (between brackets), trimmed. */
@@ -110,19 +141,27 @@ export function readCallBody(text: string, offset: number, client: string): Body
   const close = matchClose(text, open);
   if (close === -1) return { kind: 'not-literal', reason: 'the call could not be read' };
   const callee = text.slice(offset, open);
-  const args = splitTop(text.slice(open + 1, close));
+  const inner = text.slice(open + 1, close);
+  // A comment (or a regular expression that reads like one) could hide members: never read as keys.
+  if (hasComment(inner)) return { kind: 'not-literal', reason: 'the call holds a comment or a regular expression' };
+  const args = splitTop(inner);
   if (client === 'fetch') {
+    // The platform `fetch` only: a wrapper (`api.fetch`, `$fetch`) may take the body under another key.
+    const before = text.slice(Math.max(0, offset - 12), offset);
+    const bare = !/[\w$]$/.test(before) && (!/\.$/.test(before) || /(?:^|[^\w$.])(?:window|globalThis|self)\.$/.test(before));
+    if (!bare) return { kind: 'not-literal', reason: 'the call is a fetch wrapper' };
     if (args.length < 2) return { kind: 'absent' };
     const opts = objectKeys(args[1]);
     if (opts.kind !== 'literal') return { kind: 'not-literal', reason: 'the fetch options are not an object literal' };
+    if (opts.keys.some(k => k === 'json' || k === 'data' || k === 'form')) return { kind: 'not-literal', reason: 'the body is passed under another key' };
     if (!opts.keys.includes('body')) return { kind: 'absent' };
-    const inner = args[1].trim().slice(1, -1);
-    const member = splitTop(inner).find(m => /^(?:body|'body'|"body")\s*:/.test(m));
+    const optsInner = args[1].trim().slice(1, -1);
+    const member = splitTop(optsInner).find(m => /^(?:body|'body'|"body")\s*:/.test(m));
     if (!member) return { kind: 'not-literal', reason: 'the body is a shorthand reference' };
     return bodyExpression(member.slice(member.indexOf(':') + 1));
   }
   if (client === 'axios' && /\.(?:post|put|patch)\s*$/.test(callee)) {
     return args.length < 2 ? { kind: 'absent' } : bodyExpression(args[1]);
   }
-  return { kind: 'not-literal', reason: `a ${client} call's body is not read` };
+  return { kind: 'not-literal', reason: `the body of this ${client} call is not read (fetch, and axios post/put/patch, only)` };
 }

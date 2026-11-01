@@ -212,4 +212,13 @@ describe('certify_service_contract', () => {
     expect(missing.map(f => f.subject)).toEqual(['src/client.ts:1']);
     expect(missing[0].message).toContain('customerId');
   });
+
+  it('a call without a body conforms when the specification makes the body optional; two calls on a line are two sites', async () => {
+    const OPT = `openapi: 3.0.3\ninfo: {title: Orders, version: '1'}\npaths:\n  /orders:\n    post:\n      requestBody:\n        content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array}}}}}\n      responses: {'201': {description: created}}\n`;
+    const client = "export const a = () => { fetch('/orders', { method: 'POST' }); fetch('/orders', { method: 'POST', body: JSON.stringify({ x: 1 }) }); };\n";
+    const root = repo({ 'api/openapi.yaml': OPT, 'src/client.ts': client, '.openlore/analysis/route-inventory.json': routes([['POST', '/orders']]) });
+    const r = await handleCertifyServiceContract({ directory: root }) as { payload: { callSites: number; conforming: number }; findings: Array<{ code: string; message: string }> };
+    expect(r.payload).toMatchObject({ callSites: 2, conforming: 1 });
+    expect(r.findings.filter(f => f.code === 'contract-payload-missing-required').map(f => f.message)).toEqual([expect.stringContaining('items')]);
+  });
 });

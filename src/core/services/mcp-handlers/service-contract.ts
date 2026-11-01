@@ -203,7 +203,8 @@ export async function callSitesFor(
   for (const e of buildHttpEdges(calls, routes)) {
     const list = out.get(e.route.handlerName) ?? [];
     const file = emittedText(e.call.file.startsWith(root) ? e.call.file.slice(root.length + 1).split('\\').join('/') : e.call.file);
-    if (!list.some(c => c.file === file && c.line === e.call.line)) {
+    // With call offsets, two calls on one line are two sites.
+    if (!list.some(c => c.file === file && (withCall && e.call.offset !== undefined ? c.offset === e.call.offset : c.line === e.call.line))) {
       list.push({ file, line: e.call.line, method: e.call.method, url: emittedText(e.call.url), ...(withCall ? { ...(e.call.offset !== undefined ? { offset: e.call.offset } : {}), client: e.call.client } : {}) });
     }
     out.set(e.route.handlerName, list);
@@ -226,8 +227,13 @@ const MAX_PAYLOAD_LISTED = 20;
 async function checkPayloads(root: string, docs: readonly ContractDocument[], findings: GovernanceFinding[], boundaries: string[]): Promise<Record<string, unknown>> {
   const ops = docs.flatMap(d => d.operations.filter(op => op.body?.assessed && op.body.properties.some(p => p.required)).map(op => ({ file: d.file, op })));
   if (!ops.length) return { assessed: false, reason: 'no operation requires request-body properties' };
-  const sites = await callSitesFor(root, ops, [], undefined, true);
-  const { readCallBody } = await import('../contract/payload-literal.js');
+  const stats = { capped: false, totals: new Map<string, number>() };
+  const sites = await callSitesFor(root, ops, [], stats, true);
+  const { readCallBody, insideLiteral } = await import('../contract/payload-literal.js');
+  const kept = [...sites.values()].reduce((n, l) => n + l.length, 0);
+  const total = [...stats.totals.values()].reduce((n, v) => n + v, 0);
+  if (total > kept) boundaries.push(`Request bodies were read at ${kept} of ${total} matched call sites (at most ${MAX_CONSUMERS_PER_ELEMENT} per operation).`);
+  if (stats.capped) boundaries.push(`Request bodies were read in the first ${MAX_CLIENT_FILES} source files only.`);
   const byAddress = new Map(ops.map(o => [o.op.address, o]));
   const notAssessed: Array<{ file: string; line: number; operation: string; reason: string }> = [];
   const texts = new Map<string, string | null>();
@@ -245,7 +251,11 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
       const text = texts.get(site.file);
       const body = text == null || site.offset === undefined || !site.client
         ? { kind: 'not-literal' as const, reason: 'the call could not be read' }
-        : readCallBody(text, site.offset, site.client);
+        // A call written inside a string (an example, generated text) is not a call.
+        : insideLiteral(text, site.offset) ? { kind: 'not-literal' as const, reason: 'the call is inside a string' }
+          : readCallBody(text, site.offset, site.client);
+      // The specification makes the body optional: a call without one conforms.
+      if (body.kind === 'absent' && !o.op.body!.required) { conforming++; continue; }
       if (body.kind === 'absent') {
         findings.push({ code: 'contract-payload-missing-required', severity: 'warning', source: 'service-contract', subject: emittedText(`${site.file}:${site.line}`),
           discriminator: address, message: emittedText(`${site.file}:${site.line} calls ${address} with no request body; the specification (${o.file}:${o.op.line}) requires ${required.join(', ')}.`),
@@ -265,7 +275,7 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
     assessed: true, callSites: checked, conforming,
     notAssessed: notAssessed.length,
     ...(notAssessed.length ? { notAssessedSites: notAssessed.slice(0, MAX_PAYLOAD_LISTED).map(n => ({ ...n, file: emittedText(n.file) })) } : {}),
-    note: 'Only literal bodies (an object, or JSON.stringify of one, in fetch or axios post/put/patch) are checked; a body built elsewhere is not assessed, never called conforming.',
+    note: 'Only literal bodies (an object, or JSON.stringify of one, in the platform fetch or axios post/put/patch) are checked; a required body not sent is a finding; any other body, and calls in other languages, are not assessed, never called conforming.',
   };
 }
 
