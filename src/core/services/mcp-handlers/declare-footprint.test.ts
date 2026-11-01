@@ -51,7 +51,8 @@ describe('declare_footprint', () => {
     const r = await handleDeclareFootprint({ directory: b, actorId: 'agent-b', writeSet: ['src/config.ts::parseConfig'] });
     const conflicts = r.conflicts as Array<Record<string, unknown>>;
     expect(conflicts).toHaveLength(1);
-    expect(conflicts[0]).toMatchObject({ actorId: 'agent-a', branch: 'feat-a', worktree: a, hazard: 'WAW', title: 'Harden config parsing', provenance: 'local-unreviewed' });
+    // The worktree is reported as git spells it (forward slashes on Windows).
+    expect(conflicts[0]).toMatchObject({ actorId: 'agent-a', branch: 'feat-a', worktree: git(a, 'rev-parse', '--show-toplevel'), hazard: 'WAW', title: 'Harden config parsing', provenance: 'local-unreviewed' });
     expect((r.findings as Array<{ code: string }>).map(f => f.code)).toEqual(['parallel-work-conflict']);
     expect(renderFootprint(r)).toContain('WAW');
   });
