@@ -30,9 +30,38 @@ const MAX_FILE_BYTES = 1024 * 1024;
  * (`npx`, `time`, `pnpm exec`, …) before its first word is compared. So `cat jest.config.js`,
  * `git commit -m "fix vitest"`, and `pip install pytest` are not runs.
  */
-const RUNNER_HEAD = /^(?:vitest|jest|mocha|ava|pytest|py\.test|tox|nox|rspec|phpunit|pest|ctest|tap)(?=\s|$)|^(?:playwright\s+test|cypress\s+run|deno\s+test|bun\s+test|node\s+--test|dotnet\s+test|go\s+test|cargo\s+(?:test|nextest)|mix\s+test|swift\s+test|bazel\s+test|nx\s+(?:run\s+\S+:)?test|turbo\s+(?:run\s+)?test|python3?\s+-m\s+(?:pytest|unittest)|python3?\s+manage\.py\s+test)(?=\s|$)|^(?:\.\/)?(?:mvnw?|gradlew?)(?:\s+\S+)*\s+(?:test|verify|check)(?=\s|$)/;
-const PM_HEAD = /^(?:npm|pnpm|yarn|bun)(?:\.cmd)?(?:\s+--?\S+(?:\s+\S+)?)*?\s+(?:run\s+)?(?:test|t)(?=\s|$|:)/;
-const MAKE_HEAD = /^make(?:\s+-\S+(?:\s+\S+)?)*\s+(?:test|check)[\w-]*(?=\s|$)/;
+const RUNNER_HEAD = /^(?:vitest|jest|mocha|ava|pytest|py\.test|tox|nox|rspec|phpunit|pest|ctest|tap)(?=\s|$)|^(?:playwright\s+test|cypress\s+run|deno\s+test|bun\s+test|node\s+--test|dotnet\s+test|go\s+test|cargo\s+(?:test|nextest)|mix\s+test|swift\s+test|bazel\s+test|nx\s+(?:run\s+\S+:)?test|turbo\s+(?:run\s+)?test|python3?\s+-m\s+(?:pytest|unittest)|python3?\s+manage\.py\s+test)(?=\s|$)/;
+/** Options that take a separate value word (`--prefix sub`, `make -C pkg`). */
+const VALUE_OPTIONS = new Set(['--prefix', '-C', '--dir', '--filter', '-F', '--cwd', '-f', '--file', '--makefile', '-w', '--workspace']);
+
+/**
+ * Word-level checks for package-manager, make, and Maven/Gradle runs. Word by word, not one regular
+ * expression: optional repeated option groups would backtrack exponentially on hostile input.
+ */
+function wordHeadIsRun(seg: string): boolean {
+  const words = seg.split(/\s+/).filter(Boolean).slice(0, 64);
+  if (!words.length) return false;
+  const tool = words[0].replace(/\.cmd$/i, '');
+  /** The first word after the tool that is not an option (or an option's value). */
+  const firstArg = (from: number): number => {
+    for (let i = from; i < words.length; i++) {
+      if (!words[i].startsWith('-')) return i;
+      if (VALUE_OPTIONS.has(words[i])) i++;
+    }
+    return -1;
+  };
+  if (/^(?:npm|pnpm|yarn|bun)$/.test(tool)) {
+    let i = firstArg(1);
+    if (i !== -1 && words[i] === 'run') i = firstArg(i + 1);
+    return i !== -1 && /^(?:test|t)(?::\S*)?$/.test(words[i]);
+  }
+  if (tool === 'make') {
+    const i = firstArg(1);
+    return i !== -1 && /^(?:test|check)[\w-]*$/.test(words[i]);
+  }
+  if (/^(?:\.\/)?(?:mvnw?|gradlew?)$/.test(tool)) return words.slice(1).some(w => /^(?:test|verify|check)$/.test(w));
+  return false;
+}
 const NOT_A_RUN = /\s--(?:version|help|listTests|list-tests|collect-only|co)(?=\s|$)|\s-h(?=\s|$)/;
 const WRAPPER = /^(?:(?:\w+=\S*\s+)+|(?:sudo|time|env|nice|command|exec)\s+|(?:npx|bunx)\s+(?:--?\S+\s+)*|pnpm\s+(?:exec|dlx)\s+|yarn\s+(?:dlx\s+)?(?=[a-z])(?!(?:test|run|t)\b)|(?:\.\/)?node_modules\/\.bin\/)/;
 
@@ -104,7 +133,7 @@ function declaredTestCommands(root: string): RegExp | undefined {
 export function isTestCommand(root: string, command: string): boolean {
   const declared = declaredTestCommands(root);
   return segments(command.slice(0, 4000)).some(seg =>
-    !NOT_A_RUN.test(` ${seg}`) && (RUNNER_HEAD.test(seg) || PM_HEAD.test(seg) || MAKE_HEAD.test(seg) || (declared?.test(seg) ?? false)));
+    !NOT_A_RUN.test(` ${seg}`) && (RUNNER_HEAD.test(seg) || wordHeadIsRun(seg) || (declared?.test(seg) ?? false)));
 }
 
 /** A command as stored and shown: assignments dropped, secrets redacted, control text removed. */

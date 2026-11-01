@@ -56,6 +56,17 @@ describe('isTestCommand', () => {
   });
 });
 
+describe('isTestCommand on hostile input', () => {
+  it('stays fast on repeated option-like words (no regular-expression backtracking)', () => {
+    const root = repo();
+    for (const p of ['npm -!' + ' -! -!'.repeat(4000), 'make -!' + ' -! -!'.repeat(4000), 'npm -' + '-! -'.repeat(4000), './mvnw ' + 'x '.repeat(4000), 'npx ' + '-a '.repeat(4000) + 'vitest']) {
+      const t = performance.now();
+      isTestCommand(root, p);
+      expect(performance.now() - t).toBeLessThan(500);
+    }
+  });
+});
+
 describe('edits after the last test run', () => {
   it('names the symbol edited after the run, not the one before it', async () => {
     const root = repo();
