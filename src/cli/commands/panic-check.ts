@@ -129,7 +129,8 @@ export const panicCheckCommand = new Command('panic-check')
  */
 function withLedgerFacts(output: ReturnType<typeof buildPanicCheckOutput>, dir: string, format: HookFormat): ReturnType<typeof buildPanicCheckOutput> {
   if (format !== 'claude' && format !== 'codex') return output;
-  const live = readLiveLedger(resolve(dir));
+  let live: ReturnType<typeof readLiveLedger>;
+  try { live = readLiveLedger(resolve(dir)); } catch { return output; } // never costs the panic output
   if (!('ledger' in live)) return output;
   const { backgroundChanges, editOscillation } = live.ledger;
   if (!backgroundChanges.length && !editOscillation.length) return output;

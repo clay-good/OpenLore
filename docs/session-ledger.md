@@ -43,13 +43,24 @@ do not depend on the hook.
 
 `openlore status --json` has a `session` block: `counts` (served, edited, untracked, dropped),
 `backgroundChanges[]`, `editOscillation[]` (with each symbol's recent hash cycle), `editSource`, and
-`withheld` when a fact is withheld. The `panic-check` hook adds `sessionLedger` with the same two
-lists to its JSON output when they are not empty.
+`withheld` when a fact is withheld. When the panic layer is on (`panicResponse.mode` `advisory` or
+`experimental_blocking`), the `panic-check` hook adds `sessionLedger` with the same two lists to its
+JSON output when they are not empty.
 
 These read the ledger of the one live MCP server for the worktree. With none, or with several, the
 facts are withheld and the reason is given: OpenLore never picks a session.
 
 ## Limits
+
+- The agent's own edit is matched to the version the watcher observed within 5 seconds of the
+  hook's report (any time since the previous version, when versions are sampled at tool calls). Two
+  agents editing the same worktree, each with an after-edit hook, cannot be told apart: one agent's
+  edit counts as the other's own, so it is withheld, never misreported. Give each agent its own
+  worktree.
+- A watcher batch of more than 20 files (a branch switch, a formatter run) hashes the files this
+  session tracks first; the rest are counted as `untracked`, not treated as edits.
+- A file first seen already edited starts from its committed (`HEAD`) version, so a return to it
+  counts as a return.
 
 - A file OpenLore cannot hash (an unsupported language, over 1 MB) is counted as `untracked`, never
   treated as unchanged.

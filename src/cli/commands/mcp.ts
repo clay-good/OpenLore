@@ -3037,8 +3037,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
               if (ledger && ledger.root === resolve(dir)) void ledger.recordReindexed(files);
             },
           });
-          autoWatcherRoot = resolve(dir);
           const watcherStart = autoWatcher.start();
+          // The ledger takes versions from the watcher only once it is running.
+          void watcherStart.then(() => { autoWatcherRoot = resolve(dir); ledger?.setWatcherActive(ledger.root === autoWatcherRoot); }, () => {});
           void watcherStart.catch(error => {
             process.stderr.write(`[mcp-watcher] startup failed: ${(error as Error).message}\n`);
           });
