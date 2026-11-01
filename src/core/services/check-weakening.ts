@@ -23,7 +23,7 @@ import { readFile } from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import type Parser from 'tree-sitter';
 import { safeJoin } from '../../utils/path-confinement.js';
-import { execFileGit } from '../../utils/git-exec.js';
+import { execFileGit, spawnGit } from '../../utils/git-exec.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { isTestFile } from '../analyzer/test-file.js';
@@ -77,6 +77,8 @@ export interface WeakeningFile {
   path: string;
   base: string | null;
   current: string | null;
+  /** The file exceeds the read cap at one of the two revisions; it is reported not-assessed. */
+  tooLarge?: true;
 }
 
 /** Which production symbols a test file reaches, from the index. */
@@ -101,6 +103,8 @@ const MAX_REACH_DEPTH = 12;
 interface TestCase {
   /** Suite path and name, unique within the file. */
   key: string;
+  /** The key before same-title cases were numbered. */
+  title?: string;
   line: number;
   /** A skip/ignore/disable marker applies (on the case, an enclosing suite, or a skip call in its body). */
   disabled: string | null;
@@ -135,7 +139,9 @@ function* walk(root: Node, skip?: (n: Node) => boolean): Generator<Node> {
     const n = stack.pop()!;
     yield n;
     if (n !== root && skip?.(n)) continue;
-    for (let i = n.namedChildCount - 1; i >= 0; i--) stack.push(n.namedChild(i)!);
+    // `namedChildren` once: `namedChild(i)` is O(i) on a wide node, so a loop over it is quadratic.
+    const kids = n.namedChildren;
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
   }
 }
 
@@ -164,28 +170,82 @@ function isLiteral(n: Node): boolean {
   return true;
 }
 
+const STRING_TYPES = new Set(['string', 'template_string', 'interpreted_string_literal', 'raw_string_literal', 'string_literal', 'concatenated_string', 'character_literal', 'rune_literal']);
+const NUMBER_TYPES = new Set(['number', 'integer', 'float', 'int_literal', 'float_literal', 'decimal_integer_literal', 'hex_integer_literal', 'decimal_floating_point_literal']);
+
+/** A literal's value, independent of quote style, number spelling, spacing and line endings. */
+function literalValue(n: Node, depth = 0): string {
+  if (STRING_TYPES.has(n.type)) {
+    return 's:' + n.text.replace(/\r\n/g, '\n').replace(/^[a-zA-Z]*(['"`]{1,3})/, '').replace(/(['"`]{1,3})$/, '');
+  }
+  if (NUMBER_TYPES.has(n.type)) {
+    const v = Number(n.text.replace(/_/g, '').replace(/[lLfFdD]$/, ''));
+    return Number.isFinite(v) ? 'n:' + v : n.text;
+  }
+  if (!n.namedChildCount || depth > 50) return n.text;
+  return n.type + '(' + n.namedChildren.map(c => literalValue(c, depth + 1)).join(',') + ')';
+}
+
 function literalArgs(args: Node | null): string[] {
-  return args ? args.namedChildren.filter(isLiteral).map(a => a.text) : [];
+  return args ? args.namedChildren.filter(isLiteral).map(a => literalValue(a)) : [];
+}
+
+/** Literal arguments of an assertion call, without a trailing message string. */
+function assertionArgs(args: Node | null): string[] {
+  const all = args?.namedChildren ?? [];
+  const last = all[all.length - 1];
+  const kept = all.length >= 2 && last && STRING_TYPES.has(last.type) && !isLiteral(all[0]) ? all.slice(0, -1)
+    : all.length >= 3 && last && STRING_TYPES.has(last.type) ? all.slice(0, -1) : all;
+  return kept.filter(isLiteral).map(a => literalValue(a));
+}
+
+/** Every literal value inside a node: a test's data table (`each` rows, `parametrize` arguments, a Go table). */
+function dataLiterals(n: Node | null | undefined): string[] {
+  const out: string[] = [];
+  if (!n) return out;
+  for (const d of walk(n, c => LITERAL_TYPES.has(c.type))) if (d !== n && LITERAL_TYPES.has(d.type)) out.push(literalValue(d));
+  return out;
 }
 
 // TypeScript / JavaScript — Vitest, Jest, Mocha.
 const JS_CASES = new Set(['it', 'test', 'specify', 'xit', 'xtest', 'xspecify', 'fit', 'ftest']);
 const JS_SUITES = new Set(['describe', 'context', 'suite', 'xdescribe', 'xcontext', 'xsuite', 'fdescribe']);
-const JS_SKIP_MODS = new Set(['skip', 'todo', 'skipIf', 'runIf']);
+const JS_SKIP_MODS = new Set(['skip', 'todo', 'skipIf', 'runIf', 'failing', 'fails']);
 const JS_ASSERT_ROOTS = new Set(['expect', 'assert', 'expectTypeOf', 'assertType']);
 
-/** `it.skip.each(t)` → { root: 'it', mods: ['skip', 'each'] }. */
-function jsCallee(call: Node): { root: string; mods: string[] } | null {
+/** `it.skip.each(t)` → { root: 'it', mods: ['skip', 'each'], table: t }. */
+function jsCallee(call: Node): { root: string; mods: string[]; table?: Node } | null {
   let fn = call.childForFieldName('function');
   const mods: string[] = [];
-  if (fn?.type === 'call_expression') fn = fn.childForFieldName('function'); // it.each(table)('name', fn)
+  let table: Node | undefined;
+  if (fn?.type === 'call_expression') { // it.each(table)('name', fn)
+    table = fn.childForFieldName('arguments') ?? undefined;
+    fn = fn.childForFieldName('function');
+  }
   while (fn?.type === 'member_expression') {
     const prop = fn.childForFieldName('property');
     if (prop) mods.unshift(prop.text);
     fn = fn.childForFieldName('object');
     if (fn?.type === 'call_expression') fn = fn.childForFieldName('function');
   }
-  return fn?.type === 'identifier' ? { root: fn.text, mods } : null;
+  return fn?.type === 'identifier' ? { root: fn.text, mods, ...(table ? { table } : {}) } : null;
+}
+
+/** A title: a string, or a template literal's raw text when it has substitutions. */
+function jsTitle(n: Node | null | undefined): string | null {
+  return stringValue(n) ?? (n?.type === 'template_string' ? n.text.slice(1, -1) : null);
+}
+
+/** `this.skip()` / `ctx.skip()` / `t.skip()` called in a test body (a call node, not text). */
+function jsSkipCall(body: Node): boolean {
+  for (const d of walk(body)) {
+    if (d.type !== 'call_expression') continue;
+    const fn = d.childForFieldName('function');
+    if (fn?.type !== 'member_expression' || fn.childForFieldName('property')?.text !== 'skip') continue;
+    const obj = fn.childForFieldName('object');
+    if (obj && (obj.type === 'this' || /^(?:ctx|context|t)$/.test(obj.text))) return true;
+  }
+  return false;
 }
 
 function jsMarkers(c: { root: string; mods: string[] }): { disabled: string | null; focused: string | null } {
@@ -202,14 +262,16 @@ function jsAssertions(body: Node): { count: number; literals: string[] } {
     if (n.type !== 'call_expression') continue;
     const fn = n.childForFieldName('function');
     const isRoot = fn?.type === 'identifier' && JS_ASSERT_ROOTS.has(fn.text);
-    const isMember = fn?.type === 'member_expression' && fn.childForFieldName('object')?.type === 'identifier'
-      && JS_ASSERT_ROOTS.has(fn.childForFieldName('object')!.text);
+    const obj = fn?.type === 'member_expression' ? fn.childForFieldName('object') : null;
+    const isMember = obj?.type === 'identifier' && (JS_ASSERT_ROOTS.has(obj.text)
+      || (obj.text === 'chai' && JS_ASSERT_ROOTS.has(fn!.childForFieldName('property')?.text ?? '')));
     if (!isRoot && !isMember) continue;
     count++;
     // `assert.equal(a, 1)` / `assert(x === 1)`: every literal argument. `expect(actual)`: the actual
     // value is not an expected value, so only the chained matcher calls' literals count.
-    const actualSide = isRoot && (fn!.text === 'expect' || fn!.text === 'expectTypeOf');
-    if (!actualSide) literals.push(...literalArgs(n.childForFieldName('arguments')));
+    const head = isRoot ? fn!.text : obj?.text === 'chai' ? fn!.childForFieldName('property')?.text : undefined;
+    const actualSide = head === 'expect' || head === 'expectTypeOf';
+    if (!actualSide) literals.push(...assertionArgs(n.childForFieldName('arguments')));
     let cur: Node = n;
     while (cur.parent && (cur.parent.type === 'member_expression' || (cur.parent.type === 'call_expression' && cur.parent.childForFieldName('function')?.id === cur.id))) {
       cur = cur.parent;
@@ -230,7 +292,7 @@ function jsCases(root: Node): TestCase[] {
     if (n.type === 'call_expression') {
       const callee = jsCallee(n);
       const args = n.childForFieldName('arguments');
-      const title = stringValue(args?.namedChild(0));
+      const title = jsTitle(args?.namedChildren[0]);
       if (callee && title !== null && (JS_CASES.has(callee.root) || JS_SUITES.has(callee.root))) {
         const m = jsMarkers(callee);
         if (JS_SUITES.has(callee.root)) {
@@ -243,25 +305,26 @@ function jsCases(root: Node): TestCase[] {
           out.push({
             key: [...suite, title].join(' > '),
             line: n.startPosition.row + 1,
-            disabled: disabled ?? m.disabled ?? (body && /\b(?:ctx|context|this|t)\.skip\s*\(/.test(body.text) ? 'skip()' : null),
+            disabled: disabled ?? m.disabled ?? (body && jsSkipCall(body) ? 'skip()' : null),
             focused: focused ?? m.focused,
             assertions: a.count,
-            literals: a.literals,
+            literals: [...dataLiterals(callee.table), ...a.literals],
             bodyHash: hash(body?.text ?? ''),
           });
           continue; // a test case's body holds no further cases
         }
       }
     }
-    for (let i = n.namedChildCount - 1; i >= 0; i--) {
-      stack.push({ n: n.namedChild(i)!, suite: childSuite, disabled: childDisabled, focused: childFocused });
+    const kids = n.namedChildren;
+    for (let i = kids.length - 1; i >= 0; i--) {
+      stack.push({ n: kids[i], suite: childSuite, disabled: childDisabled, focused: childFocused });
     }
   }
   return out;
 }
 
 // Python — pytest, unittest.
-const PY_SKIP_DECORATOR = /^@\s*(?:pytest\.mark\.(?:skip|skipif|xfail)|unittest\.(?:skip|skipIf|skipUnless|expectedFailure)|skip|skipIf|skipUnless|expectedFailure)\b/;
+const PY_SKIP_DECORATOR = /^@\s*(?:(?:pytest\.)?mark\.(?:skip|skipif|xfail)|unittest\.(?:skip|skipIf|skipUnless|expectedFailure)|skip|skipIf|skipUnless|expectedFailure)\b/;
 
 function pyDecorators(def: Node): string[] {
   const parent = def.parent;
@@ -270,10 +333,12 @@ function pyDecorators(def: Node): string[] {
 
 function pyCases(root: Node): TestCase[] {
   const out: TestCase[] = [];
+  // A module-level `pytestmark = pytest.mark.skip(...)` disables every test in the file.
+  const moduleMark = /^pytestmark\s*=.*\b(?:skip|skipif|xfail)\b/m.test(root.text) ? 'pytestmark' : null;
   for (const n of walk(root)) {
     if (n.type !== 'function_definition') continue;
     const name = n.childForFieldName('name')?.text ?? '';
-    if (!/^test/.test(name)) continue;
+    if (!/^test/.test(name) || pyDecorators(n).some(d => /\bfixture\b/.test(d))) continue;
     let nested = false;
     for (let p = n.parent; p && !nested; p = p.parent) nested = p.type === 'function_definition';
     if (nested) continue;
@@ -288,26 +353,27 @@ function pyCases(root: Node): TestCase[] {
       for (const d of walk(body, c => c.type === 'function_definition')) {
         if (d.type === 'assert_statement') {
           count++;
-          for (const c of d.namedChildren) {
-            if (c.type === 'comparison_operator') literals.push(...c.namedChildren.filter(isLiteral).map(x => x.text));
-            else if (isLiteral(c)) literals.push(c.text);
-          }
+          // The condition only: `assert x == 1, "message"` keeps 1, not the message.
+          const cond = d.namedChildren[0];
+          if (cond?.type === 'comparison_operator') literals.push(...cond.namedChildren.filter(isLiteral).map(x => literalValue(x)));
+          else if (cond && isLiteral(cond)) literals.push(literalValue(cond));
         } else if (d.type === 'call') {
           const fn = d.childForFieldName('function');
           const last = fn?.type === 'attribute' ? fn.childForFieldName('attribute')?.text : fn?.type === 'identifier' ? fn.text : undefined;
           if (last && (/^assert/.test(last) || (fn?.type === 'attribute' && /^pytest\.(?:raises|warns)$/.test(fn.text)))) {
             count++;
-            literals.push(...literalArgs(d.childForFieldName('arguments')));
+            literals.push(...assertionArgs(d.childForFieldName('arguments')));
           }
         }
       }
     }
+    for (const dec of pyDecorators(n)) if (/\bparametrize\b/.test(dec)) literals.unshift(...dataLiterals(n.parent?.namedChildren.find(c => c.text === dec)));
     const skipDecorator = decorators.find(d => PY_SKIP_DECORATOR.test(d));
     const skipCall = body && /\b(?:pytest\.skip|self\.skipTest)\s*\(/.test(body.text);
     out.push({
       key: clsName ? `${clsName}.${name}` : name,
       line: n.startPosition.row + 1,
-      disabled: skipDecorator ? skipDecorator.replace(/\(.*$/s, '') : skipCall ? 'skip()' : null,
+      disabled: skipDecorator ? skipDecorator.replace(/\(.*$/s, '') : skipCall ? 'skip()' : moduleMark,
       focused: null,
       assertions: count,
       literals,
@@ -346,12 +412,16 @@ function goCase(key: string, line: number, body: Node, out: TestCase[]): void {
     const operand = fn.childForFieldName('operand');
     if (operand?.type === 'identifier' && (operand.text === 'assert' || operand.text === 'require')) {
       count++;
-      literals.push(...literalArgs(n.childForFieldName('arguments')));
+      literals.push(...assertionArgs(n.childForFieldName('arguments')));
     } else if (GO_FAIL.has(field)) {
       count++;
     } else if (GO_SKIP.has(field)) {
       disabled ??= `t.${field}`;
     }
+  }
+  // A table-driven test's rows are its expected values: the composite literals in its own body.
+  for (const n of walk(body, c => goSubtest(c) !== null || c.type === 'composite_literal')) {
+    if (n !== body && n.type === 'composite_literal') literals.unshift(...dataLiterals(n));
   }
   out.push({ key, line, disabled, focused: null, assertions: count, literals, bodyHash: hash(body.text) });
   for (const s of subtests) goCase(`${key}/${s.title}`, s.line, s.body, out);
@@ -385,7 +455,8 @@ function javaCases(root: Node): TestCase[] {
     const annotations = javaAnnotations(n);
     if (!annotations.some(a => JAVA_TEST_ANNOTATIONS.has(a))) continue;
     const cls = n.parent?.parent;
-    const clsAnnotations = cls?.type === 'class_declaration' ? javaAnnotations(cls) : [];
+    const clsAnnotations: string[] = [];
+    for (let p: Node | null = n.parent; p; p = p.parent) if (p.type === 'class_declaration') clsAnnotations.push(...javaAnnotations(p));
     const body = n.childForFieldName('body');
     let count = 0;
     const literals: string[] = [];
@@ -394,7 +465,7 @@ function javaCases(root: Node): TestCase[] {
         if (d.type !== 'method_invocation' || !/^assert/.test(d.childForFieldName('name')?.text ?? '')) continue;
         count++;
         // `assertThat(actual)` names the actual value; `assertEquals(expected, actual)` both.
-        if (d.childForFieldName('name')!.text !== 'assertThat') literals.push(...literalArgs(d.childForFieldName('arguments')));
+        if (d.childForFieldName('name')!.text !== 'assertThat') literals.push(...assertionArgs(d.childForFieldName('arguments')));
         let cur: Node = d;
         while (cur.parent?.type === 'method_invocation' && cur.parent.childForFieldName('object')?.id === cur.id) {
           cur = cur.parent;
@@ -418,6 +489,15 @@ function javaCases(root: Node): TestCase[] {
   return out;
 }
 
+/** Test libraries in an assessed language that are outside the closed table, by an import of theirs. */
+const UNSUPPORTED_FRAMEWORKS: Record<string, RegExp> = {
+  TypeScript: /(?:\bfrom\s+|\brequire\s*\(\s*|\bimport\s+)['"](?:node:test|tap|ava|tape|uvu|zora)['"]/,
+  Python: /^\s*(?:import\s+nose\b|from\s+nose\b)/m,
+  Go: /"github\.com\/(?:onsi\/ginkgo|smartystreets\/goconvey)/,
+  Java: /\bimport\s+(?:static\s+)?org\.testng\./,
+};
+UNSUPPORTED_FRAMEWORKS.JavaScript = UNSUPPORTED_FRAMEWORKS.TypeScript;
+
 function extractCases(language: string, root: Node): TestCase[] {
   const raw = language === 'Python' ? pyCases(root)
     : language === 'Go' ? goCases(root)
@@ -428,15 +508,16 @@ function extractCases(language: string, root: Node): TestCase[] {
   return raw.map(c => {
     const k = seen.get(c.key) ?? 0;
     seen.set(c.key, k + 1);
-    return k ? { ...c, key: `${c.key} #${k + 1}` } : c;
+    return { ...c, title: c.key, ...(k ? { key: `${c.key} #${k + 1}` } : {}) };
   });
 }
 
 // ── Suppressions ────────────────────────────────────────────────────────────────
 
 const SUPPRESSIONS: Record<string, Array<[label: string, re: RegExp]>> = {
-  TypeScript: [['@ts-ignore', /@ts-ignore\b/], ['@ts-expect-error', /@ts-expect-error\b/], ['@ts-nocheck', /@ts-nocheck\b/],
-    ['eslint-disable', /\beslint-disable(?:-next-line|-line)?\b/], ['biome-ignore', /\bbiome-ignore\b/], ['istanbul ignore', /\b(?:istanbul|c8|v8) ignore\b/]],
+  // A directive opens its comment: prose that mentions `@ts-ignore` is not one.
+  TypeScript: [['@ts-ignore', /^\/[/*]+\s*@ts-ignore\b/], ['@ts-expect-error', /^\/[/*]+\s*@ts-expect-error\b/], ['@ts-nocheck', /^\/[/*]+\s*@ts-nocheck\b/],
+    ['eslint-disable', /^\/[/*]+\s*eslint-disable(?:-next-line|-line)?\b/], ['biome-ignore', /^\/[/*]+\s*biome-ignore\b/], ['istanbul ignore', /^\/[/*]+\s*(?:istanbul|c8|v8) ignore\b/]],
   Python: [['# noqa', /#\s*noqa\b/], ['# type: ignore', /#\s*type:\s*ignore\b/], ['# pylint: disable', /#\s*pylint:\s*disable\b/],
     ['# pragma: no cover', /#\s*pragma:\s*no\s*cover\b/], ['# nosec', /#\s*nosec\b/]],
   Go: [['//nolint', /\/\/\s*nolint\b/], ['//lint:ignore', /\/\/\s*lint:ignore\b/], ['#nosec', /#nosec\b/]],
@@ -451,10 +532,10 @@ function suppressionMarkers(language: string, root: Node): Marker[] {
   const table = SUPPRESSIONS[language] ?? [];
   for (const n of walk(root)) {
     if (n.type === 'comment' || n.type === 'line_comment' || n.type === 'block_comment') {
-      for (const [label, re] of table) if (re.test(n.text)) out.push({ label, text: n.text.trim(), line: n.startPosition.row + 1 });
+      for (const [label, re] of table) if (re.test(n.text)) out.push({ label, text: n.text.replace(/\s+/g, ' ').trim(), line: n.startPosition.row + 1 });
     } else if (language === 'Java' && (n.type === 'annotation' || n.type === 'marker_annotation')
         && /^(?:java\.lang\.)?SuppressWarnings$/.test(n.childForFieldName('name')?.text ?? '')) {
-      out.push({ label: '@SuppressWarnings', text: n.text, line: n.startPosition.row + 1 });
+      out.push({ label: '@SuppressWarnings', text: n.text.replace(/\s+/g, ''), line: n.startPosition.row + 1 });
     }
   }
   return out;
@@ -479,17 +560,21 @@ function onlyLogs(language: string, block: Node | null | undefined): boolean {
   const statements = block.namedChildren.flatMap(c => (c.type === 'statement_list' ? c.namedChildren : [c]));
   return statements.every(s => {
     if (s.type === 'comment' || s.type === 'pass_statement' || s.type === 'empty_statement') return true;
+    // Python `except: ...`
+    if (s.type === 'expression_statement' && s.text.trim() === '...') return true;
     // `return;`, `return null`, `return 0`, Go `return nil`: a constant stands in for the error.
     if (s.type === 'return_statement') return s.namedChildren.flatMap(c => (c.type === 'expression_list' ? c.namedChildren : [c])).every(isLiteral);
     if (s.type !== 'expression_statement') return false;
-    return re.test(s.text.trim());
+    const call = s.text.trim().replace(/^await\s+/, '');
+    // `log.Fatal`, `logger.Panicf`: logs, then ends the process or panics — the error is not discarded.
+    return re.test(call) && !/^[\w.]*\.(?:Fatal|Panic)\w*\s*\(/.test(call);
   });
 }
 
 function enclosingFunction(n: Node): string {
   for (let p = n.parent; p; p = p.parent) {
     const name = p.childForFieldName('name');
-    if (name && /function|method|def/.test(p.type)) return name.text;
+    if (name && /function|method|def|constructor/.test(p.type)) return name.text;
     if (p.type === 'arrow_function' && p.parent?.type === 'variable_declarator') return p.parent.childForFieldName('name')?.text ?? '<anonymous>';
   }
   return '<module>';
@@ -523,7 +608,7 @@ function swallowedHandlers(language: string, root: Node): Swallow[] {
     if (!isHandler) continue;
     const block = n.type === 'except_clause' ? n.namedChildren.find(c => c.type === 'block') : n.childForFieldName('body');
     if (!onlyLogs(language, block)) continue;
-    const tryNode = n.parent?.type === 'try_statement' ? n.parent : null;
+    const tryNode = n.parent?.type === 'try_statement' || n.parent?.type === 'try_with_resources_statement' ? n.parent : null;
     const tryBody = tryNode?.childForFieldName('body') ?? tryNode?.namedChildren.find(c => c.type === 'block') ?? null;
     const call = firstCall(tryBody);
     if (!call) continue;
@@ -544,28 +629,43 @@ export function checkConfigKind(path: string): ConfigKind | null {
   if (/^\.(?:eslint|stylelint)ignore$/.test(name)) return 'ignore-file';
   if (/^(?:\.eslintrc(?:\.\w+)?|eslint\.config\.[cm]?[jt]s|\.golangci\.ya?ml|\.?ruff\.toml|\.flake8|\.pylintrc|pylintrc|mypy\.ini|biome\.jsonc?)$/.test(name)) return 'lint';
   if (/^(?:\.nycrc(?:\.\w+)?|\.c8rc(?:\.\w+)?|\.coveragerc|\.?codecov\.ya?ml)$/.test(name)) return 'coverage';
-  if (/^(?:(?:vitest|jest|vite|playwright|karma|cypress)\.config\.[cm]?[jt]s|jest\.config\.json|\.mocharc(?:\.\w+)?|pytest\.ini|package\.json)$/.test(name)) return 'test-runner';
+  if (/^(?:(?:vitest|jest|vite|playwright|karma|cypress)\.config\.[cm]?[jt]s|karma\.conf\.[cm]?[jt]s|jest\.config\.json|\.mocharc(?:\.\w+)?|pytest\.ini|package\.json)$/.test(name)) return 'test-runner';
   if (/^(?:pyproject\.toml|setup\.cfg|tox\.ini)$/.test(name)) return 'sectioned';
   return null;
 }
 
-const IGNORE_KEY = /(?:^|[\s"'{,[-])(?:exclude|excludes|extend-exclude|exclude[_-](?:dirs|files|lines|rules)|ignore|ignores|ignorePatterns|extend-ignore|per-file-ignores|(?:test|coverage|module|watch)PathIgnorePatterns|testIgnore|omit|skip-(?:dirs|files)|norecursedirs|deselect|disable|disabled-checks|--ignore|--deselect)\b/i;
+const IGNORE_KEY = /(?:^|[\s"'{,[-])(?:exclude|excludes|extend-exclude|exclude[_-](?:dirs|files|lines|rules)|ignore|ignores|ignorePatterns|extend-ignore|per-file-ignores|(?:test|coverage|module|watch)PathIgnorePatterns|testIgnore|omit|skip-(?:dirs|files)|norecursedirs|deselect|disable|disabled-checks|--ignore|--deselect|ignore[_-](?:missing[_-]imports|errors))\b/i;
 const THRESHOLD = /\b(fail[_-]?under|cov-fail-under|branches|functions|lines|statements|threshold|minimum[_-]?coverage|min[_-]?coverage)\b["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)/g;
 const CHECK_SECTION = /pytest|coverage|ruff|flake8|pylint|mypy|pycodestyle|bandit|testenv/i;
 const TEST_COMMAND = /\b(?:(?:npm|pnpm|yarn|bun)(?: run)? test\b|vitest|jest|mocha|pytest|tox\b|go test|cargo test|(?:mvn|mvnw)\b.*\b(?:test|verify)\b|gradlew?\b.*\b(?:test|check)\b|rspec|make (?:test|check)\b|dotnet test|phpunit)/;
 
 /** Lines in `current` that `base` does not have (multiset), with their 1-based line numbers. */
 function addedLines(base: string, current: string): Array<{ line: number; text: string }> {
+  // A list item that only gained a separator (`"a"` → `"a",`) is the same entry.
+  const norm = (l: string) => l.trim().replace(/,$/, '');
   const remaining = new Map<string, number>();
-  for (const l of base.split(/\r?\n/)) remaining.set(l.trim(), (remaining.get(l.trim()) ?? 0) + 1);
+  for (const l of base.split(/\r?\n/)) remaining.set(norm(l), (remaining.get(norm(l)) ?? 0) + 1);
   const out: Array<{ line: number; text: string }> = [];
   current.split(/\r?\n/).forEach((l, i) => {
-    const t = l.trim();
+    const t = norm(l);
     const left = remaining.get(t) ?? 0;
     if (left > 0) remaining.set(t, left - 1);
-    else if (t) out.push({ line: i + 1, text: t });
+    else if (t) out.push({ line: i + 1, text: l.trim() });
   });
   return out;
+}
+
+/** The check-related keys of a package.json, as text (`null` when it is not valid JSON). */
+const PACKAGE_CHECK_KEYS = ['jest', 'c8', 'nyc', 'mocha', 'vitest', 'eslintConfig'];
+function packageChecks(text: string): string | null {
+  if (!text.trim()) return '';
+  try {
+    const pkg = JSON.parse(text) as Record<string, unknown>;
+    if (!pkg || typeof pkg !== 'object') return '';
+    return JSON.stringify(Object.fromEntries(PACKAGE_CHECK_KEYS.filter(k => k in pkg).map(k => [k, pkg[k]])), null, 2);
+  } catch {
+    return null;
+  }
 }
 
 const LIST_ITEM = /^(?:-\s|["'`][^"'`]*["'`],?$|[\w./*-]+,?$)/;
@@ -598,22 +698,39 @@ function thresholds(text: string): Map<string, number[]> {
   return out;
 }
 
-interface CiFacts { testSteps: Map<string, string>; allSteps: Set<string>; allowFailure: Set<string> }
+interface CiFacts {
+  /** Test commands (by their sorted tokens) → where they ran. */
+  testSteps: Map<string, { where: string; command: string }>;
+  allSteps: Set<string>;
+  allowFailure: Set<string>;
+  /** Jobs and steps turned off (`if: false`, GitLab `when: manual` / `never`). */
+  disabled: Set<string>;
+}
+
+/** A command's identity: its tokens, sorted (flag order and line layout do not matter). */
+function commandKey(command: string): string {
+  return command.split(/\s+/).filter(Boolean).sort().join(' ');
+}
 
 function ciFacts(text: string): CiFacts | null {
   let doc: unknown;
   try { doc = parseYaml(text, { maxAliasCount: 100 }); } catch { return null; }
-  const facts: CiFacts = { testSteps: new Map(), allSteps: new Set(), allowFailure: new Set() };
+  const facts: CiFacts = { testSteps: new Map(), allSteps: new Set(), allowFailure: new Set(), disabled: new Set() };
   if (!doc || typeof doc !== 'object') return facts;
   const record = (where: string, run: unknown) => {
-    const commands = (Array.isArray(run) ? run : [run]).filter((r): r is string => typeof r === 'string');
-    for (const c of commands) {
+    const scripts = (Array.isArray(run) ? run : [run]).filter((r): r is string => typeof r === 'string');
+    // One command per line or `&&` / `;` segment; `cmd || true` stays one segment, so it differs.
+    for (const c of scripts.flatMap(r => r.split(/\n|&&|;/))) {
       const norm = c.replace(/\s+/g, ' ').trim();
-      facts.allSteps.add(norm);
-      if (TEST_COMMAND.test(norm)) facts.testSteps.set(norm, where);
+      if (!norm) continue;
+      const key = commandKey(norm);
+      facts.allSteps.add(key);
+      if (TEST_COMMAND.test(norm)) facts.testSteps.set(key, { where, command: norm });
     }
   };
-  const truthy = (v: unknown) => v === true || v === 'true' || (typeof v === 'string' && /\$\{\{/.test(v));
+  const truthy = (v: unknown) => v === true || v === 'true' || (typeof v === 'string' && /\$\{\{/.test(v))
+    || (!!v && typeof v === 'object' && !Array.isArray(v)); // GitLab `allow_failure: { exit_codes: … }`
+  const off = (v: unknown) => v === false || v === 'false' || (typeof v === 'string' && /^\$\{\{\s*false\s*\}\}$/.test(v.trim()));
   const jobs = (doc as Record<string, unknown>).jobs;
   if (jobs && typeof jobs === 'object') {
     // GitHub Actions.
@@ -621,6 +738,7 @@ function ciFacts(text: string): CiFacts | null {
       if (!job || typeof job !== 'object') continue;
       const j = job as Record<string, unknown>;
       if (truthy(j['continue-on-error'])) facts.allowFailure.add(`job ${jobName}`);
+      if (off(j.if)) facts.disabled.add(`job ${jobName}`);
       const steps = Array.isArray(j.steps) ? j.steps : [];
       steps.forEach((s, i) => {
         if (!s || typeof s !== 'object') return;
@@ -628,15 +746,18 @@ function ciFacts(text: string): CiFacts | null {
         const label = `job ${jobName}, step ${typeof step.name === 'string' ? step.name : i + 1}`;
         record(label, step.run);
         if (truthy(step['continue-on-error'])) facts.allowFailure.add(label);
+        if (off(step.if)) facts.disabled.add(label);
       });
     }
   } else {
     // GitLab CI: every top-level mapping with a script is a job.
+    // Hidden `.template` jobs are read too: a job that extends one runs its script.
     for (const [jobName, job] of Object.entries(doc as Record<string, unknown>)) {
-      if (!job || typeof job !== 'object' || jobName.startsWith('.')) continue;
+      if (!job || typeof job !== 'object' || Array.isArray(job)) continue;
       const j = job as Record<string, unknown>;
       record(`job ${jobName}`, j.script);
-      if (j.allow_failure === true) facts.allowFailure.add(`job ${jobName}`);
+      if (truthy(j.allow_failure)) facts.allowFailure.add(`job ${jobName}`);
+      if (j.when === 'manual' || j.when === 'never') facts.disabled.add(`job ${jobName}`);
     }
   }
   return facts;
@@ -644,16 +765,28 @@ function ciFacts(text: string): CiFacts | null {
 
 function configRelaxations(path: string, kind: ConfigKind, base: string, current: string): Array<{ line?: number; message: string; discriminator: string }> {
   const out: Array<{ line?: number; message: string; discriminator: string }> = [];
+  // package.json: only its test, coverage and lint keys count; lines then refer to that subset.
+  const isPackage = /(?:^|\/)package\.json$/.test(path);
+  if (isPackage) {
+    const b = packageChecks(base);
+    const c = packageChecks(current);
+    if (b === null || c === null) return out;
+    base = b;
+    current = c;
+  }
   const lines = current.split(/\r?\n/);
   if (kind === 'ci') {
     const before = ciFacts(base);
     const after = ciFacts(current);
     if (!before || !after) return out; // unparsable YAML: disclosed by the caller
-    for (const [step, where] of before.testSteps) {
-      if (!after.allSteps.has(step)) out.push({ message: `A CI step that ran tests was removed or changed in ${path} (${where}): \`${step}\`.`, discriminator: `step:${step}` });
+    for (const [key, step] of before.testSteps) {
+      if (!after.allSteps.has(key)) out.push({ message: `A CI step that ran tests was removed or changed in ${path} (${step.where}): \`${step.command}\`.`, discriminator: `step:${key}` });
     }
     for (const where of after.allowFailure) {
       if (!before.allowFailure.has(where)) out.push({ message: `Failure is now allowed for ${where} in ${path} (continue-on-error / allow_failure).`, discriminator: `allow:${where}` });
+    }
+    for (const where of after.disabled) {
+      if (!before.disabled.has(where)) out.push({ message: `${where[0].toUpperCase()}${where.slice(1)} in ${path} no longer runs on its own (\`if: false\` / \`when: manual\`).`, discriminator: `off:${where}` });
     }
   } else {
     for (const a of addedLines(base, current)) {
@@ -663,20 +796,29 @@ function configRelaxations(path: string, kind: ConfigKind, base: string, current
         out.push({ line: a.line, message: `An ignore pattern was added to ${path}: \`${a.text}\`.`, discriminator: `line:${a.text}` });
         continue;
       }
-      if (IGNORE_KEY.test(governingLine(lines, a.line - 1))) {
-        out.push({ line: a.line, message: `An exclude/ignore entry was added to ${path}: \`${a.text}\`.`, discriminator: `line:${a.text}` });
-      } else if (kind === 'lint' && /["']?\s*[:=]\s*\[?\s*["']?(?:off|0)["']?\s*(?:[,\]}]|$)/.test(a.text)) {
-        out.push({ line: a.line, message: `A lint rule was turned off in ${path}: \`${a.text}\`.`, discriminator: `line:${a.text}` });
+      const line = isPackage ? undefined : a.line;
+      if (IGNORE_KEY.test(governingLine(lines, a.line - 1)) || ((kind === 'sectioned' || kind === 'lint') && /per-file-ignores|exclude/i.test(sectionOf(lines, a.line - 1)))) {
+        out.push({ line, message: `An exclude/ignore entry was added to ${path}: \`${a.text}\`.`, discriminator: `line:${a.text}` });
+      } else if (kind === 'lint' && !/max-?warnings/i.test(a.text) && lines.slice(0, a.line - 1).some(l => /\brules\b/.test(l))
+          && /["']?\s*[:=]\s*\[?\s*["']?(?:off|0)["']?\s*(?:[,\]}]|$)/.test(a.text)) {
+        out.push({ line, message: `A lint rule was turned off in ${path}: \`${a.text}\`.`, discriminator: `line:${a.text}` });
       }
     }
   }
   if (kind !== 'lint' && kind !== 'ignore-file') {
-    const before = thresholds(base);
-    for (const [key, values] of thresholds(current)) {
-      values.forEach((v, i) => {
-        const was = before.get(key)?.[i];
-        if (was !== undefined && v < was) out.push({ message: `A coverage threshold \`${key}\` was lowered from ${was} to ${v} in ${path}.`, discriminator: `threshold:${key}:${i}` });
-      });
+    // Compared as sorted values per key: reordering entries changes nothing, a lowered one is found
+    // at its rank, and a key with fewer values than before lost a threshold.
+    const after = thresholds(current);
+    for (const [key, was] of thresholds(base)) {
+      const now = after.get(key) ?? [];
+      if (now.length < was.length) {
+        out.push({ message: `A coverage threshold \`${key}\` was removed from ${path} (${was.length} before, ${now.length} now).`, discriminator: `threshold-removed:${key}` });
+        continue;
+      }
+      const a = [...was].sort((x, y) => x - y);
+      const b = [...now].sort((x, y) => x - y);
+      const i = a.findIndex((v, k) => b[k] < v);
+      if (i >= 0) out.push({ message: `A coverage threshold \`${key}\` was lowered from ${a[i]} to ${b[i]} in ${path}.`, discriminator: `threshold:${key}` });
     }
   }
   return out;
@@ -737,7 +879,9 @@ function finding(
 ): CheckWeakeningFinding {
   return {
     code, severity, source: CHECK_WEAKENING_SOURCE,
-    subject: emittedText(subject), message: emittedText(message), discriminator: emittedText(discriminator),
+    subject: emittedText(subject), message: emittedText(message),
+    // Hashed: unique even when the screened subject is withheld, and never repository text.
+    discriminator: hash(discriminator),
     location: line === undefined ? { path: emittedText(path) } : { path: emittedText(path), line },
   };
 }
@@ -760,6 +904,33 @@ export async function detectWeakeningShapes(
   const notAssessed: NotAssessed[] = [];
   const boundaries: string[] = [];
   let capped = 0;
+  /** Test files with findings whose reach the index does not record. */
+  const noReach: string[] = [];
+
+  // Bodies of test cases that are new in some test file of the diff: a removed case whose body
+  // reappears there was moved (another file, or `mv` + a new name), not removed.
+  // Each revision is parsed once, for this pass and the one below.
+  const trees = new Map<WeakeningFile, { baseRoot: Node | null; curRoot: Node | null }>();
+  const rootsOf = async (f: WeakeningFile, language: string) => {
+    let t = trees.get(f);
+    if (!t) {
+      t = {
+        baseRoot: f.base !== null ? await parse(language, f.path, f.base) : null,
+        curRoot: f.current !== null ? await parse(language, f.path, f.current) : null,
+      };
+      trees.set(f, t);
+    }
+    return t;
+  };
+  const movedBodies = new Set<string>();
+  for (const f of files) {
+    const language = detectLanguage(f.path);
+    if (f.tooLarge || f.current === null || !isTestFile(f.path) || !ASSESSED_LANGUAGES.has(language)) continue;
+    const { baseRoot, curRoot: cur } = await rootsOf(f, language);
+    if (!cur || cur.hasError) continue;
+    const baseHashes = new Set(baseRoot && !baseRoot.hasError ? extractCases(language, baseRoot).map(c => c.bodyHash) : []);
+    for (const c of extractCases(language, cur)) if (!baseHashes.has(c.bodyHash)) movedBodies.add(c.bodyHash);
+  }
 
   for (const f of files) {
     const fileFindings: CheckWeakeningFinding[] = [];
@@ -767,12 +938,26 @@ export async function detectWeakeningShapes(
       if (fileFindings.length > MAX_FINDINGS_PER_FILE) capped += fileFindings.length - MAX_FINDINGS_PER_FILE;
       findings.push(...fileFindings.slice(0, MAX_FINDINGS_PER_FILE));
     };
+    if (f.tooLarge) {
+      notAssessed.push({ file: emittedText(f.path), shapes: [...CHECK_WEAKENING_CODES], reason: `the file is larger than ${MAX_FILE_BYTES / 1024 / 1024} MB at one of the two revisions` });
+      continue;
+    }
     const kind = checkConfigKind(f.path);
-    if (kind && f.base !== null && f.current !== null) {
-      if (kind === 'ci' && (!ciFacts(f.base) || !ciFacts(f.current))) {
-        notAssessed.push({ file: f.path, shapes: ['check-config-relaxed'], reason: 'the workflow is not valid YAML at one of the two revisions' });
+    if (kind && f.current === null && f.base !== null && (kind === 'lint' || kind === 'coverage' || (kind === 'test-runner' && !/package\.json$/.test(f.path)))) {
+      // A deleted lint, coverage or test-runner config takes its checks with it.
+      fileFindings.push(finding('check-config-relaxed', 'warning', f.path, `The check config ${f.path} was deleted.`, f.path, undefined, 'deleted'));
+    } else if (kind && !(kind === 'ci' && f.base === null)) {
+      // A deleted workflow is compared against nothing (its test steps are gone); an added config
+      // against nothing (its ignore entries are new). A new workflow cannot relax an existing check.
+      const base = f.base ?? '';
+      const current = f.current ?? '';
+      if (kind === 'ci' && (!ciFacts(base) || !ciFacts(current))) {
+        notAssessed.push({ file: emittedText(f.path), shapes: ['check-config-relaxed'], reason: 'the workflow is not valid YAML at one of the two revisions' });
       }
-      for (const r of configRelaxations(f.path, kind, f.base, f.current)) {
+      if (/(?:^|\/)package\.json$/.test(f.path) && (packageChecks(base) === null || packageChecks(current) === null)) {
+        notAssessed.push({ file: emittedText(f.path), shapes: ['check-config-relaxed'], reason: 'package.json is not valid JSON at one of the two revisions' });
+      }
+      for (const r of configRelaxations(f.path, kind, base, current)) {
         fileFindings.push(finding('check-config-relaxed', 'warning', r.line ? `${f.path}:${r.line}` : f.path, r.message, f.path, r.line, r.discriminator));
       }
     }
@@ -781,14 +966,14 @@ export async function detectWeakeningShapes(
     const isTest = isTestFile(f.path);
     if (language === 'unknown' || kind) { push(); continue; }
     if (!ASSESSED_LANGUAGES.has(language)) {
-      notAssessed.push({ file: f.path, shapes: isTest ? [...TEST_SHAPES, ...CODE_SHAPES] : CODE_SHAPES, reason: `${language} is outside the closed language table` });
+      notAssessed.push({ file: emittedText(f.path), shapes: isTest ? [...TEST_SHAPES, ...CODE_SHAPES] : CODE_SHAPES, reason: `${language} is outside the closed language table` });
       push();
       continue;
     }
-    const baseRoot = f.base !== null ? await parse(language, f.path, f.base) : null;
-    const curRoot = f.current !== null ? await parse(language, f.path, f.current) : null;
-    if ((f.base !== null && !baseRoot) || (f.current !== null && !curRoot)) {
-      notAssessed.push({ file: f.path, shapes: isTest ? [...TEST_SHAPES, ...CODE_SHAPES] : CODE_SHAPES, reason: 'the file could not be parsed at one of the two revisions' });
+    const { baseRoot, curRoot } = await rootsOf(f, language);
+    if ((f.base !== null && !baseRoot) || (f.current !== null && !curRoot) || baseRoot?.hasError || curRoot?.hasError) {
+      // A syntax error (a conflict marker, a half-written edit) would read as removed tests.
+      notAssessed.push({ file: emittedText(f.path), shapes: isTest ? [...TEST_SHAPES, ...CODE_SHAPES] : CODE_SHAPES, reason: 'the file has a syntax error, or could not be parsed, at one of the two revisions' });
       push();
       continue;
     }
@@ -805,11 +990,12 @@ export async function detectWeakeningShapes(
       // error-swallowed: a function holds more error-discarding handlers than at the baseline; the
       // extra ones are those around a call the baseline did not so wrap (an edited try body that was
       // already swallowed keeps the count and is not reported).
+      // A new file's handlers wrap new code: nothing the baseline checked is now discarded.
       const baseSwallows = baseRoot ? swallowedHandlers(language, baseRoot) : [];
       const wrapped = new Set(baseSwallows.map(s => s.key));
       const perFn = new Map<string, number>();
       for (const s of baseSwallows) perFn.set(s.fn, (perFn.get(s.fn) ?? 0) + 1);
-      const curSwallows = swallowedHandlers(language, curRoot);
+      const curSwallows = baseRoot ? swallowedHandlers(language, curRoot) : [];
       const curPerFn = new Map<string, number>();
       for (const s of curSwallows) curPerFn.set(s.fn, (curPerFn.get(s.fn) ?? 0) + 1);
       const extra = new Map([...curPerFn].map(([fn, n]) => [fn, n - (perFn.get(fn) ?? 0)]));
@@ -821,24 +1007,41 @@ export async function detectWeakeningShapes(
       }
     }
 
-    if (isTest) fileFindings.push(...testShapes(f, language, baseRoot, curRoot, reach, changedIds, notAssessed));
+    if (isTest) fileFindings.push(...testShapes(f, language, baseRoot, curRoot, reach, changedIds, notAssessed, noReach, movedBodies));
     push();
   }
   if (capped) boundaries.push(`${capped} check-weakening finding(s) past ${MAX_FINDINGS_PER_FILE} per file were omitted.`);
+  if (noReach.length && reach) {
+    boundaries.push(`Test findings in ${noReach.slice(0, 5).map(emittedText).join(', ')}${noReach.length > 5 ? ', …' : ''} name no production symbol: the index records none that ${noReach.length > 1 ? 'these test files reach' : 'this test file reaches'}.`);
+  }
   return { findings, notAssessed, boundaries };
 }
 
 function testShapes(
   f: WeakeningFile, language: string, baseRoot: Node | null, curRoot: Node | null,
-  reach: ReachIndex | undefined, changedIds: ReadonlySet<string> | undefined, notAssessed: NotAssessed[],
+  reach: ReachIndex | undefined, changedIds: ReadonlySet<string> | undefined, notAssessed: NotAssessed[], noReach: string[],
+  movedBodies?: ReadonlySet<string>,
 ): CheckWeakeningFinding[] {
   const out: CheckWeakeningFinding[] = [];
+  // A test library outside the closed table: its cases and assertions are not recognized, so the
+  // file is not-assessed rather than read as having no tests.
+  const framework = UNSUPPORTED_FRAMEWORKS[language];
+  const foreign = framework && [f.base, f.current].map(t => (t !== null ? framework.exec(t)?.[0] : undefined)).find(Boolean);
+  if (foreign) {
+    notAssessed.push({ file: emittedText(f.path), shapes: TEST_SHAPES, reason: `a test framework outside the closed table is used (${emittedText(foreign.replace(/\s+/g, ' ').trim())})` });
+    return out;
+  }
   const baseCases = baseRoot ? extractCases(language, baseRoot) : [];
   const curCases = curRoot ? extractCases(language, curRoot) : [];
   const r = reach?.reachOf(f.path) ?? { recorded: false, symbols: [] };
-  const reached = r.symbols.map(s => s.name);
-  const changed = r.symbols.filter(s => changedIds?.has(s.id)).map(s => s.name);
+  const reached = r.symbols.map(s => emittedText(s.name));
+  const changed = r.symbols.filter(s => changedIds?.has(s.id)).map(s => emittedText(s.name));
+  if (!baseCases.length && !curCases.length) {
+    notAssessed.push({ file: emittedText(f.path), shapes: TEST_SHAPES, reason: 'no test case of a framework in the closed table was recognized' });
+    return out;
+  }
   const joined = (fnd: CheckWeakeningFinding, guarded: boolean): CheckWeakeningFinding => {
+    if (guarded && !reached.length && !noReach.includes(f.path)) noReach.push(f.path);
     if (!guarded || !reached.length) return fnd;
     const tail = changed.length
       ? ` The test file reaches ${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ` and ${changed.length - 3} more` : ''}, in code this diff changes.`
@@ -858,14 +1061,32 @@ function testShapes(
     }
     return out;
   }
-  const cur = new Map(curCases.map(c => [c.key, c]));
-  const baseKeys = new Set(baseCases.map(c => c.key));
-  const newBodies = new Set(curCases.filter(c => !baseKeys.has(c.key)).map(c => c.bodyHash));
+  // Pair base and current cases with the same title: an identical body first, then by order, so a
+  // new same-titled test inserted before an old one is not compared against it.
+  const pairOf = new Map<TestCase, TestCase>();
+  const byTitle = (cases: TestCase[]) => {
+    const m = new Map<string, TestCase[]>();
+    for (const c of cases) (m.get(c.title ?? c.key) ?? m.set(c.title ?? c.key, []).get(c.title ?? c.key)!).push(c);
+    return m;
+  };
+  const curByTitle = byTitle(curCases);
+  for (const [title, bs] of byTitle(baseCases)) {
+    const free = [...(curByTitle.get(title) ?? [])];
+    const rest: TestCase[] = [];
+    for (const b of bs) {
+      const k = free.findIndex(c => c.bodyHash === b.bodyHash);
+      if (k >= 0) pairOf.set(b, free.splice(k, 1)[0]);
+      else rest.push(b);
+    }
+    rest.forEach((b, k) => { if (free[k]) pairOf.set(b, free[k]); });
+  }
+  const paired = new Set(pairOf.values());
+  const newBodies = new Set([...curCases.filter(c => !paired.has(c)).map(c => c.bodyHash), ...(movedBodies ?? [])]);
   let evcUnassessed = false;
   for (const b of baseCases) {
-    const c = cur.get(b.key);
+    const c = pairOf.get(b);
     if (!c) {
-      if (newBodies.has(b.bodyHash)) continue; // renamed, same body
+      if (newBodies.has(b.bodyHash)) continue; // renamed or moved to another file, same body
       out.push(joined(finding('test-removed', 'warning', `${f.path}::${b.key}`, `Test ${quote(b.key)} was removed from ${f.path}.`, f.path, b.line, b.key), true));
       continue;
     }
@@ -879,7 +1100,8 @@ function testShapes(
       if (!r.recorded || !changedIds) { evcUnassessed = true; continue; }
       if (changed.length) continue; // the code it checks changed too: an expected value updated with its code
       const i = c.literals.findIndex((l, k) => l !== b.literals[k]);
-      const detail = i >= 0 && b.literals[i] !== undefined ? ` (${quote(b.literals[i])} → ${quote(c.literals[i])})` : '';
+      const shown = (v: string | undefined) => (v === undefined ? '(none)' : v.startsWith('s:') ? `"${v.slice(2)}"` : v.startsWith('n:') ? v.slice(2) : v);
+      const detail = i >= 0 ? ` (${quote(shown(b.literals[i]))} → ${quote(shown(c.literals[i]))})` : '';
       out.push(joined(finding('expected-value-changed', 'info', `${f.path}::${c.key}`,
         `An expected value in test ${quote(c.key)} changed${detail}, while no production symbol the test file reaches changed (${f.path}:${c.line}).`, f.path, c.line, c.key), true));
     }
@@ -888,12 +1110,13 @@ function testShapes(
   if (!baseCases.some(b => b.focused)) {
     const focused = curCases.find(c => c.focused);
     if (focused && curCases.length > 1) {
-      out.push(joined(finding('test-disabled', 'warning', `${f.path}::${focused.key}`,
-        `${quote(focused.focused!)} was added to test ${quote(focused.key)}; the other ${curCases.length - 1} test case(s) in ${f.path} no longer run.`, f.path, focused.line, `${focused.key}:focus`), true));
+      const fnd = finding('test-disabled', 'warning', `${f.path}::${focused.key}`,
+        `${quote(focused.focused!)} was added to test ${quote(focused.key)}; the other ${curCases.length - 1} test case(s) in ${f.path} no longer run.`, f.path, focused.line, `${focused.key}:focus`);
+      out.push(joined({ ...fnd, remediation: `Test ${fnd.subject} is focused, so the other tests in its file do not run; remove the focus marker.` }, true));
     }
   }
   if (evcUnassessed) {
-    notAssessed.push({ file: f.path, shapes: ['expected-value-changed'], reason: 'the index records no production symbol this test file reaches, so a changed expected value cannot be told apart from one updated with its code' });
+    notAssessed.push({ file: emittedText(f.path), shapes: ['expected-value-changed'], reason: 'the index records no production symbol this test file reaches, so a changed expected value cannot be told apart from one updated with its code' });
   }
   return out;
 }
@@ -901,6 +1124,8 @@ function testShapes(
 // ── Git: the fixed baseline and the changed files ───────────────────────────────
 
 const SHA = /^[0-9a-f]{40,64}$/;
+/** git's empty tree, which `resolveBaseRef` returns when there is no base at all. */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf899d15f71049056';
 
 async function git(root: string, args: string[]): Promise<string> {
   const { stdout } = await execFileGit('git', args, { cwd: root, maxBuffer: 32 * 1024 * 1024 });
@@ -912,37 +1137,145 @@ async function git(root: string, args: string[]): Promise<string> {
  * read as the default branch, so a weakening already committed on this branch is still compared.
  */
 export async function resolveWeakeningBaseline(root: string, baseRef: string | undefined, headRef?: string): Promise<{ ref: string; commit: string; note?: string }> {
-  const { resolveBaseRef } = await import('../drift/git-diff.js');
+  const { resolveBaseRefDisclosed } = await import('../drift/git-diff.js');
   const explicit = baseRef && baseRef !== 'HEAD' && baseRef !== 'auto' ? baseRef : undefined;
-  const ref = await resolveBaseRef(root, explicit ?? 'auto');
-  let commit = '';
-  try { commit = (await git(root, ['merge-base', ref, headRef ?? 'HEAD'])).trim(); } catch { /* no common ancestor */ }
+  const resolution = await resolveBaseRefDisclosed(root, explicit ?? 'auto');
+  let ref = resolution.resolved;
+  const tip = headRef ?? 'HEAD';
+  const mergeBase = async (r: string): Promise<string> => {
+    try { return (await git(root, ['merge-base', r, tip])).trim(); } catch { return ''; }
+  };
+  // No default branch and no parent commit (a single-commit repo, a shallow clone): the empty tree
+  // would make every file "added", where nothing can be weakened. The current commit is the baseline.
+  if (!explicit && ref === EMPTY_TREE) ref = 'HEAD';
+  let commit = await mergeBase(ref);
+  const noCommonAncestor = !SHA.test(commit);
+  let tipSha = '';
+  try { tipSha = (await git(root, ['rev-parse', '--verify', `${tip}^{commit}`])).trim(); } catch { /* unborn */ }
+  // On the default branch itself the local merge-base is the tip: the agent's own commits would be
+  // the baseline. The remote branch, when there is one, is the point those commits started from.
+  if (!explicit && SHA.test(commit) && commit === tipSha) {
+    for (const remote of ['refs/remotes/origin/HEAD', 'origin/main', 'origin/master']) {
+      const mb = await mergeBase(remote);
+      if (SHA.test(mb) && mb !== tipSha) { ref = remote; commit = mb; break; }
+    }
+  }
   if (!SHA.test(commit)) {
     try { commit = (await git(root, ['rev-parse', '--verify', `${ref}^{commit}`])).trim(); } catch { commit = ref; }
   }
-  const note = !explicit && (ref === 'HEAD~1' || !/^(?:main|master|refs\/remotes\/origin\/HEAD|origin\/main|origin\/master)$/.test(ref))
-    ? `No default branch was found, so the weakening baseline is ${ref}; pass baseRef to compare against the branch point.`
-    : undefined;
+  let note: string | undefined;
+  if (noCommonAncestor) {
+    note = `${ref} shares no history with ${tip}, so the weakening baseline is the tip of ${ref}, not a branch point.`;
+  } else if (resolution.fellBack) {
+    note = `The base ref '${emittedText(resolution.requested)}' did not resolve, so the weakening baseline is ${ref}.`;
+  } else if (!explicit && (ref === 'HEAD~1' || ref === 'HEAD' || !/^(?:main|master|refs\/remotes\/origin\/HEAD|origin\/main|origin\/master)$/.test(ref))) {
+    note = `No default branch was found, so the weakening baseline is ${ref}; pass baseRef to compare against the branch point.`;
+  } else if (!explicit && commit === tipSha) {
+    note = 'The weakening baseline is the current commit (this is the default branch, with no remote ahead of it), so only uncommitted changes are compared; pass baseRef to compare an earlier point.';
+  }
   return { ref, commit, ...(note ? { note } : {}) };
 }
 
-async function atRef(root: string, ref: string, path: string): Promise<string | null> {
+/** Run git with `input` on stdin; bounded output. */
+function gitWithInput(root: string, args: string[], input: string, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawnGit('git', args, { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const fail = (err: Error) => { if (!settled) { settled = true; child.kill(); rejectRun(err); } };
+    child.on('error', fail);
+    child.stdin.on('error', fail);
+    child.stdout.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > maxBytes) fail(new Error('git output exceeded its bound'));
+      else chunks.push(c);
+    });
+    child.on('close', code => {
+      if (settled) return;
+      settled = true;
+      if (code === 0) resolveRun(Buffer.concat(chunks));
+      else rejectRun(new Error(`git ${args[0]} exited ${code}`));
+    });
+    child.stdin.end(input);
+  });
+}
+
+type Blob = string | null | 'too-large';
+
+/**
+ * Read many `rev:path` blobs with two git processes (sizes, then contents) instead of two per file.
+ * Absent → `null`; over the cap → `'too-large'`.
+ */
+async function readBlobs(root: string, specs: readonly string[]): Promise<Map<string, Blob>> {
+  const out = new Map<string, Blob>();
+  const asked = specs.filter(sp => !/[\n\r]/.test(sp));
+  for (const sp of specs) if (!asked.includes(sp)) out.set(sp, null);
+  if (!asked.length) return out;
+  const checks = (await gitWithInput(root, ['cat-file', '--batch-check'], asked.map(sp => sp + '\n').join(''), 1024 * 1024 + asked.length * 128))
+    .toString('utf-8').split('\n');
+  const wanted: Array<{ spec: string; sha: string; size: number }> = [];
+  asked.forEach((sp, i) => {
+    const m = /^([0-9a-f]{40,64}) blob (\d+)$/.exec(checks[i] ?? '');
+    if (!m) out.set(sp, null);
+    else if (Number(m[2]) > MAX_FILE_BYTES) out.set(sp, 'too-large');
+    else wanted.push({ spec: sp, sha: m[1], size: Number(m[2]) });
+  });
+  if (!wanted.length) return out;
+  const total = wanted.reduce((n, w) => n + w.size + 128, 0);
+  const buf = await gitWithInput(root, ['cat-file', '--batch'], wanted.map(w => w.sha + '\n').join(''), total);
+  let pos = 0;
+  for (const w of wanted) {
+    const nl = buf.indexOf(0x0a, pos);
+    if (nl < 0) { out.set(w.spec, null); continue; }
+    pos = nl + 1;
+    out.set(w.spec, buf.subarray(pos, pos + w.size).toString('utf-8'));
+    pos += w.size + 1;
+  }
+  return out;
+}
+
+async function inWorkTree(root: string, path: string): Promise<Blob> {
   try {
-    const size = Number((await git(root, ['cat-file', '-s', `${ref}:${path}`])).trim());
-    if (!(size <= MAX_FILE_BYTES)) return null;
-    return await git(root, ['show', `${ref}:${path}`]);
+    const buf = await readFile(safeJoin(root, path));
+    return buf.length <= MAX_FILE_BYTES ? buf.toString('utf-8') : 'too-large';
   } catch {
     return null;
   }
 }
 
-async function inWorkTree(root: string, path: string): Promise<string | null> {
-  try {
-    const buf = await readFile(safeJoin(root, path));
-    return buf.length <= MAX_FILE_BYTES ? buf.toString('utf-8') : null;
-  } catch {
-    return null;
+/** NUL-separated records (`-z`): no path quoting, so no path is dropped. */
+function nulRecords(text: string): string[] {
+  return text.split('\0').filter(r => r.length > 0);
+}
+
+const POLICY_RANK: Record<string, number> = { off: 0, advisory: 1, frozen: 2, blocking: 2 };
+
+/**
+ * `.openlore/config.json` itself: a weakening code whose enforcement class the diff lowered
+ * (blocking → advisory, advisory → off, or an entry removed) relaxes the check that reports it.
+ */
+function policyRelaxations(path: string, base: string | null, current: string | null): Array<{ message: string; discriminator: string }> {
+  const policyOf = (text: string | null): Record<string, string> => {
+    if (!text) return {};
+    try {
+      const p = (JSON.parse(text) as { enforcement?: { policy?: Record<string, unknown> } })?.enforcement?.policy;
+      return p && typeof p === 'object' ? Object.fromEntries(Object.entries(p).filter((e): e is [string, string] => typeof e[1] === 'string')) : {};
+    } catch {
+      return {};
+    }
+  };
+  const before = policyOf(base);
+  const after = policyOf(current);
+  const out: Array<{ message: string; discriminator: string }> = [];
+  for (const code of CHECK_WEAKENING_CODES) {
+    const was = before[code] ?? 'advisory';
+    const now = after[code] ?? 'advisory';
+    if ((POLICY_RANK[now] ?? 1) < (POLICY_RANK[was] ?? 1)) {
+      out.push({ message: `The enforcement policy for \`${code}\` was lowered from ${was} to ${now} in ${path}.`, discriminator: `policy:${code}` });
+    }
   }
+  return out;
 }
 
 /**
@@ -962,38 +1295,62 @@ export async function checkWeakening(input: {
   const baseline = await resolveWeakeningBaseline(input.root, input.baseRef, input.headRef);
   if (baseline.note) boundaries.push(baseline.note);
   const entries: Array<{ path: string; oldPath?: string; status: ChangedFile['status'] }> = [];
+  const extra: CheckWeakeningFinding[] = [];
+  const files: WeakeningFile[] = [];
+  let relevant: typeof entries;
   try {
-    const out = await git(input.root, gitPathArgs('diff', '--name-status', '-M', '--diff-filter=ACDMR', baseline.commit, ...(input.headRef ? [input.headRef] : [])));
-    for (const line of out.split('\n').filter(Boolean)) {
-      const parts = line.split('\t');
-      const s = parts[0].charAt(0);
-      if (s === 'R' && parts.length >= 3) entries.push({ path: parts[2], oldPath: parts[1], status: 'renamed' });
-      else entries.push({ path: parts[1], status: s === 'A' ? 'added' : s === 'D' ? 'deleted' : 'modified' });
+    const records = nulRecords(await git(input.root, gitPathArgs('diff', '--name-status', '-z', '-M', '--diff-filter=ACDMR', baseline.commit, ...(input.headRef ? [input.headRef] : []))));
+    for (let i = 0; i < records.length;) {
+      const s = records[i].charAt(0);
+      if (s === 'R' && i + 2 < records.length) { entries.push({ path: records[i + 2], oldPath: records[i + 1], status: 'renamed' }); i += 3; continue; }
+      entries.push({ path: records[i + 1] ?? '', status: s === 'A' ? 'added' : s === 'D' ? 'deleted' : 'modified' });
+      i += 2;
     }
     if (!input.headRef) {
       const seen = new Set(entries.map(e => e.path));
-      for (const p of (await git(input.root, gitPathArgs('ls-files', '--others', '--exclude-standard'))).split('\n').map(s => s.trim()).filter(Boolean)) {
+      for (const p of nulRecords(await git(input.root, gitPathArgs('ls-files', '-z', '--others', '--exclude-standard')))) {
         if (!seen.has(p)) entries.push({ path: p, status: 'added' });
+      }
+    }
+    const scope = input.files ? new Set(input.files) : null;
+    const inScope = entries.filter(e => e.path && (!scope || scope.has(e.path) || (e.oldPath && scope.has(e.oldPath))));
+    // The repository's own enforcement policy is a check config too.
+    const policy = inScope.find(e => e.path === '.openlore/config.json');
+    relevant = inScope
+      .filter(e => checkConfigKind(e.path) || detectLanguage(e.path) !== 'unknown')
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    if (relevant.length > MAX_FILES) boundaries.push(`Check weakening read the first ${MAX_FILES} of ${relevant.length} changed files.`);
+    const read = [...relevant.slice(0, MAX_FILES), ...(policy ? [policy] : [])];
+    const specs = new Set<string>();
+    for (const e of read) {
+      if (e.status !== 'added') specs.add(`${baseline.commit}:${e.oldPath ?? e.path}`);
+      if (e.status !== 'deleted' && input.headRef) specs.add(`${input.headRef}:${e.path}`);
+    }
+    const blobs = await readBlobs(input.root, [...specs]);
+    const sideOf = async (e: typeof entries[number], side: 'base' | 'current'): Promise<Blob> => {
+      if (side === 'base') return e.status === 'added' ? null : blobs.get(`${baseline.commit}:${e.oldPath ?? e.path}`) ?? null;
+      if (e.status === 'deleted') return null;
+      return input.headRef ? blobs.get(`${input.headRef}:${e.path}`) ?? null : inWorkTree(input.root, e.path);
+    };
+    for (const e of relevant.slice(0, MAX_FILES)) {
+      const base = await sideOf(e, 'base');
+      const current = await sideOf(e, 'current');
+      if (base === 'too-large' || current === 'too-large') { files.push({ path: e.path, base: null, current: null, tooLarge: true }); continue; }
+      if (base === null && current === null) continue;
+      files.push({ path: e.path, base, current });
+    }
+    if (policy) {
+      const base = await sideOf(policy, 'base');
+      const current = await sideOf(policy, 'current');
+      if (base !== 'too-large' && current !== 'too-large') {
+        for (const r of policyRelaxations(policy.path, base, current)) {
+          extra.push(finding('check-config-relaxed', 'warning', policy.path, r.message, policy.path, undefined, r.discriminator));
+        }
       }
     }
   } catch (err) {
     return { baseline: { ref: baseline.ref, commit: baseline.commit }, findings: [], notAssessed: [],
-      boundaries: [...boundaries, `Check weakening was not assessed: git diff failed (${err instanceof Error ? err.message : String(err)}).`] };
-  }
-  const scope = input.files ? new Set(input.files) : null;
-  const relevant = entries
-    .filter(e => !scope || scope.has(e.path) || (e.oldPath && scope.has(e.oldPath)))
-    .filter(e => checkConfigKind(e.path) || detectLanguage(e.path) !== 'unknown')
-    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  if (relevant.length > MAX_FILES) boundaries.push(`Check weakening read the first ${MAX_FILES} of ${relevant.length} changed files.`);
-
-  const files: WeakeningFile[] = [];
-  for (const e of relevant.slice(0, MAX_FILES)) {
-    const base = e.status === 'added' ? null : await atRef(input.root, baseline.commit, e.oldPath ?? e.path);
-    const current = e.status === 'deleted' ? null
-      : input.headRef ? await atRef(input.root, input.headRef, e.path) : await inWorkTree(input.root, e.path);
-    if (base === null && current === null) continue;
-    files.push({ path: e.path, base, current });
+      boundaries: [...boundaries, `Check weakening was not assessed: git failed (${emittedText(err instanceof Error ? err.message : String(err))}).`] };
   }
 
   // Production symbols this change modifies, at symbol granularity where the index allows.
@@ -1020,7 +1377,7 @@ export async function checkWeakening(input: {
   }
   return {
     baseline: { ref: baseline.ref, commit: baseline.commit },
-    findings: detected.findings,
+    findings: [...extra, ...detected.findings],
     notAssessed: detected.notAssessed,
     boundaries: [...boundaries, ...detected.boundaries],
   };

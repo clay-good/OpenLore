@@ -26,7 +26,7 @@ type Receipt = {
   items: Array<{ subject: string; check: string; severity: string; nextAction: string }>;
   testsToRun: { count?: number; unavailable?: string; toRun?: unknown[] };
   boundaries: string[];
-  summary: Record<string, number | string>;
+  summary: Record<string, number | string | null>;
   truncated?: { omitted: number };
   error?: string;
 };
@@ -206,5 +206,10 @@ describe('projectVerifyReceipt — check weakening (add-check-weakening-findings
     expect(r.boundaries).toContain('No default branch was found');
     const failed = projectVerifyReceipt(briefing({}), { checkWeakening: { error: 'Check weakening was not assessed: boom' } }) as unknown as Receipt;
     expect(failed.boundaries).toContain('Check weakening was not assessed: boom');
+    // Not run is not "nothing weakened".
+    expect(failed.summary.checksWeakened).toBeNull();
+    expect((projectVerifyReceipt(briefing({}), { error: 'boom' }) as unknown as Receipt).summary.checksWeakened).toBeNull();
+    const silenced = projectVerifyReceipt(briefing({}), sd({ findings: [], silenced: [{ code: 'test-removed', subject: 'a' }] })) as unknown as Receipt;
+    expect(silenced.boundaries.some(b => b.includes('turned off by enforcement.policy (test-removed)'))).toBe(true);
   });
 });

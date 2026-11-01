@@ -345,7 +345,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     remediation: 'Generated file {subject} was edited without its source; edit the source and regenerate, or record why the hand edit is intended.',
   },
   // ── check weakening (add-check-weakening-findings) ──
-  // Returned by structural_diff and verify_change; `openlore enforce` does not collect them.
+  // Returned by structural_diff and verify_change, listed by `openlore review`; `openlore enforce` does not collect them.
   'test-removed': {
     defaultClass: 'advisory',
     source: 'check-weakening',
@@ -385,7 +385,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
   'check-config-relaxed': {
     defaultClass: 'advisory',
     source: 'check-weakening',
-    description: 'A test-runner, coverage, lint, or CI config was relaxed: an added exclude/ignore entry, a lint rule turned off, a lowered coverage threshold, an added `continue-on-error`/`allow_failure`, or a removed or changed CI step that ran tests.',
+    description: 'A test-runner, coverage, lint, or CI config was relaxed: an added exclude/ignore entry, a lint rule turned off, a lowered coverage threshold, an added `continue-on-error`/`allow_failure` or `if: false`, a removed or changed CI step that ran tests, a deleted check config, or a lowered enforcement class for one of these codes in `.openlore/config.json`.',
     remediation: 'A check config was relaxed at {subject}; confirm the relaxation is intended.',
   },
   // ── deprecation propagation (add-deprecation-propagation) ──

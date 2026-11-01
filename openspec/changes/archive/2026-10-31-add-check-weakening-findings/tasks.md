@@ -12,7 +12,8 @@
 - [x] Detectors: `test-removed`, `test-disabled`, `assertions-reduced`, `expected-value-changed`,
       `suppression-added`, `error-swallowed`, `check-config-relaxed`
 - [x] Reach join: each test finding names the production symbols the test file reaches in the
-      index (`tested_by` edges + forward call closure), and those the diff also changes
+      index at its last analysis (`tested_by` edges + forward call closure), and those in code the
+      diff changes; a test file with no recorded reach is disclosed
 - [x] Register the 7 codes in `FINDING_CODE_REGISTRY` (advisory); project into `structural_diff`
       (`checkWeakening`) and `verify_change` (items, `findings`, `gated`, `summary.checksWeakened`)
 - [x] Unsupported language/framework → `not-assessed` per file (also: no recorded reach for

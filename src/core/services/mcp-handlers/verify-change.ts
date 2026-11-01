@@ -58,6 +58,7 @@ interface StructuralDiffShape {
     baseline?: { ref: string; commit: string };
     findings?: ClassifiedFinding[];
     notAssessed?: Array<{ file: string; shapes: string[]; reason: string }>;
+    silenced?: Array<{ code: string; subject: string }>;
     boundaries?: string[];
     error?: string;
   };
@@ -159,6 +160,9 @@ export function projectVerifyReceipt(
   const weakening = sd.error ? undefined : sd.checkWeakening;
   const weakeningFindings = weakening?.findings ?? [];
   if (weakening?.error) boundaries.push(weakening.error);
+  if (weakening?.silenced?.length) {
+    boundaries.push(`${weakening.silenced.length} check-weakening finding(s) are turned off by enforcement.policy (${[...new Set(weakening.silenced.map(x => x.code))].join(', ')}).`);
+  }
   if (weakening?.baseline && weakening.baseline.ref !== b.resolvedBaseRef) {
     boundaries.push(`Check weakening compares against the merge-base with ${weakening.baseline.ref} (${weakening.baseline.commit.slice(0, 12)}), so a weakening committed earlier on the branch is included; the rest of this receipt compares against ${b.resolvedBaseRef}.`);
   }
@@ -218,7 +222,8 @@ export function projectVerifyReceipt(
       signatureChanges: sd.summary?.signatureChanges ?? 0,
       deprecatedCallsAdded: sd.summary?.deprecatedCallsAdded ?? 0,
       generatedFilesEdited: guardFindings.length,
-      checksWeakened: weakeningFindings.length,
+      // null: the check did not run (structural_diff or check weakening failed), not "nothing weakened".
+      checksWeakened: weakening && !weakening.error ? weakeningFindings.length : null,
     },
     items: kept,
     ...(omitted > 0 ? { truncated: { omitted, note: 'Lower-severity items omitted; raise the cap to see them.' } } : {}),

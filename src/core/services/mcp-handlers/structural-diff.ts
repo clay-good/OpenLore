@@ -456,6 +456,8 @@ async function checkWeakeningBlock(absDir: string, input: StructuralDiffInput, c
       baseline: result.baseline,
       findings: gate.classified.filter(f => f.enforcementClass !== 'off'),
       gated: gate.gated,
+      // A code the policy turns off is still named, so silencing is visible, never an absence.
+      ...(gate.off.length ? { silenced: gate.off.map(f => ({ code: f.code, subject: f.subject })) } : {}),
       ...(result.notAssessed.length ? { notAssessed: result.notAssessed } : {}),
       ...(result.boundaries.length ? { boundaries: result.boundaries } : {}),
     };

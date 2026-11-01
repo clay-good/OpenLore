@@ -91,6 +91,16 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(md).toContain('Advisory');                        // advisory footer
   });
 
+  it('lists check-weakening findings in Markdown and human output', () => {
+    const structural = { ...structuralWithDelta, checkWeakening: { findings: [
+      { code: 'test-disabled', severity: 'error', message: '`it.skip` was added to test `parses` (src/a.test.ts:4).' },
+    ] } };
+    const b: ReviewBriefing = { base: 'main', head: 'working tree', structural, blast: blastBriefing, caveats: [], status: 'ok' };
+    expect(renderMarkdown(b)).toContain('### Checks weakened');
+    expect(renderMarkdown(b)).toContain('**test-disabled**');
+    expect(renderHuman(b)).toContain('test-disabled: `it.skip` was added');
+  });
+
   it('renders the frozen/new ratchet receipt and initialization action', () => {
     const md = renderMarkdown({
       base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,

@@ -3713,7 +3713,7 @@ directory. A newly added generated file SHALL NOT fire it.
 each diff shape from a closed table that weakens a check: `test-removed`, `test-disabled`,
 `assertions-reduced`, `expected-value-changed`, `suppression-added`, `error-swallowed`, and
 `check-config-relaxed`. Shapes SHALL be computed against the baseline text at the resolved merge-base,
-never against the agent's most recent commit. Each finding SHALL name the production symbols the affected test reached at the baseline.
+never against the agent's most recent commit. Each test finding SHALL name the production symbols the affected test file reaches in the index at its last analysis, and a test file with no recorded reach SHALL be disclosed.
 `expected-value-changed` SHALL fire only when no production symbol reached by that test changed.
 Messages SHALL state the fact neutrally. A file in a language or framework outside the table SHALL
 be reported `not-assessed`, never as free of weakening.
