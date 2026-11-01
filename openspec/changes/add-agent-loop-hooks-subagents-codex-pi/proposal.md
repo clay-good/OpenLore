@@ -11,7 +11,7 @@
 |------|-------|
 | Sub-agent start: task-scoped `orient` + peers' footprints | `add-peer-footprint-board` (the `orient` half can ship alone) |
 | Team task created (block only, when a coordination code is blocking) | `add-peer-footprint-board` |
-| After any tool batch (`PostToolBatch`): test runs for the session ledger | `add-session-ledger-runs-contracts-tokens` |
+| After any tool batch (`PostToolBatch`): test runs for the session ledger | `add-session-ledger-runs-contracts-tokens` (shipped for Claude Code through the after-tools `Bash` matcher; other harnesses here) |
 | Before an edit: phantom references graded on the pending text | an in-memory `checkPhantomReferences` (today it reads the file from disk) |
 | Codex (`PreToolUse`, `PostToolUse`, `SessionStart`, `SubagentStart`; no `Stop` by default: it cannot inject) and Pi (`tool_call`, `tool_result`, `session_before_compact`, `before_agent_start`) | adapters; Codex keeps `hooks.json` or `config.toml`, Pi calls in-process |
 

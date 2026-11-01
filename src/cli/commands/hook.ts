@@ -24,6 +24,7 @@
 
 import { Command } from 'commander';
 import { createHash } from 'node:crypto';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -61,6 +62,11 @@ export interface HookPayload {
   toolName?: string;
   /** Files the tool call writes, as given (absolute or relative). */
   files: string[];
+  /** The shell command of a shell tool call, and its exit status when the payload carries one. */
+  command?: string;
+  exit?: number;
+  /** The shell call was interrupted before it finished. */
+  interrupted?: boolean;
   stopHookActive: boolean;
 }
 
@@ -73,7 +79,17 @@ export function parseHookPayload(raw: string): HookPayload {
   } catch { /* an unreadable payload is an empty one */ }
   const input = p.tool_input && typeof p.tool_input === 'object' ? (p.tool_input as Record<string, unknown>) : {};
   const files = [input.file_path, input.path, input.notebook_path].filter((f): f is string => typeof f === 'string' && f.length > 0);
+  const response = p.tool_response && typeof p.tool_response === 'object' ? (p.tool_response as Record<string, unknown>) : {};
+  let exit = [response.exit_code, response.exitCode, response.returncode, response.code].find((x): x is number => typeof x === 'number' && Number.isInteger(x));
+  // Claude Code reports a non-zero shell exit as a tool failure (PostToolUseFailure, `error` text).
+  if (exit === undefined && p.hook_event_name === 'PostToolUseFailure') {
+    const m = typeof p.error === 'string' ? /exit code (\d+)/i.exec(p.error) : null;
+    exit = m ? Number(m[1]) : 1;
+  }
   return {
+    ...(response.interrupted === true || p.is_interrupt === true ? { interrupted: true } : {}),
+    ...(typeof input.command === 'string' && input.command ? { command: input.command } : {}),
+    ...(exit !== undefined ? { exit } : {}),
     ...(typeof p.session_id === 'string' && p.session_id ? { sessionId: p.session_id } : {}),
     ...(typeof p.cwd === 'string' && p.cwd ? { cwd: p.cwd } : {}),
     ...(typeof p.tool_name === 'string' ? { toolName: p.tool_name } : {}),
@@ -275,7 +291,75 @@ async function afterTools(root: string, files: string[], baseline: string | unde
  * `before-stop`: the `verify_change` receipt. Blocks only when `enforcement.policy` makes one of its
  * findings blocking, and never twice in a row (`stop_hook_active`).
  */
-async function beforeStop(root: string, baseline: string | undefined): Promise<{ items: HookItem[]; block?: string }> {
+/**
+ * The symbols this session edited after its last observed test run, and the tests that reach them
+ * (change: add-session-ledger-runs-contracts-tokens). OpenLore runs no test.
+ */
+async function testRunItem(root: string, sessionId: string | undefined): Promise<HookItem | undefined> {
+  if (!sessionId) return undefined;
+  const { editsAfterLastRun } = await import('../../core/services/test-run-ledger.js');
+  const r = await editsAfterLastRun(root, sessionId);
+  if (!r) return undefined;
+  const when = (t: number) => new Date(t).toISOString().slice(11, 16);
+  const shellNote = 'Edits made through shell commands are not tracked.';
+  if (r.kind === 'not-observed') {
+    return { key: 'test-runs:not-observed', severity: 'info', text: 'Test runs are not observed in this session (no shell command reached the after-tools hook), so edits after the last run are not stated.' };
+  }
+  if (r.kind === 'no-run') {
+    const files = r.files!.slice(0, 5).join(', ');
+    return {
+      key: `test-runs:none:${r.files!.length}`, severity: 'warning',
+      text: `No completed test run was observed this session after editing ${files}${r.files!.length > 5 ? ` and ${r.files!.length - 5} more` : ''}${r.interruptedSince ? ` (${r.interruptedSince} run(s) were interrupted)` : ''}.`,
+      next: 'run the tests that reach these files',
+    };
+  }
+  const run = r.lastRun!;
+  const runText = `\`${run.command.slice(0, 80)}\` at ${when(run.at)} UTC${run.exit !== undefined ? `, exit ${run.exit}` : ''}`;
+  if (r.kind === 'clean') {
+    return run.exit !== undefined && run.exit !== 0
+      ? { key: `test-runs:failed:${run.at}`, severity: 'warning', text: `The last test run (${runText}) failed, and nothing was edited after it.`, next: 'fix the failure and rerun' }
+      : undefined;
+  }
+  const symbols = r.symbols ?? [];
+  const parts: string[] = [];
+  if (symbols.length) parts.push(`${symbols.slice(0, 8).map(s => `${s.name} (${s.file})${s.removed ? ' [removed]' : ''}`).join(', ')}${symbols.length > 8 ? ` and ${symbols.length - 8} more` : ''}`);
+  if (r.undetermined?.length) parts.push(`${r.undetermined.slice(0, 5).join(', ')} (which symbols is not determined)`);
+  // Only names the index knows exactly: a fuzzy name would seed tests for other symbols.
+  let testText: string;
+  try {
+    const { readCachedContext } = await import('../../core/services/mcp-handlers/utils.js');
+    const ctx = await readCachedContext(root);
+    const known = new Set((ctx?.callGraph?.nodes ?? []).map(n => n.name));
+    const names = [...new Set(symbols.filter(s => !s.removed).map(s => s.name))].filter(n => known.has(n));
+    const unknown = symbols.filter(s => !s.removed && !known.has(s.name)).length;
+    if (!ctx?.callGraph) testText = ' Tests that reach them are not computed (no index: run `openlore analyze`).';
+    else if (!names.length) testText = unknown ? ' Tests that reach them are not computed (the symbols are not in the index yet).' : '';
+    else {
+      const { handleSelectTests } = await import('../../core/services/mcp-handlers/test-impact.js');
+      const sel = await handleSelectTests({ directory: root, changedSymbols: names.slice(0, 50) }) as { selectedTests?: Array<{ test: string; file: string }>; error?: string };
+      if (sel.error || !sel.selectedTests) testText = ` Tests that reach them are not computed (${sel.error ?? 'no result'}).`;
+      else {
+        const tests = [...new Set(sel.selectedTests.map(t => `${t.file} › ${t.test}`))];
+        testText = tests.length
+          ? ` Tests that reach them: ${tests.slice(0, 6).join(', ')}${tests.length > 6 ? ` and ${tests.length - 6} more` : ''}.`
+          : ' No indexed test reaches them.';
+        if (unknown) testText += ` ${unknown} symbol(s) are not in the index yet.`;
+      }
+    }
+  } catch (e) {
+    testText = ` Tests that reach them are not computed (${e instanceof Error ? e.message.split('\n')[0] : String(e)}).`;
+  }
+  const keyBase = [...symbols.map(s => `${s.file}#${s.name}`), ...(r.undetermined ?? [])].join('\0');
+  return {
+    key: `test-runs:after:${run.at}:${createHash('sha256').update(keyBase).digest('hex').slice(0, 12)}`,
+    severity: 'warning',
+    text: sanitizeForTerminal(`Edited after the last test run (${runText}): ${parts.join('; ')}.${testText}${r.interruptedSince ? ` ${r.interruptedSince} later run(s) were interrupted.` : ''} ${shellNote}`),
+    next: 'rerun the tests that reach these edits',
+  };
+}
+
+async function beforeStop(root: string, baseline: string | undefined, sessionId?: string): Promise<{ items: HookItem[]; block?: string }> {
+  const runItem = await testRunItem(root, sessionId).catch(() => undefined);
   const { handleVerifyChange } = await import('../../core/services/mcp-handlers/verify-change.js');
   const r = await handleVerifyChange({ directory: root, ...(baseline ? { baseRef: baseline } : {}) }) as {
     error?: string;
@@ -283,8 +367,9 @@ async function beforeStop(root: string, baseline: string | undefined): Promise<{
     findings?: Array<{ code: string; subject: string; message: string; enforcementClass?: string; remediation?: string }>;
     gated?: boolean;
   };
-  if (r.error) return { items: [] };
+  if (r.error) return { items: runItem ? [runItem] : [] };
   const items: HookItem[] = (r.items ?? []).map(i => ({ key: `${i.check}:${i.subject}`, severity: i.severity, text: `${i.subject} [${i.check}]`, next: i.nextAction }));
+  if (runItem) items.push(runItem);
   const blocking = (r.findings ?? []).filter(f => f.enforcementClass === 'blocking');
   if (!r.gated || !blocking.length) return { items };
   const reason = [
@@ -359,6 +444,15 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
   if (moment === 'after-compact') return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment]);
   const files = payload.files.map(f => repoPath(root, f)).filter((f): f is string => !!f);
+  // A shell command (after-tools sees them too): count it and record a test run, nothing else, so a
+  // shell call stays cheap.
+  if (moment === 'after-tools' && payload.command !== undefined && !files.length) {
+    if (payload.sessionId) {
+      const { recordShellCommand } = await import('../../core/services/test-run-ledger.js');
+      await withLoggerOptions({ quiet: true }, () => recordShellCommand(root, payload.sessionId!, payload.command!, payload.exit, payload.interrupted === true)).catch(() => undefined);
+    }
+    return silent;
+  }
   if (moment === 'before-edit' && !files.length) return silent;
 
   let timer: NodeJS.Timeout | undefined;
@@ -371,9 +465,16 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
     const baseline = await sessionBaseline(root, session.startHead);
     // Quiet: the hook's stdout is the harness's JSON channel, so no log line may reach it.
     const work = withLoggerOptions({ quiet: true }, async () => {
-      if (moment === 'before-edit') return { items: await beforeEdit(root, files) };
-      if (moment === 'after-tools') return { items: await afterTools(root, files, baseline) };
-      return beforeStop(root, baseline);
+      const runs = await import('../../core/services/test-run-ledger.js');
+      if (moment === 'before-edit') {
+        if (payload.sessionId) await runs.recordEditIntent(root, payload.sessionId, files).catch(() => undefined);
+        return { items: await beforeEdit(root, files) };
+      }
+      if (moment === 'after-tools') {
+        if (payload.sessionId) await runs.recordEdits(root, payload.sessionId, files).catch(() => undefined);
+        return { items: await afterTools(root, files, baseline) };
+      }
+      return beforeStop(root, baseline, payload.sessionId);
     });
     const done = await Promise.race([work, timeout]);
     if (done === 'timeout') return silent;
