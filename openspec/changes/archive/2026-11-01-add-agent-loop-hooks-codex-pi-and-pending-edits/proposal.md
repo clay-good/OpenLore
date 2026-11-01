@@ -1,6 +1,7 @@
 # Agent-loop hooks, part 3: Codex, Pi, task creation, pending edits
 
-> Status: PROPOSED (2026-11-01). Split from `add-agent-loop-hooks-subagents-codex-pi`, which
+> Status: SHIPPED (2026-11-01), pending-edit references only; the rest moved to
+> `add-agent-loop-hooks-codex-and-pi`. Split from `add-agent-loop-hooks-subagents-codex-pi`, which
 > shipped the Claude Code sub-agent start briefing.
 
 ## Why
