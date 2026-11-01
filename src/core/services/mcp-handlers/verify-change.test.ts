@@ -283,3 +283,27 @@ describe('projectVerifyReceipt — phantom references (add-phantom-reference-fin
     expect(r.summary.unresolvedReferences).toBe(2);
   });
 });
+
+describe('projectVerifyReceipt — request bodies (add-contract-graph-projection)', () => {
+  const payload = {
+    findings: [{ code: 'contract-payload-missing-required', severity: 'warning' as const, source: 'service-contract', subject: 'src/client.ts:1', discriminator: 'POST /orders', message: 'src/client.ts:1 calls POST /orders without required body property customerId (api/openapi.yaml:6).', location: { path: 'src/client.ts', line: 1 } }],
+    boundaries: [], notAssessed: 2,
+  };
+
+  it('a missing required property is an item and a classified finding; unread bodies are disclosed', () => {
+    const r = projectVerifyReceipt(briefing({}), {}, undefined, undefined, undefined, payload) as unknown as Receipt & { findings?: Array<{ code: string; enforcementClass: string }> };
+    expect(r.items.find(i => i.check === 'contract_payload')?.subject).toContain('customerId');
+    expect(r.summary.payloadsMissingRequired).toBe(1);
+    expect(r.findings?.map(f => [f.code, f.enforcementClass])).toEqual([['contract-payload-missing-required', 'advisory']]);
+    expect(r.boundaries.join('\n')).toContain('2 request bodies in the changed files could not be read');
+  });
+
+  it('a blocking policy gates; off drops it; an error is a boundary', () => {
+    const gated = projectVerifyReceipt(briefing({}), {}, undefined, { 'contract-payload-missing-required': 'blocking' }, undefined, payload) as unknown as { gated?: boolean };
+    expect(gated.gated).toBe(true);
+    const off = projectVerifyReceipt(briefing({}), {}, undefined, { 'contract-payload-missing-required': 'off' }, undefined, payload) as unknown as Receipt & { findings?: unknown };
+    expect(off.findings).toBeUndefined();
+    const err = projectVerifyReceipt(briefing({}), {}, undefined, undefined, undefined, { error: 'boom' }) as unknown as Receipt;
+    expect(err.boundaries).toContain('request-body check unavailable: boom');
+  });
+});

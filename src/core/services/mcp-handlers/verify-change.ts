@@ -27,7 +27,7 @@ import { validateDirectory, readCachedContext } from './utils.js';
 import { guardDiff, type DiffGuardResult } from '../generated-file-guard.js';
 import { checkPhantomReferences, type PhantomReferenceResult } from '../phantom-references.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { classifyFindings, effectivePolicy, type ClassifiedFinding, type EnforcementPolicy } from './enforcement-policy.js';
+import { classifyFindings, effectivePolicy, type ClassifiedFinding, type EnforcementPolicy, type GovernanceFinding } from './enforcement-policy.js';
 
 type Severity = 'critical' | 'error' | 'warning' | 'info';
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, error: 1, warning: 2, info: 3 };
@@ -86,6 +86,7 @@ export function projectVerifyReceipt(
   guard?: DiffGuardResult | { error: string },
   policy?: EnforcementPolicy,
   references?: PhantomReferenceResult | { error: string },
+  payload?: { findings: GovernanceFinding[]; boundaries: string[]; notAssessed: number } | { error: string },
 ): Record<string, unknown> {
   const items: ReceiptItem[] = [];
   const boundaries: string[] = [...b.caveats];
@@ -186,6 +187,23 @@ export function projectVerifyReceipt(
     boundaries.push(`${refsOk.notAssessed.length} added reference${refsOk.notAssessed.length === 1 ? '' : 's'} could not be assessed (${[...new Set(refsOk.notAssessed.map(n => n.reason))].slice(0, 3).join('; ')}).`);
   }
 
+  // ── Request bodies in the changed files against their operations (add-contract-graph-projection) ──
+  if (payload && 'error' in payload) boundaries.push(`request-body check unavailable: ${payload.error}`);
+  else if (payload) {
+    boundaries.push(...payload.boundaries);
+    if (payload.notAssessed) boundaries.push(`${payload.notAssessed} request bod${payload.notAssessed === 1 ? 'y' : 'ies'} in the changed files could not be read as a literal, so ${payload.notAssessed === 1 ? 'it was' : 'they were'} not checked.`);
+  }
+  const payloadGate = payload && !('error' in payload) && payload.findings.length ? classifyFindings(payload.findings, policy) : undefined;
+  const payloadFindings: ClassifiedFinding[] = payloadGate ? payloadGate.classified.filter(f => f.enforcementClass !== 'off') : [];
+  for (const f of payloadFindings) {
+    items.push({
+      subject: f.message,
+      check: 'contract_payload',
+      severity: f.severity,
+      nextAction: 'Send the required property, or correct the specification.',
+    });
+  }
+
   // ── Checks weakened by the diff (structural_diff's check-weakening facts) ──
   // Already classified by structural_diff against the same policy; `off` codes are already dropped.
   const weakening = sd.error ? undefined : sd.checkWeakening;
@@ -254,6 +272,7 @@ export function projectVerifyReceipt(
       deprecatedCallsAdded: sd.summary?.deprecatedCallsAdded ?? 0,
       generatedFilesEdited: guardFindings.length,
       unresolvedReferences: refFindings.length,
+      payloadsMissingRequired: payloadFindings.length,
       // null: the check did not run (structural_diff or check weakening failed), not "nothing weakened".
       checksWeakened: weakening && !weakening.error ? weakeningFindings.length : null,
     },
@@ -261,9 +280,9 @@ export function projectVerifyReceipt(
     ...(omitted > 0 ? { truncated: { omitted, note: 'Lower-severity items omitted; raise the cap to see them.' } } : {}),
     testsToRun,
     // Registered governance findings (GovernanceFinding shape) an enforcement policy can name.
-    ...(guardFindings.length || refFindings.length || weakeningFindings.length ? {
-      findings: [...guardFindings, ...refFindings, ...weakeningFindings],
-      gated: (guardGate?.gated ?? false) || (refGate?.gated ?? false) || weakeningFindings.some(f => f.enforcementClass === 'blocking'),
+    ...(guardFindings.length || refFindings.length || weakeningFindings.length || payloadFindings.length ? {
+      findings: [...guardFindings, ...refFindings, ...weakeningFindings, ...payloadFindings],
+      gated: (guardGate?.gated ?? false) || (refGate?.gated ?? false) || (payloadGate?.gated ?? false) || weakeningFindings.some(f => f.enforcementClass === 'blocking'),
     } : {}),
     ...(weakening?.baseline ? { checkWeakeningBaseline: weakening.baseline } : {}),
     // The guard's disclosures can also reach blast_radius's caveats: say each once.
@@ -271,6 +290,40 @@ export function projectVerifyReceipt(
     // Grader, not author: these are actions for the caller to take — nothing was run or written.
     note: 'Advisory receipt. verify_change names the tests to run and the breaks to fix; it runs no tests and edits no files.',
   };
+}
+
+/** Root-relative files not yet added to git (not ignored). */
+async function untrackedFiles(root: string): Promise<string[]> {
+  try {
+    const { execFileGit } = await import('../../../utils/git-exec.js');
+    const { gitPathArgs } = await import('../../../utils/git-args.js');
+    const { stdout } = await execFileGit('git', gitPathArgs('ls-files', '-z', '--others', '--exclude-standard'), { cwd: root });
+    return String(stdout).split('\0').filter(Boolean);
+  } catch { return []; }
+}
+
+/** Per root-relative file, the line ranges (in the working tree) the diff against `base` added or changed. */
+async function addedLines(root: string, base: string, files: readonly string[]): Promise<Map<string, Array<[number, number]>>> {
+  const out = new Map<string, Array<[number, number]>>();
+  if (!files.length) return out;
+  try {
+    const { execFileGit } = await import('../../../utils/git-exec.js');
+    const { gitPathArgs } = await import('../../../utils/git-args.js');
+    // --relative: paths relative to the root, as the files are given.
+    const { stdout } = await execFileGit('git', gitPathArgs('diff', '-U0', '--no-color', '--relative', '--no-ext-diff', base, '--', ...files.slice(0, 500)), { cwd: root, maxBuffer: 64 * 1024 * 1024 });
+    let file: string | undefined;
+    for (const line of String(stdout).split('\n')) {
+      const f = /^\+\+\+ b\/(.+)$/.exec(line);
+      if (f) { file = f[1]; continue; }
+      const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+      if (h && file) {
+        const start = Number(h[1]);
+        const count = h[2] === undefined ? 1 : Number(h[2]);
+        if (count > 0) (out.get(file) ?? out.set(file, []).get(file)!).push([start, start + count - 1]);
+      }
+    }
+  } catch { /* no ranges: nothing is attributed to the diff */ }
+  return out;
 }
 
 /** File paths the index knows, for the reference check's candidates; empty when it is unavailable. */
@@ -327,5 +380,23 @@ export async function handleVerifyChange(
   } catch {
     policy = undefined; // an unreadable config is "no policy declared": source defaults apply
   }
-  return projectVerifyReceipt(b, sd, guard, policy, references);
+  // Request bodies at call sites in the files the diff changes.
+  let payload: { findings: GovernanceFinding[]; boundaries: string[]; notAssessed: number } | { error: string };
+  try {
+    const root = await validateDirectory(input.directory);
+    const { getChangedFiles, getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const prefix = (await getRepoPrefix(root)) ?? '';
+    const diff = await getChangedFiles({ rootPath: root, baseRef: b.resolvedBaseRef, includeUnstaged: true });
+    const tracked = diff.files.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
+    // A file not yet added to git is all new (the agent often stops before `git add`).
+    const untracked = await untrackedFiles(root);
+    const added = await addedLines(root, b.resolvedBaseRef, tracked);
+    const { payloadFindingsForFiles } = await import('./service-contract.js');
+    // Only call sites on lines the diff added or changed: an older call in a touched file is not this change's.
+    payload = await payloadFindingsForFiles(root, [...new Set([...tracked, ...untracked])], (file, line) =>
+      untracked.includes(file) || (added.get(file)?.some(([from, to]) => line >= from && line <= to) ?? false));
+  } catch (err) {
+    payload = { error: err instanceof Error ? err.message : String(err) };
+  }
+  return projectVerifyReceipt(b, sd, guard, policy, references, payload);
 }

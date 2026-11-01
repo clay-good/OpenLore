@@ -188,6 +188,8 @@ export async function callSitesFor(
   stats?: { capped: boolean; totals: Map<string, number> },
   /** Also carry each call's offset and client (for reading its body); not served. */
   withCall = false,
+  /** Read only these root-relative source files (a diff's), not the whole repository. */
+  onlyFiles?: ReadonlySet<string>,
 ): Promise<Map<string, Array<{ file: string; line: number; method: string; url: string; offset?: number; client?: string }>>> {
   const out = new Map<string, Array<{ file: string; line: number; method: string; url: string; offset?: number; client?: string }>>();
   const { extractHttpCalls, buildHttpEdges, normalizeUrl } = await import('../../analyzer/http-route-parser.js');
@@ -196,7 +198,7 @@ export async function callSitesFor(
     file, method: op.method, path: p, normalizedPath: normalizeUrl(p), handlerName: op.address,
     framework: 'openapi', line: op.line, contractSource: 'none' as const,
   })));
-  const files = await workingFiles(root, CLIENT_EXT);
+  const files = onlyFiles ? [...onlyFiles].filter(f => CLIENT_EXT.test(f)).sort(sortStr) : await workingFiles(root, CLIENT_EXT);
   if (files.length > MAX_CLIENT_FILES) boundaries.push(`Client call sites were read from the first ${MAX_CLIENT_FILES} of ${files.length} source files.`);
   if (stats) stats.capped = files.length > MAX_CLIENT_FILES;
   const calls = (await mapFilesBounded(files.slice(0, MAX_CLIENT_FILES), f => extractHttpCalls(join(root, f)).catch(() => []), 8)).flat();
@@ -224,11 +226,11 @@ const MAX_PAYLOAD_LISTED = 20;
  * (an object, or `JSON.stringify` of one) missing a required property is a
  * `contract-payload-missing-required` finding; any other body is listed as not assessed.
  */
-async function checkPayloads(root: string, docs: readonly ContractDocument[], findings: GovernanceFinding[], boundaries: string[]): Promise<Record<string, unknown>> {
+async function checkPayloads(root: string, docs: readonly ContractDocument[], findings: GovernanceFinding[], boundaries: string[], onlyFiles?: ReadonlySet<string>, onLine?: (file: string, line: number) => boolean): Promise<Record<string, unknown>> {
   const ops = docs.flatMap(d => d.operations.filter(op => op.body?.assessed && op.body.properties.some(p => p.required)).map(op => ({ file: d.file, op })));
   if (!ops.length) return { assessed: false, reason: 'no operation requires request-body properties' };
   const stats = { capped: false, totals: new Map<string, number>() };
-  const sites = await callSitesFor(root, ops, [], stats, true);
+  const sites = await callSitesFor(root, ops, [], stats, true, onlyFiles);
   const { readCallBody, insideLiteral } = await import('../contract/payload-literal.js');
   const kept = [...sites.values()].reduce((n, l) => n + l.length, 0);
   const total = [...stats.totals.values()].reduce((n, v) => n + v, 0);
@@ -245,6 +247,8 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
     if (!o) continue;
     const required = o.op.body!.properties.filter(p => p.required).map(p => p.name);
     for (const site of list) {
+      if (onlyFiles && !onlyFiles.has(site.file)) continue;
+      if (onLine && !onLine(site.file, site.line)) continue; // not a line the diff added or changed
       if (checked >= MAX_PAYLOAD_SITES) { capped = true; break; }
       checked++;
       if (!texts.has(site.file)) texts.set(site.file, await readFileConfined(root, site.file, MAX_SPEC_BYTES).catch(() => null));
@@ -277,6 +281,22 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
     ...(notAssessed.length ? { notAssessedSites: notAssessed.slice(0, MAX_PAYLOAD_LISTED).map(n => ({ ...n, file: emittedText(n.file) })) } : {}),
     note: 'Only literal bodies (an object, or JSON.stringify of one, in the platform fetch or axios post/put/patch) are checked; a required body not sent is a finding; any other body, and calls in other languages, are not assessed, never called conforming.',
   };
+}
+
+/**
+ * The payload check for call sites in `files` (root-relative), for `verify_change`: the same rule as
+ * `certify_service_contract`'s `payload`, reading only those files, and, with `onLine`, only call
+ * sites on the lines a diff added or changed.
+ */
+export async function payloadFindingsForFiles(root: string, files: readonly string[], onLine?: (file: string, line: number) => boolean): Promise<{ findings: GovernanceFinding[]; boundaries: string[]; notAssessed: number }> {
+  const findings: GovernanceFinding[] = [];
+  const boundaries: string[] = [];
+  if (!files.length) return { findings, boundaries, notAssessed: 0 };
+  const side = await headSpecsCached(root);
+  if (side.capped) boundaries.push('The specification scan reached its cap; request bodies were checked against the specifications found.');
+  if (!side.docs.length) return { findings, boundaries, notAssessed: 0 };
+  const r = await checkPayloads(root, side.docs, findings, boundaries, new Set(files), onLine);
+  return { findings, boundaries, notAssessed: typeof r.notAssessed === 'number' ? r.notAssessed : 0 };
 }
 
 export async function handleCertifyServiceContract(input: CertifyServiceContractInput): Promise<Record<string, unknown>> {
