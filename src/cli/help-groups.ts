@@ -55,6 +55,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
       'coverage-gaps',
       'working-set',
       'briefing-since',
+      'footprint',
     ],
   },
   {

@@ -1032,7 +1032,17 @@ export async function computeInterferenceMap(
   const home = repos[0];
   let cappedTasks = 0;
   let malformedTasks = 0;
-  for (const t of input.tasks ?? []) {
+  // Live peer-board entries join as agent tasks too (change: add-peer-footprint-board); a supplied
+  // task with the same id wins.
+  const supplied = input.tasks ?? [];
+  let boardTasks: TaskDescriptor[] = [];
+  try {
+    const { liveTaskDescriptors } = await import('../footprint-board.js');
+    const ids = new Set(supplied.map(t => t?.id));
+    boardTasks = (await liveTaskDescriptors(absDir)).filter(t => !ids.has(t.id));
+  } catch { /* the board is optional: unreadable means no board tasks */ }
+  if (boardTasks.length) caveats.push(`${boardTasks.length} live peer-board entr${boardTasks.length === 1 ? 'y joins' : 'ies join'} as agent tasks (declare_footprint).`);
+  for (const t of [...supplied, ...boardTasks]) {
     if (assessed.length + notAssessed.length >= maxChanges) { cappedTasks++; continue; }
     if (!t || typeof t.id !== 'string' || t.id.length === 0) { malformedTasks++; continue; }
     const hasSeed = (t.seedSymbols && t.seedSymbols.length > 0) || (t.seedFiles && t.seedFiles.length > 0);

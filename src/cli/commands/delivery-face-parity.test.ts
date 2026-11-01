@@ -61,7 +61,7 @@ const MCP_ONLY_REASON_GROUPS: ReadonlyArray<{ reason: string; tools: readonly st
     reason: 'The CLI exposes a broader lifecycle workflow rather than this MCP operation as a one-to-one conclusion.',
     tools: [
       'record_decision', 'list_decisions', 'approve_decision', 'reject_decision',
-      'sync_decisions', 'remember', 'recall', 'verify_claim',
+      'sync_decisions', 'remember', 'recall', 'verify_claim', 'declare_footprint',
     ],
   },
   {

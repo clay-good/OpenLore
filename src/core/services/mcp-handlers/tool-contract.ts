@@ -77,6 +77,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   certify_provenance: 'conclusion',
   certify_merge: 'conclusion',
   fleet_status: 'conclusion',
+  declare_footprint: 'conclusion',
   search_code: 'conclusion',
   suggest_insertion_points: 'conclusion',
   search_specs: 'conclusion',
@@ -278,6 +279,7 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   map_in_flight_conflicts: 'coordinate',
   certify_merge: 'coordinate',
   fleet_status: 'coordinate',
+  declare_footprint: 'coordinate',
 
   // --- federate: cross-repo / spec-store conclusions ---
   federation_status: 'federate',
