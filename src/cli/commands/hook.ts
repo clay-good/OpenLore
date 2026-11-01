@@ -134,17 +134,23 @@ function pendingEdit(input: Record<string, unknown>): Pick<HookPayload, 'edit'> 
  */
 export function applyPendingEdit(current: string | null, edit: NonNullable<HookPayload['edit']>): string | undefined {
   if (edit.content !== undefined) return edit.content;
-  if (current === null || !edit.edits) return undefined;
-  let text = current;
-  for (const e of edit.edits) {
-    if (!e.oldString) return undefined;
-    const at = text.indexOf(e.oldString);
-    if (at === -1) return undefined;
-    if (e.replaceAll) { text = text.split(e.oldString).join(e.newString); continue; }
-    if (text.indexOf(e.oldString, at + 1) !== -1) return undefined;
-    text = text.slice(0, at) + e.newString + text.slice(at + e.oldString.length);
-  }
-  return text;
+  if (!edit.edits) return undefined;
+  // An Edit with an empty old string creates the file (or fills an empty one).
+  if (edit.edits.length === 1 && !edit.edits[0].oldString && (current === null || current === '')) return edit.edits[0].newString;
+  if (current === null) return undefined;
+  const apply = (start: string): string | undefined => {
+    let text = start;
+    for (const e of edit.edits!) {
+      if (!e.oldString) return undefined;
+      // Occurrences as the tool counts them (non-overlapping).
+      const parts = text.split(e.oldString);
+      if (parts.length < 2 || (!e.replaceAll && parts.length > 2)) return undefined;
+      text = parts.join(e.newString);
+    }
+    return text;
+  };
+  // The edit tool matches a CRLF file's text with LF line ends.
+  return apply(current) ?? (current.includes('\r\n') ? apply(current.replace(/\r\n/g, '\n')) : undefined);
 }
 
 /**
@@ -283,9 +289,22 @@ async function beforeEdit(root: string, files: string[], edit?: HookPayload['edi
     text: generatedText(f),
     ...(f.kind !== 'lockfile' ? { next: f.regenerateWith !== 'unknown' ? `regenerate with \`${f.regenerateWith}\`` : 'edit the source and regenerate' } : {}),
   }));
-  if (edit && files.length === 1) items.push(...(await pendingReferences(root, files[0], edit)));
+  if (edit && files.length === 1) {
+    // Bounded on its own: the generated-file facts above never wait on it.
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<HookItem[]>(r => { timer = setTimeout(() => r([]), PENDING_CHECK_MS); timer.unref?.(); });
+    items.push(...(await Promise.race([pendingReferences(root, files[0], edit).catch(() => []), limit])));
+    if (timer) clearTimeout(timer);
+  }
   return items;
 }
+
+/** Time for the pending-edit reference check, inside the before-edit moment's limit. */
+const PENDING_CHECK_MS = 5_000;
+/** Pending-edit facts per call: the budget keeps room for the generated-file facts. */
+const MAX_PENDING_FACTS = 3;
+/** The size the after-write check reads (`phantom-references` MAX_FILE_BYTES): the same files are graded. */
+const MAX_PENDING_BYTES = 2 * 1024 * 1024;
 
 /**
  * The references a pending edit would add that do not resolve, graded on the pending text in memory
@@ -294,19 +313,23 @@ async function beforeEdit(root: string, files: string[], edit?: HookPayload['edi
 async function pendingReferences(root: string, file: string, edit: NonNullable<HookPayload['edit']>): Promise<HookItem[]> {
   const { readFileConfined } = await import('../../utils/path-confinement.js');
   let current: string | null;
-  try { current = await readFileConfined(root, file, 4 * 1024 * 1024); } catch (e) {
+  try { current = await readFileConfined(root, file, MAX_PENDING_BYTES); } catch (e) {
     if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') return [];
     current = null;
   }
   const next = applyPendingEdit(current, edit);
-  if (next === undefined || next === current) return [];
+  if (next === undefined || next === current || Buffer.byteLength(next) > MAX_PENDING_BYTES) return [];
   const prefix = await repoPrefix(root);
   const { classifyFile } = await import('../../core/drift/git-diff.js');
   const path = prefix + file;
   const changed = [{ path, status: current === null ? 'added' as const : 'modified' as const, additions: 0, deletions: 0, ...classifyFile(path) }];
   const { checkPhantomReferences } = await import('../../core/services/phantom-references.js');
   const r = await checkPhantomReferences(root, 'HEAD', changed, undefined, { head: new Map([[file, next]]), base: new Map([[file, current]]) }).catch(() => undefined);
-  return (r?.findings ?? []).map(f => ({ key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: f.severity, text: `Before the write: ${f.message}`, ...(f.remediation ? { next: f.remediation } : {}) }));
+  // Own keys: a denied or failed edit must not silence the after-write fact of a later, real one.
+  return (r?.findings ?? []).slice(0, MAX_PENDING_FACTS).map(f => f.code === 'unresolved-internal-import'
+    // The module may be the agent's next write: a pending state, not yet an error.
+    ? { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: 'warning', text: `Before the write: ${f.message.replace(/, which is not a module in this repository/, ', which does not exist yet')}`, next: 'create that module, or fix the path' }
+    : { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: f.severity, text: `Before the write: ${f.message}`, ...(f.remediation ? { next: f.remediation } : {}) });
 }
 
 function generatedText(f: { file: string; kind: string; generatedFrom: string[] | 'unknown'; matched: string }): string {

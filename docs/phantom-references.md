@@ -24,7 +24,9 @@ classification to `verify_change`. That block is present whenever the check ran,
 The [`before-edit` hook](install.md#agent-loop-hooks) runs the same check **before** a `Write`,
 `Edit`, or `MultiEdit` lands: it applies the pending change to the file's current text in memory
 and states each reference the edit would add that does not resolve. Nothing is written, and an edit
-whose old text is absent or not unique is skipped, as the edit tool would refuse it.
+whose old text is absent or not unique is skipped, as the edit tool would refuse it. A missing
+relative module is a warning there ("does not exist yet"): it may be the agent's next write. These
+facts have their own keys, so a denied edit does not silence the after-write fact of a later one.
 
 ## What counts as added
 

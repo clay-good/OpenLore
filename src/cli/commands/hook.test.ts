@@ -303,6 +303,10 @@ describe('before-edit: references in the pending text (change: add-agent-loop-ho
     expect(applyPendingEdit('a b', { edits: [{ oldString: 'a', newString: 'x', replaceAll: false }, { oldString: 'b', newString: 'y', replaceAll: false }] })).toBe('x y');
     expect(applyPendingEdit('a b', { edits: [{ oldString: 'z', newString: 'x', replaceAll: false }] })).toBeUndefined();
     expect(applyPendingEdit(null, { edits: [{ oldString: 'a', newString: 'x', replaceAll: false }] })).toBeUndefined();
+    // As the tool does: an empty old string creates the file; CRLF text matches LF; counts do not overlap.
+    expect(applyPendingEdit(null, { edits: [{ oldString: '', newString: 'new', replaceAll: false }] })).toBe('new');
+    expect(applyPendingEdit('a\r\nb\r\n', { edits: [{ oldString: 'a\nb', newString: 'c', replaceAll: false }] })).toBe('c\n');
+    expect(applyPendingEdit('aaa', { edits: [{ oldString: 'aa', newString: 'x', replaceAll: false }] })).toBe('xa');
   });
 
   it('an invented import in an Edit is stated before the write; the file is unchanged', async () => {
@@ -317,7 +321,7 @@ describe('before-edit: references in the pending text (change: add-agent-loop-ho
   it('a Write of a new file importing a missing module is stated; a valid edit is quiet', async () => {
     const root = repo({ 'src/utils.ts': UTILS, 'src/main.ts': MAIN });
     const write = context((await runHook('before-edit', payload(root, 'src/new.ts', { tool_input: { file_path: join(root, 'src/new.ts'), content: "import { x } from './nowhere';\n" } }))).stdout);
-    expect(write?.additionalContext).toContain('./nowhere');
+    expect(write?.additionalContext).toContain("'./nowhere', which does not exist yet");
     const ok = await runHook('before-edit', payload(root, 'src/main.ts', { session_id: 's2', tool_input: { file_path: join(root, 'src/main.ts'), old_string: "'2026-01-01'", new_string: "'2026-02-01'" } }));
     expect(ok.stdout).toBe('');
   });
