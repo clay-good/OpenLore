@@ -325,7 +325,7 @@ event's `additionalContext` — or nothing, when there is nothing new.
 | Moment | Claude Code event | What the agent is told |
 |--------|-------------------|------------------------|
 | `before-edit` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | the target is a generated file (its source and regenerate command), vendored code, or a lockfile |
-| `after-tools` | `PostToolUse`, same tools and `Bash` | a shell command is counted, and a test run is recorded (below); an edit is recorded for the [session ledger](session-ledger.md), which can then name background changes; new ledger facts; for the edited file: [check weakening](check-weakening.md), [phantom references](phantom-references.md), and [generated files](generated-files.md) |
+| `after-tools` | `PostToolUse`, same tools and `Bash`; `PostToolUseFailure` on `Bash` (a failing command) | a shell command is counted, and a test run is recorded (below); an edit is recorded for the [session ledger](session-ledger.md), which can then name background changes; new ledger facts; for the edited file: [check weakening](check-weakening.md), [phantom references](phantom-references.md), and [generated files](generated-files.md) |
 | `before-stop` | `Stop` | the `verify_change` receipt for the session's diff, plus the symbols edited after the last test run and the tests that reach them, shown to **you** (a `systemMessage`): context for the agent at `Stop` would make it keep working |
 | `after-compact` | `SessionStart` (matcher `compact`) | the [handoff briefing](mcp-tools.md) of the in-flight change, so the agent resumes from computed state, not only the compaction summary (stated after every compaction) |
 
@@ -344,14 +344,19 @@ event's `additionalContext` — or nothing, when there is nothing new.
   in a row.
 - **Repository scope only.** The moments run on every edit, so a user-scope install does not wire
   them (they would run in every repository). Run `openlore install` in the repository to get them.
-- **Edits after the last test run.** A shell command that is a test run — a runner from a closed
-  list (`vitest`, `jest`, `pytest`, `go test`, `cargo test`, `npm test`, `make test`, …) or a test
-  script the repository declares in `package.json` (`test`, `test:*`, `e2e`) — is recorded with its
-  time and exit status (when the payload has one), and the hash of every symbol in the files the
-  session edited. At stop, the symbols whose hash changed since that run are named with the tests
-  that reach them; a failed last run with no later edit is named too. OpenLore runs no test. When
-  no shell command ever reached the hook, the fact is withheld with that reason. Other shell
-  commands are only counted, and print nothing.
+- **Edits after the last test run.** A shell command that is a test run — a runner in command
+  position from a closed list (`vitest`, `jest`, `pytest`, `go test`, `cargo test`, `npm test`,
+  `make test`, …) or a test script the repository declares in `package.json` (`test`, `test:*`,
+  `e2e`) — is recorded with its time, exit status (a failing command arrives as a tool failure),
+  and the hash of every symbol in the files the session edited. `cat jest.config.js` or
+  `vitest --version` is not a run; an interrupted run does not count. At stop, the symbols whose
+  hash changed since the last completed run are named (deleted ones as removed) with the tests that
+  reach them, or "not computed" with the reason; a file with no record of its symbols at the run is
+  named as not determined; a failed last run with no later edit is named too. Edits made through
+  shell commands are not tracked. OpenLore runs no test. When no shell command ever reached the
+  hook, the fact is withheld with that reason. Leading `VAR=value` assignments are dropped and
+  secrets redacted before a command is stored. Other shell commands are only counted, and print
+  nothing.
 - **Turning one off:** `"hooks": { "before-edit": false }` in `.openlore/config.json`.
   `openlore status` lists the wired moments and marks the ones turned off.
 - A `Write` payload over 8 MB is not read; the hook prints nothing for it.

@@ -24,12 +24,28 @@ const MAX_FILES = 200;
 const MAX_RUNS = 50;
 const MAX_FILE_BYTES = 1024 * 1024;
 
-/** Test runners, by name (a closed list); `npm test` and its siblings; `make test`/`make check`. */
-const RUNNER = /(?:^|[\s;&|(`])(?:(?:npx|bunx|pnpm\s+(?:exec|dlx)|yarn(?:\s+dlx)?)\s+)?(?:vitest|jest|mocha|ava|playwright\s+test|cypress\s+run|pytest|py\.test|tox|nox|rspec|phpunit|pest|ctest|deno\s+test|bun\s+test|node\s+--test|dotnet\s+test|go\s+test|cargo\s+(?:test|nextest)|mix\s+test|swift\s+test|bazel\s+test|(?:\.\/)?(?:mvnw?|gradlew?)\b[^;&|]*\b(?:test|verify|check)\b|python3?\s+-m\s+(?:pytest|unittest))\b/;
-const PM_TEST = /(?:^|[\s;&|(`])(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|t)(?=$|[\s;&|)`:])/;
-const MAKE_TEST = /(?:^|[\s;&|(`])make\s+(?:-\S+\s+)*(?:test|check)\w*/;
+/**
+ * Test runners in command position (a closed list). A command is split into segments at `;`, `&&`,
+ * `||`, `|`, `(` and newlines; each segment loses leading `VAR=value` assignments and wrappers
+ * (`npx`, `time`, `pnpm exec`, …) before its first word is compared. So `cat jest.config.js`,
+ * `git commit -m "fix vitest"`, and `pip install pytest` are not runs.
+ */
+const RUNNER_HEAD = /^(?:vitest|jest|mocha|ava|pytest|py\.test|tox|nox|rspec|phpunit|pest|ctest|tap)(?=\s|$)|^(?:playwright\s+test|cypress\s+run|deno\s+test|bun\s+test|node\s+--test|dotnet\s+test|go\s+test|cargo\s+(?:test|nextest)|mix\s+test|swift\s+test|bazel\s+test|nx\s+(?:run\s+\S+:)?test|turbo\s+(?:run\s+)?test|python3?\s+-m\s+(?:pytest|unittest)|python3?\s+manage\.py\s+test)(?=\s|$)|^(?:\.\/)?(?:mvnw?|gradlew?)(?:\s+\S+)*\s+(?:test|verify|check)(?=\s|$)/;
+const PM_HEAD = /^(?:npm|pnpm|yarn|bun)(?:\.cmd)?(?:\s+--?\S+(?:\s+\S+)?)*?\s+(?:run\s+)?(?:test|t)(?=\s|$|:)/;
+const MAKE_HEAD = /^make(?:\s+-\S+(?:\s+\S+)?)*\s+(?:test|check)[\w-]*(?=\s|$)/;
+const NOT_A_RUN = /\s--(?:version|help|listTests|list-tests|collect-only|co)(?=\s|$)|\s-h(?=\s|$)/;
+const WRAPPER = /^(?:(?:\w+=\S*\s+)+|(?:sudo|time|env|nice|command|exec)\s+|(?:npx|bunx)\s+(?:--?\S+\s+)*|pnpm\s+(?:exec|dlx)\s+|yarn\s+(?:dlx\s+)?(?=[a-z])(?!(?:test|run|t)\b)|(?:\.\/)?node_modules\/\.bin\/)/;
 
-export interface TestRun { at: number; command: string; exit?: number }
+/** The command segments, each with its leading assignments and wrappers removed. */
+function segments(command: string): string[] {
+  return command.split(/;|&&|\|\||\||\(|\n/).map(seg => {
+    let s = seg.trim();
+    for (let i = 0; i < 6; i++) { const next = s.replace(WRAPPER, ''); if (next === s) break; s = next.trim(); }
+    return s;
+  }).filter(Boolean);
+}
+
+export interface TestRun { at: number; command: string; exit?: number; interrupted?: boolean }
 
 interface RunState {
   /** Shell commands seen by the after-tools hook this session (0 ⇒ test runs are not observed). */
@@ -81,20 +97,31 @@ function declaredTestCommands(root: string): RegExp | undefined {
   } catch { /* no package.json */ }
   if (!names.length) return undefined;
   const alt = names.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  return new RegExp(`(?:^|[\\s;&|(\`])(?:npm\\s+run|pnpm(?:\\s+run)?|yarn(?:\\s+run)?|bun\\s+run)\\s+(?:${alt})(?=$|[\\s;&|)\`])`);
+  return new RegExp(`^(?:npm(?:\\.cmd)?\\s+run|pnpm(?:\\s+run)?|yarn(?:\\s+run)?|bun\\s+run)\\s+(?:${alt})(?=\\s|$)`);
 }
 
 /** Whether a shell command is a test run. */
 export function isTestCommand(root: string, command: string): boolean {
-  const c = command.slice(0, 4000);
-  return RUNNER.test(c) || PM_TEST.test(c) || MAKE_TEST.test(c) || (declaredTestCommands(root)?.test(c) ?? false);
+  const declared = declaredTestCommands(root);
+  return segments(command.slice(0, 4000)).some(seg =>
+    !NOT_A_RUN.test(` ${seg}`) && (RUNNER_HEAD.test(seg) || PM_HEAD.test(seg) || MAKE_HEAD.test(seg) || (declared?.test(seg) ?? false)));
+}
+
+/** A command as stored and shown: assignments dropped, secrets redacted, control text removed. */
+async function storedCommand(command: string): Promise<string> {
+  const { emittedText } = await import('./generated-file-guard.js');
+  const bare = command.replace(/(?:^|(?<=[;&|(]\s*))(?:\w+=\S*\s+)+/g, '').replace(/\s+/g, ' ').trim();
+  return emittedText(bare).slice(0, 160);
 }
 
 /** Symbol hashes of the given files now. */
-async function hashFiles(root: string, files: readonly string[]): Promise<RunState['atLastRun']> {
+async function hashFiles(root: string, files: readonly string[], budgetMs = 12_000): Promise<RunState['atLastRun']> {
   const { defaultHasher } = await import('./session-ledger.js');
   const out: RunState['atLastRun'] = {};
+  const deadline = Date.now() + budgetMs;
   for (const f of files) {
+    // Past the budget a file is left out: it then reads as "not determined", never as unchanged.
+    if (Date.now() > deadline) break;
     let text: string;
     try { text = await readFileConfined(root, f, MAX_FILE_BYTES); } catch { out[f] = {}; continue; } // deleted or unreadable: no symbols
     const hashes = await defaultHasher(f, text).catch(() => undefined);
@@ -103,17 +130,22 @@ async function hashFiles(root: string, files: readonly string[]): Promise<RunSta
   return out;
 }
 
-/** After-tools, for a shell command: count it, and record it when it is a test run. */
-export async function recordShellCommand(root: string, sessionId: string, command: string, exit?: number): Promise<boolean> {
+/**
+ * After-tools, for a shell command: count it, and record it when it is a test run. An interrupted
+ * run is recorded as interrupted and does not move the "last run" the stop fact compares with.
+ */
+export async function recordShellCommand(root: string, sessionId: string, command: string, exit?: number, interrupted = false): Promise<boolean> {
   const test = isTestCommand(root, command);
   const state = readRunState(root, sessionId);
-  const snapshot = test ? await hashFiles(root, state.editedFiles) : undefined;
+  const snapshot = test && !interrupted ? await hashFiles(root, state.editedFiles) : undefined;
+  const stored = test ? await storedCommand(command) : '';
   await writeRunState(root, sessionId, s => ({
     ...s,
     shellSeen: s.shellSeen + 1,
     ...(test ? {
-      runs: [...s.runs, { at: Date.now(), command: command.replace(/\s+/g, ' ').trim().slice(0, 160), ...(exit !== undefined ? { exit } : {}) }],
-      atLastRun: snapshot!,
+      runs: [...s.runs, { at: Date.now(), command: stored, ...(exit !== undefined ? { exit } : {}), ...(interrupted ? { interrupted: true } : {}) }],
+      // A file another hook recorded while this one was hashing keeps its own record.
+      ...(snapshot ? { atLastRun: { ...Object.fromEntries(Object.entries(s.atLastRun).filter(([f]) => !(f in snapshot) && !state.editedFiles.includes(f))), ...snapshot } } : {}),
     } : {}),
   }));
   return test;
@@ -133,33 +165,47 @@ export async function recordEditIntent(root: string, sessionId: string, files: r
 
 export async function recordEdits(root: string, sessionId: string, files: readonly string[]): Promise<void> {
   if (!files.length) return;
-  await writeRunState(root, sessionId, s => ({ ...s, editedFiles: [...s.editedFiles, ...files] }));
+  // A file edited again moves to the end, so the oldest-edited file is the one dropped at the cap.
+  await writeRunState(root, sessionId, s => ({ ...s, editedFiles: [...s.editedFiles.filter(f => !files.includes(f)), ...files] }));
 }
 
 export interface EditsAfterRun {
   kind: 'not-observed' | 'no-run' | 'after-run' | 'clean';
   lastRun?: TestRun;
-  /** Symbols edited after the last run (kind `after-run`). */
-  symbols?: Array<{ name: string; file: string }>;
+  /** Symbols edited after the last run (kind `after-run`); `removed` when the symbol is gone. */
+  symbols?: Array<{ name: string; file: string; removed?: boolean }>;
+  /** Files edited after the last run whose symbols at the run were not recorded. */
+  undetermined?: string[];
   /** Files edited this session (kind `no-run`). */
   files?: string[];
+  /** Test runs after the last completed one that were interrupted. */
+  interruptedSince?: number;
 }
 
-/** At stop: what was edited after the last observed test run. */
+/** At stop: what was edited after the last observed, completed test run. */
 export async function editsAfterLastRun(root: string, sessionId: string): Promise<EditsAfterRun | undefined> {
   const s = readRunState(root, sessionId);
   if (!s.editedFiles.length) return undefined;
   if (!s.shellSeen) return { kind: 'not-observed' };
-  const lastRun = s.runs[s.runs.length - 1];
-  if (!lastRun) return { kind: 'no-run', files: s.editedFiles };
+  const completed = s.runs.filter(r => !r.interrupted);
+  const lastRun = completed[completed.length - 1];
+  const interruptedSince = s.runs.filter(r => r.interrupted && (!lastRun || r.at > lastRun.at)).length;
+  if (!lastRun) return { kind: 'no-run', files: s.editedFiles, ...(interruptedSince ? { interruptedSince } : {}) };
   const now = await hashFiles(root, s.editedFiles);
-  const symbols: Array<{ name: string; file: string }> = [];
+  const symbols: NonNullable<EditsAfterRun['symbols']> = [];
+  const undetermined: string[] = [];
   for (const f of s.editedFiles) {
     const then = s.atLastRun[f];
-    for (const [id, v] of Object.entries(now[f] ?? {})) {
-      // A file the run never saw (no before-edit record): every symbol in it counts as after the run.
-      if (!then || then[id]?.hash !== v.hash) symbols.push({ name: v.name, file: f });
+    const current = now[f];
+    if (!then || !current) {
+      // No record of this file at the run (before-edit off or timed out), or not hashed now: which
+      // symbols changed is not determined. Unchanged since the run only when both sides agree.
+      if (!then || current === undefined) { undetermined.push(f); }
+      continue;
     }
+    for (const [id, v] of Object.entries(current)) if (then[id]?.hash !== v.hash) symbols.push({ name: v.name, file: f });
+    for (const [id, v] of Object.entries(then)) if (!(id in current)) symbols.push({ name: v.name, file: f, removed: true });
   }
-  return symbols.length ? { kind: 'after-run', lastRun, symbols } : { kind: 'clean', lastRun };
+  const extra = { ...(undetermined.length ? { undetermined } : {}), ...(interruptedSince ? { interruptedSince } : {}) };
+  return symbols.length || undetermined.length ? { kind: 'after-run', lastRun, symbols, ...extra } : { kind: 'clean', lastRun, ...extra };
 }

@@ -35,6 +35,9 @@ const edit = async (root: string, file: string, content?: string) => {
 };
 const shell = (root: string, command: string, exit?: number) =>
   runHook('after-tools', JSON.stringify({ session_id: 's1', cwd: root, tool_name: 'Bash', tool_input: { command }, tool_response: exit === undefined ? { stdout: '' } : { exit_code: exit } }));
+/** Claude Code's shape for a failing shell command. */
+const failedShell = (root: string, command: string) =>
+  runHook('after-tools', JSON.stringify({ session_id: 's1', cwd: root, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command }, error: 'Exit code 2\nFAIL src/config.test.ts' }));
 const stop = async (root: string) => {
   const out = (await runHook('before-stop', JSON.stringify({ session_id: 's1', cwd: root }), { timeoutMs: 45_000 })).stdout;
   return out ? (JSON.parse(out) as { systemMessage?: string }).systemMessage ?? '' : '';
@@ -43,9 +46,12 @@ const stop = async (root: string) => {
 describe('isTestCommand', () => {
   it('recognizes runners, package-manager test scripts, declared scripts, and make targets', () => {
     const root = repo();
-    for (const c of ['npm test', 'pnpm test -- --run', 'yarn test', 'npx vitest run src', 'pytest -q', 'python -m pytest', 'go test ./...', 'cargo test', 'cd app && npm run test', 'make test', 'make check-unit', 'pnpm test:unit', 'npm run test:unit', './gradlew test'])
+    for (const c of ['npm test', 'pnpm test -- --run', 'yarn test', 'npx vitest run src', 'pytest -q', 'python -m pytest', 'go test ./...', 'cargo test', 'cd app && npm run test', 'make test', 'make check-unit', 'pnpm test:unit', 'npm run test:unit', './gradlew test',
+      'CI=1 npm test', 'npm.cmd test', './node_modules/.bin/vitest run', 'make -C pkg test', 'python manage.py test', 'nx test app', 'time pytest'])
       expect(isTestCommand(root, c), c).toBe(true);
-    for (const c of ['npm install', 'npm run lint', 'git status', 'ls tests/', 'cat test.txt', 'echo testing', 'npm run build'])
+    for (const c of ['npm install', 'npm run lint', 'git status', 'ls tests/', 'cat test.txt', 'echo testing', 'npm run build',
+      'cat jest.config.js', 'ls vitest.config.ts', 'grep -rn pytest src', 'git commit -m "fix vitest flake"', 'pip install pytest',
+      'npm i -D vitest', 'npx jest --listTests', 'vitest --version', 'echo "npm test"'])
       expect(isTestCommand(root, c), c).toBe(false);
   });
 });
@@ -89,7 +95,7 @@ describe('edits after the last test run', () => {
     await shell(root, 'git status');
     await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 6'));
     const msg = await stop(root);
-    expect(msg).toContain('No test run was observed this session after editing src/config.ts');
+    expect(msg).toContain('No completed test run was observed this session after editing src/config.ts');
     expect(readRunState(root, 's1').shellSeen).toBe(1);
   });
 
@@ -98,12 +104,64 @@ describe('edits after the last test run', () => {
     await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 7'));
     const msg = await stop(root);
     expect(msg).toContain('Test runs are not observed in this session');
-    expect(msg).not.toContain('No test run was observed');
+    expect(msg).not.toContain('No completed test run');
   });
 
   it('a non-test shell command prints nothing and records no run', async () => {
     const root = repo();
     expect((await shell(root, 'npm run build')).stdout).toBe('');
     expect(readRunState(root, 's1').runs).toEqual([]);
+  });
+
+  it('a failing run (a tool failure in Claude Code) is recorded with its exit code', async () => {
+    const root = repo();
+    await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 8'));
+    await failedShell(root, 'npm test');
+    expect(readRunState(root, 's1').runs).toEqual([expect.objectContaining({ command: 'npm test', exit: 2 })]);
+    expect(await stop(root)).toContain('failed, and nothing was edited after it');
+  });
+
+  it('an interrupted run does not count as the last run', async () => {
+    const root = repo();
+    await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 9'));
+    await runHook('after-tools', JSON.stringify({ session_id: 's1', cwd: root, tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_response: { interrupted: true } }));
+    expect(await stop(root)).toContain('No completed test run was observed');
+  });
+
+  it('a deleted symbol is named removed; without a pre-edit record the file is "not determined"', async () => {
+    const root = repo();
+    await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 10'));
+    await shell(root, 'npm test', 0);
+    await edit(root, 'src/config.ts', 'export function parseConfig(s: string) {\n  return JSON.parse(s);\n}\n');
+    expect(await stop(root)).toContain('loadDefaults (src/config.ts) [removed]');
+    const off = repo();
+    await edit(off, 'src/config.ts', CONFIG.replace('a: 1', 'a: 11'));
+    await shell(off, 'npm test', 0);
+    // after-tools only (the before-edit moment was off or timed out)
+    write(off, 'src/other.ts', 'export function other() {\n  return 3;\n}\n');
+    await runHook('after-tools', JSON.stringify({ session_id: 's1', cwd: off, tool_name: 'Edit', tool_input: { file_path: join(off, 'src/other.ts') } }));
+    const msg = await stop(off);
+    expect(msg).toContain('src/other.ts (which symbols is not determined)');
+    expect(msg).not.toContain('other (src/other.ts)');
+  });
+
+  it('without an index, tests are "not computed", never "no test reaches them"', async () => {
+    const root = repo();
+    await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 12'));
+    await shell(root, 'npm test', 0);
+    await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 13'));
+    const msg = await stop(root);
+    expect(msg).toContain('not computed');
+    expect(msg).not.toContain('No indexed test reaches them');
+    expect(msg).toContain('shell commands are not tracked');
+  });
+
+  it('secrets and assignments in the command are not stored or shown', async () => {
+    const root = repo();
+    await edit(root, 'src/config.ts', CONFIG.replace('a: 1', 'a: 14'));
+    await shell(root, 'OPENAI_API_KEY=sk-live-abcdefghijklmnopqrstuvwxyz0123 npm test', 1);
+    const stored = JSON.stringify(readRunState(root, 's1'));
+    expect(stored).not.toContain('sk-live');
+    expect(readRunState(root, 's1').runs[0].command).toBe('npm test');
   });
 });

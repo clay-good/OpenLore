@@ -300,6 +300,8 @@ const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
   { key: 'PreToolUse', args: ['hook', 'before-edit'], moment: 'before-edit', matcher: EDIT_TOOLS, timeout: 15 },
   // Shell calls too: a test run is recorded so the stop receipt can name edits made after it.
   { key: 'PostToolUse', args: ['hook', 'after-tools'], moment: 'after-tools', matcher: `${EDIT_TOOLS}|Bash`, timeout: 30 },
+  // A failing shell command (a failed test run) arrives as a tool failure in Claude Code.
+  { key: 'PostToolUseFailure', args: ['hook', 'after-tools'], moment: 'after-tools', matcher: 'Bash', timeout: 30 },
   { key: 'Stop', args: ['hook', 'before-stop'], moment: 'before-stop', timeout: 90 },
   { key: 'SessionStart', args: ['hook', 'after-compact'], moment: 'after-compact', matcher: 'compact', timeout: 60 },
 ];
