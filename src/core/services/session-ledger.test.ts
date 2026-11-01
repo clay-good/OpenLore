@@ -425,3 +425,37 @@ describe('SessionLedger — review round 2', () => {
     expect(readFileSync(join(root, '.openlore', SESSION_LEDGER_DIR, '.gitignore'), 'utf-8')).toBe('*\n');
   });
 });
+
+describe('SessionLedger — session change counts (change: add-ledger-contract-hashes-and-counts)', () => {
+  it('counts body-only and signature changes disjointly, and changed exports, with no thresholds', async () => {
+    const root = repo();
+    const START = 'export function a(x: number) { return x; }\nfunction b(x: number) { return x; }\nexport function c(x: number) { return x; }\n';
+    write(root, 'src/m.ts', START);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'src/m.ts' }]);
+    // Bodies of a and b change; c's signature changes.
+    write(root, 'src/m.ts', 'export function a(x: number) { return x + 1; }\nfunction b(x: number) { return x * 2; }\nexport function c(x: number, y = 0) { return x; }\n');
+    await ledger.refresh(5000);
+    expect(ledger.changeKinds()).toEqual({ bodyOnly: 2, signatureChanged: 1, unclassified: 0, exportsChanged: 2 });
+    const snap = ledger.snapshot() as LedgerSnapshot & Record<string, unknown>;
+    expect(snap.changeKinds).toEqual({ bodyOnly: 2, signatureChanged: 1, unclassified: 0, exportsChanged: 2 });
+    expect(JSON.stringify(snap)).not.toMatch(/percent|threshold|ratio|score/i);
+    // Another process (openlore status) reads the same counts.
+    await ledger.persist();
+    const live = readLiveLedger(root);
+    expect('ledger' in live && live.ledger.changeKinds).toEqual({ bodyOnly: 2, signatureChanged: 1, unclassified: 0, exportsChanged: 2 });
+    ledger.dispose();
+  });
+
+  it('a symbol changed and changed back is not counted', async () => {
+    const root = repo();
+    write(root, 'src/config.ts', A);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'src/config.ts' }]);
+    write(root, 'src/config.ts', B);
+    await ledger.refresh(5000);
+    write(root, 'src/config.ts', A);
+    await ledger.refresh(5000);
+    expect(ledger.changeKinds()).toEqual({ bodyOnly: 0, signatureChanged: 0, unclassified: 0, exportsChanged: 0 });
+  });
+});
