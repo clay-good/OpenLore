@@ -58,7 +58,7 @@ describe('payload and paths', () => {
     const items = Array.from({ length: 20 }, (_, i) => ({ key: `k${i}`, severity: i === 19 ? 'error' : 'info', text: 'x'.repeat(80) }));
     const out = renderReceipt('after-tools', items, 400)!;
     expect(out.split('\n')[1]).toContain('x'); // the error sorts first
-    expect(out).toMatch(/\d+ more fact\(s\) not shown \(budget\)\./);
+    expect(out).toMatch(/\d+ more fact\(s\) not shown \(budget\); they are stated on a later call\./);
     expect(renderReceipt('after-tools', [])).toBeNull();
   });
 });
@@ -146,9 +146,10 @@ describe('before-stop', () => {
     const root = repo();
     verify.result = { items: [{ subject: finding.message, check: 'check_weakening', severity: 'error', nextAction: finding.remediation }], findings: [{ ...finding, enforcementClass: 'advisory' }], gated: false };
     const r = await runHook('before-stop', payload(root));
-    const c = context(r.stdout)!;
-    expect(c.hookEventName).toBe('Stop');
-    expect(c.additionalContext).toContain('(next action: Test src/f.test.ts::b no longer runs');
+    // Shown to the user: context for the model at Stop would make it keep working.
+    const out = JSON.parse(r.stdout) as { systemMessage?: string; hookSpecificOutput?: unknown };
+    expect(out.hookSpecificOutput).toBeUndefined();
+    expect(out.systemMessage).toContain('(next action: Test src/f.test.ts::b no longer runs');
     expect(r.stdout).not.toContain('"decision"');
   });
 
@@ -177,6 +178,54 @@ describe('before-stop', () => {
     const root = repo();
     verify.result = { error: 'no index' };
     expect((await runHook('before-stop', payload(root))).stdout).toBe('');
+  });
+});
+
+describe('review round 1', () => {
+  const TEST = "import { f } from './f';\nit('a', () => { expect(f()).toBe(1); });\nit('b', () => { expect(f()).toBe(2); });\n";
+
+  it('finds the OpenLore root above a subdirectory cwd', async () => {
+    const root = repo({ 'gen/order.pb.go': GENERATED });
+    const r = await runHook('before-edit', JSON.stringify({ session_id: 'sub', cwd: join(root, 'gen'), tool_input: { file_path: join(root, 'gen/order.pb.go') } }));
+    expect(context(r.stdout)?.additionalContext).toContain('is generated');
+  });
+
+  it('compares with the commit the session started from, not with earlier commits', async () => {
+    const root = repo({ 'src/f.ts': 'export function f() { return 1; }\n', 'src/f.test.ts': TEST });
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));
+    execFileSync('git', ['commit', '-qam', 'skip b'], { cwd: root, env: GIT_ENV });
+    // A new session after that commit: the skip is history, not this session's edit.
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'") + '\n');
+    expect((await runHook('after-tools', payload(root, 'src/f.test.ts', { session_id: 'later' }))).stdout).toBe('');
+    // In that session, a new skip is stated.
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'").replace("it('a'", "it.skip('a'"));
+    expect(context((await runHook('after-tools', payload(root, 'src/f.test.ts', { session_id: 'later' }))).stdout)?.additionalContext).toContain('test `a`');
+  });
+
+  it('works when the OpenLore root is a subfolder of the git repository', async () => {
+    const top = repo({ 'packages/app/src/f.ts': 'export function f() { return 1; }\n', 'packages/app/src/f.test.ts': TEST });
+    const app = join(top, 'packages/app');
+    mkdirSync(join(app, '.openlore'));
+    write(app, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));
+    const r = await runHook('after-tools', JSON.stringify({ session_id: 'mono', cwd: app, tool_input: { file_path: join(app, 'src/f.test.ts') } }));
+    expect(context(r.stdout)?.additionalContext).toContain('test `b`');
+  });
+
+  it('a missing import in two files is two facts', async () => {
+    const root = repo({ 'src/k.ts': 'export const k = 1;\n', 'src/sub/j.ts': 'export const j = 1;\n' });
+    write(root, 'src/k.ts', "import { u } from './utils';\nexport const k = u;\n");
+    write(root, 'src/sub/j.ts', "import { u } from './utils';\nexport const j = u;\n");
+    expect((await runHook('after-tools', payload(root, 'src/k.ts'))).stdout).toContain('utils');
+    expect((await runHook('after-tools', payload(root, 'src/sub/j.ts'))).stdout).toContain('utils');
+  });
+
+  it('facts cut by the budget are stated on a later call', async () => {
+    const root = repo({ 'src/m.ts': 'export const m = 1;\n' });
+    write(root, 'src/m.ts', Array.from({ length: 120 }, (_, i) => `import { x${i} } from './missing${i}';`).join('\n') + '\nexport const m = 1;\n');
+    const first = context((await runHook('after-tools', payload(root, 'src/m.ts'))).stdout)!.additionalContext;
+    expect(first).toMatch(/more fact\(s\) not shown/);
+    const second = (await runHook('after-tools', payload(root, 'src/m.ts'))).stdout;
+    expect(second).not.toBe('');
   });
 });
 

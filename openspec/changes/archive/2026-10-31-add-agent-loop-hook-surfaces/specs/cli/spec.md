@@ -10,7 +10,9 @@ command for the moments before an edit (`PreToolUse` on the edit tools), after a
 scope, where they would run in every repository. Each command SHALL read the harness payload, print
 at most one receipt as the event's `additionalContext` within that moment's budget (keeping the most
 severe items and counting the rest), print nothing when it has no new item, and not repeat a fact
-already delivered under the same harness `session_id`. The before-edit moment SHALL NOT write the
+already delivered under the same harness `session_id`. Facts SHALL compare with the commit the
+harness session started from. At `Stop`, the advisory receipt SHALL be shown to the user, not to
+the agent. The before-edit moment SHALL NOT write the
 target file. The after-edit moment SHALL record the edited file for the session ledger. Each moment
 SHALL be turned off by `hooks.<moment>: false` in `.openlore/config.json`, and `openlore status`
 SHALL list the wired moments.
@@ -47,7 +49,7 @@ hook's standard output SHALL carry only the receipt.
 - **GIVEN** no blocking codes in `enforcement.policy` and a session diff with a `test-disabled`
   finding
 - **WHEN** the before-stop hook runs
-- **THEN** it prints the receipt including the finding and does not block
+- **THEN** it shows the receipt including the finding to the user and does not block
 
 #### Scenario: A team can make one finding blocking
 

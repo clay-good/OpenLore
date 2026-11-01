@@ -326,19 +326,26 @@ event's `additionalContext` — or nothing, when there is nothing new.
 |--------|-------------------|------------------------|
 | `before-edit` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | the target is a generated file (its source and regenerate command), vendored code, or a lockfile |
 | `after-tools` | `PostToolUse`, same tools | the edit is recorded for the [session ledger](session-ledger.md), which can then name background changes; new ledger facts; for the edited file: [check weakening](check-weakening.md), [phantom references](phantom-references.md), and [generated files](generated-files.md) |
-| `before-stop` | `Stop` | the `verify_change` receipt for the session's diff |
+| `before-stop` | `Stop` | the `verify_change` receipt for the session's diff, shown to **you** (a `systemMessage`): context for the agent at `Stop` would make it keep working |
 
+- **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
+  hook ran, so work committed earlier is not raised again in every session.
 - **Once each.** A fact is stated once per Claude Code session (keyed by the payload's
-  `session_id`; without one, nothing is deduplicated).
+  `session_id`; without one, nothing is deduplicated). A fact cut by the size budget is stated on a
+  later call.
+- **Found from a subdirectory.** The hook uses the nearest directory at or above the session's
+  working directory that has `.openlore/`.
 - **Bounded.** Each receipt has a size budget (the most severe facts first, the rest counted) and a
   time limit (8 s, 15 s, 50 s); past it the hook prints nothing.
 - **Advisory.** Hooks exit 0 and never block, with one exception: when your
   [`enforcement.policy`](configuration.md#enforcement-policy) makes a finding code `blocking`, the
-  `before-stop` hook blocks the stop and lists those findings. It does not block twice in a row.
+  `before-stop` hook blocks the stop and lists those findings for the agent. It does not block twice
+  in a row.
 - **Repository scope only.** The moments run on every edit, so a user-scope install does not wire
   them (they would run in every repository). Run `openlore install` in the repository to get them.
 - **Turning one off:** `"hooks": { "before-edit": false }` in `.openlore/config.json`.
   `openlore status` lists the wired moments and marks the ones turned off.
+- A `Write` payload over 8 MB is not read; the hook prints nothing for it.
 - Uninstall removes only these groups (each carries `_openloreHook: <moment>`); your own hooks, and
   the opt-in `openlore check-edit --hook`, are left as they are.
 

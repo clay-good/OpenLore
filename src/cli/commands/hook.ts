@@ -10,7 +10,8 @@
  * | `after-tools` | `PostToolUse` (edit tools)   | the edit recorded for the session ledger; new ledger facts; |
  * |               |                              | generated-file, phantom-reference and check-weakening facts |
  * |               |                              | for the edited file                                         |
- * | `before-stop` | `Stop`                       | the `verify_change` receipt for the session's diff          |
+ * | `before-stop` | `Stop`                       | the `verify_change` receipt for the session's diff, shown   |
+ * |               |                              | to the user; the agent sees it only as a policy block       |
  *
  * Every hook reads the harness payload from stdin and prints at most one budgeted receipt as the
  * event's `additionalContext`; it prints nothing when it has nothing new. A fact already delivered
@@ -22,7 +23,7 @@
 
 import { Command } from 'commander';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
@@ -98,44 +99,95 @@ export function repoPath(root: string, file: string): string | undefined {
 
 /** Keep the most severe items within the budget; the rest are counted. */
 export function renderReceipt(moment: HookMoment, items: HookItem[], budgetChars = BUDGET_CHARS[moment]): string | null {
-  if (!items.length) return null;
+  return renderShown(moment, items, budgetChars).text;
+}
+
+/** The receipt and the keys of the items it shows (only those count as delivered). */
+function renderShown(moment: HookMoment, items: HookItem[], budgetChars = BUDGET_CHARS[moment]): { text: string | null; shown: string[] } {
+  if (!items.length) return { text: null, shown: [] };
   const sorted = [...items].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9));
   const header = `[openlore ${moment}]`;
   const lines: string[] = [];
   let used = header.length;
   let omitted = 0;
+  const shown: string[] = [];
   for (const it of sorted) {
     const line = `- ${it.text}${it.next ? ` (next action: ${it.next})` : ''}`;
     if (used + line.length + 1 > budgetChars) { omitted++; continue; }
     lines.push(line);
+    shown.push(it.key);
     used += line.length + 1;
   }
-  if (!lines.length) return null;
-  if (omitted) lines.push(`- ${omitted} more fact(s) not shown (budget).`);
-  return `${header}\n${lines.join('\n')}`;
+  if (!lines.length) return { text: null, shown: [] };
+  if (omitted) lines.push(`- ${omitted} more fact(s) not shown (budget); they are stated on a later call.`);
+  return { text: `${header}\n${lines.join('\n')}`, shown };
+}
+
+function deliveredDir(root: string): string {
+  return join(root, OPENLORE_DIR, 'session-ledger', 'hook-delivered');
 }
 
 function deliveredPath(root: string, sessionId: string): string {
   const id = createHash('sha256').update(sessionId).digest('hex').slice(0, 24);
-  return join(root, OPENLORE_DIR, 'session-ledger', 'hook-delivered', `${id}.json`);
+  return join(deliveredDir(root), `${id}.json`);
 }
 
-/** Facts already delivered under this harness session (fail-open: an unreadable record is empty). */
-function readDelivered(root: string, sessionId: string | undefined): Set<string> {
-  if (!sessionId) return new Set();
+/** Per harness session: the facts already delivered, and the commit the session started from. */
+interface SessionRecord { keys: Set<string>; startHead?: string }
+
+function readSession(root: string, sessionId: string | undefined): SessionRecord {
+  if (!sessionId) return { keys: new Set() };
   try {
-    const v = JSON.parse(readFileSync(deliveredPath(root, sessionId), 'utf-8')) as unknown;
-    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const v = JSON.parse(readFileSync(deliveredPath(root, sessionId), 'utf-8')) as { keys?: unknown; startHead?: unknown } | unknown[];
+    // Fail-open on an older or foreign shape.
+    const keys = Array.isArray(v) ? v : Array.isArray((v as { keys?: unknown }).keys) ? (v as { keys: unknown[] }).keys : [];
+    const head = Array.isArray(v) ? undefined : (v as { startHead?: unknown }).startHead;
+    return { keys: new Set(keys.filter((x): x is string => typeof x === 'string')), ...(typeof head === 'string' && /^[0-9a-f]{40,64}$/.test(head) ? { startHead: head } : {}) };
   } catch {
-    return new Set();
+    return { keys: new Set() };
   }
 }
 
-async function writeDelivered(root: string, sessionId: string | undefined, keys: Set<string>): Promise<void> {
+/**
+ * Write the session record, merged with what a concurrent hook of the same session wrote meanwhile
+ * (the harness runs matching hooks in parallel). Records untouched for a week are removed.
+ */
+async function writeSession(root: string, sessionId: string | undefined, rec: SessionRecord): Promise<void> {
   if (!sessionId) return;
   try {
-    await atomicWriteFile(deliveredPath(root, sessionId), JSON.stringify([...keys].slice(-MAX_DELIVERED)));
+    const now = readSession(root, sessionId);
+    const keys = [...new Set([...now.keys, ...rec.keys])].slice(-MAX_DELIVERED);
+    await atomicWriteFile(deliveredPath(root, sessionId), JSON.stringify({ startHead: now.startHead ?? rec.startHead, keys }));
+    const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
+    for (const n of readdirSync(deliveredDir(root))) {
+      try { if (statSync(join(deliveredDir(root), n)).mtimeMs < cutoff) unlinkSync(join(deliveredDir(root), n)); } catch { /* raced */ }
+    }
   } catch { /* dedupe is best-effort: at worst a fact is said twice */ }
+}
+
+async function headSha(root: string): Promise<string | undefined> {
+  try {
+    const { execFileGit } = await import('../../utils/git-exec.js');
+    const sha = String((await execFileGit('git', ['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: root })).stdout).trim();
+    return /^[0-9a-f]{40,64}$/.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function repoTop(root: string): Promise<string | undefined> {
+  try {
+    const { execFileGit } = await import('../../utils/git-exec.js');
+    return String((await execFileGit('git', ['rev-parse', '--show-toplevel'], { cwd: root })).stdout).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where `root` sits in its git repository (`packages/app/`), so git-based checks get repo paths. */
+async function repoPrefix(root: string): Promise<string> {
+  const { getRepoPrefix } = await import('../../core/drift/git-diff.js');
+  return (await getRepoPrefix(root)) ?? '';
 }
 
 /** `before-edit`: the target is generated, vendored, or a lockfile. Reads headers; writes nothing. */
@@ -161,7 +213,7 @@ function generatedText(f: { file: string; kind: string; generatedFrom: string[] 
  * delivery — the live ledger's background changes and edit loops, and for the edited file its
  * generated-file, phantom-reference and check-weakening findings.
  */
-async function afterTools(root: string, files: string[]): Promise<HookItem[]> {
+async function afterTools(root: string, files: string[], baseline: string | undefined): Promise<HookItem[]> {
   const items: HookItem[] = [];
   const { recordAgentEdit, readLiveLedger } = await import('../../core/services/session-ledger.js');
   for (const f of files) recordAgentEdit(root, f);
@@ -179,14 +231,22 @@ async function afterTools(root: string, files: string[]): Promise<HookItem[]> {
 
   items.push(...(await beforeEdit(root, files)));
 
+  if (!baseline) return items; // no commit to compare with (an unborn branch)
+  // Compared with the commit this harness session started from: a finding in an earlier commit is
+  // not this session's, and is not raised again in every session.
+  const prefix = await repoPrefix(root);
+  const repoFiles = files.map(f => prefix + f);
   const { classifyFile } = await import('../../core/drift/git-diff.js');
-  const changed = files.map(path => ({ path, status: 'modified' as const, additions: 0, deletions: 0, ...classifyFile(path) }));
+  const changed = repoFiles.map(path => ({ path, status: 'modified' as const, additions: 0, deletions: 0, ...classifyFile(path) }));
   const { checkPhantomReferences } = await import('../../core/services/phantom-references.js');
-  const phantom = await checkPhantomReferences(root, 'HEAD', changed).catch(() => undefined);
-  for (const f of phantom?.findings ?? []) items.push({ key: `${f.code}:${f.subject}`, severity: f.severity, text: f.message, ...(f.remediation ? { next: f.remediation } : {}) });
+  const phantom = await checkPhantomReferences(root, baseline, changed).catch(() => undefined);
+  for (const f of phantom?.findings ?? []) {
+    items.push({ key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: f.severity, text: f.message, ...(f.remediation ? { next: f.remediation } : {}) });
+  }
 
   const { checkWeakening } = await import('../../core/services/check-weakening.js');
-  const weak = await checkWeakening({ root, files }).catch(() => undefined);
+  const top = prefix ? await repoTop(root) : root;
+  const weak = top ? await checkWeakening({ root: top, baseRef: baseline, files: repoFiles }).catch(() => undefined) : undefined;
   for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, severity: f.severity, text: f.message });
   return items;
 }
@@ -195,9 +255,9 @@ async function afterTools(root: string, files: string[]): Promise<HookItem[]> {
  * `before-stop`: the `verify_change` receipt. Blocks only when `enforcement.policy` makes one of its
  * findings blocking, and never twice in a row (`stop_hook_active`).
  */
-async function beforeStop(root: string): Promise<{ items: HookItem[]; block?: string }> {
+async function beforeStop(root: string, baseline: string | undefined): Promise<{ items: HookItem[]; block?: string }> {
   const { handleVerifyChange } = await import('../../core/services/mcp-handlers/verify-change.js');
-  const r = await handleVerifyChange({ directory: root }) as {
+  const r = await handleVerifyChange({ directory: root, ...(baseline ? { baseRef: baseline } : {}) }) as {
     error?: string;
     items?: Array<{ subject: string; check: string; severity: string; nextAction: string }>;
     findings?: Array<{ code: string; subject: string; message: string; enforcementClass?: string; remediation?: string }>;
@@ -212,6 +272,13 @@ async function beforeStop(root: string): Promise<{ items: HookItem[]; block?: st
     ...blocking.map(f => `- ${f.code}: ${f.message}${f.remediation ? ` (next action: ${f.remediation})` : ''}`),
   ].join('\n');
   return { items, block: reason };
+}
+
+function openloreRoot(start: string): string | undefined {
+  for (let dir = start; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, OPENLORE_DIR))) return dir;
+    if (dirname(dir) === dir) return undefined;
+  }
 }
 
 /** Whether `hooks.<moment>` is turned off in `.openlore/config.json` (an unreadable config is "on"). */
@@ -233,9 +300,10 @@ export interface HookRunResult { stdout: string; exitCode: 0 }
 export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<HookRunResult> {
   const silent: HookRunResult = { stdout: '', exitCode: 0 };
   const payload = parseHookPayload(raw);
-  const root = resolve(payload.cwd ?? opts.cwd ?? process.cwd());
-  // Not an OpenLore repository (the hook is wired user-wide): nothing to say.
-  if (!existsSync(join(root, OPENLORE_DIR))) return silent;
+  // The OpenLore root: the nearest directory at or above the session's working directory (the agent
+  // may have `cd`-ed into a subdirectory) that has `.openlore`. None: nothing to say.
+  const root = openloreRoot(resolve(payload.cwd ?? opts.cwd ?? process.cwd()));
+  if (!root) return silent;
   if (momentDisabled(root, moment)) return silent;
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
   const files = payload.files.map(f => repoPath(root, f)).filter((f): f is string => !!f);
@@ -244,23 +312,28 @@ export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: str
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<'timeout'>(r => { timer = setTimeout(() => r('timeout'), opts.timeoutMs ?? TIMEOUT_MS[moment]); timer.unref?.(); });
   try {
+    const session = readSession(root, payload.sessionId);
+    // The commit this session started from: recorded by its first hook, reused by every later one.
+    const baseline = session.startHead ?? await headSha(root);
+    if (!session.startHead && baseline) session.startHead = baseline;
     // Quiet: the hook's stdout is the harness's JSON channel, so no log line may reach it.
     const work = withLoggerOptions({ quiet: true }, async () => {
       if (moment === 'before-edit') return { items: await beforeEdit(root, files) };
-      if (moment === 'after-tools') return { items: await afterTools(root, files) };
-      return beforeStop(root);
+      if (moment === 'after-tools') return { items: await afterTools(root, files, baseline) };
+      return beforeStop(root, baseline);
     });
     const done = await Promise.race([work, timeout]);
     if (done === 'timeout') return silent;
-    const delivered = readDelivered(root, payload.sessionId);
-    const fresh = done.items.filter(i => !delivered.has(i.key));
-    const text = renderReceipt(moment, fresh);
     if ('block' in done && done.block) {
       return { stdout: JSON.stringify({ decision: 'block', reason: done.block }), exitCode: 0 };
     }
-    if (!text) return silent;
-    for (const i of fresh) delivered.add(i.key);
-    await writeDelivered(root, payload.sessionId, delivered);
+    const { text, shown } = renderShown(moment, done.items.filter(i => !session.keys.has(i.key)));
+    if (!text) { await writeSession(root, payload.sessionId, session); return silent; }
+    for (const k of shown) session.keys.add(k);
+    await writeSession(root, payload.sessionId, session);
+    // At Stop, context for the model makes it continue working; the advisory receipt is for the
+    // user instead. Only a policy block reaches the model at Stop.
+    if (moment === 'before-stop') return { stdout: JSON.stringify({ systemMessage: text }), exitCode: 0 };
     return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: HOOK_EVENT[moment], additionalContext: text } }), exitCode: 0 };
   } catch {
     return silent;
