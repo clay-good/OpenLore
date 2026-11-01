@@ -166,6 +166,8 @@ export async function callSitesFor(
   root: string,
   ops: ReadonlyArray<{ file: string; op: Pick<ContractOperation, 'address' | 'method' | 'path' | 'declaredPath' | 'line'> }>,
   boundaries: string[],
+  /** Filled with the per-operation totals (before the per-operation cap) and whether a file cap was hit. */
+  stats?: { capped: boolean; totals: Map<string, number> },
 ): Promise<Map<string, Array<{ file: string; line: number; method: string; url: string }>>> {
   const out = new Map<string, Array<{ file: string; line: number; method: string; url: string }>>();
   const { extractHttpCalls, buildHttpEdges, normalizeUrl } = await import('../../analyzer/http-route-parser.js');
@@ -176,6 +178,7 @@ export async function callSitesFor(
   })));
   const files = await workingFiles(root, CLIENT_EXT);
   if (files.length > MAX_CLIENT_FILES) boundaries.push(`Client call sites were read from the first ${MAX_CLIENT_FILES} of ${files.length} source files.`);
+  if (stats) stats.capped = files.length > MAX_CLIENT_FILES;
   const calls = (await mapFilesBounded(files.slice(0, MAX_CLIENT_FILES), f => extractHttpCalls(join(root, f)).catch(() => []), 8)).flat();
   for (const e of buildHttpEdges(calls, routes)) {
     const list = out.get(e.route.handlerName) ?? [];
@@ -183,6 +186,7 @@ export async function callSitesFor(
     if (!list.some(c => c.file === file && c.line === e.call.line)) list.push({ file, line: e.call.line, method: e.call.method, url: emittedText(e.call.url) });
     out.set(e.route.handlerName, list);
   }
+  if (stats) for (const [k, v] of out) stats.totals.set(k, v.length);
   for (const [k, v] of out) out.set(k, v.sort((a, b) => sortStr(`${a.file}:${String(a.line).padStart(8, '0')}`, `${b.file}:${String(b.line).padStart(8, '0')}`)).slice(0, MAX_CONSUMERS_PER_ELEMENT));
   boundaries.push('Consumers are client call sites in this repository whose method and literal path match; callers in other repositories, and calls through generated clients or dynamic URLs, are not known here.');
   return out;
