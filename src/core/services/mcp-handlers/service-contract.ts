@@ -160,6 +160,53 @@ export async function indexedRoutes(root: string): Promise<IndexedRoute[] | unde
   }
 }
 
+/** Distinct consumer functions whose reaching tests are computed per run, and tests listed per consumer. */
+const MAX_CONSUMER_FUNCTIONS = 20;
+const MAX_TESTS_PER_CONSUMER = 5;
+
+/**
+ * Each consumer call site's enclosing indexed function and the tests that reach it (`select_tests`),
+ * so a breaking change names what to run. A call outside any indexed function, or past the cap, says
+ * why its tests are not computed (never "no tests").
+ */
+async function attachReachingTests(
+  root: string,
+  consumers: Map<string, Array<{ file: string; line: number; tests?: string[]; testsTotal?: number; testsNotComputed?: string }>>,
+  boundaries: string[],
+): Promise<void> {
+  const all = [...consumers.values()].flat();
+  if (!all.length) return;
+  const { readCachedContext } = await import('./utils.js');
+  const ctx = await readCachedContext(root).catch(() => null);
+  const nodes = ((ctx?.callGraph as { nodes?: Array<{ name: string; filePath: string; startLine?: number; endLine?: number; isExternal?: boolean; isTest?: boolean }> } | undefined)?.nodes ?? [])
+    .filter(n => !n.isExternal && !n.isTest && typeof n.startLine === 'number' && typeof n.endLine === 'number');
+  if (!nodes.length) {
+    for (const c of all) c.testsNotComputed = 'no index: run `openlore analyze`';
+    return;
+  }
+  const enclosing = (file: string, line: number) => nodes
+    .filter(n => n.filePath === file && n.startLine! <= line && n.endLine! >= line)
+    .sort((a, b) => (a.endLine! - a.startLine!) - (b.endLine! - b.startLine!))[0];
+  const { handleSelectTests } = await import('./test-impact.js');
+  const testsByName = new Map<string, { tests: string[]; total: number } | string>();
+  for (const c of all) {
+    const fn = enclosing(c.file, c.line);
+    if (!fn) { c.testsNotComputed = 'the call is outside any indexed function'; continue; }
+    if (!testsByName.has(fn.name)) {
+      if (testsByName.size >= MAX_CONSUMER_FUNCTIONS) { c.testsNotComputed = `past the first ${MAX_CONSUMER_FUNCTIONS} consumer functions`; continue; }
+      const sel = await handleSelectTests({ directory: root, changedSymbols: [fn.name] }).catch(e => ({ error: e instanceof Error ? e.message : String(e) })) as { selectedTests?: Array<{ test: string; file: string }>; error?: string };
+      testsByName.set(fn.name, sel.error || !sel.selectedTests ? (sel.error ?? 'no result') : (() => {
+        const t = [...new Set(sel.selectedTests!.map(x => emittedText(`${x.file} › ${x.test}`)))];
+        return { tests: t.slice(0, MAX_TESTS_PER_CONSUMER), total: t.length };
+      })());
+    }
+    const r = testsByName.get(fn.name)!;
+    if (typeof r === 'string') c.testsNotComputed = emittedText(r);
+    else { c.tests = r.tests; c.testsTotal = r.total; }
+  }
+  boundaries.push('Tests per consumer are the tests select_tests reaches from the function that holds the call, matched by its name (a same-named function elsewhere widens the set).');
+}
+
 /** Client call sites in this repository that call each changed operation. */
 async function consumersOf(root: string, changes: readonly ContractChange[], docs: readonly ContractDocument[], boundaries: string[]): Promise<Map<string, Array<{ file: string; line: number; method: string; url: string }>>> {
   const out = new Map<string, Array<{ file: string; line: number; method: string; url: string }>>();
@@ -380,6 +427,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
         ? { ...c, rule: 'schema-unassessed' as const, class: 'potentially-breaking' as const, detail: `${c.detail} (a scan cap was reached, so it may only have moved)` }
         : c);
     const consumers = await consumersOf(root, changes, [...head.docs, ...base.docs], boundaries);
+    await attachReachingTests(root, consumers, boundaries);
     for (const c of changes.filter(x => x.class === 'breaking' || x.class === 'dangerous')) {
       const who = consumers.get(c.address) ?? [];
       const subject = `${c.address}${c.element ? ` ${c.element}` : ''}`;

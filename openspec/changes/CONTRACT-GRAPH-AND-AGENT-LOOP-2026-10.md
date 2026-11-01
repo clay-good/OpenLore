@@ -22,6 +22,7 @@ groups:
 | Contract operations in the `orient` and `blast_radius` briefings | [add-contract-briefings](archive/2026-11-01-add-contract-briefings/) | shipped |
 | Literal request bodies against required properties | [add-contract-payload-check](archive/2026-11-01-add-contract-payload-check/) | shipped |
 | verify_change carries request-body findings | [add-verify-change-payload-findings](archive/2026-11-01-add-verify-change-payload-findings/) | shipped |
+| Contract consumers name the tests to run | [add-contract-consumer-tests](archive/2026-11-01-add-contract-consumer-tests/) | shipped |
 | Contract elements as graph nodes, handler ↔ operation edges, protobuf, GraphQL | [add-contract-graph-projection](add-contract-graph-projection/) | split from the above |
 | Grade a proposed patch in memory before it is written | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
 | `verify_change` as the one landing place for all diff findings, plus new architecture violations and secrets on added lines | [add-verification-feedback-loop](add-verification-feedback-loop/) | existing, addendum |
