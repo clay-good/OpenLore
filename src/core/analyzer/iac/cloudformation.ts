@@ -107,16 +107,23 @@ function extractTemplate(
     // The code a function runs (change: add-iac-deploy-binding); SAM `Globals.Function` supplies defaults.
     if (typeStr === 'AWS::Lambda::Function' || typeStr === 'AWS::Serverless::Function') {
       const props = ((body as Record<string, unknown>).Properties ?? {}) as Record<string, unknown>;
-      const globals = (((tpl.Globals ?? {}) as Record<string, unknown>).Function ?? {}) as Record<string, unknown>;
-      if (props.PackageType === 'Image' || props.ImageUri !== undefined) continue;
-      const handler = props.Handler ?? globals.Handler;
-      const codeUri = props.CodeUri ?? globals.CodeUri;
+      // SAM `Globals.Function` applies to `AWS::Serverless::Function` only.
+      const globals = typeStr === 'AWS::Serverless::Function'
+        ? (((tpl.Globals ?? {}) as Record<string, unknown>).Function ?? {}) as Record<string, unknown> : {};
+      const pick = (k: string) => props[k] ?? globals[k];
+      if (pick('PackageType') === 'Image' || pick('ImageUri') !== undefined) continue;
+      const handler = pick('Handler');
+      const codeUri = pick('CodeUri');
+      const runtime = pick('Runtime');
+      const code = props.Code as Record<string, unknown> | undefined;
       const r = graph.resources[graph.resources.length - 1];
-      if (r && r.address === id && handler !== undefined) {
-        r.deploys = typeof handler === 'string'
-          ? { handler, ...(typeof codeUri === 'string' && !/^s3:\/\//i.test(codeUri) ? { codeUri } : {}) }
-          : { unresolved: 'the handler is an intrinsic function' };
-      }
+      if (!r || r.address !== id || handler === undefined) continue;
+      if (pick('InlineCode') !== undefined || (code && code.ZipFile !== undefined)) r.deploys = { unresolved: 'the code is inline in the template' };
+      else if (typeof handler !== 'string') r.deploys = { unresolved: 'the handler is an intrinsic function' };
+      else if (codeUri !== undefined && typeof codeUri !== 'string') r.deploys = { unresolved: 'the code location is not a path (an S3 location or intrinsic)' };
+      else if (typeof codeUri === 'string' && /^s3:\/\//i.test(codeUri)) r.deploys = { unresolved: 'the code is in S3' };
+      else if (codeUri === undefined && typeStr === 'AWS::Lambda::Function') r.deploys = { unresolved: 'the code location is not in the repository (Code is an S3 location)' };
+      else r.deploys = { handler, ...(typeof codeUri === 'string' ? { codeUri } : {}), ...(typeof runtime === 'string' ? { runtime } : {}) };
     }
   }
 

@@ -116,19 +116,26 @@ change this?".
 ## The code a function resource runs
 
 A Lambda names its code as `<module>.<export>`. A Terraform `aws_lambda_function` with a literal
-`handler`, or a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function` with a
-string `Handler` (and `CodeUri`, relative to the template; SAM `Globals.Function` supplies
-defaults), gets a `deploys_symbol` edge to the indexed function it names: `src/orders.handler` →
-`handler` in `src/orders.ts`; `app.lambda_handler` with `CodeUri: functions/` →
-`lambda_handler` in `functions/app.py`. The module is tried under the code location, the
-repository root, and the template's directory, with the usual source extensions and `index` files.
+top-level `handler`, or a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function`
+with a string `Handler`, gets a `deploys_symbol` edge to the one indexed top-level function it
+names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handler` with
+`CodeUri: functions/` → `lambda_handler` in `functions/app.py` (relative to the template).
 
+- **Where the module is looked for:** under the code location only when one is known (SAM
+  `CodeUri`, Terraform `source_dir`); else beside a CloudFormation template; else, for Terraform,
+  at the repository root or beside the `.tf` file, and only for a module path with a directory in it
+  (a bare `index.handler` names a file inside a package built elsewhere). SAM `Globals.Function`
+  applies to `AWS::Serverless::Function` only.
+- **Which files:** the runtime picks them (`nodejs*` → TypeScript/JavaScript, `python*` → `.py`, a
+  Python module path uses `/`); other runtimes (Java, Go, .NET, custom) are not bound.
+- **Exactly one:** a module that matches more than one file, or a name with no single top-level
+  function in it (class methods do not count), is not bound.
 - `find_dead_code` counts a bound function as deployed (live): `rootKinds.deployed`.
-- `analyze_impact` on the function reaches the resource.
-- Matching is literal. A handler that is an expression (`var.handler`, `!Sub`), a build-output path
-  (`dist/…`) with no indexed source, or a name with no single indexed function in the file is
-  listed in `unresolvedDeployBindings` (in `find_dead_code`), because the code it runs can appear
-  dead. Container images (`PackageType: Image`) are not bound.
+  `analyze_impact` on the function reaches the resource.
+- Everything else is listed in `unresolvedDeployBindings` (in `find_dead_code`) with the reason,
+  because the code it runs can appear dead: an expression or intrinsic handler, inline code, code in
+  S3, a build-output path (`dist/…`) with no indexed source, an unsupported runtime, an ambiguous
+  module, a handler passed to a Terraform module. Container images are not bound.
 
 ## Environment variables set by infrastructure
 

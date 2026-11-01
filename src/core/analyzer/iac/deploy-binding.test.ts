@@ -76,7 +76,7 @@ describe('deploy binding', () => {
     const byResource = new Map((g.unresolvedDeployBindings ?? []).map(u => [u.resource, u.reason]));
     expect(byResource.get('aws_lambda_function.dynamic')).toContain('expression');
     expect(byResource.get('aws_lambda_function.built')).toContain('build-output');
-    expect(byResource.get('aws_lambda_function.missing')).toContain('no indexed function "nope"');
+    expect(byResource.get('aws_lambda_function.missing')).toContain('no top-level function "nope"');
     expect(byResource.get('Sub')).toContain('intrinsic');
     expect(byResource.has('Image')).toBe(false);
     expect(byResource.has('aws_s3_bucket.logs')).toBe(false);
@@ -94,5 +94,81 @@ describe('deploy binding', () => {
     const r = bindDeployHandlers(graph as never, [node('o', 'handler', 'src/orders.ts'), node('t1', 'run', 'src/twin.ts'), node('t2', 'run', 'src/twin.ts')]);
     expect(r.edges).toEqual([]);
     expect(r.unresolved.map(u => u.reason)).toEqual([expect.stringContaining('no indexed source file'), expect.stringContaining('more than once')]);
+  });
+});
+
+describe('deploy binding: adversarial review regressions', () => {
+  const graphOf = async (files: Array<[string, string, string]>) =>
+    serializeCallGraph(await new CallGraphBuilder().build(files.map(([path, content, language]) => ({ path, content, language }))));
+  const pairs = (g: SerializedCallGraph) => g.edges.filter(e => e.kind === 'deploys_symbol').map(e => `${e.callerId} -> ${e.calleeId}`);
+  const reasons = (g: SerializedCallGraph) => Object.fromEntries((g.unresolvedDeployBindings ?? []).map(u => [u.resource, u.reason]));
+  const TS = (name: string) => `export function ${name}(e: unknown) {\n  return e;\n}\n`;
+  const PY = (name: string) => `def ${name}(event, context):\n    return 1\n`;
+  const cfn = (resources: string, globals = '') => `AWSTemplateFormatVersion: '2010-09-09'\nTransform: AWS::Serverless-2016-10-31\n${globals}Resources:\n${resources}`;
+
+  it('inline code, S3 code, and Globals on a plain Lambda never bind', async () => {
+    const g = await graphOf([
+      ['index.ts', TS('handler'), 'TypeScript'],
+      ['src/app.py', PY('handler'), 'Python'],
+      ['template.yaml', cfn(`  Inline:\n    Type: AWS::Lambda::Function\n    Properties:\n      Handler: index.handler\n      Code:\n        ZipFile: "exports.handler = () => 1"\n  Plain:\n    Type: AWS::Lambda::Function\n    Properties:\n      Code: {S3Bucket: b, S3Key: k}\n`,
+        `Globals:\n  Function:\n    Handler: app.handler\n    CodeUri: src/\n`), 'CloudFormation'],
+    ]);
+    expect(pairs(g)).toEqual([]);
+    expect(reasons(g).Inline).toContain('inline');
+  });
+
+  it('Globals PackageType Image on a SAM function is honored', async () => {
+    const g = await graphOf([
+      ['app.py', PY('handler'), 'Python'],
+      ['template.yaml', cfn(`  F:\n    Type: AWS::Serverless::Function\n    Properties:\n      Handler: app.handler\n`, `Globals:\n  Function:\n    PackageType: Image\n`), 'CloudFormation'],
+    ]);
+    expect(pairs(g)).toEqual([]);
+  });
+
+  it('a known CodeUri is the only base; no fallback to the repository root', async () => {
+    const g = await graphOf([
+      ['app.py', PY('handler'), 'Python'],
+      ['template.yaml', cfn(`  F:\n    Type: AWS::Serverless::Function\n    Properties:\n      CodeUri: functions/orders/\n      Handler: app.handler\n`), 'CloudFormation'],
+    ]);
+    expect(pairs(g)).toEqual([]);
+    expect(reasons(g).F).toContain('under functions/orders');
+  });
+
+  it('the runtime picks the language; an unsupported runtime is disclosed', async () => {
+    const tf = (runtime: string) => `resource "aws_lambda_function" "f" {\n  handler = "src/app.handler"\n  runtime = "${runtime}"\n}\n`;
+    const files: Array<[string, string, string]> = [['src/app.ts', TS('handler'), 'TypeScript'], ['src/app.py', PY('handler'), 'Python']];
+    expect(pairs(await graphOf([...files, ['main.tf', tf('python3.12'), 'Terraform']]))[0]).toContain('src/app.py');
+    expect(reasons(await graphOf([...files, ['main.tf', tf('java21'), 'Terraform']]))['aws_lambda_function.f']).toContain('java21 runtime is not bound');
+    const ambiguous = await graphOf([...files, ['main.tf', 'resource "aws_lambda_function" "f" {\n  handler = "src/app.handler"\n}\n', 'Terraform']]);
+    expect(pairs(ambiguous)).toEqual([]);
+    expect(reasons(ambiguous)['aws_lambda_function.f']).toContain('more than one file');
+  });
+
+  it('Terraform: a bare module without source_dir is not bound; nested handler keys are ignored; modules are disclosed', async () => {
+    const g = await graphOf([
+      ['index.ts', TS('handler'), 'TypeScript'],
+      ['other.py', PY('run'), 'Python'],
+      ['infra/main.tf', [
+        'resource "aws_lambda_function" "bare" {\n  filename = "lambda.zip"\n  handler  = "index.handler"\n}',
+        'resource "aws_lambda_function" "nested" {\n  environment {\n    variables = {\n      handler = "other.run"\n    }\n  }\n  handler = var.h\n}',
+        'module "lambda" {\n  source  = "terraform-aws-modules/lambda/aws"\n  handler = "app.handler"\n}',
+      ].join('\n'), 'Terraform'],
+    ]);
+    expect(pairs(g)).toEqual([]);
+    const r = reasons(g);
+    expect(r['aws_lambda_function.bare']).toContain('no code location');
+    expect(r['aws_lambda_function.nested']).toContain('expression');
+    expect(r['module.lambda']).toContain('through a module');
+  });
+
+  it('a class method is not a handler; a Python dotted module is a path, not a dotted file name', async () => {
+    const g = await graphOf([
+      ['src/app.ts', 'export class A {\n  handle() {\n    return 1;\n  }\n}\n', 'TypeScript'],
+      ['pkg/mod.py', PY('handler'), 'Python'],
+      ['pkg.mod.py', PY('handler'), 'Python'],
+      ['main.tf', 'resource "aws_lambda_function" "m" {\n  handler = "src/app.handle"\n}\nresource "aws_lambda_function" "p" {\n  handler = "pkg.mod.handler"\n  runtime = "python3.12"\n  source_dir = "."\n}\n', 'Terraform'],
+    ]);
+    expect(reasons(g)['aws_lambda_function.m']).toContain('no top-level function');
+    expect(pairs(g)).toEqual([expect.stringContaining('pkg/mod.py')]);
   });
 });

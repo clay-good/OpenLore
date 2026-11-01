@@ -80,7 +80,7 @@ export interface IacResource {
    * The code a function resource runs (change: add-iac-deploy-binding): a literal handler in
    * `<module>.<export>` form with the code location it is relative to, or why it is not literal.
    */
-  deploys?: { handler?: string; codeUri?: string; unresolved?: string };
+  deploys?: { handler?: string; codeUri?: string; runtime?: string; unresolved?: string };
   /** Repo-relative, POSIX path. */
   filePath: string;
   /** 1-based; REQUIRED (used for graph/SCIP ranges). */
