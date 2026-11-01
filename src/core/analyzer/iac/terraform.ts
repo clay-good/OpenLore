@@ -8,7 +8,7 @@
  * scanner keeps the dependency tree flat and install-clean, and is fully
  * deterministic. We never evaluate HCL; we only read declared blocks + refs.
  *
- * Files: *.tf, *.tf.json, *.tfvars. (The JSON variant is handled tolerantly by
+ * Files: *.tf, *.tf.json, *.tfvars, and OpenTofu's *.tofu, *.tofu.json. (The JSON variant is handled tolerantly by
  * the same reference scan; structural JSON parsing is a spec-07 follow-up.)
  */
 
@@ -16,7 +16,7 @@ import { dirname, posix as posixPath } from 'node:path';
 import type { IacGraph, IacReference, IacResource, IacModule } from './types.js';
 import { emptyIacGraph } from './types.js';
 
-interface HclBlock {
+export interface HclBlock {
   /** e.g. "resource", "data", "module", "variable", "output", "provider", "locals", "terraform" */
   type: string;
   /** Quoted labels after the type, e.g. ["aws_s3_bucket", "logs"]. */
@@ -39,7 +39,7 @@ export function extractTerraform(
   const moduleSources: Array<{ mod: IacModule; sourceDir: string | null }> = [];
 
   for (const file of files) {
-    if (file.path.toLowerCase().endsWith('.tf.json')) {
+    if (/\.(?:tf|tofu)\.json$/i.test(file.path)) {
       ingestTfJson(file, graph, dirResources, moduleSources);
       continue;
     }
@@ -434,7 +434,7 @@ function attrValue(body: string, key: string): string | null {
 /**
  * Scan top-level HCL blocks, tracking strings/comments/heredocs and brace depth.
  */
-function scanHclBlocks(content: string): HclBlock[] {
+export function scanHclBlocks(content: string): HclBlock[] {
   const blocks: HclBlock[] = [];
   const len = content.length;
   let i = 0;

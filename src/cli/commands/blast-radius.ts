@@ -187,6 +187,13 @@ function renderHuman(b: BlastRadiusBriefing): string {
   }
   const refTotal = b.phantomReferences?.count ?? 0;
   if (refTotal > REFERENCES_SHOWN) lines.push(`   … and ${refTotal - REFERENCES_SHOWN} more unresolved reference(s)`);
+  // Env vars the diff stops reading that infrastructure still sets (add-iac-code-binding).
+  const ENV_SITES_SHOWN = 5;
+  for (const e of b.envDeclarations?.stillSet ?? []) {
+    const shown = e.sites.slice(0, ENV_SITES_SHOWN).map(x => `${x.file}:${x.line}`).join(', ');
+    const more = e.sites.length > ENV_SITES_SHOWN ? ` and ${e.sites.length - ENV_SITES_SHOWN} more` : '';
+    lines.push(sanitizeForTerminal(`   ⚠ env ${e.name} is no longer read, but is still set in ${shown}${more}`));
+  }
   for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;

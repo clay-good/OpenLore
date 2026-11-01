@@ -12,6 +12,7 @@
  *   openlore env-impact --name SECRET_KEY --json
  */
 
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
@@ -47,6 +48,9 @@ export interface EnvImpactView {
     reachingTests: number;
   };
   readSites?: ReadSiteView[];
+  declaration?: 'declared' | 'undeclared-in-corpus';
+  declaredBy?: Array<{ ecosystem: string; resource: string; file: string; line: number; literalValue: boolean }>;
+  opaqueEnvSources?: Array<{ ecosystem: string; resource: string; file: string; line: number; reason: string }>;
   affectedFunctions?: Array<{ symbol: string; file: string; distance: number }>;
   reachingTests?: Array<{ test: string; file: string }>;
   affectedFiles?: string[];
@@ -80,6 +84,15 @@ export function renderHuman(r: EnvImpactView): string {
     lines.push(`     ${site.file}:${site.line}  ${where}  [${req}]`);
   }
   if ((r.readSites ?? []).length === 0) lines.push('     (no source read sites found)');
+
+  // Where infrastructure sets it (add-iac-code-binding). Repository text: sanitized per line.
+  if ((r.declaredBy ?? []).length > 0) {
+    lines.push('   set by infrastructure:');
+    for (const d of r.declaredBy ?? []) {
+      lines.push(sanitizeForTerminal(`     ${d.file}:${d.line}  ${d.ecosystem} ${d.resource}${d.literalValue ? '  [literal value]' : ''}`));
+    }
+  } else if (r.declaration === 'undeclared-in-corpus') lines.push('   set by infrastructure: none in this repository (undeclared-in-corpus)');
+  for (const o of r.opaqueEnvSources ?? []) lines.push(sanitizeForTerminal(`     may be set by ${o.file}:${o.line}  ${o.ecosystem} ${o.resource} (${o.reason})`));
 
   if ((r.affectedFunctions ?? []).length > 0) {
     lines.push('   blast radius (upstream callers):');

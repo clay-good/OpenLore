@@ -7929,6 +7929,18 @@ Without churn data the trend SHALL be withheld with the reason, never reported a
 - **WHEN** the trend is computed
 - **THEN** no label is given and the reason is `shallow-history`
 
+### Requirement: OpenTofuFilesAreTerraform
+
+Language detection SHALL classify files ending in `.tofu` or `.tofu.json` as Terraform, so the
+Terraform/HCL extractor projects them exactly as it projects `.tf` and `.tf.json` files.
+
+#### Scenario: An OpenTofu file yields the same resources
+
+- **GIVEN** a `main.tofu` file and a `main.tf` file with identical content in two otherwise identical
+  repositories
+- **WHEN** both repositories are analyzed
+- **THEN** both graphs contain the same Terraform resource nodes and edges
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.

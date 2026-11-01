@@ -146,4 +146,33 @@ describe('handleAnalyzeEnvImpact', () => {
     expect(r.staleness).toBeUndefined();
     expect(r.boundaries.some((b: string) => /Index may be stale/.test(b))).toBe(false);
   });
+
+  it('names the infrastructure sites that set the variable, never their values (add-iac-code-binding)', async () => {
+    const { execFileSync } = await import('node:child_process');
+    mkdirSync(join(dir, 'k8s'), { recursive: true });
+    writeFileSync(join(dir, 'k8s', 'deploy.yaml'), [
+      'apiVersion: apps/v1', 'kind: Deployment', 'metadata: {name: api}', 'spec:', '  template:', '    spec:', '      containers:',
+      '        - name: web', '          env:', '            - name: DATABASE_URL', '              value: postgres://u:TOPSECRET@db/app', '          envFrom:', '            - configMapRef: {name: shared}', '',
+    ].join('\n'));
+    writeFileSync(join(dir, 'docker-compose.yml'), 'services:\n  api:\n    environment:\n      DATABASE_URL: ${DB}\n');
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+    execFileSync('git', ['init', '-q'], { cwd: dir, env });
+    const r = (await handleAnalyzeEnvImpact({ directory: dir, name: 'DATABASE_URL' })) as Record<string, any>;
+    expect(r.declaration).toBe('declared');
+    expect(r.declaredBy).toEqual([
+      { ecosystem: 'Docker Compose', resource: 'service/api', file: 'docker-compose.yml', line: 4, literalValue: false },
+      { ecosystem: 'Kubernetes', resource: 'Deployment/api/web', file: 'k8s/deploy.yaml', line: 10, literalValue: true },
+    ]);
+    expect(r.opaqueEnvSources).toEqual([expect.objectContaining({ file: 'k8s/deploy.yaml', reason: expect.stringContaining('envFrom') })]);
+    expect(JSON.stringify(r)).not.toContain('TOPSECRET');
+  });
+
+  it('a variable no file sets is undeclared-in-corpus, never "unset"', async () => {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('git', ['init', '-q'], { cwd: dir, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' } });
+    const r = (await handleAnalyzeEnvImpact({ directory: dir, name: 'LOG_LEVEL' })) as Record<string, any>;
+    expect(r.declaration).toBe('undeclared-in-corpus');
+    expect(r.declaredBy).toEqual([]);
+    expect(r.boundaries.join(' ')).toContain('runtime');
+  });
 });

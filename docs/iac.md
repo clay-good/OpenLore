@@ -34,7 +34,7 @@ type, so clustering and architecture overviews group by type.
 This is **static** analysis only. OpenLore never runs `terraform plan`, renders
 Helm, executes Ansible, or calls a cloud API. No external CLI is required.
 
-### Terraform / HCL  (`*.tf`, `*.tfvars`, `*.tf.json`)
+### Terraform / HCL  (`*.tf`, `*.tfvars`, `*.tf.json`; OpenTofu `*.tofu`, `*.tofu.json`)
 - **Nodes:** `resource`, `data`, `module`, `variable`, `output`, `locals` (each local), `provider` (external).
 - **Edges:** interpolation and bare references (`type.name.attr`, `var.x`, `local.y`, `module.m.out`, `data.t.n.attr`) and explicit `depends_on`. References to custom resource types without an underscore resolve too — candidates that match no declared resource are dropped, never invented.
 - **Modules:** local `source = "./…"` links the module to the resources declared under that directory; registry/git sources become external module nodes.
@@ -113,9 +113,31 @@ change this?".
 - **File-scoped resolution:** Bicep resolves bare identifiers against a flat **per-file** symbol table (no `var.`/`type.name` prefixes), so the same name (`location`, `vnet`) recurs across files. Addresses are scoped by file (`<file>::<symbol>`) and references resolve **within the declaring file only** — two files each declaring `param location` never cross-link. The single cross-file edge is the local-`module` link above.
 - **Notes:** parsed with a tolerant, hand-rolled scanner (no Bicep compiler, no native dependency). Static only — no `bicep build`, no ARM emit, no Azure/registry access. A multi-line ternary value (`= cond\n ? a\n : b`) resolves only the first line's symbols; the others are dropped rather than guessed.
 
+## Environment variables set by infrastructure
+
+`analyze_env_impact` names the files that set a variable (`declaredBy`), and `blast_radius` lists
+the files that still set a variable the diff stopped reading (`envDeclarations`). Each site records
+the key, the resource, the file and line, and whether a value is written there literally — never
+the value itself. The scan runs at query time over the working tree.
+
+| Ecosystem | Where a variable is set |
+|-----------|-------------------------|
+| Kubernetes | a container's `env` (any `containers`, `initContainers`, `ephemeralContainers` list) |
+| Docker Compose | a service's `environment` (map or `KEY=value` list) |
+| Dockerfile | `ENV KEY=value` and `ENV KEY value` |
+| Terraform / OpenTofu | `environment { variables = { … } }`; the kubernetes provider's `env { name = … }` |
+| CloudFormation / SAM | `Environment.Variables` on a resource and in `Globals.Function`; ECS `ContainerDefinitions[].Environment` |
+| GitHub Actions | `env` on the workflow, a job, a job container or service, and a step |
+
+A source whose keys cannot be listed — Kubernetes `envFrom`, compose `env_file`, or an environment
+map built by an expression — is reported in `opaqueEnvSources`: the variable may be set there.
+Helm templates are not rendered, so they are skipped and disclosed. A variable no file sets is
+`undeclared-in-corpus`, which is not "unset": runtime injection, secret stores, and CI variables
+defined outside the repository are not visible.
+
 ## Discovery & disambiguation
 
-`.tf`/`.tfvars`/`.tf.json` map to Terraform by extension; `.bicep` maps to Bicep
+`.tf`/`.tfvars`/`.tf.json` and OpenTofu's `.tofu`/`.tofu.json` map to Terraform by extension; `.bicep` maps to Bicep
 by extension (both via `detectLanguage`). `.yaml`/`.yml`/`.json` are ambiguous, so
 they route through a small pure function, `classifyYaml(path, content)`:
 
