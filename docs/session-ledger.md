@@ -25,20 +25,26 @@ not change them). The ledger stores addresses and hashes only, never file conten
 
 ### Declarations, not only code
 
-A **declared OpenAPI operation** and an **infrastructure resource** are tracked exactly like a code
-symbol — same ids (`openapi.yaml::POST /v1/checkout`, `main.tf::aws_s3_bucket.logs`), same
-versions, same notes — so a teammate's change is named by the element, not by the file it lives in.
-Each is hashed from what its reader parses:
+A **declared OpenAPI operation** and an **infrastructure resource** are tracked alongside code
+symbols, with the same ids (`openapi.yaml::POST /v1/checkout`, `main.tf::aws_s3_bucket.logs`), so a
+teammate's change is named by the element rather than by the file it lives in.
 
-| Element | Hash covers | So this is not a change |
-|---|---|---|
-| An OpenAPI/Swagger operation | its parsed model: method, path, `operationId`, deprecation, parameters, request body and success response (each with the reader's Merkle hash of the schema it references) | re-indenting the document, re-wrapping it, or adding an operation above this one |
-| An infrastructure resource | the normalized text of its declared span, where its property values live | re-indenting or re-aligning the block |
+An element model is always narrower than its file, so a declaration file is hashed **both ways**:
+one entry per element, and one whole-file entry beside them. The element names the change when it
+can; the whole-file entry is the backstop, and it means the worst case is a change named by its
+file — never silence.
 
-A resource whose span the extractor could not close falls back to the parsed IaC model — address,
-type, module, declaration header, deploy binding and references — which is a weaker hash: a changed
-property value inside such a resource is not seen. A specification that cannot be read falls back
-to one whole-file hash, so the change is still seen, named by its file.
+| Entry | Hash covers | Sees | Does not see |
+|---|---|---|---|
+| An OpenAPI/Swagger operation | its parsed model: method, path, `operationId`, deprecation, parameters, request body and success response, each with the reader's Merkle hash of the schema it references (even through a local `$ref`) | a changed parameter, required property, schema type, or success-response shape | `security`, non-2xx responses, anything behind an external `$ref`, a path added or removed |
+| An infrastructure resource, **Terraform** and **Bicep** | the normalized text of its declared span | any property value in the block | — |
+| An infrastructure resource, every other ecosystem (Kubernetes, Helm, CloudFormation, Ansible, Docker, Compose, GitHub Actions) | the parsed IaC model: address, type, kind, module, declaration header, deploy binding, references — those extractors do not close a resource's span | a changed image, dependency, or header | a property value inside the block (a replica count, a port, a step's command) |
+| The whole file | its whitespace-normalized text | every edit the rows above miss, including an element deleted or renamed, and a specification that stops parsing | a change in a file the specification only `$ref`s |
+
+What each row does not see is covered by the row below it, and the file-level row is reported only
+when no element in that file already named the change — one edit is one fact. Unlike the
+code-symbol hash, a resource's span hash is text-level: a comment added inside the block reads as a
+change.
 
 A session is one MCP server process. Its ledger is
 `.openlore/session-ledger/<pid>.json`, removed when the server exits.
@@ -73,7 +79,9 @@ confirmed when everything has the same text, refuted naming each changed or remo
 unverifiable when a file cannot be read. An edit to an unserved function, or an edit above a served
 one, does not change the lease; a reformatted Markdown, YAML, or JSON file does not either.
 Whitespace inside a served function does. A served name the index cannot locate (a class) is
-listed as not covered; call paths and insertion points are not part of a lease.
+listed as not covered; call paths and insertion points are not part of a lease. A lease covers
+functions and files: a declared operation the `contracts` briefing named is tracked by the ledger
+but is not part of a lease, so `lease-current` says nothing about it either way.
 
 ## Reading it from another process
 
@@ -110,7 +118,8 @@ facts are withheld and the reason is given: OpenLore never picks a session.
   seconds before it (or 5 seconds after); a later version by another process is still named.
 
 - A file OpenLore cannot hash (an unsupported language, over 1 MB) is counted as `untracked`, never
-  treated as unchanged.
+  treated as unchanged. A declaration file is always hashed as a whole as well, so an element its
+  model cannot see is still reported by file — see the table above for which part sees what.
 - The ledger keeps 2,000 entries per list; older ones are dropped and counted in `dropped`.
 - An oscillation is two returns to an earlier version (A → B → A → B). One return (A → B → A) is
   not reported. There is no score and no threshold beyond that count; only the existing opt-in

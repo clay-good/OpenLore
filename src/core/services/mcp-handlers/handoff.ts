@@ -39,7 +39,12 @@ export interface HandoffInput {
 
 interface Expand { tool: string; args: Record<string, unknown> }
 
-interface TouchedSymbol { symbol: string; file: string; callers?: number; hub?: boolean; editedThisSession?: true; expand: Expand }
+interface TouchedSymbol {
+  symbol: string; file: string; callers?: number; hub?: boolean; editedThisSession?: true;
+  /** Set when the entry is a declaration, not a function: an OpenAPI operation, an IaC resource. */
+  declaration?: 'contract' | 'iac';
+  expand?: Expand;
+}
 interface InScopeFact { kind: 'memory' | 'decision'; id: string; text: string; freshness: 'fresh' | 'drifted'; expand: Expand }
 interface OpenChange { change: string; mentions: string[]; uncheckedTasks: string[]; uncheckedTasksOmitted?: number; expand: Expand }
 
@@ -263,11 +268,20 @@ export async function handleGetHandoffBriefing(input: HandoffInput): Promise<Rec
   }
 
   // ── Edited this session, no longer in the working tree (committed, or reverted) ──
-  for (const e of committedEdits) touched.push({ symbol: e.name, file: e.file, editedThisSession: true, expand: { tool: 'get_function_body', args: { functionName: e.name, filePath: e.file } } });
-  if (committedEdits.length) {
+  // A declaration (an OpenAPI operation, an IaC resource) is named as what it is, and carries no
+  // `get_function_body` expansion: that call cannot succeed on an operation address
+  // (change: add-ledger-contract-hashes).
+  for (const e of committedEdits) {
+    touched.push({
+      symbol: e.name, file: e.file, editedThisSession: true,
+      ...(e.kind ? { declaration: e.kind } : { expand: { tool: 'get_function_body', args: { functionName: e.name, filePath: e.file } } }),
+    });
+  }
+  const committedSymbols = committedEdits.filter(e => !e.kind);
+  if (committedSymbols.length) {
     try {
       const { handleSelectTests } = await import('./test-impact.js');
-      const sel = await handleSelectTests({ directory: root, changedSymbols: [...new Set(committedEdits.map(e => e.name))].slice(0, 50) }) as { selectedTests?: Array<{ test: string; file: string }> };
+      const sel = await handleSelectTests({ directory: root, changedSymbols: [...new Set(committedSymbols.map(e => e.name))].slice(0, 50) }) as { selectedTests?: Array<{ test: string; file: string }> };
       tests.push(...(sel.selectedTests ?? []).map(t => ({ test: t.test, file: t.file })));
     } catch { boundaries.push('Tests reaching the symbols committed this session could not be computed.'); }
   }
@@ -320,7 +334,7 @@ export function renderHandoff(b: Record<string, unknown>): string {
   const lines: string[] = ['[openlore handoff] In-flight work in this repository:'];
   const list = <T>(key: string) => (Array.isArray(b[key]) ? b[key] as T[] : []);
   const touched = list<TouchedSymbol>('touched');
-  if (touched.length) lines.push(`Touched: ${touched.map(t => `${t.symbol}${t.file ? ` (${t.file})` : ''}${t.editedThisSession ? ' [edited earlier this session]' : ''}${t.callers ? ` — ${t.callers} caller(s)` : ''}`).join('; ')}.`);
+  if (touched.length) lines.push(`Touched: ${touched.map(t => `${t.symbol}${t.declaration ? ` [${t.declaration === 'contract' ? 'declared operation' : 'infrastructure resource'}]` : ''}${t.file ? ` (${t.file})` : ''}${t.editedThisSession ? ' [edited earlier this session]' : ''}${t.callers ? ` — ${t.callers} caller(s)` : ''}`).join('; ')}.`);
   for (const c of list<OpenChange>('openChanges')) {
     lines.push(`Open change ${c.change} names ${c.mentions.join(', ')}${c.uncheckedTasks.length ? `; unchecked: ${c.uncheckedTasks.map(t => `"${t}"`).join('; ')}` : ''}.`);
   }

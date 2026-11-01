@@ -4264,11 +4264,13 @@ not a literal SHALL be listed as not assessed, never reported as conforming.
 
 ### Requirement: SessionCountsAreExposedAsData
 
-`openlore status --json` SHALL report, for code symbols the agent's edits changed (as the after-edit
+`openlore status --json` SHALL report, for the elements the agent's edits changed (as the after-edit
 hook attributes them; withheld without that report), counts of body-only changes, signature changes,
-unclassified changes (signature unreadable or possibly cut), and symbols first seen after the agent
-edited them (each symbol in one), and of changed exported symbols. It SHALL NOT compute a percentage,
-score, or threshold.
+unclassified changes (signature unreadable or possibly cut), symbols first seen after the agent
+edited them, declared contract elements changed, and declared infrastructure resources changed (each
+element in exactly one), and of changed exported symbols. A declaration has no declaration line to
+compare, so it SHALL be counted on its own line rather than as an unclassified symbol. It SHALL NOT
+compute a percentage, score, or threshold.
 
 #### Scenario: Counts, not budgets
 
@@ -4278,11 +4280,11 @@ score, or threshold.
 - **THEN** it reports body-only 2, signature-changed 1, exports-changed 2, and no percentage or
   threshold field
 
-#### Scenario: A change undone is not counted
+#### Scenario: A declared operation is counted as what it is
 
-- **GIVEN** a symbol changed and then changed back in the same session
-- **WHEN** the counts are read
-- **THEN** the symbol is not counted
+- **GIVEN** a session in which the agent changed one declared OpenAPI operation
+- **WHEN** `openlore status --json` runs
+- **THEN** it reports one contract element changed and no unclassified change
 
 ### Requirement: VerifyChangeCarriesPayloadFindings
 

@@ -27,8 +27,7 @@ import { open, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { safeJoin } from '../../utils/path-confinement.js';
-import { detectLanguage } from '../analyzer/language-detection.js';
-import { isDockerfilePath } from '../analyzer/iac/docker.js';
+import { detectLanguage, isDockerfilePath } from '../analyzer/language-detection.js';
 import { OPENLORE_DIR } from '../../constants.js';
 import { emittedText } from './generated-file-guard.js';
 
@@ -122,7 +121,7 @@ export interface LedgerSnapshot {
    * Symbols this session saw change (more than one version), first {@link MAX_EDITED_LISTED}: the
    * work in flight, even once committed (the handoff briefing's touched set).
    */
-  edited?: Array<{ id: string; name: string; file: string }>;
+  edited?: Array<{ id: string; name: string; file: string; kind?: 'contract' | 'iac' }>;
   backgroundChanges: BackgroundChange[];
   editOscillation: EditOscillation[];
   /** Why background-change notes are withheld, when they are. */
@@ -231,22 +230,55 @@ const hashDeclarations: FileHasher = async (file, content) => {
 };
 
 /**
- * A declaration's own elements first (an operation, a resource), then code symbols, then — for a
- * file a briefing can name whole — one whole-file hash. A specification that cannot be read falls
- * through to the whole-file hash, so a change to it is still seen, just named by its file.
+ * A declaration file is hashed BOTH ways: one entry per element it declares, AND one whole-file
+ * entry beside them.
+ *
+ * The per-element entries are the point of this — a note that names `POST /v1/checkout` rather
+ * than `openapi.yaml`. The whole-file entry is the backstop, and it is not optional: an element
+ * model is always narrower than the file. A path added, an operation deleted, a `security`
+ * requirement, a non-2xx response, an infrastructure property the IaC model does not keep, a
+ * specification that stops parsing mid-session — each is a real change to something the agent
+ * read, and each would otherwise be seen by nothing at all. Keeping both means the worst case is
+ * a change named by its file, which is what this ledger did before elements existed, and never
+ * silence (change: add-ledger-contract-hashes).
+ *
+ * Otherwise: code symbols, or — for a file a briefing can name whole — one whole-file hash.
  */
-export const defaultHasher: FileHasher = async (file, content) =>
-  (await hashDeclarations(file, content))
-  ?? (await hashFileSymbols(file, content))
-  ?? (WHOLE_FILE.test(file) ? hashWholeFile(file, content) : undefined);
+export const defaultHasher: FileHasher = async (file, content) => {
+  const declarations = await hashDeclarations(file, content);
+  if (declarations) return new Map([...declarations, ...(await hashWholeFile(file, content) ?? [])]);
+  return (await hashFileSymbols(file, content))
+    ?? (WHOLE_FILE.test(file) ? hashWholeFile(file, content) : undefined);
+};
 
-/** A persisted `changeKinds` with every count a finite, non-negative integer; anything else is dropped. */
-function validChangeKinds(x: unknown): x is ChangeKinds {
-  if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
+/**
+ * A persisted `changeKinds`, normalized — or `undefined` when it is not the shape this module
+ * writes (every count a finite, non-negative integer).
+ *
+ * The two declaration counts arrived after the shape did, and a server started before this
+ * version can still be live: a missing count reads as zero rather than invalidating the whole
+ * block, which would otherwise vanish from `openlore status` with no reason given.
+ */
+function validChangeKinds(x: unknown): ChangeKinds | undefined {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
   const r = x as Record<string, unknown>;
-  return ['bodyOnly', 'signatureChanged', 'unclassified', 'firstSeenAfterEdit', 'exportsChanged',
-    'contractElementsChanged', 'iacResourcesChanged']
-    .every(k => typeof r[k] === 'number' && Number.isSafeInteger(r[k]) && (r[k] as number) >= 0);
+  const count = (k: string, required: boolean): number | undefined => {
+    const v = r[k];
+    if (v === undefined) return required ? undefined : 0;
+    return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+  };
+  const out: Record<string, number> = {};
+  for (const k of ['bodyOnly', 'signatureChanged', 'unclassified', 'firstSeenAfterEdit', 'exportsChanged']) {
+    const v = count(k, true);
+    if (v === undefined) return undefined;
+    out[k] = v;
+  }
+  for (const k of ['contractElementsChanged', 'iacResourcesChanged']) {
+    const v = count(k, false);
+    if (v === undefined) return undefined;
+    out[k] = v;
+  }
+  return out as unknown as ChangeKinds;
 }
 
 /** Keep a bookkeeping set bounded on a long session (oldest first out). */
@@ -446,7 +478,11 @@ export class SessionLedger {
     if (!hashes) { this.untracked.add(file); return; }
     const found = new Set<string>();
     for (const [id, h] of hashes) {
-      if (p.names !== 'all' && !p.names.has(h.name)) continue;
+      // The whole-file entry is the backstop for every name served from this file, so it is kept
+      // whatever was asked for: without it, a served element that is DELETED — or a specification
+      // that stops parsing — would leave no entry to compare, and the change would go unreported
+      // (change: add-ledger-contract-hashes).
+      if (p.names !== 'all' && !p.names.has(h.name) && !id.endsWith('::*')) continue;
       found.add(h.name);
       this.served.delete(id); // the latest serve is the one that counts
       this.served.set(id, { id, name: h.name, file, hash: h.hash, servedAt: p.servedAt, ...(h.kind ? { kind: h.kind } : {}) });
@@ -574,13 +610,20 @@ export class SessionLedger {
         servedAt: new Date(s.servedAt).toISOString(), changedAt: new Date(e.versions[k].at).toISOString(),
       });
     }
+    // A declaration file carries element entries AND a whole-file backstop. When an element
+    // already names the change, the file-level entry is the same change said less precisely:
+    // drop it, so one edit is one fact.
+    const namedFiles = new Set(backgroundChanges.filter(c => !c.id.endsWith('::*')).map(c => c.file));
+    const named = backgroundChanges.filter(c => !(c.id.endsWith('::*') && namedFiles.has(c.file)));
     const editOscillation: EditOscillation[] = [];
+    const loopFiles = new Set([...this.edited.values()].filter(e => e.returns >= OSCILLATION_RETURNS && !e.id.endsWith('::*')).map(e => e.file));
     for (const e of this.edited.values()) {
       if (e.returns < OSCILLATION_RETURNS) continue;
+      if (e.id.endsWith('::*') && loopFiles.has(e.file)) continue;
       editOscillation.push({ id: emittedText(e.id), name: emittedText(e.name), file: emittedText(e.file), returns: e.returns, cycle: e.versions.slice(-6).map(v => v.hash) });
     }
     return {
-      backgroundChanges: agentEditsReported ? backgroundChanges : [],
+      backgroundChanges: agentEditsReported ? named : [],
       editOscillation,
       agentEditsReported,
       ...(agentEditsReported ? {} : { withheld: NO_AGENT_EDITS }),
@@ -671,7 +714,7 @@ export class SessionLedger {
       agentEditsReported: f.agentEditsReported,
       ...(this.bulkBatches ? { bulkBatches: this.bulkBatches } : {}),
       edited: [...this.edited.values()].filter(e => e.versions.length > 1).slice(-MAX_EDITED_LISTED)
-        .map(e => ({ id: emittedText(e.id), name: emittedText(e.name), file: emittedText(e.file) })),
+        .map(e => ({ id: emittedText(e.id), name: emittedText(e.name), file: emittedText(e.file), ...(e.kind ? { kind: e.kind } : {}) })),
       counts: { served: this.served.size + [...this.pending.values()].reduce((n, p) => n + (p.names === 'all' ? 1 : p.names.size), 0), edited: [...this.edited.values()].filter(e => e.versions.length > 1).length, untracked: this.untracked.size, dropped: this.dropped },
       ...(f.agentEditsReported ? { changeKinds: this.changeKinds() } : {}),
       backgroundChanges: f.backgroundChanges,
@@ -744,9 +787,11 @@ export function servedItems(tool: string, result: unknown): Array<{ file: string
     case 'get_function_skeleton':
       return typeof r.filePath === 'string' ? [{ file: r.filePath }] : [];
     case 'get_subgraph':
-      return [...rows(r.nodes).filter(n => n.isExternal !== true).flatMap(pick), ...operations(r.crossDomain)];
+      // A contract node in the subgraph is already picked up from `nodes` by name and file.
+      return rows(r.nodes).filter(n => n.isExternal !== true).flatMap(pick);
     case 'analyze_impact':
-      return operations(r.crossDomain);
+      // The contract lane sits inside each match, not at the top level.
+      return rows(r.matches).flatMap(m => operations(m.crossDomain));
     case 'blast_radius':
       return contracts(r.contracts);
     case 'search_code':
@@ -781,7 +826,7 @@ function validSnapshot(v: unknown, root: string, filePid: number, now: number): 
     editSource: s.editSource === 'watcher' ? 'watcher' : 'sampled',
     agentEditsReported: s.agentEditsReported === true,
     counts: { served: num(counts?.served), edited: num(counts?.edited), untracked: num(counts?.untracked), dropped: num(counts?.dropped) },
-    ...(validChangeKinds(s.changeKinds) ? { changeKinds: s.changeKinds } : {}),
+    ...((k => (k ? { changeKinds: k } : {}))(validChangeKinds(s.changeKinds))),
     ...(num(s.bulkBatches) ? { bulkBatches: num(s.bulkBatches) } : {}),
     edited: list(s.edited, e => {
       const [id, name, file] = [str(e.id), str(e.name), str(e.file)];

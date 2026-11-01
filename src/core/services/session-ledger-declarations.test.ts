@@ -84,12 +84,24 @@ describe('contract operations in the ledger', () => {
     expect(ledger.facts(other).backgroundChanges.map(c => c.name)).toEqual(['POST /v1/checkout']);
   });
 
-  it('re-indenting the specification is not a change (scenario: re-indent)', async () => {
+  it('re-indenting the specification does not name the operation (scenario: re-indent)', async () => {
     const root = repo();
     write(root, 'openapi.yaml', SPEC);
     const ledger = new SessionLedger(root);
     await ledger.recordServed([{ file: 'openapi.yaml', name: 'POST /v1/checkout' }]);
     write(root, 'openapi.yaml', SPEC_REFORMATTED);
+    await ledger.refresh(5000);
+    // The declaration is unchanged, so no note names it. (A restyle that moves text between
+    // lines is still a change to the FILE, as it was before elements existed.)
+    expect(ledger.facts(other).backgroundChanges.map(b => b.name)).not.toContain('POST /v1/checkout');
+  });
+
+  it('indenting the specification deeper is not a change at all', async () => {
+    const root = repo();
+    write(root, 'openapi.yaml', SPEC);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'openapi.yaml', name: 'POST /v1/checkout' }]);
+    write(root, 'openapi.yaml', SPEC.split('\n').map(l => (l.startsWith(' ') ? ` ${l}` : l)).join('\n'));
     await ledger.refresh(5000);
     expect(ledger.takeNote(other)).toBeNull();
     expect(ledger.facts(other).backgroundChanges).toEqual([]);
@@ -102,7 +114,10 @@ describe('contract operations in the ledger', () => {
     await ledger.recordServed([{ file: 'openapi.yaml', name: 'POST /v1/checkout' }]);
     write(root, 'openapi.yaml', SPEC.replace("responses: { '200': { description: ok } }", "responses: { '204': { description: gone } }"));
     await ledger.refresh(5000);
-    expect(ledger.takeNote(other)).toBeNull();
+    const named = ledger.facts(other).backgroundChanges.map(b => b.name);
+    expect(named).not.toContain('POST /v1/checkout');
+    // The file the agent read did change, so the backstop says so — never silence.
+    expect(named).toEqual(['openapi.yaml']);
   });
 
   it('counts the agent\'s own change to a declared operation on its own line', async () => {
@@ -165,6 +180,116 @@ describe('IaC resources in the ledger', () => {
     await new Promise(r => setTimeout(r, 5));
     await ledger.refresh(5000);
     expect(ledger.changeKinds()).toMatchObject({ iacResourcesChanged: 1, contractElementsChanged: 0, unclassified: 0 });
+  });
+});
+
+const K8S = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.25
+`;
+
+const COMPOSE = `services:
+  api:
+    image: node:20
+    ports: ["80:80"]
+  db:
+    image: postgres:16
+`;
+
+const DOCKERFILE = `FROM node:20 AS build
+RUN npm ci
+`;
+
+const WORKFLOW = `name: ci
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+`;
+
+/**
+ * The element model of an ecosystem is always narrower than its file, and only Terraform and
+ * Bicep close a resource's span. These are the cases where the per-element hash CANNOT see the
+ * change — so the file-level backstop must, or the agent is told nothing at all.
+ */
+describe('the file-level backstop', () => {
+  const cases: Array<{ what: string; file: string; before: string; after: string }> = [
+    { what: 'a Kubernetes container image', file: 'deploy.yaml', before: K8S, after: K8S.replace('nginx:1.25', 'nginx:1.99') },
+    { what: 'a Kubernetes replica count', file: 'deploy.yaml', before: K8S, after: K8S.replace('replicas: 2', 'replicas: 9') },
+    { what: 'a compose port mapping', file: 'docker-compose.yml', before: COMPOSE, after: COMPOSE.replace('"80:80"', '"8080:80"') },
+    { what: 'a Dockerfile build step', file: 'Dockerfile', before: DOCKERFILE, after: DOCKERFILE.replace('npm ci', 'npm ci --production') },
+    { what: 'a workflow step', file: '.github/workflows/ci.yml', before: WORKFLOW, after: WORKFLOW.replace('echo a', 'echo b') },
+    { what: 'a path added to a specification', file: 'openapi.yaml', before: SPEC, after: SPEC.replace('paths:\n', "paths:\n  /v1/ping:\n    get:\n      responses: { '200': { description: ok } }\n") },
+    { what: 'a security requirement on the served operation', file: 'openapi.yaml', before: SPEC, after: SPEC.replace('      operationId: checkout', '      operationId: checkout\n      security: [{ apiKey: [] }]') },
+    { what: 'a non-2xx response', file: 'openapi.yaml', before: SPEC, after: SPEC.replace("responses: { '201': { description: created } }", "responses:\n        '201': { description: created }\n        '404': { description: gone }") },
+  ];
+
+  for (const c of cases) {
+    it(`names the file when the element model cannot see ${c.what}`, async () => {
+      const root = repo();
+      write(root, c.file, c.before);
+      const ledger = new SessionLedger(root);
+      await ledger.recordServed([{ file: c.file }]);
+      write(root, c.file, c.after);
+      await ledger.refresh(5000);
+      const changed = ledger.facts(other).backgroundChanges.map(b => b.name);
+      expect(changed.length).toBeGreaterThan(0);
+      expect(changed).toContain(c.file);
+    });
+  }
+
+  it('states one fact per edit: the element names it, the file stays quiet', async () => {
+    const root = repo();
+    write(root, 'openapi.yaml', SPEC);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'openapi.yaml' }]);
+    write(root, 'openapi.yaml', SPEC_CHANGED);
+    await ledger.refresh(5000);
+    expect(ledger.facts(other).backgroundChanges.map(b => b.name)).toEqual(['POST /v1/checkout']);
+  });
+
+  it('names the file when a served specification stops parsing mid-session', async () => {
+    const root = repo();
+    write(root, 'openapi.yaml', SPEC);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'openapi.yaml', name: 'POST /v1/checkout' }]);
+    write(root, 'openapi.yaml', `${SPEC}  bad: [\n`);
+    await ledger.refresh(5000);
+    expect(ledger.facts(other).backgroundChanges.map(b => b.name)).toContain('openapi.yaml');
+  });
+
+  it('names the file when the served operation is deleted outright', async () => {
+    const root = repo();
+    write(root, 'openapi.yaml', SPEC);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'openapi.yaml' }]);
+    write(root, 'openapi.yaml', SPEC.slice(0, SPEC.indexOf('  /v1/checkout:')) + '  /v1/orders:\n    get:\n      responses: { \'200\': { description: ok } }\n');
+    await ledger.refresh(5000);
+    expect(ledger.facts(other).backgroundChanges.map(b => b.name)).toContain('openapi.yaml');
+  });
+
+  it('is not counted as a changed declaration (the whole-file entry is not an element)', async () => {
+    const root = repo();
+    write(root, 'deploy.yaml', K8S);
+    const ledger = new SessionLedger(root);
+    await ledger.recordServed([{ file: 'deploy.yaml' }]);
+    await new Promise(r => setTimeout(r, 5));
+    write(root, 'deploy.yaml', K8S.replace('nginx:1.25', 'nginx:1.99'));
+    recordAgentEdit(root, 'deploy.yaml');
+    await new Promise(r => setTimeout(r, 5));
+    await ledger.refresh(5000);
+    // The resource's own hash cannot see the image, and the file entry is not a declaration.
+    expect(ledger.changeKinds()).toMatchObject({ iacResourcesChanged: 0, contractElementsChanged: 0, unclassified: 0 });
   });
 });
 
@@ -235,6 +360,16 @@ components:
     const hashes = await hashIacResources('main.tf', TERRAFORM, 'Terraform');
     expect([...hashes!.keys()]).toContain('main.tf::aws_s3_bucket.logs');
     expect(hashes!.get('main.tf::aws_s3_bucket.logs')).toMatchObject({ name: 'aws_s3_bucket.logs', kind: 'iac' });
+  });
+
+  it('joins two declarations of one address rather than letting the last win', async () => {
+    const doubled = `${TERRAFORM}resource "aws_s3_bucket" "logs" {\n  bucket = "second"\n}\n`;
+    const before = (await hashIacResources('main.tf', doubled, 'Terraform'))!.get('main.tf::aws_s3_bucket.logs')!.hash;
+    const firstChanged = (await hashIacResources('main.tf', doubled.replace('"my-logs"', '"my-logs-2"'), 'Terraform'))!.get('main.tf::aws_s3_bucket.logs')!.hash;
+    const secondChanged = (await hashIacResources('main.tf', doubled.replace('"second"', '"third"'), 'Terraform'))!.get('main.tf::aws_s3_bucket.logs')!.hash;
+    expect(firstChanged).not.toBe(before);
+    expect(secondChanged).not.toBe(before);
+    expect(firstChanged).not.toBe(secondChanged);
   });
 
   it('gives two resources of one file distinct hashes', async () => {

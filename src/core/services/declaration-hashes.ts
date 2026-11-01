@@ -108,11 +108,13 @@ export async function hashIacResources(
       signature: normalize(r.signature), deploys: r.deploys ?? null,
       references: (refs.get(r.address) ?? []).slice().sort(),
     });
-    out.set(`${file}::${r.address}`, {
-      name: r.displayName ?? r.address,
-      hash: sha(span !== undefined ? `span:${span}` : `parsed:${parsed}`),
-      kind: 'iac',
-    });
+    const id = `${file}::${r.address}`;
+    const own = sha(span !== undefined ? `span:${span}` : `parsed:${parsed}`);
+    // Two declarations of one address in one file (a duplicated block, a multi-document manifest)
+    // share an id, as the projector's first-wins node does. Join their hashes rather than letting
+    // the last overwrite the first, so a change to EITHER is a change to the id.
+    const prev = out.get(id);
+    out.set(id, { name: r.displayName ?? r.address, hash: prev ? `${prev.hash}+${own}` : own, kind: 'iac' });
   }
   return out;
 }
