@@ -25,6 +25,8 @@ const MAX_BLOB_BYTES_TOTAL = 512 * 1024 * 1024;
  * caller turns into a per-file fallback, so this fast path is never load-bearing for correctness.
  */
 export function readBlobsAtRef(absDir: string, ref: string, paths: readonly string[]): Promise<Map<string, string>> {
+  // Nothing to read: no subprocess (one would outlive the call, holding its directory on Windows).
+  if (paths.length === 0) return Promise.resolve(new Map());
   return new Promise((resolve, reject) => {
     // Specs are fed one per line and replies are correlated BY ORDER, so a path containing a
     // newline would be two requests and shift every later reply onto the wrong file. Such a path is

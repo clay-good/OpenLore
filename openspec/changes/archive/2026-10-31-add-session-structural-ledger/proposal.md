@@ -1,10 +1,11 @@
 # Session structural ledger: name what changed under the agent, and see edit loops
 
-> Status: PROPOSED (2026-10-31, `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`). Three always-on,
-> background signals from one small per-session record: which symbols the agent was *shown* and
-> which symbols were *edited*, each with its normalized content hash. No new tool. Prior art:
-> content-addressed invalidation in build systems (Bazel/Salsa early cutoff), and the
-> "fix-and-break" loop reported for autonomous agents on long tasks.
+> Status: SHIPPED (2026-10-31): the ledger, named background changes, and edit oscillation. Test-run
+> facts, contract/IaC hashes, lease tokens, and session counts moved to
+> [`add-session-ledger-runs-contracts-tokens`](../add-session-ledger-runs-contracts-tokens/): each
+> needs a change that has not shipped. The agent's own edits are identified by the harness's
+> after-edit hook, not by the watcher (which sees every process's edits). See
+> [docs/session-ledger.md](../../../docs/session-ledger.md).
 
 ## The gap
 

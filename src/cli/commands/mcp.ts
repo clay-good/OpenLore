@@ -38,6 +38,7 @@ import {
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
 import { createTracker, updateTracker, updatePanic, resetPanicOnOrient, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import { SessionLedger, servedItems } from '../../core/services/session-ledger.js';
 import {
   registerRepairBuilder,
   registerRepairHost,
@@ -2846,6 +2847,20 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
 
   // --watch-auto: start the watcher on the first tool call that carries a directory
   let autoWatcher: import('../../core/services/mcp-watcher.js').McpWatcher | undefined;
+  let autoWatcherRoot = '';
+
+  // Session ledger (change: add-session-structural-ledger): the symbols this session served and
+  // the versions edited symbols took. One per directory, like the tracker; removed on shutdown.
+  let ledger: SessionLedger | undefined;
+  const ledgerFor = (dir: string): SessionLedger => {
+    const root = resolve(dir);
+    if (!ledger || ledger.root !== root) {
+      ledger?.dispose();
+      ledger = new SessionLedger(root);
+    }
+    ledger.setWatcherActive(autoWatcherRoot === root);
+    return ledger;
+  };
 
   // change: fix-process-exit-lifecycle
   // The stdio server's lifetime is its stdin. Every long-lived resource acquired
@@ -2855,6 +2870,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // event loop alive after the client closes the pipe, leaking a zombie process
   // per agent session.
   const lifecycle = createShutdownCoordinator();
+  lifecycle.register(async () => { ledger?.dispose(); });
   enableChildProcessBuilds();
   lifecycle.register(stopChildProcessBuilds);
 
@@ -3016,8 +3032,14 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             // HEAD change / budget-exceeded stale region — the graph stays fresh
             // without a post-commit hook or a running daemon.
             selfRebuild: true,
+            // Each re-indexed file's new symbol versions feed the session ledger.
+            onFilesReindexed: files => {
+              if (ledger && ledger.root === resolve(dir)) void ledger.recordReindexed(files);
+            },
           });
           const watcherStart = autoWatcher.start();
+          // The ledger takes versions from the watcher only once it is running.
+          void watcherStart.then(() => { autoWatcherRoot = resolve(dir); ledger?.setWatcherActive(ledger.root === autoWatcherRoot); }, () => {});
           void watcherStart.catch(error => {
             process.stderr.write(`[mcp-watcher] startup failed: ${(error as Error).message}\n`);
           });
@@ -3050,6 +3072,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // Invariant: only MCP tool calls (this path) feed panic. CLI commands (panic-check,
       // telemetry) are separate processes that read state but never call updateTracker —
       // no recursive panic feedback loop from openlore internal commands.
+      // The ledger samples what changed since the last call before panic reads its loops.
+      const sessionLedger = directory ? ledgerFor(directory) : undefined;
+      if (sessionLedger) await sessionLedger.refresh().catch(() => {});
+
       if (tracker && directory) {
         const isOrient = name === 'orient';
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
@@ -3070,6 +3096,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
               staleDepth: tracker.staleDepth,
               directory,
               tool: name,
+              // Taken only here, where panic reads them, so a loop is never consumed unread.
+              editOscillation: sessionLedger?.takeNewOscillations().length ?? 0,
             });
           }
           // Locked read-modify-write so this per-call score/level update cannot clobber a
@@ -3153,6 +3181,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           }
           throw err;
         }
+        // What this response served, with each symbol's version now (hashed off the response path).
+        if (sessionLedger) void sessionLedger.recordServed(servedItems(name, result));
         // orient emits navigation telemetry tied to the MCP session's agent.
         if (name === 'orient' && result && typeof result === 'object') {
           const r = result as Record<string, unknown>;
@@ -3200,6 +3230,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       if (signal?.prepend) content.push({ type: 'text', text: signal.text });
       content.push({ type: 'text', text });
       if (signal && !signal.prepend) content.push({ type: 'text', text: signal.text });
+      // Named background changes and edit loops: a separate neutral note, each fact stated once.
+      const ledgerNote = sessionLedger?.takeNote();
+      if (ledgerNote) content.push({ type: 'text', text: ledgerNote });
 
       // Index self-healing disclosure (change: make-index-self-healing). When a
       // read-path staleness signal has triggered a background repair for this repo,

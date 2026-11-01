@@ -22,6 +22,8 @@ import { queryGryphSignals, applyGryphDelta } from '../../core/services/mcp-hand
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { emit } from '../../core/services/telemetry.js';
 import { readStdin } from '../../utils/stdin.js';
+import { resolve } from 'node:path';
+import { readLiveLedger } from '../../core/services/session-ledger.js';
 
 type HookFormat = 'claude' | 'kilo' | 'codex';
 
@@ -113,12 +115,27 @@ export const panicCheckCommand = new Command('panic-check')
         // to the normal (advisory warn) output; the block is not emitted.
       }
 
-      process.stdout.write(formatOutput(output, format) + '\n');
+      process.stdout.write(formatOutput(withLedgerFacts(output, dir, format), format) + '\n');
     } catch {
       // fail-open: any error → silent exit 0
     }
     process.exit(0);
   });
+
+/**
+ * The live session ledger's facts, as data on the JSON output (change: add-session-structural-ledger):
+ * `backgroundChanges[]` and `editOscillation[]`, present only when not empty. Plain-text formats
+ * carry the panic message only.
+ */
+function withLedgerFacts(output: ReturnType<typeof buildPanicCheckOutput>, dir: string, format: HookFormat): ReturnType<typeof buildPanicCheckOutput> {
+  if (format !== 'claude' && format !== 'codex') return output;
+  let live: ReturnType<typeof readLiveLedger>;
+  try { live = readLiveLedger(resolve(dir)); } catch { return output; } // never costs the panic output
+  if (!('ledger' in live)) return output;
+  const { backgroundChanges, editOscillation } = live.ledger;
+  if (!backgroundChanges.length && !editOscillation.length) return output;
+  return { ...output, sessionLedger: { backgroundChanges, editOscillation } } as ReturnType<typeof buildPanicCheckOutput>;
+}
 
 function formatOutput(output: ReturnType<typeof buildPanicCheckOutput>, format: HookFormat): string {
   // claude and codex both consume raw JSON — codex uses the same Claude Code hook schema

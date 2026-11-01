@@ -18,6 +18,7 @@ import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
+import { readLiveLedger, type LedgerSnapshot } from '../../core/services/session-ledger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import type { Embedder } from '../../core/analyzer/embedding-service.js';
@@ -77,6 +78,29 @@ export interface IndexStatus {
   wiringScope?: WiringScope;
   /** Decision autopilot mode and its trail (change: default-decision-autopilot-with-visible-trace). */
   governance?: GovernanceStatus;
+  /**
+   * The live MCP session's ledger (change: add-session-structural-ledger): raw counts, named
+   * background changes and edit loops — or why they are withheld. Set by `openlore status` only.
+   */
+  session?: SessionStatus;
+}
+
+export type SessionStatus =
+  | { pid: number; startedAt: string; updatedAt: string; editSource: 'watcher' | 'sampled'; agentEditsReported: boolean;
+      counts: LedgerSnapshot['counts']; bulkBatches?: number; backgroundChanges: LedgerSnapshot['backgroundChanges'];
+      editOscillation: LedgerSnapshot['editOscillation']; withheld?: string }
+  | { withheld: string };
+
+function collectSessionStatus(rootPath: string): SessionStatus {
+  const live = readLiveLedger(rootPath);
+  if (!('ledger' in live)) return { withheld: live.withheld };
+  const l = live.ledger;
+  return {
+    pid: l.pid, startedAt: l.startedAt, updatedAt: l.updatedAt, editSource: l.editSource,
+    agentEditsReported: l.agentEditsReported, counts: l.counts, ...(l.bulkBatches ? { bulkBatches: l.bulkBatches } : {}),
+    backgroundChanges: l.backgroundChanges, editOscillation: l.editOscillation,
+    ...(l.withheld ? { withheld: l.withheld } : {}),
+  };
 }
 
 interface IndexMetaShape {
@@ -264,6 +288,7 @@ Read-only: this never builds, rebuilds, or locks the index.
       ...index,
       ...(governance ? { governance } : {}),
       wiringScope: await collectWiringScope(rootPath),
+      session: collectSessionStatus(rootPath),
     };
 
     if (options.json) {
@@ -280,6 +305,16 @@ Read-only: this never builds, rebuilds, or locks the index.
       ? c.green(scope)
       : c.yellow(`${scope} — run "openlore ${scope === 'none' ? 'install' : 'doctor --fix'}"`);
     console.log(`  ${label('Wiring scope')} ${wiringText}`);
+    const session = status.session;
+    if (session && 'pid' in session) {
+      // The ledger is a file in the repository: every value is sanitized before it reaches the terminal.
+      const line = `${String(session.counts.served)} served, ${String(session.counts.edited)} edited — ` +
+        `${String(session.backgroundChanges.length)} background change(s), ${String(session.editOscillation.length)} edit loop(s)` +
+        (session.withheld ? ' (background changes withheld)' : '');
+      console.log(`  ${label('Session ledger')} ${safe(line)}`);
+    } else if (session) {
+      console.log(`  ${label('Session ledger')} ${c.dim(safe(session.withheld))}`);
+    }
 
     // Everything printed below that came from the repository — its config, its index
     // sidecar, its receipt, its file names — is sanitized: a repository must not be able
