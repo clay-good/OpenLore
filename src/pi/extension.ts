@@ -37,6 +37,7 @@ import type {
   ExtensionContext,
   SessionShutdownEvent,
   SessionStartEvent,
+  ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
@@ -44,9 +45,9 @@ import { Markdown, Text } from '@earendil-works/pi-tui';
 import { Type, type TObject, type TSchema } from 'typebox';
 
 import { execFile, spawn } from 'node:child_process';
-import { openSync, closeSync, readFileSync } from 'node:fs';
+import { openSync, closeSync, readFileSync, existsSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -2239,6 +2240,117 @@ export interface PiExtensionRuntime {
     preset?: string,
     expect?: { pid: number; version: string },
   ) => Promise<EnsureDaemonResult>;
+  /** Replaces the child process that runs one agent-loop moment (tests). */
+  runLoopMoment?: (moment: string, payload: Record<string, unknown>, cwd: string, signal?: AbortSignal) => Promise<string | undefined>;
+}
+
+/** The hook's own after-tools limit, plus node startup and the session reads outside its race. */
+const LOOP_MOMENT_TIMEOUT_MS = 20_000;
+const LOOP_MOMENT_MAX_STDOUT = 256 * 1024;
+/** Children at once: a parallel batch of edits must not start one node process per call. */
+const LOOP_MOMENT_CONCURRENCY = 2;
+
+/**
+ * The node runtime to run the CLI with: Pi's own executable only when it is node (or bun), never a
+ * compiled Pi binary, which would read the payload as a prompt. Undefined: no runtime found.
+ */
+function nodeRuntime(): string | undefined {
+  const exe = basename(process.execPath).toLowerCase().replace(/\.exe$/, '');
+  if (exe === 'node' || exe === 'nodejs' || exe === 'bun') return process.execPath;
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    for (const name of process.platform === 'win32' ? ['node.exe'] : ['node']) {
+      const candidate = join(dir, name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/** Whether a file Pi touched lies in an OpenLore project (the hook's own root walk). */
+export function inOpenloreProject(cwd: string, file?: string): boolean {
+  const home = resolvePath(process.env.OPENLORE_HOME ?? homedir());
+  const walk = (start: string): boolean => {
+    for (let dir = start; ; dir = dirname(dir)) {
+      if (dir === home) return false;
+      if (existsSync(join(dir, OPENLORE_DIR))) return true;
+      if (existsSync(join(dir, '.git')) || dirname(dir) === dir) return false;
+    }
+  };
+  return walk(resolvePath(cwd)) || (!!file && walk(dirname(resolvePath(cwd, file))));
+}
+
+/** A path as Pi's tools resolve it: a leading `@` dropped, `~` expanded. */
+export function piToolPath(path: string): string {
+  const p = path.startsWith('@') ? path.slice(1) : path;
+  return p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
+}
+
+let loopRunning = 0;
+const loopWaiting: Array<() => void> = [];
+async function withLoopSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (loopRunning >= LOOP_MOMENT_CONCURRENCY) await new Promise<void>(r => loopWaiting.push(r));
+  loopRunning++;
+  try { return await fn(); } finally { loopRunning--; loopWaiting.shift()?.(); }
+}
+
+/**
+ * Run one agent-loop moment (`openlore hook <moment>`) in a child process and return its
+ * `additionalContext`: the analyzer never loads in the Pi host (change:
+ * add-agent-loop-hooks-pi-and-task-created). Undefined on silence, timeout, abort, or any failure.
+ */
+export async function runLoopMomentChild(moment: string, payload: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<string | undefined> {
+  const runtime = nodeRuntime();
+  if (!runtime || signal?.aborted) return undefined;
+  const cliEntry = fileURLToPath(new URL('../cli/index.js', import.meta.url));
+  return withLoopSlot(() => new Promise<string | undefined>((resolveResult) => {
+    let out = '';
+    let settled = false;
+    let child: ReturnType<typeof spawn> | undefined;
+    const onAbort = () => { child?.kill(); done(undefined); };
+    const done = (v: string | undefined) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolveResult(v);
+    };
+    const timer = setTimeout(() => { child?.kill(); done(undefined); }, LOOP_MOMENT_TIMEOUT_MS);
+    timer.unref?.();
+    if (signal?.aborted) { done(undefined); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      child = spawn(runtime, [cliEntry, 'hook', moment, '--harness', 'pi'], { cwd, env: process.env, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    } catch { done(undefined); return; }
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (d: string) => {
+      out += d;
+      if (out.length > LOOP_MOMENT_MAX_STDOUT) { child?.kill(); done(undefined); }
+    });
+    child.on('error', () => done(undefined));
+    child.on('close', () => {
+      try {
+        const parsed = JSON.parse(out) as { hookSpecificOutput?: { additionalContext?: unknown } };
+        const text = parsed?.hookSpecificOutput?.additionalContext;
+        done(typeof text === 'string' && text ? text : undefined);
+      } catch { done(undefined); }
+    });
+    child.stdin?.on('error', () => { /* the child exited early */ });
+    child.stdin?.end(JSON.stringify(payload));
+  }));
+}
+
+/** Pi's built-in tools, as the hook payload names them (Claude Code's tool names). */
+const PI_LOOP_TOOLS: Record<string, string> = { edit: 'Edit', write: 'Write', bash: 'Bash', powershell: 'Bash' };
+
+/** A Pi shell result as the hook's `tool_response`: the real exit code, or an interrupted run, or nothing known. */
+export function piShellResponse(event: { isError: boolean; structuredContent?: unknown; content: Array<{ type: string; text?: string }> }): Record<string, unknown> | undefined {
+  const exit = (event.structuredContent as { exit_code?: unknown } | undefined)?.exit_code;
+  if (typeof exit === 'number' && Number.isInteger(exit)) return { exit_code: exit };
+  const text = event.content.map(c => (c.type === 'text' ? c.text ?? '' : '')).join('\n').trimEnd();
+  // Aborted or timed out: the run did not complete, so it is not a test result.
+  if (/Command (?:aborted|timed out\b[^\n]*)$/.test(text)) return { interrupted: true };
+  return undefined;
 }
 
 function registerOpenlore(
@@ -2731,6 +2843,40 @@ function registerOpenlore(
     sessionGeneration += 1;
     if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
     if (ctx) setPiStatus(ctx, undefined);
+  });
+
+  // ── B2: agent-loop receipt after an edit or shell command (change: add-agent-loop-hooks-pi-and-task-created) ──
+  // The after-tools facts (generated files, phantom references, check weakening, peer changes, test
+  // runs) are appended to the tool result the agent reads, computed in a child process.
+  pi.on('tool_result', async (event: ToolResultEvent, ctx: ExtensionContext): Promise<{ content: ToolResultEvent['content']; structuredContent?: ToolResultEvent['structuredContent'] } | void> => {
+    if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    // A call a tool (a codemode script) made: its result goes to that script, not the model.
+    if (event.parentToolCallId) return;
+    const tool = PI_LOOP_TOOLS[event.toolName];
+    if (!tool) return;
+    const input = event.input as { path?: unknown; command?: unknown };
+    if (tool === 'Bash' ? typeof input.command !== 'string' : typeof input.path !== 'string') return;
+    // An edit Pi refused changed nothing; a failed shell command is still a run (a failed test run).
+    if (tool !== 'Bash' && event.isError) return;
+    const file = tool === 'Bash' ? undefined : piToolPath(input.path as string);
+    // No OpenLore project here: no child process at all.
+    if (!inOpenloreProject(ctx.cwd, file)) return;
+    let sessionId: string | undefined;
+    try { sessionId = ctx.sessionManager.getSessionId(); } catch { /* no session id: nothing is deduplicated */ }
+    const response = tool === 'Bash' ? piShellResponse(event) : undefined;
+    const payload: Record<string, unknown> = {
+      ...(sessionId ? { session_id: sessionId } : {}),
+      cwd: ctx.cwd,
+      hook_event_name: 'PostToolUse',
+      tool_name: tool,
+      tool_input: tool === 'Bash' ? { command: input.command } : { file_path: file },
+      ...(response ? { tool_response: response } : {}),
+    };
+    const text = await (runtime.runLoopMoment ?? runLoopMomentChild)('after-tools', payload, ctx.cwd, ctx.signal).catch(() => undefined);
+    if (!text) return;
+    // Replacing content alone would drop the tool's machine-readable result: it is passed through.
+    const structured = event.structuredContent;
+    return { content: [...event.content, { type: 'text', text: `\n${text}` }], ...(structured !== undefined ? { structuredContent: structured } : {}) };
   });
 
   // ── C: context injection ──
