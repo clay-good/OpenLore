@@ -163,14 +163,15 @@ describe('retrieval handlers — coverage verdict and abstention', () => {
     expect((result.results as unknown[]).length).toBe(1);
   });
 
-  it('search_code keeps the keyword-upgrade note while abstaining', async () => {
+  it('search_code reports the keyword mode, without upgrade advice, while abstaining', async () => {
     mockSearch([]);
     const { handleSearchCode } = await import('./semantic.js');
 
     const result = await handleSearchCode(tmpDir, 'nothing matches this') as Record<string, unknown>;
 
-    // An uncovered result under keyword mode is exactly when the upgrade hint matters.
-    expect(result.note).toContain('Keyword (BM25)');
+    // Upgrade advice is for humans (`status`, `doctor`); the agent gets the mode only.
+    expect(result.retrievalMode).toMatch(/^keyword/);
+    expect(result.note).toBeUndefined();
   });
 
   it('names the question kind the caller declared, and the tool that answers it', async () => {

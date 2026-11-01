@@ -84,6 +84,12 @@ export interface InstallOptions {
    * scope alone.
    */
   repoOnly?: boolean;
+  /**
+   * Wire only the user scope: no repository file, git hook, or index is touched. The
+   * remedy `doctor --fix` and `update` offer a repository wired before user scope
+   * shipped (change: upgrade-repo-only-wiring).
+   */
+  userOnly?: boolean;
   /** User-scope root. Defaults to the user's home directory; a test seam, not a flag. */
   home?: string;
 }
@@ -402,6 +408,11 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     }
   }
 
+  if (opts.userOnly && opts.repoOnly) {
+    logger.error('--user-only and --repo-only exclude each other.');
+    return 2;
+  }
+
   let surfaces: DetectedSurface[];
   if (opts.agents?.length) {
     const unknown = opts.agents.filter((a) => !ALL_AGENTS.includes(a));
@@ -419,11 +430,14 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   } else {
     surfaces = await detect(cwd);
   }
+  if (opts.userOnly) surfaces = [];
 
   logger.discovery(
-    `${opts.uninstall ? 'Uninstalling' : 'Installing'} for ${surfaces.length} surface(s): ${surfaces
-      .map((s) => s.agent)
-      .join(', ')}`
+    opts.userOnly
+      ? `${opts.uninstall ? 'Uninstalling' : 'Installing'} the user scope only`
+      : `${opts.uninstall ? 'Uninstalling' : 'Installing'} for ${surfaces.length} surface(s): ${surfaces
+        .map((s) => s.agent)
+        .join(', ')}`
   );
 
   let conflict = false;
@@ -500,7 +514,7 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
         // Deliberately NOT "pass --force": most user-scope conflicts are refusals
         // (an unparseable file, a symlink, a concurrent write) that --force does not
         // and must not override. The adapter's own warning names the actual cause.
-        allWarnings.push('The user scope was left untouched — see the message(s) above. This repository was still wired.');
+        allWarnings.push(`The user scope was left untouched — see the message(s) above.${opts.userOnly ? '' : ' This repository was still wired.'}`);
       } else {
         conflict = true;
       }
@@ -590,11 +604,13 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   // has nothing to do with git hooks, and used to delete a decisions gate the user
   // may have installed years ago through a different command entirely
   // (change: unify-onboarding-entrypoint).
-  const removingEverything = opts.uninstall && !opts.agent && !opts.agents?.length;
+  const removingEverything = opts.uninstall && !opts.agent && !opts.agents?.length && !opts.userOnly;
   if (!opts.dryRun && removingEverything) await unwireGovernanceGate(cwd);
 
   // One-command setup: build the index so orient() works on the first session.
   // Opt out with --no-analyze; never runs for dry-run or uninstall.
+  // --user-only touches no repository, so it neither builds an index nor wires a gate.
+  if (opts.userOnly) return wiringUserScope && userScopeClean ? 0 : 1;
   const shouldAnalyze = opts.analyze !== false && !opts.dryRun && !opts.uninstall;
   if (shouldAnalyze) {
     const indexBuilt = await buildIndex(cwd);
@@ -767,6 +783,11 @@ export const installCommand = new Command('install')
     'Wire only this repository — skip the user-scope entries that make every future repository reach OpenLore',
     false,
   )
+  .option(
+    '--user-only',
+    'Wire only the user scope — leave this repository\'s files, git hooks, and index alone',
+    false,
+  )
   .option('--analyze', 'Build the index after configuring surfaces', true)
   .option('--no-analyze', 'Configure surfaces only; do not run init/analyze (run "openlore analyze" yourself later)')
   .addHelpText(
@@ -779,6 +800,7 @@ Examples:
   $ openlore install --no-analyze    Wire up surfaces only (skip index build)
   $ openlore install --dry-run       Preview changes without writing
   $ openlore install --repo-only     Wire this repository only (no user-scope entries)
+  $ openlore install --user-only     Wire the user scope only (no repository files)
   $ openlore install --uninstall     Remove OpenLore-managed entries (both scopes)
 
 Bare \`openlore install\` wires your USER scope as well as this repository: every

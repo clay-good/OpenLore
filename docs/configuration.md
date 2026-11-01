@@ -68,7 +68,8 @@ Expansion is enabled by default. Disable it without rebuilding the index:
 ```
 
 Disabling expansion restores ordinary keyword ranking. Semantic retrieval remains the higher-recall
-opt-in path, and the `openlore embed --local` guidance stays visible in both keyword modes.
+path; `openlore status` and `openlore doctor` name it in both keyword modes. Agent responses report
+`retrievalMode` only, with no advice to change it.
 `openlore prove --estimate` reports a separately labeled recall@10 comparison over up to 100 of the
 repository's own symbol/doc-comment pairs; it is not an agent-cost benchmark.
 

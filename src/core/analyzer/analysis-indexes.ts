@@ -1,4 +1,5 @@
-import { realpath } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -15,7 +16,17 @@ import { safeJoin } from '../../utils/path-confinement.js';
 import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 import type { LLMContext } from './artifact-generator.js';
 import type { Embedder } from './embedding-service.js';
-import { embedderMode, indexCapabilityAgreement, resolveEmbedder } from './embedder.js';
+import {
+  backgroundSemanticAllowed,
+  embedderMode,
+  indexCapabilityAgreement,
+  indexCarriesLocalVectors,
+  localEmbedderInstalled,
+  resolveEmbedder,
+} from './embedder.js';
+import { readCurrentGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../runtime/analysis-generation.js';
+import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
+import { acquireAnalysisOwnership, isProcessAlive, runtimeDirOf } from '../runtime/analysis-ownership.js';
 import { mergeAnalysisPatterns } from './analysis-core.js';
 import { FileWalker } from './file-walker.js';
 import { SpecVectorIndex } from './spec-vector-index.js';
@@ -88,6 +99,24 @@ async function loadContext(outputPath: string, supplied: LLMContext | null | und
   const read = await readArtifactBounded(path, ANALYSIS_ARTIFACT_MAX_BYTES);
   if (!read) throw new Error(`Unreadable analysis artifact: ${path}`);
   return JSON.parse(read.text) as LLMContext;
+}
+
+/** The source of every file the function index covers, read bounded, unreadable files left out. */
+async function readIndexedSources(rootPath: string, nodes: readonly { filePath: string }[]): Promise<Map<string, string>> {
+  const paths = [...new Set(nodes.map(node => node.filePath))];
+  const fileContents = new Map<string, string>();
+  const chunkSize = 256;
+  for (let offset = 0; offset < paths.length; offset += chunkSize) {
+    const slice = paths.slice(offset, offset + chunkSize);
+    const contents = await mapFilesBounded(slice, async filePath => {
+      try { return await readSourceCapped(safeJoin(rootPath, filePath), SOURCE_SCAN_MAX_FILE_BYTES); }
+      catch { return null; }
+    });
+    for (let index = 0; index < slice.length; index++) {
+      if (contents[index] !== null) fileContents.set(slice[index], contents[index]!);
+    }
+  }
+  return fileContents;
 }
 
 async function buildTextIndex(
@@ -287,7 +316,10 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
   let embedder: Embedder | null = null;
   if (!options.keywordOnly) {
     try {
-      embedder = await resolveEmbedder(options.config);
+      // With the analysis directory, vectors the background pass added are kept and only
+      // changed functions re-embedded. `--force` re-embeds nothing in the foreground: it
+      // builds keyword, and the next background build adds the vectors again.
+      embedder = await resolveEmbedder(options.config, options.force ? undefined : options.outputPath);
     } catch (error) {
       const reason = `Embedding provider unavailable; keyword indexes used: ${(error as Error).message}`;
       result.degraded.push({ index: 'function', reason });
@@ -305,19 +337,7 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
     if (graphNodes.length === 0 && !hasSignatures) {
       emit({ index: 'function', status: 'skip', detail: 'No call graph or signature data.' });
     } else {
-      const paths = [...new Set(graphNodes.map(node => node.filePath))];
-      const fileContents = new Map<string, string>();
-      const chunkSize = 256;
-      for (let offset = 0; offset < paths.length; offset += chunkSize) {
-        const slice = paths.slice(offset, offset + chunkSize);
-        const contents = await mapFilesBounded(slice, async filePath => {
-          try { return await readSourceCapped(safeJoin(options.rootPath, filePath), SOURCE_SCAN_MAX_FILE_BYTES); }
-          catch { return null; }
-        });
-        for (let index = 0; index < slice.length; index++) {
-          if (contents[index] !== null) fileContents.set(slice[index], contents[index]!);
-        }
-      }
+      const fileContents = await readIndexedSources(options.rootPath, graphNodes);
       try {
         const built = await VectorIndex.build(
           options.outputPath,
@@ -475,6 +495,102 @@ export async function readIndexReceipt(outputPath: string): Promise<{
     degraded: receipt.result?.degraded ?? [],
     ...(receipt.embedFailure ? { embedFailure: receipt.embedFailure } : {}),
   };
+}
+
+/**
+ * The background semantic pass (change: enable-local-semantic-search-in-background): add
+ * local vectors to the published keyword index of a repository that names no provider.
+ *
+ * Embedding takes minutes on a large repository, so it runs into a scratch index first,
+ * outside the real index's mutation lock, and is then written to the real index from the
+ * recorded vectors in about the time of a keyword build. It writes nothing when the
+ * analysis generation changed meanwhile, and stays silent — the keyword index serving as
+ * before — when the optional package or the model is unavailable.
+ */
+export async function buildBackgroundLocalVectors(
+  rootPath: string,
+  outputPath: string,
+  config: OpenLoreConfig | null,
+): Promise<'built' | 'skipped'> {
+  if (!backgroundSemanticAllowed(config) || !localEmbedderInstalled()) return 'skipped';
+  if (!VectorIndex.exists(outputPath) || indexCarriesLocalVectors(outputPath)) return 'skipped';
+  // One pass per repository: every session and repair starts one, and each embeds the whole
+  // corpus for minutes. A claim held by a live pass makes the others stand down; a dead one's
+  // is reclaimed.
+  const claim = await acquireLockAt(runtimeDirOf(outputPath), BACKGROUND_VECTORS_CLAIM, {
+    onContended: 'report',
+    isStale: (_mtimeMs, contents) => !isProcessAlive(Number.parseInt(contents, 10)),
+  });
+  if (isLockHeld(claim)) return 'skipped';
+  try {
+    return await buildClaimedLocalVectors(rootPath, outputPath, config);
+  } finally {
+    await claim.release();
+  }
+}
+
+const BACKGROUND_VECTORS_CLAIM = 'background-vectors.lock';
+
+async function buildClaimedLocalVectors(
+  rootPath: string,
+  outputPath: string,
+  config: OpenLoreConfig | null,
+): Promise<'built' | 'skipped'> {
+  const { LocalEmbeddingService } = await import('./local-embedding-service.js');
+  const local = LocalEmbeddingService.shared();
+  try {
+    await local.embed(['openlore']);
+  } catch {
+    return 'skipped';
+  }
+
+  const before = await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+  if (!before) return 'skipped';
+  const context = await loadContext(outputPath, null);
+  const graph = context.callGraph;
+  const nodes = graph?.nodes ?? [];
+  if (nodes.length === 0) return 'skipped';
+  const signatures = context.signatures ?? [];
+  const hubs = new Set(graph?.hubFunctions.map(node => node.id) ?? []);
+  const entries = new Set(graph?.entryPoints.map(node => node.id) ?? []);
+  const fileContents = await readIndexedSources(rootPath, nodes);
+  const vocabularyExpansion = config?.retrieval?.vocabularyExpansion !== false;
+
+  const recorded = new Map<string, number[]>();
+  const recorder: Embedder = {
+    modelName: local.modelName,
+    async embed(texts) {
+      const vectors = await local.embed(texts);
+      texts.forEach((text, index) => recorded.set(text, vectors[index]));
+      return vectors;
+    },
+  };
+  const replay: Embedder = {
+    modelName: local.modelName,
+    embed: texts => texts.every(text => recorded.has(text))
+      ? Promise.resolve(texts.map(text => recorded.get(text)!))
+      : local.embed(texts),
+  };
+  const scratch = await mkdtemp(join(tmpdir(), 'openlore-vectors-'));
+  try {
+    await VectorIndex.build(scratch, nodes, signatures, hubs, entries, recorder, fileContents, false, vocabularyExpansion, graph?.edges);
+    // The write, and the generation check it depends on, happen while this process owns the
+    // repository's analysis: a full analyze cannot publish a new graph in between, so the
+    // vectors always describe the graph that is published. A running analysis wins; the next
+    // build starts another pass.
+    const ownership = await acquireAnalysisOwnership(rootPath, outputPath, { stage: 'background-vectors' });
+    if (ownership.state !== 'owned') return 'skipped';
+    try {
+      const after = await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+      if (after?.generationId !== before.generationId) return 'skipped';
+      await VectorIndex.build(outputPath, nodes, signatures, hubs, entries, replay, fileContents, false, vocabularyExpansion, graph?.edges);
+      return 'built';
+    } finally {
+      await ownership.release();
+    }
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
 
 /** Build indexes one-at-a-time per canonical output directory for every frontend. */

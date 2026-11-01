@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { logger } from '../../utils/logger.js';
 import {
   formatPlatformCommand,
@@ -22,6 +23,7 @@ import {
 } from '../../utils/platform-command.js';
 import { fetchLatestVersion, isNewer } from '../../core/services/update-notifier.js';
 import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
+import { assessWiring } from '../install/wiring-scope.js';
 
 const require = createRequire(import.meta.url);
 
@@ -255,6 +257,58 @@ export function printableCommand(
 interface UpdateOpts {
   check?: boolean;
   dryRun?: boolean;
+  /** Accept the post-upgrade user-scope wiring offer without asking. */
+  yes?: boolean;
+}
+
+/** Ask one yes/no question on the attached terminal. */
+async function confirmOnTty(question: string): Promise<boolean> {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+    return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+export interface WiringOffer {
+  rootPath: string;
+  home: string;
+  isTTY: boolean;
+  yes: boolean;
+  confirm: (question: string) => Promise<boolean>;
+  /** Runs the user-scope install; resolves to its exit code. */
+  rewire: () => Promise<number>;
+  currentEntry?: string | null;
+}
+
+/**
+ * After a successful upgrade, offer once to wire the user scope when only this
+ * repository is wired or the user-scope entry is an older shape (change:
+ * upgrade-repo-only-wiring). Only on an interactive terminal: a script or an agent
+ * running `update` never writes `~`, and is told the command that would.
+ */
+export async function offerUserScopeWiring(offer: WiringOffer): Promise<'not-needed' | 'not-offered' | 'declined' | 'wired' | 'failed'> {
+  const wiring = await assessWiring(offer.rootPath, offer.home, offer.currentEntry);
+  if (wiring.scope !== 'repo only' && wiring.userOutdated === null) return 'not-needed';
+  const gap = wiring.scope === 'repo only'
+    ? 'Only this repository is wired; new repositories and worktrees will not reach OpenLore.'
+    : 'Your user-scope OpenLore wiring is an older shape.';
+  if (!offer.isTTY) {
+    logger.info('Wiring', `${gap} Run "openlore doctor --fix" to wire the user scope.`);
+    return 'not-offered';
+  }
+  if (!offer.yes && !await offer.confirm(`${gap} Wire the user scope now (openlore install --user-only)?`)) {
+    return 'declined';
+  }
+  const code = await offer.rewire();
+  if (code !== 0) {
+    logger.warning(`Could not wire the user scope (exit ${code}). Run "openlore install" yourself.`);
+    return 'failed';
+  }
+  return 'wired';
 }
 
 export async function runUpdate(
@@ -349,6 +403,19 @@ export async function runUpdate(
     return 1;
   }
   logger.success(`Upgraded openlore to ${latest}.`);
+  await offerUserScopeWiring({
+    rootPath: process.cwd(),
+    home: process.env.OPENLORE_HOME || homedir(),
+    isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    yes: !!opts.yes,
+    confirm: confirmOnTty,
+    // The UPGRADED `openlore` on PATH writes the wiring, not this process: a Homebrew
+    // upgrade moves the build this process runs from, and the new version owns the shape.
+    rewire: () => {
+      const install = resolvePlatformCommand('openlore', ['install', '--user-only'], platform, runtime);
+      return runCommand(install.command, install.args);
+    },
+  });
   return 0;
 }
 
@@ -356,6 +423,7 @@ export const updateCommand = new Command('update')
   .description('Upgrade openlore to the latest published version (detects npm / Homebrew / npx)')
   .option('--check', 'Only report whether a newer version exists; do not upgrade', false)
   .option('--dry-run', 'Print the upgrade command without running it', false)
+  .option('--yes', 'After the upgrade, wire the user scope without asking (interactive terminal only)', false)
   .addHelpText(
     'after',
     `

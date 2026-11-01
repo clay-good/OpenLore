@@ -2079,7 +2079,7 @@ export class McpWatcher {
       // updateFiles then refreshes the BM25-only corpus rather than re-embedding,
       // keeping the keyword index live in watch mode.
       const cfg = await readOpenLoreConfig(this.rootPath);
-      const embedSvc = await resolveEmbedder(cfg);
+      const embedSvc = await resolveEmbedder(cfg, this.outputPath);
 
       const cg = context.callGraph;
       if (!cg) return;

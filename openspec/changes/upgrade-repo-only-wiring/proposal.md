@@ -8,7 +8,7 @@ author's own machine:
 
 - No user-scope OpenLore entry exists.
 - roughlogic.com has June-era repo wiring (`npx --yes openlore mcp`, a `SessionStart` hook only).
-  Its `.mcp.json` and `.claude/settings.json` are untracked, so none of its three agent worktrees
+  That wiring lives in an untracked `.claude/settings.json`, so none of its three agent worktrees
   had OpenLore at all. An August worktree session got "OpenLore is installed but no analysis was
   found" and continued without it.
 
@@ -35,6 +35,8 @@ wired. `openlore update` upgrades the package but never the wiring.
 ## Impact
 
 - Code: `src/cli/commands/doctor.ts` (one check plus a remediation), `src/cli/commands/update.ts`
-  (the post-upgrade offer), `src/core/services/status-report.ts` (one field). It reuses the install
+  (the post-upgrade offer), `src/cli/commands/status.ts` (one field). It reuses the install
   writer and `withGuardedConfigWrite`.
-- No new command, no new config key.
+- No new command or config key. One new flag, `openlore install --user-only`, writes only the user
+  scope: a bare `install` as the remedy would also rewrite repository files and install a blocking
+  commit gate, which the user did not ask for.

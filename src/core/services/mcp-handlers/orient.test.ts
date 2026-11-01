@@ -621,12 +621,9 @@ describe('handleOrient', () => {
 
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.retrievalMode).toBe('keyword');
-    expect(typeof result.note).toBe('string');
-    // Honest, low-noise: name the mode + offer the upgrade, never warn about a
-    // "fallback" or an "unavailable" server for the plain default.
-    expect(result.note as string).toContain('Keyword (BM25)');
-    expect(result.note as string).toContain('embed --local');
-    expect(result.note as string).not.toContain('unavailable');
+    // The mode is reported; upgrade advice is for humans (status/doctor), never the agent.
+    expect(result.note).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('openlore embed');
   });
 
   it('includes specDomains when mapping index provides file-to-spec data', async () => {

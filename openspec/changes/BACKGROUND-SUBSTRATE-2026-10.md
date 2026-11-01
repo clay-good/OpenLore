@@ -34,7 +34,7 @@ records what was decided, without the user running a command. The user can alway
 - **"Auto-setup means writing the user's global config."** It does not. Writing `~/.claude` stays an
   explicit command; OpenLore offers it in the places a human already looks.
 
-## Build order
+## Build order (all four built, 2026-10-31)
 
 1. `upgrade-repo-only-wiring`: without user scope, the other three do not reach worktrees.
 2. `seed-worktree-index-from-sibling-checkout`: needs the file hashes from PR #630.

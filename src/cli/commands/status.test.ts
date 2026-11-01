@@ -6,11 +6,11 @@
  * is in flight.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { collectIndexStatus, statusCommand } from './status.js';
+import { collectIndexStatus, collectWiringScope, statusCommand } from './status.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
@@ -82,6 +82,15 @@ describe('openlore status — what the index is', () => {
     expect(status.configuredProvider).toBeNull();
   });
 
+  it('names keyword chosen by configuration apart from the unconfigured default', async () => {
+    await withIndex(false);
+    await writeConfig({ provider: 'none' });
+
+    const status = await collectIndexStatus(root);
+
+    expect(status.keywordCause).toBe('keyword-by-configuration');
+  });
+
   it('reports the semantic mode and no keyword cause when vectors are present', async () => {
     await withIndex(true);
     await writeConfig({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'all-MiniLM-L6-v2' });
@@ -135,6 +144,28 @@ describe('openlore status — what the index is', () => {
     }
   });
 
+  it('offers the optional semantic upgrade to a human, never in --json', async () => {
+    await withIndex(false);
+    await writeConfig(null);
+    const cwd = process.cwd();
+    const run = async (args: string[]): Promise<string> => {
+      const lines: string[] = [];
+      const log = console.log;
+      console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+      try {
+        process.chdir(root);
+        await statusCommand.parseAsync(['node', 'openlore', ...args]);
+      } finally {
+        console.log = log;
+        process.chdir(cwd);
+      }
+      return lines.join('\n');
+    };
+
+    expect(await run([])).toContain('openlore embed --local');
+    expect(await run(['--json'])).not.toContain('openlore embed');
+  });
+
   it('emits the same fields through --json', async () => {
     await withIndex(false);
     await writeConfig({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'all-MiniLM-L6-v2' });
@@ -158,6 +189,70 @@ describe('openlore status — what the index is', () => {
     });
     expect(typeof parsed.retrievalMode).toBe('string');
     expect(Array.isArray(parsed.staleFiles)).toBe(true);
+  });
+
+  // change: default-decision-autopilot-with-visible-trace
+  it('reports the governance block: mode, counts, newest ledger entries, and the review command', async () => {
+    await writeConfig(null);
+    const configPath = join(root, '.openlore', 'config.json');
+    await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), governance: { autopilot: true } }));
+    await mkdir(join(root, '.openlore', 'decisions'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'decisions', 'pending.json'), JSON.stringify({
+      decisions: [{ id: 'aaaa1111', status: 'auto-approved' }],
+    }));
+    await writeFile(join(root, '.openlore', 'decisions', 'ledger.jsonl'), JSON.stringify({
+      id: 'aaaa1111', title: 'Use UUIDs', from: null, to: 'auto-approved', actor: 'agent', at: '2026-10-31T00:00:00.000Z',
+    }) + '\n');
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore']);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+    }
+    const text = lines.join('\n');
+    expect(text).toContain('Decision autopilot');
+    expect(text).toContain('governance.autopilot is true — set it to false to require review');
+    expect(text).toContain('1 auto-accepted, 1 unreviewed');
+    expect(text).toContain('[aaaa1111] ∅ → auto-approved by agent');
+    expect(text).toContain('openlore decisions review');
+    // The status line's shared collector stays cheap: no governance block there.
+    expect((await collectIndexStatus(root)).governance).toBeUndefined();
+  });
+
+  it('reports the wiring scope, in text and through --json', async () => {
+    const home = join(root, 'home');
+    await mkdir(home);
+    expect(await collectWiringScope(root, home)).toBe('none');
+    await writeFile(join(root, '.mcp.json'), JSON.stringify({
+      mcpServers: { openlore: { command: 'npx', args: ['--yes', 'openlore', 'mcp'] } },
+      _openlore: { managed: true, version: 1, paths: ['mcpServers.openlore'] },
+    }));
+    expect(await collectWiringScope(root, home)).toBe('repo only');
+
+    const savedHome = process.env.OPENLORE_HOME;
+    process.env.OPENLORE_HOME = home;
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore', '--json']);
+      expect((JSON.parse(lines.join('\n')) as Record<string, unknown>).wiringScope).toBe('repo only');
+      await writeFile(join(home, '.claude.json'), JSON.stringify({ mcpServers: { openlore: { command: 'npx', args: [] } } }));
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore']);
+      expect(lines.join('\n')).toMatch(/Wiring scope\s+user \+ repo/);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+      if (savedHome === undefined) delete process.env.OPENLORE_HOME; else process.env.OPENLORE_HOME = savedHome;
+    }
   });
 
   it('reports unknown freshness when git is unavailable rather than claiming current', async () => {

@@ -21,6 +21,7 @@ import {
   registerRepairBuilder,
   registerRepairHost,
   requestRepairFromHost,
+  startBackgroundVectorPass,
   _resetRepairServiceForTesting,
 } from './cold-start-bootstrap.js';
 import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
@@ -125,6 +126,27 @@ describe('bootstrapAnalysisInBackground', () => {
   });
 });
 
+describe('startBackgroundVectorPass', () => {
+  it('starts the detached vector pass with the given CLI', () => {
+    const calls: Array<readonly string[]> = [];
+    const spawnProcess = ((_: string, args: readonly string[]) => {
+      calls.push(args);
+      const child = new EventEmitter() as ChildProcess;
+      child.unref = vi.fn();
+      return child;
+    }) as typeof spawn;
+    startBackgroundVectorPass('/repo', { cliPath: '/openlore/dist/cli/index.js', spawnProcess });
+    expect(calls).toEqual([['/openlore/dist/cli/index.js', 'analyze', '--background-vectors']]);
+  });
+
+  it("never launches a host's own argv[1]: with no built OpenLore CLI it starts nothing", () => {
+    // Running from TypeScript source there is no dist/cli/index.js beside the module.
+    const spawnProcess = vi.fn() as unknown as typeof spawn;
+    startBackgroundVectorPass('/repo', { spawnProcess });
+    expect(spawnProcess).not.toHaveBeenCalled();
+  });
+});
+
 describe('buildIndexInChildProcess', () => {
   function spawnHarness(calls: Array<{ command: string; args: readonly string[]; options: unknown }>): typeof spawn {
     return ((command: string, args: readonly string[], options: unknown) => {
@@ -147,6 +169,8 @@ describe('buildIndexInChildProcess', () => {
     expect(calls.map(call => call.args)).toEqual([
       ['/openlore/dist/cli/index.js', 'init'],
       ['/openlore/dist/cli/index.js', 'analyze', '--embedded', '--partial-serving'],
+      // Local vectors follow the published keyword index, in a process nobody awaits.
+      ['/openlore/dist/cli/index.js', 'analyze', '--background-vectors'],
     ]);
     expect(calls.every(call => call.command === process.execPath)).toBe(true);
     expect(calls.every(call => (call.options as { detached: boolean }).detached)).toBe(true);
@@ -166,7 +190,7 @@ describe('buildIndexInChildProcess', () => {
           cliPath: '/openlore/dist/cli/index.js',
           spawnProcess: spawnHarness(calls),
         });
-        expect(calls.map(call => call.args[1])).toEqual(['init', 'analyze']);
+        expect(calls.map(call => call.args[1])).toEqual(['init', 'analyze', 'analyze']);
       }
     } finally {
       if (prior === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
@@ -188,6 +212,7 @@ describe('buildIndexInChildProcess', () => {
 
     expect(calls.map(call => call.args)).toEqual([
       ['/openlore/dist/cli/index.js', 'analyze', '--reanalyze', '--embedded', '--partial-serving'],
+      ['/openlore/dist/cli/index.js', 'analyze', '--background-vectors'],
     ]);
   });
 

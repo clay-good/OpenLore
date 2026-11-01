@@ -735,7 +735,7 @@ export const viewCommand = new Command('view')
                   }
                   const { readOpenLoreConfig } = await import('../../core/services/config-manager.js');
                   const config = await readOpenLoreConfig(rootPath);
-                  const embedSvc = await resolveEmbedder(config);
+                  const embedSvc = await resolveEmbedder(config, analysisDir);
                   const results = await VectorIndex.search(analysisDir, q, embedSvc, {
                     limit: 5,
                     vocabularyExpansion: config?.retrieval?.vocabularyExpansion !== false,

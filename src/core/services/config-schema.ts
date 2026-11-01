@@ -141,7 +141,7 @@ const embeddingRule: ConfigRule = {
   kind: 'object',
   nullable: true,
   fields: fieldsFor<EmbeddingConfig>({
-    provider: { kind: 'enum', values: ['remote', 'local'] },
+    provider: { kind: 'enum', values: ['remote', 'local', 'none'] },
     baseUrl: stringRule,
     model: stringRule,
     apiKey: stringRule,

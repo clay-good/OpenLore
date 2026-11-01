@@ -2148,9 +2148,11 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'record_decision',
     description:
-      'Record a DRAFT architectural decision — a proposal, not a final record. ' +
+      'Record an architectural decision. ' +
       'Call this on a significant design choice: data structure, library, API contract, auth strategy. ' +
-      'Diff-grounded consolidation then promotes it (possibly rewording it, keeping your text as ' +
+      'Under decision autopilot (the default unless a blocking decisions gate is installed) it is accepted ' +
+      'at once as auto-approved and a human reviews it later; otherwise it is a DRAFT, and ' +
+      'diff-grounded consolidation then promotes it (possibly rewording it, keeping your text as ' +
       'authorStatement), merges it, or rejects it — always with a stated reason. The response returns ' +
       'the draft id and the command that reads the verdict; re-recording a decided draft returns that ' +
       'verdict instead of a second draft. Use supersedes when a later decision replaces an earlier one.',
@@ -2984,10 +2986,22 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           // the session warms up on its own. Non-blocking and fail-soft. We inject
           // install's full buildIndex (init + analyze + BM25 search index, no API
           // key) so orient is warmed to full parity, not just the structural graph.
-          const { bootstrapAnalysisInBackground } = await import('../../core/services/cold-start-bootstrap.js');
-          bootstrapAnalysisInBackground(resolve(dir), {
-            analyze: buildIndexInChildProcess,
-          });
+          const { bootstrapAnalysisInBackground, hasAnalysis, repairInBackground } = await import('../../core/services/cold-start-bootstrap.js');
+          // A new worktree first copies a sibling checkout's verified index, awaited so this
+          // very call answers from it; the rebuild then reuses its per-file memo
+          // (change: seed-worktree-index-from-sibling-checkout).
+          const { seedFromSiblingCheckout, servingSeededIndex } = await import('../../core/runtime/seed-from-sibling.js');
+          const root = resolve(dir);
+          if (!hasAnalysis(root) && !autoInitSuppression(root)) await seedFromSiblingCheckout(root);
+          if (await servingSeededIndex(root)) {
+            repairInBackground(root, 'seeded', {
+              analyze: (d, buildOpts) => buildIndexInChildProcess(d, { repair: true, mode: buildOpts?.mode }),
+            });
+          } else {
+            bootstrapAnalysisInBackground(root, {
+              analyze: buildIndexInChildProcess,
+            });
+          }
           const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
           const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
           const watchConfig = await readOpenLoreConfig(resolve(dir));

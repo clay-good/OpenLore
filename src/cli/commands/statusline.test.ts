@@ -29,6 +29,9 @@ describe('statusLabel', () => {
     [{ configUnreadable: true }, 'yellow', 'OpenLore: check index status'],
     [{ staleFilesUnknown: true }, 'yellow', 'OpenLore: freshness unknown'],
     [{ staleFiles: ['a.ts', 'b.ts'], staleFilesTruncated: true }, 'yellow', 'OpenLore: index stale (2+)'],
+    // change: default-decision-autopilot-with-visible-trace
+    [{ governance: { unreviewed: 2 } }, 'green', 'OpenLore: index ready · 2 to review'],
+    [{ governance: { unreviewed: 0 } }, 'green', 'OpenLore: index ready'],
   ] as const)('%j → %s', (patch, color, text) => {
     expect(statusLabel({ ...base, ...patch } as unknown as IndexStatus)).toEqual({ color, text });
   });
