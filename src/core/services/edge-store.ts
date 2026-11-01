@@ -1909,7 +1909,7 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
 const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
   'calls', 'overrides', 'tested_by', 'references', 'depends_on',
-  'affects', 'authored_by', 'changed_in_pr',
+  'affects', 'authored_by', 'changed_in_pr', 'deploys_symbol',
 ]);
 const CALL_TYPES = new Set<NonNullable<CallEdge['callType']>>([
   'direct', 'method', 'awaited', 'constructor',

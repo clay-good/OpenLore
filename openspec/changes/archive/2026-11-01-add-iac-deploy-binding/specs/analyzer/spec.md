@@ -5,11 +5,9 @@
 ### Requirement: IacResourcesBindToTheCodeTheyRun
 
 The IaC projection SHALL link a resource to the indexed function it runs, by a `deploys_symbol`
-edge, when the resource's handler or command names a source location literally: a Lambda, SAM,
-CloudFormation, or Serverless handler in `<module>.<export>` form, or a Dockerfile
-`CMD`/`ENTRYPOINT` or Kubernetes container `command` naming a script file (bound to that file's
-module-level entry). A build-output path SHALL bind only through the analyzed project's own
-`outDir` or package `main` mapping. An interpolated or otherwise non-literal handler SHALL be
+edge, when the resource's handler names a source location literally: a Terraform
+`aws_lambda_function` or CloudFormation/SAM function handler in `<module>.<export>` form, resolved
+relative to its code location, the repository root, or the template's directory. An interpolated or otherwise non-literal handler SHALL be
 recorded as a disclosed unresolved binding, never dropped silently. A bound function SHALL count as
 an entry point for dead-code analysis.
 

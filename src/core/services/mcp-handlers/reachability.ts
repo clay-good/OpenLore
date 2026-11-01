@@ -29,6 +29,7 @@
  * synthesized edges and get the strict directly-resolved reachability instead.
  */
 
+import { emittedText } from '../generated-file-guard.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
@@ -132,6 +133,8 @@ function externallyInvokedHandlerIds(cg: SerializedCallGraph, includeSynthesized
   for (const e of cg.edges) {
     if (!e.calleeId) continue;
     if (e.confidence === 'http_endpoint') ids.add(e.calleeId);
+    // A function a resource deploys (a Lambda handler) is invoked from outside the code (add-iac-deploy-binding).
+    else if (e.kind === 'deploys_symbol') ids.add(e.calleeId);
     else if (includeSynthesizedRoutes && e.confidence === 'synthesized' && e.synthesizedBy === 'route-handler') {
       ids.add(e.calleeId);
     }
@@ -276,6 +279,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // in strict mode) · main-like entry functions · functions in files a config
   // invokes (package.json, tsconfig, test-runner config, CI run steps).
   const httpHandlerIds = externallyInvokedHandlerIds(cg, !input.directResolvedOnly);
+  const deployedIds = new Set(cg.edges.filter(e => e.kind === 'deploys_symbol' && e.calleeId).map(e => e.calleeId));
   const wiring = await loadExternalWiring(absDir);
   const isWired = (n: FunctionNode) => wiring.byFile.has(wiringKey(n.filePath));
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
@@ -490,9 +494,18 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     rootKinds: {
       tests: roots.filter(r => r.isTest).length,
       imported: importedNames !== null ? roots.filter(r => !r.isTest && importedNames.has(r.name)).length : 0,
-      httpHandlers: roots.filter(r => httpHandlerIds.has(r.id)).length,
+      httpHandlers: roots.filter(r => httpHandlerIds.has(r.id) && !deployedIds.has(r.id)).length,
       externallyWired: roots.filter(isWired).length,
+      deployed: roots.filter(r => deployedIds.has(r.id)).length,
     },
+    // Function resources whose handler binds to no indexed function: the code they run can look dead.
+    ...(cg.unresolvedDeployBindings?.length ? {
+      unresolvedDeployBindings: {
+        count: cg.unresolvedDeployBindings.length,
+        items: cg.unresolvedDeployBindings.slice(0, 20).map(u => ({ ...u, resource: emittedText(u.resource), file: emittedText(u.file), ...(u.handler ? { handler: emittedText(u.handler) } : {}), reason: emittedText(u.reason) })),
+        note: 'These function resources name a handler that binds to no indexed function (an expression, a build-output path, or a missing file); the code they run can appear dead.',
+      },
+    } : {}),
     // Receipts for every config-wired file that kept code live, and every config reference that
     // could not be resolved (change: add-framework-entry-point-adapters).
     externalWiring: externalWiringBlock(wiring.report, roots.filter(isWired)),

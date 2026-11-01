@@ -85,7 +85,13 @@ function ingestBlock(
       const [type, name] = block.labels;
       if (!type || !name) return;
       const address = `${type}.${name}`;
-      push(makeResource(address, type, 'resource', filePath, block));
+      const r = makeResource(address, type, 'resource', filePath, block);
+      if (type === 'aws_lambda_function') {
+        const literal = attrValue(block.body, 'handler');
+        if (literal !== null) r.deploys = /\$\{/.test(literal) ? { unresolved: 'the handler is interpolated' } : { handler: literal };
+        else if (/(^|\n)\s*handler\s*=/.test(block.body)) r.deploys = { unresolved: 'the handler is an expression' };
+      }
+      push(r);
       addRefs(address, block, filePath, graph);
       return;
     }
@@ -341,7 +347,10 @@ function ingestTfJson(
     for (const obj of each(named)) {
       for (const [name, body] of Object.entries(obj)) {
         const address = `${type}.${name}`;
-        push({ address, type, kind: 'resource', filePath: file.path, startLine: lineOf(name), signature: `resource "${type}" "${name}"`, language: 'Terraform' });
+        const handler = type === 'aws_lambda_function' ? (body as Record<string, unknown> | null)?.handler : undefined;
+        const deploys = handler === undefined ? undefined
+          : typeof handler === 'string' && !/\$\{/.test(handler) ? { handler } : { unresolved: 'the handler is not a literal' };
+        push({ address, type, kind: 'resource', filePath: file.path, startLine: lineOf(name), signature: `resource "${type}" "${name}"`, language: 'Terraform', ...(deploys ? { deploys } : {}) });
         addRefsFrom(address, body);
       }
     }

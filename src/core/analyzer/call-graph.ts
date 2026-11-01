@@ -40,7 +40,9 @@ import {
 } from './http-route-parser.js';
 import { mapFilesBounded } from './bounded-file-scan.js';
 import type { CfgSpill } from './cfg-spill.js';
-import { buildProjectedIac } from './iac/index.js';
+import { buildIacGraph } from './iac/index.js';
+import { projectIacGraph } from './iac/project.js';
+import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
@@ -6570,8 +6572,10 @@ export class CallGraphBuilder {
     // Pass 2c: Infrastructure-as-Code projection (spec-07).
     // IaC resources/references project onto the existing node/edge primitives.
     let iacClasses: ClassNode[] = [];
+    let unresolvedDeployBindings: UnresolvedDeployBinding[] = [];
     try {
-      const iac = buildProjectedIac(structuralFiles);
+      const iacGraph = buildIacGraph(structuralFiles);
+      const iac = projectIacGraph(iacGraph);
       for (const n of iac.nodes) if (!allNodes.has(n.id)) allNodes.set(n.id, n);
       edges.push(...iac.edges);
       iacClasses = iac.classes;
@@ -6583,6 +6587,12 @@ export class CallGraphBuilder {
       // boundary end-to-end. Standalone IaC (.tf/.yaml) has no co-located code, so
       // no edge is created — those stay infra-only components, exactly as today.
       edges.push(...linkCodeToInfra(iac.nodes, allNodes));
+
+      // Pass 2c.2: function resources → the code they run (change: add-iac-deploy-binding).
+      const codeNodes = [...allNodes.values()].filter(n => !n.isExternal && !isIacLanguage(n.language));
+      const deploys = bindDeployHandlers(iacGraph, codeNodes);
+      edges.push(...deploys.edges.filter(e => allNodes.has(e.callerId)));
+      unresolvedDeployBindings = deploys.unresolved;
     } catch {
       // IaC extraction is best-effort; never fail the whole build
     }
@@ -6968,6 +6978,7 @@ export class CallGraphBuilder {
         ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
         : undefined,
       ambiguousSites: ambiguousSites.length > 0 ? ambiguousSites : undefined,
+      unresolvedDeployBindings: unresolvedDeployBindings.length > 0 ? unresolvedDeployBindings : undefined,
       extractionLane,
       pass1Cache,
     };
@@ -7331,6 +7342,9 @@ export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph
     // disclose them (change: harden-call-resolution-ambiguity). Omitted when empty.
     ...(result.ambiguousSites && result.ambiguousSites.length > 0
       ? { ambiguousSites: result.ambiguousSites }
+      : {}),
+    ...(result.unresolvedDeployBindings && result.unresolvedDeployBindings.length > 0
+      ? { unresolvedDeployBindings: result.unresolvedDeployBindings }
       : {}),
   };
 }

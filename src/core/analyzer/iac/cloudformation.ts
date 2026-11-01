@@ -104,6 +104,20 @@ function extractTemplate(
     const type = (body as Record<string, unknown>).Type;
     const typeStr = typeof type === 'string' ? type : 'AWS::Unknown';
     addNode(id, typeStr, 'resource', ['Resources', id], `${id} (${typeStr})`);
+    // The code a function runs (change: add-iac-deploy-binding); SAM `Globals.Function` supplies defaults.
+    if (typeStr === 'AWS::Lambda::Function' || typeStr === 'AWS::Serverless::Function') {
+      const props = ((body as Record<string, unknown>).Properties ?? {}) as Record<string, unknown>;
+      const globals = (((tpl.Globals ?? {}) as Record<string, unknown>).Function ?? {}) as Record<string, unknown>;
+      if (props.PackageType === 'Image' || props.ImageUri !== undefined) continue;
+      const handler = props.Handler ?? globals.Handler;
+      const codeUri = props.CodeUri ?? globals.CodeUri;
+      const r = graph.resources[graph.resources.length - 1];
+      if (r && r.address === id && handler !== undefined) {
+        r.deploys = typeof handler === 'string'
+          ? { handler, ...(typeof codeUri === 'string' && !/^s3:\/\//i.test(codeUri) ? { codeUri } : {}) }
+          : { unresolved: 'the handler is an intrinsic function' };
+      }
+    }
   }
 
   const outputs = (tpl.Outputs ?? {}) as Record<string, unknown>;

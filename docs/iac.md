@@ -113,6 +113,23 @@ change this?".
 - **File-scoped resolution:** Bicep resolves bare identifiers against a flat **per-file** symbol table (no `var.`/`type.name` prefixes), so the same name (`location`, `vnet`) recurs across files. Addresses are scoped by file (`<file>::<symbol>`) and references resolve **within the declaring file only** — two files each declaring `param location` never cross-link. The single cross-file edge is the local-`module` link above.
 - **Notes:** parsed with a tolerant, hand-rolled scanner (no Bicep compiler, no native dependency). Static only — no `bicep build`, no ARM emit, no Azure/registry access. A multi-line ternary value (`= cond\n ? a\n : b`) resolves only the first line's symbols; the others are dropped rather than guessed.
 
+## The code a function resource runs
+
+A Lambda names its code as `<module>.<export>`. A Terraform `aws_lambda_function` with a literal
+`handler`, or a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function` with a
+string `Handler` (and `CodeUri`, relative to the template; SAM `Globals.Function` supplies
+defaults), gets a `deploys_symbol` edge to the indexed function it names: `src/orders.handler` →
+`handler` in `src/orders.ts`; `app.lambda_handler` with `CodeUri: functions/` →
+`lambda_handler` in `functions/app.py`. The module is tried under the code location, the
+repository root, and the template's directory, with the usual source extensions and `index` files.
+
+- `find_dead_code` counts a bound function as deployed (live): `rootKinds.deployed`.
+- `analyze_impact` on the function reaches the resource.
+- Matching is literal. A handler that is an expression (`var.handler`, `!Sub`), a build-output path
+  (`dist/…`) with no indexed source, or a name with no single indexed function in the file is
+  listed in `unresolvedDeployBindings` (in `find_dead_code`), because the code it runs can appear
+  dead. Container images (`PackageType: Image`) are not bound.
+
 ## Environment variables set by infrastructure
 
 `analyze_env_impact` names the files that set a variable (`declaredBy`), and `blast_radius` lists
