@@ -85,6 +85,50 @@ describe('EdgeStore with contract nodes', () => {
     expect(store.getCallees(HANDLER.id).map(e => e.calleeId)).not.toContain(RENDER.id);
   });
 
+  // The path a watcher save actually takes for every RECOMPUTED CALLER file, not just the
+  // edited one. It had no projection guard at all, so touching one shared utility wiped the
+  // `implements_endpoint` edges of every route file in the closure and left orphaned operation
+  // nodes with no edges — while the index reported itself current.
+  it('keeps a contract edge when a subset rebuild deletes the handler file OUTGOING edges', () => {
+    store.deleteOutgoingEdgesForFile('src/handlers.ts');
+    expect(store.getCallers(OPERATION.id).map(e => e.callerId)).toEqual([HANDLER.id]);
+    expect(store.getCallees(HANDLER.id).map(e => e.calleeId)).not.toContain(RENDER.id);
+  });
+
+  it('keeps a deploy binding through both subset-rebuild deletions', () => {
+    const resource = fn('serverless.yml::function.getOrder', { language: 'Serverless', name: 'function.getOrder' });
+    store.insertNodes([resource]);
+    store.insertEdges([{
+      callerId: resource.id, calleeId: HANDLER.id, calleeName: HANDLER.name,
+      confidence: 'import', kind: 'deploys_symbol',
+    }]);
+
+    // A deploy edge makes the manifest a CALLER file of the handler source, so editing a
+    // deployed handler used to drag the manifest into the closure and drop the binding.
+    store.deleteEdgesForFile('src/handlers.ts');
+    store.deleteOutgoingEdgesForFile('serverless.yml');
+
+    expect(store.getCallers(HANDLER.id).map(e => e.kind)).toContain('deploys_symbol');
+  });
+
+  it('never lets a deploy binding give the handler a fan-in, or cost it its entry point', () => {
+    const resource = fn('serverless.yml::function.create', { language: 'Serverless', name: 'function.create' });
+    const create = fn('src/orders.ts::create');
+    store.insertNodes([resource, create]);
+    store.insertEdges([{
+      callerId: resource.id, calleeId: create.id, calleeName: create.name,
+      confidence: 'import', kind: 'deploys_symbol',
+    }]);
+    store.recomputeStructuralMetrics();
+
+    // The deployed handler is still an entry point of the code; the YAML stanza never is.
+    expect(store.getNode(create.id)?.fanIn).toBe(0);
+    const entryPoints = store.getEntryPoints(100).map(n => n.id);
+    expect(entryPoints).toContain(create.id);
+    expect(entryPoints).not.toContain(resource.id);
+    expect(store.getHubs(100).map(n => n.id)).not.toContain(resource.id);
+  });
+
   it('round-trips both contract edge kinds', () => {
     store.insertEdges([{
       callerId: 'src/client.ts::load', calleeId: OPERATION.id, calleeName: OPERATION.name,

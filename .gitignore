@@ -60,7 +60,12 @@ env/
 # --------------------
 # Node/JS Specific
 # --------------------
-node_modules/
+# No trailing slash: `node_modules/` matches only a DIRECTORY, so a SYMLINK named
+# node_modules — which is how a developer shares one install across git worktrees — was not
+# ignored, and got committed as an absolute path pointing at that developer's machine. Any
+# clone that then ran `npm ci` had the directory it pointed at emptied first
+# (`npm warn reify Removing non-directory …`). Keep this pattern slash-free.
+node_modules
 .pnpm-store/
 /jspm_packages/
 /dist/
