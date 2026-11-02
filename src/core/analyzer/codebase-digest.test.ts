@@ -225,6 +225,30 @@ describe('generateCodebaseDigest', () => {
     expect(content).toContain('**1** entry points');
   });
 
+  it('does not count projected declarations as functions it analyzed', async () => {
+    // A specification file can declare several hundred named schemas. Counting them as
+    // "functions / methods analyzed" reported a seven-function repository as having thousands,
+    // and the tables below this line are labelled as functions and described as "the natural
+    // starting point for any task" (change: add-contract-schema-elements).
+    const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
+    const cg = makeCallGraph({
+      nodes: [
+        { id: 'src/orders.ts::createOrder', name: 'createOrder', filePath: 'src/orders.ts', fanIn: 1, fanOut: 2, isAsync: false, language: 'TypeScript', startIndex: 0, endIndex: 10 },
+        { id: 'openapi.yaml::POST /orders', name: 'POST /orders', filePath: 'openapi.yaml', fanIn: 0, fanOut: 1, isAsync: false, language: 'OpenAPI', startIndex: 0, endIndex: 0 },
+        { id: 'openapi.yaml::#/components/schemas/Order', name: '#/components/schemas/Order', filePath: 'openapi.yaml', fanIn: 1, fanOut: 0, isAsync: false, language: 'OpenAPI', startIndex: 0, endIndex: 0 },
+        { id: 'main.tf::aws_lambda_function.api', name: 'aws_lambda_function.api', filePath: 'main.tf', fanIn: 0, fanOut: 1, isAsync: false, language: 'Terraform', startIndex: 0, endIndex: 0 },
+      ],
+    });
+
+    await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
+    const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+
+    expect(content).toContain('**1** functions / methods analyzed');
+    // And no declaration is offered as a place to start work.
+    expect(content).not.toContain('#/components/schemas/Order');
+    expect(content).not.toContain('aws_lambda_function.api');
+  });
+
   // change: add-framework-entry-point-adapters
   it('counts the entry points that live in files a config invokes', async () => {
     const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));

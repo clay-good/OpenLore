@@ -50,6 +50,7 @@ export const EDGE_KIND_VALUES = [
   'deploys_symbol',      // function resource → the code function it runs (add-iac-deploy-binding)
   'implements_endpoint', // route handler → the declared operation it serves (add-contract-node-projection)
   'consumes_endpoint',   // the function enclosing a client call → the operation it calls
+  'references_schema',   // an operation or schema → the named schema it references (add-contract-graph-projection)
 ] as const;
 
 export type EdgeKind = (typeof EDGE_KIND_VALUES)[number];
