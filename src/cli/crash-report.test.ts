@@ -61,6 +61,23 @@ describe('explainFailure', () => {
   });
 });
 
+// The reporter is bound first, so its handler runs first. Exiting there pre-empted
+// `ShutdownManager`, which saves resume state and runs registered teardown — so a crash leaked
+// the `generate --preview` temp workspace (change: fix-crash-reporter-shutdown-order).
+describe('the reporter hands off to a registered shutdown handler', () => {
+  it('returns instead of exiting when another handler for that event exists', async () => {
+    const source = await readFile(join(import.meta.dirname, 'crash-reporter.ts'), 'utf8');
+    // Asserted against the source: binding real process handlers inside a test would make any
+    // unrelated rejection in the run exit this process.
+    expect(source).toMatch(/process\.listenerCount\(event\)\s*>\s*1/);
+    expect(source).toContain('process.exitCode = 1');
+    // The decision is per EVENT, not pooled: a second uncaughtException listener must not make
+    // an unhandledRejection hand off to a handler that does not exist.
+    expect(source).toMatch(/report\('uncaughtException'/);
+    expect(source).toMatch(/report\('unhandledRejection'/);
+  });
+});
+
 describe('the reporter is bound before the command modules load', () => {
   it('index.ts imports crash-reporter ahead of its first command module', async () => {
     const source = await readFile(join(import.meta.dirname, 'index.ts'), 'utf8');
