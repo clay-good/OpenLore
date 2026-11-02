@@ -494,7 +494,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
           outputPath,
           config: openloreConfig,
           reporter: {
-            report(event): void { console.log(event.status === 'warning' ? formatSpecIndexFailure(event.detail ?? 'unknown error', options.freshSpecDirectory === true) : `    ${event.detail ?? 'Spec index updated'}`); },
+            report(event): void { console.log(event.status === 'warning' ? formatSpecIndexFailure(event.detail ?? 'unknown error', options.freshSpecDirectory === true, defaultSpecsDir(rootPath)) : `    ${event.detail ?? 'Spec index updated'}`); },
           },
         });
         return;
@@ -1068,7 +1068,7 @@ async function runEmbedStep(
     report(event: IndexReport): void {
       const label = event.index === 'function' ? 'Function index' : event.index === 'text' ? 'Text line index' : 'Spec index';
       if (event.index === 'spec' && (event.status === 'warning' || event.status === 'skip')) {
-        console.log(formatSpecIndexFailure(event.detail ?? 'unknown error', freshSpecDirectory));
+        console.log(formatSpecIndexFailure(event.detail ?? 'unknown error', freshSpecDirectory, defaultSpecsDir(rootPath)));
       } else if (event.status === 'warning') console.log(`    ⚠ ${label} skipped: ${safe(event.detail ?? 'unknown error')}`);
       else if (event.status === 'skip') console.log(`    ℹ ${label} skipped${event.detail ? `: ${safe(event.detail)}` : ''}`);
       else if (event.status === 'complete') console.log(`    ✓ ${label} built${event.detail ? ` ${safe(event.detail)}` : ''}`);
@@ -1103,14 +1103,45 @@ async function runEmbedStep(
   }
 }
 
-export function formatSpecIndexFailure(message: string, freshSpecDirectory: boolean): string {
+/**
+ * The specs directory `openlore init` creates, resolved against a repository root.
+ *
+ * An empty directory THERE is OpenLore's own artifact; an empty one at a configured
+ * `openspecPath` is the user's, and worth a warning.
+ */
+export function defaultSpecsDir(rootPath: string): string {
+  return join(rootPath, 'openspec', 'specs');
+}
+
+export function formatSpecIndexFailure(
+  message: string,
+  freshSpecDirectory: boolean,
+  /**
+   * The resolved default specs directory for this repository. Compared as a PATH, not as a
+   * slash pattern over the prose: a regex built from `openspec/specs` never matched a Windows
+   * `C:\repo\openspec\specs`, so the whole distinction was inert there, and it matched any
+   * configured path ending in those two segments — `vendor/openspec/specs`, `docs/openspec/specs`
+   * — which are the user's, not ours (change: fix-spec-skip-path-comparison).
+   */
+  defaultSpecs?: string,
+): string {
   if (message.includes('No OpenSpec specs directory')) {
     return '    ℹ No OpenSpec specs directory — spec index skipped';
   }
-  if (freshSpecDirectory && message.includes('exists but contains no spec.md files')) {
-    // change: align-first-run-ctas-with-repo-shape — install created this
-    // empty directory, so it is expected first-run state rather than a warning.
-    return '    ℹ No specs yet — optional: run "openlore generate" (requires an LLM provider; see "openlore features")';
+  if (message.includes('exists but contains no spec.md files')) {
+    // change: align-first-run-ctas-with-repo-shape — an empty specs directory OpenLore's own
+    // `init` created is expected state, not a warning.
+    //
+    // This used to require `freshSpecDirectory`, which is true only on the run that created the
+    // directory, so every LATER run of a merely-initialized repository warned about a directory
+    // OpenLore had made itself. The honest discriminator is not WHEN the directory appeared but
+    // WHOSE it is: the default `openspec/specs` location is ours, and a configured
+    // `openspecPath` is the user's — an empty one there means their specs are somewhere else,
+    // which is worth a warning (change: fix-self-inflicted-spec-warning).
+    const ours = freshSpecDirectory || (defaultSpecs !== undefined && message.includes(defaultSpecs));
+    if (ours) {
+      return '    ℹ No specs yet — optional: run "openlore generate" (requires an LLM provider; see "openlore features")';
+    }
   }
   return `    ⚠ Spec index skipped: ${message}`;
 }
