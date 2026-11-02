@@ -48,6 +48,7 @@ import { isContractLanguage } from './contract/types.js';
 import { isContractEdgeKind } from './contract/project.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
+import { hasRustTestAttribute } from './rust-test-attributes.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
@@ -6755,8 +6756,22 @@ export class CallGraphBuilder {
 
     // Pass 4 (prep): Mark test-file nodes before tested_by derivation
     const nodes = Array.from(allNodes.values());
+    // Rust's dominant convention is an inline `#[cfg(test)] mod tests`, which no path shows. The
+    // attribute on each test function does, and the source is still in hand here. Split each
+    // Rust file once, not once per function (change: fix-rust-test-detection).
+    const rustLines = new Map<string, string[]>();
     for (const n of nodes) {
       if (!n.isExternal && isTestFile(n.filePath)) n.isTest = true;
+      else if (!n.isExternal && n.language === 'Rust' && n.startLine) {
+        let lines = rustLines.get(n.filePath);
+        if (!lines) {
+          const content = fileContents.get(n.filePath);
+          if (content === undefined) continue;
+          lines = content.split('\n');
+          rustLines.set(n.filePath, lines);
+        }
+        if (hasRustTestAttribute(lines, n.startLine)) n.isTest = true;
+      }
     }
 
     // Pass 3b: Derive tested_by edges — reverse edges from production fn ← test fn

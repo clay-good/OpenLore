@@ -107,6 +107,31 @@ the graph.**
 
 ### Fixed
 
+- **Rust tests are detected.** `isTestFile` is a path-only predicate, and Rust's dominant
+  convention is not a path: a test lives in an inline `#[cfg(test)] mod tests` beside the code.
+  On a real Cargo workspace that left **2,496 of 3,363 "entry points" as test functions**,
+  `report_coverage_gaps` reporting a 96% gap rate while 2,759 `#[test]` attributes sat in the
+  source, and `orient` offering a `#[test]` function as the place to add a feature. A Rust test
+  is now recognized from the attribute on the function (`#[test]`, `#[tokio::test]`,
+  `#[rstest]`, `#[test_case]`, `#[bench]`), and the two missing path conventions
+  (`src/<module>/tests.rs`, `foo_test.rs`) were added.
+- **`orient` never offers a test function as an insertion point**, in any language.
+- **`report_coverage_gaps` names what test detection cannot see for a language.** Rust reported
+  `testDetection: "full"` as soon as one path rule matched. It now also discloses that an
+  unattributed helper inside a test module counts as production code, and that a call inside a
+  macro body — `assert_eq!(sha256_hex(x), y)`, the usual shape of a Rust assertion — is not a
+  call-graph edge, so code exercised only through an assertion macro still reports no reaching
+  test.
+- **`orient` no longer prescribes tools the wired preset does not expose.** Its `nextSteps` named
+  `record_decision`, `check_spec_drift` and `get_spec` unconditionally; none is in the default
+  `substrate` preset, so an agent that followed them got a preset-membership error — in the same
+  session where `install` had printed "the generated guidance prescribes only tools this preset
+  exposes". Guidance now falls back to the CLI equivalent (`openlore decisions record`,
+  `openlore drift`, the spec file path), and `suggestedTools` lists only wired tools.
+- **`env-impact` explains an empty inventory honestly.** It advised "run analyze first" for a
+  repository whose language the env scan does not cover (Rust, Java, …), where re-running can
+  never help. It now names the scope boundary instead.
+
 - **A whole-repository answer no longer discards itself when it exceeds the response budget.**
   `get_architecture_overview`, `get_refactor_report` and `get_mapping` returned a JSON string cut
   mid-structure, with advice to narrow the query using parameters they do not accept. They now keep

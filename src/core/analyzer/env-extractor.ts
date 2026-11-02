@@ -147,7 +147,13 @@ function extractFromSource(source: string, relPath: string, ext: string): Array<
 
 // ENV_DECLARATION_FILES is imported from bounded-file-scan: the disclosure predicate must be
 // built from the SAME list this scan reads, or an oversized `.env` is dropped without a word.
-const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '.go', '.rb']);
+/**
+ * The file extensions this scan reads. Exported so a caller reporting an EMPTY inventory can say
+ * "no in-scope language here" rather than "run analyze first" — the latter can never help a
+ * repository written in a language the scan does not cover (change: fix-env-scope-hint).
+ */
+export const ENV_SOURCE_EXTENSIONS: ReadonlySet<string> = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '.go', '.rb']);
+const SOURCE_EXTENSIONS = ENV_SOURCE_EXTENSIONS;
 const SKIP_DIRS = ['/node_modules/', '/.openlore/', '/dist/', '/build/', '/coverage/'];
 
 /**
