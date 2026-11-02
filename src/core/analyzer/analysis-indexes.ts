@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { join, resolve } from 'node:path';
@@ -233,11 +233,60 @@ function indexConfigurationHash(options: BuildAnalysisIndexesOptions): string {
   })).digest('hex');
 }
 
-function indexExists(index: 'function' | 'text' | 'spec', status: string, outputPath: string): boolean {
-  if (status === 'skipped') return true;
+/**
+ * Whether a receipt's recorded outcome for one index still holds.
+ *
+ * A `skipped` spec index used to count as "exists", and the configuration hash covers no spec
+ * state, so the FIRST analyze of a repository with no `spec.md` files cached that skip forever:
+ * adding specs and re-running `analyze` replayed the stored "contains no spec.md files" message —
+ * by then a flat lie — `search_specs` stayed permanently dead advising the command that could not
+ * help, and because the spec-index build is what writes `mapping.json`, `orient` reported that no
+ * spec governed any code. A skip is reusable only while the condition that caused it still holds
+ * (change: fix-governance-face-dark).
+ */
+function indexExists(
+  index: 'function' | 'text' | 'spec',
+  status: string,
+  outputPath: string,
+  specCorpusPresent?: boolean,
+): boolean {
+  if (status === 'skipped') return index === 'spec' ? specCorpusPresent !== true : true;
   if (index === 'function') return VectorIndex.exists(outputPath);
   if (index === 'text') return TextLineIndex.exists(outputPath);
   return SpecVectorIndex.exists(outputPath);
+}
+
+/** Whether the spec corpus holds at least one `spec.md` — the condition a spec skip rests on. */
+async function specCorpusPresent(options: BuildAnalysisIndexesOptions): Promise<boolean> {
+  try {
+    const specsDir = join(
+      resolveOpenspecDir(options.rootPath, options.config?.openspecPath ?? OPENSPEC_DIR),
+      OPENSPEC_SPECS_SUBDIR,
+    );
+    return (await findSpecMarkdown(specsDir, 0)).length > 0;
+  } catch {
+    // Unreadable: do not invalidate on a transient error — the ordinary rebuild path still runs.
+    return false;
+  }
+}
+
+/** `spec.md` files under a specs directory, bounded in depth like the spec index's own discovery. */
+async function findSpecMarkdown(dir: string, depth: number): Promise<string[]> {
+  if (depth > 4) return [];
+  let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name === 'spec.md') found.push(join(dir, entry.name));
+    else if (entry.isDirectory() && !entry.name.startsWith('.')) {
+      found.push(...await findSpecMarkdown(join(dir, entry.name), depth + 1));
+    }
+  }
+  return found;
 }
 
 /**
@@ -260,9 +309,12 @@ async function readReusableIndexes(options: BuildAnalysisIndexesOptions): Promis
     if (!raw) return { receipt: null };
     const receipt = JSON.parse(raw.text) as IndexGenerationReceipt;
     if (receipt.generationId !== options.generationId || receipt.configurationHash !== indexConfigurationHash(options)) return { receipt: null };
+    // The spec corpus is only consulted when the receipt actually recorded a skip, so an
+    // ordinary reuse pays nothing for it.
+    const corpus = receipt.result.specIndex === 'skipped' ? await specCorpusPresent(options) : false;
     if (!indexExists('function', receipt.result.functionIndex, options.outputPath)
       || !indexExists('text', receipt.result.textIndex, options.outputPath)
-      || !indexExists('spec', receipt.result.specIndex, options.outputPath)) return { receipt: null };
+      || !indexExists('spec', receipt.result.specIndex, options.outputPath, corpus)) return { receipt: null };
     // A receipt is now written even for a degraded build, so that the degradation is
     // REPORTABLE. Reuse still requires a clean one — the previous behavior, when a
     // degraded build simply wrote nothing.
@@ -428,6 +480,24 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
   try {
     result.specIndex = await buildSpecIndexWithEmbedder(options, embedder);
     if (result.specIndex === 'skipped') specSkipDetail = 'No OpenSpec specs directory.';
+    // The spec→code link index, written here so the documented happy path produces a working
+    // governance face. It is a rebuildable CACHE, but `orient` only reads the cache: with none,
+    // it reported `specDomains: []` on a repository whose specs carry valid anchors — an absent
+    // cache presented as a finding, in the tool every agent calls first. `analyze` never wrote
+    // it; only `mapping refresh` and `generate` did (change: fix-governance-face-dark).
+    if (result.specIndex === 'built') {
+      try {
+        const { resolveSpecLinkIndex } = await import('../generator/spec-link-service.js');
+        await resolveSpecLinkIndex({
+          rootPath: options.rootPath,
+          openspecPath: options.config?.openspecPath ?? OPENSPEC_DIR,
+          persist: true,
+        });
+      } catch (error) {
+        // Never fail the index build over the cache: every reader can re-derive it.
+        emit({ index: 'spec', status: 'warning', detail: `spec link index not cached: ${(error as Error).message}` });
+      }
+    }
   } catch (error) {
     const reason = (error as Error).message;
     specSkipDetail = reason;
