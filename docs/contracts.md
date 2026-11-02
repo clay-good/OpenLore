@@ -90,6 +90,38 @@ edges are therefore **preserved**, not deleted, when a bound handler's own file 
 cannot silently drop the binding. Run `openlore analyze` to refresh the operations after a
 specification changes.
 
+## Named schemas as nodes
+
+Each named schema a specification declares — `components/schemas` in OpenAPI 3, `definitions` in
+Swagger 2 — is a graph node, and `references_schema` edges connect an operation to the schemas it
+names and a schema to the schemas its own definition names:
+
+```
+implements_endpoint : createOrder -> POST /v1/orders
+references_schema   : POST /v1/orders -> #/components/schemas/Order
+references_schema   : POST /v1/orders -> #/components/schemas/OrderInput
+references_schema   : #/components/schemas/Order -> #/components/schemas/Customer
+```
+
+That shape is the point: a schema shared by twenty operations is **one node with twenty inbound
+edges**, so "what does changing `Order` touch?" is a graph question, and a handler reaches the
+schemas of its own contract through the operation it serves.
+
+**Per-field nodes are deliberately not projected.** A large document has thousands of fields, and
+the question they would answer — did this property's type or requiredness change — already
+belongs to `certify_service_contract`'s verdict. The named schema is the reusable unit.
+
+Edges are **direct only**; the transitive closure is the graph's to walk rather than a list
+duplicated on every node. A cycle terminates, each edge drawn once. A `$ref` naming something the
+document does not declare — an external reference, or a name that does not resolve — draws no edge
+and is disclosed; nothing is invented for it. The number of projected schemas is bounded, and a
+document past the cap says so rather than projecting part of its schemas silently.
+
+A `references_schema` edge is a declaration binding, so it contributes to no function's degree, no
+entry-point or hub classification, no file-level dependency ranking and no layer violation —
+verified as a difference between two builds of the same code, one with the specification and one
+without.
+
 ## Generated clients
 
 A generated API client builds its URL from a base variable —
@@ -209,5 +241,6 @@ scan cap, or parses with no operation the reader recognizes is named rather than
 
 ## Not read
 
-Fields, messages and types as their own nodes; protobuf and GraphQL; registry or network fetches;
-runtime traffic; contract tests; code generation; any LLM.
+Per-FIELD nodes (named schemas are projected; individual properties are not); protobuf and
+GraphQL; registry or network fetches; runtime traffic; contract tests; code generation; any
+LLM.

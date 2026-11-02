@@ -211,8 +211,14 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
  * reader so a valid bundle is rejected as TAMPERED. Both were reproduced against the published
  * v3.5.0 build before this bump (changes: add-iac-deploy-binding, add-contract-node-projection,
  * add-serverless-and-build-output-binding).
+ *
+ * v15 adds no column either — it marks one more `edges.kind` value, `references_schema` (an
+ * operation or a named schema → the schema it references). Same reason as v14: a v14 reader
+ * would pass the version gate and then DROP every schema edge, leaving the named-schema nodes
+ * in the graph with nothing bound to them, and recompute a bundle digest through that dropping
+ * reader (change: add-contract-schema-elements).
  */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /**
  * Bound on the number of bound parameters in one generated `IN (…)` list.

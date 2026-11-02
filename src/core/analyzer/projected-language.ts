@@ -28,5 +28,5 @@ export function isProjectedLanguage(language: string | undefined): boolean {
  * measurement agree.
  */
 export function isDeclarationEdgeKind(kind: string | undefined): boolean {
-  return isContractEdgeKind(kind) || kind === 'deploys_symbol';
+  return isContractEdgeKind(kind) || kind === 'deploys_symbol' || kind === 'references_schema';
 }

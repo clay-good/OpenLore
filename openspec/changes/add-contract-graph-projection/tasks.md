@@ -2,7 +2,7 @@
 
 ## Graph (OpenAPI)
 - [x] Project operations onto graph nodes (`language: OpenAPI`), stable addresses — shipped in `add-contract-node-projection`
-- [ ] Params, fields, messages, and types as nodes, with `$ref` edges
+- [x] Named schemas (messages and types) as nodes, with `$ref` edges — shipped in `add-contract-schema-elements`; per-FIELD nodes deliberately not projected (the property-level verdict is `certify_service_contract`'s)
 - [x] `implements_endpoint` edges from indexed route handlers by method + normalized path template — shipped in `add-contract-node-projection`
 - [x] `consumes_endpoint` edges from HTTP-projection client calls, including operations with no in-repo handler — shipped in `add-contract-node-projection`
 - [x] Generated-client calls bound via `operationId` when the module is a generated file sourced from the spec — shipped in `add-generated-client-operation-binding`
@@ -22,6 +22,6 @@
 
 ## Spec
 - [ ] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL)
-- [ ] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers
+- [x] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers — shipped in `add-contract-schema-elements`
 - [x] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume — the generated-client half shipped; the path-matching half shipped in `add-contract-node-projection`
 - [~] `mcp-handlers` delta: ADD ChangedSpecificationsAndFederatedConsumersSurface — the changed-specification half shipped as `ChangedSpecificationsSurfaceTheirBoundCode`; federated consumers remain

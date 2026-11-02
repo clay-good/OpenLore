@@ -236,3 +236,129 @@ paths:
     expect(bound.entryPoints.map(n => n.name)).toContain('getOrder');
   });
 });
+
+// Named schemas as nodes, with `$ref` edges (change: add-contract-schema-elements). A schema
+// shared by twenty operations is ONE node with twenty inbound edges, which is what makes "what
+// does changing `Order` touch?" answerable.
+describe('named schemas in the graph', () => {
+  const SCHEMA_SPEC = `openapi: 3.0.0
+info: { title: orders, version: '1' }
+servers:
+  - url: /v1
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/OrderInput' } } }
+      responses:
+        '201':
+          description: created
+          content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+components:
+  schemas:
+    Order:
+      type: object
+      properties:
+        id: { type: string }
+        customer: { $ref: '#/components/schemas/Customer' }
+    OrderInput: { type: object, properties: { sku: { type: string } } }
+    Customer: { type: object, properties: { name: { type: string } } }
+`;
+  const HANDLER = `import express from 'express';
+export const app = express();
+export function createOrder(req, res) { return res.json({}); }
+app.post('/orders', createOrder);
+`;
+
+  const build = () => new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: SCHEMA_SPEC }] })
+    .build([{ path: 'src/orders.ts', content: HANDLER, language: 'TypeScript' }]);
+
+  it('projects one node per named schema, with its declared line', async () => {
+    const result = await build();
+
+    const schemas = [...result.nodes.values()].filter(n => n.name.startsWith('#/components/schemas/'));
+    expect(schemas.map(n => n.name).sort()).toEqual([
+      '#/components/schemas/Customer',
+      '#/components/schemas/Order',
+      '#/components/schemas/OrderInput',
+    ]);
+    // The bare name is carried as the signature, and the line is the declaration's own.
+    expect(schemas.find(n => n.name.endsWith('/Order'))?.signature).toBe('Order');
+    expect(schemas.every(n => (n.startLine ?? 0) > 1)).toBe(true);
+  });
+
+  it('links an operation to the schemas it names, and a schema to the schemas it names', async () => {
+    const result = await build();
+
+    const refs = result.edges.filter(e => e.kind === 'references_schema')
+      .map(e => `${result.nodes.get(e.callerId)?.name} -> ${result.nodes.get(e.calleeId)?.name}`)
+      .sort();
+    expect(refs).toEqual([
+      'POST /v1/orders -> #/components/schemas/Order',
+      'POST /v1/orders -> #/components/schemas/OrderInput',
+      '#/components/schemas/Order -> #/components/schemas/Customer',
+    ].sort());
+  });
+
+  it('leaves every code measurement untouched', async () => {
+    const bare = await new CallGraphBuilder().build([{ path: 'src/orders.ts', content: HANDLER, language: 'TypeScript' }]);
+    const withSchemas = await build();
+
+    const degrees = (r: typeof bare) => [...r.nodes.values()]
+      .filter(n => n.language === 'TypeScript')
+      .map(n => `${n.name}:${n.fanIn}/${n.fanOut}`).sort();
+    expect(degrees(withSchemas)).toEqual(degrees(bare));
+    expect(withSchemas.stats.avgFanIn).toBe(bare.stats.avgFanIn);
+    expect(withSchemas.stats.avgFanOut).toBe(bare.stats.avgFanOut);
+    // A declaration is never an entry point or a hub of the code.
+    for (const n of [...withSchemas.entryPoints, ...withSchemas.hubFunctions]) {
+      expect(n.language).not.toBe('OpenAPI');
+    }
+  });
+
+  it('discloses a `$ref` naming a schema the document does not declare instead of dropping it', async () => {
+    // A ref to a name that is not under `components/schemas` — a typo, or a schema that moved.
+    const dangling = SCHEMA_SPEC.replace(
+      "{ $ref: '#/components/schemas/Customer' }",
+      "{ $ref: '#/components/schemas/Missing' }",
+    );
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: dangling }] })
+      .build([{ path: 'src/orders.ts', content: HANDLER, language: 'TypeScript' }]);
+
+    const names = [...result.nodes.values()].map(n => n.name);
+    expect(names, 'nothing is invented for a name the document never declares').not.toContain('#/components/schemas/Missing');
+    // No edge, and the gap is named rather than read as "Order references nothing".
+    const from = result.edges.filter(e => e.kind === 'references_schema')
+      .map(e => result.nodes.get(e.calleeId)?.name);
+    expect(from).not.toContain('#/components/schemas/Missing');
+    expect(result.contracts?.notAssessed?.join(' ') ?? '').toMatch(/does not declare|unresolved \$ref/);
+  });
+
+  it('survives a schema cycle without looping', async () => {
+    const cyclic = `openapi: 3.0.0
+info: { title: c, version: '1' }
+paths:
+  /a:
+    get:
+      responses:
+        '200':
+          description: ok
+          content: { application/json: { schema: { $ref: '#/components/schemas/Node' } } }
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Node' }
+        peer: { $ref: '#/components/schemas/Other' }
+    Other: { type: object, properties: { back: { $ref: '#/components/schemas/Node' } } }
+`;
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: cyclic }] }).build([]);
+
+    const refs = result.edges.filter(e => e.kind === 'references_schema');
+    // Self-reference and the two-way cycle are both edges, each drawn once.
+    expect(refs.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(refs.map(e => `${e.callerId}->${e.calleeId}`)).size).toBe(refs.length);
+  });
+});

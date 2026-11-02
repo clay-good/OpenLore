@@ -5,6 +5,19 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Named schemas are in the graph
+
+- **Each named schema a specification declares is a graph node**, with `references_schema` edges
+  from the operations that reference it and from the schemas whose definitions reference it. A
+  schema shared by twenty operations is one node with twenty inbound edges, so "what does
+  changing `Order` touch?" becomes a graph question, and a handler reaches its contract's schemas
+  through the operation it serves. Per-field nodes are deliberately not projected — a large
+  document has thousands of fields, and the property-level verdict already belongs to
+  `certify_service_contract`. Edges are direct only, cycles terminate, and a `$ref` naming
+  something the document does not declare draws no edge and is disclosed. Like every projected
+  declaration, a schema node is excluded from the code rankings and its edges change no
+  function's degree.
+
 ### Your consumers are usually in another repository
 
 - **`certify_service_contract` censuses indexed sibling repositories for consumers** with

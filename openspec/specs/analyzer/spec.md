@@ -8002,6 +8002,52 @@ several binds nothing and is disclosed as ambiguous.
 - **WHEN** the repository is analyzed
 - **THEN** no `implements_endpoint` edge is created and the address is disclosed as ambiguous
 
+### Requirement: ContractElementsAreGraphNodesBoundToHandlers
+
+Each NAMED schema a specification declares — `components/schemas` in OpenAPI 3, `definitions` in
+Swagger 2 — SHALL be projected as a graph node carrying the specification's path, the schema's
+declared line, its JSON pointer as the node name and its bare name as the signature. An operation
+SHALL be linked by a `references_schema` edge to each named schema it references directly across
+its parameters, body and responses, and a named schema SHALL be linked the same way to each named
+schema its own definition references directly. Transitive reachability SHALL be left to the graph
+rather than duplicated per node.
+
+Per-FIELD nodes SHALL NOT be projected: a named schema is the reusable unit, and the
+property-level verdict already belongs to `certify_service_contract`.
+
+A `$ref` naming a schema the document does not declare — an external reference, or a name that
+does not resolve — SHALL draw no edge and SHALL be disclosed. The number of named schemas
+projected SHALL be bounded, with any excess disclosed as a cap rather than projected in part
+silently. A schema cycle SHALL terminate, each edge drawn once.
+
+A `references_schema` edge is a DECLARATION binding, so it SHALL contribute to no function's
+fan-in or fan-out, no entry-point or hub classification, no file-level dependency ranking and no
+layer violation; and a schema node SHALL be excluded from every candidate set that ranks source
+code, as every other projected declaration is.
+
+#### Scenario: A shared schema is one node with many referents
+
+- **GIVEN** a document declaring `Order` (which references `Customer`) and `OrderInput`, and
+  `POST /v1/orders` whose body references `OrderInput` and whose response references `Order`
+- **WHEN** the repository is analyzed
+- **THEN** three schema nodes exist, `POST /v1/orders` has a `references_schema` edge to `Order`
+  and to `OrderInput`, and `Order` has one to `Customer`
+
+#### Scenario: A declaration binding changes no code measurement
+
+- **GIVEN** the same repository analyzed with and without the specification
+- **WHEN** the two graphs are compared
+- **THEN** every code function's fan-in and fan-out, the structural averages, the entry points and
+  the hubs are identical, and no schema node appears among the entry points or hubs
+
+#### Scenario: A dangling reference is disclosed, not invented
+
+- **GIVEN** a schema whose property references `#/components/schemas/Missing`, which the document
+  does not declare
+- **WHEN** the repository is analyzed
+- **THEN** no node is created for it, no edge is drawn, and the projection discloses the
+  unresolved reference
+
 ### Requirement: UnboundContractElementsAreDisclosed
 
 Everything the contract projection could not bind SHALL be disclosed on the build rather than
