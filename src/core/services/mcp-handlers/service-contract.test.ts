@@ -451,6 +451,20 @@ paths: {}
     expect(census.skipped.some(s => s.reason.includes('already names this directory'))).toBe(true);
   });
 
+  // A URL written inside a string literal is documentation or a fixture, not a call. The review
+  // found a README snippet and a test mock reported as federated consumers.
+  it('does not credit a URL that only appears inside a string literal', async () => {
+    const root = service();
+    const sibling = repo({
+      'src/docs.ts': "export const EXAMPLE = 'https://api.example.com/v1/orders/42';\nexport const DOC = `GET https://api.example.com/v1/orders/7`;\n",
+    });
+    registry(root, [{ name: 'docsib', path: sibling, fingerprint: indexSibling(sibling) }]);
+
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD', federation: true }) as Record<string, unknown>;
+
+    expect(r.federatedConsumers, 'a documentation URL is not a consumer').toBeUndefined();
+  });
+
   it('never reports this repository as its own sibling consumer', async () => {
     const root = service();
     const fp = indexSibling(root);

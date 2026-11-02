@@ -17,7 +17,7 @@
  */
 
 import { existsSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { validateDirectory } from './utils.js';
 import { execFileGit } from '../../../utils/git-exec.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
@@ -287,7 +287,6 @@ async function federatedConsumersOf(
   const { evaluateRepoState, canonicalize } = await import('../../federation/registry.js');
   const { sameDeclaredHost, allParameterPath } = await import('../contract/contract-briefing.js');
   const { normalizeUrl } = await import('../../analyzer/http-route-parser.js');
-  const { insideLiteral } = await import('../contract/payload-literal.js');
   // The repository directory, not the user's home: `.openlore/federation.json` is repo-relative,
   // and this is what `certify_public_surface`, `find_dead_code`, `find_path` and `select_tests`
   // all pass. Using the home directory would have read a manifest none of them reads.
@@ -356,9 +355,7 @@ async function federatedConsumersOf(
       }
       if (at.length) byAddress.set(address, at);
     }
-    void insideLiteral;
   }
-  if (scope.repos.some(e => !hostsByAddress.size)) { /* nothing declared: disclosed by the caller */ }
   return { byAddress, census };
 }
 
