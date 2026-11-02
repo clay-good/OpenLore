@@ -36,6 +36,7 @@ import {
 } from '../../core/services/mcp-handlers/tool-guard.js';
 
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { setActiveToolSurface } from '../../core/services/mcp-handlers/active-surface.js';
 import { createTracker, updateTracker, updatePanic, resetPanicOnOrient, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import { SessionLedger, servedItems } from '../../core/services/session-ledger.js';
@@ -2893,6 +2894,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   }
   const activePreset = resolvePresetName(selectorOpts);
   const activeToolNames = new Set(activeTools.map((tool) => tool.name));
+  // Tell the guidance renderers what this process actually serves, so `orient` cannot
+  // prescribe a tool this preset does not expose (change: fix-orient-guidance-preset).
+  setActiveToolSurface(activeToolNames);
   // Advertise breadth once via server instructions only when the active surface
   // IS the lean default (LEAN_DEFAULT_PRESET) — whether reached by no selector or
   // an explicit `--preset <that name>` (how install wires it). Adds no tool schemas.
