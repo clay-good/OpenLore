@@ -212,7 +212,7 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     run(['setup', '--hooks', 'claude', '--dir', isolated]);
     // The user's (broken) content must be preserved, not silently overwritten.
     expect(readFileSync(settingsPath, 'utf-8')).toBe(corrupt);
-    rmSync(isolated, { recursive: true, force: true });
+    rmSync(isolated, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('panic-check / panic-level ALWAYS exit 0 — even on commander parse errors (fail-open invariant)', () => {

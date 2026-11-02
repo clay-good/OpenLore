@@ -237,7 +237,7 @@ describe('untrusted-repository config hardening', () => {
       // Non-vacuous: the real internal diff still ran.
       expect(stdout).toContain('a.txt');
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -262,7 +262,7 @@ describe('untrusted-repository config hardening', () => {
 
       expect(existsSync(marker)).toBe(false);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 

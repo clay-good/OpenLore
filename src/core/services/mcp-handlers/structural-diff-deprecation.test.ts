@@ -34,7 +34,7 @@ let dirs: string[] = [];
 let stores: EdgeStore[] = [];
 afterEach(() => {
   for (const s of stores) s.close();
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   dirs = []; stores = [];
   vi.mocked(readCachedContext).mockResolvedValue(null as never);
 });
