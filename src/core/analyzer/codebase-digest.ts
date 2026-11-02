@@ -24,6 +24,7 @@ import type { LLMContext, RepoStructure } from './artifact-generator.js';
 import { collectExternalWiring } from './entry-point-adapters.js';
 import type { DependencyGraphResult } from './dependency-graph.js';
 import { languageCoverageMatrix, renderCoverageMatrixMarkdown } from './language-support.js';
+import { isProjectedLanguage } from './projected-language.js';
 
 // ============================================================================
 // TYPES
@@ -131,7 +132,13 @@ export async function generateCodebaseDigest(
       // production surface, so exclude both — otherwise test helpers and stdlib
       // calls inflate the counts and leak into the god-function list (e.g. a Java
       // `FooTest.checkOption` showing up as an orchestrator).
-      const prodNodes = cg.nodes.filter(n => !n.isTest && !n.isExternal);
+      // A projected declaration (an IaC resource, an OpenAPI operation or schema) is not a
+      // function that was analyzed, and the tables below are labelled as functions — a document
+      // declaring a few hundred schemas otherwise reports a seven-function repository as having
+      // thousands, and fills "the natural starting point for any task" with YAML stanzas.
+      const prodNodes = cg.nodes.filter(
+        n => !n.isTest && !n.isExternal && !isProjectedLanguage(n.language),
+      );
       // `stats.totalEdges` counts ALL `calls` edges — including test-caller and
       // external-callee edges — so labeling it "internal" next to the production-only
       // function count mixes two populations under one qualifier. Count only edges

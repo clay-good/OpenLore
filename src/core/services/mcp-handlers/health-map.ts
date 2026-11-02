@@ -4,6 +4,8 @@ import { volatilityLevel } from '../../provenance/change-coupling.js';
 import { computeComplexityTrends, decliningHealthFindings } from './complexity-trend.js';
 import { classifyFindings, effectivePolicy } from './enforcement-policy.js';
 import { readOpenLoreConfig } from '../config-manager.js';
+import { isDeclarationEdgeKind } from '../../analyzer/projected-language.js';
+import { isCodeNode } from './code-node.js';
 
 const HUB_MIN_FAN_IN = 5;
 const GOD_MIN_FAN_OUT = 8;
@@ -100,12 +102,20 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
 
   const limit = Math.max(1, Math.min(input.limit ?? DEFAULT_LIMIT, 50));
   const cg = ctx.callGraph as SerializedCallGraph;
-  const codeNodes = cg.nodes.filter(n => !n.isExternal && !n.isTest);
+  // A projected declaration is not code whose health can decline, so it is no more a hub,
+  // orchestrator or chokepoint here than it is in the graph's own rankings — `isCodeNode` is
+  // that same predicate. An OpenAPI schema referenced by every operation otherwise lands as the
+  // repository's top bridge node and pushes the real chokepoint down the list.
+  const codeNodes = cg.nodes.filter(n => isCodeNode(n) && !n.isTest);
   // Structural-health signals are measured on the directly-resolved graph: synthesized
   // dynamic-dispatch edges are heuristic shortcuts that can manufacture false betweenness
   // chokepoints and mask untested hotspots, so they are excluded from centrality/coverage
   // here. (Reachability, impact, and dead-code traverse them by default elsewhere.)
-  const directEdges = cg.edges.filter(e => e.confidence !== 'synthesized');
+  // A declaration edge is not a call either: it carries no control flow, so it can shift no
+  // function's betweenness.
+  const directEdges = cg.edges.filter(
+    e => e.confidence !== 'synthesized' && !isDeclarationEdgeKind(e.kind),
+  );
 
   // --- Hubs (high fan-in) ---
   const hubNodes = codeNodes
