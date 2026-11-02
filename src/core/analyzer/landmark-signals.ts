@@ -23,6 +23,7 @@
  */
 
 import { GOD_FUNCTION_FAN_OUT_THRESHOLD } from '../../constants.js';
+import { isProjectedLanguage } from './projected-language.js';
 import type { SerializedCallGraph } from './call-graph.js';
 
 export type LandmarkLabel =
@@ -69,6 +70,9 @@ export function computeLandmarkSignals(
   const landmarks: Landmark[] = [];
   for (const node of graph.nodes) {
     if (node.isExternal) continue; // synthetic stdlib/HTTP leaves are not landmarks
+    // A declaration is not a landmark of the code either: a YAML stanza or a declared
+    // operation is not a place to navigate to (change: fix-projection-integrity).
+    if (isProjectedLanguage(node.language)) continue;
 
     const signals: LandmarkSignal[] = [];
     const fanIn = node.fanIn ?? 0;
