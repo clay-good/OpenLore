@@ -2,6 +2,28 @@
 
 `openlore mcp` starts openlore as a [Model Context Protocol](https://modelcontextprotocol.io/) server over stdio, exposing static analysis as tools that any MCP-compatible AI agent (Cline, Roo Code, Kilocode, Claude Code, Cursor...) can call directly -- no API key required.
 
+### Reading a response
+
+A tool result is a list of text content blocks, and **the payload is one block among them.**
+OpenLore's own notes — the freshness (Epistemic Lease) signal, a background-change note from the
+session ledger, an index self-heal or auto-init disclosure, a panic signal — are each their **own
+block**, never concatenated into the payload, so a structured result (JSON, a patch) is never
+corrupted by them.
+
+A note's position is not fixed: an urgent one is placed **before** the payload so the agent reads
+it first, an informational one **after**. So do not read `content[0]` and assume it is the answer.
+Either hand every block to the model (what an agent host does, and why this shape exists), or, if
+you parse the payload yourself, pick the block that parses:
+
+```js
+const payload = result.content
+  .map(b => b.text)
+  .find(t => { try { JSON.parse(t); return true; } catch { return false; } });
+```
+
+Every note begins with a bracketed source tag (`[openlore freshness]`, `[openlore index]`), so they
+are also identifiable by prefix.
+
 ### Setup
 
 **Claude Code** -- add a `.mcp.json` at your project root:

@@ -218,15 +218,62 @@ describe('capStructuredResult', () => {
     expect(r.text).toMatch(/output truncated/i);
   });
 
-  it('falls back to a valid JSON envelope when there is no dominant string field', () => {
-    // A huge array with no big top-level string field — still must stay parseable.
-    const result = { items: Array.from({ length: 50_000 }, (_, i) => ({ id: i, name: `n${i}` })) };
+  it('shortens a long list instead of discarding the answer, with an exact dropped count', () => {
+    // A whole-repository answer is a summary plus ranked arrays. Keeping the top of the list and
+    // saying how many were dropped is usable; a JSON string cut mid-structure is not
+    // (change: fix-whole-repo-answers-under-budget).
+    const result = { summary: { total: 50_000 }, items: Array.from({ length: 50_000 }, (_, i) => ({ id: i, name: `n${i}` })) };
     const r = capStructuredResult(result, 64 * 1024);
     expect(r.truncated).toBe(true);
     expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(64 * 1024);
-    const parsed = JSON.parse(r.text) as { truncated: boolean; note: string; partial: string };
+    const parsed = JSON.parse(r.text) as {
+      summary: { total: number }; items: Array<{ id: number }>;
+      truncated: boolean; omitted: Record<string, number>; partial?: string;
+    };
+    expect(parsed.partial).toBeUndefined();
+    expect(parsed.summary).toEqual({ total: 50_000 });
+    expect(parsed.items.length).toBeGreaterThan(0);
+    // The ranked prefix is what is kept, in order.
+    expect(parsed.items[0].id).toBe(0);
+    expect(parsed.items.map(i => i.id)).toEqual(parsed.items.map((_, i) => i));
+    // And the count is exact.
+    expect(parsed.omitted.items).toBe(50_000 - parsed.items.length);
+  });
+
+  it('bounds every list, each with its own dropped count', () => {
+    const result = {
+      big: Array.from({ length: 20_000 }, (_, i) => ({ id: i, pad: 'x'.repeat(40) })),
+      small: Array.from({ length: 2_000 }, (_, i) => ({ id: i })),
+    };
+    const r = capStructuredResult(result, 32 * 1024);
+    const parsed = JSON.parse(r.text) as { big: unknown[]; small: unknown[]; omitted: Record<string, number> };
+    expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(32 * 1024);
+    for (const key of Object.keys(parsed.omitted)) {
+      const kept = (parsed[key as 'big' | 'small'] as unknown[]).length;
+      const total = key === 'big' ? 20_000 : 2_000;
+      expect(parsed.omitted[key]).toBe(total - kept);
+    }
+  });
+
+  it('still falls back to the partial envelope when the non-list part alone is over budget', () => {
+    // Nothing to shrink: the summary itself does not fit, so a cut partial is the honest answer.
+    const result = { summary: { blob: Array.from({ length: 4_000 }, (_, i) => `field-${i}`) }, items: [{ id: 1 }] };
+    const r = capStructuredResult(result, 2 * 1024);
+    expect(r.truncated).toBe(true);
+    expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(2 * 1024);
+    const parsed = JSON.parse(r.text) as { truncated: boolean; partial?: string };
     expect(parsed.truncated).toBe(true);
     expect(typeof parsed.partial).toBe('string');
+  });
+
+  it('is deterministic: the same oversized result trims identically every time', () => {
+    const result = {
+      a: Array.from({ length: 5_000 }, (_, i) => ({ id: i, pad: 'y'.repeat(20) })),
+      b: Array.from({ length: 5_000 }, (_, i) => ({ id: i, pad: 'z'.repeat(20) })),
+    };
+    const one = capStructuredResult(result, 48 * 1024);
+    const two = capStructuredResult(result, 48 * 1024);
+    expect(one.text).toBe(two.text);
   });
 
   it('preserves a redaction receipt when capping a nested source result', () => {
