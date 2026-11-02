@@ -1986,7 +1986,7 @@ export const TOOL_DEFINITIONS = [
         maxResults: { type: 'number', description: 'Cap per list (default 100, max 1000).' },
         allowBaseFallback: { type: 'boolean', description: 'Fall back to the default branch when baseRef does not resolve (disclosed).' },
         federation: { type: 'boolean', description: 'Also census client call sites in indexed sibling repositories (.openlore/federation.json). A service\'s consumers are usually not in its own repository; every sibling not censused is disclosed.' },
-        federationRepos: { type: 'array', items: { type: 'string' }, description: 'Limit the federation census to these registry repo names (default: all).' },
+        federationRepos: { type: 'array', items: { type: 'string' }, maxItems: 100, description: 'Limit the federation census to these registry repo names (default: all).' },
       },
     },
   },

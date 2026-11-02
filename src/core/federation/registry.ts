@@ -38,7 +38,7 @@ export function federationManifestPath(homeDir: string): string {
  * home-repo self-add guard, path de-dup, and remove-by-path all compare canonically.
  * Falls back to `resolve()` when the path does not exist (realpath would throw).
  */
-function canonicalize(p: string): string {
+export function canonicalize(p: string): string {
   const abs = resolve(p);
   try {
     return realpathSync(abs);

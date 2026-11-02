@@ -58,6 +58,22 @@ export interface FederatedConsumer {
   line: number;
 }
 
+/** What the federation census covered, and what it did not. */
+export interface FederationCensus {
+  /** Siblings scanned in full. */
+  repos: string[];
+  /** Siblings whose scan hit a file cap: scanned, but not exhaustively. */
+  partial: string[];
+  /** Siblings not scanned at all, each with why. */
+  skipped: Array<{ repo: string; reason: string }>;
+  /** Skipped entries past the cap. */
+  skippedOmitted?: number;
+}
+
+/** Federated consumers listed per call (one flat list), and skipped siblings listed per call. */
+const MAX_FEDERATED_CONSUMERS = 100;
+const MAX_FEDERATION_SKIPPED = 50;
+
 const SPEC_EXT = /\.(?:ya?ml|json)$/i;
 const SKIP_DIR = /(?:^|\/)(?:node_modules|vendor|dist|build|\.git)\//;
 const MAX_SPEC_FILES = 200;
@@ -257,48 +273,92 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
  */
 async function federatedConsumersOf(
   ops: ReadonlyArray<{ file: string; op: Pick<ContractOperation, 'address' | 'method' | 'path' | 'declaredPath' | 'line'> }>,
+  /** The declared `servers` hosts of each operation's document, keyed by address. */
+  hostsByAddress: ReadonlyMap<string, readonly string[]>,
   input: CertifyServiceContractInput,
   selfPath: string,
   boundaries: string[],
-): Promise<{ byAddress: Map<string, FederatedConsumer[]>; census: { repos: string[]; skipped: Array<{ repo: string; reason: string }> } } | undefined> {
+): Promise<{ byAddress: Map<string, FederatedConsumer[]>; census: FederationCensus } | undefined> {
   if (input.federation !== true && !(input.federationRepos?.length)) return undefined;
   const byAddress = new Map<string, FederatedConsumer[]>();
-  const census = { repos: [] as string[], skipped: [] as Array<{ repo: string; reason: string }> };
+  const census: FederationCensus = { repos: [], partial: [], skipped: [] };
   if (!ops.length) return { byAddress, census };
   const { resolveFederationScope } = await import('../../federation/resolver.js');
-  const { evaluateRepoState } = await import('../../federation/registry.js');
+  const { evaluateRepoState, canonicalize } = await import('../../federation/registry.js');
+  const { sameDeclaredHost, allParameterPath } = await import('../contract/contract-briefing.js');
+  const { normalizeUrl } = await import('../../analyzer/http-route-parser.js');
+  const { insideLiteral } = await import('../contract/payload-literal.js');
   // The repository directory, not the user's home: `.openlore/federation.json` is repo-relative,
   // and this is what `certify_public_surface`, `find_dead_code`, `find_path` and `select_tests`
   // all pass. Using the home directory would have read a manifest none of them reads.
   const scope = resolveFederationScope(selfPath, { ...(input.federation !== undefined ? { federation: input.federation } : {}), ...(input.federationRepos ? { federationRepos: input.federationRepos } : {}) });
-  for (const name of scope.unknownNames) {
-    census.skipped.push({ repo: emittedText(name), reason: 'not in the federation registry' });
+  const skip = (repo: string, reason: string): void => {
+    if (census.skipped.length < MAX_FEDERATION_SKIPPED) census.skipped.push({ repo: emittedText(repo), reason: emittedText(reason) });
+    else census.skippedOmitted = (census.skippedOmitted ?? 0) + 1;
+  };
+  for (const name of scope.unknownNames) skip(name, 'not in the federation registry');
+
+  // An all-parameter operation path matches almost any URL of that segment count, so it can
+  // attribute neither a handler nor a caller. Excluded from the census and disclosed, exactly as
+  // `blast_radius` does for the same shape.
+  const generic = ops.filter(({ op }) => allParameterPath(normalizeUrl(op.path)) || allParameterPath(normalizeUrl(op.declaredPath)));
+  const censusable = ops.filter(o => !generic.includes(o));
+  for (const { op } of generic) {
+    boundaries.push(`${op.address} is an all-parameter path, which matches too broadly to attribute a call site, so consumers outside this repository are not assessed for it.`);
   }
-  const selfReal = resolve(selfPath);
+  if (!censusable.length) return { byAddress, census };
+
+  // `canonicalize` (realpath), not `resolve`: the registry stores realpath'd paths while a
+  // caller-supplied `directory` is only resolved, so on macOS `/tmp` vs `/private/tmp` the
+  // repository under certification was censused as its own sibling and its own call sites were
+  // re-reported as a sibling's.
+  const selfReal = canonicalize(selfPath);
+  const seenDirs = new Set<string>();
   for (const entry of scope.repos) {
-    if (resolve(entry.path) === selfReal) continue; // this repository is already censused
+    const dir = canonicalize(entry.path);
+    if (dir === selfReal) continue;
+    // Two names for one directory would report every call site twice.
+    if (seenDirs.has(dir)) { skip(entry.name, 'another registry entry already names this directory'); continue; }
+    seenDirs.add(dir);
     const state = evaluateRepoState(entry);
     if (state !== 'indexed') {
       // A sibling whose index cannot be trusted is DISCLOSED, never counted as consumer-free.
-      census.skipped.push({ repo: emittedText(entry.name), reason: `index ${state}` });
+      skip(entry.name, `index ${state}`);
       continue;
     }
     const siblingBoundaries: string[] = [];
+    const stats = { capped: false, totals: new Map<string, number>() };
     let sites: Awaited<ReturnType<typeof callSitesFor>>;
     try {
-      sites = await callSitesFor(entry.path, ops, siblingBoundaries);
+      // `dir`, not `entry.path`: `callSitesFor` relativizes with `startsWith(root)`, so an
+      // unnormalized registry path (a `..` segment, a trailing slash) made it serve an absolute
+      // local path — or a corrupted one — as the consumer's file.
+      sites = await callSitesFor(dir, censusable, siblingBoundaries, stats, true);
     } catch (error) {
-      census.skipped.push({ repo: emittedText(entry.name), reason: `scan failed: ${error instanceof Error ? error.message : String(error)}` });
+      skip(entry.name, `scan failed: ${String(error instanceof Error ? error.message : error).split('\n')[0]}`);
       continue;
     }
     census.repos.push(emittedText(entry.name));
-    for (const b of siblingBoundaries) boundaries.push(`${entry.name}: ${b}`);
+    // A file cap means this sibling was only PARTLY scanned: "censused and clean" would be a
+    // conclusion the scan did not reach.
+    if (stats.capped) census.partial.push(emittedText(entry.name));
+    for (const b of siblingBoundaries) boundaries.push(`${emittedText(entry.name)}: ${b}`);
     for (const [address, found] of sites) {
+      const hosts = hostsByAddress.get(address) ?? [];
       const at = byAddress.get(address) ?? [];
-      for (const f of found) at.push({ repo: emittedText(entry.name), file: emittedText(f.file), line: f.line });
-      byAddress.set(address, at);
+      for (const f of found) {
+        // Another vendor on the same path shape is not a consumer. Across repositories this is
+        // the normal case, and reporting it put a false accusation in an error finding.
+        if (!sameDeclaredHost(f.url ?? '', hosts)) continue;
+        // A URL written inside a string literal is documentation or a fixture, not a call.
+        if (f.offset !== undefined && f.client === undefined) continue;
+        at.push({ repo: emittedText(entry.name), file: emittedText(f.file), line: f.line });
+      }
+      if (at.length) byAddress.set(address, at);
     }
+    void insideLiteral;
   }
+  if (scope.repos.some(e => !hostsByAddress.size)) { /* nothing declared: disclosed by the caller */ }
   return { byAddress, census };
 }
 
@@ -471,7 +531,9 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   // ── Breaking-change verdicts against the merge-base ──
   let changesOut: Record<string, unknown> | undefined;
   /** Which sibling repositories were censused for consumers, and which were not. Run-level. */
-  let federationCensus: { repos: string[]; skipped: Array<{ repo: string; reason: string }> } | undefined;
+  let federationCensus: FederationCensus | undefined;
+  /** Every federated consumer, flat and address-tagged: one trimmable top-level list. */
+  const federatedConsumers: Array<FederatedConsumer & { address: string }> = [];
   if (input.baseRef) {
     const { validateGitRef, resolveBaseRefDisclosed } = await import('../../drift/git-diff.js');
     try { validateGitRef(input.baseRef); } catch (e) { return { error: `Invalid base ref: ${e instanceof Error ? e.message : String(e)}` }; }
@@ -511,10 +573,40 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     await attachReachingTests(root, consumers, boundaries);
     // A service's consumers are usually in OTHER repositories, so "no caller in this repository"
     // is the least informative thing to say about the change most worth stopping.
-    const opsForFederation = [...head.docs, ...base.docs].flatMap(d =>
-      d.operations.filter(op => changes.some(c => c.address === op.address)).map(op => ({ file: d.file, op })));
-    const federated = await federatedConsumersOf(opsForFederation, input, root, boundaries).catch(() => undefined);
+    // Scoped to the addresses the in-repo join already covers — breaking and dangerous only.
+    // Censusing every changed address reported federated consumers for added and non-breaking
+    // operations too, which no finding asks about.
+    const censusAddresses = new Set(changes.filter(c => c.class === 'breaking' || c.class === 'dangerous').map(c => c.address));
+    const hostsByAddress = new Map<string, readonly string[]>();
+    const opsForFederation: Array<{ file: string; op: ContractOperation }> = [];
+    for (const d of [...head.docs, ...base.docs]) {
+      for (const op of d.operations) {
+        if (!censusAddresses.has(op.address) || hostsByAddress.has(op.address)) continue;
+        hostsByAddress.set(op.address, d.serverHosts);
+        opsForFederation.push({ file: d.file, op });
+      }
+    }
+    const anyHostless = [...hostsByAddress.values()].some(h => !h.length);
+    const federated = await federatedConsumersOf(opsForFederation, hostsByAddress, input, root, boundaries)
+      // A present-but-corrupt registry throws on purpose, so a typo never degrades to "no
+      // federation". Swallowing it told the caller to pass the flag they had just passed.
+      .catch((error: unknown): { byAddress: Map<string, FederatedConsumer[]>; census: FederationCensus } => ({
+        byAddress: new Map<string, FederatedConsumer[]>(),
+        census: {
+          repos: [], partial: [],
+          skipped: [{ repo: '(registry)', reason: emittedText(`federation registry could not be read: ${String(error instanceof Error ? error.message : error).split('\n')[0]}`) }],
+        },
+      }));
     federationCensus = federated?.census;
+    if (federated) {
+      for (const [address, found] of federated.byAddress) {
+        for (const f of found) federatedConsumers.push({ address: emittedText(address), ...f });
+      }
+      federatedConsumers.sort((a, b) => sortStr(a.address, b.address) || sortStr(a.repo, b.repo) || sortStr(a.file, b.file) || a.line - b.line);
+    }
+    if (federated && anyHostless) {
+      boundaries.push('A changed specification declares no `servers` host, so a sibling call site matched only by path may belong to another service.');
+    }
     for (const c of changes.filter(x => x.class === 'breaking' || x.class === 'dangerous')) {
       const who = consumers.get(c.address) ?? [];
       const across = federated?.byAddress.get(c.address) ?? [];
@@ -526,7 +618,12 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
         : across.length
           ? `; no caller in this repository, but called from ${across.slice(0, 3).map(w => `${w.repo}:${w.file}:${w.line}`).join(', ')}${across.length > 3 ? ` and ${across.length - 3} more` : ''}`
           : federated
-            ? `; no caller in this repository or in ${federated.census.repos.length} censused sibling repositor${federated.census.repos.length === 1 ? 'y' : 'ies'}${federated.census.skipped.length ? ` (${federated.census.skipped.length} not censused)` : ''}`
+            // Never "censused and clean" without saying how complete the census was: a sibling
+            // whose scan hit a file cap was only partly read, and one that was skipped was not
+            // read at all.
+            ? `; no caller in this repository or in ${federated.census.repos.length} censused sibling repositor${federated.census.repos.length === 1 ? 'y' : 'ies'}`
+              + `${federated.census.partial.length ? ` (${federated.census.partial.length} only partly scanned)` : ''}`
+              + `${federated.census.skipped.length ? `, with ${federated.census.skipped.length} not censused` : ''}`
             : '; no caller in this repository';
       findings.push({
         code: 'contract-breaking', severity: c.class === 'breaking' ? 'error' : 'warning', source: 'service-contract', subject: emittedText(subject),
@@ -537,6 +634,12 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     if (federated) {
       for (const s of federated.census.skipped) {
         boundaries.push(`Sibling repository ${s.repo} was not censused for consumers (${s.reason}), so a caller there is not counted.`);
+      }
+      if (federated.census.skippedOmitted) {
+        boundaries.push(`${federated.census.skippedOmitted} further sibling repositor${federated.census.skippedOmitted === 1 ? 'y was' : 'ies were'} not censused and not listed.`);
+      }
+      for (const r of federated.census.partial) {
+        boundaries.push(`Sibling repository ${r} was only partly scanned (a file cap was reached), so it is not evidence that nothing there calls these operations.`);
       }
       if (!federated.census.repos.length) {
         boundaries.push('No sibling repository was censused, so a consumer outside this repository is not assessed.');
@@ -551,7 +654,14 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
         ...c, file: emittedText(c.file), address: emittedText(c.address), detail: emittedText(c.detail),
         ...(c.element ? { element: emittedText(c.element) } : {}),
         consumers: consumers.get(c.address) ?? [],
-        ...(federated?.byAddress.get(c.address)?.length ? { federatedConsumers: federated.byAddress.get(c.address) } : {}),
+        // A COUNT here, and the sites themselves in one top-level list below. Nesting them per
+        // item put 25-per-sibling inside `changes.items`, which the response trimmer cannot
+        // reach into (it shrinks top-level arrays only) — so at the default `maxResults` a
+        // 200-operation change blew the byte budget and the agent received a cut JSON string
+        // instead of the verdict, findings and census.
+        ...(federated?.byAddress.get(c.address)?.length
+          ? { federatedConsumerCount: federated.byAddress.get(c.address)!.length }
+          : {}),
       })),
       ...(changes.length > limit ? { omitted: changes.length - limit } : {}),
       suggestedBump: contractBump(changes),
@@ -580,6 +690,15 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     payload,
     ...(changesOut ? { changes: changesOut } : {}),
     ...(federationCensus ? { federationCensus } : {}),
+    // One flat top-level list, so the response trimmer can shrink it and keep the verdict.
+    ...(federatedConsumers.length
+      ? {
+        federatedConsumers: federatedConsumers.slice(0, MAX_FEDERATED_CONSUMERS),
+        ...(federatedConsumers.length > MAX_FEDERATED_CONSUMERS
+          ? { federatedConsumersOmitted: federatedConsumers.length - MAX_FEDERATED_CONSUMERS }
+          : {}),
+      }
+      : {}),
     findings: shown,
     ...(kept.length > shown.length ? { findingsOmitted: kept.length - shown.length } : {}),
     gated: gate.gated,

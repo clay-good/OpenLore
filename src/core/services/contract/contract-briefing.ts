@@ -48,6 +48,33 @@ export interface ContractBriefing {
 const onlyParams = (normalized: string) => normalized.split('/').filter(Boolean).every(seg => seg.startsWith(':'));
 
 /**
+ * Whether a call's literal URL targets a host the specification declares.
+ *
+ * A host-less (relative) URL targets this service, so it counts. A URL whose host is not among
+ * the declared `servers` hosts is another vendor on the same path shape and must not be read as
+ * a consumer. With no declared host there is nothing to compare, so the caller discloses that
+ * rather than excluding.
+ *
+ * Exported because the FEDERATED census needs exactly this rule: across repositories a host
+ * mismatch is the normal case, not the edge case (change: add-contract-graph-projection).
+ */
+export function sameDeclaredHost(url: string, hosts: readonly string[]): boolean {
+  if (!hosts.length) return true;
+  let host: string;
+  try {
+    host = new URL(url).host.toLowerCase();
+  } catch {
+    return true; // relative or non-absolute: this service
+  }
+  return hosts.some(h => h.toLowerCase() === host);
+}
+
+/** A path template made only of parameters (`/{a}/{b}`): too generic to attribute a call site. */
+export function allParameterPath(normalized: string): boolean {
+  return onlyParams(normalized);
+}
+
+/**
  * The OpenAPI operations served by routes in `files` (root-relative), and the indexed route files
  * whose handler is named in `handlers`, or undefined when no such route is indexed or no
  * specification declares one. A route matches an operation by method and its full path (servers
@@ -282,16 +309,7 @@ export async function changedContractsForSpecFiles(
   // `callSitesFor` matches on the normalized PATH only, so a call to another vendor on the same
   // path shape was attributed to this specification's operation. The document's own `servers`
   // hosts are the filter; a host-less (relative) URL stays, since it targets this service.
-  const sameHost = (url: string, hosts: readonly string[]): boolean => {
-    if (!hosts.length) return true; // nothing declared to compare against — disclosed below
-    let host: string;
-    try {
-      host = new URL(url).host.toLowerCase();
-    } catch {
-      return true; // relative or non-absolute: this service
-    }
-    return hosts.some(h => h.toLowerCase() === host);
-  };
+  const sameHost = sameDeclaredHost;
   const anyHostless = docs.some(d => !d.serverHosts.length);
   if (anyHostless && ops.length) {
     notAssessed.push('A changed specification declares no `servers` host, so a call site matched only by path may belong to another service.');

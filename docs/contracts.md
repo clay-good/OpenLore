@@ -147,11 +147,30 @@ A finding then distinguishes three states, which the single in-repo answer colla
 | Called in neither | `no caller in this repository or in 3 censused sibling repositories (1 not censused)` |
 
 The third is the one that must not read as proof of safety, so it names how many siblings were
-censused and how many were not. A sibling that is missing, unindexed, stale or unbaselined is
-**named as not censused**, never counted consumer-free; a registry name you asked for that does
-not exist is reported rather than ignored; and the repository under certification is never
-censused as its own sibling. Without the flag, the tool says plainly that consumers outside this
-repository were not assessed.
+censused, how many were only **partly** scanned, and how many were not censused at all.
+
+The same consumer rule applies across repositories as within one — and getting this wrong is how
+a tool accuses an innocent repository:
+
+| Rule | Why |
+|---|---|
+| A call counts only if its URL is host-less or names a declared `servers` host | Across repositories a host mismatch is the *normal* case. Without this, a sibling's call to another vendor on the same path was reported as consuming your operation, inside an error finding. |
+| An all-parameter path (`/{tenant}/{id}`) is excluded and disclosed | It matches almost any URL of that segment count — a Stripe call and a GitHub call were both reported as consumers. |
+| Only `breaking` and `dangerous` addresses are censused | The same scope the in-repository join uses; no finding asks about the rest. |
+| Sibling directories are compared by canonical path | Otherwise the repository under certification is censused as its own sibling (`/tmp` vs `/private/tmp`), and two names for one directory count every call site twice. |
+| Every repository-derived string is screened | A registry name is attacker-influenced text; an instruction-shaped one was being served verbatim through the boundary list. |
+
+`federationCensus` reports `repos`, `partial` and `skipped` — a sibling that is missing,
+unindexed, stale or unbaselined is **named as not censused**, never counted consumer-free; one
+whose scan hit a file cap is named as partly scanned; a registry name you asked for that does not
+exist is reported rather than ignored; and a registry that cannot be read is named rather than
+answered as though you had not asked.
+
+Consumers come back as one bounded top-level `federatedConsumers` list with an exact omitted
+count, each entry tagged with its operation address. Nested per changed element they were
+unreachable to the response trimmer, and a 200-operation change blew the byte budget and replaced
+the whole verdict with a cut JSON string. Without the flag, the tool says plainly that consumers
+outside this repository were not assessed.
 
 ## Editing a specification
 
