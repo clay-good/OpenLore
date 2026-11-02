@@ -85,6 +85,35 @@ async function loadInventory(absDir: string): Promise<EnvVar[] | null> {
  * offline. Returns `unknown` (additive-by-cast), conclusion-shaped — read sites +
  * blast radius + reaching tests + disclosed boundaries, never a graph.
  */
+/**
+ * Why the inventory is empty, when it is.
+ *
+ * "Run analyze first" is advice that cannot help a repository the scan does not cover: the
+ * extractor reads TS/JS/Python/Go/Ruby only, so a Rust or Java repository reads env vars the
+ * inventory will never hold however many times it is analyzed. Name the boundary instead
+ * (change: fix-env-scope-hint).
+ */
+async function emptyInventoryHint(absDir: string): Promise<string> {
+  const RUN_ANALYZE = 'No environment variables in the inventory. Run analyze_codebase first.';
+  try {
+    const { readCachedContext } = await import('./utils.js');
+    const { ENV_SOURCE_EXTENSIONS } = await import('../../analyzer/env-extractor.js');
+    const cached = await readCachedContext(absDir);
+    const nodes = cached?.callGraph?.nodes ?? [];
+    if (!nodes.length) return RUN_ANALYZE;
+    const inScope = nodes.some(n => {
+      const dot = n.filePath.lastIndexOf('.');
+      return dot >= 0 && ENV_SOURCE_EXTENSIONS.has(n.filePath.slice(dot).toLowerCase());
+    });
+    if (inScope) return RUN_ANALYZE;
+    return 'No file in this repository is in scope for environment-variable scanning, which reads '
+      + `${[...ENV_SOURCE_EXTENSIONS].sort().join(' ')} only. Re-running analyze will not change `
+      + 'that; a read in another language is a disclosed boundary, not a missing index.';
+  } catch {
+    return RUN_ANALYZE;
+  }
+}
+
 export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Promise<unknown> {
   const absDir = await validateDirectory(input.directory);
 
@@ -113,7 +142,7 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
       candidates,
       hint: candidates.length
         ? (fuzzy.length ? 'Did you mean one of these?' : 'Not in the inventory. Known variables include:')
-        : 'No environment variables in the inventory. Run analyze_codebase first.',
+        : await emptyInventoryHint(absDir),
     };
   }
 

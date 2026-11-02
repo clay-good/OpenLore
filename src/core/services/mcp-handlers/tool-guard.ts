@@ -428,11 +428,29 @@ export function capStructuredResult(result: unknown, maxBytes: number): { text: 
       // Serialize the enclosing shape ONCE with the field emptied; the field's own
       // contribution is then pure arithmetic. `""` in the shell is the 2 quote bytes
       // the real field also pays, so the shell's size needs no adjustment.
+      //
+      // `truncated: true` is this branch's long-standing receipt and stays the default. But it
+      // must not OVERWRITE a tool that declares a `truncated` of its own shape
+      // (`certify_public_surface`'s `{ omitted }`, `blast_radius`'s, `plan_parallel_work`'s) —
+      // that replaced an object with a boolean and erased the count it carried. Where the field
+      // is already taken, the receipt goes under `responseBudget`, as the list-trimming one
+      // does, and the tool's own disclosure is left exactly as it was
+      // (change: fix-budget-receipt-collision).
+      const receipt = 'truncated' in obj
+        ? {
+          responseBudget: {
+            trimmed: true,
+            note: 'One field was cut to fit the response byte budget; it ends with a marker '
+              + "saying so. This tool's own `truncated` disclosure is unchanged. Narrow the "
+              + 'query for the whole value.',
+          },
+        }
+        : { truncated: true };
       const shellBytes = Buffer.byteLength(
-        JSON.stringify({ ...obj, [key]: '', truncated: true }, null, 2), 'utf8',
+        JSON.stringify({ ...obj, [key]: '', ...receipt }, null, 2), 'utf8',
       );
       const best = largestFittingJsonCut(field, maxBytes - shellBytes - jsonEscapedBytes(marker));
-      const capped = { ...obj, [key]: field.slice(0, best) + marker, truncated: true };
+      const capped = { ...obj, [key]: field.slice(0, best) + marker, ...receipt };
       const text = JSON.stringify(capped, null, 2);
       if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: true };
     }

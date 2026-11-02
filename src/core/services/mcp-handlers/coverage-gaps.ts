@@ -28,6 +28,7 @@
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
+import { TEST_DETECTION_CAVEATS } from '../../analyzer/test-file.js';
 import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
 import { deadCodeIds, wiringKey, loadExternalWiring, externalWiringCaveats } from './reachability.js';
 import type { WiringReceipt } from '../../analyzer/entry-point-adapters.js';
@@ -358,6 +359,14 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     // untested. Honesty: the over-report risk is scoped to these languages alone.
     const langsWithoutTests = universeLangs.filter(l => !langsWithTests.has(l));
     caveats.push(`No test files were detected for these languages (${langsWithoutTests.join(', ')}); their gaps may be over-reported (every symbol looks untested where no test was detected).`);
+  }
+  // A language WITH detected tests can still have a convention this analysis cannot see, which
+  // is not visible in the full/partial/none verdict. Rust is the case that matters: a helper
+  // inside an inline `#[cfg(test)] mod` carries no test attribute of its own and is counted as
+  // production code, so a gap on it is an over-report (change: fix-rust-test-detection).
+  for (const lang of universeLangs) {
+    const caveat = TEST_DETECTION_CAVEATS.get(lang);
+    if (caveat) caveats.push(`${lang}: ${caveat}.`);
   }
   if (hasSymbols) {
     // Symbol resolution prefers an exact (case-insensitive) name match but falls back
