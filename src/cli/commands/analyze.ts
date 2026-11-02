@@ -1103,14 +1103,27 @@ async function runEmbedStep(
   }
 }
 
+/** The specs directory `openlore init` creates. An empty one here is OpenLore's own artifact. */
+const DEFAULT_SPEC_LOCATION = 'openspec/specs';
+
 export function formatSpecIndexFailure(message: string, freshSpecDirectory: boolean): string {
   if (message.includes('No OpenSpec specs directory')) {
     return '    ℹ No OpenSpec specs directory — spec index skipped';
   }
-  if (freshSpecDirectory && message.includes('exists but contains no spec.md files')) {
-    // change: align-first-run-ctas-with-repo-shape — install created this
-    // empty directory, so it is expected first-run state rather than a warning.
-    return '    ℹ No specs yet — optional: run "openlore generate" (requires an LLM provider; see "openlore features")';
+  if (message.includes('exists but contains no spec.md files')) {
+    // change: align-first-run-ctas-with-repo-shape — an empty specs directory OpenLore's own
+    // `init` created is expected state, not a warning.
+    //
+    // This used to require `freshSpecDirectory`, which is true only on the run that created the
+    // directory, so every LATER run of a merely-initialized repository warned about a directory
+    // OpenLore had made itself. The honest discriminator is not WHEN the directory appeared but
+    // WHOSE it is: the default `openspec/specs` location is ours, and a configured
+    // `openspecPath` is the user's — an empty one there means their specs are somewhere else,
+    // which is worth a warning (change: fix-self-inflicted-spec-warning).
+    const ours = freshSpecDirectory || new RegExp(`${DEFAULT_SPEC_LOCATION}/?(?:\\s|$)`).test(message);
+    if (ours) {
+      return '    ℹ No specs yet — optional: run "openlore generate" (requires an LLM provider; see "openlore features")';
+    }
   }
   return `    ⚠ Spec index skipped: ${message}`;
 }

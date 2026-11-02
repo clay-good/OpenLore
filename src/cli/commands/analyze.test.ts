@@ -282,8 +282,24 @@ describe('analyze command', () => {
       expect(line).not.toContain('⚠');
     });
 
-    it('preserves the warning for an empty spec directory not created by this run', () => {
-      expect(formatSpecIndexFailure('exists but contains no spec.md files', false)).toContain('⚠ Spec index skipped');
+    // The discriminator is WHOSE directory it is, not when it appeared. Requiring
+    // `freshSpecDirectory` meant every run after the one that created it warned about a
+    // directory OpenLore had made itself (change: fix-self-inflicted-spec-warning).
+    it('presents the default empty spec directory as normal state on every later run too', () => {
+      const line = formatSpecIndexFailure(
+        "Spec directory /repo/openspec/specs exists but contains no spec.md files — run 'openlore generate'",
+        false,
+      );
+      expect(line).toContain('ℹ No specs yet');
+      expect(line).not.toContain('⚠');
+    });
+
+    it('still warns for an empty spec directory the user configured elsewhere', () => {
+      const line = formatSpecIndexFailure(
+        '/repo/docs/my-specs exists but contains no spec.md files',
+        false,
+      );
+      expect(line).toContain('⚠ Spec index skipped');
     });
 
     describe('collect function', () => {
