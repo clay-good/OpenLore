@@ -673,6 +673,41 @@ describe('default providers disclose assessment gaps', () => {
     expect(changes[0].fetchError).toBeUndefined();
   });
 
+  // The caller's own filter must come first: a branch nobody asked about must not be reported
+  // as one the budget could not reach (change: fix-harvest-budget-scope).
+  it('never reports a branch the caller excluded as unassessed', async () => {
+    const many = async (repoPath: string, args: string[]): Promise<string> => {
+      if (args[0] === 'for-each-ref') return 'main\nfeature-x\nold-1\nold-2\nold-3\n';
+      return branchList(repoPath, args);
+    };
+    const result = await defaultEnumerateBranches(
+      '/repo', 'this-repo', 'main', ['feature-x'], many, undefined, Date.now() - 1,
+    );
+    const changes = Array.isArray(result) ? result : result.changes;
+    expect(changes.map(c => c.ref)).toEqual(['feature-x']);
+  });
+
+  it('discloses a pull request it ran out of time to read, instead of fetching it', async () => {
+    const runGh = async (_repoPath: string, args: string[]): Promise<string> => {
+      if (args[1] === 'list') {
+        return JSON.stringify([
+          { number: 1, headRefName: 'a', title: 'first' },
+          { number: 2, headRefName: 'b', title: 'second' },
+        ]);
+      }
+      throw new Error('must not be reached: the budget was spent');
+    };
+    const result = await defaultEnumeratePullRequests(
+      '/repo', 'this-repo', 'main', runGh, branchList, undefined, Date.now() - 1,
+    );
+    const changes = Array.isArray(result) ? result : result.changes;
+    expect(changes).toHaveLength(2);
+    for (const change of changes) {
+      expect(change.kind).toBe('pull-request');
+      expect(change.assessmentError).toMatch(/harvest budget/i);
+    }
+  });
+
   it('carries an unverifiable repo base as a map-level caveat', async () => {
     const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
       if (args[0] === 'for-each-ref') return 'feature\n';
