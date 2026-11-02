@@ -5,18 +5,119 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+**Everything the agent needs to see, pushed at the moment it can act — and the API contract in
+the graph.**
+
+### Your API contract is part of the graph
+
+- **`certify_service_contract`** grades an OpenAPI 3.x / Swagger 2.0 change against the code:
+  two-way parity with the indexed route handlers, a closed-table breaking/dangerous verdict per
+  changed element, each one joined to the in-repo clients it breaks and to the tests that reach
+  them, and a suggested version bump that is withheld when compatibility cannot be proven. (#639,
+  #659)
+- **Declared operations are now graph nodes**, bound to the handler that serves each
+  (`implements_endpoint`) and to the function that calls it (`consumes_endpoint`), so `orient`,
+  `analyze_impact` and `get_subgraph` cross the API boundary. Matching is literal: an address that
+  names two operations binds nothing, and a call to another host never binds to your own
+  specification. (#660)
+- **`orient` names the contract of a handler in scope** — the operation it serves, its spec
+  file:line, its required parameters and body properties — unasked. (#655)
+- **A literal request body that omits a required property is reported** by
+  `certify_service_contract` and carried in `verify_change`. (#656, #658)
+
+### The diff shapes agents get wrong
+
+- **Weakened checks are reported:** tests deleted, skipped or emptied, assertions removed,
+  suppressions added, a relaxed CI gate — each joined to the code it used to guard. (#634)
+- **Invented references are reported:** an import, export or package that does not exist or is not
+  declared. (#632)
+- **A hand-edited generated file is named with its source and regenerate command**, so the edit
+  that will be overwritten is caught before it is made. (#629)
+
+### Receipts arrive when you can act on them
+
+- **The agent-loop hooks** push OpenLore's receipts at the moments a harness offers: after an edit,
+  after a compaction, before stopping, at sub-agent start, and before a write. (#637, #649, #650)
+- **A sub-agent is briefed on its own task** when it starts, instead of inheriting nothing. (#649)
+- **Edits made after the last test run are named** in the before-stop receipt. (#643)
+- **Codex and Pi** get the same moments: a managed Codex hook set, Pi after-edit receipts, and a
+  Pi session that resumes from the handoff briefing after a compaction. (#651, #652, #654)
+- **`get_handoff_briefing`** states the in-flight change — touched symbols, open changes, drifted
+  specs, the tests to run — so a compaction or a new session does not lose it. (#638)
+
+### The session ledger
+
+- **It names the symbol that changed under you**, tells a background change from your own edit, and
+  sees a modify/revert loop. (#636)
+- **Session change counts** (body-only, signature, unclassified, first-seen-after-edit, changed
+  exports) — counts only, never a percentage or a threshold. (#657)
+- **Declared OpenAPI operations and infrastructure resources are tracked like code symbols**, so a
+  note names `POST /v1/checkout`, not the file it lives in; a reformat is not a change, and a file
+  is still named whenever an element model cannot see what moved. (#661)
+- **Lease tokens** (`orient` and `recall`) let any process ask `verify_claim` whether everything it
+  was served still hashes the same. (#644)
+
+### Infrastructure, bound to the code it runs
+
+- **Which manifests set each environment variable** — Kubernetes, compose, Dockerfile,
+  Terraform/OpenTofu, CloudFormation/SAM, GitHub Actions and Serverless — with the key and location,
+  never the value. (#640, #662)
+- **A function resource is bound to the code it runs** (`deploys_symbol`): Terraform and
+  CloudFormation/SAM Lambda handlers, Serverless `functions.*.handler`, and a handler that names
+  built output resolved through the project's own `outDir`/`rootDir` or `main`/`source` mapping.
+  An unmappable handler is disclosed, never guessed. (#645, #662)
+- **`orient` names the infrastructure a deployed handler depends on**: the resource that runs it and
+  the sites that set each variable it reads, read only when a resource actually runs something in
+  scope. (#662)
+- **Serverless Framework** is a supported ecosystem (13 in all). (#662)
+
+### Parallel agents see each other
+
+- **A shared footprint board** across every worktree of a clone: who is about to write which
+  symbols, with hazard-typed conflicts and duplicate-intent detection. (#641)
+- **A peer change notice** when another agent changes a symbol you declared as a read, or one you
+  were served. (#646, #647)
+- **Fleet records** are shared on the board, and `plan_parallel_work` can plan against the live
+  agents on it. (#648)
+
+### Claims you can check before you assert them
+
+- **`verify_claim` gains `endpoint-implemented`, `endpoint-consumed`, `decision-governed` and
+  `lease-current`.** It now answers `unverifiable`, naming the disagreement, when its own scan
+  contradicts an edge the graph published, instead of a confident "no". (#642, #644, #661)
+
+### Onboarding and the background
+
+- **OpenLore sets itself up and stays current** in the background: a cold start builds the index,
+  a stale one repairs itself, and the first touch is disclosed once rather than read as a broken
+  install. (#631)
+- **Index staleness is judged by content**, not the clock or file mtimes, so a checkout or a pull
+  that rewrote unchanged files no longer reads as behind. (#630)
+- **Local semantic vectors build 8–10x faster.** (#633)
+- **An OpenSpec `propose` prompt is grounded in repository structure** before drafting, in Claude
+  Code, Codex and Pi. (#623)
+- **A color-coded OpenLore status line** for Claude Code. (#622)
 - **Behavior change (Pi): the repository digest is now on-demand.** The Pi extension no longer
   appends the architecture digest and spec-domain index to every turn; the agent calls
   `openlore_orient` when it has a task. To restore the previous every-turn injection, set
   `"pi": { "contextMode": "full" }` in `.openlore/config.json`. (#623)
-- **OpenSpec proposals are grounded in repository structure.** A recognized OpenSpec `propose`
-  prompt gets a short instruction to recover the user's decisions and call `orient` before
-  drafting, in Claude Code, Codex, and Pi. (#623)
-- **Codex support in `openlore install`/`connect`:** registers the OpenLore MCP server and a
-  managed proposal hook in `.codex/` (user or project scope). (#623)
-- **The minimum supported Node.js version is now 22.22** (`^22.22.0 || >=23.5.0`), matching
-  the file watcher's new floor (chokidar 6). On Node 22.19–22.21 the CLI now exits with code 78
-  and asks you to upgrade. (#620)
+- **The minimum supported Node.js version is now 22.22** (`^22.22.0 || >=23.5.0`), matching the
+  file watcher's new floor (chokidar 6). On Node 22.19–22.21 the CLI exits with code 78 and asks
+  you to upgrade. (#620)
+
+### Fixed
+
+- **A whole-repository answer no longer discards itself when it exceeds the response budget.**
+  `get_architecture_overview`, `get_refactor_report` and `get_mapping` returned a JSON string cut
+  mid-structure, with advice to narrow the query using parameters they do not accept. They now keep
+  the summary and the top of every ranked list and say in `omitted` exactly how many items each
+  list lost. (#663)
+- **`map_in_flight_conflicts` no longer dies on a clone with many branches.** It reads branches
+  most-recently-committed first rather than alphabetically, and a harvest time budget discloses any
+  branch it did not reach instead of letting the whole call time out. (#663)
+- **A Pi daemon left by an older version recovers** instead of failing to start. (#621)
+- **The vocabulary cache is keyed on its meta file's content**, so a stale cache is not served.
+  (#653)
 
 ## [3.5.0] - 2026-10-25
 
