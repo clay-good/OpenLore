@@ -17,6 +17,7 @@ import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
+import { depthOption } from '../numeric-options.js';
 
 interface EscapeView {
   type?: string;
@@ -161,7 +162,7 @@ export async function runErrorPropagationCli(opts: ErrorPropagationCliOptions): 
 export const errorPropagationCommand = new Command('error-propagation')
   .description('Analyze escaping exceptions (TS/JS/Python/Java/C#) or returned errors and panics (Go). Read-only, deterministic, never blocks.')
   .option('--symbol <name>', 'The function to analyze: its name, or name::path to disambiguate')
-  .option('--max-depth <n>', 'Callee-traversal depth bound (default 10, clamped to [1, 30])', (v) => parseInt(v, 10))
+  .option('--max-depth <n>', 'Callee-traversal depth bound (default 10, clamped to [1, 30])', depthOption('--max-depth'))
   .option('--json', 'Emit the result as JSON', false)
   .action(async (opts: { symbol?: string; maxDepth?: number; json?: boolean }) => {
     const code = await runErrorPropagationCli({
