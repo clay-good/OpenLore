@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { CallGraphBuilder, serializeCallGraph, type SerializedCallGraph } from '../call-graph.js';
 import { bindDeployHandlers } from './deploy-binding.js';
+import type { FunctionNode } from '../call-graph-types.js';
 
 const ORDERS_TS = 'export function handler(event: unknown) {\n  return process(event);\n}\nfunction process(e: unknown) {\n  return e;\n}\n';
 const APP_PY = 'def lambda_handler(event, context):\n    return {"ok": True}\n';
