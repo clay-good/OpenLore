@@ -129,6 +129,34 @@ the graph.**
   `[openlore …]`, so a host filtering on the documented prefix read it as the answer; and "pick
   the block that parses" loses the whole answer for the tools that return plain text
   (`get_signatures`). Both are named now.
+- **A watcher save no longer destroys the projected edges in the graph store.** Contract bindings
+  and deploy bindings are produced only by a full `analyze`, so a subset rebuild must preserve
+  them. The guard was on `deleteEdgesForFile` but not on `deleteOutgoingEdgesForFile` — the path
+  taken for every *recomputed caller* file, which is most of them — and it listed contract kinds
+  only, so `deploys_symbol` was unguarded everywhere. Saving one shared utility left orphaned
+  OpenAPI operation nodes with no edges, saving a deployed handler dropped its own deploy
+  binding, and the index reported itself current either way; an `.olbundle` exported afterwards
+  shipped a graph with no contract or deploy edges under a valid attestation. Both deletions are
+  now keyed on the node *language*, so the next projected language is covered by construction.
+- **One unreadable manifest no longer erases the whole infrastructure graph.** A throw anywhere
+  in the IaC pass was swallowed silently: a single YAML file with heavy anchor reuse trips the
+  parser's own alias-count guard, and every resource, reference and deploy binding of all eleven
+  ecosystems disappeared with nothing said — `orient` then reported no infrastructure, which
+  reads as "no resource runs a function in scope". Each ecosystem's extractor now runs in
+  isolation, and a failure is named in `iacNotAssessed` rather than served as an empty result.
+- **An infrastructure declaration is no longer served as code.** The "a declaration is never a
+  hub, an entry point, or a term in the average fan-in/fan-out" invariant was implemented with a
+  contract-only predicate, so infrastructure never had it. Adding a `serverless.yml` to a
+  repository gave the deployed handler a fan-in of 1 *from its own manifest*, which removed it
+  from the entry points and left the YAML stanza as the only entry point — and `CODEBASE.md`
+  prints that table under "the natural starting point for any task". On this repository 48 of
+  1,121 entry points were GitHub Actions jobs, Helm templates, Bicep modules and Serverless
+  stanzas, all of them terms in the published averages. A declaration binding is now excluded
+  from degrees, entry-point status, hub status, the file-level dependency rankings, the
+  layer-violation check, the landmark set and `find_path`'s `role:` endpoints — in both the
+  in-memory build and the persisted store, which are checked against each other.
+- **`orient`'s infrastructure briefing matches a deployed function by name *and* file.** A bare
+  name match attributed one file's environment reads to a same-named function in another.
 
 - **A whole-repository answer no longer discards itself when it exceeds the response budget.**
   `get_architecture_overview`, `get_refactor_report` and `get_mapping` returned a JSON string cut

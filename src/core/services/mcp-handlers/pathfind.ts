@@ -12,6 +12,7 @@
  */
 
 import { relative, isAbsolute } from 'node:path';
+import { isProjectedLanguage } from '../../analyzer/projected-language.js';
 import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
 import { resolveFederationScope, locateSymbolProducers } from '../../federation/resolver.js';
 import { buildWeightedAdjacency, weightedBfs } from './graph.js';
@@ -44,7 +45,9 @@ export function resolveEndpoint(
   traversal: TraversalIndex,
   filter?: TraversalFilter,
 ): ResolvedEndpoint {
-  const real = (ns: FunctionNode[]) => ns.filter(n => !n.isExternal && !n.isTest);
+  // A projected declaration is never a `role:` endpoint: "find the path from a hub" must not
+  // resolve to a manifest stanza (change: fix-projection-integrity).
+  const real = (ns: FunctionNode[]) => ns.filter(n => !n.isExternal && !n.isTest && !isProjectedLanguage(n.language));
 
   if (spec.startsWith('role:')) {
     const role = spec.slice(5);
