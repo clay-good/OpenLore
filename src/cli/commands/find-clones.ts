@@ -15,6 +15,7 @@ import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
+import { positiveIntegerOption, ratioOption } from '../numeric-options.js';
 
 interface CloneMatchView {
   type: 'exact' | 'structural' | 'near';
@@ -120,8 +121,8 @@ export const findClonesCommand = new Command('find-clones')
   .description('Find existing clones of a single function symbol or code snippet (reuse instead of reinventing). Read-only, deterministic, never blocks.')
   .option('--symbol <name>', 'A function in the index: its name, or name::path. Provide exactly one of --symbol / --snippet')
   .option('--snippet <code>', 'Raw code to compare (need not be in the index). Provide exactly one of --symbol / --snippet')
-  .option('--min <ratio>', 'Near-clone similarity floor (default 0.7, clamped to [0.1, 1])', parseFloat)
-  .option('--max <n>', 'Cap on returned matches (default 25, max 200)', (v) => parseInt(v, 10))
+  .option('--min <ratio>', 'Near-clone similarity floor (default 0.7, must be in [0.1, 1])', ratioOption('--min', 0.1, 1))
+  .option('--max <n>', 'Cap on returned matches (default 25, max 200)', positiveIntegerOption('--max'))
   .option('--json', 'Emit the result as JSON', false)
   .action(async (opts: { symbol?: string; snippet?: string; min?: number; max?: number; json?: boolean }) => {
     const code = await runFindClonesCli({

@@ -7,11 +7,13 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { writeStdout } from '../output.js';
 import { formatDuration } from '../../utils/command-helpers.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_AUDIT_REPORT } from '../../constants.js';
 import { openloreAudit } from '../../api/audit.js';
+import { logger } from '../../utils/logger.js';
+import { stat } from 'node:fs/promises';
 import type { AuditReport } from '../../types/index.js';
 
 // ============================================================================
@@ -93,6 +95,11 @@ function printReport(report: AuditReport, rootPath: string): void {
 // COMMAND
 // ============================================================================
 
+/** Whether a path is an existing directory (an audit must not create its own target). */
+async function directoryExists(path: string): Promise<boolean> {
+  try { return (await stat(path)).isDirectory(); } catch { return false; }
+}
+
 export const auditCommand = new Command('audit')
   .description('Report spec coverage gaps: uncovered functions, orphan requirements, hub gaps, stale domains')
   .argument('[directory]', 'Project directory to audit', '.')
@@ -104,7 +111,16 @@ export const auditCommand = new Command('audit')
     hubThreshold: string;
     json: boolean;
   }) => {
-    const rootPath = join(process.cwd(), directory === '.' ? '' : directory);
+    // `resolve`, not `join`: `join(cwd, '/abs/path')` silently produces `cwd + '/abs/path'`, so an
+    // absolute argument audited a place that does not exist — reporting `analysis-unavailable`
+    // for a fully analyzed repository and `mkdir -p`-ing a phantom `.openlore/analysis/` tree
+    // under the caller's cwd on the way out (change: fix-cli-input-validation).
+    const rootPath = resolve(process.cwd(), directory);
+    if (!(await directoryExists(rootPath))) {
+      logger.error(`Directory not found: ${safe(rootPath)}`);
+      process.exitCode = 1;
+      return;
+    }
     const startTime = Date.now();
 
     try {
