@@ -130,6 +130,29 @@ never re-projects contracts, and contract edges are preserved across a subset re
 deleting a `@generated from …` header does not drop the binding until the next `openlore
 analyze`.
 
+## Consumers in other repositories
+
+A service's consumers are usually **not in its own repository**, so a breaking verdict computed
+from this repository alone says "no caller in this repository" for exactly the change most worth
+stopping. Pass `federation: true` (or `--federation`) and `certify_service_contract` also censuses
+the client call sites of the indexed siblings in `.openlore/federation.json`, reporting each hit
+against the sibling's **registry name** — its stable id — never a path on this machine.
+
+A finding then distinguishes three states, which the single in-repo answer collapsed:
+
+| State | What the finding says |
+|---|---|
+| Called here | `called from src/client.ts:12` |
+| Called only in a sibling | `no caller in this repository, but called from web:src/client.ts:4` |
+| Called in neither | `no caller in this repository or in 3 censused sibling repositories (1 not censused)` |
+
+The third is the one that must not read as proof of safety, so it names how many siblings were
+censused and how many were not. A sibling that is missing, unindexed, stale or unbaselined is
+**named as not censused**, never counted consumer-free; a registry name you asked for that does
+not exist is reported rather than ignored; and the repository under certification is never
+censused as its own sibling. Without the flag, the tool says plainly that consumers outside this
+repository were not assessed.
+
 ## Editing a specification
 
 A specification is not a call-graph node and declares no handler of its own, so a diff that edits
@@ -167,6 +190,5 @@ scan cap, or parses with no operation the reader recognizes is named rather than
 
 ## Not read
 
-Fields, messages and types as their own nodes; protobuf and GraphQL; consumers in federated
-sibling repositories; registry or network fetches; runtime traffic; contract tests; code
-generation; any LLM.
+Fields, messages and types as their own nodes; protobuf and GraphQL; registry or network fetches;
+runtime traffic; contract tests; code generation; any LLM.

@@ -17,7 +17,7 @@
  */
 
 import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { validateDirectory } from './utils.js';
 import { execFileGit } from '../../../utils/git-exec.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
@@ -37,6 +37,25 @@ export interface CertifyServiceContractInput {
   /** Cap on each listed item kind (default 100, max 1,000); totals are always given. */
   maxResults?: number;
   allowBaseFallback?: boolean;
+  /**
+   * Opt-in: also count client call sites in indexed sibling repositories
+   * (`.openlore/federation.json`), as `certify_public_surface` does for an exported symbol.
+   *
+   * A service's consumers are usually NOT in its own repository, so a breaking verdict computed
+   * from this repository alone reads as "nothing calls it" for exactly the change most worth
+   * stopping (change: add-contract-graph-projection).
+   */
+  federation?: boolean;
+  /** Limit the federation census to these registry repo names (default: all). */
+  federationRepos?: string[];
+}
+
+/** Consumers of one operation found in a sibling repository. */
+export interface FederatedConsumer {
+  /** The registry name of the sibling repository — its stable id, not its path. */
+  repo: string;
+  file: string;
+  line: number;
 }
 
 const SPEC_EXT = /\.(?:ya?ml|json)$/i;
@@ -224,6 +243,66 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
 }
 
 /**
+ * Client call sites in INDEXED SIBLING repositories, keyed by operation address.
+ *
+ * A service's consumers are usually not in its own repository, so a breaking verdict computed
+ * from this repository alone reads as "nothing calls it" for exactly the change most worth
+ * stopping. This runs the same literal method-and-path match over each registered sibling, and
+ * reports each hit against the sibling's REGISTRY NAME — its stable id — never its path on this
+ * machine (change: add-contract-graph-projection).
+ *
+ * Honesty is the whole difficulty here, so every repository that was not censused is named:
+ * a sibling that is missing, unindexed, stale or unbaselined is NOT evidence of no consumer, and
+ * a registry name the caller asked for that does not exist is reported rather than ignored.
+ */
+async function federatedConsumersOf(
+  ops: ReadonlyArray<{ file: string; op: Pick<ContractOperation, 'address' | 'method' | 'path' | 'declaredPath' | 'line'> }>,
+  input: CertifyServiceContractInput,
+  selfPath: string,
+  boundaries: string[],
+): Promise<{ byAddress: Map<string, FederatedConsumer[]>; census: { repos: string[]; skipped: Array<{ repo: string; reason: string }> } } | undefined> {
+  if (input.federation !== true && !(input.federationRepos?.length)) return undefined;
+  const byAddress = new Map<string, FederatedConsumer[]>();
+  const census = { repos: [] as string[], skipped: [] as Array<{ repo: string; reason: string }> };
+  if (!ops.length) return { byAddress, census };
+  const { resolveFederationScope } = await import('../../federation/resolver.js');
+  const { evaluateRepoState } = await import('../../federation/registry.js');
+  // The repository directory, not the user's home: `.openlore/federation.json` is repo-relative,
+  // and this is what `certify_public_surface`, `find_dead_code`, `find_path` and `select_tests`
+  // all pass. Using the home directory would have read a manifest none of them reads.
+  const scope = resolveFederationScope(selfPath, { ...(input.federation !== undefined ? { federation: input.federation } : {}), ...(input.federationRepos ? { federationRepos: input.federationRepos } : {}) });
+  for (const name of scope.unknownNames) {
+    census.skipped.push({ repo: emittedText(name), reason: 'not in the federation registry' });
+  }
+  const selfReal = resolve(selfPath);
+  for (const entry of scope.repos) {
+    if (resolve(entry.path) === selfReal) continue; // this repository is already censused
+    const state = evaluateRepoState(entry);
+    if (state !== 'indexed') {
+      // A sibling whose index cannot be trusted is DISCLOSED, never counted as consumer-free.
+      census.skipped.push({ repo: emittedText(entry.name), reason: `index ${state}` });
+      continue;
+    }
+    const siblingBoundaries: string[] = [];
+    let sites: Awaited<ReturnType<typeof callSitesFor>>;
+    try {
+      sites = await callSitesFor(entry.path, ops, siblingBoundaries);
+    } catch (error) {
+      census.skipped.push({ repo: emittedText(entry.name), reason: `scan failed: ${error instanceof Error ? error.message : String(error)}` });
+      continue;
+    }
+    census.repos.push(emittedText(entry.name));
+    for (const b of siblingBoundaries) boundaries.push(`${entry.name}: ${b}`);
+    for (const [address, found] of sites) {
+      const at = byAddress.get(address) ?? [];
+      for (const f of found) at.push({ repo: emittedText(entry.name), file: emittedText(f.file), line: f.line });
+      byAddress.set(address, at);
+    }
+  }
+  return { byAddress, census };
+}
+
+/**
  * Client call sites in this repository whose HTTP method and literal path match each operation
  * (with or without its base path), keyed by operation address.
  */
@@ -391,6 +470,8 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
 
   // ── Breaking-change verdicts against the merge-base ──
   let changesOut: Record<string, unknown> | undefined;
+  /** Which sibling repositories were censused for consumers, and which were not. Run-level. */
+  let federationCensus: { repos: string[]; skipped: Array<{ repo: string; reason: string }> } | undefined;
   if (input.baseRef) {
     const { validateGitRef, resolveBaseRefDisclosed } = await import('../../drift/git-diff.js');
     try { validateGitRef(input.baseRef); } catch (e) { return { error: `Invalid base ref: ${e instanceof Error ? e.message : String(e)}` }; }
@@ -428,19 +509,50 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
         : c);
     const consumers = await consumersOf(root, changes, [...head.docs, ...base.docs], boundaries);
     await attachReachingTests(root, consumers, boundaries);
+    // A service's consumers are usually in OTHER repositories, so "no caller in this repository"
+    // is the least informative thing to say about the change most worth stopping.
+    const opsForFederation = [...head.docs, ...base.docs].flatMap(d =>
+      d.operations.filter(op => changes.some(c => c.address === op.address)).map(op => ({ file: d.file, op })));
+    const federated = await federatedConsumersOf(opsForFederation, input, root, boundaries).catch(() => undefined);
+    federationCensus = federated?.census;
     for (const c of changes.filter(x => x.class === 'breaking' || x.class === 'dangerous')) {
       const who = consumers.get(c.address) ?? [];
+      const across = federated?.byAddress.get(c.address) ?? [];
       const subject = `${c.address}${c.element ? ` ${c.element}` : ''}`;
+      // Three distinct states, never collapsed: called here, called elsewhere, or not called in
+      // anything censused — and the last one names what was censused so it is not read as "safe".
+      const where = who.length
+        ? `; called from ${who.slice(0, 3).map(w => `${w.file}:${w.line}`).join(', ')}${who.length > 3 ? ` and ${who.length - 3} more` : ''}`
+        : across.length
+          ? `; no caller in this repository, but called from ${across.slice(0, 3).map(w => `${w.repo}:${w.file}:${w.line}`).join(', ')}${across.length > 3 ? ` and ${across.length - 3} more` : ''}`
+          : federated
+            ? `; no caller in this repository or in ${federated.census.repos.length} censused sibling repositor${federated.census.repos.length === 1 ? 'y' : 'ies'}${federated.census.skipped.length ? ` (${federated.census.skipped.length} not censused)` : ''}`
+            : '; no caller in this repository';
       findings.push({
         code: 'contract-breaking', severity: c.class === 'breaking' ? 'error' : 'warning', source: 'service-contract', subject: emittedText(subject),
-        discriminator: c.rule, message: emittedText(`${c.detail} (${c.rule}, ${c.class})${who.length ? `; called from ${who.slice(0, 3).map(w => `${w.file}:${w.line}`).join(', ')}${who.length > 3 ? ` and ${who.length - 3} more` : ''}` : '; no caller in this repository'}.`),
+        discriminator: c.rule, message: emittedText(`${c.detail} (${c.rule}, ${c.class})${where}.`),
         location: { path: c.file, line: c.line },
       });
+    }
+    if (federated) {
+      for (const s of federated.census.skipped) {
+        boundaries.push(`Sibling repository ${s.repo} was not censused for consumers (${s.reason}), so a caller there is not counted.`);
+      }
+      if (!federated.census.repos.length) {
+        boundaries.push('No sibling repository was censused, so a consumer outside this repository is not assessed.');
+      }
+    } else {
+      boundaries.push('Consumers outside this repository are not assessed; pass `federation: true` to census indexed sibling repositories.');
     }
     changesOut = {
       baseRef: input.baseRef, resolvedBaseRef: res.resolved, ...(res.fellBack ? { baseRefFallback: { requested: res.requested, resolved: res.resolved } } : {}),
       total: changes.length,
-      items: changes.slice(0, limit).map(c => ({ ...c, file: emittedText(c.file), address: emittedText(c.address), detail: emittedText(c.detail), ...(c.element ? { element: emittedText(c.element) } : {}), consumers: consumers.get(c.address) ?? [] })),
+      items: changes.slice(0, limit).map(c => ({
+        ...c, file: emittedText(c.file), address: emittedText(c.address), detail: emittedText(c.detail),
+        ...(c.element ? { element: emittedText(c.element) } : {}),
+        consumers: consumers.get(c.address) ?? [],
+        ...(federated?.byAddress.get(c.address)?.length ? { federatedConsumers: federated.byAddress.get(c.address) } : {}),
+      })),
       ...(changes.length > limit ? { omitted: changes.length - limit } : {}),
       suggestedBump: contractBump(changes),
       ...(contractBump(changes) === null ? { suggestedBumpWithheld: 'a change is outside the model, so compatibility is not proven' } : {}),
@@ -467,6 +579,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     parity,
     payload,
     ...(changesOut ? { changes: changesOut } : {}),
+    ...(federationCensus ? { federationCensus } : {}),
     findings: shown,
     ...(kept.length > shown.length ? { findingsOmitted: kept.length - shown.length } : {}),
     gated: gate.gated,

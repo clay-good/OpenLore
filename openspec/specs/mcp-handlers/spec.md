@@ -3943,9 +3943,20 @@ merge-base via a closed deterministic rule table (`breaking` | `dangerous` | `no
 changed schema the table cannot read SHALL be `potentially-breaking`, which withholds the suggested
 version bump. Each `breaking` or `dangerous` element SHALL list the client call sites in this
 repository whose HTTP method and literal path match it, and SHALL be emitted as a registered
-advisory `contract-breaking` finding. Callers in other repositories, through generated clients, or
+advisory `contract-breaking` finding. Callers through generated clients or
 with dynamic URLs SHALL be disclosed as a boundary, never implied absent. The tool SHALL be a
 `conclusion` in family `change`, available only in the `full` preset.
+
+A service's consumers are usually not in its own repository, so with `federation` the tool SHALL
+also census client call sites in the indexed sibling repositories of `.openlore/federation.json`
+and report each hit against the sibling's REGISTRY NAME, never a path on this machine. A finding
+SHALL distinguish three states: called in this repository, called only in a censused sibling, or
+called in neither — and the third SHALL name how many siblings were censused, so it is not read
+as proof of safety. A sibling that is missing, unindexed, stale or unbaselined SHALL be named as
+not censused rather than counted consumer-free; a requested registry name that does not exist
+SHALL be reported; and the repository under certification SHALL never be censused as its own
+sibling. Without `federation`, the tool SHALL disclose that consumers outside this repository
+were not assessed.
 
 #### Scenario: A breaking schema change names its consumers
 
@@ -3954,6 +3965,21 @@ with dynamic URLs SHALL be disclosed as a boundary, never implied absent. The to
 - **WHEN** `certify_service_contract` runs with the base ref
 - **THEN** the change is `operation-removed`, `breaking`, names the call site's file and line, and
   the boundary statement for other repositories is present
+
+#### Scenario: A consumer in a sibling repository is named by its registry id
+
+- **GIVEN** a removed operation with no caller in this repository, and an indexed sibling
+  registered as `web` whose `src/client.ts` calls it
+- **WHEN** `certify_service_contract` runs with the base ref and `federation`
+- **THEN** the change lists a federated consumer `{ repo: 'web', file: 'src/client.ts' }`, the
+  finding says it is called from `web:src/client.ts`, and no filesystem path appears
+
+#### Scenario: A sibling whose index cannot be trusted is not counted clean
+
+- **GIVEN** a sibling registered but never analyzed
+- **WHEN** the census runs
+- **THEN** it is absent from the censused repositories, named in `federationCensus.skipped` with
+  its index state, and a boundary says a caller there is not counted
 
 #### Scenario: Unprovable is potentially-breaking
 

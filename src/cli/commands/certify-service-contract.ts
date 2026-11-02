@@ -20,6 +20,10 @@ export interface CertifyServiceContractCliOptions {
   max?: number;
   allowBaseFallback?: boolean;
   json?: boolean;
+  /** Census indexed sibling repositories for consumers too. */
+  federation?: boolean;
+  /** Limit that census to these registry repo names. */
+  federationRepos?: string[];
 }
 
 interface Finding { code: string; severity: string; subject: string; message: string; enforcementClass?: string }
@@ -72,6 +76,7 @@ export async function runCertifyServiceContractCli(opts: CertifyServiceContractC
   try {
     result = await dispatchTool('certify_service_contract', {
       directory: cwd, baseRef: opts.base, maxResults: opts.max, allowBaseFallback: opts.allowBaseFallback,
+      federation: opts.federation, federationRepos: opts.federationRepos,
     }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
@@ -94,7 +99,12 @@ export const certifyServiceContractCommand = new Command('certify-service-contra
   .option('--base <ref>', 'Compare the specifications with this ref (its merge-base with HEAD)')
   .option('--max <n>', 'Cap on each listed item kind (default 100, max 1000)', (v) => parseInt(v, 10))
   .option('--allow-base-fallback', 'When --base does not resolve, compare with the default branch instead of erroring (disclosed)', false)
+  .option('--federation', 'Also census client call sites in indexed sibling repositories; every sibling not censused is disclosed', false)
+  .option('--federation-repo <name...>', 'Limit the federation census to these registry repo names')
   .option('--json', 'Emit the result as JSON', false)
-  .action(async (opts: { base?: string; max?: number; allowBaseFallback?: boolean; json?: boolean }) => {
-    process.exit(await runCertifyServiceContractCli({ base: opts.base, max: opts.max, allowBaseFallback: opts.allowBaseFallback, json: opts.json }));
+  .action(async (opts: { base?: string; max?: number; allowBaseFallback?: boolean; json?: boolean; federation?: boolean; federationRepo?: string[] }) => {
+    process.exit(await runCertifyServiceContractCli({
+      base: opts.base, max: opts.max, allowBaseFallback: opts.allowBaseFallback, json: opts.json,
+      federation: opts.federation, federationRepos: opts.federationRepo,
+    }));
   });
