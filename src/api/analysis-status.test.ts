@@ -109,7 +109,9 @@ describe('openloreAnalysisStatus', () => {
       stage: 'call-graph',
       progressPath: progressPathOf(analysisDir),
     };
-    await plantLock(runtimeDir, payload, -50);
+    // 60s ahead, not 50ms: a loaded runner can spend more than 50ms between planting the
+    // mtime and reading it, which makes the age genuinely positive and tests nothing.
+    await plantLock(runtimeDir, payload, -60_000);
 
     const status = await openloreAnalysisStatus({ rootPath: root });
 

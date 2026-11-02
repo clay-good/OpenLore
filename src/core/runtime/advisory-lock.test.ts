@@ -223,7 +223,10 @@ describe('wait policy — maxWaitMs and waitedMs', () => {
   it('never reports a negative age when the lock mtime leads the clock', async () => {
     const held = await acquireLockAt(root, '.future.lock');
     if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
-    const ahead = (Date.now() + 50) / 1000;
+    // Far enough ahead that no plausible scheduling delay closes the gap: at +50ms a loaded CI
+    // runner spent more than that before the read, so the age was genuinely positive and the
+    // clamp was never exercised (observed: "expected 101 to be +0").
+    const ahead = (Date.now() + 60_000) / 1000;
     await utimes(join(root, '.future.lock'), ahead, ahead);
 
     const contender = await acquireLockAt(root, '.future.lock', { maxWaitMs: 0, bestEffortAfterMaxWait: false });
