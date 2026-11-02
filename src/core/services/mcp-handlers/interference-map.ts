@@ -67,6 +67,14 @@ const WITNESS_CAP = 8;
 const MAX_MERGE_SIMULATIONS = 60;
 /** Wall-clock budget for all merge simulations in one call (tool calls time out at 60 s). */
 const MERGE_SIMULATION_BUDGET_MS = 20_000;
+/**
+ * Wall-clock budget for READING the in-flight changes in one call. Reading a branch costs a
+ * merge-base, a diff and a base-snapshot reparse, and a working clone can hold hundreds of
+ * branches; without a budget a real clone (705 branches) ran for three minutes and the whole
+ * call died on the 60 s tool timeout, so the agent got nothing instead of the conflicts among
+ * the changes that WERE read (change: fix-in-flight-harvest-budget).
+ */
+const HARVEST_BUDGET_MS = 25_000;
 /** Files re-parsed per change for its base snapshot (a huge diff is the slow path). */
 const MAX_FILES_PER_CHANGE = 400;
 /**
@@ -655,10 +663,15 @@ export async function defaultEnumerateBranches(
   only?: string[],
   runGit: CommandRunner = git,
   autoResolve?: AutoBaseResolver,
+  deadline: number = Date.now() + HARVEST_BUDGET_MS,
 ): Promise<RawChangeEnumeration> {
   let names: string[];
   try {
-    names = (await runGit(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']))
+    // Most recently committed FIRST. In-flight work is recent work, and a clone can hold
+    // hundreds of stale branches: taking them in alphabetical order spent the whole change cap
+    // on whatever sorts first, which is arbitrary (change: fix-in-flight-harvest-budget).
+    // `--sort` is a git-side order, so the selection stays deterministic.
+    names = (await runGit(repoPath, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads/']))
       .split('\n').map(s => s.trim()).filter(Boolean);
   } catch (err) {
     // Propagate rather than returning []. The caller has a caveat for exactly this
@@ -674,8 +687,20 @@ export async function defaultEnumerateBranches(
   // that can genuinely conflict with a teammate's branch (a true positive the user wants).
   const wanted = only && only.length > 0 ? new Set(only) : null;
   const out: RawChange[] = [];
-  for (const branch of names.sort()) {
+  for (const branch of names) {
     if (branch === baseRef) continue;
+    // A wall-clock budget, like the merge simulations have: a branch not reached is disclosed
+    // as not assessed rather than letting the whole call hit the tool timeout, where the agent
+    // gets nothing at all. 705 branches × (merge-base + diff + a base-snapshot reparse) ran to
+    // three minutes on a real clone (change: fix-in-flight-harvest-budget).
+    if (Date.now() > deadline) {
+      out.push({
+        actor: branch, ref: branch, title: branch, repo: repoName, kind: 'branch',
+        files: [], baseSymbolsByFile: new Map(),
+        assessmentError: `the ${HARVEST_BUDGET_MS / 1000}s harvest budget for one call was reached before this branch was read`,
+      });
+      continue;
+    }
     if (wanted && !wanted.has(branch)) continue;
     let mergeBase: string;
     try {

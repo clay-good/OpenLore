@@ -641,6 +641,38 @@ describe('default providers disclose assessment gaps', () => {
     expect(changes[0].fetchError).toMatch(new RegExp(String(_label).split(' ')[0], 'i'));
   });
 
+  // A working clone holds hundreds of branches, and reading one costs a merge-base, a diff and a
+  // base-snapshot reparse. Both halves of the fix are asserted here: WHICH branches are read, and
+  // that running out of time is disclosed rather than hitting the tool timeout
+  // (change: fix-in-flight-harvest-budget).
+  it('asks git for branches most-recently-committed first, not alphabetically', async () => {
+    const seen: string[][] = [];
+    const runGit = async (repoPath: string, args: string[]): Promise<string> => {
+      seen.push(args);
+      return branchList(repoPath, args);
+    };
+    await defaultEnumerateBranches('/repo', 'this-repo', 'main', undefined, runGit).catch(() => undefined);
+    const forEachRef = seen.find(a => a[0] === 'for-each-ref');
+    expect(forEachRef, 'branches must be enumerated').toBeDefined();
+    expect(forEachRef).toContain('--sort=-committerdate');
+  });
+
+  it('discloses a branch it ran out of time to read, instead of reading it', async () => {
+    const runGit = async (repoPath: string, args: string[]): Promise<string> => {
+      if (args[0] === 'merge-base') throw new Error('must not be reached: the budget was spent');
+      return branchList(repoPath, args);
+    };
+    // A deadline already past: nothing may be read, and every candidate must come back named.
+    const result = await defaultEnumerateBranches(
+      '/repo', 'this-repo', 'main', undefined, runGit, undefined, Date.now() - 1,
+    );
+    const changes = Array.isArray(result) ? result : result.changes;
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ ref: 'feature', kind: 'branch' });
+    expect(changes[0].assessmentError).toMatch(/harvest budget/i);
+    expect(changes[0].fetchError).toBeUndefined();
+  });
+
   it('carries an unverifiable repo base as a map-level caveat', async () => {
     const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
       if (args[0] === 'for-each-ref') return 'feature\n';
