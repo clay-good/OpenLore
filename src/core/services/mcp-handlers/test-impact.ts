@@ -17,6 +17,7 @@
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
+import { TEST_DETECTION_CAVEATS } from '../../analyzer/test-file.js';
 import { resolveFederationScope, findCrossRepoTests } from '../../federation/resolver.js';
 import { loadTraversalIndex } from './traversal.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -565,6 +566,13 @@ export async function handleSelectTests(
     caveats.push('No tests were detected in this graph — the selection is empty, not "no tests needed". Verify test-file detection for your languages.');
   } else if (testDetection === 'partial') {
     caveats.push(`Test detection is incomplete for some changed languages (${seedLangs.join(', ')}); tests in undetected languages are missing.`);
+  }
+  // A language WITH detected tests can still have a convention this analysis cannot see, which
+  // the full/partial/none verdict does not show. Same disclosure `report_coverage_gaps` makes,
+  // so the two tools do not disagree about the same language (change: fix-rust-test-detection).
+  for (const lang of seedLangs) {
+    const caveat = TEST_DETECTION_CAVEATS.get(lang);
+    if (caveat) caveats.push(`${lang}: ${caveat}.`);
   }
   if (usedFileFallback) {
     caveats.push('Some seeds had no reaching test; sibling-file tests were included at low confidence (likely newly-added or untested functions).');

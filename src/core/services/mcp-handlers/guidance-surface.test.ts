@@ -29,6 +29,21 @@ describe('the active tool surface', () => {
   });
 });
 
+// Both servers must register the surface. `openlore mcp` delegates to a running `openlore
+// serve` daemon with no flag, so a daemon that never registered made the stdio default regress
+// the moment it was warm (change: fix-orient-guidance-preset).
+describe('every server registers the surface it serves', () => {
+  it('both the stdio server and the serve daemon call setActiveToolSurface', async () => {
+    for (const file of ['mcp.ts', 'serve.ts']) {
+      const source = await readFile(join(import.meta.dirname, '..', '..', '..', 'cli', 'commands', file), 'utf8');
+      expect(
+        source.includes('setActiveToolSurface('),
+        `${file} computes an active tool set but never registers it, so guidance it serves can name unwired tools`,
+      ).toBe(true);
+    }
+  });
+});
+
 describe('orient guidance under the default preset', () => {
   /**
    * A SOURCE guard, not a behavioural one: the branch that prescribes `record_decision` and

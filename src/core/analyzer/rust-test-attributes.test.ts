@@ -78,6 +78,22 @@ describe('hasRustTestAttribute', () => {
     expect(at(src, 'later')).toBe(false);
   });
 
+  // An attribute written BESIDE its item decorates that item, not the next one. Reading
+  // `#[test] fn smoke() {}` as a bare attribute line inverted both labels: the test was
+  // reported as production code, and the production function below it was HIDDEN as a test —
+  // the one direction this module's own doc comment forbids.
+  it('attributes a same-line attribute to the item beside it, not the one below', () => {
+    const src = '#[test] fn smoke() { assert!(true); }\npub fn critical_entry_point(n: u8) -> u8 { n + 1 }\n';
+    expect(at(src, 'smoke')).toBe(true);
+    expect(at(src, 'critical_entry_point')).toBe(false);
+  });
+
+  it('does not let a same-line non-test attribute hide a test below it', () => {
+    const src = '#[inline] pub fn fast(n: u8) -> u8 { n }\n#[test]\nfn checks() {}\n';
+    expect(at(src, 'fast')).toBe(false);
+    expect(at(src, 'checks')).toBe(true);
+  });
+
   it('scans a bounded number of lines', () => {
     const src = '#[test]\n' + '#[allow(dead_code)]\n'.repeat(80) + 'fn far_below() {}\n';
     expect(at(src, 'far_below')).toBe(false);

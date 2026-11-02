@@ -44,15 +44,27 @@ const TEST_ATTRIBUTES = new Set([
  * file splits it once.
  */
 export function hasRustTestAttribute(lines: readonly string[], startLine: number): boolean {
-  // One line above the signature; `startLine` is 1-based, so index `startLine - 1` is the
-  // signature itself.
+  // `startLine` is 1-based, so index `startLine - 1` is the signature itself. Its OWN line may
+  // carry the attribute: `#[test] fn smoke() { … }` is one line, and reading it as a bare
+  // attribute line belonging to the NEXT item inverted both labels — the test was reported as
+  // production code and the production function below it was HIDDEN as a test.
+  if (isTestAttribute(lines[startLine - 1]?.trim() ?? '')) return true;
+
   for (let i = startLine - 2, scanned = 0; i >= 0 && scanned < MAX_ATTRIBUTE_LINES; i--, scanned++) {
     const line = lines[i]?.trim() ?? '';
     if (line === '') continue;
     if (line.startsWith('//')) continue;
     if (!line.startsWith('#')) return false; // ordinary code: the attribute block has ended
-    const path = ATTRIBUTE_PATH.exec(line)?.[1];
-    if (path && TEST_ATTRIBUTES.has(path.split('::').pop()!)) return true;
+    // An attribute that does not END its line decorates the item written beside it, not the one
+    // below: `#[test] fn smoke() {}` must not mark the next function.
+    if (!/\]\s*$/.test(line)) return false;
+    if (isTestAttribute(line)) return true;
   }
   return false;
+}
+
+/** Whether a line opens with a test-marking attribute. */
+function isTestAttribute(line: string): boolean {
+  const path = ATTRIBUTE_PATH.exec(line)?.[1];
+  return path !== undefined && TEST_ATTRIBUTES.has(path.split('::').pop()!);
 }
