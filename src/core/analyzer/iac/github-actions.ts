@@ -171,23 +171,36 @@ function lineOfPath(doc: ReturnType<typeof parseDocument>, content: string, path
   return off != null ? offsetToLine(content, off) : 1;
 }
 
+/**
+ * Parse one workflow or action file, or `undefined` when it cannot be read.
+ *
+ * `merge: true` expands YAML merge keys (`<<: *anchor`) at parse time so a job that inherits
+ * `steps`/`needs` from an `&anchor` carries them, rather than leaving them under a literal `<<`
+ * property (mirrors the compose parser, add-docker-container-graph). `yaml` collects recoverable
+ * syntax errors instead of throwing, so a half-parsed document is refused rather than minting a
+ * garbage node. `toJS` is inside the guard on purpose: it is the call that throws on an excessive
+ * alias count, and an escape would abort the whole repository's IaC graph.
+ */
+function readYaml(content: string): { doc: ReturnType<typeof parseDocument>; js: Record<string, unknown> } | undefined {
+  try {
+    const doc = parseDocument(maskExpressions(content), { merge: true });
+    if (doc.errors && doc.errors.length > 0) return undefined;
+    const js = doc.toJS() as Record<string, unknown> | null;
+    return js && typeof js === 'object' ? { doc, js } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── workflow ──────────────────────────────────────────────────────────────────
 
 function parseWorkflow(filePath: string, content: string, graph: IacGraph, ctx: Ctx): void {
-  let doc;
-  try {
-    // `merge: true` expands YAML merge keys (`<<: *anchor`) at parse time so a job that
-    // inherits `steps`/`needs` from an `&anchor` carries them, rather than leaving them
-    // under a literal `<<` property (mirrors the compose parser, add-docker-container-graph).
-    doc = parseDocument(maskExpressions(content), { merge: true });
-  } catch {
-    return;
-  }
-  // `yaml` collects recoverable syntax errors instead of throwing; bail rather than mint
-  // a garbage node from a half-parsed document (same posture as the compose parser).
-  if (doc.errors && doc.errors.length > 0) return;
-  const js = doc.toJS() as Record<string, unknown> | null;
-  if (!js || typeof js !== 'object') return;
+  // Both the parse AND `toJS` are inside the guard: `toJS` is what throws on an excessive alias
+  // count, and an escape here would abort the whole repository's IaC graph — every other
+  // ecosystem's resources with it, silently (change: add-serverless-and-build-output-binding).
+  const parsed = readYaml(content);
+  if (!parsed) return;
+  const { doc, js } = parsed;
 
   // Workflow handle node — the searchable "this workflow" entity and the target of a
   // reusable-workflow `uses:`. Its signature carries the human name and triggers.
@@ -249,15 +262,9 @@ function parseWorkflow(filePath: string, content: string, graph: IacGraph, ctx: 
 // ── action metadata ─────────────────────────────────────────────────────────────
 
 function parseAction(filePath: string, content: string, graph: IacGraph, ctx: Ctx): void {
-  let doc;
-  try {
-    doc = parseDocument(maskExpressions(content), { merge: true });
-  } catch {
-    return;
-  }
-  if (doc.errors && doc.errors.length > 0) return;
-  const js = doc.toJS() as Record<string, unknown> | null;
-  if (!js || typeof js !== 'object') return;
+  const parsed = readYaml(content);
+  if (!parsed) return;
+  const { js } = parsed;
   const runs = js.runs;
   // An action without a `runs:` block is not an action (classifyYaml already gated, but
   // a same-named file that slipped through must not mint a node).

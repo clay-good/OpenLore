@@ -69,7 +69,7 @@ export async function scanEnvDeclarations(root: string): Promise<EnvDeclarationI
       else if (underChart(path)) { helm++; continue; }
       else language = classifyYaml(path, content) ?? 'unknown';
     }
-    if (!['Dockerfile', 'Terraform', 'Kubernetes', 'Docker Compose', 'CloudFormation', 'GitHub Actions'].includes(language)) continue;
+    if (!['Dockerfile', 'Terraform', 'Kubernetes', 'Docker Compose', 'CloudFormation', 'GitHub Actions', 'Serverless'].includes(language)) continue;
     filesScanned++;
     const scan = extractEnvDeclarations({ path, content, language });
     declarations.push(...scan.declarations);

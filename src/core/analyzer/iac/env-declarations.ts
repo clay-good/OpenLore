@@ -18,7 +18,7 @@
 
 import { LineCounter, parseAllDocuments, isAlias, isMap, isSeq, isScalar, type Document, type Node } from 'yaml';
 
-export type EnvEcosystem = 'Kubernetes' | 'Docker Compose' | 'Dockerfile' | 'Terraform' | 'CloudFormation' | 'GitHub Actions';
+export type EnvEcosystem = 'Kubernetes' | 'Docker Compose' | 'Dockerfile' | 'Terraform' | 'CloudFormation' | 'GitHub Actions' | 'Serverless';
 
 export interface EnvDeclaration {
   name: string;
@@ -59,7 +59,7 @@ export function extractEnvDeclarations(file: { path: string; content: string; la
     switch (file.language) {
       case 'Dockerfile': dockerfile(file, out); break;
       case 'Terraform': terraform(file, out); break;
-      case 'Kubernetes': case 'Docker Compose': case 'CloudFormation': case 'GitHub Actions': yamlLike(file, out); break;
+      case 'Kubernetes': case 'Docker Compose': case 'CloudFormation': case 'GitHub Actions': case 'Serverless': yamlLike(file, out); break;
       default: break;
     }
   } catch {
@@ -364,6 +364,7 @@ function yamlLike(file: { path: string; content: string; language: string }, out
     else if (file.language === 'Docker Compose') r.compose(root);
     else if (file.language === 'GitHub Actions') r.actions(root);
     else if (file.language === 'CloudFormation') r.cloudFormation(root);
+    else if (file.language === 'Serverless') r.serverless(root);
     else if (file.language === 'Terraform') r.tfJson(root);
   }
 }
@@ -494,6 +495,21 @@ function makeReader(doc: Document, lc: LineCounter, file: string, eco: EnvEcosys
         at(get(j.value, 'container'), `job/${job}/container`);
         for (const svc of pairsOf(get(j.value, 'services'))) at(svc.value, `job/${job}/service/${keyOf(svc) ?? '?'}`);
         itemsOf(get(j.value, 'steps')).forEach((st, i) => at(st, `job/${job}/step/${strOf(get(st, 'id')) ?? strOf(get(st, 'name')) ?? i + 1}`));
+      }
+    },
+
+    /**
+     * A Serverless service sets variables provider-wide and per function (change:
+     * add-serverless-and-build-output-binding). Without this, a handler's `TABLE_NAME` read from a
+     * `serverless.yml` `environment:` block would be reported as set by nothing.
+     */
+    serverless(root: Node): void {
+      const provider = get(root, 'provider');
+      if (get(provider, 'environment') !== undefined) envMap(get(provider, 'environment'), 'provider', keyNode(provider, 'environment'));
+      for (const f of pairsOf(get(root, 'functions'))) {
+        const name = keyOf(f);
+        if (!name) continue;
+        if (get(f.value, 'environment') !== undefined) envMap(get(f.value, 'environment'), `function.${name}`, keyNode(f.value, 'environment'));
       }
     },
 

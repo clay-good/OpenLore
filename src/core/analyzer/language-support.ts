@@ -17,6 +17,7 @@
  *   - `cfgOverlay`     ← {@link cfgSupportsLanguage}        (cfg.ts)
  *   - `typeInference`  ← {@link TYPE_INFERENCE_LANGUAGES}   (type-inference-engine.ts)
  *   - `iacProjection`  ← {@link isIacLanguage}              (iac/types.ts)
+ *   - `iacCodeBinding` ← {@link IAC_CODE_BINDING_LANGUAGES} (iac/deploy-binding.ts)
  *   - `contractSchemas`← {@link isContractLanguage}         (contract/types.ts)
  *   - `styleFingerprint`← {@link STYLE_FINGERPRINT_LANGUAGES} (style-fingerprint.ts)
  *   - `dynamicBoundary`← {@link supportsDynamicBoundary}    (dynamic-boundary.ts)
@@ -36,6 +37,7 @@
 import { cfgSupportsLanguage } from './cfg.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
 import { isContractLanguage, CONTRACT_LANGUAGES } from './contract/types.js';
+import { IAC_CODE_BINDING_LANGUAGES } from './iac/deploy-binding.js';
 import { CALLGRAPH_LANGUAGES } from './call-graph.js';
 import { SIGNATURE_LANGUAGES } from './signature-extractor.js';
 import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
@@ -69,6 +71,7 @@ export const CAPABILITIES = [
   'receiverResolution',
   'styleFingerprint',
   'iacProjection',
+  'iacCodeBinding',
   'contractSchemas',
   'crossServiceHttp',
   'errorPropagation',
@@ -92,6 +95,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   receiverResolution: 'Chained intra-object receiver resolution (`this.<field>.m()` / `self.<field>.m()`) through a per-file registry of declared field and return types, with the residue disclosed as a boundary by `analyze_error_propagation` rather than left silent (that tool is the only surface that discloses it). A language WITHOUT this does NOT bind that call shape; what it does instead varies by that language\'s own call query — Java, C# and Ruby capture the chained receiver and fall through to their ordinary member-call handling, while Go captures no chained receiver at all and so records nothing for it.',
   styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
+  iacCodeBinding: 'Infrastructure-to-code binding: a resource that names the code it runs (a Lambda handler, a Serverless function handler) is linked to the indexed function by a `deploys_symbol` edge, resolved literally against the source — through the project\'s own `outDir`/`rootDir` or `main`/`source` mapping when the handler names built output. An ecosystem WITHOUT this names no code, so no binding is looked for; a handler that resolves to nothing is disclosed as unresolved, never dropped.',
   contractSchemas: 'Interface-schema reading and projection: declared operations become graph nodes bound to the route handler that serves each (`implements_endpoint`) and the client call that consumes it (`consumes_endpoint`), matched literally by method and normalized path. A format WITHOUT this is not read, so it declares no operation — never "this repository declares none".',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
   errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
@@ -178,6 +182,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (RECEIVER_REGISTRY_LANGUAGES.has(language)) out.push('receiverResolution');
   if (STYLE_FINGERPRINT_LANGUAGES.has(language)) out.push('styleFingerprint');
   if (isIacLanguage(language)) out.push('iacProjection');
+  if (IAC_CODE_BINDING_LANGUAGES.has(language)) out.push('iacCodeBinding');
   if (isContractLanguage(language)) out.push('contractSchemas');
   if (CROSS_SERVICE_HTTP_LANGUAGES.has(language)) out.push('crossServiceHttp');
   if (ERROR_PROPAGATION_LANGUAGES.has(language)) out.push('errorPropagation');

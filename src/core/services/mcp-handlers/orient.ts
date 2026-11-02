@@ -1063,6 +1063,17 @@ export async function handleOrient(
     } catch { /* never fail orient over the contract summary */ }
   }
 
+  // ── The infrastructure a handler in scope depends on (change: add-iac-deploy-binding-commands) ──
+  // The resource that runs it, and the sites that set the env vars it reads. The env scan runs
+  // only when a function in scope actually reads one, so a non-handler task pays nothing.
+  let infrastructure: import('./deploy-briefing.js').InfrastructureBriefing | undefined;
+  if (!lean && relevantFunctions.length > 0 && llmCtx?.callGraph) {
+    try {
+      const { infrastructureForFunctions } = await import('./deploy-briefing.js');
+      infrastructure = await infrastructureForFunctions(absDir, llmCtx.callGraph as SerializedCallGraph, relevantFunctions.map(f => ({ name: f.name, filePath: f.filePath })));
+    } catch { /* never fail orient over the infrastructure summary */ }
+  }
+
   // ReadyOrHonestFirstUse (change: make-index-self-healing): distinguish *repairing*
   // from *absent* (the not-ready result above) and plain *stale*. readCachedContext,
   // awaited above, fires the background repair for a stale/mismatched index; surface
@@ -1168,6 +1179,7 @@ export async function handleOrient(
     ...(behavioralHotspots !== undefined ? { behavioralHotspots } : {}),
     ...(regionStyle !== undefined ? { regionStyle } : {}),
     ...(contracts !== undefined ? { contracts } : {}),
+    ...(infrastructure !== undefined ? { infrastructure } : {}),
     nextSteps,
   };
   return tokenBudget
@@ -1224,7 +1236,7 @@ async function evaluatePushedMemories(
  * synced decisions), the file scope the answer was computed for, and next steps.
  */
 const ORIENT_BUDGET_TRIM_ORDER = [
-  'contracts', 'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
+  'infrastructure', 'contracts', 'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
   'insertionPoints', 'staleTriggeredMemories', 'injectedMemories', 'specDomains', 'relevantFunctions',
 ] as const;
 

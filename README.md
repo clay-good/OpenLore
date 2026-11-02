@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/node/v/openlore?color=339933&logo=node.js&logoColor=white" alt="Node >=22.22">
   <br>
   <img src="https://img.shields.io/badge/MCP-ready-7c3aed?logo=anthropic&logoColor=white" alt="MCP ready">
-  <img src="https://img.shields.io/badge/languages-21%20%2B%2012%20IaC-f97316" alt="21 languages + 12 IaC ecosystems">
+  <img src="https://img.shields.io/badge/languages-21%20%2B%2013%20IaC-f97316" alt="21 languages + 13 IaC ecosystems">
   <img src="https://img.shields.io/badge/tests-5500%2B-success" alt="5500+ tests">
   <img src="https://img.shields.io/badge/API_key-not_required-0ea5e9" alt="No API key required">
   <a href="https://github.com/clay-good/OpenLore/stargazers"><img src="https://img.shields.io/github/stars/clay-good/OpenLore?style=social" alt="GitHub stars"></a>
@@ -173,7 +173,7 @@ Large monorepos take minutes rather than seconds, stated plainly in [Known limit
 
 **Languages**: TypeScript · JavaScript · Python · Go · Rust · Ruby · Java · C++ · Swift · C# · Kotlin · PHP · C · Scala · Dart · Lua · Elixir · Bash — call graphs ride the same primitives for every language. → [docs/language-support.md](docs/language-support.md)
 
-**Infrastructure-as-Code**: Terraform/HCL · Kubernetes · Helm · CloudFormation · Ansible · Pulumi · AWS CDK · CDKTF · Dockerfile · Docker Compose · GitHub Actions · Azure Bicep — IaC resources project onto the **same graph** as application code, so `orient`, `search_code`, and `analyze_impact` answer "what's the blast radius of changing this security group / IAM role / base image / CI job?" with zero new tooling. → [docs/iac.md](docs/iac.md)
+**Infrastructure-as-Code**: Terraform/HCL · Kubernetes · Helm · CloudFormation · Ansible · Pulumi · AWS CDK · CDKTF · Dockerfile · Docker Compose · GitHub Actions · Azure Bicep · Serverless Framework — IaC resources project onto the **same graph** as application code, so `orient`, `search_code`, and `analyze_impact` answer "what's the blast radius of changing this security group / IAM role / base image / CI job?" with zero new tooling. → [docs/iac.md](docs/iac.md)
 
 **Interface contracts**: OpenAPI 3.x · Swagger 2.0 — each declared operation projects onto the **same graph**, bound to the route handler that serves it and the function that calls it, so `orient` and `analyze_impact` cross the API boundary. Matching is literal, and everything unbound is disclosed. → [docs/contracts.md](docs/contracts.md)
 

@@ -26,8 +26,8 @@ Edge direction is **dependent → dependency**. So for any resource node:
 
 `FunctionNode.language` carries the ecosystem tag (`Terraform`, `Kubernetes`,
 `Helm`, `CloudFormation`, `Ansible`, `Pulumi`, `CDK`, `CDKTF`, `Dockerfile`,
-`Docker Compose`, `GitHub Actions`, `Bicep`); `className` carries the resource
-type, so clustering and architecture overviews group by type.
+`Docker Compose`, `GitHub Actions`, `Bicep`, `Serverless`); `className` carries
+the resource type, so clustering and architecture overviews group by type.
 
 ## What is extracted, per ecosystem
 
@@ -113,12 +113,18 @@ change this?".
 - **File-scoped resolution:** Bicep resolves bare identifiers against a flat **per-file** symbol table (no `var.`/`type.name` prefixes), so the same name (`location`, `vnet`) recurs across files. Addresses are scoped by file (`<file>::<symbol>`) and references resolve **within the declaring file only** — two files each declaring `param location` never cross-link. The single cross-file edge is the local-`module` link above.
 - **Notes:** parsed with a tolerant, hand-rolled scanner (no Bicep compiler, no native dependency). Static only — no `bicep build`, no ARM emit, no Azure/registry access. A multi-line ternary value (`= cond\n ? a\n : b`) resolves only the first line's symbols; the others are dropped rather than guessed.
 
+### Serverless Framework  (`serverless.yml`, `.yaml`, `.json`)
+- **Nodes:** the service, and one resource per `functions.<name>` grouped under it. The file name is the signal; a `service:` key, or `provider:` + `functions:`, corroborates it, so a same-named file is not misclassified.
+- **Edges:** each function → its service (`depends_on`).
+- **Handlers:** `functions.<name>.handler` binds like a Lambda's (below), with the function's own `runtime` overriding the provider's. A function that runs a container `image`, declares no handler, or builds its handler from a `${...}` variable is a disclosed unresolved binding.
+- **Notes:** static only — no plugin execution, no `${...}` resolution, no `sls package`. A manifest's own `resources.Resources` block (CloudFormation written inside a Serverless file) is **not read at all** — dispatch is by language tag, so the CloudFormation extractor never sees a file tagged `Serverless`. Those resources are absent from the graph.
+
 ## The code a function resource runs
 
 A Lambda names its code as `<module>.<export>`. A Terraform `aws_lambda_function` with a literal
-top-level `handler`, or a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function`
-with a string `Handler`, gets a `deploys_symbol` edge to the one indexed top-level function it
-names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handler` with
+top-level `handler`, a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function`
+with a string `Handler`, or a Serverless `functions.<name>.handler`, gets a `deploys_symbol` edge
+to the one indexed top-level function it names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handler` with
 `CodeUri: functions/` → `lambda_handler` in `functions/app.py` (relative to the template).
 
 - **Where the module is looked for:** under the code location only when one is known (SAM
@@ -128,6 +134,14 @@ names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handle
   applies to `AWS::Serverless::Function` only.
 - **Which files:** the runtime picks them (`nodejs*` → TypeScript/JavaScript, `python*` → `.py`, a
   Python module path uses `/`); other runtimes (Java, Go, .NET, custom) are not bound.
+- **Built output:** a handler that names the built file (`dist/orders.handler` — the common case
+  once a project compiles) reaches its source through a mapping the **project itself declares**:
+  TypeScript's `compilerOptions.outDir` with `rootDir`, or a package manifest's `main` paired with
+  `source`. Read from the **repository root's** `tsconfig.json` and `package.json` only, and an
+  `extends` chain is not followed — so a monorepo whose mapping lives in `packages/api/tsconfig.json`,
+  or a root config that inherits `rootDir`, has no mapping here, and the unresolved reason says so. A path under a declared `outDir` the project maps to no input stays unresolved and says
+  so: an output path says nothing about where its input lives, and a same-basename file elsewhere
+  would be a similarity match, which this substrate does not make.
 - **Exactly one:** a module that matches more than one file, or a name with no single top-level
   function in it (class methods do not count), is not bound.
 - `find_dead_code` counts a bound function as deployed (live): `rootKinds.deployed`.
@@ -150,6 +164,7 @@ the value itself. The scan runs at query time over the working tree.
 | Docker Compose | a service's `environment` (map or `KEY=value` list) |
 | Dockerfile | `ENV KEY=value` and `ENV KEY value` |
 | Terraform / OpenTofu | `environment { variables = { … } }`; the kubernetes provider's `env { name = … }` |
+| Serverless | `provider.environment` (service-wide) and each `functions.<name>.environment` |
 | CloudFormation / SAM | `Environment.Variables` on a resource and in `Globals.Function`; ECS `ContainerDefinitions[].Environment` |
 | GitHub Actions | `env` on the workflow, a job, a job container or service, and a step |
 
@@ -171,6 +186,7 @@ they route through a small pure function, `classifyYaml(path, content)`:
 - top-level `hosts:`/playbook list, or a file under `roles/*/{tasks,handlers,…}/` → **Ansible**
 - a `.github/workflows/*.y?ml` with `on:` + `jobs:`, or an `action.y?ml` with `runs:` → **GitHub Actions**
 - a `docker-compose*.y?ml` / `compose*.y?ml` filename with a top-level `services:` key → **Docker Compose**
+- a `serverless.yml` / `.yaml` / `.json` filename with a `service:` key, or `provider:` + `functions:` (either spelling, YAML or JSON) → **Serverless**
 - otherwise → `null` (left as generic config — app config and other CI systems are never misclassified as IaC)
 
 Dockerfiles have no extension to switch on, so they are recognized by name in the
