@@ -410,3 +410,68 @@ describe('analyzeForRefactoring — edge cases', () => {
     expect(ts).toBeGreaterThan(Date.now() - 5000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Projected declarations are not refactoring targets
+// ---------------------------------------------------------------------------
+
+describe('analyzeForRefactoring — projected declarations', () => {
+  it('does not report two mutually-recursive schemas as a dependency cycle', () => {
+    // `Node.next → Other.back → Node` is an ordinary recursive type — a tree with parent
+    // links, a linked list, a comment thread. It is not a cycle anyone can or should break,
+    // and this report is what the generated architecture document prints as work to do.
+    const graph = makeGraph(
+      [
+        makeNode({ id: 'openapi.yaml::#/components/schemas/Node', name: '#/components/schemas/Node', filePath: 'openapi.yaml', language: 'OpenAPI' }),
+        makeNode({ id: 'openapi.yaml::#/components/schemas/Other', name: '#/components/schemas/Other', filePath: 'openapi.yaml', language: 'OpenAPI' }),
+      ],
+      [
+        { callerId: 'openapi.yaml::#/components/schemas/Node', calleeId: 'openapi.yaml::#/components/schemas/Other', calleeName: '#/components/schemas/Other', confidence: 'name_only' as const, kind: 'references_schema' },
+        { callerId: 'openapi.yaml::#/components/schemas/Other', calleeId: 'openapi.yaml::#/components/schemas/Node', calleeName: '#/components/schemas/Node', confidence: 'name_only' as const, kind: 'references_schema' },
+      ],
+    );
+
+    const report = analyzeForRefactoring(graph);
+
+    expect(report.cycles).toEqual([]);
+    expect(report.stats.cyclesDetected).toBe(0);
+    expect(report.stats.cycleParticipants).toBe(0);
+    expect(report.priorities.flatMap(p => p.issues)).not.toContain('in_cycle');
+  });
+
+  it('still reports a real cycle between two functions', () => {
+    // The exclusion is keyed on the node language and the edge kind, so it must not have
+    // disarmed cycle detection itself.
+    const graph = makeGraph(
+      [
+        makeNode({ id: 'a.ts::a', name: 'a', filePath: 'a.ts' }),
+        makeNode({ id: 'b.ts::b', name: 'b', filePath: 'b.ts' }),
+      ],
+      [
+        { callerId: 'a.ts::a', calleeId: 'b.ts::b', calleeName: 'b', confidence: 'name_only' as const, kind: 'calls' },
+        { callerId: 'b.ts::b', calleeId: 'a.ts::a', calleeName: 'a', confidence: 'name_only' as const, kind: 'calls' },
+      ],
+    );
+
+    expect(analyzeForRefactoring(graph).stats.cyclesDetected).toBe(1);
+  });
+
+  it('counts only code in the totals it reports refactoring work against', () => {
+    // `totalFunctions` is the denominator a reader uses to judge how much of the repository has
+    // outstanding work. Counting declarations in it makes any proportion meaningless.
+    const graph = makeGraph(
+      [
+        makeNode({ id: 'src/h.ts::handler', name: 'handler', filePath: 'src/h.ts' }),
+        makeNode({ id: 'openapi.yaml::GET /x', name: 'GET /x', filePath: 'openapi.yaml', language: 'OpenAPI' }),
+        makeNode({ id: 'openapi.yaml::#/components/schemas/X', name: '#/components/schemas/X', filePath: 'openapi.yaml', language: 'OpenAPI' }),
+      ],
+      [{ callerId: 'openapi.yaml::GET /x', calleeId: 'src/h.ts::handler', calleeName: 'handler', confidence: 'name_only' as const, kind: 'implements_endpoint' }],
+    );
+
+    const report = analyzeForRefactoring(graph);
+
+    expect(report.stats.totalFunctions).toBe(1);
+    expect(report.priorities.map(p => p.function)).not.toContain('GET /x');
+    expect(report.priorities.map(p => p.function)).not.toContain('#/components/schemas/X');
+  });
+});

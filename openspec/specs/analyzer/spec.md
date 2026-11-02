@@ -8002,6 +8002,57 @@ several binds nothing and is disclosed as ambiguous.
 - **WHEN** the repository is analyzed
 - **THEN** no `implements_endpoint` edge is created and the address is disclosed as ambiguous
 
+### Requirement: ContractElementsAreGraphNodesBoundToHandlers
+
+Each NAMED schema a specification declares — `components/schemas` in OpenAPI 3, `definitions` in
+Swagger 2 — SHALL be projected as a graph node carrying the specification's path, the schema's
+declared line, its JSON pointer as the node name and its bare name as the signature. An operation
+SHALL be linked by a `references_schema` edge to each named schema it references directly across
+its parameters, body and responses, and a named schema SHALL be linked the same way to each named
+schema its own definition references directly. Transitive reachability SHALL be left to the graph
+rather than duplicated per node.
+
+Per-FIELD nodes SHALL NOT be projected: a named schema is the reusable unit, and the
+property-level verdict already belongs to `certify_service_contract`.
+
+A schema cycle SHALL terminate, each edge drawn once.
+
+A `references_schema` edge is a DECLARATION binding, so it SHALL contribute to no function's
+fan-in or fan-out, no entry-point or hub classification, no file-level dependency ranking and no
+layer violation; and a schema node SHALL be excluded from every candidate set that ranks source
+code, as every other projected declaration is.
+
+#### Scenario: A shared schema is one node with many referents
+
+- **GIVEN** a document declaring `Order` (which references `Customer`) and `OrderInput`, and
+  `POST /v1/orders` whose body references `OrderInput` and whose response references `Order`
+- **WHEN** the repository is analyzed
+- **THEN** three schema nodes exist, `POST /v1/orders` has a `references_schema` edge to `Order`
+  and to `OrderInput`, and `Order` has one to `Customer`
+
+#### Scenario: A declaration binding changes no code measurement
+
+- **GIVEN** the same repository analyzed with and without the specification
+- **WHEN** the two graphs are compared
+- **THEN** every code function's fan-in and fan-out, the structural averages, the entry points and
+  the hubs are identical, and no schema node appears among the entry points or hubs
+
+#### Scenario: A reference through a reusable component is followed; a documented one is not
+
+- **GIVEN** an operation referencing `components/parameters/OrderId`, whose schema is
+  `OrderId`, and a response whose `example` references `Legacy`
+- **WHEN** the repository is analyzed
+- **THEN** the operation has a `references_schema` edge to `OrderId`, none to `Legacy`, and
+  nothing is disclosed as unresolved
+
+#### Scenario: A dangling reference is disclosed, not invented
+
+- **GIVEN** a schema whose property references `#/components/schemas/Missing`, which the document
+  does not declare
+- **WHEN** the repository is analyzed
+- **THEN** no node is created for it, no edge is drawn, and the projection discloses the
+  unresolved reference
+
 ### Requirement: UnboundContractElementsAreDisclosed
 
 Everything the contract projection could not bind SHALL be disclosed on the build rather than
@@ -8046,12 +8097,59 @@ build reports "no operations" for a repository whose specification merely failed
 - **THEN** no edge is created, the route is not called unmatched, and the unresolved binding is
   disclosed
 
+### Requirement: ContractReferencesAreStructuralAndAttributedByAddress
+
+A reference SHALL be followed through a reusable component to the named schema it names, SHALL be
+ignored where it appears only in documentation, and SHALL be attributed to an operation by that
+operation's address. A reference to a schema that was not projected SHALL be disclosed with its
+reason, and a cap SHALL be reported against the DECLARED count.
+
+Keeping parameters and responses in `components` is the style the specification recommends, so an
+operation that does so depends on those schemas exactly as if they were inline. A reference inside
+a `description` or an `example` is prose about a type, not a dependency on it. An `operationId` is
+required to be unique and a document may still repeat one, so it is not an identity.
+
+#### Scenario: A reference through a reusable component is followed
+
+- **GIVEN** an operation referencing `components/parameters/OrderId`, whose schema is `OrderId`,
+  and a response referencing `components/responses/OrderOut`, whose schema is `Order`
+- **WHEN** the repository is analyzed
+- **THEN** the operation has a `references_schema` edge to `OrderId` and to `Order`, and nothing
+  is disclosed as unresolved
+
+#### Scenario: A reference written only in documentation draws no edge
+
+- **GIVEN** a response whose `example` references `Legacy`, which the document declares
+- **WHEN** the repository is analyzed
+- **THEN** `Legacy` is a node, and no operation has a `references_schema` edge to it
+
+#### Scenario: A repeated operationId attributes nothing across operations
+
+- **GIVEN** two operations in one document declaring the same `operationId`, each referencing a
+  different schema
+- **WHEN** the repository is analyzed
+- **THEN** each operation references only its own schema
+
+#### Scenario: A cap reports what the document declared
+
+- **GIVEN** a document declaring more named schemas than the reader's own cap admits
+- **WHEN** the repository is analyzed
+- **THEN** the number disclosed as not projected is the declared count minus the projected count
+
 ### Requirement: ContractElementsAreNotRankedAsCode
 
-A contract element is a declaration, not a code unit. A contract node SHALL be excluded from the
-candidate sets that rank source code — hubs, entry points, dead code, coverage gaps, change
-significance, and the file-level dependency rankings — and a contract edge SHALL NOT change any
+A contract element is a declaration, not a code unit. A contract node SHALL be excluded from
+EVERY candidate set that ranks or counts source code, and a contract edge SHALL NOT change any
 function's fan-in or fan-out, in the in-memory build and in the persisted graph every tool reads.
+A caller that NAMES a projected language SHALL still be served it.
+
+The exclusion SHALL be keyed on the node's projected LANGUAGE and the edge's declaration KIND, in
+one shared predicate, so a newly projected language is covered the day it is added rather than the
+day each surface remembers it. The surfaces in scope are the hubs, entry points, dead code,
+coverage gaps, change significance and file-level dependency rankings; the retrieval surfaces
+(`search_code`, `suggest_insertion_points`, `orient`); the structural health signals (betweenness
+bridges, untested hotspots); the refactoring report; and the counts the generated digest prints as
+functions.
 A contract node SHALL reach an agent as a typed cross-domain neighbour, never inside a list of
 functions it could edit or test. A handler bound to a declared operation SHALL be treated as
 invoked from outside the code, so it is a reachability root rather than dead code.
@@ -8062,6 +8160,21 @@ invoked from outside the code, so it is a reachability root rather than dead cod
 - **WHEN** the two graphs are compared
 - **THEN** every function's fan-in and fan-out, the hubs, the entry points, and the structural
   averages are identical, and no contract node appears among them
+
+#### Scenario: A declaration never competes with code for a ranked slot
+
+- **GIVEN** a document declaring more named schemas than the repository has functions
+- **WHEN** `search_code`, `suggest_insertion_points`, `orient` or the structural health map ranks
+  candidates without being asked for a projected language
+- **THEN** no schema or operation appears among the results, the code's own scores are unchanged
+  including a normalised betweenness, and naming a projected language explicitly serves it again
+
+#### Scenario: A recursive schema is not reported as a cycle to break
+
+- **GIVEN** two named schemas whose definitions reference each other
+- **WHEN** the refactoring report and the generated architecture document are produced
+- **THEN** no dependency cycle is reported, and the count of functions analyzed excludes both
+  declarations
 
 #### Scenario: The served graph classifies a declaration the same way
 

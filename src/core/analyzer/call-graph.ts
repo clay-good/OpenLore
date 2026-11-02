@@ -6757,10 +6757,16 @@ export class CallGraphBuilder {
         // in the graph with no edges and no disclosure (the same lesson as Pass 7a). Operation ids
         // are `<spec file>::<METHOD path>`, so a collision with a code node is not reachable; the
         // filter below keeps the invariant explicit rather than assumed.
-        const operationIds = new Set(projection.nodes.map(n => n.id));
+        const projectedIds = new Set(projection.nodes.map(n => n.id));
         const projected: CallEdge[] = [];
         for (const e of projection.edges) {
-          if (!operationIds.has(e.calleeId) || !allNodes.has(e.callerId)) continue;
+          // The callee is always a projected declaration. The caller is either CODE (a handler
+          // or a client function, already in `allNodes`) or another projected declaration — a
+          // named schema referencing a named schema. Requiring the caller to pre-exist in
+          // `allNodes` silently dropped every schema → schema edge, since the projected nodes
+          // are added on the next line (change: add-contract-schema-elements).
+          if (!projectedIds.has(e.calleeId)) continue;
+          if (!allNodes.has(e.callerId) && !projectedIds.has(e.callerId)) continue;
           projected.push(e);
         }
         for (const n of projection.nodes) if (!allNodes.has(n.id)) allNodes.set(n.id, n);
