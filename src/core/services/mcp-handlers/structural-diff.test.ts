@@ -60,7 +60,7 @@ describe('handleStructuralDiff', () => {
     } as never);
   });
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('reports added, removed, and signature-changed functions', async () => {
     const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as {
@@ -153,7 +153,7 @@ describe('handleStructuralDiff', () => {
       const r = await handleStructuralDiff({ directory: dir }) as { error: string };
       expect(r.error).toMatch(/git repository/i);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -207,7 +207,7 @@ describe('handleStructuralDiff — stable-id matching', () => {
     vi.mocked(readCachedContext).mockResolvedValue(null as never);
   });
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('reports a pure cross-file move as the same symbol, not remove+add', async () => {
     const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as {
@@ -298,7 +298,7 @@ describe('handleStructuralDiff — stable-id matching', () => {
       // gone.ts's dup was genuinely deleted → reported removed.
       expect(r.removed.some(n => n.name === 'dup' && n.file === 'src/gone.ts')).toBe(true);
     } finally {
-      rmSync(repo2, { recursive: true, force: true });
+      rmSync(repo2, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

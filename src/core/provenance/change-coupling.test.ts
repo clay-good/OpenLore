@@ -51,7 +51,7 @@ describe('analyzeChangeCoupling (crafted history)', () => {
     commit(repo, bulk, 'format sweep');
   });
 
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('reports the coupled pair above thresholds with correct support/confidence', async () => {
     const r = await analyzeChangeCoupling(repo);
@@ -109,7 +109,7 @@ describe('analyzeChangeCoupling — start-ref window (fix-git-derived-signal-hon
     commit(repo, ['h.ts'], 'after-2');
     commit(repo, ['h.ts'], 'after-3');
   });
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('mines the whole history from HEAD when no start ref is given (unchanged behavior)', async () => {
     const r = await analyzeChangeCoupling(repo);
@@ -144,7 +144,7 @@ describe('analyzeChangeCoupling — below-root re-framing (fix-git-derived-signa
     commit(repo, ['packages/foo/a.ts', 'packages/foo/b.ts'], 'c2');
     commit(repo, ['packages/foo/a.ts', 'packages/foo/b.ts'], 'c3');
   });
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('at the repo root, churn keys are repo-root-relative (unchanged)', async () => {
     const r = await analyzeChangeCoupling(repo);
@@ -174,7 +174,7 @@ describe('analyzeChangeCoupling — graceful degradation', () => {
       expect(r.churn.size).toBe(0);
       expect(r.coupling.size).toBe(0);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

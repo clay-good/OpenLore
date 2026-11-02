@@ -46,7 +46,7 @@ function freshDir(withAnalysis = false, opts: { git?: boolean } = {}): string {
 afterEach(() => {
   delete process.env.OPENLORE_NO_AUTO_ANALYZE;
   _resetRepairServiceForTesting();
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe('bootstrapAnalysisInBackground', () => {

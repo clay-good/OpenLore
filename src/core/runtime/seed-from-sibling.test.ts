@@ -44,13 +44,13 @@ function addWorktree(): string {
 async function withMainIndex(mutate: (analysisDir: string) => void, check: () => Promise<void>): Promise<void> {
   const analysisDir = join(main, ANALYSIS);
   const backup = join(base, 'index-backup');
-  rmSync(backup, { recursive: true, force: true });
+  rmSync(backup, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   cpSync(analysisDir, backup, { recursive: true });
   try {
     mutate(analysisDir);
     await check();
   } finally {
-    rmSync(analysisDir, { recursive: true, force: true });
+    rmSync(analysisDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     cpSync(backup, analysisDir, { recursive: true });
   }
 }
@@ -82,7 +82,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(() => {
-  rmSync(base, { recursive: true, force: true });
+  rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 afterEach(() => {
@@ -165,7 +165,7 @@ describe('seeding a new worktree from a sibling checkout', () => {
     expect(await seedFromSiblingCheckout(worktree)).toMatchObject({ state: 'seeded' });
     expect(existsSync(dead)).toBe(false);
     expect(existsSync(live)).toBe(true);
-    rmSync(live, { recursive: true, force: true });
+    rmSync(live, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('never seeds a checkout that already has an index', async () => {
