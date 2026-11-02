@@ -741,9 +741,19 @@ function printSummary(
     logger.success('OpenLore install complete.');
   } else {
     logger.success('OpenLore uninstall complete.');
+    // Everything left behind, not just the one directory. `openspec/` and the `.gitignore`
+    // line were both left in place silently, so `git status` came back dirty after an
+    // uninstall that reported itself complete (change: fix-uninstall-leftovers).
     logger.info(
       'Kept data',
-      'The ".openlore/" directory remains (index, decisions, and memories). From the repository root, remove it with `rm -rf -- ./.openlore/` if you no longer need that data.'
+      'The ".openlore/" directory remains (index, decisions, and memories). From the repository '
+      + 'root, remove it with `rm -rf -- ./.openlore/` if you no longer need that data.'
+    );
+    logger.info(
+      'Also left in place',
+      'Any "openspec/" directory (your specs and changes), and the ".openlore/" line added to '
+      + '.gitignore — both are yours to keep or remove. Neither is touched by uninstall, so '
+      + '`git status` may still show .gitignore as modified.'
     );
   }
 }

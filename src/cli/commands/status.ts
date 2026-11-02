@@ -12,6 +12,7 @@
  */
 
 import { Command } from 'commander';
+import { formatAge } from '../../utils/command-helpers.js';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -196,6 +197,21 @@ async function changedSinceIndex(rootPath: string, builtAtMs: number | null): Pr
 }
 
 /** Collect the index's self-state without mutating anything. */
+/**
+ * "3 minutes ago (2026-11-01 20:30)" for an ISO timestamp, or the raw value when it cannot be
+ * parsed. Relative first, because that is the question a reader has; the local absolute time
+ * second, because a precise one is sometimes what they need.
+ */
+function describeBuiltAt(iso: string): string {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return iso;
+  const local = new Date(at).toLocaleString(undefined, {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+  const delta = Date.now() - at;
+  return delta < 0 ? local : `${formatAge(delta)} (${local})`;
+}
+
 export async function collectIndexStatus(rootPath: string): Promise<IndexStatus> {
   const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   let config: OpenLoreConfig | null = null;
@@ -370,7 +386,9 @@ Read-only: this never builds, rebuilds, or locks the index.
     if (status.configUnreadable) {
       console.log(`  ${label('Configuration')} ${c.yellow('unreadable — run "openlore doctor"')}`);
     }
-    console.log(`  ${label('Index built')} ${status.builtAt ? safe(status.builtAt) : c.dim('unknown')}`);
+    // Relative, like every other line in this panel. A raw UTC ISO stamp read as TOMORROW's
+    // date for anyone west of UTC in the evening (change: fix-self-inflicted-spec-warning).
+    console.log(`  ${label('Index built')} ${status.builtAt ? safe(describeBuiltAt(status.builtAt)) : c.dim('unknown')}`);
 
     const staleCount = status.staleFiles.length;
     const staleText = status.staleFilesUnknown
