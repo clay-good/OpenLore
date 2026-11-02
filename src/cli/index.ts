@@ -21,6 +21,9 @@ import './node-version-bootstrap.js';
 // does essentially no wasted work before handing off to the larger-heap child. Fail-open and
 // at-most-once — see heap-sizing.ts.
 import './heap-bootstrap.js';
+// Render an unexpected failure as one legible stderr line instead of a V8 stack trace. Bound
+// here, before the command modules load, so a throw while they evaluate is covered too.
+import './crash-reporter.js';
 import { allowInsecureTls } from '../core/services/tls-scope.js';
 
 import { Command } from 'commander';

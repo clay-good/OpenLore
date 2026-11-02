@@ -690,6 +690,33 @@ export const claudeCodeAdapter: Adapter = {
       mdResult.conflict = true;
       return mdResult;
     }
+    // A pre-existing `mcpServers.openlore` this install did not write — a hand-wired wrapper,
+    // a pinned preset, another checkout's absolute path — is the user's, not ours: preserved
+    // with a warning, as the Codex adapter already does for `mcp_servers.openlore`. Silently
+    // replacing it threw away a deliberate choice. Scoped to a file carrying no managed meta
+    // and an entry that is not our own shape, so an entry we wrote (or one whose meta was
+    // lost) still updates in place.
+    if (!prevMcpMeta && hadMcp && !ctx.force) {
+      const servers = existingMcp.mcpServers;
+      const foreign = servers && typeof servers === 'object'
+        ? (servers as Record<string, unknown>).openlore
+        : undefined;
+      if (foreign !== undefined && !isOurMcpEntry(foreign)) {
+        mdResult.changes.push({
+          path: mcpPath,
+          kind: 'noop',
+          summary: `${layout.mcp}: preserved the existing mcpServers.openlore entry`,
+        });
+        mdResult.warnings.push(
+          `${layout.mcp} already defines mcpServers.openlore and OpenLore did not write it — `
+          + 'OpenLore preserved it and registered nothing. Remove that entry (or pass --force) '
+          + 'to have install wire the server itself.',
+        );
+        mdResult.conflict = true;
+        return mdResult;
+      }
+    }
+
     const entry = mcpEntry(ctx.preset, ctx.platform, ctx.platformCommandRuntime);
     const { next: nextMcp, action: mcpAction } = mergeEntries(existingMcp, [
       { path: 'mcpServers.openlore', value: entry },

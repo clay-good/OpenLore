@@ -85,6 +85,41 @@ describe('openlore install (end-to-end)', () => {
     expect(combined).toMatch(/\(new file\).+settings\.json/);
   });
 
+  // An `mcpServers.openlore` entry OpenLore did not write is someone's deliberate choice —
+  // a wrapper script, a pinned preset, another checkout's path. It used to be replaced with
+  // no warning at all. Matches what the Codex adapter already does for `mcp_servers.openlore`.
+  it('preserves an mcpServers.openlore entry it did not write, and says so', async () => {
+    await writeFile(
+      join(dir, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          openlore: { command: 'my-wrapper', args: ['--my-flag'] },
+          other: { command: 'other-server' },
+        },
+      }, null, 2) + '\n',
+    );
+
+    const code = await runInstall({ cwd: dir, agent: 'claude-code', repoOnly: true, analyze: false });
+
+    expect(code).toBe(1);
+    const after = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(after.mcpServers.openlore).toEqual({ command: 'my-wrapper', args: ['--my-flag'] });
+    expect(after._openlore).toBeUndefined();
+  });
+
+  it('--force takes over an mcpServers.openlore entry it did not write', async () => {
+    await writeFile(
+      join(dir, '.mcp.json'),
+      JSON.stringify({ mcpServers: { openlore: { command: 'my-wrapper' } } }, null, 2) + '\n',
+    );
+
+    const code = await runInstall({ cwd: dir, agent: 'claude-code', repoOnly: true, analyze: false, force: true });
+
+    expect(code).toBe(0);
+    const after = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(after.mcpServers.openlore.command).not.toBe('my-wrapper');
+  });
+
   it('agent-md install creates AGENTS.md with managed block', async () => {
     const code = await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
     expect(code).toBe(0);

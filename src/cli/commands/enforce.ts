@@ -89,6 +89,7 @@ import {
   resolveTrustedHookLauncher,
   renderTrustedHookCommand,
   updateHookFile,
+  insertHookBlock,
 } from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-enforcement-hook';
@@ -132,10 +133,7 @@ export async function installEnforcementHook(rootPath: string): Promise<void> {
       const refreshed = existing.replace(/# openlore-enforcement-hook[\s\S]*?# end-openlore-enforcement-hook/, hookContent.trimEnd());
       return refreshed === existing ? null : refreshed;
     }
-    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped
-      ? stripped + '\n\n' + hookContent
-      : '#!/bin/sh\n\n' + hookContent;
+    return insertHookBlock(existing, hookContent);
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the enforcement hook at ${displayHookPath(hookPath)}: ${result.reason}`);

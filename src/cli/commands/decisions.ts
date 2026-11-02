@@ -77,6 +77,7 @@ import {
   resolveTrustedHookLauncher,
   renderTrustedHookCommand,
   updateHookFile,
+  insertHookBlock,
 } from '../git-hooks.js';
 
 // ============================================================================
@@ -349,13 +350,9 @@ export async function installPreCommitHook(
       return preAlreadyInstalled ? null : refreshed;
     }
     appendedPre = existing !== null;
-    const stripped = existing
-      ?.replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '')
-      .trimEnd()
-      .replace(/\n*\nexit 0\s*$/, '');
-    return stripped
-      ? stripped + '\n\n' + hookContent
-      : '#!/bin/sh\n\n' + hookContent;
+    return insertHookBlock(existing, hookContent, [
+      /\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g,
+    ]);
   });
   if (preResult.status === 'unavailable') {
     logger.warning(`Cannot install the decisions hook at ${displayHookPath(hookPath)}: ${preResult.reason}`);
@@ -380,10 +377,7 @@ export async function installPreCommitHook(
   }
   const postResult = await updateHookFile(postCommitPath, (existing) => {
     if (existing?.includes(POST_COMMIT_HOOK_MARKER)) return null;
-    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped
-      ? stripped + '\n\n' + POST_COMMIT_HOOK_CONTENT
-      : '#!/bin/sh\n\n' + POST_COMMIT_HOOK_CONTENT;
+    return insertHookBlock(existing, POST_COMMIT_HOOK_CONTENT);
   });
   if (postResult.status === 'unavailable') {
     logger.warning(`Cannot install the decisions post-commit hook at ${displayHookPath(postCommitPath)}: ${postResult.reason}`);

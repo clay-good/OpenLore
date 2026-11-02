@@ -593,8 +593,13 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   }
 
   if (conflict) {
+    // Cause-neutral on purpose. A repo-scope refusal is not always a hand-edit: it is also an
+    // unparseable managed file, a symlink OpenLore will not write through, or a configuration
+    // entry someone else wrote. Each refusal already pushed a warning naming its own cause and,
+    // where `--force` actually overrides it, saying so. Naming hand-edits here described the
+    // wrong problem and advertised a flag that does not help for most of them.
     logger.error(
-      'Hand-edited OpenLore block(s) detected. Re-run with --force to overwrite, or revert your edits.'
+      'Install did not complete — the file(s) named above were left exactly as they are.'
     );
     return 1;
   }

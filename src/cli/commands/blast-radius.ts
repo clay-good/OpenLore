@@ -29,6 +29,7 @@ import {
   resolveTrustedHookLauncher,
   renderTrustedHookCommand,
   updateHookFile,
+  insertHookBlock,
 } from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-blast-radius-hook';
@@ -63,8 +64,7 @@ export async function installBlastRadiusHook(rootPath: string): Promise<void> {
   let alreadyInstalled = false;
   const result = await updateHookFile(hookPath, (existing) => {
     if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; const refreshed = existing.replace(/# openlore-blast-radius-hook[\s\S]*?# end-openlore-blast-radius-hook/, hookContent.trimEnd()); return refreshed === existing ? null : refreshed; }
-    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped ? stripped + '\n\n' + hookContent : '#!/bin/sh\n\n' + hookContent;
+    return insertHookBlock(existing, hookContent);
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the blast-radius hook at ${displayHookPath(hookPath)}: ${result.reason}`);

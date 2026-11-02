@@ -79,6 +79,28 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     expect(config.governance.autopilot).toBe(true);
   });
 
+  // An existing hook is the user's script, not ours to edit. Theirs may end with `exit 0` to
+  // swallow a non-zero status from a linter; an earlier version deleted that line so our
+  // appended block could be reached, silently changing what their hook does. The gate goes in
+  // first instead, and every other byte of their script survives.
+  it("keeps an existing pre-commit hook byte for byte, including a trailing exit 0", async () => {
+    await initGit();
+    await writeConfig(dir);
+    const hookPath = join(dir, '.git', 'hooks', 'pre-commit');
+    await mkdir(join(dir, '.git', 'hooks'), { recursive: true });
+    const theirs = '#!/bin/sh\n# my own hook\nnpm run lint\nexit 0\n';
+    await writeFile(hookPath, theirs, { mode: 0o755 });
+
+    expect(await wireGovernanceGate(dir)).toBe('wired');
+
+    const hook = await readFile(hookPath, 'utf8');
+    expect(hook.startsWith('#!/bin/sh\n')).toBe(true);
+    // Their script is intact — the trailing `exit 0` above all.
+    expect(hook).toContain('# my own hook\nnpm run lint\nexit 0');
+    // And the gate runs before it, so the `exit 0` cannot skip it.
+    expect(hook.indexOf('openlore-decisions-hook')).toBeLessThan(hook.indexOf('npm run lint'));
+  });
+
   it('writes autopilot into the project file without copying user-wide defaults into it', async () => {
     await initGit();
     await writeConfig(dir);

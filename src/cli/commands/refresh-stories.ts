@@ -21,6 +21,7 @@ import {
   resolveGitHookTarget,
   resolveTrustedHookLauncher,
   renderTrustedHookCommand,
+  insertHookBlock,
   updateHookFile,
 } from '../git-hooks.js';
 
@@ -60,7 +61,7 @@ export async function installPostCommitHook(rootPath: string): Promise<void> {
   const result = await updateHookFile(hookPath, (existing) => {
     if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; const refreshed = existing.replace(/# openlore-refresh-hook[\s\S]*?# end-openlore-refresh-hook/, hookContent.trimEnd()); return refreshed === existing ? null : refreshed; }
     appended = existing !== null;
-    return existing ? existing.trimEnd() + '\n\n' + hookContent : '#!/bin/sh\n\n' + hookContent;
+    return insertHookBlock(existing, hookContent);
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the refresh-stories hook at ${displayHookPath(hookPath)}: ${result.reason}`);
