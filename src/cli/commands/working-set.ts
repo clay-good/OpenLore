@@ -18,6 +18,7 @@ import {
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { configureLogger, logger } from '../../utils/logger.js';
 import { renderPushedMemories } from './pushed-memory-render.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 const SEVERITY_MARK: Record<WorkingSetFinding['severity'], string> = {
   error: '✗',
@@ -92,8 +93,8 @@ export async function runWorkingSetContextCli(opts: WorkingSetContextCliOptions)
     // surface cleanly and exit 0.
     configureLogger({ quiet: false });
     const message = err instanceof Error ? err.message : String(err);
-    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: message }, null, 2) + '\n');
-    else logger.warning(`working-set: ${message}`);
+    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: toCliVocabulary(message) }, null, 2) + '\n');
+    else logger.warning(`working-set: ${toCliVocabulary(message)}`);
     return 0;
   }
   configureLogger({ quiet: false });

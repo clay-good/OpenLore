@@ -30,6 +30,7 @@ import {
   renderTrustedHookCommand,
   updateHookFile,
 } from '../git-hooks.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 const HOOK_MARKER = '# openlore-blast-radius-hook';
 
@@ -242,8 +243,9 @@ export async function runBlastRadiusCli(opts: BlastRadiusCliOptions): Promise<nu
   if ('error' in result) {
     // Advisory: an infrastructure failure (no graph, not a repo) must NEVER block
     // a commit. Surface the reason and exit 0 in hook mode.
-    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: result.error }, null, 2) + '\n');
-    else logger.warning(`blast-radius: ${result.error}`);
+    const error = toCliVocabulary(String(result.error));
+    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
+    else logger.warning(`blast-radius: ${error}`);
     return 0;
   }
 
