@@ -27,7 +27,7 @@ import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.j
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { isContractLanguage } from '../../analyzer/contract/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
-import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
+import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
 import { fitPayloadToBudget } from './budget-fit.js';
 import { estimateTokens } from '../llm-service.js';
 import { loadArchitectureRules } from '../../architecture/rules.js';
@@ -209,6 +209,33 @@ interface InlineSpec {
 // HANDLER
 // ============================================================================
 
+/**
+ * How many spec domains the corpus holds, for the one question `specDomains: []` cannot answer on
+ * its own: is this repository ungoverned, or is the link index simply not built? A local,
+ * depth-bounded scan on purpose — no cross-module dependency for a directory probe, and every
+ * failure is "no disclosure" rather than a broken orient (change: fix-governance-face-dark).
+ */
+async function countSpecDomains(absDir: string, openspecPath?: string): Promise<number> {
+  try {
+    const { readdir } = await import('node:fs/promises');
+    const specsDir = join(absDir, openspecPath ?? OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+    const walk = async (dir: string, depth: number): Promise<number> => {
+      if (depth > 3) return 0;
+      let found = 0;
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name === 'spec.md') found++;
+        else if (entry.isDirectory() && !entry.name.startsWith('.')) {
+          found += await walk(join(dir, entry.name), depth + 1);
+        }
+      }
+      return found;
+    };
+    return await walk(specsDir, 0);
+  } catch {
+    return 0;
+  }
+}
+
 export async function handleOrient(
   directory: string,
   task: string,
@@ -356,6 +383,20 @@ export async function handleOrient(
   }
 
   // ── Spec domains covering those files ─────────────────────────────────────
+  // With no mapping index there is nothing to match against, and `specDomains: []` would read as
+  // "no spec governs this code". Say which it is: an absent index is a missing CACHE, not a
+  // finding about the repository (change: fix-governance-face-dark).
+  let specLinkage: { state: 'unavailable'; reason: string; remediation: string } | undefined;
+  if (!mappingIdx) {
+    const specCount = await countSpecDomains(absDir, cfg?.openspecPath);
+    if (specCount > 0) {
+      specLinkage = {
+        state: 'unavailable',
+        reason: `${specCount} spec domain(s) exist, but the spec→code link index has not been built, so no requirement could be matched to the code in scope.`,
+        remediation: 'Run `openlore analyze` (it writes the index), or `openlore mapping refresh`.',
+      };
+    }
+  }
   const domainScores = new Map<string, { specFile: string; matchCount: number }>();
   if (mappingIdx) {
     for (const filePath of relevantFiles) {
@@ -1178,6 +1219,7 @@ export async function handleOrient(
     ...(landmarks !== undefined ? { landmarks } : {}),
     ...(behavioralHotspots !== undefined ? { behavioralHotspots } : {}),
     ...(regionStyle !== undefined ? { regionStyle } : {}),
+    ...(specLinkage ? { specLinkage } : {}),
     ...(contracts !== undefined ? { contracts } : {}),
     ...(infrastructure !== undefined ? { infrastructure } : {}),
     nextSteps,
