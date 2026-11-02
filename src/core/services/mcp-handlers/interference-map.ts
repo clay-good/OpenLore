@@ -503,10 +503,16 @@ export interface RawChangeEnumeration {
 type EnumerationOutput = RawChange[] | RawChangeEnumeration;
 
 export interface InFlightProviders {
-  /** Enumerate local branch changes ahead of base in a repo. */
-  enumerateBranches(repoPath: string, repoName: string, baseRef: string, only?: string[]): Promise<EnumerationOutput>;
+  /**
+   * Enumerate local branch changes ahead of base in a repo.
+   *
+   * `deadline` is an epoch-millisecond budget for the WHOLE call, not for this repo: it is
+   * computed once by the handler and handed to every provider, so a federation of N repos
+   * cannot spend N budgets and blow the tool timeout.
+   */
+  enumerateBranches(repoPath: string, repoName: string, baseRef: string, only?: string[], deadline?: number): Promise<EnumerationOutput>;
   /** Enumerate open pull requests in a repo (via gh). Resolves to [] when gh is absent. */
-  enumeratePullRequests(repoPath: string, repoName: string, baseRef: string): Promise<EnumerationOutput>;
+  enumeratePullRequests(repoPath: string, repoName: string, baseRef: string, deadline?: number): Promise<EnumerationOutput>;
   /** Whether `gh` is available at all (drives the "PRs not enumerated" caveat). */
   ghAvailable(repoPath: string): Promise<boolean>;
   /** Simulate merging two tip commits (default: a read-only `git merge-tree` in a scratch repository). */
@@ -693,6 +699,10 @@ export async function defaultEnumerateBranches(
     // as not assessed rather than letting the whole call hit the tool timeout, where the agent
     // gets nothing at all. 705 branches × (merge-base + diff + a base-snapshot reparse) ran to
     // three minutes on a real clone (change: fix-in-flight-harvest-budget).
+    // The caller's own filter comes FIRST: a branch it never asked about must not be reported
+    // as one the budget could not reach. Reporting those turned a request for one branch into
+    // four results, three of them "not assessed" for a branch nobody wanted assessed.
+    if (wanted && !wanted.has(branch)) continue;
     if (Date.now() > deadline) {
       out.push({
         actor: branch, ref: branch, title: branch, repo: repoName, kind: 'branch',
@@ -701,7 +711,6 @@ export async function defaultEnumerateBranches(
       });
       continue;
     }
-    if (wanted && !wanted.has(branch)) continue;
     let mergeBase: string;
     try {
       // `--end-of-options` on every operand that is a REF NAME read out of the repo.
@@ -774,6 +783,7 @@ export async function defaultEnumeratePullRequests(
   },
   runGit: CommandRunner = git,
   autoResolve?: AutoBaseResolver,
+  deadline: number = Date.now() + HARVEST_BUDGET_MS,
 ): Promise<RawChangeEnumeration> {
   let prs: GhPr[];
   try {
@@ -793,6 +803,17 @@ export async function defaultEnumeratePullRequests(
     const ref = `PR #${pr.number}`;
     const headBranch = pr.headRefName;
     const actor = pr.author?.login || 'unknown';
+    // The same wall-clock budget the branch half has. `gh pr diff` is a network call per PR,
+    // 50 of them, and this loop had no bound at all: the budget stopped reading branches and
+    // then spent minutes here instead (change: fix-harvest-budget-scope).
+    if (Date.now() > deadline) {
+      out.push({
+        actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', headBranch,
+        files: [], baseSymbolsByFile: new Map(),
+        assessmentError: `the ${HARVEST_BUDGET_MS / 1000}s harvest budget for one call was reached before this pull request was read`,
+      });
+      continue;
+    }
     let patch: string;
     try {
       patch = await runGh(repoPath, ['pr', 'diff', String(pr.number), '--patch']);
@@ -840,8 +861,12 @@ async function defaultGhAvailable(repoPath: string): Promise<boolean> {
 }
 
 const DEFAULT_PROVIDERS: InFlightProviders = {
-  enumerateBranches: defaultEnumerateBranches,
-  enumeratePullRequests: defaultEnumeratePullRequests,
+  // Each default carries its injectable runners before the deadline, so the interface's
+  // 5th/4th argument is mapped onto the right tail parameter rather than onto `runGit`.
+  enumerateBranches: (repoPath, repoName, baseRef, only, deadline) =>
+    defaultEnumerateBranches(repoPath, repoName, baseRef, only, undefined, undefined, deadline),
+  enumeratePullRequests: (repoPath, repoName, baseRef, deadline) =>
+    defaultEnumeratePullRequests(repoPath, repoName, baseRef, undefined, undefined, undefined, deadline),
   ghAvailable: defaultGhAvailable,
   simulateMerge,
 };
@@ -960,13 +985,18 @@ export async function computeInterferenceMap(
 
   // ── 1. Gather raw in-flight changes from every assessed repo ────────────────
   const raw: RawChange[] = [];
+  // ONE deadline for the whole call. The budget used to be a per-repo default argument, so a
+  // federation of N repos harvested for N × 25s, and PR enumeration had no budget at all —
+  // 50 `gh pr diff` calls plus the merge simulations sat on top. On this clone (506 branches,
+  // 5 open PRs) the call spent 52s of its 60s tool timeout.
+  const harvestDeadline = Date.now() + HARVEST_BUDGET_MS;
   const includeBranches = input.includeBranches !== false;
   const includePrs = input.includePullRequests !== false;
   let anyGh = false;
   let anyPrEnumerationSucceeded = false;
   for (const repo of repos) {
     if (includeBranches) {
-      try { appendEnumeration(await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches), raw, caveats); }
+      try { appendEnumeration(await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches, harvestDeadline), raw, caveats); }
       catch (err) {
         // Carry the reason: "not a git worktree" and "safe.directory rejected" need
         // different fixes, and a bare failure notice is not actionable.
@@ -978,7 +1008,7 @@ export async function computeInterferenceMap(
       anyGh = anyGh || has;
       if (has) {
         try {
-          appendEnumeration(await providers.enumeratePullRequests(repo.path, repo.name, resolvedBaseRef), raw, caveats);
+          appendEnumeration(await providers.enumeratePullRequests(repo.path, repo.name, resolvedBaseRef, harvestDeadline), raw, caveats);
           anyPrEnumerationSucceeded = true;
         } catch (error) {
           caveats.push(`PR enumeration failed for ${repo.name}: ${errorDetail(error)}`);

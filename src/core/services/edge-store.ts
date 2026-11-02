@@ -2,9 +2,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
-import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
+import { EDGE_CONFIDENCE_VALUES, EDGE_KIND_VALUES } from '../analyzer/call-graph-types.js';
 import { CONTRACT_EDGE_KINDS } from '../analyzer/contract/project.js';
 import { CONTRACT_LANGUAGES } from '../analyzer/contract/types.js';
+import { IAC_LANGUAGES } from '../analyzer/iac/types.js';
 import { MAX_DEPRECATION_HINT } from '../analyzer/call-graph-extract.js';
 import { recordPerfWork } from '../analyzer/perf-counters.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
@@ -200,8 +201,18 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
  *
  * v13 adds `nodes.deprecation` (change: add-deprecation-propagation): a v12 store has no marker
  * column, so serving it would report no deprecated symbols rather than "not extracted".
+ *
+ * v14 adds no column either — it marks three new `edges.kind` values (`deploys_symbol`,
+ * `implements_endpoint`, `consumes_endpoint`) and the projected node languages that carry them
+ * (`OpenAPI`, and the `Serverless` IaC tag). This is the v12 case exactly: `rawToCallEdge` DROPS a
+ * row whose `kind` it does not know, so a v13 reader opening a v14 store passes the version gate
+ * and then discards every infrastructure- and contract-binding edge — leaving the operation nodes
+ * behind as if they were code, and recomputing an `.olbundle` digest through that same dropping
+ * reader so a valid bundle is rejected as TAMPERED. Both were reproduced against the published
+ * v3.5.0 build before this bump (changes: add-iac-deploy-binding, add-contract-node-projection,
+ * add-serverless-and-build-output-binding).
  */
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 /**
  * Bound on the number of bound parameters in one generated `IN (…)` list.
@@ -686,13 +697,23 @@ export class EdgeStore {
   deleteEdgesForFile(file: string): void {
     this.db.prepare(
       `DELETE FROM edges WHERE (caller_file = ? OR callee_file = ?)
-         AND (kind IS NULL OR kind NOT IN (${CONTRACT_EDGE_KIND_SQL}))`,
+         AND NOT ${TOUCHES_PROJECTED_NODE}`,
     ).run(file, file);
   }
 
-  /** Remove only outgoing edges from this file (incoming edges remain). */
+  /**
+   * Remove only outgoing edges from this file (incoming edges remain).
+   *
+   * Carries the same projection guard. This is the path a watcher save takes for every
+   * RECOMPUTED CALLER file, not just the edited one, so it ran far more often than
+   * `deleteEdgesForFile` and had no guard at all: touching one shared utility wiped the
+   * `implements_endpoint` edges of every route file in the closure, leaving orphaned operation
+   * nodes with no edges and the index reporting itself current. A `deploys_symbol` binding also
+   * makes a manifest a caller-file of the handler source, so editing a deployed handler dropped
+   * the deploy edges too.
+   */
   deleteOutgoingEdgesForFile(file: string): void {
-    this.db.prepare('DELETE FROM edges WHERE caller_file = ?').run(file);
+    this.db.prepare(`DELETE FROM edges WHERE caller_file = ? AND NOT ${TOUCHES_PROJECTED_NODE}`).run(file);
   }
 
   /** Bulk-insert edges in a single transaction. */
@@ -943,8 +964,8 @@ export class EdgeStore {
     // edge is not a call, so it changes no function's degree, and a contract node is a
     // declaration, so it is never a hub or an entry point of the code
     // (change: add-contract-node-projection).
-    const notContract = `kind IS NULL OR kind NOT IN (${CONTRACT_EDGE_KIND_SQL})`;
-    const notProjected = `language IS NULL OR language NOT IN (${CONTRACT_LANGUAGE_SQL})`;
+    const notContract = `kind IS NULL OR kind NOT IN (${DECLARATION_EDGE_KIND_SQL})`;
+    const notProjected = `language IS NULL OR language NOT IN (${PROJECTED_LANGUAGE_SQL})`;
     this.db.exec(`
       UPDATE nodes SET
         fan_in = (
@@ -962,7 +983,7 @@ export class EdgeStore {
       UPDATE nodes SET
         is_hub = CASE WHEN is_external = 0 AND (${notProjected}) AND fan_in >= ${HUB_THRESHOLD} THEN 1 ELSE 0 END,
         is_entry_point = CASE WHEN is_external = 0 AND (${notProjected}) AND NOT EXISTS (
-          SELECT 1 FROM edges WHERE callee_id = nodes.id
+          SELECT 1 FROM edges WHERE callee_id = nodes.id AND (${notContract})
         ) THEN 1 ELSE 0 END;
       UPDATE classes SET
         fan_in = COALESCE((
@@ -1930,15 +1951,32 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
 }
 
 /** The contract projection's edge kinds / node languages, as SQL literal lists. */
-const CONTRACT_EDGE_KIND_SQL = CONTRACT_EDGE_KINDS.map(k => `'${k}'`).join(', ');
-const CONTRACT_LANGUAGE_SQL = CONTRACT_LANGUAGES.map(l => `'${l}'`).join(', ');
+/**
+ * Every projected (non-code) node language: infrastructure plus contract.
+ *
+ * Keyed on the LANGUAGE rather than on a list of edge kinds, so the next projected language is
+ * covered the day it is added instead of the day someone remembers to extend a kind list.
+ * `edge-store-schema-gate.test.ts` pins the same union.
+ */
+const PROJECTED_LANGUAGE_SQL = [...IAC_LANGUAGES, ...CONTRACT_LANGUAGES].map(l => `'${l}'`).join(', ');
+/**
+ * Every edge kind that binds a DECLARATION to code: the contract bindings plus `deploys_symbol`.
+ * None of them is a call, so none may contribute to a function's fan-in or fan-out. A
+ * `deploys_symbol` edge used to be counted, which gave a deployed handler a fan-in of 1 and so
+ * removed it from the entry points — leaving a YAML stanza as the only entry point of the repo.
+ */
+const DECLARATION_EDGE_KIND_SQL = [...CONTRACT_EDGE_KINDS, 'deploys_symbol'].map(k => `'${k}'`).join(', ');
+/** An edge whose caller or callee is a projected declaration: not produced by a subset rebuild. */
+const TOUCHES_PROJECTED_NODE = `EXISTS (
+  SELECT 1 FROM nodes n
+   WHERE (n.id = edges.caller_id OR n.id = edges.callee_id)
+     AND n.language IN (${PROJECTED_LANGUAGE_SQL})
+)`;
 
 const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
-const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
-  'calls', 'overrides', 'tested_by', 'references', 'depends_on',
-  'affects', 'authored_by', 'changed_in_pr', 'deploys_symbol',
-  'implements_endpoint', 'consumes_endpoint',
-]);
+// Built from the type's own runtime list, so a new kind cannot reach the type without reaching
+// the validator — the drift that made an older reader drop rows it had no name for.
+const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>(EDGE_KIND_VALUES);
 const CALL_TYPES = new Set<NonNullable<CallEdge['callType']>>([
   'direct', 'method', 'awaited', 'constructor',
 ]);

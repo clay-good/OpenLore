@@ -31,19 +31,28 @@ export type EdgeConfidence =
   | 'synthesized'    // dynamic-dispatch edge recovered by AST pattern synthesis (not direct name resolution)
   | 'external';      // unresolved external/stdlib call (synthetic leaf node)
 
-/** Broad relationship kind */
-export type EdgeKind =
-  | 'calls'
-  | 'overrides'      // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
-  | 'tested_by'
-  | 'references'
-  | 'depends_on'
-  | 'affects'        // decision → governed file (spec-16)
-  | 'authored_by'    // file → person, from local git history (spec-18)
-  | 'changed_in_pr'  // file → pull request, from local git/gh (spec-18)
-  | 'deploys_symbol'   // function resource → the code function it runs (add-iac-deploy-binding)
-  | 'implements_endpoint' // route handler → the declared operation it serves (add-contract-node-projection)
-  | 'consumes_endpoint';  // the function enclosing a client call → the operation it calls
+/**
+ * Broad relationship kind.
+ *
+ * The runtime list is the single source: `edge-store.ts` builds its row validator from it, so the
+ * type and the set of kinds a store will accept cannot drift apart. They did, and an older reader
+ * then silently dropped the rows it had no name for (see `SCHEMA_VERSION`).
+ */
+export const EDGE_KIND_VALUES = [
+  'calls',
+  'overrides',           // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
+  'tested_by',
+  'references',
+  'depends_on',
+  'affects',             // decision → governed file (spec-16)
+  'authored_by',         // file → person, from local git history (spec-18)
+  'changed_in_pr',       // file → pull request, from local git/gh (spec-18)
+  'deploys_symbol',      // function resource → the code function it runs (add-iac-deploy-binding)
+  'implements_endpoint', // route handler → the declared operation it serves (add-contract-node-projection)
+  'consumes_endpoint',   // the function enclosing a client call → the operation it calls
+] as const;
+
+export type EdgeKind = (typeof EDGE_KIND_VALUES)[number];
 
 /** Semantic nature of the call at the call site */
 export type CallType =
@@ -565,6 +574,8 @@ export interface CallGraphResult {
   ambiguousSites?: AmbiguousCallSite[];
   /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
   unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** Ecosystems whose IaC extraction threw: their resources were not assessed, not absent. */
+  iacNotAssessed?: string[];
   /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
   contracts?: import('./contract/project.js').ContractDisclosure;
   /**
@@ -607,6 +618,8 @@ export interface SerializedCallGraph {
   ambiguousSites?: AmbiguousCallSite[];
   /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
   unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** Ecosystems whose IaC extraction threw: their resources were not assessed, not absent. */
+  iacNotAssessed?: string[];
   /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
   contracts?: import('./contract/project.js').ContractDisclosure;
 }

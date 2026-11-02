@@ -22,6 +22,7 @@ import {
 import { verifyDecisionCurrent } from '../../core/services/mcp-handlers/claim-verification.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { positiveIntegerOption } from '../numeric-options.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 interface SurfaceChangeOut {
   changeKind: string;
@@ -202,7 +203,7 @@ export async function runCertifyPublicSurfaceCli(opts: CertifyPublicSurfaceCliOp
   }
 
   if (result && typeof result === 'object' && 'error' in result) {
-    const error = (result as { error: string }).error;
+    const error = toCliVocabulary((result as { error: string }).error);
     if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
     else logger.warning(`certify-public-surface: ${error}`);
     return 1;

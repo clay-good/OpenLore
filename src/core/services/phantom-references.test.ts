@@ -27,7 +27,11 @@ const write = (cwd: string, rel: string, content: string) => {
 
 let dirs: string[] = [];
 afterEach(() => {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  // `maxRetries` covers Windows: each fixture is a real git repository, and a `git` child can
+  // still hold a descriptor inside it when the test ends, which makes the removal fail with
+  // EPERM. That failed the Windows unit job on PRs that do not touch this file at all
+  // (change: fix-windows-temp-cleanup).
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   dirs = [];
 });
 

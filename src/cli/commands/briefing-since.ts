@@ -15,6 +15,7 @@ import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { positiveIntegerOption } from '../numeric-options.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 interface BriefingItem {
   name: string;
@@ -167,7 +168,7 @@ export async function runBriefingSinceCli(opts: BriefingSinceCliOptions): Promis
   }
 
   if (result && typeof result === 'object' && 'error' in result) {
-    const error = (result as { error: string }).error;
+    const error = toCliVocabulary((result as { error: string }).error);
     if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
     else logger.warning(`briefing-since: ${error}`);
     return 1;

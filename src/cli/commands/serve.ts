@@ -34,6 +34,7 @@
  */
 
 import { Command } from 'commander';
+import { setActiveToolSurface } from '../../core/services/mcp-handlers/active-surface.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
@@ -550,6 +551,12 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       : selectActiveTools(TOOL_DEFINITIONS, { preset: presetName })
     ).map((t) => t.name),
   );
+  // Tell the guidance renderers what THIS process serves, exactly as `openlore mcp` does.
+  // Without it the daemon kept prescribing `record_decision` and `check_spec_drift`, which it
+  // then refuses with a preset-membership error — and because `openlore mcp` delegates to a
+  // running daemon with no flag, the stdio default regressed as soon as a daemon was warm
+  // (change: fix-orient-guidance-preset).
+  setActiveToolSurface(activeNames);
 
   // Idle self-shutdown: a request resets the timer; firing tears down and exits.
   // Bounds orphaned-daemon lifetime so they can't accumulate in RAM (see

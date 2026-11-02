@@ -107,6 +107,81 @@ the graph.**
 
 ### Fixed
 
+- **Rust tests are detected.** `isTestFile` is a path-only predicate, and Rust's dominant
+  convention is not a path: a test lives in an inline `#[cfg(test)] mod tests` beside the code.
+  On a real Cargo workspace that left **2,496 of 3,363 "entry points" as test functions**,
+  `report_coverage_gaps` reporting a 96% gap rate while 2,759 `#[test]` attributes sat in the
+  source, and `orient` offering a `#[test]` function as the place to add a feature. A Rust test
+  is now recognized from the attribute on the function (`#[test]`, `#[tokio::test]`,
+  `#[rstest]`, `#[test_case]`, `#[bench]`), and the two missing path conventions
+  (`src/<module>/tests.rs`, `foo_test.rs`) were added.
+- **`orient` never offers a test function as an insertion point**, in any language.
+- **`report_coverage_gaps` names what test detection cannot see for a language.** Rust reported
+  `testDetection: "full"` as soon as one path rule matched. It now also discloses that an
+  unattributed helper inside a test module counts as production code, and that a call inside a
+  macro body — `assert_eq!(sha256_hex(x), y)`, the usual shape of a Rust assertion — is not a
+  call-graph edge, so code exercised only through an assertion macro still reports no reaching
+  test.
+- **`orient` no longer prescribes tools the wired preset does not expose.** Its `nextSteps` named
+  `record_decision`, `check_spec_drift` and `get_spec` unconditionally; none is in the default
+  `substrate` preset, so an agent that followed them got a preset-membership error — in the same
+  session where `install` had printed "the generated guidance prescribes only tools this preset
+  exposes". Guidance now falls back to the CLI equivalent (`openlore decisions record`,
+  `openlore drift`, the spec file path), and `suggestedTools` lists only wired tools.
+- **`env-impact` explains an empty inventory honestly.** It advised "run analyze first" for a
+  repository whose language the env scan does not cover (Rust, Java, …), where re-running can
+  never help. It now names the scope boundary instead.
+- **A trimmed response gives every list a fair share of the budget.** The list-shortening added
+  for over-budget answers grew the lists back largest-first with every other list still at zero,
+  so the biggest list took the whole budget and every other list was served EMPTY — on a
+  `get_mapping` answer, 1,549 `linked` rows filled 256 KB and the `ambiguous`, `stale` and
+  `unmapped` lanes the tool exists to surface were all zeroed. Each list now gets an equal share
+  of what is left, an unused share rolls to the next list, and the remainder is spent on the
+  largest. (#663)
+- **A trim receipt no longer overwrites a tool's own disclosure.** It was written as top-level
+  `truncated` / `omitted` / `truncationNote`, which clobbered payloads that already define them:
+  `get_architecture_overview`'s partial answer carries an `omitted` **array** of field names
+  beside an `omittedBecause` explaining it, and `certify_public_surface`, `blast_radius` and
+  `plan_parallel_work` each declare a `truncated` or `truncationNote` of their own shape. The
+  receipt now lives under its own `responseBudget` key and nothing else is rewritten. (#663)
+- **`map_in_flight_conflicts` budgets the whole call, not each repository.** The harvest budget
+  was a per-repository default, so a federation of N repositories harvested for N budgets, and
+  pull-request enumeration — a `gh pr diff` per PR, up to 50 — had no budget at all. One deadline
+  is now computed per call and honored by both halves. A branch the caller explicitly excluded is
+  also no longer reported as one the budget could not reach. (#663)
+- **Two response-reading claims in the docs were wrong.** A panic block begins `[PANIC:`, not
+  `[openlore …]`, so a host filtering on the documented prefix read it as the answer; and "pick
+  the block that parses" loses the whole answer for the tools that return plain text
+  (`get_signatures`). Both are named now.
+- **A watcher save no longer destroys the projected edges in the graph store.** Contract bindings
+  and deploy bindings are produced only by a full `analyze`, so a subset rebuild must preserve
+  them. The guard was on `deleteEdgesForFile` but not on `deleteOutgoingEdgesForFile` — the path
+  taken for every *recomputed caller* file, which is most of them — and it listed contract kinds
+  only, so `deploys_symbol` was unguarded everywhere. Saving one shared utility left orphaned
+  OpenAPI operation nodes with no edges, saving a deployed handler dropped its own deploy
+  binding, and the index reported itself current either way; an `.olbundle` exported afterwards
+  shipped a graph with no contract or deploy edges under a valid attestation. Both deletions are
+  now keyed on the node *language*, so the next projected language is covered by construction.
+- **One unreadable manifest no longer erases the whole infrastructure graph.** A throw anywhere
+  in the IaC pass was swallowed silently: a single YAML file with heavy anchor reuse trips the
+  parser's own alias-count guard, and every resource, reference and deploy binding of all eleven
+  ecosystems disappeared with nothing said — `orient` then reported no infrastructure, which
+  reads as "no resource runs a function in scope". Each ecosystem's extractor now runs in
+  isolation, and a failure is named in `iacNotAssessed` rather than served as an empty result.
+- **An infrastructure declaration is no longer served as code.** The "a declaration is never a
+  hub, an entry point, or a term in the average fan-in/fan-out" invariant was implemented with a
+  contract-only predicate, so infrastructure never had it. Adding a `serverless.yml` to a
+  repository gave the deployed handler a fan-in of 1 *from its own manifest*, which removed it
+  from the entry points and left the YAML stanza as the only entry point — and `CODEBASE.md`
+  prints that table under "the natural starting point for any task". On this repository 48 of
+  1,121 entry points were GitHub Actions jobs, Helm templates, Bicep modules and Serverless
+  stanzas, all of them terms in the published averages. A declaration binding is now excluded
+  from degrees, entry-point status, hub status, the file-level dependency rankings, the
+  layer-violation check, the landmark set and `find_path`'s `role:` endpoints — in both the
+  in-memory build and the persisted store, which are checked against each other.
+- **`orient`'s infrastructure briefing matches a deployed function by name *and* file.** A bare
+  name match attributed one file's environment reads to a same-named function in another.
+
 - **A whole-repository answer no longer discards itself when it exceeds the response budget.**
   `get_architecture_overview`, `get_refactor_report` and `get_mapping` returned a JSON string cut
   mid-structure, with advice to narrow the query using parameters they do not accept. They now keep

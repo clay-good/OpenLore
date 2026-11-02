@@ -228,7 +228,7 @@ describe('capStructuredResult', () => {
     expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(64 * 1024);
     const parsed = JSON.parse(r.text) as {
       summary: { total: number }; items: Array<{ id: number }>;
-      truncated: boolean; omitted: Record<string, number>; partial?: string;
+      responseBudget?: { trimmed: boolean; omitted: Record<string, number> }; partial?: string;
     };
     expect(parsed.partial).toBeUndefined();
     expect(parsed.summary).toEqual({ total: 50_000 });
@@ -237,7 +237,7 @@ describe('capStructuredResult', () => {
     expect(parsed.items[0].id).toBe(0);
     expect(parsed.items.map(i => i.id)).toEqual(parsed.items.map((_, i) => i));
     // And the count is exact.
-    expect(parsed.omitted.items).toBe(50_000 - parsed.items.length);
+    expect(parsed.responseBudget?.omitted.items).toBe(50_000 - parsed.items.length);
   });
 
   it('bounds every list, each with its own dropped count', () => {
@@ -246,13 +246,100 @@ describe('capStructuredResult', () => {
       small: Array.from({ length: 2_000 }, (_, i) => ({ id: i })),
     };
     const r = capStructuredResult(result, 32 * 1024);
-    const parsed = JSON.parse(r.text) as { big: unknown[]; small: unknown[]; omitted: Record<string, number> };
+    const parsed = JSON.parse(r.text) as {
+      big: unknown[]; small: unknown[];
+      responseBudget: { omitted: Record<string, number> };
+    };
     expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(32 * 1024);
-    for (const key of Object.keys(parsed.omitted)) {
+    for (const key of Object.keys(parsed.responseBudget.omitted)) {
       const kept = (parsed[key as 'big' | 'small'] as unknown[]).length;
       const total = key === 'big' ? 20_000 : 2_000;
-      expect(parsed.omitted[key]).toBe(total - kept);
+      expect(parsed.responseBudget.omitted[key]).toBe(total - kept);
     }
+    // Both lists are served. The growth loop used to run largest-first with every other list
+    // still at zero, so the big list took the whole budget and `small` came back EMPTY.
+    expect(parsed.small.length).toBeGreaterThan(0);
+    expect(parsed.big.length).toBeGreaterThan(0);
+  });
+
+  // A fair share per list, not first-come. On a `get_mapping` answer, 1,549 `linked` rows used
+  // the whole 256 KB and the `ambiguous` / `stale` / `unmapped` lanes the tool exists to
+  // surface were all served empty (change: fix-budget-trim-allocation).
+  it('serves the short lists whole and bounds the dominant list', () => {
+    const row = (i: number) => ({ requirement: `Req${i}`, domain: 'd', specFile: 'openspec/specs/d/spec.md', anchors: [{ raw: `sym${i}::src/f.ts` }] });
+    const result = {
+      stats: { totalRequirements: 40_000 },
+      linked: Array.from({ length: 40_000 }, (_, i) => row(i)),
+      unmapped: Array.from({ length: 12 }, (_, i) => row(i)),
+      ambiguous: Array.from({ length: 7 }, (_, i) => row(i)),
+      stale: Array.from({ length: 5 }, (_, i) => row(i)),
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 256 * 1024).text) as {
+      linked: unknown[]; unmapped: unknown[]; ambiguous: unknown[]; stale: unknown[];
+      responseBudget: { omitted: Record<string, number> };
+    };
+    expect(parsed.unmapped.length).toBe(12);
+    expect(parsed.ambiguous.length).toBe(7);
+    expect(parsed.stale.length).toBe(5);
+    expect(parsed.linked.length).toBeGreaterThan(0);
+    // Only the dominant list paid.
+    expect(Object.keys(parsed.responseBudget.omitted)).toEqual(['linked']);
+  });
+
+  it('gives eight equal lists a share each rather than all of it to the first', () => {
+    const lists = Object.fromEntries(
+      Array.from({ length: 8 }, (_, k) => [`list${k}`, Array.from({ length: 20_000 }, (_, i) => ({ id: i, pad: 'y'.repeat(30) }))]),
+    );
+    const parsed = JSON.parse(capStructuredResult(lists, 256 * 1024).text) as Record<string, unknown[]>;
+    for (let k = 0; k < 8; k++) expect(parsed[`list${k}`].length).toBeGreaterThan(0);
+  });
+
+  // The receipt used to be written as top-level `truncated` / `omitted` / `truncationNote`,
+  // which overwrote payloads that already define them.
+  it("never overwrites the tool's own omitted disclosure", () => {
+    const result = {
+      summary: { files: 1_478 },
+      clusters: Array.from({ length: 2_000 }, (_, i) => ({ id: i, files: Array.from({ length: 20 }, (_, j) => `src/f${i}_${j}.ts`) })),
+      omitted: ['hubs', 'entryPoints', 'godFunctions', 'layers', 'cycles'],
+      omittedBecause: 'they are derived from the call graph, which this first build has not produced yet',
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 60_000).text) as {
+      omitted: string[]; omittedBecause: string; responseBudget: { omitted: Record<string, number> };
+    };
+    expect(parsed.omitted).toEqual(['hubs', 'entryPoints', 'godFunctions', 'layers', 'cycles']);
+    expect(parsed.omittedBecause).toContain('first build has not produced');
+    expect(parsed.responseBudget.omitted.clusters).toBeGreaterThan(0);
+  });
+
+  // The string-cut branch is tried BEFORE list trimming, and it kept writing a top-level
+  // `truncated: true` — the very collision the list branch was fixed for, 70 lines up in the
+  // same file (change: fix-budget-receipt-collision).
+  it("never overwrites the tool's own truncated object when cutting a dominant string", () => {
+    const result = {
+      truncated: { limit: 5_000, atPath: 'src/huge' },
+      report: 'x'.repeat(5_000),
+      summary: 'ok',
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 1_200).text) as {
+      truncated: { limit: number; atPath: string };
+      summary: string;
+      responseBudget: { trimmed: boolean };
+    };
+    expect(parsed.truncated).toEqual({ limit: 5_000, atPath: 'src/huge' });
+    expect(parsed.summary).toBe('ok');
+    expect(parsed.responseBudget.trimmed).toBe(true);
+  });
+
+  it("never overwrites the tool's own truncated object", () => {
+    const result = {
+      changes: Array.from({ length: 5_000 }, (_, i) => ({ symbol: `s${i}`, verdict: 'breaking', detail: 'x'.repeat(60) })),
+      truncated: { omitted: 1_200 },
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 60_000).text) as {
+      truncated: { omitted: number }; responseBudget: { omitted: Record<string, number> };
+    };
+    expect(parsed.truncated).toEqual({ omitted: 1_200 });
+    expect(parsed.responseBudget.omitted.changes).toBeGreaterThan(0);
   });
 
   it('still falls back to the partial envelope when the non-list part alone is over budget', () => {
