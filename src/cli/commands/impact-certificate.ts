@@ -28,6 +28,7 @@ import {
   resolveTrustedHookLauncher,
   renderTrustedHookCommand,
   updateHookFile,
+  insertHookBlock,
 } from '../git-hooks.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
 
@@ -63,8 +64,7 @@ export async function installImpactCertificateHook(rootPath: string): Promise<vo
   let alreadyInstalled = false;
   const result = await updateHookFile(hookPath, (existing) => {
     if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; const refreshed = existing.replace(/# openlore-impact-certificate-hook[\s\S]*?# end-openlore-impact-certificate-hook/, hookContent.trimEnd()); return refreshed === existing ? null : refreshed; }
-    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped ? stripped + '\n\n' + hookContent : '#!/bin/sh\n\n' + hookContent;
+    return insertHookBlock(existing, hookContent);
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the impact-certificate hook at ${displayHookPath(hookPath)}: ${result.reason}`);

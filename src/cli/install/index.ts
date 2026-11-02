@@ -571,7 +571,18 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     await runAdapter(ADAPTERS[surface.agent], contextFor(surface.root, 'repo'));
   }
 
-  printSummary(allChanges, allWarnings, !!opts.dryRun, !!opts.uninstall);
+  // The verdict comes BEFORE the summary. A conflict that is reachable on an otherwise
+  // successful install — a `.mcp.json` someone else wired — printed "OpenLore install
+  // complete.", then a "Wired surface" line claiming the guidance matches a preset no MCP
+  // registration had been written for, and then "Install did not complete". Three conclusions,
+  // two of them wrong (change: fix-install-conflict-verdict).
+  printSummary(allChanges, allWarnings, !!opts.dryRun, !!opts.uninstall, conflict);
+  if (conflict) {
+    logger.error(
+      'Install did not complete — the file(s) named above were left exactly as they are.'
+    );
+    return 1;
+  }
   reportScopes({
     uninstall: !!opts.uninstall,
     dryRun: !!opts.dryRun,
@@ -590,13 +601,6 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
       'Wired surface',
       `\`${guidancePreset}\` — the generated guidance prescribes only tools this preset exposes`
     );
-  }
-
-  if (conflict) {
-    logger.error(
-      'Hand-edited OpenLore block(s) detected. Re-run with --force to overwrite, or revert your edits.'
-    );
-    return 1;
   }
 
   // The decisions gate belongs to `openlore install`, not to any one agent
@@ -702,7 +706,9 @@ function printSummary(
   changes: PlannedChange[],
   warnings: string[],
   dryRun: boolean,
-  uninstall: boolean
+  uninstall: boolean,
+  /** A refusal happened: the run is reported as incomplete, never as complete. */
+  conflict = false,
 ): void {
   const verb = dryRun ? 'would' : 'did';
   for (const c of changes) {
@@ -725,7 +731,11 @@ function printSummary(
     }
   }
   for (const w of warnings) logger.warning(w);
-  if (dryRun) {
+  if (conflict) {
+    // Never "complete" when something was refused: the caller prints the reason next and
+    // exits non-zero.
+    logger.discovery(`OpenLore ${uninstall ? 'uninstall' : 'install'} incomplete — see below.`);
+  } else if (dryRun) {
     logger.discovery('Dry run — no files were written.');
   } else if (!uninstall) {
     logger.success('OpenLore install complete.');

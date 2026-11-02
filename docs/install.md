@@ -233,8 +233,9 @@ gate entirely when OpenLore resolves inside the repository (a local devDependenc
 commit gate must not execute code the repository can change.
 
 Every other git hook below is installed explicitly and is advisory by default. All of them coexist
-in a single `.git/hooks/pre-commit` (each installer appends its own marked block and strips a
-trailing `exit 0` so the next one stays reachable):
+in a single `.git/hooks/pre-commit`. Each installer inserts its own marked block directly after
+the shebang and changes nothing else in the script, so a hook of your own that ends in `exit 0`
+keeps working exactly as written and still reaches every OpenLore block:
 
 | Hook | Install | Blocks when |
 |------|---------|-------------|

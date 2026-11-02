@@ -107,6 +107,30 @@ the graph.**
 
 ### Fixed
 
+- **A failed command prints one legible line, not a V8 stack trace.** Any throw from a command
+  action used to surface as Node's raw trace — absolute `dist/` paths, internal frames, the
+  version banner. The most common way a real user met it was `install` in a repository whose
+  `CLAUDE.md` is a symlink into a dotfiles checkout: the trace named `path-confinement.js` and
+  nothing actionable. Failures now render as `error: openlore <command> stopped: <message>`, with
+  an explanation for the shapes a first run actually hits (a symlink out of the repository, an
+  unwritable path, a full disk, exhausted file descriptors) and the stack behind `--verbose`.
+- **`install` preserves an `mcpServers.openlore` entry it did not write.** A hand-wired wrapper or
+  a pinned preset in `.mcp.json` was replaced silently; it is now kept, with a warning naming it,
+  and `--force` takes it over. This matches what the Codex adapter already did for
+  `mcp_servers.openlore`.
+- **OpenLore no longer edits your pre-commit hook.** Five installers (the decisions gate,
+  `enforce`, `blast-radius`, `impact-certificate`, `refresh-stories`) appended their block to the
+  end of an existing hook and deleted a trailing `exit 0` so the block could be reached —
+  silently changing what that script does for anyone whose `exit 0` was deliberately swallowing a
+  linter's status. Every block is now inserted directly after the shebang through one shared
+  `insertHookBlock`, and every other byte of the hook survives.
+- **A refusal during `install` is described by its cause.** The summary claimed "hand-edited
+  OpenLore block(s) detected" for every repo-scope refusal, including unparseable files, symlinks
+  and foreign configuration entries, and advertised `--force` where it does not help. Each refusal
+  already names its own cause; the summary now points at those messages.
+- **A lock age is never negative.** `openlore status` and the analysis-in-progress error could
+  report a negative heartbeat age, because a filesystem mtime carries sub-millisecond precision
+  while `Date.now()` is truncated to whole milliseconds.
 - **Rust tests are detected.** `isTestFile` is a path-only predicate, and Rust's dominant
   convention is not a path: a test lives in an inline `#[cfg(test)] mod tests` beside the code.
   On a real Cargo workspace that left **2,496 of 3,363 "entry points" as test functions**,

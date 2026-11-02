@@ -85,6 +85,78 @@ describe('openlore install (end-to-end)', () => {
     expect(combined).toMatch(/\(new file\).+settings\.json/);
   });
 
+  // An `mcpServers.openlore` entry OpenLore did not write is someone's deliberate choice —
+  // a wrapper script, a pinned preset, another checkout's path. It used to be replaced with
+  // no warning at all. Matches what the Codex adapter already does for `mcp_servers.openlore`.
+  it('preserves an mcpServers.openlore entry it did not write, and says so', async () => {
+    await writeFile(
+      join(dir, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          openlore: { command: 'my-wrapper', args: ['--my-flag'] },
+          other: { command: 'other-server' },
+        },
+      }, null, 2) + '\n',
+    );
+
+    const code = await runInstall({ cwd: dir, agent: 'claude-code', repoOnly: true, analyze: false });
+
+    expect(code).toBe(1);
+    const after = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(after.mcpServers.openlore).toEqual({ command: 'my-wrapper', args: ['--my-flag'] });
+    expect(after._openlore).toBeUndefined();
+  });
+
+  // A conflict reachable on an otherwise successful install used to print THREE conclusions:
+  // "OpenLore install complete.", a "Wired surface" line claiming the guidance matches a preset
+  // no registration had been written for, and "Install did not complete"
+  // (change: fix-install-conflict-verdict).
+  it('states one verdict when a refusal happens, and never claims a wired surface', async () => {
+    await writeFile(
+      join(dir, '.mcp.json'),
+      JSON.stringify({ mcpServers: { openlore: { command: 'my-wrapper' } } }, null, 2) + '\n',
+    );
+    const lines: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    const origError = console.error;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    }) as typeof process.stderr.write;
+    // The logger renders through console.error and console.log, so all sinks are captured.
+    const origLog = console.log;
+    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    let code: number;
+    try {
+      code = await runInstall({ cwd: dir, agent: 'claude-code', repoOnly: true, analyze: false });
+    } finally {
+      process.stderr.write = origWrite;
+      console.error = origError;
+      console.log = origLog;
+    }
+    const out = lines.join('\n');
+
+    expect(code).toBe(1);
+    expect(out).toContain('install incomplete');
+    expect(out).toContain('Install did not complete');
+    expect(out).not.toContain('OpenLore install complete.');
+    expect(out, 'no registration was written, so no surface was wired').not.toContain('Wired surface');
+  });
+
+  it('--force takes over an mcpServers.openlore entry it did not write', async () => {
+    await writeFile(
+      join(dir, '.mcp.json'),
+      JSON.stringify({ mcpServers: { openlore: { command: 'my-wrapper' } } }, null, 2) + '\n',
+    );
+
+    const code = await runInstall({ cwd: dir, agent: 'claude-code', repoOnly: true, analyze: false, force: true });
+
+    expect(code).toBe(0);
+    const after = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
+    expect(after.mcpServers.openlore.command).not.toBe('my-wrapper');
+  });
+
   it('agent-md install creates AGENTS.md with managed block', async () => {
     const code = await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
     expect(code).toBe(0);

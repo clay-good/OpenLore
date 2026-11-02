@@ -547,7 +547,8 @@ export async function readAnalysisOwner(
   const owner = parsePayload(contents);
   return {
     owner,
-    heartbeatAgeMs: Date.now() - mtimeMs,
+    // Never negative: `mtimeMs` is sub-millisecond, `Date.now()` is truncated (see advisory-lock).
+    heartbeatAgeMs: Math.max(0, Date.now() - mtimeMs),
     elapsedMs: owner ? Date.now() - Date.parse(owner.startedAt) : null,
   };
 }

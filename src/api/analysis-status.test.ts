@@ -51,7 +51,7 @@ async function plantLock(
 ): Promise<string> {
   const lockPath = join(runtimeDir, OWNERSHIP_LOCK_FILE);
   await writeFile(lockPath, JSON.stringify(payload), 'utf8');
-  if (ageMs > 0) {
+  if (ageMs !== 0) {
     const when = new Date(Date.now() - ageMs);
     await utimes(lockPath, when, when);
   }
@@ -94,6 +94,29 @@ describe('openloreAnalysisStatus', () => {
     expect(status.elapsedMs).toBeGreaterThanOrEqual(5_000);
     expect(status.heartbeatAgeMs).toBeGreaterThanOrEqual(0);
     expect(status.heartbeatAgeMs).toBeLessThan(60_000);
+  });
+
+  // A filesystem mtime carries sub-millisecond precision while `Date.now()` is truncated to
+  // whole milliseconds, so a heartbeat written microseconds ago reads as a fraction of a
+  // millisecond in the future. This plants that skew outright: an age is never negative.
+  it('never reports a negative heartbeat age when the heartbeat mtime leads the clock', async () => {
+    const { root, analysisDir, runtimeDir } = await workspace();
+    const payload: AnalysisOwnerPayload = {
+      repository: root,
+      pid: process.pid,
+      startedAt: new Date(Date.now() - 5_000).toISOString(),
+      heartbeatAt: new Date().toISOString(),
+      stage: 'call-graph',
+      progressPath: progressPathOf(analysisDir),
+    };
+    // 60s ahead, not 50ms: a loaded runner can spend more than 50ms between planting the
+    // mtime and reading it, which makes the age genuinely positive and tests nothing.
+    await plantLock(runtimeDir, payload, -60_000);
+
+    const status = await openloreAnalysisStatus({ rootPath: root });
+
+    expect(status.inProgress).toBe(true);
+    expect(status.heartbeatAgeMs).toBe(0);
   });
 
   it('acquires, steals or awaits nothing — the lock and the runtime directory are untouched', async () => {
