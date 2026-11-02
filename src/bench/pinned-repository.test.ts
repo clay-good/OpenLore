@@ -9,7 +9,7 @@ describe('pinned benchmark repository', () => {
   const roots: string[] = [];
 
   afterEach(() => {
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   function repository(): { root: string; pin: { id: string; sha: string } } {

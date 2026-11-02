@@ -334,7 +334,7 @@ const write = (cwd: string, rel: string, content: string) => {
 
 describe('check weakening — fixed baseline (real git)', () => {
   const dirs: string[] = [];
-  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   function repo(): string {
     const dir = mkdtempSync(join(tmpdir(), 'olcw-'));
@@ -562,7 +562,7 @@ describe('check weakening — review round 2 (detection)', () => {
 
 describe('check weakening — review round 2 (git)', () => {
   const dirs: string[] = [];
-  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
   const init = (branch: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'olcw2-'));
     dirs.push(dir);
@@ -654,7 +654,7 @@ describe('check weakening — review round 3', () => {
 
 describe('check weakening — review round 3 (git)', () => {
   const dirs: string[] = [];
-  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   it('an unresolvable explicit base on the default branch falls back like the automatic baseline', async () => {
     const remote = mkdtempSync(join(tmpdir(), 'olcw3r-'));
