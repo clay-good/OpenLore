@@ -3943,9 +3943,35 @@ merge-base via a closed deterministic rule table (`breaking` | `dangerous` | `no
 changed schema the table cannot read SHALL be `potentially-breaking`, which withholds the suggested
 version bump. Each `breaking` or `dangerous` element SHALL list the client call sites in this
 repository whose HTTP method and literal path match it, and SHALL be emitted as a registered
-advisory `contract-breaking` finding. Callers in other repositories, through generated clients, or
+advisory `contract-breaking` finding. Callers through generated clients or
 with dynamic URLs SHALL be disclosed as a boundary, never implied absent. The tool SHALL be a
 `conclusion` in family `change`, available only in the `full` preset.
+
+A service's consumers are usually not in its own repository, so with `federation` the tool SHALL
+also census client call sites in the indexed sibling repositories of `.openlore/federation.json`.
+
+The same consumer rule SHALL apply across repositories as within one: a call site counts only
+when its literal URL has no host or a host the specification's `servers` declares, and an
+all-parameter operation path SHALL be excluded from the census and disclosed, because it matches
+too broadly to attribute. The census SHALL be scoped to the `breaking` and `dangerous` addresses
+the in-repository join already covers.
+
+Each hit SHALL be reported against the sibling's REGISTRY NAME, never a path on this machine, and
+every repository-derived string SHALL be screened before it is served. Sibling directories SHALL
+be compared by canonical path, so the repository under certification is never censused as its own
+sibling and two registry names for one directory are censused once. Consumers SHALL be served as
+one bounded top-level list with an exact omitted count, not nested per changed element, so the
+response budget can shrink them without discarding the verdict.
+
+A finding SHALL distinguish three states: called in this repository, called only in a censused
+sibling, or called in neither — and the third SHALL name how many siblings were censused, how
+many were only partly scanned, and how many were not censused, so it is not read as proof of
+safety. A sibling that is missing, unindexed, stale or unbaselined SHALL be named as not censused
+rather than counted consumer-free; one whose scan reached a file cap SHALL be named as partly
+scanned; a requested registry name that does not exist SHALL be reported; and a registry that
+cannot be read SHALL be named rather than answered as though federation were not requested.
+Without `federation`, the tool SHALL disclose that consumers outside this repository were not
+assessed.
 
 #### Scenario: A breaking schema change names its consumers
 
@@ -3954,6 +3980,37 @@ with dynamic URLs SHALL be disclosed as a boundary, never implied absent. The to
 - **WHEN** `certify_service_contract` runs with the base ref
 - **THEN** the change is `operation-removed`, `breaking`, names the call site's file and line, and
   the boundary statement for other repositories is present
+
+#### Scenario: A consumer in a sibling repository is named by its registry id
+
+- **GIVEN** a removed operation with no caller in this repository, and an indexed sibling
+  registered as `web` whose `src/client.ts` calls it
+- **WHEN** `certify_service_contract` runs with the base ref and `federation`
+- **THEN** `federatedConsumers` holds `{ repo: 'web', file: 'src/client.ts' }`, the changed
+  element carries a `federatedConsumerCount`, the finding says it is called from
+  `web:src/client.ts`, and no filesystem path appears
+
+#### Scenario: A sibling calling another vendor is not a consumer
+
+- **GIVEN** a specification declaring `servers: https://svc.example.com` and an indexed sibling
+  whose only matching call is to `https://other-vendor.example.net` on the same path
+- **WHEN** the census runs
+- **THEN** no federated consumer is reported for that operation, and the finding does not name
+  the sibling
+
+#### Scenario: A partly scanned sibling is not evidence of absence
+
+- **GIVEN** an indexed sibling whose client scan reaches its file cap
+- **WHEN** the census runs
+- **THEN** the sibling is listed in `federationCensus.partial` and the finding says it was only
+  partly scanned
+
+#### Scenario: A sibling whose index cannot be trusted is not counted clean
+
+- **GIVEN** a sibling registered but never analyzed
+- **WHEN** the census runs
+- **THEN** it is absent from the censused repositories, named in `federationCensus.skipped` with
+  its index state, and a boundary says a caller there is not counted
 
 #### Scenario: Unprovable is potentially-breaking
 

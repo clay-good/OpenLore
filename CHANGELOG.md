@@ -5,6 +5,17 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Your consumers are usually in another repository
+
+- **`certify_service_contract` censuses indexed sibling repositories for consumers** with
+  `federation: true` / `--federation`, reporting each hit against the sibling's registry name
+  rather than a path on this machine. A breaking verdict computed from one repository said "no
+  caller in this repository" for exactly the change most worth stopping. A finding now
+  distinguishes called-here, called-only-in-a-sibling, and called-in-neither — and the last names
+  how many siblings were censused, so it is not read as proof of safety. A sibling that is
+  missing, unindexed, stale or unbaselined is named as not censused rather than counted
+  consumer-free, and the repository under certification is never censused as its own sibling.
+
 ### A generated client is no longer invisible to the contract graph
 
 - **A generated API client is bound to the operations it calls, by `operationId`.** Such a client

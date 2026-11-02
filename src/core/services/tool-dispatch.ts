@@ -583,10 +583,10 @@ async function dispatchToolImpl(
       args as { directory: string; communityId?: string; filePath?: string; language?: string };
     return handleGetStyleFingerprint({ directory, communityId, filePath, language });
   } else if (name === 'certify_service_contract') {
-    const { directory, baseRef, maxResults, allowBaseFallback } =
-      args as { directory: string; baseRef?: string; maxResults?: number; allowBaseFallback?: boolean };
+    const { directory, baseRef, maxResults, allowBaseFallback, federation, federationRepos } =
+      args as { directory: string; baseRef?: string; maxResults?: number; allowBaseFallback?: boolean; federation?: boolean; federationRepos?: string[] };
     const { handleCertifyServiceContract } = await import('./mcp-handlers/service-contract.js');
-    return handleCertifyServiceContract({ directory, baseRef, maxResults, allowBaseFallback });
+    return handleCertifyServiceContract({ directory, baseRef, maxResults, allowBaseFallback, federation, federationRepos });
   } else if (name === 'get_handoff_briefing') {
     const { directory, tokenBudget } = args as { directory: string; tokenBudget?: number };
     const { handleGetHandoffBriefing } = await import('./mcp-handlers/handoff.js');
