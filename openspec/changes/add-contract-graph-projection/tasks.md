@@ -5,7 +5,7 @@
 - [ ] Params, fields, messages, and types as nodes, with `$ref` edges
 - [x] `implements_endpoint` edges from indexed route handlers by method + normalized path template — shipped in `add-contract-node-projection`
 - [x] `consumes_endpoint` edges from HTTP-projection client calls, including operations with no in-repo handler — shipped in `add-contract-node-projection`
-- [ ] Generated-client calls bound via `operationId` when the module is a generated file sourced from the spec
+- [x] Generated-client calls bound via `operationId` when the module is a generated file sourced from the spec — shipped in `add-generated-client-operation-binding`
 - [x] Language-support capability `contractSchemas` — shipped in `add-contract-node-projection`
 
 ## Briefings and consumers
@@ -23,5 +23,5 @@
 ## Spec
 - [ ] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL)
 - [ ] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers
-- [ ] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume
+- [x] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume — the generated-client half shipped; the path-matching half shipped in `add-contract-node-projection`
 - [~] `mcp-handlers` delta: ADD ChangedSpecificationsAndFederatedConsumersSurface — the changed-specification half shipped as `ChangedSpecificationsSurfaceTheirBoundCode`; federated consumers remain

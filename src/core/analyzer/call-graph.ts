@@ -44,6 +44,7 @@ import { buildIacGraph } from './iac/index.js';
 import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
+import { generatedClientFunctionsFor } from './contract/generated-client.js';
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -6714,6 +6715,7 @@ export class CallGraphBuilder {
           const at = codeNodesByFile.get(n.filePath);
           if (at) at.push(n); else codeNodesByFile.set(n.filePath, [n]);
         }
+        const generatedClientCache = new Map<string, ReadonlyMap<string, readonly FunctionNode[]>>();
         const projection = projectContracts({
           files: this.contractFiles,
           filesOmitted: this.contractFilesOmitted,
@@ -6728,6 +6730,15 @@ export class CallGraphBuilder {
             const candidates = trie.findBySimpleName(simple).filter(n => !n.isExternal);
             return candidates.find(n => n.filePath === route.file)
               ?? (candidates.length === 1 ? candidates[0] : undefined);
+          },
+          // One header slice per code file per specification, memoized: the answer is the same
+          // for every operation of that specification.
+          generatedClientFunctions: specPath => {
+            const cached = generatedClientCache.get(specPath);
+            if (cached) return cached;
+            const built = generatedClientFunctionsFor(specPath, codeNodesByFile, f => fileContents.get(f));
+            generatedClientCache.set(specPath, built);
+            return built;
           },
           resolveCaller: call => {
             const inFile = codeNodesByFile.get(call.file);

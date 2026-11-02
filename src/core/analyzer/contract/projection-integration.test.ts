@@ -98,3 +98,75 @@ describe('contract projection through the builder', () => {
     expect(result.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
   });
 });
+
+// A generated client's URL is built from a base variable, so path matching binds nothing and the
+// operation reads as consumed by no one. Its method name is the `operationId`
+// (change: add-contract-graph-projection).
+describe('generated clients bound by operationId', () => {
+  const GEN_SPEC = `openapi: 3.0.0
+info: { title: orders, version: '1' }
+servers:
+  - url: /v1
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      responses: { '200': { description: ok } }
+`;
+  const GENERATED = `/** @generated from openapi.yaml - do not edit */
+const BASE = '/v1';
+export function getOrder(id) { return fetch(\`\${BASE}/orders/\${id}\`); }
+`;
+  const HANDWRITTEN = `export function getOrder(id) { return { id }; }\n`;
+
+  it('binds the generated method and leaves a same-named hand-written function alone', async () => {
+    const builder = new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: GEN_SPEC }] });
+    const result = await builder.build([
+      { path: 'src/generated/client.ts', content: GENERATED, language: 'TypeScript' },
+      { path: 'src/handwritten.ts', content: HANDWRITTEN, language: 'TypeScript' },
+    ]);
+
+    const consumes = result.edges.filter(e => e.kind === 'consumes_endpoint');
+    expect(consumes).toHaveLength(1);
+    expect(consumes[0].callerId).toBe('src/generated/client.ts::getOrder');
+    expect(result.nodes.get(consumes[0].calleeId)?.name).toBe('GET /v1/orders/{id}');
+  });
+
+  it('binds nothing when no module claims the specification as its source', async () => {
+    const builder = new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: GEN_SPEC }] });
+    const result = await builder.build([
+      { path: 'src/handwritten.ts', content: HANDWRITTEN, language: 'TypeScript' },
+    ]);
+
+    expect(result.edges.filter(e => e.kind === 'consumes_endpoint')).toHaveLength(0);
+  });
+
+  it('refuses to pick between two generated modules declaring the same operationId', async () => {
+    const builder = new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: GEN_SPEC }] });
+    const result = await builder.build([
+      { path: 'src/gen/a.ts', content: GENERATED, language: 'TypeScript' },
+      { path: 'src/gen/b.ts', content: GENERATED, language: 'TypeScript' },
+    ]);
+
+    expect(result.edges.filter(e => e.kind === 'consumes_endpoint')).toHaveLength(0);
+    const disclosed = result.contracts?.unresolvedGeneratedBindings;
+    expect(disclosed?.total).toBe(1);
+    expect(disclosed?.items[0]).toMatchObject({ operationId: 'getOrder', reason: 'ambiguous-function' });
+  });
+
+  it('does not count a declaration binding toward a code function degree', async () => {
+    const bare = await new CallGraphBuilder().build([
+      { path: 'src/generated/client.ts', content: GENERATED, language: 'TypeScript' },
+    ]);
+    const withSpec = new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: GEN_SPEC }] });
+    const bound = await withSpec.build([
+      { path: 'src/generated/client.ts', content: GENERATED, language: 'TypeScript' },
+    ]);
+
+    const degree = (r: typeof bare) => [...r.nodes.values()]
+      .filter(n => n.language === 'TypeScript')
+      .map(n => `${n.name}:${n.fanIn}/${n.fanOut}`).sort();
+    expect(degree(bound)).toEqual(degree(bare));
+    expect(bound.entryPoints.map(n => n.name)).toContain('getOrder');
+  });
+});

@@ -8095,6 +8095,16 @@ an absolute URL SHALL bind only when its host is one the matched document declar
 another service is never read as a call to this one. A call whose method or path is not literal
 SHALL be left unbound.
 
+A generated client builds its URL from a base variable, so no literal path is extracted and
+nothing binds by path. Where a module's HEADER names a specification as the source it was
+generated from, a function in that module whose name is exactly an `operationId` of that
+specification SHALL be linked by a `consumes_endpoint` edge to that operation. The header claim is
+required: a name match alone SHALL NOT bind, so a hand-written function sharing a name with an
+`operationId` is never linked. The reference SHALL be read only from a comment in the module's
+header, so a specification path used in ordinary code — a loader that reads it at runtime — is not
+a generation claim. Where the name matches more than one function, or the document declares one
+`operationId` twice, nothing SHALL bind and the case SHALL be disclosed.
+
 #### Scenario: Calls to an external API are visible
 
 - **GIVEN** a vendored OpenAPI document for an external service declaring `POST /v1/charges`, and a
@@ -8108,6 +8118,21 @@ SHALL be left unbound.
   `/v1/orders/7`
 - **WHEN** the repository is analyzed
 - **THEN** a `consumes_endpoint` edge links the calling function to `GET /v1/orders/{id}`
+
+#### Scenario: A generated client binds by operationId
+
+- **GIVEN** a specification declaring `GET /v1/orders/{id}` with `operationId: getOrder`, and a
+  module whose header reads `@generated from openapi.yaml` holding a `getOrder` function that
+  fetches a URL built from a base variable
+- **WHEN** the repository is analyzed
+- **THEN** a `consumes_endpoint` edge links `getOrder` to `GET /v1/orders/{id}`
+
+#### Scenario: A hand-written function of the same name is not bound
+
+- **GIVEN** the same specification and a module with NO header naming it, holding its own
+  `getOrder` function
+- **WHEN** the repository is analyzed
+- **THEN** no `consumes_endpoint` edge is created for it
 
 #### Scenario: A call to another host is not bound
 

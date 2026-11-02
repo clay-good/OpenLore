@@ -90,6 +90,25 @@ edges are therefore **preserved**, not deleted, when a bound handler's own file 
 cannot silently drop the binding. Run `openlore analyze` to refresh the operations after a
 specification changes.
 
+## Generated clients
+
+A generated API client builds its URL from a base variable —
+`fetch(`${BASE}/orders/${id}`)` — so the HTTP projection extracts no literal path and binds
+nothing by path: the operation it calls reads as consumed by no one, which is false. Its method
+name, though, *is* the `operationId`, an exact identifier rather than a resemblance.
+
+So where a module's **header names a specification** as the source it was generated from, a
+function in that module whose name is exactly an `operationId` of that specification is linked to
+that operation with a `consumes_endpoint` edge.
+
+The header claim is required, and that is the whole safety of the rule: a name match alone never
+binds, so a hand-written `getOrder` is not tied to an operation it has nothing to do with — a
+wrong edge is worse than a missing one. The reference is read only from a comment in the header,
+so a specification path appearing in ordinary code (a loader that reads it at runtime, a fixture
+path, a string constant) is not a generation claim. Where the name matches more than one function,
+or a document declares one `operationId` twice, nothing binds and the case is disclosed in
+`unresolvedGeneratedBindings`.
+
 ## Editing a specification
 
 A specification is not a call-graph node and declares no handler of its own, so a diff that edits
@@ -127,6 +146,6 @@ scan cap, or parses with no operation the reader recognizes is named rather than
 
 ## Not read
 
-Fields, messages and types as their own nodes; protobuf and GraphQL; generated clients bound by
-`operationId`; consumers in federated sibling repositories; registry or network fetches; runtime
-traffic; contract tests; code generation; any LLM.
+Fields, messages and types as their own nodes; protobuf and GraphQL; consumers in federated
+sibling repositories; registry or network fetches; runtime traffic; contract tests; code
+generation; any LLM.
