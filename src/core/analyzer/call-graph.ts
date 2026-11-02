@@ -6711,11 +6711,16 @@ export class CallGraphBuilder {
         // Code nodes by file, for the enclosing-function lookup a client call needs.
         const codeNodesByFile = new Map<string, FunctionNode[]>();
         for (const n of allNodes.values()) {
-          if (n.isExternal) continue;
+          // A PROJECTED declaration is not code. IaC nodes are already in `allNodes` here (Pass
+          // 2c runs before this), and Bicep exposes a bare symbol name — so a `var getOrder` in
+          // a .bicep file whose header named the specification was bound as a "generated client
+          // function", linking a declaration to a declaration. The pre-existing `resolveCaller`
+          // path was safe only by accident: it is driven by extracted HTTP calls, which come
+          // from code files. The generated-client rule consults this map directly.
+          if (n.isExternal || isProjectedLanguage(n.language)) continue;
           const at = codeNodesByFile.get(n.filePath);
           if (at) at.push(n); else codeNodesByFile.set(n.filePath, [n]);
         }
-        const generatedClientCache = new Map<string, ReadonlyMap<string, readonly FunctionNode[]>>();
         const projection = projectContracts({
           files: this.contractFiles,
           filesOmitted: this.contractFilesOmitted,
@@ -6731,15 +6736,10 @@ export class CallGraphBuilder {
             return candidates.find(n => n.filePath === route.file)
               ?? (candidates.length === 1 ? candidates[0] : undefined);
           },
-          // One header slice per code file per specification, memoized: the answer is the same
-          // for every operation of that specification.
-          generatedClientFunctions: specPath => {
-            const cached = generatedClientCache.get(specPath);
-            if (cached) return cached;
-            const built = generatedClientFunctionsFor(specPath, codeNodesByFile, f => fileContents.get(f));
-            generatedClientCache.set(specPath, built);
-            return built;
-          },
+          // One header slice per code file per specification. The projector calls this once per
+          // specification, so no memo is needed — an earlier one here never hit.
+          generatedClientFunctions: specPath =>
+            generatedClientFunctionsFor(specPath, codeNodesByFile, f => fileContents.get(f), isTestFile),
           resolveCaller: call => {
             const inFile = codeNodesByFile.get(call.file);
             if (!inFile) return undefined;

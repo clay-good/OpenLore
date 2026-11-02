@@ -8096,14 +8096,19 @@ another service is never read as a call to this one. A call whose method or path
 SHALL be left unbound.
 
 A generated client builds its URL from a base variable, so no literal path is extracted and
-nothing binds by path. Where a module's HEADER names a specification as the source it was
+nothing binds by path. Where a module's HEADER declares a specification as the source it was
 generated from, a function in that module whose name is exactly an `operationId` of that
-specification SHALL be linked by a `consumes_endpoint` edge to that operation. The header claim is
-required: a name match alone SHALL NOT bind, so a hand-written function sharing a name with an
-`operationId` is never linked. The reference SHALL be read only from a comment in the module's
-header, so a specification path used in ordinary code — a loader that reads it at runtime — is not
-a generation claim. Where the name matches more than one function, or the document declares one
-`operationId` twice, nothing SHALL bind and the case SHALL be disclosed.
+specification SHALL be linked by a `consumes_endpoint` edge to that operation, and that edge SHALL
+record that it was bound by `operationId` rather than by a literal path.
+
+The header declaration SHALL require all of: the reference appears in a COMMENT within the
+header, so a specification path used in ordinary code (a loader that reads it at runtime) is not
+a claim; the same line carries a generation marker, so a prose mention is not a claim; and the
+reference matches on path boundaries, so one specification's header never names another whose
+base name is a substring of it. A name match alone SHALL NOT bind. Projected declarations (an
+infrastructure resource, a contract element) and test modules SHALL NOT be candidates. Where the
+name matches more than one function node, or the document declares one `operationId` twice,
+nothing SHALL bind and the case SHALL be disclosed.
 
 #### Scenario: Calls to an external API are visible
 
@@ -8133,6 +8138,27 @@ a generation claim. Where the name matches more than one function, or the docume
   `getOrder` function
 - **WHEN** the repository is analyzed
 - **THEN** no `consumes_endpoint` edge is created for it
+
+#### Scenario: A prose mention is not a generation claim
+
+- **GIVEN** a hand-written module whose header reads `See api/openapi.yaml for the wire contract
+  these mirror.` and holds a `getOrder` function
+- **WHEN** the repository is analyzed
+- **THEN** no `consumes_endpoint` edge is created for it
+
+#### Scenario: One specification's header never names another
+
+- **GIVEN** `api/openapi.yaml` and `third-party/stripe/openapi.yaml`, each declaring an operation
+  with `operationId: getOrder`, and a module whose header reads `@generated from
+  api/openapi.yaml`
+- **WHEN** the repository is analyzed
+- **THEN** the only `consumes_endpoint` edge is to the operation of `api/openapi.yaml`
+
+#### Scenario: An operation bound by a generated client is not reported unmatched
+
+- **GIVEN** a specification whose operation is consumed only by a generated client
+- **WHEN** the repository is analyzed
+- **THEN** the operation is absent from `unmatchedOperations`
 
 #### Scenario: A call to another host is not bound
 

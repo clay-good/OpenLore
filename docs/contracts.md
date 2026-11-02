@@ -101,13 +101,34 @@ So where a module's **header names a specification** as the source it was genera
 function in that module whose name is exactly an `operationId` of that specification is linked to
 that operation with a `consumes_endpoint` edge.
 
-The header claim is required, and that is the whole safety of the rule: a name match alone never
-binds, so a hand-written `getOrder` is not tied to an operation it has nothing to do with — a
-wrong edge is worse than a missing one. The reference is read only from a comment in the header,
-so a specification path appearing in ordinary code (a loader that reads it at runtime, a fixture
-path, a string constant) is not a generation claim. Where the name matches more than one function,
-or a document declares one `operationId` twice, nothing binds and the case is disclosed in
-`unresolvedGeneratedBindings`.
+A wrong edge is worse than a missing one, so the header declaration carries the whole safety of
+the rule and is held to three conditions — each one closing a wrong edge found by review:
+
+| Condition | What it stops |
+|---|---|
+| The reference is in a **comment** in the header | A loader that reads the specification at runtime, a fixture path, a string constant. |
+| The same line carries a **generation marker** (`@generated`, `generated from`, `DO NOT EDIT`, …) | `// See api/openapi.yaml for the wire contract these mirror.` on a hand-written module. |
+| The reference matches on **path boundaries** | `api/openapi.yaml` naming `third-party/stripe/openapi.yaml` — `openapi.yaml` is the common filename, and a substring test bound a client to a vendored spec, making the graph assert the repository called Stripe. |
+
+Projected declarations are not candidates either: a Bicep `var getOrder` in a file whose header
+named the specification was otherwise bound, linking a declaration to a declaration. Nor are test
+modules, whose fixtures mention a specification for conformance and whose helpers collide readily
+with a short `operationId` such as `list`.
+
+Where the name matches more than one function node, or a document declares one `operationId`
+twice, nothing binds and the case is disclosed in `unresolvedGeneratedBindings`. Two same-named
+functions in ONE module collapse to a single graph node before the guard sees them, so that case
+binds the surviving node.
+
+Such an edge records `synthesizedBy: 'operationId'`, because it has **no literal call site by
+construction** — that is why it is bound by name. `verify_claim endpoint-consumed` reads that
+provenance and confirms the consumption instead of reporting a snapshot disagreement it would
+otherwise infer from finding no call text.
+
+The edge's evidence is a comment in a code file, which the watcher does re-read — but the watcher
+never re-projects contracts, and contract edges are preserved across a subset rebuild. So
+deleting a `@generated from …` header does not drop the binding until the next `openlore
+analyze`.
 
 ## Editing a specification
 

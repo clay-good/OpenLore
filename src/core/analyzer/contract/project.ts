@@ -67,6 +67,14 @@ export interface UnboundClientCall {
 /** A method + path that names more than one declared operation, so nothing binds to it. */
 export interface AmbiguousAddress { address: string; operations: string[] }
 
+/**
+ * `synthesizedBy` on an edge bound by `operationId` rather than by a literal path.
+ *
+ * Such an edge has no literal call site by construction, so a consumer that re-scans for one
+ * must read its absence as expected, not as a stale index.
+ */
+export const GENERATED_CLIENT_BINDING = 'operationId';
+
 /** An `operationId` a generated-client module declared but that could not be bound. */
 export interface GeneratedClientBinding {
   operation: string;
@@ -402,7 +410,18 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   const matchedOperations = new Set<string>();
   const unmatchedRoutes: UnmatchedRoute[] = [];
   const unresolvedBindings: UnresolvedBinding[] = [];
-  const pushEdge = (from: FunctionNode, to: FunctionNode, kind: 'implements_endpoint' | 'consumes_endpoint', line?: number): void => {
+  const pushEdge = (
+    from: FunctionNode,
+    to: FunctionNode,
+    kind: 'implements_endpoint' | 'consumes_endpoint',
+    line?: number,
+    /**
+     * How the binding was established, when it was not a literal path match. An `operationId`
+     * binding has no literal call site BY CONSTRUCTION — that is the point of it — so a reader
+     * that re-scans for one and finds nothing must be able to tell this apart from a stale index.
+     */
+    synthesizedBy?: string,
+  ): void => {
     const key = `${from.id}\0${to.id}\0${kind}`;
     if (seenEdges.has(key)) return;
     seenEdges.add(key);
@@ -413,6 +432,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       ...(line !== undefined ? { line } : {}),
       confidence: 'import',
       kind,
+      ...(synthesizedBy ? { synthesizedBy } : {}),
     });
   };
   const routes = [...input.routes].sort((a, b) =>
@@ -471,11 +491,6 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   // An operation is "unmatched" only when every input that could have matched it was assessed. A
   // route extraction that threw, a degraded file, an unread specification, or an operation past
   // the cap withholds the conclusion instead of asserting a false absence.
-  const withheld = notAssessed.size > 0;
-  const unmatchedOperations = nodes
-    .filter(n => !matchedOperations.has(n.id))
-    .map(n => `${n.name} (${n.filePath}:${n.startLine})`)
-    .sort();
   // ── consumes_endpoint by operationId: a generated client's own method name ────────────────
   //
   // Runs after path matching and only ADDS edges; `pushEdge` dedupes, so an operation already
@@ -495,14 +510,17 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       for (const op of doc.operations) {
         if (!op.operationId) continue;
         const key = `${doc.file}\0${op.operationId}`;
+        const fns = byName.get(op.operationId);
+        // Nothing of that name here: not a binding that failed, so nothing to disclose. The
+        // duplicate check follows, so a document repeating an `operationId` no module even
+        // mentions does not emit noise into a disclosure whose purpose is signal.
+        if (!fns?.length) continue;
         if (duplicateOperationIds.has(key)) {
           generatedBindings.push({ operation: op.address, operationId: op.operationId, spec: doc.file, reason: 'duplicate-operation-id' });
           continue;
         }
         const target = byOperationId.get(key);
         if (!target) continue; // past the operation cap
-        const fns = byName.get(op.operationId);
-        if (!fns?.length) continue;
         if (fns.length > 1) {
           // Two functions of that name in the module: binding either would be arbitrary.
           generatedBindings.push({
@@ -511,12 +529,17 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
           });
           continue;
         }
-        pushEdge(fns[0], target, 'consumes_endpoint', fns[0].startLine);
+        pushEdge(fns[0], target, 'consumes_endpoint', fns[0].startLine, GENERATED_CLIENT_BINDING);
         matchedOperations.add(target.id);
       }
     }
   }
 
+  const withheld = notAssessed.size > 0;
+  const unmatchedOperations = nodes
+    .filter(n => !matchedOperations.has(n.id))
+    .map(n => `${n.name} (${n.filePath}:${n.startLine})`)
+    .sort();
   return finish({
     nodes,
     edges,
