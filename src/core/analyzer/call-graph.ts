@@ -44,6 +44,7 @@ import { buildIacGraph } from './iac/index.js';
 import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
+import { generatedClientFunctionsFor } from './contract/generated-client.js';
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -6710,7 +6711,13 @@ export class CallGraphBuilder {
         // Code nodes by file, for the enclosing-function lookup a client call needs.
         const codeNodesByFile = new Map<string, FunctionNode[]>();
         for (const n of allNodes.values()) {
-          if (n.isExternal) continue;
+          // A PROJECTED declaration is not code. IaC nodes are already in `allNodes` here (Pass
+          // 2c runs before this), and Bicep exposes a bare symbol name — so a `var getOrder` in
+          // a .bicep file whose header named the specification was bound as a "generated client
+          // function", linking a declaration to a declaration. The pre-existing `resolveCaller`
+          // path was safe only by accident: it is driven by extracted HTTP calls, which come
+          // from code files. The generated-client rule consults this map directly.
+          if (n.isExternal || isProjectedLanguage(n.language)) continue;
           const at = codeNodesByFile.get(n.filePath);
           if (at) at.push(n); else codeNodesByFile.set(n.filePath, [n]);
         }
@@ -6729,6 +6736,10 @@ export class CallGraphBuilder {
             return candidates.find(n => n.filePath === route.file)
               ?? (candidates.length === 1 ? candidates[0] : undefined);
           },
+          // One header slice per code file per specification. The projector calls this once per
+          // specification, so no memo is needed — an earlier one here never hit.
+          generatedClientFunctions: specPath =>
+            generatedClientFunctionsFor(specPath, codeNodesByFile, f => fileContents.get(f), isTestFile),
           resolveCaller: call => {
             const inFile = codeNodesByFile.get(call.file);
             if (!inFile) return undefined;

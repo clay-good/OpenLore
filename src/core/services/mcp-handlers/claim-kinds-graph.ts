@@ -88,7 +88,7 @@ async function graphBinding(
   root: string,
   kind: 'endpoint-implemented' | 'endpoint-consumed',
   matches: Match[],
-): Promise<{ edges: number; callers: string[] } | null> {
+): Promise<{ edges: number; callers: string[]; operationIdBound: number } | null> {
   const ctx = await readCachedContext(root).catch(() => null);
   const cg = ctx?.callGraph;
   if (!cg) return null;
@@ -96,13 +96,15 @@ async function graphBinding(
   const ids = new Set(matches.map(({ op, doc }) => `${doc.file}::${op.address}`));
   const callers = new Set<string>();
   let edges = 0;
+  let operationIdBound = 0;
   for (const e of cg.edges) {
     if (e.kind !== wanted || !ids.has(e.calleeId)) continue;
     edges++;
+    if (e.synthesizedBy === 'operationId') operationIdBound++;
     const caller = cg.nodes.find(n => n.id === e.callerId);
     if (caller) callers.add(`${caller.name} (${caller.filePath})`);
   }
-  return edges ? { edges, callers: [...callers].sort().slice(0, 5) } : null;
+  return edges ? { edges, callers: [...callers].sort().slice(0, 5), operationIdBound } : null;
 }
 
 async function endpointClaim(root: string, kind: 'endpoint-implemented' | 'endpoint-consumed', subject: string): Promise<unknown> {
@@ -184,6 +186,17 @@ async function endpointClaim(root: string, kind: 'endpoint-implemented' | 'endpo
   }
   const binding = await graphBinding(root, kind, found.matches);
   if (binding) {
+    // An `operationId`-bound edge has no literal call site by construction: the client builds
+    // its URL from a base variable, which is why it is bound by name. Calling that a snapshot
+    // disagreement was simply false, and it made the verdict permanently unverifiable.
+    if (binding.operationIdBound === binding.edges) {
+      return {
+        claim, verdict: 'confirmed' as Verdict,
+        reason: `${binding.edges} generated client function(s) consume ${where} (${binding.callers.map(emittedText).join(', ')}), bound by \`operationId\` from a module whose header declares that specification as its source. There is no literal call site to find: such a client builds its URL from a base variable.`,
+        receipt: { indexCommit, operations, consumers: binding.callers.map(emittedText), evidence: 'operationId binding', scope: 'this repository' },
+        confidenceBoundary: assembleBoundary({ staleness, extraCrossings: crossings([EXTERNAL_CALLERS]) }),
+      };
+    }
     return unverifiable(`No client call site was found for ${where} in the files read, but the graph holds ${binding.edges} \`consumes_endpoint\` edge(s) to it (from ${binding.callers.map(emittedText).join(', ')}). The two were computed from different snapshots — the graph from the last \`openlore analyze\`, this check from git HEAD — so the disagreement, not either answer, is the fact.`, crossings([]));
   }
   const evidence = `no client call site in this repository calls ${where}`;

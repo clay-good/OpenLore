@@ -5,6 +5,18 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### A generated client is no longer invisible to the contract graph
+
+- **A generated API client is bound to the operations it calls, by `operationId`.** Such a client
+  builds its URL from a base variable, so no literal path is extracted and nothing bound by path:
+  the operation read as consumed by no one. Where a module's header names a specification as its
+  source, a function whose name is exactly an `operationId` of that specification is now linked
+  with a `consumes_endpoint` edge. The header claim is required — a name match alone never binds,
+  so a hand-written function sharing a name with an `operationId` is not falsely linked — and the
+  reference is read only from a header comment, so a specification path used in ordinary code is
+  not mistaken for a generation claim. An ambiguous name, or a document declaring one
+  `operationId` twice, binds nothing and is disclosed.
+
 ### A specification edit is no longer an empty briefing
 
 - **`blast_radius` names the contract elements a changed specification declares**, and for each

@@ -68,6 +68,24 @@ export interface UnboundClientCall {
 export interface AmbiguousAddress { address: string; operations: string[] }
 
 /**
+ * `synthesizedBy` on an edge bound by `operationId` rather than by a literal path.
+ *
+ * Such an edge has no literal call site by construction, so a consumer that re-scans for one
+ * must read its absence as expected, not as a stale index.
+ */
+export const GENERATED_CLIENT_BINDING = 'operationId';
+
+/** An `operationId` a generated-client module declared but that could not be bound. */
+export interface GeneratedClientBinding {
+  operation: string;
+  operationId: string;
+  spec: string;
+  reason: 'duplicate-operation-id' | 'ambiguous-function';
+  /** For `ambiguous-function`: the modules holding the same-named functions. */
+  files?: string[];
+}
+
+/**
  * What the projection could not bind, carried on the build result so a consumer can say
  * "unmatched" rather than imply absence. No node, no edge — disclosure only.
  */
@@ -84,6 +102,8 @@ export interface ContractDisclosure {
   unboundClientCalls: Disclosed<UnboundClientCall>;
   /** Addresses that name more than one declared operation; nothing binds to them. */
   ambiguousAddresses: Disclosed<AmbiguousAddress>;
+  /** `operationId`s a generated-client module declared that could not be bound. */
+  unresolvedGeneratedBindings: Disclosed<GeneratedClientBinding>;
   /**
    * Set when a conclusion is WITHHELD because an input was not assessed — the route extraction
    * failed or degraded, a specification could not be read, or the operation cap stopped the
@@ -113,6 +133,7 @@ function empty(): ProjectedContracts {
     nodes: [], edges: [],
     unmatchedOperations: none(), unmatchedRoutes: none(), unresolvedBindings: none(),
     unreadSpecifications: none(), unboundClientCalls: none(), ambiguousAddresses: none(),
+    unresolvedGeneratedBindings: none(),
   };
 }
 
@@ -125,12 +146,14 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     unreadSpecifications: p.unreadSpecifications,
     unboundClientCalls: p.unboundClientCalls,
     ambiguousAddresses: p.ambiguousAddresses,
+    unresolvedGeneratedBindings: p.unresolvedGeneratedBindings,
     ...(p.notAssessed ? { notAssessed: p.notAssessed } : {}),
     ...(p.truncations ? { truncations: p.truncations } : {}),
   };
   const lists: Array<Disclosed<unknown>> = [
     rest.unmatchedOperations, rest.unmatchedRoutes, rest.unresolvedBindings,
     rest.unreadSpecifications, rest.unboundClientCalls, rest.ambiguousAddresses,
+    rest.unresolvedGeneratedBindings,
   ];
   const silent = lists.every(l => l.total === 0) && !rest.notAssessed && !rest.truncations;
   return silent ? undefined : rest;
@@ -154,6 +177,19 @@ export interface ContractProjectionInput {
   resolveHandler: (route: RouteDefinition) => FunctionNode | undefined;
   /** The code node enclosing a client call, or undefined. */
   resolveCaller: (call: HttpCall) => FunctionNode | undefined;
+  /**
+   * The functions of each module whose header names this specification as its source, indexed by
+   * function name (change: add-contract-graph-projection).
+   *
+   * A generated client builds its URL from a base variable —
+   * `fetch(\`${BASE}/orders/${id}\`)` — so the HTTP projection sees no literal path and binds
+   * nothing: the operation it calls reads as consumed by no one. Its method name, however, IS the
+   * `operationId`, which is an exact identifier rather than a guess.
+   *
+   * Supplied by the caller because the projector holds specifications, not source: the header
+   * scan needs file content the builder already has.
+   */
+  generatedClientFunctions?: (specPath: string) => ReadonlyMap<string, readonly FunctionNode[]>;
 }
 
 /** A path template with no literal segment (`/`, `/{id}`): too generic to match without its base path. */
@@ -249,6 +285,10 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   const byFullPath = new Map<string, Indexed[]>();
   /** Normalized `METHOD /declared/path` → the operations at it. */
   const byDeclaredPath = new Map<string, Indexed[]>();
+  /** `<spec>\0<operationId>` → its operation node, for the generated-client binding. */
+  const byOperationId = new Map<string, FunctionNode>();
+  /** Keys whose document declared the same `operationId` twice: nothing binds to either. */
+  const duplicateOperationIds = new Set<string>();
   const index = (m: Map<string, Indexed[]>, key: string, entry: Indexed): void => {
     const at = m.get(key);
     if (at) at.push(entry); else m.set(key, [entry]);
@@ -273,6 +313,13 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
         endLine: op.line,
       };
       nodes.push(node);
+      if (op.operationId) {
+        const key = `${doc.file}\0${op.operationId}`;
+        // An `operationId` is required to be unique within a document; a document that repeats
+        // one is malformed, and binding either operation would be a guess.
+        if (byOperationId.has(key)) duplicateOperationIds.add(key);
+        else byOperationId.set(key, node);
+      }
       const full = normalizeUrl(op.path);
       index(byFullPath, `${op.method} ${full}`, { node, doc, segments: full.split('/').filter(Boolean) });
       const declared = normalizeUrl(op.declaredPath);
@@ -363,7 +410,18 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   const matchedOperations = new Set<string>();
   const unmatchedRoutes: UnmatchedRoute[] = [];
   const unresolvedBindings: UnresolvedBinding[] = [];
-  const pushEdge = (from: FunctionNode, to: FunctionNode, kind: 'implements_endpoint' | 'consumes_endpoint', line?: number): void => {
+  const pushEdge = (
+    from: FunctionNode,
+    to: FunctionNode,
+    kind: 'implements_endpoint' | 'consumes_endpoint',
+    line?: number,
+    /**
+     * How the binding was established, when it was not a literal path match. An `operationId`
+     * binding has no literal call site BY CONSTRUCTION — that is the point of it — so a reader
+     * that re-scans for one and finds nothing must be able to tell this apart from a stale index.
+     */
+    synthesizedBy?: string,
+  ): void => {
     const key = `${from.id}\0${to.id}\0${kind}`;
     if (seenEdges.has(key)) return;
     seenEdges.add(key);
@@ -374,6 +432,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       ...(line !== undefined ? { line } : {}),
       confidence: 'import',
       kind,
+      ...(synthesizedBy ? { synthesizedBy } : {}),
     });
   };
   const routes = [...input.routes].sort((a, b) =>
@@ -432,6 +491,50 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   // An operation is "unmatched" only when every input that could have matched it was assessed. A
   // route extraction that threw, a degraded file, an unread specification, or an operation past
   // the cap withholds the conclusion instead of asserting a false absence.
+  // ── consumes_endpoint by operationId: a generated client's own method name ────────────────
+  //
+  // Runs after path matching and only ADDS edges; `pushEdge` dedupes, so an operation already
+  // bound by a literal path is not bound twice. Nothing here is a guess: the module's header
+  // names the specification, and the method name equals an `operationId` exactly.
+  const generatedBindings: GeneratedClientBinding[] = [];
+  if (input.generatedClientFunctions) {
+    for (const doc of docs) {
+      let byName: ReadonlyMap<string, readonly FunctionNode[]>;
+      try {
+        byName = input.generatedClientFunctions(doc.file);
+      } catch {
+        notAssessed.add(`the generated-client lookup failed for ${doc.file}, so its operationId bindings were not assessed`);
+        continue;
+      }
+      if (!byName.size) continue;
+      for (const op of doc.operations) {
+        if (!op.operationId) continue;
+        const key = `${doc.file}\0${op.operationId}`;
+        const fns = byName.get(op.operationId);
+        // Nothing of that name here: not a binding that failed, so nothing to disclose. The
+        // duplicate check follows, so a document repeating an `operationId` no module even
+        // mentions does not emit noise into a disclosure whose purpose is signal.
+        if (!fns?.length) continue;
+        if (duplicateOperationIds.has(key)) {
+          generatedBindings.push({ operation: op.address, operationId: op.operationId, spec: doc.file, reason: 'duplicate-operation-id' });
+          continue;
+        }
+        const target = byOperationId.get(key);
+        if (!target) continue; // past the operation cap
+        if (fns.length > 1) {
+          // Two functions of that name in the module: binding either would be arbitrary.
+          generatedBindings.push({
+            operation: op.address, operationId: op.operationId, spec: doc.file,
+            reason: 'ambiguous-function', files: [...new Set(fns.map(f => f.filePath))].sort().slice(0, 4),
+          });
+          continue;
+        }
+        pushEdge(fns[0], target, 'consumes_endpoint', fns[0].startLine, GENERATED_CLIENT_BINDING);
+        matchedOperations.add(target.id);
+      }
+    }
+  }
+
   const withheld = notAssessed.size > 0;
   const unmatchedOperations = nodes
     .filter(n => !matchedOperations.has(n.id))
@@ -440,6 +543,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   return finish({
     nodes,
     edges,
+    unresolvedGeneratedBindings: bound(generatedBindings),
     unmatchedOperations: withheld ? none() : bound(unmatchedOperations),
     unmatchedRoutes: withheld ? none() : bound(unmatchedRoutes),
     unresolvedBindings: bound(unresolvedBindings),
