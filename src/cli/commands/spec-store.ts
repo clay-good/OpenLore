@@ -13,6 +13,7 @@ import { writeStdout } from '../output.js';
 import type { SpecStoreStatusReport, SpecStoreFinding } from '../../core/services/mcp-handlers/spec-store.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { configureLogger, logger } from '../../utils/logger.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 const SEVERITY_MARK: Record<SpecStoreFinding['severity'], string> = {
   error: '✗',
@@ -67,8 +68,8 @@ export async function runSpecStoreStatusCli(opts: SpecStoreStatusCliOptions): Pr
     // corrupt federation manifest) must still surface cleanly and exit 0.
     configureLogger({ quiet: false });
     const message = err instanceof Error ? err.message : String(err);
-    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: message }, null, 2) + '\n');
-    else logger.warning(`spec-store: ${message}`);
+    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: toCliVocabulary(message) }, null, 2) + '\n');
+    else logger.warning(`spec-store: ${toCliVocabulary(message)}`);
     return 0;
   }
   configureLogger({ quiet: false });

@@ -8,6 +8,7 @@ import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 interface PeerView { actorId: string; branch: string; worktree: string; title?: string; titleWithheld?: boolean; writes: string[]; creates: string[]; lastSeenAt: string; movedSinceDeclared?: string[]; hazard?: string; witnesses?: string[]; duplicateIntent?: string[] }
 
@@ -50,7 +51,7 @@ async function run(args: Record<string, unknown>, json: boolean | undefined): Pr
     configureLogger({ quiet: false });
   }
   if (result && typeof result === 'object' && 'error' in result) {
-    const error = (result as { error: string }).error;
+    const error = toCliVocabulary((result as { error: string }).error);
     if (json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
     else logger.warning(`footprint: ${safe(error)}`);
     return 1;
