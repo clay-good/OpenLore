@@ -15,6 +15,7 @@
  */
 
 import { classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
+import { toolIsWired } from './active-surface.js';
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
@@ -483,7 +484,20 @@ export async function handleOrient(
   // Normalise search scores to [0, 1] for compositeScore (scores are RRF/BM25: higher = better)
   // With a budget the search is widened for the function pool; insertion points still come from the
   // default search width, so they match the no-budget answer.
-  const insertionResults = tokenBudget ? rawResults.slice(0, clampedLimit * 3) : rawResults;
+  // A test function is never where a feature is added. The candidates come straight from the
+  // search results, which include test code: on a Rust workspace the top insertion points were
+  // `#[test]` functions, so `orient` told the agent to write the feature inside a test
+  // (change: fix-rust-test-detection). Filtered here rather than in the search, because a test
+  // IS a legitimate `relevantFunction` — it shows how the code is used.
+  // The search index carries no test flag, so the graph answers it: a node the build marked
+  // `isTest` (a path convention, or a Rust `#[test]` attribute) is not an insertion point.
+  const isTestNode = (id: string): boolean => {
+    const node = llmCtx?.edgeStore?.getNode(id);
+    if (node) return node.isTest === true;
+    return llmCtx?.callGraph?.nodes.find(n => n.id === id)?.isTest === true;
+  };
+  const nonTestResults = rawResults.filter(r => !isTestNode(r.record.id));
+  const insertionResults = tokenBudget ? nonTestResults.slice(0, clampedLimit * 3) : nonTestResults;
   const maxRawScore = insertionResults.length > 0 ? Math.max(...insertionResults.map(r => r.score)) : 1;
   const normalise = (s: number) => maxRawScore > 0 ? s / maxRawScore : 0;
 
@@ -968,7 +982,10 @@ export async function handleOrient(
   if (/\b(cluster|community|coupled|group)\b/.test(_taskLow)) _suggested.push('get_cluster');
   if (!emptyResult) _suggested.push('check_spec_drift');
   const _seen = new Set<string>();
-  const suggestedTools = _suggested.filter(t => (_seen.has(t) ? false : (_seen.add(t), true)));
+  // `suggestedTools` is a CALL LIST: an entry this process does not serve is a wasted turn.
+  const suggestedTools = _suggested
+    .filter(t => (_seen.has(t) ? false : (_seen.add(t), true)))
+    .filter(toolIsWired);
 
   // ── Next steps ────────────────────────────────────────────────────────────
   const nextSteps: string[] = [];
@@ -985,9 +1002,13 @@ export async function handleOrient(
       );
     }
   } else {
-    nextSteps.push(
-      'Before making an architectural choice, call record_decision(title, rationale, consequences, affectedFiles) to document it',
-    );
+    // Named only when this process serves it. The default `substrate` preset does not, and an
+    // agent that followed the old unconditional advice got "Tool \"record_decision\" is not
+    // available in the active preset" — in the same session where install had promised the
+    // guidance names only wired tools (change: fix-orient-guidance-preset).
+    nextSteps.push(toolIsWired('record_decision')
+      ? 'Before making an architectural choice, call record_decision(title, rationale, consequences, affectedFiles) to document it'
+      : 'Before making an architectural choice, record it with `openlore decisions record --title "…" --rationale "…"` (the record_decision tool is not in the wired preset)');
   }
   if (!emptyResult && insertionPoints.length > 0) {
     nextSteps.push(
@@ -995,13 +1016,18 @@ export async function handleOrient(
     );
   }
   if (!emptyResult && specDomains.length > 0) {
-    const hint = inlineSpecs
-      ? `Domain purposes included in inlineSpecs — call get_spec("${specDomains[0].domain}") for requirements and implementation details`
-      : `Call get_spec("${specDomains[0].domain}") to read the full spec before writing code`;
+    const domain = specDomains[0].domain;
+    const hint = !toolIsWired('get_spec')
+      ? `Read the spec before writing code: ${specDomains[0].specFile} (the get_spec tool is not in the wired preset)`
+      : inlineSpecs
+        ? `Domain purposes included in inlineSpecs — call get_spec("${domain}") for requirements and implementation details`
+        : `Call get_spec("${domain}") to read the full spec before writing code`;
     nextSteps.push(hint);
   }
   if (!emptyResult) {
-    nextSteps.push('After implementing, run check_spec_drift to verify the code matches the spec');
+    nextSteps.push(toolIsWired('check_spec_drift')
+      ? 'After implementing, run check_spec_drift to verify the code matches the spec'
+      : 'After implementing, run `openlore drift` to verify the code matches the spec (the check_spec_drift tool is not in the wired preset)');
   }
 
   // Signal when the graph index is unavailable (e.g. wiped by a version upgrade and

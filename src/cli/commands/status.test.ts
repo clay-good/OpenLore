@@ -166,6 +166,28 @@ describe('openlore status — what the index is', () => {
     expect(await run(['--json'])).not.toContain('openlore embed');
   });
 
+  // A raw UTC ISO stamp read as TOMORROW's date for anyone west of UTC in the evening, in a
+  // panel where every other line is prose (change: fix-status-built-at-rendering).
+  it('renders the build time relatively, not as a raw UTC ISO stamp', async () => {
+    await withIndex(false);
+    await writeConfig(null);
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore']);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+    }
+    const built = lines.find(l => l.includes('Index built'));
+    expect(built, 'the panel must report a build time').toBeDefined();
+    expect(built).toMatch(/just now|ago/);
+    expect(built, 'no raw ISO timestamp').not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
+
   it('emits the same fields through --json', async () => {
     await withIndex(false);
     await writeConfig({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'all-MiniLM-L6-v2' });
