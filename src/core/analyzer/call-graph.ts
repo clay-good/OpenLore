@@ -44,8 +44,7 @@ import { buildIacGraph } from './iac/index.js';
 import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
-import { isContractLanguage } from './contract/types.js';
-import { isContractEdgeKind } from './contract/project.js';
+import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
@@ -6615,8 +6614,13 @@ export class CallGraphBuilder {
     // IaC resources/references project onto the existing node/edge primitives.
     let iacClasses: ClassNode[] = [];
     let unresolvedDeployBindings: UnresolvedDeployBinding[] = [];
+    // Named failures, never a silent empty projection. Before this, a single throw anywhere in
+    // Pass 2c erased every resource, reference and deploy binding, and nothing said so: orient
+    // reported no infrastructure (read as "no resource runs a function in scope") and
+    // `unresolvedDeployBindings` was absent (read as "every binding resolved").
+    const iacFailures: string[] = [];
     try {
-      const iacGraph = buildIacGraph(structuralFiles);
+      const iacGraph = buildIacGraph(structuralFiles, iacFailures);
       const iac = projectIacGraph(iacGraph);
       for (const n of iac.nodes) if (!allNodes.has(n.id)) allNodes.set(n.id, n);
       edges.push(...iac.edges);
@@ -6635,8 +6639,9 @@ export class CallGraphBuilder {
       const deploys = bindDeployHandlers(iacGraph, codeNodes, this.buildOutput);
       edges.push(...deploys.edges.filter(e => allNodes.has(e.callerId)));
       unresolvedDeployBindings = deploys.unresolved;
-    } catch {
-      // IaC extraction is best-effort; never fail the whole build
+    } catch (error) {
+      // Best-effort still: a failure never fails the whole build. But it is disclosed.
+      iacFailures.push(`projection: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     // Transport sends no indexed consumer selects, disclosed as boundary sites below.
@@ -6677,6 +6682,12 @@ export class CallGraphBuilder {
     const seenPairs = new Set<string>();
     for (const edge of edges) {
       if (edge.confidence === 'synthesized') continue;
+      // A declaration binding is not a call. Contract edges are pushed after this loop for
+      // exactly that reason, but `deploys_symbol` is pushed in Pass 2c, before it: the deployed
+      // handler was given a fan-in of 1 by its own manifest, which removed it from the entry
+      // points and left the YAML stanza as the only entry point of the repository. The store's
+      // `recomputeStructuralMetrics` excludes the same set, so both copies agree.
+      if (isDeclarationEdgeKind(edge.kind)) continue;
       const pairKey = `${edge.callerId}\0${edge.calleeId}`;
       if (seenPairs.has(pairKey)) continue;
       seenPairs.add(pairKey);
@@ -6872,24 +6883,32 @@ export class CallGraphBuilder {
 
     // Pass 4: Derive hub functions, entry points, layer violations
     // External and test nodes are excluded from structural stats
-    // A contract element is a DECLARATION, not a code unit: it is never a hub, an entry point,
-    // or a term in the average fan-in/fan-out (change: add-contract-node-projection).
-    const internalNodes = nodes.filter(n => !n.isExternal && !n.isTest && !isContractLanguage(n.language));
+    // A projected element is a DECLARATION, not a code unit: it is never a hub, an entry point,
+    // or a term in the average fan-in/fan-out (change: add-contract-node-projection). Scoped to
+    // contract languages only, this missed INFRASTRUCTURE entirely — 48 of this repository's
+    // 1,121 entry points were GitHub Actions jobs, Helm templates, Bicep modules and Serverless
+    // stanzas, and `CODEBASE.md` prints that table under "the natural starting point for any
+    // task".
+    const internalNodes = nodes.filter(n => !n.isExternal && !n.isTest && !isProjectedLanguage(n.language));
 
     const hubFunctions = internalNodes
       .filter(n => n.fanIn >= HUB_THRESHOLD)
       .sort((a, b) => b.fanIn - a.fanIn);
 
-    const calledIds = new Set(edges.map(e => e.calleeId));
+    // A declaration binding does not make a function "called": a `deploys_symbol` edge out of a
+    // manifest cost the deployed handler its entry-point status, leaving the YAML stanza as the
+    // only entry point of the repository. Same exclusion as the degree loop, and as the store's
+    // `recomputeStructuralMetrics`.
+    const calledIds = new Set(edges.filter(e => !isDeclarationEdgeKind(e.kind)).map(e => e.calleeId));
     const entryPoints = internalNodes
       .filter(n => !calledIds.has(n.id))
       .sort((a, b) => b.fanOut - a.fanOut);
 
     const layerViolations = layers
-      // A declaration is not a layer member: a contract edge into a specification file that
-      // happens to sit inside a configured layer is not an architecture violation
+      // A declaration is not a layer member: a binding edge into a specification file or a
+      // manifest that happens to sit inside a configured layer is not an architecture violation
       // (change: add-contract-node-projection).
-      ? this.detectLayerViolations(edges.filter(e => !isContractEdgeKind(e.kind)), allNodes, layers)
+      ? this.detectLayerViolations(edges.filter(e => !isDeclarationEdgeKind(e.kind)), allNodes, layers)
       : [];
 
     const totalFanIn = internalNodes.reduce((s, n) => s + n.fanIn, 0);
@@ -7093,6 +7112,7 @@ export class CallGraphBuilder {
         : undefined,
       ambiguousSites: ambiguousSites.length > 0 ? ambiguousSites : undefined,
       unresolvedDeployBindings: unresolvedDeployBindings.length > 0 ? unresolvedDeployBindings : undefined,
+      iacNotAssessed: iacFailures.length > 0 ? iacFailures : undefined,
       ...(contractProjection ? { contracts: contractDisclosure(contractProjection) } : {}),
       extractionLane,
       pass1Cache,
@@ -7461,6 +7481,11 @@ export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph
     ...(result.contracts ? { contracts: result.contracts } : {}),
     ...(result.unresolvedDeployBindings && result.unresolvedDeployBindings.length > 0
       ? { unresolvedDeployBindings: result.unresolvedDeployBindings }
+      : {}),
+    // An ecosystem whose extraction threw: its resources are NOT absent, they were not
+    // assessed. Carried into llm-context.json so serve-time consumers can say which.
+    ...(result.iacNotAssessed && result.iacNotAssessed.length > 0
+      ? { iacNotAssessed: result.iacNotAssessed }
       : {}),
   };
 }
