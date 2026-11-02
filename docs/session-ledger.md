@@ -38,7 +38,7 @@ file — never silence.
 |---|---|---|---|
 | An OpenAPI/Swagger operation | its parsed model: method, path, `operationId`, deprecation, parameters, request body and success response, each with the reader's Merkle hash of the schema it references (even through a local `$ref`) | a changed parameter, required property, schema type, or success-response shape | `security`, non-2xx responses, anything behind an external `$ref`, a path added or removed |
 | An infrastructure resource, **Terraform** and **Bicep** | the normalized text of its declared span | any property value in the block | — |
-| An infrastructure resource, every other ecosystem (Kubernetes, Helm, CloudFormation, Ansible, Docker, Compose, GitHub Actions) | the parsed IaC model: address, type, kind, module, declaration header, deploy binding, references — those extractors do not close a resource's span | a changed image, dependency, or header | a property value inside the block (a replica count, a port, a step's command) |
+| An infrastructure resource, every other ecosystem (Kubernetes, Helm, CloudFormation, Ansible, Docker, Compose, GitHub Actions, Serverless) | the parsed IaC model: address, type, kind, module, declaration header, deploy binding, references — those extractors do not close a resource's span | a changed image, dependency, or header | a property value inside the block (a replica count, a port, a step's command) |
 | The whole file | its whitespace-normalized text | every edit the rows above miss, including an element deleted or renamed, and a specification that stops parsing | a change in a file the specification only `$ref`s |
 
 What each row does not see is covered by the row below it, and the file-level row is reported only
