@@ -107,6 +107,29 @@ the graph.**
 
 ### Fixed
 
+- **A trimmed response gives every list a fair share of the budget.** The list-shortening added
+  for over-budget answers grew the lists back largest-first with every other list still at zero,
+  so the biggest list took the whole budget and every other list was served EMPTY — on a
+  `get_mapping` answer, 1,549 `linked` rows filled 256 KB and the `ambiguous`, `stale` and
+  `unmapped` lanes the tool exists to surface were all zeroed. Each list now gets an equal share
+  of what is left, an unused share rolls to the next list, and the remainder is spent on the
+  largest. (#663)
+- **A trim receipt no longer overwrites a tool's own disclosure.** It was written as top-level
+  `truncated` / `omitted` / `truncationNote`, which clobbered payloads that already define them:
+  `get_architecture_overview`'s partial answer carries an `omitted` **array** of field names
+  beside an `omittedBecause` explaining it, and `certify_public_surface`, `blast_radius` and
+  `plan_parallel_work` each declare a `truncated` or `truncationNote` of their own shape. The
+  receipt now lives under its own `responseBudget` key and nothing else is rewritten. (#663)
+- **`map_in_flight_conflicts` budgets the whole call, not each repository.** The harvest budget
+  was a per-repository default, so a federation of N repositories harvested for N budgets, and
+  pull-request enumeration — a `gh pr diff` per PR, up to 50 — had no budget at all. One deadline
+  is now computed per call and honored by both halves. A branch the caller explicitly excluded is
+  also no longer reported as one the budget could not reach. (#663)
+- **Two response-reading claims in the docs were wrong.** A panic block begins `[PANIC:`, not
+  `[openlore …]`, so a host filtering on the documented prefix read it as the answer; and "pick
+  the block that parses" loses the whole answer for the tools that return plain text
+  (`get_signatures`). Both are named now.
+
 - **A whole-repository answer no longer discards itself when it exceeds the response budget.**
   `get_architecture_overview`, `get_refactor_report` and `get_mapping` returned a JSON string cut
   mid-structure, with advice to narrow the query using parameters they do not accept. They now keep
