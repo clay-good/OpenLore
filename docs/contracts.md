@@ -90,8 +90,43 @@ edges are therefore **preserved**, not deleted, when a bound handler's own file 
 cannot silently drop the binding. Run `openlore analyze` to refresh the operations after a
 specification changes.
 
+## Editing a specification
+
+A specification is not a call-graph node and declares no handler of its own, so a diff that edits
+only `openapi.yaml` used to brief an agent on nothing at all: no impacted symbols, no tests, no
+contracts. `blast_radius` now carries a `changedContracts` field for exactly that diff — the
+elements the changed specifications declare, and for each one the indexed handler that serves it
+and the in-repo call sites that consume it. Consumers are read from the whole repository, not from
+the diff, because a specification change affects callers the diff never touched.
+
+It is a blast radius, not a verdict. It does not compare against a base revision and does not
+grade the change; `certify_service_contract` with a base ref owns that conclusion, and the field's
+note says so.
+
+Honesty rules, the same as everywhere else here. `unbound` is the only new claim the field
+makes, so it is the one held hardest: an element is `unbound` only when **nothing stood in the
+way of seeing a binding** — a concrete-method route is indexed, no route matched it ambiguously,
+the consumer scan ran and was not capped, and its path is not all-parameter. Each of those is
+otherwise disclosed as not assessed. Specifically:
+
+| Situation | Why `unbound` is withheld |
+|---|---|
+| No route inventory | No index is not no handler. |
+| Every indexed route has a wildcard method (Django) | Such a route cannot be matched to an operation, but it may well serve it. |
+| Several routes match one operation | It is ambiguous, not unbound; the candidates are named and no single handler is. |
+| The operation path is all parameters (`/{kind}/{id}`) | It matches too broadly to attribute either a handler or a caller. |
+| The consumer scan was capped or failed | Absence of evidence, not evidence of absence. |
+
+A call site counts as a consumer only when its literal URL has no host (relative — this service)
+or a host the specification's own `servers` declares; a call to another vendor on the same path
+shape is not a consumer, and the count of such calls is disclosed. `servedBy` is read from the
+route inventory as of the last `analyze`, which the field says, since a handler added since then
+is not reflected. The consumer scan reads TypeScript, JavaScript, Python and Go, which it also
+says. A changed specification that cannot be parsed, cannot be read, was never examined under the
+scan cap, or parses with no operation the reader recognizes is named rather than dropped.
+
 ## Not read
 
 Fields, messages and types as their own nodes; protobuf and GraphQL; generated clients bound by
-`operationId`; registry or network fetches; runtime traffic; contract tests; code generation; any
-LLM.
+`operationId`; consumers in federated sibling repositories; registry or network fetches; runtime
+traffic; contract tests; code generation; any LLM.

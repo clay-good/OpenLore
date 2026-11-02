@@ -4241,6 +4241,71 @@ without the base path only when unique and not all-parameter; nothing is added o
 - **WHEN** `orient` returns
 - **THEN** there is no `contracts` field and no specification is read
 
+### Requirement: ChangedSpecificationsSurfaceTheirBoundCode
+
+`blast_radius` SHALL include, as an additive `changedContracts` field, the contract elements
+declared by the specification files the diff changes, and for each element the indexed route
+handler that serves it and the in-repo client call sites that consume it. Consumers SHALL be read
+from the whole repository, not from the diff, because a specification change affects callers the
+diff does not touch. The field SHALL be a blast radius and never a verdict: it SHALL NOT compare
+against a base revision or grade the change, and its note SHALL name
+`certify_service_contract` as the tool that does.
+
+An element SHALL be reported `unbound` only when nothing prevented a binding from being seen: a
+concrete-method route is indexed, no route matched it ambiguously, the consumer scan ran and was
+not capped, and its path is not all-parameter. Each of those conditions SHALL instead be
+disclosed as not assessed. A call site SHALL be counted as a consumer only when its literal URL
+has no host or a host the specification's `servers` declares; a specification declaring no host,
+and the languages the consumer scan reads, SHALL be disclosed. Where several indexed routes match
+one operation, no single handler SHALL be named and the candidates SHALL be disclosed. A changed
+specification that cannot be parsed, cannot be read, was never examined under the scan cap, or
+parses with no recognized operation SHALL be named rather than omitted. Elements and consumers
+SHALL be bounded with exact omitted counts.
+
+#### Scenario: A specification-only diff still briefs
+
+- **GIVEN** a diff that edits `api/openapi.yaml` and no source file, an indexed `POST /orders`
+  route in `src/orders.ts`, and a client in `src/client.ts` calling `GET /v1/orders/{id}`
+- **WHEN** `blast_radius` returns
+- **THEN** `changedContracts` names `POST /v1/orders` with its serving route, and
+  `GET /v1/orders/{id}` with the consuming call site, though neither source file is in the diff
+
+#### Scenario: No route index is not an unbound operation
+
+- **GIVEN** a changed specification in a repository with no route inventory
+- **WHEN** `blast_radius` returns
+- **THEN** no element is marked `unbound`, and `notAssessed` says the serving handler was not
+  assessed
+
+#### Scenario: A wildcard-method route may still serve the operation
+
+- **GIVEN** a changed specification and a repository whose only indexed route carries a wildcard
+  method, as Django routes do
+- **WHEN** `blast_radius` returns
+- **THEN** no element is marked `unbound`, and `notAssessed` names the wildcard-method routes
+
+#### Scenario: A call to another host is not a consumer
+
+- **GIVEN** a specification declaring `servers: https://api.example.com/v1` and an operation
+  `GET /alpha`, and a repository whose only matching call is to
+  `https://totally-unrelated.example.net/v1/alpha`
+- **WHEN** `blast_radius` returns
+- **THEN** the element has no `consumedBy`, and `notAssessed` says call sites targeting another
+  host were not counted
+
+#### Scenario: Two handlers match, so neither is named
+
+- **GIVEN** a changed specification whose operation is matched by indexed routes in two files
+- **WHEN** `blast_radius` returns
+- **THEN** the element has no `servedBy` and is not `unbound`, and `notAssessed` names both
+  candidate files
+
+#### Scenario: The diff touches no specification
+
+- **GIVEN** a diff that changes only source files
+- **WHEN** `blast_radius` returns
+- **THEN** there is no `changedContracts` field
+
 ### Requirement: LiteralPayloadsAreCheckedAgainstRequiredProperties
 
 For each in-repo client call site of an operation whose request body requires properties,

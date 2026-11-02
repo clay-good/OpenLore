@@ -134,3 +134,247 @@ export async function contractsForFiles(root: string, files: readonly string[], 
     note: 'OpenAPI operations served by routes in scope, matched by method and path (with the servers base path, or without it only when unique and not all-parameter). A change to a handler, its parameters, or its body must keep this contract or change the specification; certify_service_contract with a base ref grades the change.',
   };
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// The inverse question: the diff changed a SPECIFICATION, so what does it bind to?
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Elements named per briefing. */
+const MAX_CHANGED_ELEMENTS = 10;
+/** Consumer call sites listed per element. */
+const MAX_CONSUMERS = 5;
+
+export interface ChangedContractElement {
+  /** `GET /v1/orders/{id}`. */
+  operation: string;
+  operationId?: string;
+  /** `openapi.yaml:42`. */
+  spec: string;
+  deprecated?: true;
+  /** The indexed route that serves it, when one does. */
+  servedBy?: { file: string; method: string; path: string };
+  /** Matched on the path without the servers base path (the router may mount under it). */
+  matchedWithoutBasePath?: true;
+  /** In-repo call sites that consume it. */
+  consumedBy?: Array<{ file: string; line: number }>;
+  /** Consumers beyond the cap. */
+  consumersOmitted?: number;
+  /** Nothing indexed in this repository serves or consumes it. */
+  unbound?: true;
+}
+
+export interface ChangedContractBriefing {
+  /** The changed specification files this briefing read. */
+  specs: string[];
+  elements: ChangedContractElement[];
+  /** Elements beyond the cap. */
+  omitted?: number;
+  /** What could not be assessed, named rather than implied absent. */
+  notAssessed?: string[];
+  note: string;
+}
+
+/**
+ * The contract elements a diff's SPECIFICATION files declare, and the code bound to each.
+ *
+ * The sibling briefing (`contractsForFiles`) answers "my diff touched a handler — what contract
+ * does it owe?". This answers the inverse: "my diff touched a specification — who is affected?".
+ * An agent editing `openapi.yaml` otherwise sees nothing at all, because a specification is not
+ * a call-graph node and no handler of its own appears in the diff.
+ *
+ * Deliberately NOT a verdict: it does not grade the change or compare against a base revision.
+ * `certify_service_contract` with a base ref owns that conclusion, and the note says so — two
+ * tools must not return the same answer in different words.
+ *
+ * Read-only, bounded, fail-quiet. Returns undefined when the diff touches no specification.
+ */
+export async function changedContractsForSpecFiles(
+  root: string,
+  changedFiles: readonly string[],
+): Promise<ChangedContractBriefing | undefined> {
+  if (!changedFiles.length) return undefined;
+  const changed = new Set(changedFiles);
+  const { indexedRoutes, headSpecsCached, callSitesFor } = await import('../mcp-handlers/service-contract.js');
+  const side = await headSpecsCached(root);
+
+  // Only the specifications the diff actually touched.
+  const docs = side.docs.filter(d => changed.has(d.file));
+  const unreadableChanged = side.unreadable.filter(u => changed.has(u.file));
+  // A changed candidate that could not be READ at all (over the size cap, a link out of the
+  // repository, an I/O error) lands in `unread`, not `unreadable`. Consulting only the latter
+  // returned no briefing for it — the silent omission the spec forbids.
+  const unreadChanged = side.unread.filter(u => changed.has(u.file));
+  // Past the scan cap a changed specification may never have been examined, so the cap is a
+  // reason to brief, not a footnote on a briefing that does not happen.
+  const cappedMayHide = side.capped && changedFiles.some(f => side.candidates.has(f) && !side.examined.has(f));
+  if (!docs.length && !unreadableChanged.length && !unreadChanged.length && !cappedMayHide) return undefined;
+
+  const notAssessed: string[] = [];
+  for (const u of unreadableChanged) {
+    notAssessed.push(`${u.file} could not be parsed (${u.reason}), so its operations were not assessed.`);
+  }
+  for (const u of unreadChanged) {
+    notAssessed.push(`${u.file} could not be read (${u.reason}), so its operations were not assessed.`);
+  }
+  if (side.capped) {
+    notAssessed.push('The specification scan reached its cap, so a changed specification may not have been examined here; certify_service_contract lists the candidates.');
+  }
+
+  const { emittedText } = await import('../generated-file-guard.js');
+  const { normalizeUrl } = await import('../../analyzer/http-route-parser.js');
+  const { HTTP_METHODS } = await import('../../analyzer/contract/openapi.js');
+  const concrete = new Set<string>(HTTP_METHODS.map(m => m.toUpperCase()));
+
+  const routes = (await indexedRoutes(root)) ?? [];
+  // Only a CONCRETE-method route can be matched to an operation. Django and friends are
+  // extracted with `method: 'UNKNOWN'`, so a repository whose routes are all wildcard-method
+  // has nothing to match — and gating the honesty notes on `routes` rather than on these left
+  // every operation in such a repository reported `unbound` with no disclosure at all.
+  const local = routes.filter(r => concrete.has(r.method.toUpperCase()));
+  if (!local.length) {
+    notAssessed.push(routes.length === 0
+      ? 'No route handler is indexed, so "served by" is not assessed — it is not a claim that nothing serves these operations.'
+      : `Every one of the ${routes.length} indexed route(s) carries a wildcard method, which cannot be matched to an operation, so "served by" is not assessed.`);
+  } else if (routes.length > local.length) {
+    notAssessed.push(`${routes.length - local.length} indexed route(s) carry a wildcard method and were not matched, so one of them may serve an operation reported here as unserved.`);
+  }
+  // `servedBy` is read from the route inventory as of the last `analyze`; consumers are read
+  // from the working tree. A handler added before this diff and not yet re-analyzed is
+  // therefore invisible, which is a reason to hedge, not to claim absence.
+  if (local.length) {
+    notAssessed.push('"served by" is read from the route inventory as of the last analyze, so a handler added since then is not reflected.');
+  }
+
+  // A base-less match must be unique across every specification, as in the sibling briefing.
+  const bareCount = new Map<string, number>();
+  for (const doc of side.docs) for (const op of doc.operations) {
+    const k = `${op.method.toUpperCase()} ${normalizeUrl(op.declaredPath)}`;
+    bareCount.set(k, (bareCount.get(k) ?? 0) + 1);
+  }
+
+  // A specification that parsed but yielded nothing is NOT the same as one with no elements to
+  // report: the reader skips a path item it does not recognize (a malformed operation, a `$ref`
+  // it does not follow). Saying so beats an empty list that reads as "this change affects
+  // nothing".
+  for (const doc of docs) {
+    if (!doc.operations.length) {
+      notAssessed.push(`${doc.file} parsed but declares no operation this reader recognizes, so its elements are not assessed.`);
+    }
+  }
+
+  const ops = docs.flatMap(doc => doc.operations.map(op => ({ file: doc.file, op })));
+  // The declared hosts of the specification each operation belongs to, for the host filter below.
+  const hostsByAddress = new Map<string, string[]>();
+  for (const doc of docs) for (const op of doc.operations) hostsByAddress.set(op.address, doc.serverHosts);
+  const consumerBoundaries: string[] = [];
+  const stats = { capped: false, totals: new Map<string, number>() };
+  // Consumers are read from the whole repository, not the diff: a specification change affects
+  // callers the diff never touched, which is the point of asking. `withCall` carries each
+  // call's literal URL so the host can be checked.
+  let consumerScanFailed = false;
+  const consumers = ops.length
+    ? await callSitesFor(root, ops, consumerBoundaries, stats, true).catch(() => { consumerScanFailed = true; return new Map(); })
+    : new Map();
+  notAssessed.push(...consumerBoundaries);
+  if (consumerScanFailed) {
+    notAssessed.push('The consumer scan failed, so no call site was assessed — this is not a claim that nothing consumes these operations.');
+  }
+  // `callSitesFor` matches on the normalized PATH only, so a call to another vendor on the same
+  // path shape was attributed to this specification's operation. The document's own `servers`
+  // hosts are the filter; a host-less (relative) URL stays, since it targets this service.
+  const sameHost = (url: string, hosts: readonly string[]): boolean => {
+    if (!hosts.length) return true; // nothing declared to compare against — disclosed below
+    let host: string;
+    try {
+      host = new URL(url).host.toLowerCase();
+    } catch {
+      return true; // relative or non-absolute: this service
+    }
+    return hosts.some(h => h.toLowerCase() === host);
+  };
+  const anyHostless = docs.some(d => !d.serverHosts.length);
+  if (anyHostless && ops.length) {
+    notAssessed.push('A changed specification declares no `servers` host, so a call site matched only by path may belong to another service.');
+  }
+  // The client scan reads a fixed set of extensions. A consumer written in any other language is
+  // never seen, which must not read as "nothing consumes this".
+  notAssessed.push('Consumers are read from TypeScript, JavaScript, Python and Go sources only; a client in another language is not assessed (see get_language_support).');
+
+  const elements: ChangedContractElement[] = [];
+  for (const { file, op } of ops) {
+    const full = normalizeUrl(op.path);
+    const bare = normalizeUrl(op.declaredPath);
+    // EVERY matching route, not the last one to win the loop. Overwriting `served` on each
+    // match named one handler of several and discarded the rest silently — and the one it
+    // named was simply the last in inventory order.
+    const matches: Array<{ file: string; method: string; path: string; exact: boolean }> = [];
+    for (const r of local) {
+      if (r.method.toUpperCase() !== op.method.toUpperCase()) continue;
+      const n = normalizeUrl(r.path);
+      const exact = n === full;
+      if (!exact && !(n === bare && !onlyParams(n) && bareCount.get(`${op.method.toUpperCase()} ${bare}`) === 1)) continue;
+      matches.push({ file: r.file, method: r.method, path: r.path, exact });
+    }
+    // A full-path match beats a base-less one; among equals there is no winner to pick.
+    const exactMatches = matches.filter(m => m.exact);
+    const best = exactMatches.length ? exactMatches : matches;
+    const ambiguous = best.length > 1;
+    const served = best.length === 1
+      ? { file: emittedText(best[0].file), method: emittedText(best[0].method), path: emittedText(best[0].path) }
+      : undefined;
+    const withoutBase = best.length === 1 && !best[0].exact;
+    if (ambiguous) {
+      notAssessed.push(`${op.address} is matched by ${best.length} indexed routes (${best.slice(0, 4).map(m => m.file).join(', ')}${best.length > 4 ? ', …' : ''}), so no single handler is named.`);
+    }
+
+    const hosts = hostsByAddress.get(op.address) ?? [];
+    const allSites = (consumers.get(op.address) ?? []) as Array<{ file: string; line: number; url?: string }>;
+    // Host filter, plus the same all-parameter guard the handler side already has: an operation
+    // path made only of parameters matches almost any URL of that segment count.
+    const pathTooGeneric = onlyParams(full) || onlyParams(bare);
+    const sites = pathTooGeneric
+      ? []
+      : allSites.filter(site => sameHost(site.url ?? '', hosts));
+    if (pathTooGeneric && allSites.length) {
+      notAssessed.push(`${op.address} is an all-parameter path, which matches too broadly to attribute a call site, so its consumers are not assessed.`);
+    }
+    const dropped = allSites.length - sites.length;
+    if (!pathTooGeneric && dropped > 0) {
+      notAssessed.push(`${dropped} call site(s) matching ${op.address} by path target another host and were not counted as consumers.`);
+    }
+    const total = (stats.totals.get(op.address) ?? allSites.length) - (allSites.length - sites.length);
+    const shown = sites.slice(0, MAX_CONSUMERS).map(s => ({ file: emittedText(s.file), line: s.line }));
+    elements.push({
+      operation: emittedText(op.address),
+      ...(op.operationId ? { operationId: emittedText(op.operationId) } : {}),
+      spec: emittedText(`${file}:${op.line}`),
+      ...(op.deprecated ? { deprecated: true as const } : {}),
+      ...(served ? { servedBy: served } : {}),
+      ...(served && withoutBase ? { matchedWithoutBasePath: true as const } : {}),
+      ...(shown.length ? { consumedBy: shown } : {}),
+      ...(total > shown.length ? { consumersOmitted: total - shown.length } : {}),
+      // Claimable only when nothing stood in the way of seeing a binding: a concrete-method
+      // route index exists, no route matched ambiguously, the consumer scan ran, was not
+      // capped, and the path is specific enough to attribute. Every one of those was a false
+      // `unbound` before.
+      ...(!served && !matches.length && !sites.length && local.length > 0 && !stats.capped
+        && !consumerScanFailed && !pathTooGeneric
+        ? { unbound: true as const }
+        : {}),
+    });
+  }
+
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  // Bound elements first (they have affected code), then by operation address.
+  elements.sort((a, b) =>
+    Number(!!b.servedBy || !!b.consumedBy) - Number(!!a.servedBy || !!a.consumedBy)
+    || cmp(a.operation, b.operation));
+
+  return {
+    specs: [...new Set([...docs.map(d => d.file), ...unreadableChanged.map(u => u.file)])].sort(cmp).map(emittedText),
+    elements: elements.slice(0, MAX_CHANGED_ELEMENTS),
+    ...(elements.length > MAX_CHANGED_ELEMENTS ? { omitted: elements.length - MAX_CHANGED_ELEMENTS } : {}),
+    ...(notAssessed.length ? { notAssessed: [...new Set(notAssessed)].map(emittedText) } : {}),
+    note: 'Contract elements declared by the specification files this diff changed, with the indexed handler that serves each and the in-repo call sites that consume it — who a specification change affects. This is a blast radius, NOT a verdict: it does not compare against a base revision or grade the change. Run certify_service_contract with a base ref for the breaking/dangerous verdict per changed element.',
+  };
+}
