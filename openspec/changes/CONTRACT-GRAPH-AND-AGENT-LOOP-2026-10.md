@@ -30,7 +30,8 @@ groups:
 | Name the symbol that changed under the agent; detect modify/revert edit loops; name edits made after the last test run | [add-session-structural-ledger](archive/2026-10-31-add-session-structural-ledger/) (shipped; edits after the last test run in [add-session-ledger-runs-contracts-tokens](archive/2026-11-01-add-session-ledger-runs-contracts-tokens/); contract hashes and lease tokens in [add-session-lease-tokens](add-session-lease-tokens/)) | shipped |
 | IaC sites that set each env var | [add-iac-code-binding](archive/2026-11-01-add-iac-code-binding/) | shipped (env half) |
 | IaC resource → the code it runs (Lambda) | [add-iac-deploy-binding](archive/2026-11-01-add-iac-deploy-binding/) | shipped |
-| Commands, Serverless, build output, orient | [add-iac-deploy-binding-commands](add-iac-deploy-binding-commands/) | split from the above |
+| Serverless, build output, orient | [add-serverless-and-build-output-binding](archive/2026-11-01-add-serverless-and-build-output-binding/) | shipped |
+| Container commands | [add-iac-deploy-binding-commands](add-iac-deploy-binding-commands/) | split from the above |
 | Tests deleted, skipped, or emptied; expected values changed; suppressions; swallowed errors; relaxed CI | [add-check-weakening-findings](archive/2026-10-31-add-check-weakening-findings/) | shipped (#634) |
 | Imports, exports, and packages that do not exist or are not declared | [add-phantom-reference-findings](archive/2026-10-31-add-phantom-reference-findings/) | shipped (#632) |
 | Generated or vendored file edited by hand; name its source and regenerate command | [add-generated-file-guard](archive/2026-10-31-add-generated-file-guard/) | shipped (#629) |

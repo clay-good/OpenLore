@@ -26,7 +26,9 @@ export type IacLanguage =
   // CI/CD layer (spec-07 deferred follow-up: add-github-actions-workflow-graph).
   | 'GitHub Actions'
   // Azure IaC DSL (spec-07 deferred follow-up: add-bicep-iac-graph).
-  | 'Bicep';
+  | 'Bicep'
+  // Serverless Framework service manifests (change: add-iac-deploy-binding-commands).
+  | 'Serverless';
 
 /** All IaC language tags (single source of truth for dispatch + gating). */
 export const IAC_LANGUAGES: readonly IacLanguage[] = [
@@ -42,6 +44,7 @@ export const IAC_LANGUAGES: readonly IacLanguage[] = [
   'Docker Compose',
   'GitHub Actions',
   'Bicep',
+  'Serverless',
 ] as const;
 
 export function isIacLanguage(lang: string): lang is IacLanguage {

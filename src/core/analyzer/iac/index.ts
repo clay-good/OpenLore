@@ -17,12 +17,14 @@ import { extractCdk } from './cdk.js';
 import { extractDocker } from './docker.js';
 import { extractGitHubActions } from './github-actions.js';
 import { extractBicep } from './bicep.js';
+import { extractServerless } from './serverless.js';
 import { projectIacGraph, type ProjectedIac } from './project.js';
 import { mergeIacGraphs, type IacGraph } from './types.js';
 
 export { isIacLanguage, IAC_LANGUAGES } from './types.js';
 export { classifyYaml } from './classify-yaml.js';
 export { isDockerfilePath } from './docker.js';
+export { isServerlessPath, looksLikeServerless } from './serverless.js';
 export { isWorkflowPath, isActionMetadataPath } from './github-actions.js';
 export type { ProjectedIac } from './project.js';
 
@@ -49,6 +51,8 @@ export function buildIacGraph(files: InFile[]): IacGraph {
     extractGitHubActions(byLang('GitHub Actions')),
     // Bicep is its own DSL, tagged by the `.bicep` extension.
     extractBicep(byLang('Bicep')),
+    // Serverless service manifests, tagged by file name + content (change: add-iac-deploy-binding-commands).
+    extractServerless(byLang('Serverless')),
   ];
   return mergeIacGraphs(graphs);
 }

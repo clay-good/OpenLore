@@ -20,6 +20,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `receiverResolution` | Chained intra-object receiver resolution — `this.<field>.m()` / `self.<field>.m()` — through a per-file registry of declared field types (annotation, `new T()`, constructor parameter property, Python `__init__` annotation, class-body annotation, or `self.x = T()` construction — where a capitalized name the file declares as a `def` is a factory, not a class, and is refused) and locally-declared return types. A resolved call becomes a `receiver_inferred` edge; a receiver the registry cannot bind emits NO edge and is disclosed as a boundary by `analyze_error_propagation`, never guessed. Backed for TypeScript/JavaScript/Python. A language without it does not bind the shape; what it records instead is its own call query's business, and the three outcomes differ: Java/C# capture the chained receiver and fall through to ordinary member-call handling; **Go captures no chained receiver at all**, so it records nothing (a known open gap); and **Ruby is worse than either** — its call query matches only the receiverless alternative, so `self.repo.save` / `@repo.save` emit a raw edge carrying NO receiver, which then binds by `name_only` to any same-named method in the repository. All three are pre-existing and untouched here. | `RECEIVER_REGISTRY_LANGUAGES` (`receiver-registry.ts`) |
 | `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
+| `iacCodeBinding` | Infrastructure-to-code binding: a resource that names the code it runs (a Lambda handler, a Serverless `functions.*.handler`) is linked to the indexed function by a `deploys_symbol` edge, resolved literally — through the project's own `outDir`/`rootDir` or `main`/`source` mapping when the handler names built output. Backed for Terraform, CloudFormation/SAM and Serverless. An ecosystem WITHOUT it names no code, so no binding is looked for; an unresolvable handler is disclosed, never dropped. See [iac.md](iac.md). | `IAC_CODE_BINDING_LANGUAGES` (`iac/deploy-binding.ts`) |
 | `contractSchemas` | Interface-schema reading and projection: each declared operation becomes a graph node bound to the route handler that serves it (`implements_endpoint`) and to the function enclosing the call that consumes it (`consumes_endpoint`), matched literally by method and normalized path. Backed for OpenAPI 3.x and Swagger 2.0 — both are read, and both tag their nodes with the single registry language `OpenAPI`. A format WITHOUT it is not read, so it declares no operation — never "this repository declares none". See [contracts.md](contracts.md). | `isContractLanguage()` / `CONTRACT_LANGUAGES` (`contract/types.ts`) |
 | `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-capability.ts`) |
 | `dynamicBoundary` | Dispatch the resolver cannot follow — reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition, DI-container resolution, and (TS/JS) a tagged message send with no indexed consumer — recorded as a disclosed **boundary site** — unless `literalReflection` binds it to an edge. Backed for TypeScript/JavaScript/Python/Ruby/Go/Java/PHP/C#. A language WITHOUT it records no site because none is looked for, never because it contains no dynamic dispatch. | `DYNAMIC_BOUNDARY_LANG_SPECS` (`dynamic-boundary.ts`) |
@@ -38,6 +39,8 @@ cross-checks **every member** of the `signatures`, `callGraph`, `complexity`, `i
 `receiverResolution`, `cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, `errorPropagation`, and
 `dynamicBoundary` sets by running the real extractor on a per-language fixture and asserting it produces
 output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
+`iacCodeBinding` is cross-checked both ways too: exactly against `IAC_CODE_BINDING_LANGUAGES`, and
+behaviorally by requiring each member to emit a resource that carries a `deploys` handler.
 `cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
 (`cfgSupportsLanguage`, `isIacLanguage`) for every language, and `iacProjection`'s per-ecosystem node
 tagging is covered by the dedicated `iac/*.test.ts` suite and an end-to-end analyze check.
@@ -193,7 +196,14 @@ an existing one to a new capability:
         behavioral test — and assert the BOUNDARY fires for an untypeable receiver, not only that
         a resolved edge appears.
    - `imports`: extend the live `buildBaseImportMap` path and add `L` to `IMPORT_RESOLUTION_LANGUAGES`.
-   - `iacProjection`: add the ecosystem to `IAC_LANGUAGES` and its projector under `analyzer/iac/`.
+   - `iacProjection`: add the ecosystem to `IAC_LANGUAGES` and its projector under `analyzer/iac/`,
+     then add a case to `iac-projection-conformance.test.ts` and a fixture contributor to the
+     `iacProjection is behaviorally faithful` block in `language-support.test.ts` — both guards fail
+     until you do.
+   - `iacCodeBinding`: populate `IacResource.deploys` in that ecosystem's extractor and add it to
+     `IAC_CODE_BINDING_LANGUAGES` (`iac/deploy-binding.ts`), then wire a fixture into the
+     `every iacCodeBinding ecosystem emits a resource carrying a deploys binding` test — it fails
+     until a real extractor produces one, so the set cannot claim an ecosystem nothing binds.
    - `contractSchemas`: add the format to `CONTRACT_LANGUAGES` and its reader under `analyzer/contract/`,
      then wire it into `projectContracts` and the `contractSchemas` fixture map in
      `language-support.test.ts` — the real builder must emit a node tagged with it.

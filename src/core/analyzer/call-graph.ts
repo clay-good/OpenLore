@@ -5660,6 +5660,12 @@ export interface CallGraphBuilderOptions {
   contractFiles?: ReadonlyArray<{ path: string; content: string }>;
   /** Specification candidates the caller did not retain, so the projection discloses the cap. */
   contractFilesOmitted?: number;
+  /**
+   * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
+   * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
+   * no mapping: a built path then binds only if it is itself indexed.
+   */
+  buildOutput?: import('./iac/build-output.js').BuildOutputMap;
 }
 
 export class CallGraphBuilder {
@@ -5671,6 +5677,7 @@ export class CallGraphBuilder {
   private readonly resolution: Required<CallGraphResolutionToggles>;
   private readonly contractFiles: ReadonlyArray<{ path: string; content: string }>;
   private readonly contractFilesOmitted: number;
+  private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
@@ -5679,6 +5686,7 @@ export class CallGraphBuilder {
     this.legacyLatePassesForTesting = options.legacyLatePassesForTesting === true;
     this.contractFiles = options.contractFiles ?? [];
     this.contractFilesOmitted = options.contractFilesOmitted ?? 0;
+    this.buildOutput = options.buildOutput;
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
       reExport: options.resolution?.reExport !== false,
@@ -6624,7 +6632,7 @@ export class CallGraphBuilder {
 
       // Pass 2c.2: function resources → the code they run (change: add-iac-deploy-binding).
       const codeNodes = [...allNodes.values()].filter(n => !n.isExternal && !isIacLanguage(n.language));
-      const deploys = bindDeployHandlers(iacGraph, codeNodes);
+      const deploys = bindDeployHandlers(iacGraph, codeNodes, this.buildOutput);
       edges.push(...deploys.edges.filter(e => allNodes.has(e.callerId)));
       unresolvedDeployBindings = deploys.unresolved;
     } catch {
