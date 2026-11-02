@@ -4241,6 +4241,42 @@ without the base path only when unique and not all-parameter; nothing is added o
 - **WHEN** `orient` returns
 - **THEN** there is no `contracts` field and no specification is read
 
+### Requirement: ChangedSpecificationsSurfaceTheirBoundCode
+
+`blast_radius` SHALL include, as an additive `changedContracts` field, the contract elements
+declared by the specification files the diff changes, and for each element the indexed route
+handler that serves it and the in-repo client call sites that consume it. Consumers SHALL be read
+from the whole repository, not from the diff, because a specification change affects callers the
+diff does not touch. The field SHALL be a blast radius and never a verdict: it SHALL NOT compare
+against a base revision or grade the change, and its note SHALL name
+`certify_service_contract` as the tool that does.
+
+An element SHALL be reported `unbound` only when a route inventory exists AND the consumer scan
+was not capped; the absence of an index SHALL be disclosed as not assessed instead. A changed
+specification that cannot be parsed, or that parses with no recognized operation, SHALL be named
+rather than omitted. Elements and consumers SHALL be bounded with exact omitted counts.
+
+#### Scenario: A specification-only diff still briefs
+
+- **GIVEN** a diff that edits `api/openapi.yaml` and no source file, an indexed `POST /orders`
+  route in `src/orders.ts`, and a client in `src/client.ts` calling `GET /v1/orders/{id}`
+- **WHEN** `blast_radius` returns
+- **THEN** `changedContracts` names `POST /v1/orders` with its serving route, and
+  `GET /v1/orders/{id}` with the consuming call site, though neither source file is in the diff
+
+#### Scenario: No route index is not an unbound operation
+
+- **GIVEN** a changed specification in a repository with no route inventory
+- **WHEN** `blast_radius` returns
+- **THEN** no element is marked `unbound`, and `notAssessed` says the serving handler was not
+  assessed
+
+#### Scenario: The diff touches no specification
+
+- **GIVEN** a diff that changes only source files
+- **WHEN** `blast_radius` returns
+- **THEN** there is no `changedContracts` field
+
 ### Requirement: LiteralPayloadsAreCheckedAgainstRequiredProperties
 
 For each in-repo client call site of an operation whose request body requires properties,

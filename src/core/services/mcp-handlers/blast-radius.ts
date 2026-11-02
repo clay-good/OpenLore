@@ -255,6 +255,11 @@ export interface BlastRadiusBriefing {
   /** OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection). */
   contracts?: import('../contract/contract-briefing.js').ContractBriefing;
   /**
+   * The inverse of `contracts`: the diff changed a SPECIFICATION, so this names the elements it
+   * declares and the code bound to each (change: add-contract-graph-projection).
+   */
+  changedContracts?: import('../contract/contract-briefing.js').ChangedContractBriefing;
+  /**
    * Env vars the diff stops reading anywhere, each with the infrastructure sites that still set the
    * old name (change: add-iac-code-binding). Absent when the diff removes no env-var read.
    */
@@ -525,12 +530,18 @@ export async function computeBlastRadius(
 
   // ── 4f. OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection) ──
   let contracts: import('../contract/contract-briefing.js').ContractBriefing | undefined;
+  let changedContracts: import('../contract/contract-briefing.js').ChangedContractBriefing | undefined;
   try {
     const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
     const prefix = (await getRepoPrefix(absDir)) ?? '';
     const files = diffEntries.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
-    const { contractsForFiles } = await import('../contract/contract-briefing.js');
+    const { contractsForFiles, changedContractsForSpecFiles } = await import('../contract/contract-briefing.js');
     contracts = await contractsForFiles(absDir, files);
+    // The inverse question. A specification is not a call-graph node and declares no handler of
+    // its own, so a diff that only edits `openapi.yaml` produced an empty briefing: no impacted
+    // symbols, no tests, nothing. These are the operations it declares and the code bound to
+    // each — who the change affects.
+    changedContracts = await changedContractsForSpecFiles(absDir, files);
   } catch { /* additive: the briefing never fails over it */ }
 
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
@@ -685,6 +696,7 @@ export async function computeBlastRadius(
         }
       : {}),
     ...(contracts ? { contracts } : {}),
+    ...(changedContracts ? { changedContracts } : {}),
     ...(envRenames?.removedReads.length
       ? { envDeclarations: { removedReads: envRenames.removedReads, stillSet: envRenames.stillSet } }
       : {}),

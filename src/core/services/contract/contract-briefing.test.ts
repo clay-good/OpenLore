@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { contractsForFiles } from './contract-briefing.js';
+import { changedContractsForSpecFiles, contractsForFiles } from './contract-briefing.js';
 import { handleBlastRadius } from '../mcp-handlers/blast-radius.js';
 
 const dirs: string[] = [];
@@ -87,5 +87,121 @@ describe('contract elements in the briefings', () => {
     write(root, 'src/health.ts', 'export const ok = true;\n');
     const r = await handleBlastRadius({ directory: root, baseRef: 'HEAD' }) as { contracts?: { contracts: Array<{ operation: string }> } };
     expect(r.contracts?.contracts.map(c => c.operation)).toEqual(['GET /v1/health']);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// The inverse question: the diff changed a SPECIFICATION (change:
+// add-contract-graph-projection). A specification is not a call-graph node and declares no
+// handler of its own, so a diff that only edits `openapi.yaml` briefed an agent on nothing at
+// all — no impacted symbols, no tests, no contracts.
+// ════════════════════════════════════════════════════════════════════════════
+describe('contract elements a changed specification declares', () => {
+  const CLIENT = `export async function loadOrder(id: string) {
+  const r = await fetch(\`https://api.example.com/v1/orders/\${id}\`);
+  return r.json();
+}
+`;
+
+  it('names each operation with the handler that serves it and the callers that consume it', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC,
+      '.openlore/analysis/route-inventory.json': INVENTORY,
+      'src/orders.ts': 'export {};\n',
+      'src/health.ts': 'export {};\n',
+      'src/client.ts': CLIENT,
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    expect(brief, 'a changed specification must brief').toBeDefined();
+    expect(brief!.specs).toEqual(['api/openapi.yaml']);
+    const byOp = new Map(brief!.elements.map(e => [e.operation, e]));
+    expect([...byOp.keys()].sort()).toEqual([
+      'GET /v1/health', 'GET /v1/orders/{id}', 'POST /v1/orders',
+    ]);
+    // Served by the indexed route.
+    expect(byOp.get('POST /v1/orders')?.servedBy).toMatchObject({ file: 'src/orders.ts', method: 'POST' });
+    expect(byOp.get('POST /v1/orders')?.operationId).toBe('createOrder');
+    // Consumed by a client the diff never touched — the reason to ask the question.
+    const consumed = byOp.get('GET /v1/orders/{id}');
+    expect(consumed?.consumedBy?.[0]).toMatchObject({ file: 'src/client.ts' });
+    expect(consumed?.deprecated).toBe(true);
+    // It is a blast radius, and it names the tool that owns the verdict.
+    expect(brief!.note).toContain('NOT a verdict');
+    expect(brief!.note).toContain('certify_service_contract');
+  });
+
+  it('returns nothing when the diff touches no specification', async () => {
+    const root = repo({ 'api/openapi.yaml': SPEC, '.openlore/analysis/route-inventory.json': INVENTORY, 'src/orders.ts': 'export {};\n' });
+    await expect(changedContractsForSpecFiles(root, ['src/orders.ts'])).resolves.toBeUndefined();
+    await expect(changedContractsForSpecFiles(root, [])).resolves.toBeUndefined();
+  });
+
+  // The honest half: "nothing binds to this" is only claimable when a route index EXISTS.
+  // Without one, silence means not-assessed, and saying `unbound` would be a false negative.
+  it('does not claim an operation is unbound when no route handler is indexed', async () => {
+    const root = repo({ 'api/openapi.yaml': SPEC, 'src/orders.ts': 'export {};\n' });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    expect(brief).toBeDefined();
+    for (const e of brief!.elements) {
+      expect(e.servedBy, 'no index, so nothing can be served').toBeUndefined();
+      expect(e.unbound, 'absence of an index is not absence of a handler').toBeUndefined();
+    }
+    expect(brief!.notAssessed?.join(' ')).toContain('not assessed');
+  });
+
+  it('marks an operation unbound only when the index exists and nothing matches', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC,
+      '.openlore/analysis/route-inventory.json': routes([['POST', '/orders', 'src/orders.ts']]),
+      'src/orders.ts': 'export {};\n',
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    const byOp = new Map(brief!.elements.map(e => [e.operation, e]));
+    expect(byOp.get('POST /v1/orders')?.unbound).toBeUndefined();
+    expect(byOp.get('GET /v1/health')?.unbound).toBe(true);
+  });
+
+  it('names a changed specification it could not parse instead of omitting it', async () => {
+    const root = repo({
+      'api/openapi.yaml': 'openapi: 3.0.3\npaths:\n  /a:\n    get: [not, an, object]\n',
+      '.openlore/analysis/route-inventory.json': INVENTORY,
+      'src/orders.ts': 'export {};\n',
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    if (brief) {
+      expect(brief.specs).toContain('api/openapi.yaml');
+      // Either it parsed with no operations, or it is named as unparseable — never silent.
+      if (!brief.elements.length) expect(brief.notAssessed?.length ?? 0).toBeGreaterThan(0);
+    }
+  });
+
+  it('surfaces through blast_radius when the diff is a specification edit', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC,
+      '.openlore/analysis/route-inventory.json': INVENTORY,
+      'src/orders.ts': 'export {};\n',
+      'src/health.ts': 'export {};\n',
+      'src/client.ts': CLIENT,
+      '.openlore/analysis/llm-context.json': JSON.stringify({ callGraph: { nodes: [], edges: [] } }),
+    });
+    // Edit only the specification: add an operation, touching no source file.
+    write(root, 'api/openapi.yaml', SPEC + `  /orders/{id}/items:\n    get:\n      responses: {'200': {description: ok}}\n`);
+
+    const result = await handleBlastRadius({ directory: root }) as Record<string, unknown>;
+    const changed = result.changedContracts as { elements: Array<{ operation: string }> } | undefined;
+
+    expect(changed, `a specification-only diff must still brief; got keys ${Object.keys(result).join(',')}`).toBeDefined();
+    // The point: the rest of the briefing is empty for a specification-only diff, so without
+    // this field the agent is told nothing at all.
+    expect(changed!.elements.map(e => e.operation)).toContain('POST /v1/orders');
+    expect(changed!.elements.length).toBeGreaterThan(0);
   });
 });

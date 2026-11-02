@@ -90,8 +90,26 @@ edges are therefore **preserved**, not deleted, when a bound handler's own file 
 cannot silently drop the binding. Run `openlore analyze` to refresh the operations after a
 specification changes.
 
+## Editing a specification
+
+A specification is not a call-graph node and declares no handler of its own, so a diff that edits
+only `openapi.yaml` used to brief an agent on nothing at all: no impacted symbols, no tests, no
+contracts. `blast_radius` now carries a `changedContracts` field for exactly that diff — the
+elements the changed specifications declare, and for each one the indexed handler that serves it
+and the in-repo call sites that consume it. Consumers are read from the whole repository, not from
+the diff, because a specification change affects callers the diff never touched.
+
+It is a blast radius, not a verdict. It does not compare against a base revision and does not
+grade the change; `certify_service_contract` with a base ref owns that conclusion, and the field's
+note says so.
+
+Honesty rules, the same as everywhere else here: an element is `unbound` only when a route
+inventory exists *and* the consumer scan was not capped — otherwise the gap is disclosed as not
+assessed, because no index is not the same as no handler. A changed specification that cannot be
+parsed, or that parses with no operation the reader recognizes, is named rather than dropped.
+
 ## Not read
 
 Fields, messages and types as their own nodes; protobuf and GraphQL; generated clients bound by
-`operationId`; registry or network fetches; runtime traffic; contract tests; code generation; any
-LLM.
+`operationId`; consumers in federated sibling repositories; registry or network fetches; runtime
+traffic; contract tests; code generation; any LLM.

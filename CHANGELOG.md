@@ -5,6 +5,17 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### A specification edit is no longer an empty briefing
+
+- **`blast_radius` names the contract elements a changed specification declares**, and for each
+  one the indexed handler that serves it and the in-repo call sites that consume it. A
+  specification is not a call-graph node and declares no handler of its own, so a diff that edits
+  only `openapi.yaml` previously briefed an agent on nothing at all — no impacted symbols, no
+  tests, no contracts. Consumers are read from the whole repository, not from the diff, because a
+  specification change affects callers the diff never touched. It is a blast radius, not a
+  verdict: `certify_service_contract` with a base ref still owns the breaking/dangerous grade,
+  and the field's note says so.
+
 **Everything the agent needs to see, pushed at the moment it can act — and the API contract in
 the graph.**
 
