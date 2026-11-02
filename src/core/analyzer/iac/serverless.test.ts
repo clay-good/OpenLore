@@ -34,6 +34,12 @@ describe('looksLikeServerless', () => {
     expect(looksLikeServerless('provider:\n  name: aws\nfunctions:\n  a:\n    handler: h.x\n')).toBe(true);
     expect(looksLikeServerless('jobs:\n  build: {}\n')).toBe(false);
   });
+
+  it('corroborates the JSON spelling, which the framework also reads', () => {
+    expect(looksLikeServerless('{"service":"orders","functions":{"a":{"handler":"h.x"}}}')).toBe(true);
+    expect(looksLikeServerless('{\n  "provider": { "name": "aws" },\n  "functions": {}\n}')).toBe(true);
+    expect(looksLikeServerless('{"name":"pkg","version":"1.0.0"}')).toBe(false);
+  });
 });
 
 describe('extractServerless', () => {
@@ -86,6 +92,20 @@ describe('extractServerless', () => {
   it('reads a service declared as an object', () => {
     const g = extractServerless(file('service:\n  name: orders\nfunctions:\n  a:\n    handler: h.x\n'));
     expect(g.resources[0].displayName).toBe('service.orders');
+  });
+
+  it('reads a serverless.json manifest end to end', () => {
+    const g = extractServerless([{
+      path: 'serverless.json',
+      language: 'Serverless',
+      content: JSON.stringify({
+        service: 'orders',
+        provider: { name: 'aws', runtime: 'nodejs20.x' },
+        functions: { createOrder: { handler: 'src/orders.create' } },
+      }, null, 2),
+    }]);
+    expect(g.resources.map(r => r.displayName)).toEqual(['service.orders', 'function.createOrder']);
+    expect(g.resources[1].deploys).toEqual({ handler: 'src/orders.create', runtime: 'nodejs20.x' });
   });
 
   it('reads nothing from a file that is not a service manifest, or will not parse', () => {

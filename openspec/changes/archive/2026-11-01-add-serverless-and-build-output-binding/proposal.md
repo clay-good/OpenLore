@@ -17,8 +17,8 @@ ask three separate tools to learn what runs it and where its configuration comes
 | Part | What it does |
 |------|--------------|
 | Serverless | a `serverless.yml` reader: each `functions.*` becomes a resource whose handler binds like a Lambda's |
-| Build output | a handler under the project's declared `outDir` resolves through `rootDir`, or through a `main`/`source` pair; an `outDir` the project maps to no input stays unresolved, with the reason |
-| `orient` | for a function in scope: the resource that runs it, and the infrastructure sites that set each environment variable it reads — one budgeted additive field |
+| Build output | a handler under the root `tsconfig.json`'s `outDir` resolves through its `rootDir`, or through a `main`/`source` pair; no `extends` chain is followed, and an unmapped path stays unresolved naming exactly what was read |
+| `orient` | when a resource runs a function in scope: that resource, and the sites that set each environment variable the deployed function reads — one budgeted additive field, read only then |
 | Capability | language-support `iacCodeBinding`, derived from the extractors that populate a binding |
 
 ## Not built

@@ -21,7 +21,7 @@
 import { posix } from 'node:path';
 import type { CallEdge, FunctionNode } from '../call-graph-types.js';
 import type { IacGraph } from './types.js';
-import { sourceStems, isUnmappedBuildOutput, type BuildOutputMap } from './build-output.js';
+import { mappedSourceStems, isUnmappedBuildOutput, type BuildOutputMap } from './build-output.js';
 
 export interface UnresolvedDeployBinding {
   resource: string;
@@ -59,11 +59,14 @@ function runtimeExtensions(runtime: string | undefined): { ext: string[]; python
 function moduleFiles(module: string, bases: readonly string[], ext: readonly string[], python: boolean | undefined, files: ReadonlySet<string>, build?: BuildOutputMap): string[] {
   // Python imports `pkg.mod` from `pkg/mod.py`; a Node module path is a file path.
   const paths = python ? [module.replace(/\./g, '/')] : [...new Set([module, module.replace(/\./g, '/')])];
-  // A built path is also every source path the project's own mapping says it came from.
-  const variants = [...new Set(paths.flatMap(p => sourceStems(p, build)))];
+  // The path as written is resolved against each base; a stem the project's build mapping produced
+  // is resolved from the repository ROOT only, because that is where the mapping was declared.
+  const candidates: Array<{ base: string; path: string }> = [];
+  for (const base of bases) for (const p of paths) candidates.push({ base, path: p });
+  for (const p of paths) for (const mapped of mappedSourceStems(p, build)) candidates.push({ base: '', path: mapped });
   const out = new Set<string>();
-  for (const base of bases) {
-    for (const v of variants) {
+  for (const { base, path: v } of candidates) {
+    {
       const stem = clean(base ? `${base}/${v}` : v);
       if (stem.startsWith('..')) continue;
       for (const e of ext) {
@@ -103,8 +106,11 @@ export function bindDeployHandlers(
     const codeUri = r.deploys.codeUri !== undefined ? clean(r.deploys.codeUri) : undefined;
     let bases: string[];
     if (codeUri !== undefined) {
-      // A known code location is the only place the module can be (relative to the template).
-      bases = [...new Set([clean(templateDir === '.' ? codeUri || '.' : `${templateDir}/${codeUri}`), codeUri])].map(b => (b === '.' ? '' : b));
+      // A known code location is the only place the module can be, and it is relative to the
+      // TEMPLATE — `CodeUri: .` in `infra/template.yml` means `infra/`, not the repository root.
+      // Also trying the bare `codeUri` bound a bare `app.handler` to an unrelated same-named file
+      // at the root (change: add-serverless-and-build-output-binding).
+      bases = [clean(templateDir === '.' ? codeUri || '.' : `${templateDir}/${codeUri}`)].map(b => (b === '.' ? '' : b));
     } else if (r.language === 'CloudFormation' || r.language === 'Serverless') {
       // A handler is relative to the template/manifest's own directory — the service root, as both
       // tools resolve it. The repository root is NOT also tried: for a template in a
@@ -120,7 +126,7 @@ export function bindDeployHandlers(
     const candidates = moduleFiles(module, [...new Set(bases)], rt.ext, rt.python, files, build);
     if (!candidates.length) {
       const reason = isUnmappedBuildOutput(module, build)
-        ? `a build-output path under "${build?.outDir ?? ''}" that the project maps to no source (no tsconfig rootDir, no package main/source pair)`
+        ? `a build-output path under "${build?.outDir ?? ''}" with no mapping to source: the repository root's tsconfig.json declares no rootDir (an extends chain is not followed) and the package manifest declares no main/source pair`
         : /^(?:dist|build|out|lib|\.aws-sam)\//.test(module)
           ? 'a build-output path with no indexed source'
           : `no indexed source file for module "${module}"${codeUri !== undefined ? ` under ${codeUri || '.'}` : ''}`;

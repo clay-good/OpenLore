@@ -98,11 +98,25 @@ describe('infrastructureForFunctions', () => {
     expect(out?.environment.map(e => e.name)).toEqual(['AWS_REGION', 'TABLE_NAME']);
   });
 
-  it('still names the variables when the infrastructure scan finds nothing at all', async () => {
-    const root = repo({ 'src/orders.ts': HANDLER });
-    const out = await infrastructureForFunctions(root, graph([]), scope);
-    expect(out?.deployedBy).toEqual([]);
+  it('reads nothing at all when no resource runs a function in scope', async () => {
+    const root = repo({ 'src/orders.ts': HANDLER, 'main.tf': TERRAFORM });
+    // The function reads two variables, but nothing deploys it: this field is about a deployed
+    // handler, and `analyze_env_impact` answers the configuration question on its own.
+    expect(await infrastructureForFunctions(root, graph([]), scope)).toBeUndefined();
+  });
+
+  it('names only the variables the DEPLOYED function reads', async () => {
+    const root = repo({ 'src/orders.ts': HANDLER, 'main.tf': TERRAFORM });
+    const out = await infrastructureForFunctions(root, graph(), [...scope, { name: 'helper', filePath: 'src/orders.ts' }]);
+    // `helper` is in scope but nothing deploys it, so its `UNRELATED` is not here.
     expect(out?.environment.map(e => e.name)).toEqual(['AWS_REGION', 'TABLE_NAME']);
+  });
+
+  it('discloses a file of a deployed function it could not re-read', async () => {
+    const root = repo({ 'main.tf': TERRAFORM });
+    const out = await infrastructureForFunctions(root, graph(), scope);
+    expect(out?.deployedBy).toHaveLength(1);
+    expect(out?.scanBoundaries?.join(' ')).toMatch(/could not be re-read/);
   });
 
   it('returns nothing for a scope with no deployment and no variable', async () => {
@@ -113,10 +127,8 @@ describe('infrastructureForFunctions', () => {
     expect(out).toBeUndefined();
   });
 
-  it('does not name a resource that runs a function outside the scope', async () => {
+  it('returns nothing for a scope whose functions no resource runs', async () => {
     const root = repo({ 'src/orders.ts': HANDLER, 'main.tf': TERRAFORM });
-    const out = await infrastructureForFunctions(root, graph(), [{ name: 'helper', filePath: 'src/orders.ts' }]);
-    expect(out?.deployedBy).toEqual([]);
-    expect(out?.environment.map(e => e.name)).toEqual(['UNRELATED']);
+    expect(await infrastructureForFunctions(root, graph(), [{ name: 'helper', filePath: 'src/orders.ts' }])).toBeUndefined();
   });
 });

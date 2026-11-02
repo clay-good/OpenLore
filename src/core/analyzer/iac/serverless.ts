@@ -3,12 +3,18 @@
  *
  * A `serverless.yml` declares functions the same way a SAM template does — `functions.<name>`
  * with a `<module>.<export>` handler — so each function becomes a resource carrying the `deploys`
- * binding the shared deploy binder already resolves against indexed source. Its resources
- * (`resources.Resources.*`) are CloudFormation and are read by that extractor, not here.
+ * binding the shared deploy binder already resolves against indexed source.
+ *
+ * A manifest's own `resources.Resources` block is CloudFormation written inside a Serverless file,
+ * and it is read by NOBODY: dispatch is by language tag, so the CloudFormation extractor never
+ * sees a file tagged `Serverless` (and its own probe requires `Resources:` at the top level, which
+ * this is not). Those resources are therefore absent from the graph, not read elsewhere.
  *
  * Static only: no plugin execution, no `${...}` variable resolution, no `sls package`. A handler
  * behind a variable, a container image, or a runtime nothing binds is recorded as an unresolved
- * binding with the reason, never dropped silently.
+ * binding with the reason, never dropped silently. A file the YAML parser reports errors for — a
+ * `---`-separated multi-document file among them, which the framework does not accept either — is
+ * skipped whole, as every other ecosystem's reader skips an unparseable file.
  */
 
 import { LineCounter, parseDocument } from 'yaml';
@@ -33,11 +39,14 @@ export function isServerlessPath(path: string): boolean {
 
 /**
  * Whether a file's text declares a Serverless service: a `service` key, or a `provider` with a
- * `functions` block. A cheap corroboration so a same-named file is not misclassified.
+ * `functions` block. A cheap corroboration so a same-named file is not misclassified — it accepts
+ * the JSON spelling too (a quoted, indented key), since the framework reads `serverless.json`.
+ * The file name has already been matched by {@link isServerlessPath}, so leading whitespace is no
+ * risk here.
  */
 export function looksLikeServerless(content: string): boolean {
-  return /(^|\n)service[ \t]*:/.test(content)
-    || (/(^|\n)provider[ \t]*:/.test(content) && /(^|\n)functions[ \t]*:/.test(content));
+  const key = (name: string) => new RegExp(`(?:^|[\\n{,])[ \\t]*["']?${name}["']?[ \\t]*:`).test(content);
+  return key('service') || (key('provider') && key('functions'));
 }
 
 export function extractServerless(files: readonly InFile[]): IacGraph {
@@ -46,13 +55,19 @@ export function extractServerless(files: readonly InFile[]): IacGraph {
     if (!isServerlessPath(file.path) || !looksLikeServerless(file.content)) continue;
     const lc = new LineCounter();
     let doc;
+    let js: Record<string, unknown> | null;
     try {
-      doc = parseDocument(file.content, { lineCounter: lc, uniqueKeys: false });
+      // `merge: true`: a shared-config anchor (`<<: *defaults`) is common in a real manifest, and
+      // without it the handler it supplies reads as absent — a confident wrong reason.
+      doc = parseDocument(file.content, { lineCounter: lc, uniqueKeys: false, merge: true });
       if (doc.errors.length) continue;
+      // INSIDE the try: `toJS` is what throws on an excessive alias count, and an escape here
+      // would abort `buildIacGraph` for the WHOLE repository — every other ecosystem's resources
+      // with it, silently (change: add-serverless-and-build-output-binding).
+      js = doc.toJS({ maxAliasCount: 100 }) as Record<string, unknown> | null;
     } catch {
       continue;
     }
-    const js = doc.toJS({ maxAliasCount: 100 }) as Record<string, unknown> | null;
     if (!js || typeof js !== 'object') continue;
     const lineOf = (path: (string | number)[]): number => {
       const node = doc.getIn(path, true) as { range?: [number, number, number] } | undefined;
@@ -78,8 +93,9 @@ export function extractServerless(files: readonly InFile[]): IacGraph {
 
     const providerRuntime = typeof provider.runtime === 'string' ? provider.runtime : undefined;
     const functions = js.functions;
-    if (!functions || typeof functions !== 'object' || Array.isArray(functions)) continue;
-    for (const [name, body] of Object.entries(functions as Record<string, unknown>)) {
+    const entries = functions && typeof functions === 'object' && !Array.isArray(functions)
+      ? Object.entries(functions as Record<string, unknown>) : [];
+    for (const [name, body] of entries) {
       const fn = (body ?? {}) as Record<string, unknown>;
       const startLine = lineOf(['functions', name]);
       const resource: IacResource = {

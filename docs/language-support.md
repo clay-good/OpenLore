@@ -39,6 +39,8 @@ cross-checks **every member** of the `signatures`, `callGraph`, `complexity`, `i
 `receiverResolution`, `cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, `errorPropagation`, and
 `dynamicBoundary` sets by running the real extractor on a per-language fixture and asserting it produces
 output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
+`iacCodeBinding` is cross-checked both ways too: exactly against `IAC_CODE_BINDING_LANGUAGES`, and
+behaviorally by requiring each member to emit a resource that carries a `deploys` handler.
 `cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
 (`cfgSupportsLanguage`, `isIacLanguage`) for every language, and `iacProjection`'s per-ecosystem node
 tagging is covered by the dedicated `iac/*.test.ts` suite and an end-to-end analyze check.
@@ -199,7 +201,9 @@ an existing one to a new capability:
      `iacProjection is behaviorally faithful` block in `language-support.test.ts` — both guards fail
      until you do.
    - `iacCodeBinding`: populate `IacResource.deploys` in that ecosystem's extractor and add it to
-     `IAC_CODE_BINDING_LANGUAGES` (`iac/deploy-binding.ts`).
+     `IAC_CODE_BINDING_LANGUAGES` (`iac/deploy-binding.ts`), then wire a fixture into the
+     `every iacCodeBinding ecosystem emits a resource carrying a deploys binding` test — it fails
+     until a real extractor produces one, so the set cannot claim an ecosystem nothing binds.
    - `contractSchemas`: add the format to `CONTRACT_LANGUAGES` and its reader under `analyzer/contract/`,
      then wire it into `projectContracts` and the `contractSchemas` fixture map in
      `language-support.test.ts` — the real builder must emit a node tagged with it.

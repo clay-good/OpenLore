@@ -4,7 +4,7 @@
  * declaration — and stay unresolved, with the reason, when the project declares none.
  */
 import { describe, it, expect } from 'vitest';
-import { readBuildOutputMap, sourceStems, isUnmappedBuildOutput } from './build-output.js';
+import { readBuildOutputMap, mappedSourceStems, isUnmappedBuildOutput } from './build-output.js';
 import { bindDeployHandlers } from './deploy-binding.js';
 import { extractServerless } from './serverless.js';
 import type { FunctionNode } from '../call-graph-types.js';
@@ -32,6 +32,16 @@ describe('readBuildOutputMap', () => {
       .toEqual({ mainToSource: { main: 'dist/index.js', source: 'src/index.ts' } });
   });
 
+  it('reads a tsconfig written with a byte-order mark', () => {
+    expect(map({ 'tsconfig.json': '\ufeff{"compilerOptions":{"outDir":"dist","rootDir":"src"}}' }))
+      .toEqual({ outDir: 'dist', rootDir: 'src' });
+  });
+
+  it('keeps a comma inside a quoted path, which a whole-text regex would delete', () => {
+    expect(map({ 'package.json': '{"main":"dist/a, }b.js", // c\n "source":"src/a, }b.ts"}' }))
+      .toEqual({ mainToSource: { main: 'dist/a, }b.js', source: 'src/a, }b.ts' } });
+  });
+
   it('contributes nothing from an absent, unreadable, or mapping-free config', () => {
     expect(map({})).toEqual({});
     expect(map({ 'tsconfig.json': 'not json at all {{' })).toEqual({});
@@ -40,21 +50,22 @@ describe('readBuildOutputMap', () => {
   });
 });
 
-describe('sourceStems', () => {
+describe('mappedSourceStems', () => {
   const m = { outDir: 'dist', rootDir: 'src' };
-  it('keeps the path itself first, so a handler naming source is unaffected', () => {
-    expect(sourceStems('src/orders.ts', m)).toEqual(['src/orders.ts']);
-  });
-  it('maps a path under outDir to the same path under rootDir', () => {
-    expect(sourceStems('dist/api/orders', m)).toEqual(['dist/api/orders', 'src/api/orders']);
+  it('returns only what the mapping says, not the path itself', () => {
+    expect(mappedSourceStems('dist/api/orders', m)).toEqual(['src/api/orders']);
+    expect(mappedSourceStems('src/orders.ts', m)).toEqual([]);
   });
   it('maps main to source, extension aside', () => {
-    expect(sourceStems('dist/index.js', { mainToSource: { main: 'dist/index.js', source: 'src/index.ts' } }))
-      .toEqual(['dist/index.js', 'src/index']);
+    expect(mappedSourceStems('dist/index.js', { mainToSource: { main: 'dist/index.js', source: 'src/index.ts' } }))
+      .toEqual(['src/index']);
   });
   it('maps nothing without a mapping, and nothing outside outDir', () => {
-    expect(sourceStems('dist/orders', undefined)).toEqual(['dist/orders']);
-    expect(sourceStems('other/orders', m)).toEqual(['other/orders']);
+    expect(mappedSourceStems('dist/orders', undefined)).toEqual([]);
+    expect(mappedSourceStems('other/orders', m)).toEqual([]);
+  });
+  it('maps nothing when the mapping points out of the repository', () => {
+    expect(mappedSourceStems('dist/orders', { outDir: 'dist', rootDir: '../src' })).toEqual([]);
   });
 });
 
@@ -98,17 +109,27 @@ describe('a built handler through the deploy binder', () => {
     expect(bound.unresolved).toEqual([]);
   });
 
-  it('stays unresolved, naming the missing mapping, when the project declares none', () => {
+  it('stays unresolved, naming exactly what was looked at, when the root config maps nothing', () => {
     const graph = extractServerless([{ path: 'serverless.yml', content: SLS, language: 'Serverless' }]);
     const bound = bindDeployHandlers(graph, [code('src/orders.ts', 'create')], { outDir: 'dist' });
     expect(bound.edges).toEqual([]);
-    expect(bound.unresolved[0].reason).toMatch(/maps to no source/);
+    // Not "the project declares no rootDir": only the root tsconfig was read, and an `extends`
+    // chain is not followed, so the reason says that instead of over-claiming.
+    expect(bound.unresolved[0].reason).toMatch(/repository root's tsconfig\.json declares no rootDir \(an extends chain is not followed\)/);
   });
 
   it('binds a Serverless handler that names source directly', () => {
     const graph = extractServerless([{ path: 'serverless.yml', content: SLS.replace('dist/orders.create', 'src/orders.create'), language: 'Serverless' }]);
     const bound = bindDeployHandlers(graph, [code('src/orders.ts', 'create')]);
     expect(bound.edges.map(e => e.calleeId)).toEqual(['src/orders.ts::create']);
+  });
+
+  it('does not apply the root mapping inside a manifest\'s own directory', () => {
+    const graph = extractServerless([{ path: 'services/api/serverless.yml', content: SLS, language: 'Serverless' }]);
+    // The root tsconfig describes `dist` → `src` at the ROOT; `services/src/orders.ts` is a file
+    // it never described, so binding to it would be a guess.
+    const bound = bindDeployHandlers(graph, [code('services/src/orders.ts', 'create')], { outDir: 'dist', rootDir: 'src' });
+    expect(bound.edges).toEqual([]);
   });
 
   it('binds a handler relative to a manifest in a subdirectory', () => {

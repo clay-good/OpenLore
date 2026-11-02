@@ -172,3 +172,35 @@ describe('deploy binding: adversarial review regressions', () => {
     expect(pairs(g)).toEqual([expect.stringContaining('pkg/mod.py')]);
   });
 });
+
+/**
+ * A template in a subdirectory: the handler is relative to the TEMPLATE's own directory, never
+ * also the repository root — that would bind a bare `app.handler` to an unrelated same-named file
+ * (change: add-serverless-and-build-output-binding).
+ */
+describe('a template in a subdirectory', () => {
+  const template = (dir: string) => ({
+    path: `${dir}/template.yml`,
+    content: 'Resources:\n  Fn:\n    Type: AWS::Serverless::Function\n    Properties:\n      Handler: app.handler\n      CodeUri: .\n      Runtime: nodejs20.x\n',
+    language: 'CloudFormation',
+  });
+  const node = (file: string): FunctionNode => ({
+    id: `${file}::handler`, name: 'handler', filePath: file, isAsync: false, language: 'TypeScript',
+    startIndex: 0, endIndex: 10, fanIn: 0, fanOut: 0, startLine: 1, endLine: 2,
+  });
+
+  it('does not bind to a same-named file at the repository root', async () => {
+    const { extractCloudFormation } = await import('./cloudformation.js');
+    const graph = extractCloudFormation([template('infra')]);
+    const bound = bindDeployHandlers(graph, [node('app.ts')]);
+    expect(bound.edges).toEqual([]);
+    expect(bound.unresolved).toHaveLength(1);
+  });
+
+  it('binds to the file beside the template, with no ambiguity from a root twin', async () => {
+    const { extractCloudFormation } = await import('./cloudformation.js');
+    const graph = extractCloudFormation([template('infra')]);
+    const bound = bindDeployHandlers(graph, [node('app.ts'), node('infra/app.ts')]);
+    expect(bound.edges.map(e => e.calleeId)).toEqual(['infra/app.ts::handler']);
+  });
+});

@@ -20,6 +20,7 @@ import {
 import { cfgSupportsLanguage, CFG_LANGUAGES } from './cfg.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
 import { isContractLanguage, CONTRACT_LANGUAGES } from './contract/types.js';
+import { IAC_CODE_BINDING_LANGUAGES } from './iac/deploy-binding.js';
 import { CALLGRAPH_LANGUAGES, CallGraphBuilder, serializeCallGraph, extractFileStyle } from './call-graph.js';
 import { TYPE_INFERENCE_LANGUAGES as TI, inferTypesFromSource } from './type-inference-engine.js';
 import { SIGNATURE_LANGUAGES as SIG, extractSignatures, detectLanguage as detectLanguageReexport } from './signature-extractor.js';
@@ -458,6 +459,42 @@ describe('completeness + fail-soft + determinism', () => {
     ]);
     for (const lang of referenced) {
       expect(keys.has(lang), `${lang} (referenced by a capability source) is missing from the registry`).toBe(true);
+    }
+  });
+
+  it('iacCodeBinding cell === IAC_CODE_BINDING_LANGUAGES.has(lang) for EVERY language (exact, drift-proof)', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('iacCodeBinding');
+      expect(claims, `iacCodeBinding mismatch for ${lang}`).toBe(IAC_CODE_BINDING_LANGUAGES.has(lang));
+    }
+  });
+
+  // Behavioral, not tautological: every claimed ecosystem must produce a resource that actually
+  // CARRIES a `deploys` binding from its own fixture. Adding a name to the set without an
+  // extractor that populates `deploys` fails here, which is the whole point of the claim.
+  it('every iacCodeBinding ecosystem emits a resource carrying a deploys binding', async () => {
+    const fixtures: Record<string, Array<{ path: string; content: string; language: string }>> = {
+      Terraform: [{
+        path: 'main.tf', language: 'Terraform',
+        content: 'resource "aws_lambda_function" "orders" {\n  handler = "src/orders.handler"\n  runtime = "nodejs20.x"\n}\n',
+      }],
+      CloudFormation: [{
+        path: 'template.yaml', language: 'CloudFormation',
+        content: 'Resources:\n  Fn:\n    Type: AWS::Serverless::Function\n    Properties:\n      Handler: src/orders.handler\n      CodeUri: .\n      Runtime: nodejs20.x\n',
+      }],
+      Serverless: [{
+        path: 'serverless.yml', language: 'Serverless',
+        content: 'service: orders\nprovider:\n  name: aws\n  runtime: nodejs20.x\nfunctions:\n  createOrder:\n    handler: src/orders.create\n',
+      }],
+    };
+    for (const lang of IAC_CODE_BINDING_LANGUAGES) {
+      expect(fixtures[lang], `no fixture wired for IAC_CODE_BINDING_LANGUAGES member ${lang}`).toBeDefined();
+    }
+    const { buildIacGraph } = await import('./iac/index.js');
+    for (const lang of IAC_CODE_BINDING_LANGUAGES) {
+      const graph = buildIacGraph(fixtures[lang]);
+      const bound = graph.resources.filter(r => r.language === lang && r.deploys?.handler);
+      expect(bound.length, `${lang} claims iacCodeBinding but no resource carried a deploys handler`).toBeGreaterThan(0);
     }
   });
 

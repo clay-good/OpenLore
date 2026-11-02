@@ -35,8 +35,9 @@ Serverless variable SHALL be recorded as an unresolved binding with that reason.
 ### Requirement: BuiltHandlersResolveThroughTheProjectsOwnMapping
 
 A deployed handler that names built output SHALL resolve to its source only through a mapping the
-project itself declares — TypeScript's `outDir` with `rootDir`, or a package manifest's `main`
-paired with `source`. A path under a declared `outDir` that the project maps to no input SHALL
+project itself declares in the repository root's `tsconfig.json` or `package.json` — TypeScript's
+`outDir` with `rootDir`, or `main` paired with `source`. An `extends` chain is not followed, and
+the unresolved reason SHALL name what was read rather than assert the project declares no mapping. A path under a declared `outDir` that the project maps to no input SHALL
 remain an unresolved binding naming the missing mapping; it SHALL NOT be matched to a
 same-basename source file.
 

@@ -11,6 +11,11 @@
  *   - A package's `main` paired with `source` (the parcel/microbundle convention): the one names
  *     the output, the other names the input.
  *
+ * Only the REPOSITORY ROOT's `tsconfig.json` and `package.json` are read, and an `extends` chain
+ * is not followed: a monorepo whose mapping lives in `packages/api/tsconfig.json`, or a root
+ * config that inherits `rootDir` from a base, has no mapping here. The unresolved binding says
+ * exactly that rather than claiming the project declares none.
+ *
  * An `outDir` with no `rootDir` and no `source` maps nothing: the output path says nothing about
  * where its input lives, and a same-basename file elsewhere is a similarity match, which this
  * substrate does not make. That case is disclosed as `build-output-unmapped`, the same reason the
@@ -33,7 +38,10 @@ const clean = (p: string): string =>
 const stripExt = (p: string): string => p.replace(/\.[cm]?[jt]sx?$/i, '');
 
 /** Strip `//` and `/* *\/` comments and trailing commas: a `tsconfig.json` is JSONC. */
-function parseJsonc(text: string): Record<string, unknown> | undefined {
+function parseJsonc(raw: string): Record<string, unknown> | undefined {
+  // A BOM is routine from some Windows editors, and `JSON.parse` refuses it — without this a
+  // BOM'd `tsconfig.json` silently left every built handler unmapped.
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
   try {
     return JSON.parse(text) as Record<string, unknown>;
   } catch {
@@ -53,10 +61,17 @@ function parseJsonc(text: string): Record<string, unknown> | undefined {
       if (c === '"') { inString = true; out += c; continue; }
       if (c === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') i++; out += '\n'; continue; }
       if (c === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); i = end === -1 ? text.length : end + 1; continue; }
+      // A trailing comma, dropped HERE rather than by a regex over the whole text: a `, }` inside
+      // a quoted path would otherwise be edited out of the value.
+      if (c === ',') {
+        let j = i + 1;
+        while (j < text.length && /\s/.test(text[j])) j++;
+        if (text[j] === '}' || text[j] === ']') continue;
+      }
       out += c;
     }
     try {
-      return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1')) as Record<string, unknown>;
+      return JSON.parse(out) as Record<string, unknown>;
     } catch {
       return undefined;
     }
@@ -90,20 +105,28 @@ export function readBuildOutputMap(
 }
 
 /**
- * Every source path a module path could be, given the project's declared mapping — the path
- * itself first, so a handler that already names source is unaffected. Extension-less stems, as
- * the deploy binder appends the runtime's extensions itself.
+ * The source paths the project's declared mapping says a module path came from — repository-root
+ * relative, because that is where the mapping was declared. Empty when the mapping says nothing
+ * about this path.
+ *
+ * These are kept apart from the path itself on purpose: the path is resolved relative to the
+ * template's directory as well, while a mapped stem is only ever meaningful from the root. Joining
+ * a root mapping to a manifest's directory bound `dist/orders` under `services/api/` to
+ * `services/src/orders.ts` for a `rootDir` of `../src` — a file the root config never described.
  */
-export function sourceStems(module: string, map: BuildOutputMap | undefined): string[] {
+export function mappedSourceStems(module: string, map: BuildOutputMap | undefined): string[] {
   const path = clean(module);
-  const stems = [path];
-  if (!map) return stems;
+  if (!map) return [];
+  const stems: string[] = [];
   if (map.outDir && map.rootDir !== undefined && path.startsWith(`${map.outDir}/`)) {
     const rest = path.slice(map.outDir.length + 1);
-    stems.push(clean(map.rootDir && map.rootDir !== '.' ? `${map.rootDir}/${rest}` : rest));
+    const mapped = clean(map.rootDir && map.rootDir !== '.' ? `${map.rootDir}/${rest}` : rest);
+    // A `rootDir` pointing out of the repository maps to nothing indexable.
+    if (!mapped.startsWith('..')) stems.push(mapped);
   }
   if (map.mainToSource && stripExt(path) === stripExt(map.mainToSource.main)) {
-    stems.push(stripExt(map.mainToSource.source));
+    const mapped = stripExt(map.mainToSource.source);
+    if (!mapped.startsWith('..')) stems.push(mapped);
   }
   return [...new Set(stems)];
 }
