@@ -21,8 +21,14 @@ const payload = result.content
   .find(t => { try { JSON.parse(t); return true; } catch { return false; } });
 ```
 
-Every note begins with a bracketed source tag (`[openlore freshness]`, `[openlore index]`), so they
-are also identifiable by prefix.
+Notes are also identifiable by prefix, but there are **two** prefix shapes: the disclosures begin
+with a bracketed source tag (`[openlore freshness]`, `[openlore index]`), while a panic signal
+begins `[PANIC:` and its level (`[PANIC:ELEVATED]`, `[PANIC:PLANNING]`, `[PANIC:SCOPE]`). A host
+that filters on `[openlore` alone will read a panic block as the answer.
+
+One caveat on "pick the block that parses": a few tools return plain text rather than JSON —
+`get_signatures` is the one you are most likely to hit. For those, no block parses, and the
+payload is the block that carries no note prefix.
 
 ### Setup
 
