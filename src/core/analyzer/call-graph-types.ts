@@ -574,6 +574,8 @@ export interface CallGraphResult {
   ambiguousSites?: AmbiguousCallSite[];
   /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
   unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** Ecosystems whose IaC extraction threw: their resources were not assessed, not absent. */
+  iacNotAssessed?: string[];
   /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
   contracts?: import('./contract/project.js').ContractDisclosure;
   /**
@@ -616,6 +618,8 @@ export interface SerializedCallGraph {
   ambiguousSites?: AmbiguousCallSite[];
   /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
   unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** Ecosystems whose IaC extraction threw: their resources were not assessed, not absent. */
+  iacNotAssessed?: string[];
   /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
   contracts?: import('./contract/project.js').ContractDisclosure;
 }

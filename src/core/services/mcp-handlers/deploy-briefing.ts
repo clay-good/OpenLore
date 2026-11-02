@@ -69,6 +69,7 @@ export async function infrastructureForFunctions(
 
   // ── Which resource runs a function in scope ──────────────────────────────
   const deployed: DeployedResource[] = [];
+  const boundTargets = new Map<string, { name: string; filePath: string }>();
   for (const e of cg.edges) {
     if (e.kind !== 'deploys_symbol') continue;
     const target = nodeById.get(e.calleeId);
@@ -81,6 +82,11 @@ export async function infrastructureForFunctions(
       declaredAt: emittedText(`${resource.filePath}:${resource.startLine ?? 1}`),
       runs: emittedText(target!.name),
     });
+    // Remembered as the NODE, not as a name to re-match later. A bare-name match attributed one
+    // file's environment reads to a same-named function in another: two `handler`s, one
+    // deployed, and the other's variables were reported as the deployed one's. These are the
+    // screened-output values' source, so they are kept unscreened for matching only.
+    boundTargets.set(`${target!.filePath}\0${target!.name}`, { name: target!.name, filePath: target!.filePath });
   }
   const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
   deployed.sort((a, b) => cmp(a.resource, b.resource) || cmp(a.runs, b.runs));
@@ -91,7 +97,7 @@ export async function infrastructureForFunctions(
 
   // ── Which variables the DEPLOYED functions read, and which site sets each ──
   const scanBoundaries: string[] = [];
-  const bound = functions.filter(f => deployed.some(d => d.runs === f.name));
+  const bound = functions.filter(f => boundTargets.has(`${f.filePath}\0${f.name}`));
   const files = [...new Set(bound.map(f => f.filePath))];
   const read = files.slice(0, MAX_FILES);
   if (files.length > read.length) {
