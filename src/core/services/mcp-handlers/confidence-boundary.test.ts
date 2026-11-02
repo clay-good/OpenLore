@@ -207,7 +207,7 @@ describe('computeStaleness (integration)', () => {
     expect(await computeStaleness(dir)).toBeUndefined();
   });
 
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 });
 
 describe('computeStaleness (git-backed positive path + memo)', () => {
@@ -231,7 +231,7 @@ describe('computeStaleness (git-backed positive path + memo)', () => {
     writeFingerprint({ hash: 'h', commit: head });
   });
 
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('emits a marker naming the build commit when a graph-source file changed since it', async () => {
     writeFileSync(join(dir, 'src.ts'), 'export const a = 2;\n'); // uncommitted edit to a .ts file

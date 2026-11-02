@@ -73,7 +73,7 @@ beforeEach(() => {
 
 afterEach(() => {
   _resetContextCacheForTesting();
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe('runManifestEmit (end-to-end)', () => {
@@ -179,7 +179,7 @@ describe('runManifestEmit (end-to-end)', () => {
   });
 
   it('returns exit code 2 when no analysis graph exists', async () => {
-    rmSync(join(dir, '.openlore'), { recursive: true, force: true });
+    rmSync(join(dir, '.openlore'), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     _resetContextCacheForTesting();
     expect(await runManifestEmit({ projectRoot: dir })).toBe(2);
   });

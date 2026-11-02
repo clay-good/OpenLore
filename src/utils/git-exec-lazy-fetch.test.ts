@@ -44,7 +44,7 @@ describe.skipIf(process.platform === 'win32' || !gitVersionAtLeast(2, 45))('part
     git(victim, 'config', 'remote.origin.uploadpack', hostile);
   });
 
-  afterEach(() => rmSync(root, { recursive: true, force: true }));
+  afterEach(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('the fixture is live: plain git runs the repository uploadpack on a missing blob', () => {
     git(victim, 'show', 'HEAD~1:file.txt');

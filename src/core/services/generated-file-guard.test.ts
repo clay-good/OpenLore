@@ -32,7 +32,7 @@ const write = (cwd: string, rel: string, content: string) => {
 
 let dirs: string[] = [];
 afterEach(() => {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   dirs = [];
 });
 
