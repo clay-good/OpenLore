@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { configureLogger, logger } from '../../utils/logger.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { writeStdout } from '../output.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 type TargetKind = 'symbol' | 'file' | 'requirement';
 
@@ -200,7 +201,7 @@ export async function runSearchCli(query: string, opts: SearchCliOptions): Promi
   if (response?.error) {
     if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
     else {
-      logger.error(`search: ${response.error}`);
+      logger.error(`search: ${toCliVocabulary(String(response.error))}`);
       if (response.hint) logger.info('Hint', response.hint);
     }
     return 1;
