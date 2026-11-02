@@ -4251,10 +4251,16 @@ diff does not touch. The field SHALL be a blast radius and never a verdict: it S
 against a base revision or grade the change, and its note SHALL name
 `certify_service_contract` as the tool that does.
 
-An element SHALL be reported `unbound` only when a route inventory exists AND the consumer scan
-was not capped; the absence of an index SHALL be disclosed as not assessed instead. A changed
-specification that cannot be parsed, or that parses with no recognized operation, SHALL be named
-rather than omitted. Elements and consumers SHALL be bounded with exact omitted counts.
+An element SHALL be reported `unbound` only when nothing prevented a binding from being seen: a
+concrete-method route is indexed, no route matched it ambiguously, the consumer scan ran and was
+not capped, and its path is not all-parameter. Each of those conditions SHALL instead be
+disclosed as not assessed. A call site SHALL be counted as a consumer only when its literal URL
+has no host or a host the specification's `servers` declares; a specification declaring no host,
+and the languages the consumer scan reads, SHALL be disclosed. Where several indexed routes match
+one operation, no single handler SHALL be named and the candidates SHALL be disclosed. A changed
+specification that cannot be parsed, cannot be read, was never examined under the scan cap, or
+parses with no recognized operation SHALL be named rather than omitted. Elements and consumers
+SHALL be bounded with exact omitted counts.
 
 #### Scenario: A specification-only diff still briefs
 
@@ -4270,6 +4276,29 @@ rather than omitted. Elements and consumers SHALL be bounded with exact omitted 
 - **WHEN** `blast_radius` returns
 - **THEN** no element is marked `unbound`, and `notAssessed` says the serving handler was not
   assessed
+
+#### Scenario: A wildcard-method route may still serve the operation
+
+- **GIVEN** a changed specification and a repository whose only indexed route carries a wildcard
+  method, as Django routes do
+- **WHEN** `blast_radius` returns
+- **THEN** no element is marked `unbound`, and `notAssessed` names the wildcard-method routes
+
+#### Scenario: A call to another host is not a consumer
+
+- **GIVEN** a specification declaring `servers: https://api.example.com/v1` and an operation
+  `GET /alpha`, and a repository whose only matching call is to
+  `https://totally-unrelated.example.net/v1/alpha`
+- **WHEN** `blast_radius` returns
+- **THEN** the element has no `consumedBy`, and `notAssessed` says call sites targeting another
+  host were not counted
+
+#### Scenario: Two handlers match, so neither is named
+
+- **GIVEN** a changed specification whose operation is matched by indexed routes in two files
+- **WHEN** `blast_radius` returns
+- **THEN** the element has no `servedBy` and is not `unbound`, and `notAssessed` names both
+  candidate files
 
 #### Scenario: The diff touches no specification
 

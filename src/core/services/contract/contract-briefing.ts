@@ -200,14 +200,24 @@ export async function changedContractsForSpecFiles(
   // Only the specifications the diff actually touched.
   const docs = side.docs.filter(d => changed.has(d.file));
   const unreadableChanged = side.unreadable.filter(u => changed.has(u.file));
-  if (!docs.length && !unreadableChanged.length) return undefined;
+  // A changed candidate that could not be READ at all (over the size cap, a link out of the
+  // repository, an I/O error) lands in `unread`, not `unreadable`. Consulting only the latter
+  // returned no briefing for it — the silent omission the spec forbids.
+  const unreadChanged = side.unread.filter(u => changed.has(u.file));
+  // Past the scan cap a changed specification may never have been examined, so the cap is a
+  // reason to brief, not a footnote on a briefing that does not happen.
+  const cappedMayHide = side.capped && changedFiles.some(f => side.candidates.has(f) && !side.examined.has(f));
+  if (!docs.length && !unreadableChanged.length && !unreadChanged.length && !cappedMayHide) return undefined;
 
   const notAssessed: string[] = [];
   for (const u of unreadableChanged) {
     notAssessed.push(`${u.file} could not be parsed (${u.reason}), so its operations were not assessed.`);
   }
+  for (const u of unreadChanged) {
+    notAssessed.push(`${u.file} could not be read (${u.reason}), so its operations were not assessed.`);
+  }
   if (side.capped) {
-    notAssessed.push('The specification scan reached its cap, so a changed specification may be missing here; certify_service_contract lists the candidates.');
+    notAssessed.push('The specification scan reached its cap, so a changed specification may not have been examined here; certify_service_contract lists the candidates.');
   }
 
   const { emittedText } = await import('../generated-file-guard.js');
@@ -216,9 +226,23 @@ export async function changedContractsForSpecFiles(
   const concrete = new Set<string>(HTTP_METHODS.map(m => m.toUpperCase()));
 
   const routes = (await indexedRoutes(root)) ?? [];
+  // Only a CONCRETE-method route can be matched to an operation. Django and friends are
+  // extracted with `method: 'UNKNOWN'`, so a repository whose routes are all wildcard-method
+  // has nothing to match — and gating the honesty notes on `routes` rather than on these left
+  // every operation in such a repository reported `unbound` with no disclosure at all.
   const local = routes.filter(r => concrete.has(r.method.toUpperCase()));
-  if (!routes.length) {
-    notAssessed.push('No route handler is indexed, so "served by" is not assessed — it is not a claim that nothing serves these operations.');
+  if (!local.length) {
+    notAssessed.push(routes.length === 0
+      ? 'No route handler is indexed, so "served by" is not assessed — it is not a claim that nothing serves these operations.'
+      : `Every one of the ${routes.length} indexed route(s) carries a wildcard method, which cannot be matched to an operation, so "served by" is not assessed.`);
+  } else if (routes.length > local.length) {
+    notAssessed.push(`${routes.length - local.length} indexed route(s) carry a wildcard method and were not matched, so one of them may serve an operation reported here as unserved.`);
+  }
+  // `servedBy` is read from the route inventory as of the last `analyze`; consumers are read
+  // from the working tree. A handler added before this diff and not yet re-analyzed is
+  // therefore invisible, which is a reason to hedge, not to claim absence.
+  if (local.length) {
+    notAssessed.push('"served by" is read from the route inventory as of the last analyze, so a handler added since then is not reflected.');
   }
 
   // A base-less match must be unique across every specification, as in the sibling briefing.
@@ -239,32 +263,86 @@ export async function changedContractsForSpecFiles(
   }
 
   const ops = docs.flatMap(doc => doc.operations.map(op => ({ file: doc.file, op })));
+  // The declared hosts of the specification each operation belongs to, for the host filter below.
+  const hostsByAddress = new Map<string, string[]>();
+  for (const doc of docs) for (const op of doc.operations) hostsByAddress.set(op.address, doc.serverHosts);
   const consumerBoundaries: string[] = [];
   const stats = { capped: false, totals: new Map<string, number>() };
   // Consumers are read from the whole repository, not the diff: a specification change affects
-  // callers the diff never touched, which is the point of asking.
+  // callers the diff never touched, which is the point of asking. `withCall` carries each
+  // call's literal URL so the host can be checked.
+  let consumerScanFailed = false;
   const consumers = ops.length
-    ? await callSitesFor(root, ops, consumerBoundaries, stats).catch(() => new Map())
+    ? await callSitesFor(root, ops, consumerBoundaries, stats, true).catch(() => { consumerScanFailed = true; return new Map(); })
     : new Map();
   notAssessed.push(...consumerBoundaries);
+  if (consumerScanFailed) {
+    notAssessed.push('The consumer scan failed, so no call site was assessed — this is not a claim that nothing consumes these operations.');
+  }
+  // `callSitesFor` matches on the normalized PATH only, so a call to another vendor on the same
+  // path shape was attributed to this specification's operation. The document's own `servers`
+  // hosts are the filter; a host-less (relative) URL stays, since it targets this service.
+  const sameHost = (url: string, hosts: readonly string[]): boolean => {
+    if (!hosts.length) return true; // nothing declared to compare against — disclosed below
+    let host: string;
+    try {
+      host = new URL(url).host.toLowerCase();
+    } catch {
+      return true; // relative or non-absolute: this service
+    }
+    return hosts.some(h => h.toLowerCase() === host);
+  };
+  const anyHostless = docs.some(d => !d.serverHosts.length);
+  if (anyHostless && ops.length) {
+    notAssessed.push('A changed specification declares no `servers` host, so a call site matched only by path may belong to another service.');
+  }
+  // The client scan reads a fixed set of extensions. A consumer written in any other language is
+  // never seen, which must not read as "nothing consumes this".
+  notAssessed.push('Consumers are read from TypeScript, JavaScript, Python and Go sources only; a client in another language is not assessed (see get_language_support).');
 
   const elements: ChangedContractElement[] = [];
   for (const { file, op } of ops) {
     const full = normalizeUrl(op.path);
     const bare = normalizeUrl(op.declaredPath);
-    let served: { file: string; method: string; path: string } | undefined;
-    let withoutBase = false;
+    // EVERY matching route, not the last one to win the loop. Overwriting `served` on each
+    // match named one handler of several and discarded the rest silently — and the one it
+    // named was simply the last in inventory order.
+    const matches: Array<{ file: string; method: string; path: string; exact: boolean }> = [];
     for (const r of local) {
       if (r.method.toUpperCase() !== op.method.toUpperCase()) continue;
       const n = normalizeUrl(r.path);
       const exact = n === full;
       if (!exact && !(n === bare && !onlyParams(n) && bareCount.get(`${op.method.toUpperCase()} ${bare}`) === 1)) continue;
-      served = { file: emittedText(r.file), method: emittedText(r.method), path: emittedText(r.path) };
-      withoutBase = !exact;
-      if (exact) break; // a full-path match wins over a base-less one
+      matches.push({ file: r.file, method: r.method, path: r.path, exact });
     }
-    const sites = (consumers.get(op.address) ?? []) as Array<{ file: string; line: number }>;
-    const total = stats.totals.get(op.address) ?? sites.length;
+    // A full-path match beats a base-less one; among equals there is no winner to pick.
+    const exactMatches = matches.filter(m => m.exact);
+    const best = exactMatches.length ? exactMatches : matches;
+    const ambiguous = best.length > 1;
+    const served = best.length === 1
+      ? { file: emittedText(best[0].file), method: emittedText(best[0].method), path: emittedText(best[0].path) }
+      : undefined;
+    const withoutBase = best.length === 1 && !best[0].exact;
+    if (ambiguous) {
+      notAssessed.push(`${op.address} is matched by ${best.length} indexed routes (${best.slice(0, 4).map(m => m.file).join(', ')}${best.length > 4 ? ', …' : ''}), so no single handler is named.`);
+    }
+
+    const hosts = hostsByAddress.get(op.address) ?? [];
+    const allSites = (consumers.get(op.address) ?? []) as Array<{ file: string; line: number; url?: string }>;
+    // Host filter, plus the same all-parameter guard the handler side already has: an operation
+    // path made only of parameters matches almost any URL of that segment count.
+    const pathTooGeneric = onlyParams(full) || onlyParams(bare);
+    const sites = pathTooGeneric
+      ? []
+      : allSites.filter(site => sameHost(site.url ?? '', hosts));
+    if (pathTooGeneric && allSites.length) {
+      notAssessed.push(`${op.address} is an all-parameter path, which matches too broadly to attribute a call site, so its consumers are not assessed.`);
+    }
+    const dropped = allSites.length - sites.length;
+    if (!pathTooGeneric && dropped > 0) {
+      notAssessed.push(`${dropped} call site(s) matching ${op.address} by path target another host and were not counted as consumers.`);
+    }
+    const total = (stats.totals.get(op.address) ?? allSites.length) - (allSites.length - sites.length);
     const shown = sites.slice(0, MAX_CONSUMERS).map(s => ({ file: emittedText(s.file), line: s.line }));
     elements.push({
       operation: emittedText(op.address),
@@ -275,8 +353,14 @@ export async function changedContractsForSpecFiles(
       ...(served && withoutBase ? { matchedWithoutBasePath: true as const } : {}),
       ...(shown.length ? { consumedBy: shown } : {}),
       ...(total > shown.length ? { consumersOmitted: total - shown.length } : {}),
-      // Only claimable when a route index exists AND the consumer scan was not capped.
-      ...(!served && !sites.length && routes.length > 0 && !stats.capped ? { unbound: true as const } : {}),
+      // Claimable only when nothing stood in the way of seeing a binding: a concrete-method
+      // route index exists, no route matched ambiguously, the consumer scan ran, was not
+      // capped, and the path is specific enough to attribute. Every one of those was a false
+      // `unbound` before.
+      ...(!served && !matches.length && !sites.length && local.length > 0 && !stats.capped
+        && !consumerScanFailed && !pathTooGeneric
+        ? { unbound: true as const }
+        : {}),
     });
   }
 

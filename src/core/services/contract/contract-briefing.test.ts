@@ -205,3 +205,127 @@ describe('contract elements a changed specification declares', () => {
     expect(changed!.elements.length).toBeGreaterThan(0);
   });
 });
+
+// Each case below produced a FALSE claim before the fix. `unbound` and `consumedBy` are the two
+// assertions this field adds, so each one that can be wrong needs a test that pins it.
+describe('the changed-specification briefing never claims more than it checked', () => {
+  const SPEC_ONE = `openapi: 3.0.3
+info: {title: A, version: '1'}
+servers: [{url: 'https://api.example.com/v1'}]
+paths:
+  /alpha:
+    get:
+      operationId: getAlpha
+      responses: {'200': {description: ok}}
+`;
+
+  it('does not claim unbound when every indexed route carries a wildcard method', async () => {
+    // Django routes are extracted with method UNKNOWN. They cannot be matched to an operation,
+    // so they were filtered out of matching — while the honesty gate counted them as an index.
+    const root = repo({
+      'api/openapi.yaml': SPEC_ONE,
+      '.openlore/analysis/route-inventory.json': routes([['UNKNOWN', '/v1/alpha', 'app/urls.py']]),
+      'app/urls.py': 'urlpatterns = []\n',
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    expect(brief!.elements[0].unbound, 'a wildcard-method route may serve it').toBeUndefined();
+    expect(brief!.notAssessed?.join(' ')).toContain('wildcard method');
+  });
+
+  it('discloses that the serving handler comes from the last analyze, not the working tree', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC_ONE,
+      '.openlore/analysis/route-inventory.json': routes([['GET', '/v1/alpha', 'src/alpha.ts']]),
+      'src/alpha.ts': 'export {};\n',
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    expect(brief!.notAssessed?.join(' ')).toContain('as of the last analyze');
+  });
+
+  it('does not attribute a call to another host as a consumer', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC_ONE,
+      '.openlore/analysis/route-inventory.json': routes([['GET', '/v1/alpha', 'src/alpha.ts']]),
+      'src/alpha.ts': 'export {};\n',
+      'src/otherhost.ts': "export const r = fetch('https://totally-unrelated.example.net/v1/alpha');\n",
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    const el = brief!.elements.find(e => e.operation === 'GET /v1/alpha');
+    expect(el?.consumedBy, 'another vendor on the same path is not a consumer').toBeUndefined();
+    expect(brief!.notAssessed?.join(' ')).toContain('another host');
+  });
+
+  it('keeps a relative-URL call site, which targets this service', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC_ONE,
+      '.openlore/analysis/route-inventory.json': routes([['GET', '/v1/alpha', 'src/alpha.ts']]),
+      'src/alpha.ts': 'export {};\n',
+      'src/client.ts': "export const r = fetch('/v1/alpha');\n",
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    expect(brief!.elements.find(e => e.operation === 'GET /v1/alpha')?.consumedBy?.[0].file).toBe('src/client.ts');
+  });
+
+  it('does not attribute consumers to an all-parameter operation path', async () => {
+    const generic = `openapi: 3.0.3
+info: {title: G, version: '1'}
+servers: [{url: 'https://api.example.com/v1'}]
+paths:
+  /{kind}/{id}:
+    get:
+      operationId: getGeneric
+      responses: {'200': {description: ok}}
+`;
+    const root = repo({
+      'api/openapi.yaml': generic,
+      '.openlore/analysis/route-inventory.json': routes([['GET', '/v1/other', 'src/other.ts']]),
+      'src/other.ts': 'export {};\n',
+      'src/unrelated.ts': "export const r = fetch('https://billing.internal.corp/v1/invoices/4711');\n",
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    const el = brief!.elements[0];
+    expect(el.consumedBy, 'an all-parameter path matches too broadly to attribute').toBeUndefined();
+    expect(el.unbound, 'and it is too broad to call unbound either').toBeUndefined();
+  });
+
+  it('names every route that matches instead of silently picking the last', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC_ONE,
+      '.openlore/analysis/route-inventory.json': routes([['GET', '/alpha', 'src/svc_a.ts'], ['GET', '/alpha', 'src/svc_b.ts']]),
+      'src/svc_a.ts': 'export {};\n',
+      'src/svc_b.ts': 'export {};\n',
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    const el = brief!.elements[0];
+    expect(el.servedBy, 'two handlers match, so neither is "the" one').toBeUndefined();
+    expect(el.unbound, 'routes DID match; it is ambiguous, not unbound').toBeUndefined();
+    const note = brief!.notAssessed?.join(' ') ?? '';
+    expect(note).toContain('src/svc_a.ts');
+    expect(note).toContain('src/svc_b.ts');
+  });
+
+  it('discloses the languages the consumer scan reads', async () => {
+    const root = repo({
+      'api/openapi.yaml': SPEC_ONE,
+      '.openlore/analysis/route-inventory.json': routes([['GET', '/v1/alpha', 'src/alpha.ts']]),
+      'src/alpha.ts': 'export {};\n',
+      'src/beta_client.rb': "Net::HTTP.get(URI('https://api.example.com/v1/alpha'))\n",
+    });
+
+    const brief = await changedContractsForSpecFiles(root, ['api/openapi.yaml']);
+
+    expect(brief!.notAssessed?.join(' ')).toContain('another language is not assessed');
+  });
+});
