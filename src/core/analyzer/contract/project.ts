@@ -30,9 +30,9 @@ import { readOpenApi, looksLikeOpenApi, HTTP_METHODS, type ContractDocument } fr
 /** Specification files read per build. */
 export const MAX_CONTRACT_FILES = 50;
 /** Operation nodes projected per build. */
-export /** Named-schema nodes projected across all documents in one build. */
+export const MAX_CONTRACT_OPERATIONS = 2000;
+/** Named-schema nodes projected across all documents in one build. */
 const MAX_CONTRACT_SCHEMAS = 2_000;
-const MAX_CONTRACT_OPERATIONS = 2000;
 /** Items listed per disclosure (every list carries its exact total beside it). */
 export const MAX_DISCLOSED = 20;
 
@@ -289,6 +289,8 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   const byDeclaredPath = new Map<string, Indexed[]>();
   /** `<spec>\0<operationId>` → its operation node, for the generated-client binding. */
   const byOperationId = new Map<string, FunctionNode>();
+  /** Every operation node by its own id — the only key that is unique per operation. */
+  const operationNodeById = new Map<string, FunctionNode>();
   /** Keys whose document declared the same `operationId` twice: nothing binds to either. */
   const duplicateOperationIds = new Set<string>();
   const index = (m: Map<string, Indexed[]>, key: string, entry: Indexed): void => {
@@ -315,6 +317,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
         endLine: op.line,
       };
       nodes.push(node);
+      operationNodeById.set(node.id, node);
       if (op.operationId) {
         const key = `${doc.file}\0${op.operationId}`;
         // An `operationId` is required to be unique within a document; a document that repeats
@@ -425,8 +428,10 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   const schemaNodeByRef = new Map<string, FunctionNode>();
   let schemasSeen = 0;
   for (const doc of docs) {
+    // What the DOCUMENT declared, not what the reader handed over: the reader has a cap of its
+    // own, so counting the list it returned under-states every drop past that cap.
+    schemasSeen += Math.max(doc.schemasDeclared, doc.schemas.length);
     for (const schema of doc.schemas) {
-      schemasSeen++;
       if (schemaNodeByRef.size >= MAX_CONTRACT_SCHEMAS) continue;
       const id = nodeId(doc.file, schema.ref);
       // One node per ref per document. Two documents declaring the same ref are distinct
@@ -598,8 +603,11 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   };
   for (const doc of docs) {
     for (const op of doc.operations) {
-      const from = byOperationId.get(`${doc.file}\0${op.operationId ?? ''}`)
-        ?? nodes.find(n => n.id === nodeId(doc.file, op.address));
+      // By ADDRESS, never by `operationId`: a document that repeats an `operationId` is
+      // malformed, and keying on it hands the second operation's schema edges to the first —
+      // the graph then states that an operation references a type it never names. The address
+      // is unique per operation by construction.
+      const from = operationNodeById.get(nodeId(doc.file, op.address));
       if (from) linkRefs(from, doc.file, op.refs);
     }
     for (const schema of doc.schemas) {
@@ -608,7 +616,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     }
   }
   if (unresolvedRefs.size) {
-    notAssessed.add(`${unresolvedRefs.size} \`$ref\`(s) name a schema this document does not declare (usually an external ref), so no edge was drawn for them`);
+    notAssessed.add(`${unresolvedRefs.size} \`$ref\`(s) name a schema that was not projected — undeclared by this document, or past the schema cap — so no edge was drawn for them`);
   }
 
   return finish({

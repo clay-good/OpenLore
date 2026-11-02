@@ -8,9 +8,19 @@
  * so a Serverless function stanza was served as an entry point of the repository.
  */
 
-import { isIacLanguage } from './iac/types.js';
-import { isContractLanguage } from './contract/types.js';
+import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
+import { isContractLanguage, CONTRACT_LANGUAGES } from './contract/types.js';
 import { isContractEdgeKind } from './contract/project.js';
+
+/** Every projected (non-code) language tag, named once. */
+export const PROJECTED_LANGUAGES: readonly string[] = [...IAC_LANGUAGES, ...CONTRACT_LANGUAGES];
+
+/**
+ * The same union as a SQL string list, for the stores and indexes that exclude projected
+ * declarations in a query rather than in a loop. Derived from `PROJECTED_LANGUAGES` so a new
+ * projected language cannot be added to the predicate and missed by the SQL.
+ */
+export const PROJECTED_LANGUAGE_SQL = PROJECTED_LANGUAGES.map((l) => `'${l}'`).join(', ');
 
 /** Whether a node's language is a projected declaration (infrastructure or contract), not code. */
 export function isProjectedLanguage(language: string | undefined): boolean {
@@ -28,5 +38,5 @@ export function isProjectedLanguage(language: string | undefined): boolean {
  * measurement agree.
  */
 export function isDeclarationEdgeKind(kind: string | undefined): boolean {
-  return isContractEdgeKind(kind) || kind === 'deploys_symbol' || kind === 'references_schema';
+  return isContractEdgeKind(kind) || kind === 'deploys_symbol';
 }

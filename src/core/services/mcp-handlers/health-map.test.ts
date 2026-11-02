@@ -472,3 +472,111 @@ describe('handleGetHealthMap — summary counts are not capped by `limit`', () =
     expect(r.hotspots.untestedHotspots.length).toBeLessThanOrEqual(5);
   });
 });
+
+// ============================================================================
+// Projected declarations are not code whose health can decline
+// ============================================================================
+
+describe('handleGetHealthMap — a projected declaration never displaces code', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  /**
+   * `a → helper → b` makes `helper` the repository's only chokepoint. Adding an OpenAPI schema
+   * that every operation references gives the schema a far higher raw betweenness than `helper`
+   * — and because betweenness is reported normalised against the maximum, the schema does not
+   * merely join the list, it RESCALES it: `helper` drops from 1.0 to a fraction and the top
+   * bridge node of the repository becomes a type declaration nobody can refactor.
+   */
+  const codeChokepoint = (): { nodes: FunctionNode[]; edges: CallEdge[] } => ({
+    nodes: [
+      node({ id: 'a.ts::a', fanOut: 1 }),
+      node({ id: 'h.ts::helper', fanIn: 1, fanOut: 1 }),
+      node({ id: 'b.ts::b', fanIn: 1 }),
+    ],
+    edges: [
+      { callerId: 'a.ts::a', calleeId: 'h.ts::helper', kind: 'calls' },
+      { callerId: 'h.ts::helper', calleeId: 'b.ts::b', kind: 'calls' },
+    ] as CallEdge[],
+  });
+
+  it('keeps the schema out of the bridge, hub and god-function lists', async () => {
+    const { nodes, edges } = codeChokepoint();
+    // Four operations all naming one shared schema, as a real document does.
+    const schema = node({
+      id: 'openapi.yaml::#/components/schemas/Order',
+      name: '#/components/schemas/Order',
+      language: 'OpenAPI',
+      fanIn: 0,
+      fanOut: 0,
+    });
+    const ops = [0, 1, 2, 3].map(i =>
+      node({ id: `openapi.yaml::GET /o${i}`, name: `GET /o${i}`, language: 'OpenAPI' }),
+    );
+    const refEdges = ops.map(o => ({
+      callerId: o.id, calleeId: schema.id, kind: 'references_schema',
+    })) as CallEdge[];
+
+    mockCtx.mockResolvedValue({
+      callGraph: graph([...nodes, schema, ...ops], [...edges, ...refEdges]),
+    } as never);
+
+    const r = await handleGetHealthMap({ directory: '/p', limit: 10 }) as {
+      summary: { totalFunctions: number };
+      hotspots: {
+        hubs: Array<{ name: string }>;
+        godFunctions: Array<{ name: string }>;
+        bridges: Array<{ name: string; betweenness: number }>;
+      };
+    };
+
+    const named = (xs: Array<{ name: string }>) => xs.map(x => x.name);
+    expect(named(r.hotspots.bridges)).not.toContain('#/components/schemas/Order');
+    expect(named(r.hotspots.hubs)).not.toContain('#/components/schemas/Order');
+    expect(named(r.hotspots.godFunctions)).not.toContain('#/components/schemas/Order');
+    // The declaration is not one of the functions whose health is being summarised.
+    expect(r.summary.totalFunctions).toBe(3);
+  });
+
+  it('leaves the real chokepoint at the top of the bridge list, at its own score', async () => {
+    // The schema must sit BETWEEN two nodes to score any betweenness at all, so the fixture is
+    // a reference chain — operation → Order → Customer — which is the ordinary shape of a
+    // document whose types compose. A leaf schema would score zero and the test would pass
+    // whether or not the exclusion exists.
+    const { nodes, edges } = codeChokepoint();
+    mockCtx.mockResolvedValue({ callGraph: graph(nodes, edges) } as never);
+    const before = await handleGetHealthMap({ directory: '/p', limit: 10 }) as {
+      hotspots: { bridges: Array<{ name: string; betweenness: number }> };
+    };
+    expect(before.hotspots.bridges[0]?.name).toBe('helper');
+    expect(before.hotspots.bridges[0]?.betweenness).toBe(1);
+
+    const order = node({
+      id: 'openapi.yaml::#/components/schemas/Order',
+      name: '#/components/schemas/Order',
+      language: 'OpenAPI',
+    });
+    const customer = node({
+      id: 'openapi.yaml::#/components/schemas/Customer',
+      name: '#/components/schemas/Customer',
+      language: 'OpenAPI',
+    });
+    const ops = [0, 1, 2, 3, 4, 5].map(i =>
+      node({ id: `openapi.yaml::GET /o${i}`, name: `GET /o${i}`, language: 'OpenAPI' }),
+    );
+    const refEdges = [
+      ...ops.map(o => ({ callerId: o.id, calleeId: order.id, kind: 'references_schema' })),
+      { callerId: order.id, calleeId: customer.id, kind: 'references_schema' },
+    ] as CallEdge[];
+    mockCtx.mockResolvedValue({
+      callGraph: graph([...nodes, order, customer, ...ops], [...edges, ...refEdges]),
+    } as never);
+    const after = await handleGetHealthMap({ directory: '/p', limit: 10 }) as {
+      hotspots: { bridges: Array<{ name: string; betweenness: number }> };
+    };
+
+    // Not merely "the schema is absent": betweenness is reported normalised against the
+    // maximum, so a declaration that scored at all would RESCALE the list and push the real
+    // chokepoint below 1.0. The code's own scores must be identical.
+    expect(after.hotspots.bridges).toEqual(before.hotspots.bridges);
+  });
+});

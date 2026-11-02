@@ -17,6 +17,23 @@ All notable changes to OpenLore are documented here. This project adheres to
   something the document does not declare draws no edge and is disclosed. Like every projected
   declaration, a schema node is excluded from the code rankings and its edges change no
   function's degree.
+- **A reference is followed through a reusable component and ignored in documentation.** An
+  operation keeping its parameters in `components/parameters` — the style the specification
+  recommends — is bound to the schemas those components name, where previously it appeared to
+  reference nothing and the missing edges were disclosed as external references. A `$ref` written
+  inside a `description` or an `example` is prose about a type, so it draws no edge. An
+  operation's references are attributed by its address, so a document repeating an `operationId`
+  can no longer give one operation's schemas to another.
+- **The exclusion that keeps declarations out of the code rankings now covers every surface that
+  ranks or counts code.** `search_code`, `suggest_insertion_points` and `orient` share one
+  candidate filter in the index, so a document declaring a few hundred schemas could fill the
+  whole result set and evict every function; the structural health map could report a schema as
+  the repository's top betweenness bridge, rescaling the real chokepoint's score; the refactoring
+  report could call two mutually-recursive schemas a dependency cycle to break; and `CODEBASE.md`
+  counted declarations under "functions / methods analyzed". A caller that names a projected
+  language explicitly is still served it.
+- **A schema cap now reports what the document declared**, not the capped list the reader
+  returned — which reported every document past the cap as having dropped nothing.
 
 ### Your consumers are usually in another repository
 

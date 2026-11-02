@@ -80,8 +80,15 @@ export interface ContractDocument {
    */
   serverHosts: string[];
   operations: ContractOperation[];
-  /** Named schemas the document declares, sorted by ref. */
+  /** Named schemas the document declares, sorted by ref. Capped; see `schemasDeclared`. */
   schemas: ContractSchema[];
+  /**
+   * How many named schemas the document DECLARES, which is `schemas.length` unless the reader's
+   * own cap truncated the list. A consumer counting the dropped ones has to subtract from this,
+   * not from what it was handed — a cap that reports the capped number as the total under-states
+   * every drop beyond the first cap.
+   */
+  schemasDeclared: number;
   /** Element classes present in the file but outside the model (`callbacks`, `webhooks`, external `$ref`). */
   unassessed: string[];
   /** Path keys (method-agnostic, parameter names erased) whose operations are behind a ref the model does not read. */
@@ -200,6 +207,7 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
   // The named schemas and the line each is declared on. OpenAPI 3 keeps them under
   // `components/schemas`; Swagger 2 under `definitions` (change: add-contract-graph-projection).
   const schemaContainer = swagger ? ['definitions'] : ['components', 'schemas'];
+  const schemaPrefix = swagger ? '#/definitions/' : '#/components/schemas/';
   const schemaLines = new Map<string, number>();
   {
     let node = doc.get(schemaContainer[0], true) as { items?: YPair[] } | undefined;
@@ -255,6 +263,40 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
       }
     }
     return out;
+  };
+  /**
+   * The refs that become GRAPH EDGES: only those naming a declared schema.
+   *
+   * Two things separate this from `refsIn`, which hashes the document and so must see every ref
+   * verbatim. A `$ref` sitting inside a `description` or an `example` is documentation, not a
+   * dependency, so it draws no edge. And a ref to a reusable PARAMETER, RESPONSE, REQUEST BODY
+   * or HEADER is followed THROUGH to the schema it names: the operation depends on that schema
+   * exactly as much as if it had been written inline. Without that step an operation keeping its
+   * parameters in `components/parameters` — the style the specification recommends — looks as
+   * though it references no schema at all, and the missing edges get disclosed as external refs.
+   *
+   * Schema refs are collected, never followed: the projection draws schema → schema edges, so
+   * the transitive closure is the graph's to walk.
+   */
+  const schemaRefsIn = (v: unknown): string[] => {
+    const out = new Set<string>();
+    const followed = new Set<string>();
+    const stack: unknown[] = [v];
+    while (stack.length) {
+      const n = stack.pop();
+      if (Array.isArray(n)) { for (const x of n) stack.push(x); continue; }
+      if (!isObj(n)) continue;
+      if (typeof n.$ref === 'string' && isLocal(n.$ref)) {
+        const ref = n.$ref;
+        if (ref.startsWith(schemaPrefix)) out.add(ref);
+        else if (!followed.has(ref)) { followed.add(ref); stack.push(resolveRef(ref)); }
+      }
+      for (const [k, x] of Object.entries(n)) {
+        if (k === '$ref' || DOC_ONLY.has(k) || k.startsWith('x-')) continue;
+        stack.push(x);
+      }
+    }
+    return [...out];
   };
   const reachMemo = new Map<string, Set<string>>();
   /** The local refs reachable from `ref`'s target (not `ref` itself unless it is in a cycle). */
@@ -444,7 +486,7 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
         // The named schemas this operation names directly, across its parameters, body and
         // responses. Direct only: the projection draws schema → schema edges, so the closure is
         // the graph's to walk (change: add-contract-graph-projection).
-        refs: [...new Set(refsIn([op.parameters, pathItem.parameters, op.requestBody, op.responses]))].sort(),
+        refs: schemaRefsIn([op.parameters, pathItem.parameters, op.requestBody, op.responses]).sort(),
         address: `${m.toUpperCase()} ${full}`,
         key: `${m.toUpperCase()} ${full.replace(/\{[^}]*\}/g, '{}')}`,
         method: m.toUpperCase(),
@@ -464,17 +506,18 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
   // Named schemas, each with the local refs its OWN definition makes directly. Direct, not
   // transitive: the projection draws schema → schema edges, so the transitive closure is the
   // graph's to walk rather than a list to duplicate per node.
-  const prefix = swagger ? '#/definitions/' : '#/components/schemas/';
   const container = schemaContainer.reduce<unknown>((o, k) => (isObj(o) ? o[k] : undefined), root);
   const schemas: ContractSchema[] = [];
+  let schemasDeclared = 0;
   if (isObj(container)) {
     for (const [name, def] of Object.entries(container)) {
-      if (schemas.length >= MAX_NAMED_SCHEMAS) { unassessed.add(`more than ${MAX_NAMED_SCHEMAS} named schemas`); break; }
+      schemasDeclared++;
+      if (schemas.length >= MAX_NAMED_SCHEMAS) { unassessed.add(`more than ${MAX_NAMED_SCHEMAS} named schemas`); continue; }
       schemas.push({
-        ref: `${prefix}${name}`,
+        ref: `${schemaPrefix}${name}`,
         name,
         line: schemaLines.get(name) ?? 1,
-        refs: [...new Set(refsIn(def))].sort(),
+        refs: schemaRefsIn(def).sort(),
       });
     }
     schemas.sort((a, b) => (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
@@ -482,7 +525,7 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
 
   return {
     file, format: swagger ? 'swagger-2' : 'openapi-3', basePath: docBase,
-    serverHosts: serverHosts(root.servers, root.host), operations, schemas,
+    serverHosts: serverHosts(root.servers, root.host), operations, schemas, schemasDeclared,
     unassessed: [...unassessed].sort(), opaquePaths: [...opaquePaths].sort(),
   };
   }

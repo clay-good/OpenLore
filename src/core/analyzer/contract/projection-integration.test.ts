@@ -332,7 +332,138 @@ app.post('/orders', createOrder);
     const from = result.edges.filter(e => e.kind === 'references_schema')
       .map(e => result.nodes.get(e.calleeId)?.name);
     expect(from).not.toContain('#/components/schemas/Missing');
-    expect(result.contracts?.notAssessed?.join(' ') ?? '').toMatch(/does not declare|unresolved \$ref/);
+    expect(result.contracts?.notAssessed?.join(' ') ?? '').toMatch(/not projected|unresolved \$ref/);
+  });
+
+  it('follows a component-level parameter or response through to the schema it names', async () => {
+    // Keeping parameters and responses in `components` and referencing them is the style the
+    // specification recommends, so this is the common shape, not an edge case. Scraping only
+    // the refs written literally under the operation found a ref to the PARAMETER, which names
+    // no schema — so the operation appeared to reference nothing, and the missing edges were
+    // disclosed as external refs, which was a false reason.
+    const viaComponents = `openapi: 3.0.0
+info: { title: orders, version: '1' }
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200': { $ref: '#/components/responses/OrderOut' }
+components:
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/OrderId' }
+  responses:
+    OrderOut:
+      description: one order
+      content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+  schemas:
+    OrderId: { type: string }
+    Order: { type: object, properties: { id: { $ref: '#/components/schemas/OrderId' } } }
+`;
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: viaComponents }] }).build([]);
+
+    const refs = result.edges.filter(e => e.kind === 'references_schema')
+      .map(e => `${result.nodes.get(e.callerId)?.name} -> ${result.nodes.get(e.calleeId)?.name}`)
+      .sort();
+    expect(refs).toEqual([
+      'GET /orders/{id} -> #/components/schemas/Order',
+      'GET /orders/{id} -> #/components/schemas/OrderId',
+      '#/components/schemas/Order -> #/components/schemas/OrderId',
+    ].sort());
+    // Nothing is disclosed as unresolved: every ref was accounted for.
+    expect(result.contracts?.notAssessed?.join(' ') ?? '').not.toMatch(/does not declare/);
+  });
+
+  it('draws no edge for a `$ref` that appears only inside documentation', async () => {
+    // A ref inside an `example` or a `description` is prose about a type, not a dependency on
+    // it. Counting it makes "what does changing `Legacy` touch?" name operations that do not
+    // use it, which is the question these edges exist to answer.
+    const inExample = `openapi: 3.0.0
+info: { title: orders, version: '1' }
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      responses:
+        '200':
+          description: "see #/components/schemas/Legacy for the old shape"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+              example: { $ref: '#/components/schemas/Legacy' }
+components:
+  schemas:
+    Order: { type: object }
+    Legacy: { type: object }
+`;
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: inExample }] }).build([]);
+
+    // Both schemas are declared, so both are nodes…
+    const names = [...result.nodes.values()].map(n => n.name);
+    expect(names).toContain('#/components/schemas/Legacy');
+    // …but only the one the operation structurally uses is referenced.
+    const referenced = result.edges.filter(e => e.kind === 'references_schema')
+      .map(e => result.nodes.get(e.calleeId)?.name);
+    expect(referenced).toContain('#/components/schemas/Order');
+    expect(referenced).not.toContain('#/components/schemas/Legacy');
+  });
+
+  it('never attributes one operation\'s schemas to another that repeats its `operationId`', async () => {
+    // A repeated `operationId` is malformed, and resolving an operation by it handed the
+    // second operation's schema edges to the first — the graph then stated that an operation
+    // references a type it never names.
+    const duplicated = `openapi: 3.0.0
+info: { title: orders, version: '1' }
+paths:
+  /a:
+    get:
+      operationId: dup
+      responses:
+        '200':
+          description: ok
+          content: { application/json: { schema: { $ref: '#/components/schemas/A' } } }
+  /b:
+    get:
+      operationId: dup
+      responses:
+        '200':
+          description: ok
+          content: { application/json: { schema: { $ref: '#/components/schemas/B' } } }
+components:
+  schemas:
+    A: { type: object }
+    B: { type: object }
+`;
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: duplicated }] }).build([]);
+
+    const refs = result.edges.filter(e => e.kind === 'references_schema')
+      .map(e => `${result.nodes.get(e.callerId)?.name} -> ${result.nodes.get(e.calleeId)?.name}`)
+      .sort();
+    // Each operation names its own schema, and neither names the other's.
+    expect(refs).toEqual([
+      'GET /a -> #/components/schemas/A',
+      'GET /b -> #/components/schemas/B',
+    ]);
+  });
+
+  it('reports how many schemas it dropped, counting what the document declared', async () => {
+    // The reader has a cap of its own (500 named schemas per document). Counting the list it
+    // RETURNED, rather than what the document declared, reported every document past that cap
+    // as having dropped nothing — the one case the disclosure exists for.
+    const many = ['openapi: 3.0.0', "info: { title: big, version: '1' }", 'paths: {}', 'components:', '  schemas:'];
+    for (let i = 0; i < 600; i++) many.push(`    S${i}: { type: object }`);
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'openapi.yaml', content: many.join('\n') + '\n' }] }).build([]);
+
+    const schemaNodes = [...result.nodes.values()].filter(n => n.name.startsWith('#/components/schemas/'));
+    expect(schemaNodes.length).toBe(500);
+    // 600 declared − 500 projected = 100, named exactly rather than reported as none.
+    expect(result.contracts?.notAssessed?.join(' ') ?? '').toContain('100 named schema(s) past the cap');
   });
 
   it('survives a schema cycle without looping', async () => {

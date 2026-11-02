@@ -22,6 +22,6 @@
 
 ## Spec
 - [ ] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL)
-- [x] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers — shipped in `add-contract-schema-elements`
+- [x] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers + ContractReferencesAreStructuralAndAttributedByAddress, and broaden ContractElementsAreNotRankedAsCode to every surface that ranks or counts code — shipped in `add-contract-schema-elements`
 - [x] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume — the generated-client half shipped; the path-matching half shipped in `add-contract-node-projection`
 - [~] `mcp-handlers` delta: ADD ChangedSpecificationsAndFederatedConsumersSurface — the changed-specification half shipped as `ChangedSpecificationsSurfaceTheirBoundCode`; federated consumers remain

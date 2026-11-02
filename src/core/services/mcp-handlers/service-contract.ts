@@ -253,7 +253,7 @@ async function consumersOf(root: string, changes: readonly ContractChange[], doc
   for (const addr of addresses) {
     if (ops.some(o => o.op.address === addr)) continue;
     const [method, path] = [addr.slice(0, addr.indexOf(' ')), addr.slice(addr.indexOf(' ') + 1)];
-    ops.push({ d: { file: '', format: 'openapi-3', basePath: '', serverHosts: [], operations: [], schemas: [], unassessed: [], opaquePaths: [] }, op: { address: addr, key: addr, method, path, declaredPath: path, line: 0, deprecated: false, params: [], refs: [] } });
+    ops.push({ d: { file: '', format: 'openapi-3', basePath: '', serverHosts: [], operations: [], schemas: [], schemasDeclared: 0, unassessed: [], opaquePaths: [] }, op: { address: addr, key: addr, method, path, declaredPath: path, line: 0, deprecated: false, params: [], refs: [] } });
   }
   return callSitesFor(root, ops.map(({ d, op }) => ({ file: d.file, op })), boundaries);
 }

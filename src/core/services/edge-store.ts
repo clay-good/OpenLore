@@ -4,8 +4,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
 import { EDGE_CONFIDENCE_VALUES, EDGE_KIND_VALUES } from '../analyzer/call-graph-types.js';
 import { CONTRACT_EDGE_KINDS } from '../analyzer/contract/project.js';
-import { CONTRACT_LANGUAGES } from '../analyzer/contract/types.js';
-import { IAC_LANGUAGES } from '../analyzer/iac/types.js';
+import { PROJECTED_LANGUAGE_SQL } from '../analyzer/projected-language.js';
 import { MAX_DEPRECATION_HINT } from '../analyzer/call-graph-extract.js';
 import { recordPerfWork } from '../analyzer/perf-counters.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
@@ -1957,14 +1956,6 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
 }
 
 /** The contract projection's edge kinds / node languages, as SQL literal lists. */
-/**
- * Every projected (non-code) node language: infrastructure plus contract.
- *
- * Keyed on the LANGUAGE rather than on a list of edge kinds, so the next projected language is
- * covered the day it is added instead of the day someone remembers to extend a kind list.
- * `edge-store-schema-gate.test.ts` pins the same union.
- */
-const PROJECTED_LANGUAGE_SQL = [...IAC_LANGUAGES, ...CONTRACT_LANGUAGES].map(l => `'${l}'`).join(', ');
 /**
  * Every edge kind that binds a DECLARATION to code: the contract bindings plus `deploys_symbol`.
  * None of them is a call, so none may contribute to a function's fan-in or fan-out. A

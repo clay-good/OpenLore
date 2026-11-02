@@ -23,6 +23,7 @@ import type { CallEdge, FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
 import type { Embedder } from './embedding-service.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from './code-shaper.js';
+import { isProjectedLanguage, PROJECTED_LANGUAGE_SQL } from './projected-language.js';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
@@ -290,6 +291,31 @@ function isRepoFunction(node: Pick<FunctionNode, 'id' | 'filePath' | 'isExternal
 
 function isRepoFunctionRow(row: Record<string, unknown>): boolean {
   return row.filePath !== 'external' && !(row.id as string | undefined)?.startsWith('external::');
+}
+
+/**
+ * The candidate filter every search path applies, in one place.
+ *
+ * A projected declaration (an IaC resource, an OpenAPI operation or schema) is indexed so that a
+ * caller who NAMES its language can retrieve it, but it is not source code and must not compete
+ * with code for a ranked slot: a document declaring a few hundred schemas otherwise fills the
+ * whole result set, every schema scoring identically, and evicts every function the caller was
+ * actually looking for. Naming a projected language opts back in; `isProjectedLanguage` is the
+ * same predicate the graph's rankings use.
+ */
+function rowPassesSearchFilters(
+  row: Record<string, unknown>,
+  language?: string,
+  minFanIn?: number,
+): boolean {
+  if (!isRepoFunctionRow(row)) return false;
+  if (language) {
+    if ((row.language as string) !== language) return false;
+  } else if (isProjectedLanguage(row.language as string | undefined)) {
+    return false;
+  }
+  if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
+  return true;
 }
 
 // ============================================================================
@@ -1271,6 +1297,9 @@ function filePathInPredicate(paths: Set<string>): string | null {
 function functionSearchPredicate(language?: string, minFanIn?: number): string | null {
   const clauses: string[] = [];
   if (language) clauses.push(`\`language\` = '${language.replace(/'/g, "''")}'`);
+  // Mirror of rowPassesSearchFilters: keep projected declarations out of the ANN recall set
+  // unless the caller named one, so the prefilter and the row filter cannot disagree.
+  else clauses.push(`(\`language\` IS NULL OR \`language\` NOT IN (${PROJECTED_LANGUAGE_SQL}))`);
   if (minFanIn !== undefined && minFanIn > 0 && Number.isFinite(minFanIn)) {
     clauses.push(`\`fanIn\` >= ${minFanIn}`);
   }
@@ -2123,12 +2152,8 @@ export class VectorIndex {
     if (densePredicate) denseQuery = denseQuery.where(densePredicate);
     const denseRows = await denseQuery.limit(denseFetch).toArray() as Record<string, unknown>[];
 
-    const passesFilters = (row: Record<string, unknown>): boolean => {
-      if (!isRepoFunctionRow(row)) return false;
-      if (language && (row.language as string) !== language) return false;
-      if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
-      return true;
-    };
+    const passesFilters = (row: Record<string, unknown>): boolean =>
+      rowPassesSearchFilters(row, language, minFanIn);
 
     // ── Dense-only path ───────────────────────────────────────────────────────
     if (!hybrid) {
@@ -2306,12 +2331,7 @@ export class VectorIndex {
         return row ? { row, idx, score, expansionScore } : null;
       })
       .filter((x): x is { row: Record<string, unknown>; idx: number; score: number; expansionScore: number } => x !== null)
-      .filter(({ row }) => {
-        if (!isRepoFunctionRow(row)) return false;
-        if (language && (row.language as string) !== language) return false;
-        if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
-        return true;
-      })
+      .filter(({ row }) => rowPassesSearchFilters(row, language, minFanIn))
       .slice(0, traceCandidates ? undefined : limit)
       .map(({ row, idx, score, expansionScore }) => ({
         record: rowToRecord(row),
