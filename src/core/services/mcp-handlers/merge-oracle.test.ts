@@ -43,7 +43,7 @@ beforeAll(() => {
   git(repo, 'commit', '-q', '-m', 'base');
 });
 
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
 describe('simulateMerge', () => {
   it('reports clean-automerge for disjoint edits to one function, and textual-conflict for the same line', async () => {
