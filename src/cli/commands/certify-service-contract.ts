@@ -12,6 +12,7 @@ import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 export interface CertifyServiceContractCliOptions {
   cwd?: string;
@@ -78,7 +79,7 @@ export async function runCertifyServiceContractCli(opts: CertifyServiceContractC
     configureLogger({ quiet: false });
   }
   if (result && typeof result === 'object' && 'error' in result) {
-    const error = (result as { error: string }).error;
+    const error = toCliVocabulary((result as { error: string }).error);
     if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
     else logger.warning(`certify-service-contract: ${safe(error)}`);
     return 1;
