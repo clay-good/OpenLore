@@ -13,6 +13,7 @@ import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
+import { positiveIntegerOption } from '../numeric-options.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
 
 interface CoverageGapItem {
@@ -195,7 +196,7 @@ export async function runCoverageGapsCli(opts: CoverageGapsCliOptions): Promise<
 
 export const coverageGapsCommand = new Command('coverage-gaps')
   .description('Ranked structural test-coverage gaps for the repo (or a diff/region): important code with NO reaching test. Read-only, deterministic, never blocks.')
-  .option('--max <n>', 'Limit reported gaps (default 100, capped 500)', (v) => parseInt(v, 10))
+  .option('--max <n>', 'Limit reported gaps (default 100, capped 500)', positiveIntegerOption('--max'))
   .option('--file-pattern <substr>', 'Only report gaps whose file path contains this substring (region scope)')
   .option('--base <ref>', 'Diff scope: only report gaps among symbols changed vs this git ref (e.g. HEAD, main)')
   .option('--symbols <list>', 'Diff scope: comma-separated changed symbol names to restrict the report to', (v) => v.split(',').map(s => s.trim()).filter(Boolean))
