@@ -106,9 +106,11 @@ export function bindDeployHandlers(
       // A known code location is the only place the module can be (relative to the template).
       bases = [...new Set([clean(templateDir === '.' ? codeUri || '.' : `${templateDir}/${codeUri}`), codeUri])].map(b => (b === '.' ? '' : b));
     } else if (r.language === 'CloudFormation' || r.language === 'Serverless') {
-      // A handler is relative to the template/manifest's own directory (and, for a manifest in a
-      // subdirectory of a monorepo, to the repository root).
-      bases = [...new Set([templateDir === '.' ? '' : templateDir, ''])];
+      // A handler is relative to the template/manifest's own directory — the service root, as both
+      // tools resolve it. The repository root is NOT also tried: for a template in a
+      // subdirectory that would bind a bare `app.handler` to an unrelated same-named file
+      // elsewhere in the repository, which is a guess, not the declared location.
+      bases = [templateDir === '.' ? '' : templateDir];
     } else {
       // Terraform without a source directory names a path inside a package built elsewhere: only a
       // module path specific enough to name one file (a directory in it) is bound.
