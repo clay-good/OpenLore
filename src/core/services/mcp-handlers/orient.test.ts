@@ -145,6 +145,36 @@ describe('handleOrient', () => {
     expect(result.hint).toBeDefined();
   });
 
+  // A test function is never where a feature is added. On a Rust workspace the top insertion
+  // points were `#[test]` functions, so orient told the agent to write the feature inside a
+  // test (change: fix-rust-test-detection). A test stays a `relevantFunction` — it shows use.
+  it('never offers a test function as an insertion point', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([
+      makeSearchResult({ id: 'src/util.rs::hashes_a_string', name: 'hashes_a_string', filePath: 'src/util.rs' }),
+      makeSearchResult({ id: 'src/util.rs::sha256_hex', name: 'sha256_hex', filePath: 'src/util.rs' }),
+    ]);
+    const utils = await import('./utils.js');
+    vi.mocked(utils.readCachedContext).mockResolvedValue({
+      callGraph: {
+        nodes: [
+          { id: 'src/util.rs::hashes_a_string', name: 'hashes_a_string', filePath: 'src/util.rs', isTest: true },
+          { id: 'src/util.rs::sha256_hex', name: 'sha256_hex', filePath: 'src/util.rs' },
+        ],
+        edges: [],
+      },
+    } as never);
+
+    const result = await handleOrient('/tmp/proj', 'hash a string', 2) as Record<string, unknown>;
+
+    const insertion = (result.insertionPoints as Array<{ name: string }>).map(p => p.name);
+    expect(insertion).toContain('sha256_hex');
+    expect(insertion).not.toContain('hashes_a_string');
+    const relevant = (result.relevantFunctions as Array<{ name: string }>).map(f => f.name);
+    expect(relevant).toContain('hashes_a_string');
+    vi.mocked(utils.readCachedContext).mockResolvedValue(null);
+  });
+
   it('returns orient structure when code index exists and search returns results', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     vi.mocked(VectorIndex.search).mockResolvedValue([

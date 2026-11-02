@@ -311,6 +311,25 @@ describe('capStructuredResult', () => {
     expect(parsed.responseBudget.omitted.clusters).toBeGreaterThan(0);
   });
 
+  // The string-cut branch is tried BEFORE list trimming, and it kept writing a top-level
+  // `truncated: true` — the very collision the list branch was fixed for, 70 lines up in the
+  // same file (change: fix-budget-receipt-collision).
+  it("never overwrites the tool's own truncated object when cutting a dominant string", () => {
+    const result = {
+      truncated: { limit: 5_000, atPath: 'src/huge' },
+      report: 'x'.repeat(5_000),
+      summary: 'ok',
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 1_200).text) as {
+      truncated: { limit: number; atPath: string };
+      summary: string;
+      responseBudget: { trimmed: boolean };
+    };
+    expect(parsed.truncated).toEqual({ limit: 5_000, atPath: 'src/huge' });
+    expect(parsed.summary).toBe('ok');
+    expect(parsed.responseBudget.trimmed).toBe(true);
+  });
+
   it("never overwrites the tool's own truncated object", () => {
     const result = {
       changes: Array.from({ length: 5_000 }, (_, i) => ({ symbol: `s${i}`, verdict: 'breaking', detail: 'x'.repeat(60) })),
