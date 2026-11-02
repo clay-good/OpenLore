@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, writeFile, readFile, mkdir, rm, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, rm, stat, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
@@ -446,7 +446,10 @@ describe('McpWatcher — real fs watcher', () => {
     try {
       const w = new McpWatcher({ rootPath: aliasRoot, debounceMs: DEBOUNCE_MS }) as unknown as
         { rootPath: string; watchRoot: string };
-      expect(w.watchRoot, 'libuv must be given the resolved root').toBe(rootPath);
+      // Resolve the EXPECTATION too: on macOS the temp root is itself reached through a symlink
+      // (`/var` → `/private/var`), so `rootPath` is another alias and comparing against it
+      // asserted that resolution stops halfway.
+      expect(w.watchRoot, 'libuv must be given the resolved root').toBe(await realpath(rootPath));
       // The caller's spelling stays the identity: artifact paths and graph node ids are
       // derived from it, so re-spelling it would silently rename every node.
       expect(w.rootPath, 'identity must remain what the caller passed').toBe(aliasRoot);
