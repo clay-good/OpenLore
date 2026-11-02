@@ -216,6 +216,21 @@ describe('wait policy — maxWaitMs and waitedMs', () => {
     expect(Date.now() - t0).toBeLessThan(3_000);
     await held.release();
   }, 10_000);
+
+  // A filesystem mtime carries sub-millisecond precision while `Date.now()` is truncated to
+  // whole milliseconds, so a lock written microseconds ago can read as being in the future.
+  // Planted outright here: the age a holder is reported with is never negative.
+  it('never reports a negative age when the lock mtime leads the clock', async () => {
+    const held = await acquireLockAt(root, '.future.lock');
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    const ahead = (Date.now() + 50) / 1000;
+    await utimes(join(root, '.future.lock'), ahead, ahead);
+
+    const contender = await acquireLockAt(root, '.future.lock', { maxWaitMs: 0, bestEffortAfterMaxWait: false });
+    if (!isLockHeld(contender)) throw new Error('the live holder must be reported, not superseded');
+    expect(contender.ageMs).toBe(0);
+    await held.release();
+  }, 10_000);
 });
 
 describe('isDecisionsLockHeld', () => {
