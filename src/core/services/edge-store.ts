@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
-import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
+import { EDGE_CONFIDENCE_VALUES, EDGE_KIND_VALUES } from '../analyzer/call-graph-types.js';
 import { CONTRACT_EDGE_KINDS } from '../analyzer/contract/project.js';
 import { CONTRACT_LANGUAGES } from '../analyzer/contract/types.js';
 import { MAX_DEPRECATION_HINT } from '../analyzer/call-graph-extract.js';
@@ -200,8 +200,18 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
  *
  * v13 adds `nodes.deprecation` (change: add-deprecation-propagation): a v12 store has no marker
  * column, so serving it would report no deprecated symbols rather than "not extracted".
+ *
+ * v14 adds no column either — it marks three new `edges.kind` values (`deploys_symbol`,
+ * `implements_endpoint`, `consumes_endpoint`) and the projected node languages that carry them
+ * (`OpenAPI`, and the `Serverless` IaC tag). This is the v12 case exactly: `rawToCallEdge` DROPS a
+ * row whose `kind` it does not know, so a v13 reader opening a v14 store passes the version gate
+ * and then discards every infrastructure- and contract-binding edge — leaving the operation nodes
+ * behind as if they were code, and recomputing an `.olbundle` digest through that same dropping
+ * reader so a valid bundle is rejected as TAMPERED. Both were reproduced against the published
+ * v3.5.0 build before this bump (changes: add-iac-deploy-binding, add-contract-node-projection,
+ * add-serverless-and-build-output-binding).
  */
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 /**
  * Bound on the number of bound parameters in one generated `IN (…)` list.
@@ -1934,11 +1944,9 @@ const CONTRACT_EDGE_KIND_SQL = CONTRACT_EDGE_KINDS.map(k => `'${k}'`).join(', ')
 const CONTRACT_LANGUAGE_SQL = CONTRACT_LANGUAGES.map(l => `'${l}'`).join(', ');
 
 const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
-const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
-  'calls', 'overrides', 'tested_by', 'references', 'depends_on',
-  'affects', 'authored_by', 'changed_in_pr', 'deploys_symbol',
-  'implements_endpoint', 'consumes_endpoint',
-]);
+// Built from the type's own runtime list, so a new kind cannot reach the type without reaching
+// the validator — the drift that made an older reader drop rows it had no name for.
+const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>(EDGE_KIND_VALUES);
 const CALL_TYPES = new Set<NonNullable<CallEdge['callType']>>([
   'direct', 'method', 'awaited', 'constructor',
 ]);
