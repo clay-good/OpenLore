@@ -197,7 +197,7 @@ function parseGraphqlSide(candidates: string[], texts: Map<string, string>, unre
 const windows = (listed: readonly string[]) => {
   const yaml = listed.filter(f => !isProtobufPath(f) && !isGraphqlPath(f));
   // The same fixture rule as `analyze`: a test schema is a fake service, not this repository's contract.
-  const proto = listed.filter(f => isProtobufPath(f) && !isFixtureSchemaPath(f));
+  const proto = listed.filter(f => isProtobufPath(f));
   const graphql = listed.filter(f => isGraphqlPath(f) && !isFixtureSchemaPath(f));
   return { yaml, proto, graphql, read: [...yaml.slice(0, MAX_CANDIDATES), ...proto.slice(0, MAX_PROTO_FILES), ...graphql.slice(0, MAX_CANDIDATES)] };
 };
@@ -602,6 +602,10 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     const relay = [...await clientSchemas(root)].filter(f => head.graphql.candidates.has(f));
     if (relay.length) boundaries.push(emittedText(`${relay.join(', ')} ${relay.length === 1 ? 'is' : 'are'} named by a Relay compiler config: possibly a copy of another service's schema, graded here as this repository's.`));
   }
+  {
+    const fixtures = (await workingFiles(root, SPEC_EXT)).filter(f => isGraphqlPath(f) && isFixtureSchemaPath(f));
+    if (fixtures.length) boundaries.push(emittedText(`${fixtures.length} GraphQL schema file(s) under a fixture path were not read as this repository's contract (${fixtures.slice(0, 3).join(', ')}${fixtures.length > 3 ? ', …' : ''}).`));
+  }
   if (head.graphql.unread.length) boundaries.push(`${head.graphql.unread.length} GraphQL file(s) could not be read, so their schemas are not assessed.`);
   const notAssessed = [...head.unreadable, ...head.proto.unreadable, ...head.graphql.unreadable].map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
   // Bounded and screened: a file can name thousands of distinct directives.
@@ -632,7 +636,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     for (const a of merged.ambiguous.slice(0, limit)) notAssessed.push({ file: emittedText(a.files[0]), reason: emittedText(`GraphQL type ${a.name} is defined in more than one file (${a.files.slice(0, 3).join(', ')}), so nothing binds to it`) });
     for (const c of merged.conflicts.slice(0, limit)) notAssessed.push({ file: '(graphql schema)', reason: emittedText(c) });
   }
-  if (head.graphql.clientDocuments.length) {
+  if (head.graphql.clientDocuments.length && head.graphql.docs.length) {
     // One entry, not one per file: a frontend holds hundreds of query documents.
     const docs = head.graphql.clientDocuments;
     notAssessed.push({ file: emittedText(docs[0]), reason: emittedText(`${docs.length} GraphQL client document(s) (operations and fragments) are not schemas${docs.length > 1 ? `: ${docs.slice(0, 3).join(', ')}${docs.length > 3 ? ', …' : ''}` : ''}`) });

@@ -297,7 +297,13 @@ it grades the file and names the Relay link in its boundaries. One schema per re
 a monorepo with several servers' SDL makes their shared roots ambiguous — disclosed, not guessed.
 
 Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
-bound: a type field is not a node. Code-first servers (Strawberry, Graphene, Nexus,
+bound: a type field is not a node.
+
+Known boundaries, disclosed where they bite: a schema a frontend vendors for graphql-codegen or
+`apollo.config.js` (not Relay) is graded as this repository's contract; an Ariadne bindable created
+in one module and decorated in another is not followed (its operations stay unbound); a map in a
+directory holding an inline schema is not bound to the repository's SDL; and an operation two maps
+bind keeps both edges, with a note naming it. Code-first servers (Strawberry, Graphene, Nexus,
 gqlgen) have no resolver map, so their operations are listed in `unboundGraphqlOperations` — "not
 bound", never "not served".
 

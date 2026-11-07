@@ -99,3 +99,16 @@ describe('round-3 review', () => {
     expect(Date.now() - t).toBeLessThan(6_000);
   });
 });
+
+describe('round-4 e2e review', () => {
+  it('a CommonJS barrel and a default-export object hand on the names they import', () => {
+    const repo = files({
+      'cjs/index.js': "const { cjsE } = require('./e');\nmodule.exports = { cjsE };\n",
+      'cjs/e.js': 'function cjsE() {}\nmodule.exports = { cjsE };\n',
+      'defexp/index.ts': "import { defI } from './i';\nfunction defH() {}\nexport default { defH, defI };\n",
+      'defexp/i.ts': 'export function defI() {}\n',
+    });
+    expect(importTargets('server.ts', './cjs', 'cjsE', 'node', repo.list, repo.get)).toEqual(expect.arrayContaining([{ file: 'cjs/e.js', name: 'cjsE' }]));
+    expect(importTargets('server.ts', './defexp', 'defI', 'node', repo.list, repo.get)).toEqual(expect.arrayContaining([{ file: 'defexp/i.ts', name: 'defI' }]));
+  });
+});

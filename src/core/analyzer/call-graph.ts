@@ -48,7 +48,7 @@ import { generatedClientFunctionsFor } from './contract/generated-client.js';
 import { scanGrpcRegistrations, isGeneratedGrpcStub, createImportResolver, type GrpcRegistration, type ImportTarget } from './contract/grpc-registration.js';
 import { isProtobufPath } from './contract/protobuf.js';
 import { isGraphqlPath } from './contract/graphql.js';
-import { scanResolverMaps, type ResolverMap } from './contract/graphql-resolvers.js';
+import { scanResolverMaps, hasInlineSdl, type ResolverMap } from './contract/graphql-resolvers.js';
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -6552,7 +6552,9 @@ export class CallGraphBuilder {
     // (change: add-contract-node-projection) — extracted once, here. Retained only when a
     // specification exists: on a repository with none, holding the whole route and call list
     // across Passes 3-8 would be memory spent for nothing.
-    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0 || this.graphqlFilesOmitted > 0;
+    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0 || this.graphqlFilesOmitted > 0
+      // A schema skipped as a fixture or a Relay copy is still disclosed when it is the only one.
+      || this.contractFilesSkipped.length > 0;
     let httpRoutes: RouteDefinition[] = [];
     let httpCalls: HttpCall[] = [];
     /** Why the route/call extraction is not complete — withholds every "unmatched" conclusion. */
@@ -6784,8 +6786,13 @@ export class CallGraphBuilder {
           graphqlResolverMaps: roots => {
             if (!this.contractFiles.some(f => isGraphqlPath(f.path))) return [];
             const maps: ResolverMap[] = [];
+            // A directory holding an inline schema (`typeDefs.ts`) serves THAT schema: maps beside it
+            // are not bound to the repository's SDL by field name.
+            const dirOf = (f: string) => f.slice(0, f.lastIndexOf('/') + 1);
+            const inlineDirs = new Set<string>();
+            for (const [file, content] of fileContents) if (!isTestFile(file) && hasInlineSdl(content)) inlineDirs.add(dirOf(file));
             for (const [file, content] of fileContents) {
-              if (isTestFile(file)) continue;
+              if (isTestFile(file) || inlineDirs.has(dirOf(file))) continue;
               for (const m of scanResolverMaps(file, content, roots)) maps.push(m);
             }
             return maps;

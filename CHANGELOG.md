@@ -22,8 +22,9 @@ All notable changes to OpenLore are documented here. This project adheres to
 - **An imported handler binds only in the module it was imported from**, one barrel re-export
   followed — for gRPC Node registrations too, which previously took any same-named function in the
   repository. A package or path-alias import binds nothing and says so.
-- **Schemas under test or fixture paths are not read** (`.proto` and GraphQL), and are listed under
-  `skippedCandidates`: a fixture's `type Query` made the real root ambiguous.
+- **GraphQL schemas under fixture paths are not read** (`fixtures/`, `__tests__/`, `testdata/`,
+  `*.test.graphql`), and are listed under `skippedCandidates`: a fixture's `type Query` made the real
+  root ambiguous. `.proto` files are read wherever they are, as before.
 - `find_dead_code` names unbound GraphQL operations and gRPC RPCs, so a code-first resolver or a
   handler registered in an unread style is not reported dead without a word.
 

@@ -1637,12 +1637,12 @@ export class AnalysisArtifactGenerator {
         // carried truncated so it is reported unread for its size rather than absent.
         // A schema under a test or fixture path describes a fake service: read as the contract, it
         // makes the real root types ambiguous and silently unbinds every resolver.
-        const fixtureSchema = isTest || isFixtureSchemaPath(file.path);
-        if ((isProtobufPath(file.path) || isGraphqlPath(file.path)) && fixtureSchema) {
+        const fixtureSchema = isGraphqlPath(file.path) && isFixtureSchemaPath(file.path);
+        if (fixtureSchema) {
           // Named, not dropped: discovery scope stays visible.
           skippedContractFiles.push({ file: file.path, reason: 'a schema under a test or fixture path, not this repository\'s contract' });
         }
-        if (isProtobufPath(file.path) && !fixtureSchema) {
+        if (isProtobufPath(file.path)) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
           if (protoFiles < MAX_PROTO_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {

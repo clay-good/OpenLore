@@ -222,6 +222,12 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
       bound.add(target.id);
     }
   }
+  // One operation, two implementations: two servers in one repository sharing a schema file, or
+  // one map not this schema's. Both edges stay — each is a literal binding — and the fact is said.
+  const perOp = new Map<string, number>();
+  for (const e of out.edges) if (e.kind === 'implements_endpoint') perOp.set(e.calleeId, (perOp.get(e.calleeId) ?? 0) + 1);
+  const doubled = [...perOp].filter(([, n]) => n > 1).map(([id]) => id.slice(id.indexOf('::') + 2)).sort();
+  if (doubled.length) out.notes.push(`${doubled.length} GraphQL operation(s) are bound by more than one resolver map (${doubled.slice(0, 3).join(', ')}${doubled.length > 3 ? ', …' : ''}): two servers, or a map that serves another schema`);
   out.unboundOperations = [...operationNodes.values()].filter(n => !bound.has(n.id)).map(n => `${n.name} (${n.filePath}:${n.startLine})`).sort();
   return out;
 }

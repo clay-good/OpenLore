@@ -63,7 +63,7 @@ const MOCK_PACKAGES = /^(?:msw|@graphql-tools\/mock|graphql-tools\/mock|@mswjs\/
  * serves that schema, not one read from a `.graphql` file: its resolver maps belong to it, and
  * binding them to the repository's SDL by field name would link one app's code to another's API.
  */
-const INLINE_SDL = /(?:\btypeDefs\b|\btype_defs\b|\bgql\s*`|\bgql\s*\(\s*(?:"""|'''|")|\bgraphql\s*`|\bbuildSchema\s*\(|\bcreateSchema\s*\(|\bmakeExecutableSchema\s*\(|\bmake_executable_schema\s*\()[\s\S]{0,4000}?\btype\s+(?:Query|Mutation|Subscription)\b/;
+const INLINE_SDL = /(?:\btypeDefs\b|\btype_defs\b|\bgql\s*`|\bgql\s*\(\s*(?:"""|'''|")|\bgraphql\s*`|\bbuildSchema\s*\(|\bcreateSchema\s*\(|\bmakeExecutableSchema\s*\(|\bmake_executable_schema\s*\()[\s\S]{0,4000}?\b(?:type\s+[A-Za-z_]\w*[^{}]{0,200}\{|schema\s*\{)/;
 
 function runtimeOf(file: string): ResolverRuntime | undefined {
   if (/\.[cm]?[jt]sx?$/i.test(file)) return 'node';
@@ -144,6 +144,15 @@ function restoreQuotedKeys(content: string, masked: string): string {
 }
 
 /**
+ * Whether a source file writes a schema of its own inline (a root type in a `typeDefs` / `gql` /
+ * `buildSchema` string). Its maps — and those beside it in its directory — serve that schema.
+ */
+export function hasInlineSdl(content: string): boolean {
+  // The cheap test first: only a file holding a root type in a string pays for the slower one.
+  return /["'`]\s*(?:extend\s+)?(?:type\s+[A-Za-z_]\w*[^{}"'`]{0,200}\{|schema\s*\{)|`[^`]{0,4000}?\b(?:type\s+[A-Za-z_]\w*[^{}`]{0,200}\{|schema\s*\{)/.test(content) && INLINE_SDL.test(content);
+}
+
+/**
  * Every resolver map for the given root type names in one source file. `roots` comes from the
  * schema (its `schema { query: … }` block, or the default names), so a map is read only for a root
  * the schema actually has.
@@ -154,8 +163,7 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
   const rootSet = new Set(roots);
   // Cheap gate before masking: a root name must appear literally.
   if (!roots.some(r => content.includes(r)) && !(runtime === 'python' && /\b(?:QueryType|MutationType|SubscriptionType|ObjectType)\b/.test(content))) return [];
-  // The cheap test first: only a file holding a root type in a string pays for the slower one.
-  if (/["'`]\s*(?:extend\s+)?type\s+(?:Query|Mutation|Subscription)\b|`[^`]{0,4000}?\btype\s+(?:Query|Mutation|Subscription)\b/.test(content) && INLINE_SDL.test(content)) return [];
+  if (hasInlineSdl(content)) return [];
   const masked = maskNonCode(content, runtime === 'python' ? 'python' : 'js');
   const text = runtime === 'node' ? restoreQuotedKeys(content, masked) : masked;
   const starts = [0];

@@ -335,6 +335,20 @@ export function createImportResolver(files: readonly string[], contentOf: (file:
           if (a) name(a[2] ?? a[1], r[2], a[1]);
         }
       }
+      // Names the barrel IMPORTS and hands on without a `from`: `module.exports = { a }`,
+      // `export default { a }`, `export { a }` — each resolved through the barrel's own import.
+      const own = importedNames(masked);
+      for (const r of masked.matchAll(/(?:\bmodule\.exports\s*=|\bexport\s+default)\s*\{([^}]{0,2000})\}|\bexport\s*\{([^}]{0,2000})\}(?!\s*from)/g)) {
+        if (parts > MAX_REEXPORT_PARTS) break;
+        for (const part of (r[1] ?? r[2]).split(',')) {
+          const a = /^\s*([A-Za-z_$][\w$]*)(?:\s*(?::|as)\s*([A-Za-z_$][\w$]*))?\s*$/.exec(part);
+          if (!a) continue;
+          // `{ a: b }` exports local `b` as `a`; `{ b as a }` likewise.
+          const [exported, local] = r[1] !== undefined ? [a[1], a[2] ?? a[1]] : [a[2] ?? a[1], a[1]];
+          const imp = own.get(local);
+          if (imp?.exported) name(exported, imp.from, imp.exported);
+        }
+      }
       for (const r of masked.matchAll(/\bexport\s*\*\s*from\s*['"]([^'"\n]{1,500})['"]/g)) {
         if (b.star.length >= MAX_REEXPORT_PARTS) break;
         if (!b.star.includes(r[1])) b.star.push(r[1]);

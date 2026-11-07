@@ -171,4 +171,19 @@ describe('GraphQL projection through the builder', () => {
     expect(result.edges.filter(e => e.kind === 'implements_endpoint')).toEqual([]);
     expect(result.contracts?.unresolvedRegistrations.items).toEqual([expect.objectContaining({ rpc: 'GetOrder', reason: 'implementation-not-found' })]);
   });
+
+  it('a map beside an inline schema serves that schema; a fixture .proto is still read (round-4 e2e review)', async () => {
+    const code = [
+      { path: 'apps/a/resolvers.ts', language: 'TypeScript', content: 'function me() {}\nexport const resolvers = { RootQuery: { me } };\n' },
+      { path: 'apps/b/typeDefs.ts', language: 'TypeScript', content: 'export const typeDefs = gql`type RootQuery { me: String }`;\n' },
+      { path: 'apps/b/resolvers.ts', language: 'TypeScript', content: 'function meB() {}\nexport const resolvers = { RootQuery: { me: meB } };\n' },
+      { path: 'cmd/main.go', language: 'Go', content: 'package main\n\ntype echoServer struct{}\n\nfunc (e *echoServer) Say() {}\n\nfunc main() {\n\tpb.RegisterEchoServer(s, &echoServer{})\n}\n' },
+    ];
+    const result = await new CallGraphBuilder({ contractFiles: [
+      { path: 'apps/a/schema.graphql', content: 'schema { query: RootQuery }\ntype RootQuery { me: Int }' },
+      { path: 'e2e/echo.proto', content: 'syntax = "proto3";\npackage echo;\nmessage M {}\nservice Echo { rpc Say(M) returns (M); }\n' },
+    ] }).build(code);
+    const edges = result.edges.filter(e => e.kind === 'implements_endpoint').map(e => `${e.callerId} -> ${e.calleeId}`).sort();
+    expect(edges).toEqual(['apps/a/resolvers.ts::me -> apps/a/schema.graphql::RootQuery.me', 'cmd/main.go::echoServer.Say -> e2e/echo.proto::/echo.Echo/Say']);
+  });
 });
