@@ -613,9 +613,13 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     const comparable = (file: string) => !unparsed.has(file) && !lostSpec(file)
       && (head.examined.has(file) || !head.candidates.has(file)) && (base.examined.has(file) || !base.candidates.has(file));
     const docFiles = new Set([...head.docs, ...base.docs].map(d => d.file));
-    for (const u of [...head.unread, ...base.unread]) if (docFiles.has(u.file)) notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
     /** Specification files present on a side but not compared, for the bump below. */
     const notCompared = new Set<string>([...head.unreadable, ...base.unreadable].map(u => u.file));
+    for (const u of [...head.unread, ...base.unread]) {
+      if (!docFiles.has(u.file)) continue;
+      notCompared.add(u.file);
+      notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
+    }
     for (const f of docFiles) {
       if (unparsed.has(f) || comparable(f)) continue;
       notCompared.add(f);
@@ -628,6 +632,8 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       && (head.proto.examined.has(file) || !head.proto.candidates.has(file)) && (base.proto.examined.has(file) || !base.proto.candidates.has(file));
     for (const u of [...head.proto.unread, ...base.proto.unread]) notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
     for (const f of protoUnparsed) notCompared.add(f);
+    // Every `.proto` file is a schema, so one past the cap on either side is one no rule saw.
+    for (const side of [head.proto, base.proto]) for (const f of side.candidates) if (!side.examined.has(f)) notCompared.add(f);
     for (const f of new Set([...head.proto.docs, ...base.proto.docs].map(d => d.file))) {
       if (protoUnparsed.has(f) || protoComparable(f)) continue;
       notCompared.add(f);
@@ -655,13 +661,14 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     // changes no rule saw, so no bump is proven. One that did not change hides nothing.
     let uncomparedChanged = 0;
     if (notCompared.size) {
-      const files = [...notCompared].sort(sortStr).slice(0, 500);
       const onBothSides = (f: string) => (base.candidates.has(f) || base.proto.candidates.has(f)) && (head.candidates.has(f) || head.proto.candidates.has(f));
+      // One listing of every change since the base, intersected here: no pathspec to batch, quote,
+      // or misread (`:x.yaml` is magic to git).
       let diffed: Set<string> | undefined;
       try {
-        diffed = new Set((await git(root, gitPathArgs('diff', '--relative', '--name-only', '-z', commit, '--', ...files))).split('\0').filter(Boolean));
+        diffed = new Set((await git(root, gitPathArgs('diff', '--relative', '--name-only', '-z', commit))).split('\0').filter(Boolean));
       } catch { /* unknown: every one counts as changed */ }
-      uncomparedChanged = files.filter(f => !diffed || !onBothSides(f) || diffed.has(f)).length + (notCompared.size - files.length);
+      uncomparedChanged = [...notCompared].filter(f => !diffed || !onBothSides(f) || diffed.has(f)).length;
     }
     const consumers = await consumersOf(root, httpChanges, [...head.docs, ...base.docs], boundaries);
     await attachReachingTests(root, consumers, boundaries);

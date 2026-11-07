@@ -65,8 +65,11 @@ function diffMessage(file: string, b: ProtoMessage, m: ProtoMessage, out: Contra
     const prior = oneofMap.get(old.oneof);
     oneofMap.set(old.oneof, prior === undefined || prior === into ? into : null);
   }
+  // Two base oneofs merged into one head oneof: setting one member now clears the other.
+  const intoCount = new Map<string, number>();
+  for (const into of oneofMap.values()) if (into) intoCount.set(into, (intoCount.get(into) ?? 0) + 1);
   const sameOneof = (old: ProtoField, f: ProtoField): boolean =>
-    (!old.oneof || !f.oneof) ? old.oneof === f.oneof : oneofMap.get(old.oneof) === f.oneof;
+    (!old.oneof || !f.oneof) ? old.oneof === f.oneof : oneofMap.get(old.oneof) === f.oneof && intoCount.get(f.oneof) === 1;
   for (const [n, f] of now) {
     const old = was.get(n);
     const sameName = wasByName.get(f.name);
@@ -97,7 +100,10 @@ function diffMessage(file: string, b: ProtoMessage, m: ProtoMessage, out: Contra
     if (old.optionsHash !== f.optionsHash) push('schema-unassessed', `field ${n} (\`${f.name}\`): its options changed outside the model (json_name, packed, or a custom option)`, f.line, fieldLabel(f));
   }
   for (const [n, old] of was) {
-    if (now.has(n)) continue;
+    // Still on its number — unless what holds the number now is ANOTHER base field moved onto
+    // it, in which case this one is gone (base `a=1, b=2`, head `a=2`: `b` was removed).
+    const holder = now.get(n);
+    if (holder && !(holder.name !== old.name && wasByName.has(holder.name))) continue;
     if (nowByName.has(old.name)) continue; // moved: reported as field-number-changed above
     const reserved = reservedNumber(headReserved, n);
     push(reserved ? 'field-removed-reserved' : 'field-removed',
@@ -149,8 +155,10 @@ function diffEnum(file: string, b: ProtoEnum, e: ProtoEnum, out: ContractChange[
     const old = was.get(name);
     if (!old) {
       if (reservedNumber(baseReserved, v.number) || baseReserved.names.has(name)) push('reserved-number-reused', `enum value ${name} = ${v.number} uses a number or name the previous revision reserved`, v.line, name);
-      // A new name on a number the base already had: a rename or a new alias, reported once below.
       else if (!wasNumbers.has(v.number)) push('enum-value-added', `enum value ${name} = ${v.number} added`, v.line, name);
+      // A new name on a number the base had and still has under its old name: a new alias.
+      // (When the old name is gone, it is a rename, reported once below.)
+      else if (b.values.some(x => x.number === v.number && now.has(x.name))) push('enum-value-added', `enum value ${name} = ${v.number} added as an alias`, v.line, name);
       continue;
     }
     if (old.number !== v.number) push('enum-value-number-changed', `enum value ${name}: ${old.number} → ${v.number}`, v.line, name);

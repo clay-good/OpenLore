@@ -240,7 +240,7 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     const svc = serviceFor(reg);
     // A Node call naming a service object rather than a `.service` descriptor is a gRPC
     // registration only if that service is declared: `addService` is a common method name.
-    if (!svc.name && reg.descriptor === false) continue;
+    if (!svc.name && reg.descriptor === false && svc.reason === 'unknown-service') continue;
     if (!svc.name) {
       out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: reg.service, reason: svc.reason!, ...(svc.candidates ? { detail: svc.candidates.sort().join(', ') } : {}) });
       continue;

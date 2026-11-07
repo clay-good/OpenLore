@@ -549,4 +549,15 @@ service OrderService {
     git(root, 'commit', '-qam', 'edit');
     expect((await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD' })).changes).toMatchObject({ suggestedBump: 'patch' });
   });
+
+  it('many unchanged uncomparable files do not withhold the bump; a changed .proto past the cap does', async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 502; i++) files[`legacy/f${String(i).padStart(4, '0')}.proto`] = `package l${i};\nmessage M { optional string a = 1; }\n`;
+    const root = repo(files);
+    expect((await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD' })).changes).toMatchObject({ suggestedBump: 'patch' });
+    // The last file sorts past the protobuf cap: never read, but changed.
+    write(root, 'legacy/f0501.proto', 'package l501;\n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD' });
+    expect(r.changes).toMatchObject({ suggestedBump: null, suggestedBumpWithheld: expect.stringContaining('1 changed specification file(s)') });
+  }, 60_000);
 });

@@ -200,3 +200,22 @@ describe('diffProtobuf: round-1 review regressions', () => {
       .toEqual(['rpc-type-changed request', 'rpc-type-changed response']);
   });
 });
+
+describe('diffProtobuf: round-2 review regressions', () => {
+  const msg = (body: string) => `syntax = "proto3";\npackage p;\n${body}\n`;
+  const r = (b: string, h: string) => diffProtobuf(side({ 'x.proto': msg(b) }), side({ 'x.proto': msg(h) })).map(c => `${c.rule}${c.element ? ` ${c.element}` : ''}`);
+
+  it('two oneofs merged into one is a change for both members', () => {
+    expect(r('message M { oneof x { int32 a = 1; } oneof w { int32 b = 2; } }', 'message M { oneof y { int32 a = 1; int32 b = 2; } }'))
+      .toEqual(['field-oneof-changed field 1 (a)', 'field-oneof-changed field 2 (b)']);
+  });
+
+  it('a field removed while another moves onto its number is reported removed', () => {
+    expect(r('message M { string a = 1; string b = 2; }', 'message M { string a = 2; }'))
+      .toEqual(['field-number-changed field 2 (a)', 'field-removed field 2 (b)']);
+  });
+
+  it('a new alias on a number in use is an addition', () => {
+    expect(r('enum E { option allow_alias = true; A = 0; B = 1; }', 'enum E { option allow_alias = true; A = 0; B = 1; C = 1; }')).toEqual(['enum-value-added C']);
+  });
+});
