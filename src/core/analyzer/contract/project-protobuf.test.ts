@@ -567,3 +567,45 @@ describe('round-4 review', () => {
     expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found', detail: expect.stringContaining('from a module that is not indexed') })]);
   });
 });
+
+describe('round-4 e2e review: a registration names ONE type', () => {
+  const PAY = 'syntax = "proto3";\npackage pay.v1;\nmessage M {}\nservice PaymentService { rpc Charge(M) returns (M); rpc Refund(M) returns (M); }\n';
+  const pay = (partial: Partial<ProtobufProjectionInput>) => projectProtobuf({ files: [{ path: 'pay.proto', content: PAY }], registrations: [], resolveImplementation: () => [], ...partial });
+
+  it('Go: two packages of the qualifier\'s name make the whole registration ambiguous, not half of it', () => {
+    const p = pay({
+      registrations: [{ file: 'go/billing/main.go', line: 5, runtime: 'go', service: 'PaymentService', implType: 'PaymentServer', implQualifier: 'impl' }],
+      resolveImplementation: resolverOver([
+        fn('go/billing/impl/pay.go::PaymentServer.Charge', { className: 'PaymentServer' }),
+        fn('go/refunds/impl/pay.go::PaymentServer.Charge', { className: 'PaymentServer' }),
+        fn('go/refunds/impl/pay.go::PaymentServer.Refund', { className: 'PaymentServer' }),
+      ]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'ambiguous-implementation', detail: expect.stringContaining('more than one place') })]);
+  });
+
+  it('Python: a bare class defined in two modules binds no RPC of the registration', () => {
+    const p = pay({
+      registrations: [{ file: 'py/one/main.py', line: 3, runtime: 'python', service: 'PaymentService', implType: 'PyServicer' }],
+      resolveImplementation: resolverOver([
+        fn('py/one/pysvc.py::PyServicer.Charge', { language: 'Python', className: 'PyServicer' }),
+        fn('py/two/pysvc.py::PyServicer.Charge', { language: 'Python', className: 'PyServicer' }),
+        fn('py/two/pysvc.py::PyServicer.Refund', { language: 'Python', className: 'PyServicer' }),
+      ]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations.map(r => r.reason)).toEqual(['ambiguous-implementation']);
+  });
+
+  it('one home binds every RPC it defines', () => {
+    const p = pay({
+      registrations: [{ file: 'go/billing/main.go', line: 5, runtime: 'go', service: 'PaymentService', implType: 'PaymentServer', implQualifier: 'impl' }],
+      resolveImplementation: resolverOver([
+        fn('go/billing/impl/pay.go::PaymentServer.Charge', { className: 'PaymentServer' }),
+        fn('go/billing/impl/refund.go::PaymentServer.Refund', { className: 'PaymentServer' }),
+      ]),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toHaveLength(2);
+  });
+});

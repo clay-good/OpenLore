@@ -173,7 +173,9 @@ The rules refuse rather than guess:
   is in the registration's file or, failing that, the only one anywhere; `servicer.OrderServicer` is
   in a module named `servicer`. Node: the registration's file, else — only when the file imports
   that handler — the only one anywhere. Two candidates in that scope bind nothing
-  (`ambiguous-implementation`); a lone candidate outside it is never taken.
+  (`ambiguous-implementation`); a lone candidate outside it is never taken. For Go and Python the
+  type's location is settled once per registration: a type defined in two places makes the whole
+  registration ambiguous, so no RPC binds to whichever place alone happens to define its method.
 - Generated stubs are never candidates (Python's `*_pb2_grpc.py` holds a client class named exactly
   like the service), and once a Python servicer class is found in the registration's own file, an
   RPC it does not implement is not looked for elsewhere. Inheritance is not followed: a method

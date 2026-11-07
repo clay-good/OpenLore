@@ -108,20 +108,32 @@ const dirName = (f: string) => dirOf(f).replace(/\/$/, '').split('/').pop() ?? '
  *   Node                the registration's own file, else — only when the file imports the
  *                       handler — the only one anywhere
  */
-function pick(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): FunctionNode | 'ambiguous' | undefined {
-  const one = (at: readonly FunctionNode[]) => (at.length === 1 ? at[0] : at.length > 1 ? 'ambiguous' as const : undefined);
+function inScope(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): readonly FunctionNode[] {
   if (reg.runtime === 'go') {
-    if (reg.implQualifier === undefined) return one(candidates.filter(n => dirOf(n.filePath) === dirOf(reg.file)));
-    return one(candidates.filter(n => dirOf(n.filePath) !== dirOf(reg.file) && dirName(n.filePath) === reg.implQualifier));
+    if (reg.implQualifier === undefined) return candidates.filter(n => dirOf(n.filePath) === dirOf(reg.file));
+    return candidates.filter(n => dirOf(n.filePath) !== dirOf(reg.file) && dirName(n.filePath) === reg.implQualifier);
   }
   if (reg.runtime === 'python' && reg.implQualifier !== undefined) {
-    return one(candidates.filter(n => moduleName(n.filePath) === reg.implQualifier));
+    return candidates.filter(n => moduleName(n.filePath) === reg.implQualifier);
   }
   const local = candidates.filter(n => n.filePath === reg.file);
-  if (local.length || reg.runtime === 'python') return local.length ? one(local) : one(candidates);
+  if (local.length || reg.runtime === 'python') return local.length ? local : candidates;
   // Node: a handler outside the registration's file only when this file imports it.
-  return imported ? one(candidates) : undefined;
+  return imported ? candidates : [];
 }
+
+function pick(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): FunctionNode | 'ambiguous' | undefined {
+  const at = inScope(reg, candidates, imported);
+  return at.length === 1 ? at[0] : at.length > 1 ? 'ambiguous' : undefined;
+}
+
+/**
+ * Where a Go or Python registration's type lives — a package directory (Go) or a file (Python)
+ * — settled ONCE for the whole registration. Choosing per RPC let one registration bind `Charge`
+ * nowhere (two candidates) and `Refund` to whichever package alone defines it: a type the
+ * registration never named.
+ */
+const homeOf = (reg: GrpcRegistration, n: FunctionNode) => (reg.runtime === 'go' ? dirOf(n.filePath) : n.filePath);
 
 export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProjection {
   const out: ProtobufProjection = {
@@ -278,20 +290,31 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     // Linear in RPCs and map keys: one key map per registration, and each RPC's candidates
     // resolved once (a registration × RPCs × keys product made one hostile repository cost 68 s).
     const byKey = new Map((reg.methods ?? []).map(e => [e.key, e] as const));
-    const work: Array<{ rpc: ProtoRpc; target: FunctionNode; fnName?: string; imported: boolean; inline: boolean; found: readonly FunctionNode[] }> = [];
+    const work: Array<{ rpc: ProtoRpc; target: FunctionNode; fnName?: string; imported: boolean; inline: boolean; found: FunctionNode[] }> = [];
     for (const rpc of service.rpcs) {
       const target = rpcNodes.get(nodeId(doc.file, rpc.address));
       if (!target) continue; // past the cap
-      if (reg.runtime !== 'node') { work.push({ rpc, target, fnName: rpc.name, imported: false, inline: false, found: input.resolveImplementation(reg, rpc.name) }); continue; }
+      if (reg.runtime !== 'node') { work.push({ rpc, target, fnName: rpc.name, imported: false, inline: false, found: [...input.resolveImplementation(reg, rpc.name)] }); continue; }
       const entry = byKey.get(rpc.name) ?? byKey.get(lowerFirst(rpc.name)) ?? byKey.get(lodashCamel(rpc.name));
       if (!entry) continue; // not in the map: left unbound
       work.push({ rpc, target, ...(entry.fn ? { fnName: entry.fn } : {}), imported: entry.imported === true, inline: !entry.fn,
-        found: entry.fn ? input.resolveImplementation(reg, entry.fn) : [] });
+        found: entry.fn ? [...input.resolveImplementation(reg, entry.fn)] : [] });
     }
     // Python: a class found in the registration's own file for any RPC is THE class, so an RPC it
     // does not implement is not looked for in a same-named class elsewhere (a servicer named like
     // the service took the rest from the generated client class).
     const homeIsLocal = reg.runtime === 'python' && reg.implQualifier === undefined && work.some(w => w.found.some(n => n.filePath === reg.file));
+    if (reg.runtime !== 'node') {
+      const homes = new Set(work.flatMap(w => inScope(reg, homeIsLocal ? w.found.filter(n => n.filePath === reg.file) : w.found).map(n => homeOf(reg, n))));
+      if (homes.size > 1) {
+        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, reason: 'ambiguous-implementation',
+          detail: `\`${reg.implQualifier ? `${reg.implQualifier}.` : ''}${reg.implType}\` is defined in more than one place: ${[...homes].sort().slice(0, 4).join(', ')}` });
+        continue;
+      }
+      // One home: every RPC is looked for there and nowhere else.
+      const [home] = homes;
+      if (home !== undefined) for (const w of work) w.found = w.found.filter(n => homeOf(reg, n) === home);
+    }
     let anyCandidate = false;
     for (const w of work) {
       const { rpc, target, fnName } = w;
