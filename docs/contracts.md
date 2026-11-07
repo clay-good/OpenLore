@@ -282,6 +282,16 @@ test files and `*.generated.*` files are not read, and neither are schemas under
 paths — a fixture's `type Query` would make the real root ambiguous. A root type defined in two
 files is reported as not assessed, which `find_dead_code` repeats.
 
+An import is followed one level through a barrel (`export * from './feature'`, `export { a as b }
+from …`, a Python package's `__init__.py`); when the module is indexed but does not define or
+directly re-export the name, the detail says so. A file that writes its OWN schema inline
+(`typeDefs: `type Query {…}``, Ariadne `gql("""…""")`) serves that schema, so its maps are not bound
+to the repository's SDL; neither are files importing a mocking library (`msw`,
+`@graphql-tools/mock`). A schema that a Relay config names (`"relay": { "schema": … }`) is the
+compiler's copy of a server's schema, and a file whose types sit beside `@client` operations is
+Apollo local state: neither is read as this repository's contract. One schema per repository means
+a monorepo with several servers' SDL makes their shared roots ambiguous — disclosed, not guessed.
+
 Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
 bound: a type field is not a node. Code-first servers (Strawberry, Graphene, Nexus,
 gqlgen) have no resolver map, so their operations are listed in `unboundGraphqlOperations` — "not
