@@ -38,6 +38,31 @@ export const CONTRACT_RULES = {
   'response-property-type-changed': 'breaking',
   'response-property-widened': 'dangerous',
   'schema-unassessed': 'potentially-breaking',
+  // Protobuf (change: add-contract-graph-projection). A field's NUMBER is its identity on the
+  // wire, so fields are matched by number: a rename keeps the wire and breaks JSON and text.
+  'rpc-removed': 'breaking',
+  'rpc-added': 'non-breaking',
+  'rpc-deprecated': 'dangerous',
+  'rpc-type-changed': 'breaking',
+  'rpc-streaming-changed': 'breaking',
+  'type-removed': 'breaking',
+  'type-added': 'non-breaking',
+  'field-removed': 'breaking',
+  'field-removed-reserved': 'dangerous',
+  'field-added': 'non-breaking',
+  'field-number-changed': 'breaking',
+  'field-type-changed': 'breaking',
+  'field-label-changed': 'breaking',
+  'field-presence-changed': 'dangerous',
+  'field-oneof-changed': 'breaking',
+  'field-renamed': 'dangerous',
+  'field-deprecated': 'dangerous',
+  'reserved-number-reused': 'breaking',
+  'reserved-removed': 'dangerous',
+  'enum-value-removed': 'breaking',
+  'enum-value-removed-reserved': 'dangerous',
+  'enum-value-added': 'non-breaking',
+  'enum-value-number-changed': 'breaking',
 } as const satisfies Record<string, ContractChangeClass>;
 export type ContractRule = keyof typeof CONTRACT_RULES;
 

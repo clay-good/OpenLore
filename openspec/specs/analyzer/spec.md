@@ -8339,6 +8339,83 @@ same-basename source file.
 - **WHEN** the repository is analyzed
 - **THEN** no edge is created and the unresolved binding names the missing mapping
 
+### Requirement: ContractSchemasAreDiscoveredAndNormalized
+
+The analyzer SHALL deterministically discover interface-schema files — OpenAPI and Swagger
+documents by their top-level key, and every `.proto` file — and read each into a normalized element
+model for rule-table diffing. For protobuf that model SHALL hold RPCs, messages under their full
+names with numbered fields, enums with their values, and `reserved` numbers and names, with type
+names resolved across files by protobuf's own scoping rule. Discovery scope SHALL be visible, and a
+file that cannot be read SHALL be unread with the reason, never omitted.
+
+#### Scenario: Discovery scope is visible
+
+- **GIVEN** a repository containing one OpenAPI document, one `.proto` file, and one YAML file
+  with an `openapi` key below the top level
+- **WHEN** the repository is analyzed
+- **THEN** the two schemas are projected, and the third is listed under `skippedCandidates` with
+  the reason it was excluded
+
+#### Scenario: Parse failure is unread, not empty
+
+- **GIVEN** a `.proto` file with a syntax error, and another with no `syntax` statement (proto2)
+- **WHEN** the repository is analyzed, and when `certify_service_contract` runs with a base ref
+- **THEN** both files are listed as unread with the reason, and no diff over either reports "no
+  changes" or a removed element
+
+#### Scenario: Elements outside the model are named
+
+- **GIVEN** a `.proto` file that declares an `extend` block
+- **WHEN** the repository is analyzed
+- **THEN** `extend` is listed as not assessed, and the rest of the file is read
+
+#### Scenario: Protobuf types resolve by scope, across files
+
+- **GIVEN** `orders.proto` in package `orders.v1` whose `Order` has a field of type `Status`, and
+  `status.proto` in the same package declaring `enum Status`
+- **WHEN** the repository is analyzed
+- **THEN** `orders.v1.Order` has a `references_schema` edge to `orders.v1.Status`; a field typed
+  `google.protobuf.Timestamp` with no such file in the repository, or a name declared in two files,
+  draws no edge and is disclosed
+
+### Requirement: RpcsAreBoundToTheImplementationTheirServerRegistrationNames
+
+Each protobuf RPC SHALL be a graph node named by its gRPC method path (`/package.Service/Method`),
+and each message and enum a node named by its full name, all `language: Protobuf`. A method SHALL
+be bound to an RPC by an `implements_endpoint` edge only through a gRPC server registration that
+names both the service and its implementation literally (Go, Python, Node grpc-js). Nothing SHALL
+be guessed: every registration that cannot be bound is disclosed with the reason, and an RPC left
+unbound is listed as not bound, never as not implemented.
+
+#### Scenario: A Go registration binds the implementing methods
+
+- **GIVEN** `service OrderService { rpc GetOrder(…) }` in package `orders.v1`, and Go code calling
+  `pb.RegisterOrderServiceServer(s, &orderServer{})` with `func (s *orderServer) GetOrder(…)`
+- **WHEN** the repository is analyzed
+- **THEN** an `implements_endpoint` edge runs from `orderServer.GetOrder` to
+  `/orders.v1.OrderService/GetOrder`, and `orderServer.GetOrder` is not a dead-code candidate
+
+#### Scenario: A registration that names no type binds nothing
+
+- **GIVEN** `pb.RegisterOrderServiceServer(s, NewServer())`
+- **WHEN** the repository is analyzed
+- **THEN** no edge is drawn, the registration is disclosed as `not-literal`, and the service's RPCs
+  are listed as unbound
+
+#### Scenario: Registrations that are not code are not read
+
+- **GIVEN** a registration written in a comment, one in a test file, and the generated stub's own
+  definition of `RegisterOrderServiceServer`
+- **WHEN** the repository is analyzed
+- **THEN** none of them binds anything
+
+#### Scenario: A declaration binding changes no code measurement
+
+- **GIVEN** the same repository analyzed with and without its `.proto` files
+- **WHEN** the two graphs are compared
+- **THEN** every code function's fan-in and fan-out, the entry points and the hubs are identical,
+  and no protobuf node appears among them
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.

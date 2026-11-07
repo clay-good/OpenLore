@@ -42,7 +42,7 @@ export function renderServiceContract(result: Record<string, unknown>): string {
   const r = clean(result) as Record<string, unknown>;
   const lines: string[] = [];
   const specs = (r.specs as Array<{ file: string; format: string; operations: number }>) ?? [];
-  if (!specs.length) lines.push('No OpenAPI or Swagger document found.');
+  if (!specs.length) lines.push('No OpenAPI, Swagger, or protobuf schema found.');
   for (const s of specs) lines.push(`📄 ${s.file} (${s.format}): ${s.operations} operation(s)`);
   const parity = r.parity as { assessed: boolean; reason?: string; matched?: number; declaredUnimplemented?: number; implementedUndeclared?: number };
   if (parity?.assessed) {
@@ -95,7 +95,7 @@ export async function runCertifyServiceContractCli(opts: CertifyServiceContractC
 }
 
 export const certifyServiceContractCommand = new Command('certify-service-contract')
-  .description('Certify OpenAPI/Swagger contracts against the code: declared operations and parity with the indexed route handlers (no --base), or the breaking-change verdict for each changed element with its in-repo callers (--base <ref>). Read-only, advisory.')
+  .description('Certify OpenAPI/Swagger and protobuf contracts against the code: declared operations and parity with the indexed route handlers (no --base), or the breaking-change verdict for each changed element with its in-repo callers (--base <ref>). Read-only, advisory.')
   .option('--base <ref>', 'Compare the specifications with this ref (its merge-base with HEAD)')
   .option('--max <n>', 'Cap on each listed item kind (default 100, max 1000)', (v) => parseInt(v, 10))
   .option('--allow-base-fallback', 'When --base does not resolve, compare with the default branch instead of erroring (disclosed)', false)

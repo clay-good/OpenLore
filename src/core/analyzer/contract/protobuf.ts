@@ -1,0 +1,592 @@
+/**
+ * Protocol Buffers v3 reader (change: add-contract-graph-projection, protobuf phase).
+ *
+ * Reads one `.proto` file into a normalized element model: services and their RPCs, messages
+ * (nested ones under their full name), fields with their numbers, labels and types, enums with
+ * their values, and the `reserved` ranges and names of each. Deterministic and offline: a small
+ * hand-written tokenizer, no grammar, no `protoc`, no network.
+ *
+ * Only proto3 is read. A file with no `syntax` statement is proto2 by the language's own rule,
+ * and an `edition` file follows other rules again; both are UNREAD with that reason, never read as
+ * declaring nothing. An element the model does not cover (`extend`, `extensions`) is listed in
+ * `unassessed`. Type names are resolved across every file read by {@link resolveProtoTypes}, with
+ * protobuf's own scoping rule — never by similarity.
+ */
+
+import { createHash } from 'node:crypto';
+import { MAX_SPEC_BYTES } from './openapi.js';
+
+/** Whether a path is a protobuf definition file. */
+export const isProtobufPath = (path: string): boolean => /\.proto$/i.test(path);
+
+/** The largest field number protobuf allows; `max` in a `reserved` range. */
+const MAX_FIELD_NUMBER = 536_870_911;
+/** The largest enum value (an int32); `max` in an enum's `reserved` range. */
+const MAX_ENUM_VALUE = 2_147_483_647;
+/** Nesting depth of messages read at most: deeper is unreadable, never a stack overflow. */
+const MAX_NESTING = 64;
+
+const SCALARS: ReadonlySet<string> = new Set([
+  'double', 'float', 'int32', 'int64', 'uint32', 'uint64', 'sint32', 'sint64',
+  'fixed32', 'fixed64', 'sfixed32', 'sfixed64', 'bool', 'string', 'bytes',
+]);
+
+/** Whether a field type is a scalar (never a reference to a message or enum). */
+export const isProtoScalar = (type: string): boolean => SCALARS.has(type);
+
+export type ProtoLabel = 'singular' | 'optional' | 'repeated' | 'map';
+
+/** A type name as written, with the scope it was written in — resolved later, across files. */
+export interface ProtoTypeRef { written: string; scope: string }
+
+export interface ProtoField {
+  name: string;
+  number: number;
+  label: ProtoLabel;
+  /** The type as written: a scalar, a (possibly qualified) message or enum name, or `map<K, V>`. */
+  type: string;
+  /** For a message or enum type (or a map's value type): what to resolve. */
+  ref?: ProtoTypeRef;
+  /** The full name it resolved to (`pkg.Order`), set by {@link resolveProtoTypes}. */
+  resolved?: string;
+  /** The `oneof` it belongs to. */
+  oneof?: string;
+  deprecated: boolean;
+  /** A hash of the field options the rule table does not compare (`json_name`, `packed`, …). */
+  optionsHash: string;
+  line: number;
+}
+
+export interface ProtoReserved {
+  /** Inclusive number ranges. */
+  ranges: Array<[number, number]>;
+  names: string[];
+}
+
+export interface ProtoMessage {
+  kind: 'message';
+  /** The full name, package included, no leading dot: `pkg.Outer.Inner`. */
+  name: string;
+  /** The name as declared: `Inner`. */
+  simpleName: string;
+  line: number;
+  fields: ProtoField[];
+  reserved: ProtoReserved;
+  /** A hash of the message's own options. */
+  optionsHash: string;
+}
+
+export interface ProtoEnumValue { name: string; number: number; deprecated: boolean; line: number }
+
+export interface ProtoEnum {
+  kind: 'enum';
+  name: string;
+  simpleName: string;
+  line: number;
+  values: ProtoEnumValue[];
+  reserved: ProtoReserved;
+  optionsHash: string;
+}
+
+export interface ProtoRpc {
+  /** The gRPC method path: `/pkg.Service/Method`. Unique per RPC, and what a client puts on the wire. */
+  address: string;
+  /** The full service name: `pkg.Service`. */
+  service: string;
+  name: string;
+  request: ProtoTypeRef;
+  response: ProtoTypeRef;
+  /** Full names, set by {@link resolveProtoTypes} when they resolve. */
+  requestType?: string;
+  responseType?: string;
+  clientStreaming: boolean;
+  serverStreaming: boolean;
+  deprecated: boolean;
+  optionsHash: string;
+  line: number;
+}
+
+export interface ProtoService { name: string; simpleName: string; line: number; rpcs: ProtoRpc[] }
+
+export interface ProtoDocument {
+  file: string;
+  format: 'protobuf-3';
+  package: string;
+  imports: string[];
+  services: ProtoService[];
+  messages: ProtoMessage[];
+  enums: ProtoEnum[];
+  /** Element classes present in the file but outside the model (`extend`, `extensions`). */
+  unassessed: string[];
+}
+
+// ── Tokenizer ──────────────────────────────────────────────────────────────
+
+interface Tok { t: 'id' | 'num' | 'str' | 'sym'; v: string; line: number }
+
+class ProtoSyntaxError extends Error {}
+
+function tokenize(text: string): Tok[] {
+  const out: Tok[] = [];
+  let i = 0;
+  let line = 1;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '\n') { line++; i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\f' || c === '\v') { i++; continue; }
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < n && text[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end < 0) throw new ProtoSyntaxError(`line ${line}: unterminated comment`);
+      for (let k = i; k < end; k++) if (text[k] === '\n') line++;
+      i = end + 2;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const start = line;
+      let j = i + 1;
+      let v = '';
+      while (j < n && text[j] !== c) {
+        if (text[j] === '\n') throw new ProtoSyntaxError(`line ${start}: unterminated string`);
+        if (text[j] === '\\' && j + 1 < n) { v += text[j + 1]; j += 2; continue; }
+        v += text[j++];
+      }
+      if (j >= n) throw new ProtoSyntaxError(`line ${start}: unterminated string`);
+      out.push({ t: 'str', v, line: start });
+      i = j + 1;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[\w.]/.test(text[j])) j++;
+      out.push({ t: 'id', v: text.slice(i, j), line });
+      i = j;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(text[i + 1] ?? ''))) {
+      let j = i + 1;
+      while (j < n && /[\w.+-]/.test(text[j]) && !((text[j] === '+' || text[j] === '-') && !/[eE]/.test(text[j - 1]))) j++;
+      out.push({ t: 'num', v: text.slice(i, j), line });
+      i = j;
+      continue;
+    }
+    // A leading dot makes a fully-qualified type name: `.pkg.Order`.
+    if (c === '.' && /[A-Za-z_]/.test(text[i + 1] ?? '')) {
+      let j = i + 1;
+      while (j < n && /[\w.]/.test(text[j])) j++;
+      out.push({ t: 'id', v: text.slice(i, j), line });
+      i = j;
+      continue;
+    }
+    out.push({ t: 'sym', v: c, line });
+    i++;
+  }
+  return out;
+}
+
+const sha = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 16);
+
+/** Parse an integer literal as protobuf writes one (decimal, hex, octal), or `undefined`. */
+function intValue(v: string): number | undefined {
+  let x: number;
+  if (/^0[xX][0-9a-fA-F]+$/.test(v)) x = parseInt(v.slice(2), 16);
+  else if (/^0[0-7]+$/.test(v)) x = parseInt(v.slice(1), 8);
+  else if (/^(?:0|[1-9][0-9]*)$/.test(v)) x = Number(v);
+  else return undefined;
+  return Number.isSafeInteger(x) ? x : undefined;
+}
+
+// ── Parser ─────────────────────────────────────────────────────────────────
+
+/**
+ * Parse one file. Returns an `error` when it cannot be read as proto3 — a syntax error, proto2,
+ * editions, or a file past the size cap. A `.proto` file is always a specification, so there is
+ * no "not a document" outcome.
+ */
+export function readProtobuf(file: string, text: string): ProtoDocument | { file: string; error: string } {
+  if (text.length > MAX_SPEC_BYTES) return { file, error: `larger than ${MAX_SPEC_BYTES / 1024 / 1024} MB` };
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  try {
+    return parse(file, tokenize(text));
+  } catch (e) {
+    return { file, error: e instanceof Error ? e.message.split('\n')[0] : String(e) };
+  }
+}
+
+function parse(file: string, toks: Tok[]): ProtoDocument {
+  let p = 0;
+  const peek = (k = 0): Tok | undefined => toks[p + k];
+  const fail = (msg: string, t: Tok | undefined = peek()): never => {
+    throw new ProtoSyntaxError(`line ${t?.line ?? toks[toks.length - 1]?.line ?? 1}: ${msg}`);
+  };
+  const next = (): Tok => toks[p++] ?? fail('unexpected end of file');
+  const isSym = (v: string, k = 0) => peek(k)?.t === 'sym' && peek(k)?.v === v;
+  const isId = (v: string, k = 0) => peek(k)?.t === 'id' && peek(k)?.v === v;
+  const expectSym = (v: string): Tok => (isSym(v) ? next() : fail(`expected \`${v}\`, found \`${peek()?.v ?? 'end of file'}\``));
+  const ident = (what: string): Tok => (peek()?.t === 'id' ? next() : fail(`expected ${what}, found \`${peek()?.v ?? 'end of file'}\``));
+  /** A name with no dots (a message, field, service, or RPC name). */
+  const simpleIdent = (what: string): Tok => {
+    const t = ident(what);
+    if (t.v.includes('.')) fail(`expected ${what}, found \`${t.v}\``, t);
+    return t;
+  };
+
+  /**
+   * Skip one option statement's value up to and including its `;`, balancing braces and
+   * brackets (an aggregate value `{ a: 1 }` can hold anything). Returns the skipped text.
+   */
+  const skipToSemicolon = (): string => {
+    let depth = 0;
+    const parts: string[] = [];
+    for (;;) {
+      const t = next();
+      if (t.t === 'sym' && (t.v === '{' || t.v === '[' || t.v === '(')) depth++;
+      else if (t.t === 'sym' && (t.v === '}' || t.v === ']' || t.v === ')')) {
+        if (--depth < 0) fail(`unbalanced \`${t.v}\``, t);
+      } else if (t.t === 'sym' && t.v === ';' && depth === 0) return parts.join(' ');
+      parts.push(`${t.t}:${t.v}`);
+    }
+  };
+  /** Skip a balanced `{ … }` block, the opening brace next. */
+  const skipBlock = (): void => {
+    expectSym('{');
+    let depth = 1;
+    while (depth > 0) {
+      const t = next();
+      if (t.t === 'sym' && t.v === '{') depth++;
+      else if (t.t === 'sym' && t.v === '}') depth--;
+    }
+  };
+  /** `option name = value;` with `option` already consumed: whether it says `deprecated = true`, and its text. */
+  const optionStatement = (): { deprecated: boolean; text: string } => {
+    const text = skipToSemicolon();
+    return { deprecated: /^id:deprecated sym:= id:true$/.test(text), text };
+  };
+  /** Field or enum-value options `[a = 1, deprecated = true]`, the `[` next. */
+  const bracketOptions = (): { deprecated: boolean; rest: string[] } => {
+    expectSym('[');
+    const items: string[][] = [[]];
+    let depth = 0;
+    for (;;) {
+      const t = next();
+      if (t.t === 'sym' && (t.v === '{' || t.v === '[' || t.v === '(')) depth++;
+      else if (t.t === 'sym' && (t.v === '}' || t.v === ')')) depth--;
+      else if (t.t === 'sym' && t.v === ']') {
+        if (depth === 0) break;
+        depth--;
+      } else if (t.t === 'sym' && t.v === ',' && depth === 0) { items.push([]); continue; }
+      items[items.length - 1].push(`${t.t}:${t.v}`);
+    }
+    const texts = items.map(i => i.join(' ')).filter(Boolean);
+    return { deprecated: texts.includes('id:deprecated sym:= id:true'), rest: texts.filter(t => !/^id:deprecated sym:=/.test(t)).sort() };
+  };
+  const intLiteral = (what: string): number => {
+    const neg = isSym('-') ? (next(), true) : false;
+    const t = next();
+    const v = t.t === 'num' ? intValue(t.v) : undefined;
+    if (v === undefined) fail(`expected ${what}, found \`${t.v}\``, t);
+    return neg ? -v! : v!;
+  };
+  const reservedStatement = (into: ProtoReserved, max: number): void => {
+    for (;;) {
+      if (peek()?.t === 'str') into.names.push(next().v);
+      else {
+        const lo = intLiteral('a field number');
+        let hi = lo;
+        if (isId('to')) {
+          next();
+          if (isId('max')) { next(); hi = max; } else hi = intLiteral('a field number');
+        }
+        if (hi < lo) fail(`reserved range ${lo} to ${hi} is empty`);
+        into.ranges.push([lo, hi]);
+      }
+      if (isSym(',')) { next(); continue; }
+      expectSym(';');
+      return;
+    }
+  };
+
+  // ── File header ──
+  while (isSym(';')) next();
+  if (isId('edition')) fail('protobuf editions are not read; only proto3 is');
+  if (!isId('syntax')) fail('no `syntax` statement, so the file is proto2; only proto3 is read');
+  next();
+  expectSym('=');
+  const syntax = next();
+  if (syntax.t !== 'str') fail('expected a syntax string', syntax);
+  if (syntax.v !== 'proto3') fail(`\`syntax = "${syntax.v}"\` is not read; only proto3 is`, syntax);
+  expectSym(';');
+
+  let pkg = '';
+  const imports: string[] = [];
+  const services: ProtoService[] = [];
+  const messages: ProtoMessage[] = [];
+  const enums: ProtoEnum[] = [];
+  const unassessed = new Set<string>();
+  const full = (scope: string, name: string) => (scope ? `${scope}.${name}` : name);
+
+  const typeRef = (scope: string): ProtoTypeRef => ({ written: ident('a type name').v, scope });
+
+  const enumBody = (scope: string, nameTok: Tok): void => {
+    const e: ProtoEnum = { kind: 'enum', name: full(scope, nameTok.v), simpleName: nameTok.v, line: nameTok.line, values: [], reserved: { ranges: [], names: [] }, optionsHash: '' };
+    const options: string[] = [];
+    const valueNames = new Set<string>();
+    expectSym('{');
+    while (!isSym('}')) {
+      if (isSym(';')) { next(); continue; }
+      if (isId('option')) { next(); options.push(optionStatement().text); continue; }
+      if (isId('reserved') && (peek(1)?.t === 'num' || peek(1)?.t === 'str' || isSym('-', 1))) { next(); reservedStatement(e.reserved, MAX_ENUM_VALUE); continue; }
+      const name = simpleIdent('an enum value name');
+      if (valueNames.has(name.v)) fail(`enum value \`${name.v}\` declared twice in ${e.name}`, name);
+      valueNames.add(name.v);
+      expectSym('=');
+      const number = intLiteral('an enum value number');
+      const opts = isSym('[') ? bracketOptions() : { deprecated: false, rest: [] };
+      expectSym(';');
+      e.values.push({ name: name.v, number, deprecated: opts.deprecated, line: name.line });
+    }
+    expectSym('}');
+    e.optionsHash = sha(options.sort().join('\n'));
+    enums.push(e);
+  };
+
+  const messageBody = (scope: string, nameTok: Tok, depth: number): void => {
+    if (depth > MAX_NESTING) fail(`messages nested deeper than ${MAX_NESTING}`, nameTok);
+    const name = full(scope, nameTok.v);
+    const m: ProtoMessage = { kind: 'message', name, simpleName: nameTok.v, line: nameTok.line, fields: [], reserved: { ranges: [], names: [] }, optionsHash: '' };
+    messages.push(m);
+    const options: string[] = [];
+    const numbers = new Set<number>();
+    const names = new Set<string>();
+    const field = (label: ProtoLabel, oneof?: string): void => {
+      let type: string;
+      let ref: ProtoTypeRef | undefined;
+      if (label === 'map') {
+        next(); // map
+        expectSym('<');
+        const k = ident('a map key type').v;
+        expectSym(',');
+        const vTok = ident('a map value type');
+        expectSym('>');
+        type = `map<${k}, ${vTok.v}>`;
+        if (!isProtoScalar(vTok.v)) ref = { written: vTok.v, scope: name };
+      } else {
+        const t = ident('a field type');
+        if (t.v === 'group') fail('`group` is proto2 only', t);
+        type = t.v;
+        if (!isProtoScalar(t.v)) ref = { written: t.v, scope: name };
+      }
+      const fname = simpleIdent('a field name');
+      expectSym('=');
+      const number = intLiteral('a field number');
+      if (number < 1 || number > MAX_FIELD_NUMBER) fail(`field number ${number} is out of range`, fname);
+      const opts = isSym('[') ? bracketOptions() : { deprecated: false, rest: [] };
+      expectSym(';');
+      // protoc refuses both; a model holding either could not say which field a number means.
+      if (numbers.has(number)) fail(`field number ${number} used twice in ${name}`, fname);
+      if (names.has(fname.v)) fail(`field \`${fname.v}\` declared twice in ${name}`, fname);
+      numbers.add(number);
+      names.add(fname.v);
+      m.fields.push({
+        name: fname.v, number, label, type, ...(ref ? { ref } : {}), ...(oneof ? { oneof } : {}),
+        deprecated: opts.deprecated, optionsHash: sha(opts.rest.join('\n')), line: fname.line,
+      });
+    };
+    const startsNested = (kw: string) => isId(kw) && peek(1)?.t === 'id' && isSym('{', 2);
+    expectSym('{');
+    while (!isSym('}')) {
+      if (isSym(';')) { next(); continue; }
+      if (startsNested('message')) { next(); messageBody(name, simpleIdent('a message name'), depth + 1); continue; }
+      if (startsNested('enum')) { next(); enumBody(name, simpleIdent('an enum name')); continue; }
+      if (isId('extend') && peek(1)?.t === 'id' && isSym('{', 2)) { next(); next(); unassessed.add('extend'); skipBlock(); continue; }
+      if (isId('option')) { next(); options.push(optionStatement().text); continue; }
+      if (isId('reserved') && (peek(1)?.t === 'num' || peek(1)?.t === 'str')) { next(); reservedStatement(m.reserved, MAX_FIELD_NUMBER); continue; }
+      if (isId('extensions') && peek(1)?.t === 'num') { next(); unassessed.add('extensions'); skipToSemicolon(); continue; }
+      if (startsNested('oneof')) {
+        next();
+        const oneof = simpleIdent('a oneof name').v;
+        expectSym('{');
+        while (!isSym('}')) {
+          if (isSym(';')) { next(); continue; }
+          if (isId('option')) { next(); options.push(`oneof ${oneof}: ${optionStatement().text}`); continue; }
+          field('singular', oneof);
+        }
+        expectSym('}');
+        continue;
+      }
+      if (isId('map') && isSym('<', 1)) { field('map'); continue; }
+      if (isId('required') && peek(1)?.t === 'id' && peek(2)?.t === 'id') fail('`required` is proto2 only');
+      if ((isId('repeated') || isId('optional')) && peek(1)?.t === 'id' && peek(2)?.t === 'id') {
+        const label = next().v as 'repeated' | 'optional';
+        field(label);
+        continue;
+      }
+      field('singular');
+    }
+    expectSym('}');
+    m.optionsHash = sha(options.sort().join('\n'));
+  };
+
+  const serviceBody = (nameTok: Tok): void => {
+    const sname = full(pkg, nameTok.v);
+    const s: ProtoService = { name: sname, simpleName: nameTok.v, line: nameTok.line, rpcs: [] };
+    services.push(s);
+    const rpcNames = new Set<string>();
+    expectSym('{');
+    while (!isSym('}')) {
+      if (isSym(';')) { next(); continue; }
+      if (isId('option')) { next(); optionStatement(); continue; }
+      if (!isId('rpc')) fail(`expected \`rpc\` in service ${nameTok.v}, found \`${peek()?.v ?? 'end of file'}\``);
+      next();
+      const rname = simpleIdent('an RPC name');
+      if (rpcNames.has(rname.v)) fail(`rpc \`${rname.v}\` declared twice in ${sname}`, rname);
+      rpcNames.add(rname.v);
+      const side = (): { ref: ProtoTypeRef; streaming: boolean } => {
+        expectSym('(');
+        const streaming = isId('stream') && peek(1)?.t === 'id' ? (next(), true) : false;
+        const ref = typeRef(pkg);
+        expectSym(')');
+        return { ref, streaming };
+      };
+      const req = side();
+      if (!isId('returns')) fail('expected `returns`');
+      next();
+      const res = side();
+      let deprecated = false;
+      const options: string[] = [];
+      if (isSym('{')) {
+        next();
+        while (!isSym('}')) {
+          if (isSym(';')) { next(); continue; }
+          if (!isId('option')) fail(`expected \`option\` in rpc ${rname.v}`);
+          next();
+          const o = optionStatement();
+          if (o.deprecated) deprecated = true; else options.push(o.text);
+        }
+        expectSym('}');
+        if (isSym(';')) next();
+      } else expectSym(';');
+      s.rpcs.push({
+        address: `/${sname}/${rname.v}`, service: sname, name: rname.v,
+        request: req.ref, response: res.ref, clientStreaming: req.streaming, serverStreaming: res.streaming,
+        deprecated, optionsHash: sha(options.sort().join('\n')), line: rname.line,
+      });
+    }
+    expectSym('}');
+  };
+
+  while (p < toks.length) {
+    if (isSym(';')) { next(); continue; }
+    const kw = next();
+    if (kw.t !== 'id') fail(`unexpected \`${kw.v}\``, kw);
+    switch (kw.v) {
+      case 'package': {
+        if (pkg) fail('a second `package` statement', kw);
+        pkg = ident('a package name').v;
+        expectSym(';');
+        break;
+      }
+      case 'import': {
+        if (isId('public') || isId('weak')) next();
+        const t = next();
+        if (t.t !== 'str') fail('expected an import path', t);
+        imports.push(t.v);
+        expectSym(';');
+        break;
+      }
+      case 'option': optionStatement(); break;
+      case 'message': messageBody(pkg, simpleIdent('a message name'), 1); break;
+      case 'enum': enumBody(pkg, simpleIdent('an enum name')); break;
+      case 'service': serviceBody(simpleIdent('a service name')); break;
+      case 'extend': ident('an extended type'); unassessed.add('extend'); skipBlock(); break;
+      default: fail(`unexpected \`${kw.v}\` at the top level`, kw);
+    }
+  }
+
+  const typeNames = new Set<string>();
+  for (const t of [...messages, ...enums, ...services]) {
+    if (typeNames.has(t.name)) fail(`\`${t.name}\` declared twice`, { t: 'id', v: t.name, line: t.line });
+    typeNames.add(t.name);
+  }
+
+  const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  return {
+    file, format: 'protobuf-3', package: pkg, imports: imports.sort(),
+    services: services.sort(byName).map(s => ({ ...s, rpcs: s.rpcs.sort(byName) })),
+    messages: messages.sort(byName).map(m => ({ ...m, fields: m.fields.sort((a, b) => a.number - b.number) })),
+    enums: enums.sort(byName),
+    unassessed: [...unassessed].sort(),
+  };
+}
+
+// ── Type resolution across files ───────────────────────────────────────────
+
+/** Why a type reference did not resolve. */
+export interface UnresolvedProtoType { file: string; line: number; written: string; reason: 'undeclared' | 'ambiguous' }
+
+/**
+ * Resolve every message and enum type reference across `docs`, with protobuf's own scoping rule:
+ * a qualified name's FIRST component is looked up from the innermost scope outward, and the rest
+ * must then resolve under it — a first component that resolves to a type or package and whose
+ * rest does not is an error, not a reason to keep looking further out. A leading dot means
+ * "from the root". A full name declared in two files (two copies of one schema) is ambiguous and
+ * binds nothing.
+ *
+ * Mutates nothing: returns new documents with `resolved` / `requestType` / `responseType` set,
+ * plus every reference that did not resolve.
+ */
+export function resolveProtoTypes(docs: readonly ProtoDocument[]): { docs: ProtoDocument[]; unresolved: UnresolvedProtoType[] } {
+  const declared = new Map<string, number>();
+  const packages = new Set<string>();
+  for (const d of docs) {
+    for (const t of [...d.messages, ...d.enums]) declared.set(t.name, (declared.get(t.name) ?? 0) + 1);
+    const parts = d.package ? d.package.split('.') : [];
+    for (let i = 1; i <= parts.length; i++) packages.add(parts.slice(0, i).join('.'));
+  }
+  // A scope component can be a package or a message: either may hold the next name.
+  const isScope = (n: string) => declared.has(n) || packages.has(n);
+  const resolve = (ref: ProtoTypeRef): { name?: string; reason?: UnresolvedProtoType['reason'] } => {
+    const settle = (n: string) => (declared.get(n) === 1 ? { name: n } : declared.has(n) ? { reason: 'ambiguous' as const } : { reason: 'undeclared' as const });
+    if (ref.written.startsWith('.')) return settle(ref.written.slice(1));
+    const [first, ...rest] = ref.written.split('.');
+    const scope = ref.scope ? ref.scope.split('.') : [];
+    for (let i = scope.length; i >= 0; i--) {
+      const head = [...scope.slice(0, i), first].join('.');
+      // A one-component name must find a TYPE: protoc skips a package of that name and keeps
+      // looking outward. Only a compound name's first component may be a package.
+      if (rest.length ? !isScope(head) : !declared.has(head)) continue;
+      return settle(rest.length ? `${head}.${rest.join('.')}` : head);
+    }
+    return { reason: 'undeclared' };
+  };
+  const unresolved: UnresolvedProtoType[] = [];
+  const out = docs.map(d => ({
+    ...d,
+    messages: d.messages.map(m => ({
+      ...m,
+      fields: m.fields.map(f => {
+        if (!f.ref) return f;
+        const r = resolve(f.ref);
+        if (r.name) return { ...f, resolved: r.name };
+        unresolved.push({ file: d.file, line: f.line, written: f.ref.written, reason: r.reason! });
+        return f;
+      }),
+    })),
+    services: d.services.map(s => ({
+      ...s,
+      rpcs: s.rpcs.map(rpc => {
+        const req = resolve(rpc.request);
+        const res = resolve(rpc.response);
+        for (const [r, ref] of [[req, rpc.request], [res, rpc.response]] as const) {
+          if (!r.name) unresolved.push({ file: d.file, line: rpc.line, written: ref.written, reason: r.reason! });
+        }
+        return { ...rpc, ...(req.name ? { requestType: req.name } : {}), ...(res.name ? { responseType: res.name } : {}) };
+      }),
+    })),
+  }));
+  return { docs: out, unresolved };
+}

@@ -45,6 +45,8 @@ import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
 import { generatedClientFunctionsFor } from './contract/generated-client.js';
+import { scanGrpcRegistrations, type GrpcRegistration } from './contract/grpc-registration.js';
+import { isProtobufPath } from './contract/protobuf.js';
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -5661,6 +5663,8 @@ export interface CallGraphBuilderOptions {
   contractFiles?: ReadonlyArray<{ path: string; content: string }>;
   /** Specification candidates the caller did not retain, so the projection discloses the cap. */
   contractFilesOmitted?: number;
+  /** `.proto` files the walk did not retain (change: add-contract-graph-projection). */
+  protoFilesOmitted?: number;
   /**
    * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
    * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
@@ -5678,6 +5682,7 @@ export class CallGraphBuilder {
   private readonly resolution: Required<CallGraphResolutionToggles>;
   private readonly contractFiles: ReadonlyArray<{ path: string; content: string }>;
   private readonly contractFilesOmitted: number;
+  private readonly protoFilesOmitted: number;
   private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
@@ -5687,6 +5692,7 @@ export class CallGraphBuilder {
     this.legacyLatePassesForTesting = options.legacyLatePassesForTesting === true;
     this.contractFiles = options.contractFiles ?? [];
     this.contractFilesOmitted = options.contractFilesOmitted ?? 0;
+    this.protoFilesOmitted = options.protoFilesOmitted ?? 0;
     this.buildOutput = options.buildOutput;
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
@@ -6536,7 +6542,7 @@ export class CallGraphBuilder {
     // (change: add-contract-node-projection) — extracted once, here. Retained only when a
     // specification exists: on a repository with none, holding the whole route and call list
     // across Passes 3-8 would be memory spent for nothing.
-    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0;
+    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0;
     let httpRoutes: RouteDefinition[] = [];
     let httpCalls: HttpCall[] = [];
     /** Why the route/call extraction is not complete — withholds every "unmatched" conclusion. */
@@ -6721,9 +6727,31 @@ export class CallGraphBuilder {
           const at = codeNodesByFile.get(n.filePath);
           if (at) at.push(n); else codeNodesByFile.set(n.filePath, [n]);
         }
+        // gRPC server registrations, read only when a `.proto` file is in hand: the scan is a
+        // marker test per file, but a repository with no protobuf schema has nothing to bind.
+        // Test files are skipped — a test server registers a fake, not the implementation.
+        const grpcRegistrations: GrpcRegistration[] = [];
+        if (this.contractFiles.some(f => isProtobufPath(f.path))) {
+          for (const [file, content] of fileContents) {
+            if (isTestFile(file)) continue;
+            for (const r of scanGrpcRegistrations(file, content)) grpcRegistrations.push(r);
+          }
+        }
+        const runtimeLanguages: Record<GrpcRegistration['runtime'], ReadonlySet<string>> = {
+          go: new Set(['Go']), python: new Set(['Python']), node: new Set(['TypeScript', 'JavaScript']),
+        };
         const projection = projectContracts({
+          grpcRegistrations,
+          // The candidates a registration could mean: for Go and Python, methods of the registered
+          // type; for Node, functions of the name the implementation map gives. The projector
+          // picks the one in the registration's file, then its directory, then the only one.
+          resolveGrpcImplementation: (reg, name) => trie.findBySimpleName(name).filter(n =>
+            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath)
+            && runtimeLanguages[reg.runtime].has(n.language)
+            && (reg.implType === undefined || n.className === reg.implType)),
           files: this.contractFiles,
           filesOmitted: this.contractFilesOmitted,
+          protoFilesOmitted: this.protoFilesOmitted,
           ...(extractionNotAssessed.size ? { extractionNotAssessed: [...extractionNotAssessed] } : {}),
           routes: httpRoutes,
           calls: httpCalls,

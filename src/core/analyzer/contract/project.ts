@@ -26,6 +26,9 @@ import type { CallEdge, FunctionNode } from '../call-graph-types.js';
 import type { HttpCall, RouteDefinition } from '../http-route-parser.js';
 import { normalizeUrl } from '../http-route-parser.js';
 import { readOpenApi, looksLikeOpenApi, HTTP_METHODS, type ContractDocument } from './openapi.js';
+import { isProtobufPath } from './protobuf.js';
+import { projectProtobuf, MAX_PROTO_FILES, type UnresolvedRegistration } from './project-protobuf.js';
+import type { GrpcRegistration } from './grpc-registration.js';
 
 /** Specification files read per build. */
 export const MAX_CONTRACT_FILES = 50;
@@ -106,6 +109,20 @@ export interface ContractDisclosure {
   ambiguousAddresses: Disclosed<AmbiguousAddress>;
   /** `operationId`s a generated-client module declared that could not be bound. */
   unresolvedGeneratedBindings: Disclosed<GeneratedClientBinding>;
+  /** gRPC server registrations that name a service but could not be bound to its RPCs. */
+  unresolvedRegistrations: Disclosed<UnresolvedRegistration>;
+  /**
+   * Files that looked like a specification but are not one — a YAML or JSON file with an
+   * `openapi` or `swagger` key that is not at the top level — each with why. Listed so the
+   * discovery scope is visible: a file the reader passed over is never silently absent.
+   */
+  skippedCandidates: Disclosed<UnreadSpecification>;
+  /**
+   * RPCs no scanned registration binds. Registrations are read in Go, Python, and Node (grpc-js)
+   * only, so an RPC served from another language is listed here too: this is "not bound", never
+   * "not implemented".
+   */
+  unboundRpcs: Disclosed<string>;
   /**
    * Set when a conclusion is WITHHELD because an input was not assessed — the route extraction
    * failed or degraded, a specification could not be read, or the operation cap stopped the
@@ -114,7 +131,7 @@ export interface ContractDisclosure {
    */
   notAssessed?: string[];
   /** Every cap the projection stopped at (both can fire in one build). */
-  truncations?: Array<{ reason: 'file-cap' | 'operation-cap' | 'schema-cap'; cap: number; seen: number }>;
+  truncations?: Array<{ reason: 'file-cap' | 'proto-file-cap' | 'operation-cap' | 'schema-cap'; cap: number; seen: number }>;
 }
 
 export interface ProjectedContracts extends ContractDisclosure {
@@ -122,7 +139,7 @@ export interface ProjectedContracts extends ContractDisclosure {
   edges: CallEdge[];
 }
 
-const bound = <T>(items: T[]): Disclosed<T> => ({ items: items.slice(0, MAX_DISCLOSED), total: items.length });
+const bound = <T>(items: T[], total = items.length): Disclosed<T> => ({ items: items.slice(0, MAX_DISCLOSED), total });
 const none = <T>(): Disclosed<T> => ({ items: [], total: 0 });
 
 /** An empty projection, for a caller that must disclose a failure instead of a result. */
@@ -135,7 +152,8 @@ function empty(): ProjectedContracts {
     nodes: [], edges: [],
     unmatchedOperations: none(), unmatchedRoutes: none(), unresolvedBindings: none(),
     unreadSpecifications: none(), unboundClientCalls: none(), ambiguousAddresses: none(),
-    unresolvedGeneratedBindings: none(),
+    unresolvedGeneratedBindings: none(), unresolvedRegistrations: none(), unboundRpcs: none(),
+    skippedCandidates: none(),
   };
 }
 
@@ -149,13 +167,16 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     unboundClientCalls: p.unboundClientCalls,
     ambiguousAddresses: p.ambiguousAddresses,
     unresolvedGeneratedBindings: p.unresolvedGeneratedBindings,
+    unresolvedRegistrations: p.unresolvedRegistrations,
+    unboundRpcs: p.unboundRpcs,
+    skippedCandidates: p.skippedCandidates,
     ...(p.notAssessed ? { notAssessed: p.notAssessed } : {}),
     ...(p.truncations ? { truncations: p.truncations } : {}),
   };
   const lists: Array<Disclosed<unknown>> = [
     rest.unmatchedOperations, rest.unmatchedRoutes, rest.unresolvedBindings,
     rest.unreadSpecifications, rest.unboundClientCalls, rest.ambiguousAddresses,
-    rest.unresolvedGeneratedBindings,
+    rest.unresolvedGeneratedBindings, rest.unresolvedRegistrations, rest.unboundRpcs, rest.skippedCandidates,
   ];
   const silent = lists.every(l => l.total === 0) && !rest.notAssessed && !rest.truncations;
   return silent ? undefined : rest;
@@ -166,6 +187,8 @@ export interface ContractProjectionInput {
   files: readonly { path: string; content: string }[];
   /** Candidates the caller did not read, so the cap it hit is disclosed rather than invisible. */
   filesOmitted?: number;
+  /** `.proto` files the caller did not retain: they withhold protobuf conclusions only. */
+  protoFilesOmitted?: number;
   /** Server route registrations from the HTTP route parser. */
   routes: readonly RouteDefinition[];
   /** Client call sites from the HTTP projection. */
@@ -192,6 +215,10 @@ export interface ContractProjectionInput {
    * scan needs file content the builder already has.
    */
   generatedClientFunctions?: (specPath: string) => ReadonlyMap<string, readonly FunctionNode[]>;
+  /** gRPC server registrations in the indexed source, for binding protobuf RPCs to their implementation. */
+  grpcRegistrations?: readonly GrpcRegistration[];
+  /** The code functions a registration could mean by a name (see `ProtobufProjectionInput`). */
+  resolveGrpcImplementation?: (reg: GrpcRegistration, name: string) => readonly FunctionNode[];
 }
 
 /** A path template with no literal segment (`/`, `/{id}`): too generic to match without its base path. */
@@ -245,14 +272,53 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   const truncations: NonNullable<ContractDisclosure['truncations']> = [];
   const omitted = input.filesOmitted ?? 0;
 
-  const finish = (p: ProjectedContracts): ProjectedContracts => ({
-    ...p,
-    ...(notAssessed.size ? { notAssessed: [...notAssessed].sort() } : {}),
-    ...(truncations.length ? { truncations } : {}),
-  });
+  // ── Protobuf (change: add-contract-graph-projection) ─────────────────────
+  //
+  // Projected on its own — an RPC has no method or path, so nothing below applies to it — and
+  // merged into every result this function returns. Its own file cap: protobuf schemas come as
+  // many small files, so a shared cap of 50 would leave most of a typical repository unread.
+  const protoCandidates = [...input.files].filter(f => isProtobufPath(f.path))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const protoRead = protoCandidates.slice(0, MAX_PROTO_FILES);
+  const proto = protoRead.length
+    ? projectProtobuf({
+      files: protoRead,
+      registrations: input.grpcRegistrations ?? [],
+      resolveImplementation: input.resolveGrpcImplementation ?? (() => []),
+    })
+    : undefined;
+  /** Why a protobuf conclusion is withheld. Kept apart: an unread `.proto` declares no HTTP operation. */
+  const protoNotAssessed = [...(proto?.notAssessed ?? [])];
+  const protoUnread = protoCandidates.length - protoRead.length + (input.protoFilesOmitted ?? 0);
+  if (protoUnread > 0) protoNotAssessed.push(`${protoUnread} protobuf file(s) past the file cap were not read`);
+
+  const finish = (p: ProjectedContracts): ProjectedContracts => {
+    // Merged here, after the OpenAPI conclusions were drawn, so neither side withholds the other's.
+    const protoWithheld = protoNotAssessed.length > 0;
+    for (const reason of protoNotAssessed) notAssessed.add(reason);
+    if (protoUnread > 0) truncations.push({ reason: 'proto-file-cap', cap: MAX_PROTO_FILES, seen: protoCandidates.length + (input.protoFilesOmitted ?? 0) });
+    for (const t of proto?.truncations ?? []) truncations.push(t);
+    if (proto?.outsideModel.length) notAssessed.add(`protobuf elements outside the model were not read: ${proto.outsideModel.join(', ')}`);
+    if (proto?.unresolvedTypes) {
+      // Said after the fact, like an unresolved `$ref`: it draws no edge, and withholds nothing.
+      notAssessed.add(`${proto.unresolvedTypes} protobuf type reference(s) resolve to no type projected from the files read (an import from outside this repository such as \`google.protobuf.*\`, a name declared in two files, or a type past the cap), so no edge was drawn for them`);
+    }
+    return {
+      ...p,
+      nodes: proto ? [...p.nodes, ...proto.nodes] : p.nodes,
+      edges: proto ? [...p.edges, ...proto.edges] : p.edges,
+      unreadSpecifications: proto?.unreadSpecifications.length
+        ? bound([...p.unreadSpecifications.items, ...proto.unreadSpecifications], p.unreadSpecifications.total + proto.unreadSpecifications.length)
+        : p.unreadSpecifications,
+      unresolvedRegistrations: bound(proto?.unresolvedRegistrations ?? []),
+      unboundRpcs: proto && !protoWithheld ? bound(proto.unboundRpcs) : none(),
+      ...(notAssessed.size ? { notAssessed: [...notAssessed].sort() } : {}),
+      ...(truncations.length ? { truncations } : {}),
+    };
+  };
 
   const candidates = [...input.files]
-    .filter(f => looksLikeOpenApi(f.content))
+    .filter(f => !isProtobufPath(f.path) && looksLikeOpenApi(f.content))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   // Defensive: the caller caps RETENTION (it holds the content); this caps reading. Either cap
   // means a candidate that could declare what a route serves was never read.
@@ -266,9 +332,10 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
 
   const docs: ContractDocument[] = [];
   const unreadSpecifications: UnreadSpecification[] = [];
+  const skippedCandidates: UnreadSpecification[] = [];
   for (const f of read) {
     const doc = readOpenApi(f.path, f.content);
-    if (!doc) continue;
+    if (!doc) { skippedCandidates.push({ file: f.path, reason: 'an `openapi` or `swagger` key, but not at the top level: not a specification' }); continue; }
     if ('error' in doc) { unreadSpecifications.push({ file: f.path, reason: doc.error }); continue; }
     docs.push(doc);
   }
@@ -278,7 +345,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     notAssessed.add(`${unreadSpecifications.length} specification(s) could not be read`);
   }
   if (!docs.length) {
-    return finish({ ...empty(), unreadSpecifications: bound(unreadSpecifications) });
+    return finish({ ...empty(), unreadSpecifications: bound(unreadSpecifications), skippedCandidates: bound(skippedCandidates) });
   }
 
   // ── Operation nodes ───────────────────────────────────────────────────────
@@ -586,8 +653,10 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   }
 
   const withheld = notAssessed.size > 0;
+  // Operations only: `nodes` holds the named-schema nodes too, and a schema is not served or
+  // called, so listing one here read as "declared but nothing serves it".
   const unmatchedOperations = nodes
-    .filter(n => !matchedOperations.has(n.id))
+    .filter(n => operationNodeById.has(n.id) && !matchedOperations.has(n.id))
     .map(n => `${n.name} (${n.filePath}:${n.startLine})`)
     .sort();
   // Edges: operation → the schemas it names, and schema → the schemas its own definition names.
@@ -623,6 +692,9 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     nodes,
     edges,
     unresolvedGeneratedBindings: bound(generatedBindings),
+    // Set by `finish` from the protobuf half.
+    unresolvedRegistrations: none(), unboundRpcs: none(),
+    skippedCandidates: bound(skippedCandidates),
     unmatchedOperations: withheld ? none() : bound(unmatchedOperations),
     unmatchedRoutes: withheld ? none() : bound(unmatchedRoutes),
     unresolvedBindings: bound(unresolvedBindings),

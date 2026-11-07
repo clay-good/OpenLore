@@ -17,11 +17,11 @@
 - [x] `verify_change` carries payload findings — shipped in `add-verify-change-payload-findings`
 
 ## Formats
-- [ ] protobuf v3 reader, implements edges from generated-server registrations, rule-table additions (field number/type, `reserved`, removed RPC)
+- [x] protobuf v3 reader, implements edges from generated-server registrations, rule-table additions (field number/type, `reserved`, removed RPC) — shipped in `add-contract-protobuf-reader`; gRPC client calls (`consumes_endpoint`) deliberately not read, a disclosed boundary
 - [ ] GraphQL SDL reader, implements edges from literal resolver maps; directives unassessed
 
 ## Spec
-- [ ] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL)
+- [~] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL) — added with the protobuf half (plus RpcsAreBoundToTheImplementationTheirServerRegistrationNames, and `mcp-handlers` ProtobufChangesAreGradedByWireIdentity) in `add-contract-protobuf-reader`; the GraphQL reader MODIFIES it
 - [x] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers + ContractReferencesAreStructuralAndAttributedByAddress, and broaden ContractElementsAreNotRankedAsCode to every surface that ranks or counts code — shipped in `add-contract-schema-elements`
 - [x] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume — the generated-client half shipped; the path-matching half shipped in `add-contract-node-projection`
-- [~] `mcp-handlers` delta: ADD ChangedSpecificationsAndFederatedConsumersSurface — the changed-specification half shipped as `ChangedSpecificationsSurfaceTheirBoundCode`; federated consumers remain
+- [x] `mcp-handlers` delta: ADD ChangedSpecificationsAndFederatedConsumersSurface — the changed-specification half shipped as `ChangedSpecificationsSurfaceTheirBoundCode`; federated consumers shipped in `add-contract-federated-consumers` (#681)

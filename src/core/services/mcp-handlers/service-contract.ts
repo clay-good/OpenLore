@@ -27,6 +27,9 @@ import { readArtifactBounded, ANALYSIS_ARTIFACT_MAX_BYTES } from '../../../utils
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ROUTE_INVENTORY } from '../../../constants.js';
 import { readOpenApi, looksLikeOpenApi, MAX_SPEC_BYTES, type ContractDocument, type ContractOperation } from '../../analyzer/contract/openapi.js';
 import { diffContracts, contractParity, contractBump, type ContractChange, type IndexedRoute } from '../contract/contract-diff.js';
+import { readProtobuf, resolveProtoTypes, isProtobufPath, type ProtoDocument } from '../../analyzer/contract/protobuf.js';
+import { diffProtobuf } from '../contract/protobuf-diff.js';
+import { MAX_PROTO_FILES } from '../../analyzer/contract/project-protobuf.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { classifyFindings, effectivePolicy, type GovernanceFinding } from './enforcement-policy.js';
 import { emittedText } from '../generated-file-guard.js';
@@ -74,7 +77,7 @@ export interface FederationCensus {
 const MAX_FEDERATED_CONSUMERS = 100;
 const MAX_FEDERATION_SKIPPED = 50;
 
-const SPEC_EXT = /\.(?:ya?ml|json)$/i;
+const SPEC_EXT = /\.(?:ya?ml|json|proto)$/i;
 const SKIP_DIR = /(?:^|\/)(?:node_modules|vendor|dist|build|\.git)\//;
 const MAX_SPEC_FILES = 200;
 const CLIENT_EXT = /\.(?:[cm]?[jt]sx?|py|pyw|go)$/i;
@@ -99,6 +102,11 @@ const MAX_CANDIDATES = MAX_SPEC_FILES * 10;
 /** One revision's specifications, with what was and was not examined. */
 export interface SpecSide {
   docs: ContractDocument[];
+  /**
+   * Protobuf schemas, types resolved across every `.proto` file of this revision (change:
+   * add-contract-graph-projection). Kept apart from `docs`: nothing HTTP applies to them.
+   */
+  protoDocs: ProtoDocument[];
   /** Specifications that could not be parsed. */
   unreadable: Array<{ file: string; reason: string }>;
   /** Every YAML/JSON candidate at this revision (examined or not). */
@@ -113,13 +121,24 @@ export interface SpecSide {
 
 /** Sniff and parse candidate texts, in path order, up to the specification cap. */
 function parseSide(candidates: string[], texts: Map<string, string>, unread: SpecSide['unread']): SpecSide {
-  const side: SpecSide = { docs: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_CANDIDATES };
+  const side: SpecSide = { docs: [], protoDocs: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_CANDIDATES };
   let specs = 0;
+  let protos = 0;
+  const protoDocs: ProtoDocument[] = [];
   for (const file of candidates.slice(0, MAX_CANDIDATES)) {
-    if (specs >= MAX_SPEC_FILES) { side.capped = true; break; }
+    // Each format has its own cap, so a repository with many `.proto` files does not stop the
+    // OpenAPI scan early (and the reverse). A file past its format's cap is left unexamined.
+    if (isProtobufPath(file) ? protos >= MAX_PROTO_FILES : specs >= MAX_SPEC_FILES) { side.capped = true; continue; }
     const text = texts.get(file);
     if (text === undefined) continue;
     side.examined.add(file);
+    if (isProtobufPath(file)) {
+      protos++;
+      const r = readProtobuf(file, text);
+      if ('error' in r) side.unreadable.push({ file, reason: r.error });
+      else protoDocs.push(r);
+      continue;
+    }
     if (!looksLikeOpenApi(text)) continue;
     specs++;
     const r = readOpenApi(file, text); // a text over the size cap is an error here, never dropped
@@ -127,6 +146,7 @@ function parseSide(candidates: string[], texts: Map<string, string>, unread: Spe
     if ('error' in r) side.unreadable.push({ file, reason: r.error });
     else side.docs.push(r);
   }
+  side.protoDocs = resolveProtoTypes(protoDocs).docs;
   return side;
 }
 
@@ -494,15 +514,25 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   if (head.capped) boundaries.push(`Past the scan cap (${MAX_CANDIDATES} YAML/JSON files or ${MAX_SPEC_FILES} specifications), ${head.candidates.size - head.examined.size} file(s) were not checked for a specification.`);
   if (head.unread.length) boundaries.push(`${head.unread.length} YAML/JSON file(s) could not be read (over ${MAX_SPEC_BYTES / 1024 / 1024} MB, a link out of the repository, or an I/O error); a specification among them is not assessed.`);
   const notAssessed = head.unreadable.map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
-  for (const d of head.docs) if (d.unassessed.length) notAssessed.push({ file: emittedText(d.file), reason: `outside the model: ${d.unassessed.join(', ')}` });
+  for (const d of [...head.docs, ...head.protoDocs]) if (d.unassessed.length) notAssessed.push({ file: emittedText(d.file), reason: `outside the model: ${d.unassessed.join(', ')}` });
 
   const findings: GovernanceFinding[] = [];
-  const specs = head.docs.map(d => ({ file: emittedText(d.file), format: d.format, basePath: d.basePath || '/', operations: d.operations.length }));
+  const specs: Array<Record<string, unknown>> = [
+    ...head.docs.map(d => ({ file: emittedText(d.file), format: d.format, basePath: d.basePath || '/', operations: d.operations.length })),
+    ...head.protoDocs.map(d => ({
+      file: emittedText(d.file), format: d.format, ...(d.package ? { package: emittedText(d.package) } : {}),
+      operations: d.services.reduce((n, s) => n + s.rpcs.length, 0), types: d.messages.length + d.enums.length,
+    })),
+  ];
 
   // ── Parity against the indexed route handlers ──
   const routes = await indexedRoutes(root);
   let parity: Record<string, unknown>;
-  if (!head.docs.length) parity = { assessed: false, reason: 'no OpenAPI or Swagger document was found' };
+  if (!head.docs.length) {
+    parity = { assessed: false, reason: head.protoDocs.length
+      ? 'no OpenAPI or Swagger document was found; protobuf RPCs are bound to their implementation in the graph by server registration, not compared with routes'
+      : 'no OpenAPI or Swagger document was found' };
+  }
   else if (!routes) parity = { assessed: false, reason: 'no route inventory: run `openlore analyze` first' };
   else if (!routes.length) parity = { assessed: false, reason: 'no server route handler is indexed in this repository (the specification may describe another service)' };
   else {
@@ -549,24 +579,35 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     const unparsed = new Set([...head.unreadable, ...base.unreadable, ...head.unread, ...base.unread].map(u => u.file));
     // A file that is a specification on one side and read but not a specification on the other
     // (reformatted past the sniff, a version key removed) cannot be compared either.
-    const specFiles = (side: SpecSide) => new Set([...side.docs.map(d => d.file), ...side.unreadable.map(u => u.file)]);
+    const specFiles = (side: SpecSide) => new Set([...side.docs.map(d => d.file), ...side.protoDocs.map(d => d.file), ...side.unreadable.map(u => u.file)]);
     const headSpec = specFiles(head);
     const baseSpec = specFiles(base);
     const lostSpec = (f: string) => (headSpec.has(f) && base.examined.has(f) && !baseSpec.has(f)) || (baseSpec.has(f) && head.examined.has(f) && !headSpec.has(f));
     const comparable = (file: string) => !unparsed.has(file) && !lostSpec(file)
       && (head.examined.has(file) || !head.candidates.has(file)) && (base.examined.has(file) || !base.candidates.has(file));
-    const docFiles = new Set([...head.docs, ...base.docs].map(d => d.file));
+    const docFiles = new Set([...head.docs, ...base.docs, ...head.protoDocs, ...base.protoDocs].map(d => d.file));
     for (const u of [...head.unread, ...base.unread]) if (docFiles.has(u.file)) notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
     for (const f of docFiles) {
       if (unparsed.has(f) || comparable(f)) continue;
       notAssessed.push({ file: emittedText(f), reason: lostSpec(f) ? 'reads as a specification on one side only, so it is not compared' : 'past the scan cap on one side, so it is not compared' });
     }
     // With a cap reached, an operation missing on the capped side may only have moved past the cap.
-    const changes = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file))).map(c =>
-      (c.rule === 'operation-removed' && head.capped) || (c.rule === 'operation-added' && base.capped)
+    const removedRule = new Set(['operation-removed', 'rpc-removed', 'type-removed']);
+    const addedRule = new Set(['operation-added', 'rpc-added', 'type-added']);
+    const capped = (c: ContractChange): ContractChange =>
+      (removedRule.has(c.rule) && head.capped) || (addedRule.has(c.rule) && base.capped)
         ? { ...c, rule: 'schema-unassessed' as const, class: 'potentially-breaking' as const, detail: `${c.detail} (a scan cap was reached, so it may only have moved)` }
-        : c);
-    const consumers = await consumersOf(root, changes, [...head.docs, ...base.docs], boundaries);
+        : c;
+    const httpChanges = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file))).map(capped);
+    // Protobuf (change: add-contract-graph-projection): its own rules, and no consumer join —
+    // a gRPC client call names no method and path, so the HTTP call-site census cannot find it.
+    const protoChanges = diffProtobuf(base.protoDocs.filter(d => comparable(d.file)), head.protoDocs.filter(d => comparable(d.file))).map(capped);
+    const protoAddresses = new Set(protoChanges.map(c => c.address));
+    if (protoChanges.some(c => c.class === 'breaking' || c.class === 'dangerous')) {
+      boundaries.push('gRPC client call sites are not read, so a breaking protobuf change names no consumer, in this repository or another.');
+    }
+    const changes = [...httpChanges, ...protoChanges];
+    const consumers = await consumersOf(root, httpChanges, [...head.docs, ...base.docs], boundaries);
     await attachReachingTests(root, consumers, boundaries);
     // A service's consumers are usually in OTHER repositories, so "no caller in this repository"
     // is the least informative thing to say about the change most worth stopping.
@@ -608,6 +649,14 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       const who = consumers.get(c.address) ?? [];
       const across = federated?.byAddress.get(c.address) ?? [];
       const subject = `${c.address}${c.element ? ` ${c.element}` : ''}`;
+      if (protoAddresses.has(c.address)) {
+        findings.push({
+          code: 'contract-breaking', severity: c.class === 'breaking' ? 'error' : 'warning', source: 'service-contract', subject: emittedText(subject),
+          discriminator: c.rule, message: emittedText(`${c.detail} (${c.rule}, ${c.class}); gRPC consumers are not assessed.`),
+          location: { path: c.file, line: c.line },
+        });
+        continue;
+      }
       // Three distinct states, never collapsed: called here, called elsewhere, or not called in
       // anything censused — and the last one names what was censused so it is not read as "safe".
       const where = who.length
@@ -682,7 +731,10 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     tool: 'certify_service_contract',
     posture: 'advisory',
     specs,
-    surface: head.docs.flatMap(d => d.operations.map(o => ({ file: emittedText(d.file), address: emittedText(o.address), line: o.line, ...(o.operationId ? { operationId: emittedText(o.operationId) } : {}), ...(o.deprecated ? { deprecated: true } : {}) }))).slice(0, limit),
+    surface: [
+      ...head.docs.flatMap(d => d.operations.map(o => ({ file: emittedText(d.file), address: emittedText(o.address), line: o.line, ...(o.operationId ? { operationId: emittedText(o.operationId) } : {}), ...(o.deprecated ? { deprecated: true } : {}) }))),
+      ...head.protoDocs.flatMap(d => d.services.flatMap(s => s.rpcs.map(r => ({ file: emittedText(d.file), address: emittedText(r.address), line: r.line, ...(r.deprecated ? { deprecated: true } : {}) })))),
+    ].slice(0, limit),
     parity,
     payload,
     ...(changesOut ? { changes: changesOut } : {}),
@@ -701,6 +753,6 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     gated: gate.gated,
     ...(notAssessed.length ? { notAssessed: notAssessed.sort((a, b) => sortStr(a.file, b.file)) } : {}),
     ...(boundaries.length ? { boundaries } : {}),
-    note: 'OpenAPI 3.x and Swagger 2.0 only (protobuf and GraphQL are not read yet). Advisory: nothing blocks unless enforcement.policy says so.',
+    note: 'OpenAPI 3.x, Swagger 2.0, and protobuf v3 (GraphQL is not read yet). Advisory: nothing blocks unless enforcement.policy says so.',
   };
 }

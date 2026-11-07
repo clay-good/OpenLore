@@ -122,6 +122,86 @@ entry-point or hub classification, no file-level dependency ranking and no layer
 verified as a difference between two builds of the same code, one with the specification and one
 without.
 
+## Protobuf
+
+Every `.proto` file is read as a **proto3** schema. A file with no `syntax` statement is proto2 by
+the language's own rule, and an `edition` file follows other rules again; both are listed as
+unread, with that reason, never read as declaring nothing. The reader is a small tokenizer
+written for this — no `protoc`, no grammar, no network.
+
+| Protobuf concept | OpenLore graph primitive |
+|---|---|
+| An RPC (`rpc GetOrder`) | a node named by its gRPC method path, `/orders.v1.OrderService/GetOrder`, `language: Protobuf` |
+| A message or enum | a node named by its full name, `orders.v1.Order` |
+| The request and response types of an RPC; the message and enum types of a message's fields | `references_schema` edges |
+| The method a registered server implementation defines | an `implements_endpoint` edge, **method → RPC** |
+
+Type names are resolved with protobuf's own scoping rule, across every `.proto` file read: the
+first part of a name is looked up from the innermost scope outward, and a leading dot means "from
+the root". A name declared in two files binds nothing, and a type imported from outside the
+repository (`google.protobuf.Timestamp`) draws no edge — both are disclosed. Fields are not nodes,
+for the same reason as above.
+
+### Which code serves an RPC
+
+A gRPC server is wired up at **one call that names both the service and its implementation**, in
+code the generator emits for every language. That call is the evidence the edge rests on:
+
+| Runtime | Registration | The RPC `GetOrder` is served by |
+|---|---|---|
+| Go | `pb.RegisterOrderServiceServer(s, &orderServer{})` | the method `GetOrder` of `orderServer` |
+| Python | `orders_pb2_grpc.add_OrderServiceServicer_to_server(OrderServicer(), server)` | the method `GetOrder` of `OrderServicer` |
+| Node (grpc-js) | `server.addService(proto.orders.v1.OrderService.service, { getOrder })` | the function the map names under `GetOrder` or `getOrder` |
+
+The rules refuse rather than guess:
+
+- The implementation must be written **at the registration**: `&orderServer{}`, `OrderServicer()`,
+  an object literal. A variable or a factory call (`NewServer()`) names no type, so the
+  registration is disclosed as `not-literal`.
+- A service named by two packages, or declared in two files, binds nothing (`ambiguous-service`).
+  A service no file read declares — its `.proto` lives in another repository — is
+  `unknown-service`.
+- The implementing method is looked for in the registration's file, then its directory, then
+  anywhere; two at the same level bind nothing (`ambiguous-implementation`).
+- Registrations in comments, strings and test files are not read, and generated stubs are skipped:
+  they define the registration function rather than call it.
+- Other styles are not read: Go `s.RegisterService(&pb.X_ServiceDesc, impl)`, grpc-tools static
+  stubs (`server.addService(OrderServiceService, impl)`), Python keyword arguments, and quoted keys in
+  a Node implementation map. Their RPCs stay in `unboundRpcs`.
+
+What did not bind is in the build result: `unresolvedRegistrations` (with the reasons above) and
+`unboundRpcs`. Registrations are read in **Go, Python and Node only**, so an RPC served from Java
+or C# is in `unboundRpcs` too: that list means "not bound", never "not implemented". gRPC client
+calls are not read, so a protobuf RPC has no `consumes_endpoint` edge.
+
+A method that serves an RPC is invoked from outside the code, so — like an HTTP handler — it is a
+reachability root rather than a dead-code candidate.
+
+### Breaking changes
+
+`certify_service_contract` compares the `.proto` files of two revisions with protobuf rows in the
+same closed rule table. A field's **number** is its identity on the wire, so fields are matched by
+number:
+
+| Change | Class |
+|---|---|
+| A field renamed (same number) | `dangerous` — the binary wire still works; JSON and text formats do not |
+| A field's number, type, or label (singular / repeated / map) changed; moved into or out of a `oneof` | `breaking` |
+| A field removed without reserving its number | `breaking` — a later field can reuse the number with another type |
+| A field removed with its number reserved | `dangerous` |
+| A field added on a number or name the previous revision reserved | `breaking` |
+| A reservation removed | `dangerous` |
+| `optional` added or removed | `dangerous` |
+| An enum value removed (`breaking`, or `dangerous` when reserved), renumbered (`breaking`), added (`non-breaking`) | as stated |
+| An RPC removed, its request or response type changed, its streaming changed | `breaking` |
+| An RPC or a field newly deprecated | `dangerous` |
+| A message or enum removed | `breaking` |
+| A field option other than `deprecated` (`json_name`, `packed`, a custom option) | `potentially-breaking` |
+
+Messages and RPCs are matched by full name across files, so moving a message to another file is
+not a change; renaming the package changes every wire name, so everything is removed and added.
+A gRPC finding names no consumer — client call sites are not read — and says so.
+
 ## Generated clients
 
 A generated API client builds its URL from a base variable —

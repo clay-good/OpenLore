@@ -511,11 +511,13 @@ describe('completeness + fail-soft + determinism', () => {
   it('the real builder emits a node for every CONTRACT_LANGUAGES tag', async () => {
     const specs: Record<string, string> = {
       OpenAPI: `openapi: 3.0.0\ninfo: { title: t, version: '1' }\npaths:\n  /ping:\n    get:\n      responses: { '200': { description: ok } }\n`,
+      Protobuf: `syntax = "proto3";\npackage p;\nmessage Ping {}\nservice S { rpc Do(Ping) returns (Ping); }\n`,
     };
+    const ext: Record<string, string> = { OpenAPI: 'yaml', Protobuf: 'proto' };
     for (const lang of CONTRACT_LANGUAGES) {
       expect(specs[lang], `no specification fixture wired for CONTRACT_LANGUAGES member ${lang}`).toBeDefined();
     }
-    const contractFiles = Object.entries(specs).map(([lang, content]) => ({ path: `${lang.toLowerCase()}.yaml`, content }));
+    const contractFiles = Object.entries(specs).map(([lang, content]) => ({ path: `${lang.toLowerCase()}.${ext[lang]}`, content }));
     const graph = serializeCallGraph(await new CallGraphBuilder({ contractFiles }).build([]));
     const emitted = new Set(graph.nodes.filter(n => !n.isExternal && n.language).map(n => n.language));
     for (const lang of CONTRACT_LANGUAGES) {
