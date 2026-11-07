@@ -21,7 +21,7 @@ All notable changes to OpenLore are documented here. This project adheres to
 - **`certify_service_contract` grades `.proto` changes** with protobuf rows in the closed rule
   table: fields matched by number, removal without `reserved` and reuse of a reserved number
   `breaking`, a rename `dangerous`, removed or retyped RPCs `breaking`. gRPC consumers are a
-  disclosed boundary.
+  disclosed boundary: a protobuf change carries `consumersNotAssessed`, not an empty `consumers`.
 - **A file that looks like a specification but is not one** — an `openapi` key below the top
   level — is now listed under `skippedCandidates` instead of passing silently.
 - **`unmatchedOperations` no longer lists named schemas.** A schema is neither served nor called,

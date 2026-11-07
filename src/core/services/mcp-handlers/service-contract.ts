@@ -228,7 +228,11 @@ async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
   let protoBytes = 0;
   for (const f of w.read) {
     const t = blobs.get(prefix + f);
-    if (t !== undefined && isProtobufPath(f) && (protoBytes += t.length) > MAX_PROTO_TOTAL_BYTES) { protoUnread.push({ file: f, reason: 'past the total .proto byte budget' }); continue; }
+    // Checked before counting, as on the working-tree side, so both sides read the same files.
+    if (t !== undefined && isProtobufPath(f)) {
+      if (protoBytes > MAX_PROTO_TOTAL_BYTES) { protoUnread.push({ file: f, reason: 'past the total .proto byte budget' }); continue; }
+      protoBytes += t.length;
+    }
     if (t === undefined) (isProtobufPath(f) ? protoUnread : unread).push({ file: f, reason: 'could not be read at the base revision' });
     else texts.set(f, t);
   }

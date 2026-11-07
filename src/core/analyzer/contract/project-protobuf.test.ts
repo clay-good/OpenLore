@@ -557,3 +557,13 @@ service Greeter {
     expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'unknown-service', detail: expect.stringContaining('could not be read and may declare it') })]);
   });
 });
+
+describe('round-4 review', () => {
+  it('an imported handler that is not indexed says it is imported', () => {
+    const p = direct({
+      registrations: [{ file: 'srv/server.js', line: 2, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', methods: [{ key: 'getOrder', fn: 'getOrder', imported: true }] }],
+      resolveImplementation: () => [],
+    });
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found', detail: expect.stringContaining('from a module that is not indexed') })]);
+  });
+});

@@ -163,9 +163,10 @@ The rules refuse rather than guess:
   registration is disclosed as `not-literal`.
 - A service named by two packages, or declared in two files, binds nothing (`ambiguous-service`).
   A service no file read declares — its `.proto` lives in another repository, or in a file that
-  could not be read, which the detail then says — is `unknown-service`. A service path that names a
-  package (`proto.billing.v2.PaymentService`) binds only to that full name, never to a same-named
-  service in another package.
+  could not be read, which the detail then says — is `unknown-service`. A Node service path of
+  three or more parts (`proto.billing.v2.PaymentService`) binds only to a declared full name it ends
+  with; a one- or two-part path (`services.PaymentService`) states no package, so it falls back to
+  a service of that simple name declared exactly once.
 - The implementing method is looked for only where the registration's own scope says the type
   is. Go: a bare `orderServer` is in the registration's own package (its directory) and nowhere
   else; `v2.OrderServer` is in another package whose directory is named `v2`. Python: a bare class
@@ -219,7 +220,10 @@ number:
 | A field added on a number or name the previous revision reserved | `breaking` |
 | A reservation removed | `dangerous` |
 | `optional` added or removed | `dangerous` |
-| An enum value removed (`breaking`, or `dangerous` when reserved), renumbered (`breaking`), added (`non-breaking`) | as stated |
+| Two fields' numbers swapped, or a field moved to another number | `breaking` (`field-number-changed`) |
+| An enum value removed (`breaking`, or `dangerous` when its NUMBER is reserved), renumbered (`breaking`), added (`non-breaking`) | as stated |
+| An enum value renamed, or an alias removed while its number stays | `dangerous` (`enum-value-renamed`) |
+| An enum value newly deprecated | `dangerous` |
 | An RPC removed, its request or response type changed, its streaming changed | `breaking` |
 | An RPC or a field newly deprecated | `dangerous` |
 | A message or enum removed | `breaking` |

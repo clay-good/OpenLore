@@ -32,6 +32,8 @@ const MAX_NAME_PARTS = 64;
  * attacker-chosen text there is a free channel into its context.
  */
 const shown = (t: Tok | undefined): string => (!t ? 'end of file' : t.t === 'str' ? 'a string literal' : `\`${t.v.length > 40 ? `${t.v.slice(0, 40)}…` : t.v}\``);
+/** A declared name as an error message names it: at most 40 characters. */
+const short = (n: string): string => `\`${n.length > 40 ? `${n.slice(0, 40)}…` : n}\``;
 /** Nesting depth of messages read at most: deeper is unreadable, never a stack overflow. */
 const MAX_NESTING = 64;
 
@@ -420,7 +422,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       if (isId('option')) { next(); options.push(optionStatement().text); continue; }
       if (isId('reserved') && (peek(1)?.t === 'num' || peek(1)?.t === 'str' || isSym('-', 1))) { next(); reservedStatement(e.reserved, MAX_ENUM_VALUE); continue; }
       const name = simpleIdent('an enum value name');
-      if (valueNames.has(name.v)) fail(`enum value \`${name.v}\` declared twice in ${e.name}`, name);
+      if (valueNames.has(name.v)) fail(`enum value ${shown(name)} declared twice in ${short(e.name)}`, name);
       valueNames.add(name.v);
       expectSym('=');
       const number = intLiteral('an enum value number');
@@ -468,8 +470,8 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       const opts = isSym('[') ? bracketOptions() : { deprecated: false, rest: [] };
       expectSym(';');
       // protoc refuses both; a model holding either could not say which field a number means.
-      if (numbers.has(number)) fail(`field number ${number} used twice in ${name}`, fname);
-      if (names.has(fname.v)) fail(`field \`${fname.v}\` declared twice in ${name}`, fname);
+      if (numbers.has(number)) fail(`field number ${number} used twice in ${short(name)}`, fname);
+      if (names.has(fname.v)) fail(`field ${shown(fname)} declared twice in ${short(name)}`, fname);
       numbers.add(number);
       names.add(fname.v);
       m.fields.push({
@@ -514,7 +516,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
     const reservedRanges = mergeRanges(m.reserved.ranges);
     for (const f of m.fields) {
       if (reservedNames.has(f.name) || inRanges(reservedRanges, f.number)) {
-        fail(`field \`${f.name}\` = ${f.number} uses a number or name ${name} reserves`, { t: 'id', v: f.name, line: f.line });
+        fail(`field ${short(f.name)} = ${f.number} uses a number or name ${short(name)} reserves`, { t: 'id', v: f.name, line: f.line });
       }
     }
     m.optionsHash = sha(options.sort().join('\n'));
@@ -533,7 +535,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       if (!isId('rpc')) fail(`expected \`rpc\` in service ${nameTok.v}, found ${shown(peek())}`);
       next();
       const rname = simpleIdent('an RPC name');
-      if (rpcNames.has(rname.v)) fail(`rpc \`${rname.v}\` declared twice in ${sname}`, rname);
+      if (rpcNames.has(rname.v)) fail(`rpc ${shown(rname)} declared twice in ${short(sname)}`, rname);
       rpcNames.add(rname.v);
       const side = (): { ref: ProtoTypeRef; streaming: boolean } => {
         expectSym('(');
@@ -602,7 +604,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
 
   const typeNames = new Set<string>();
   for (const t of [...messages, ...enums, ...services]) {
-    if (typeNames.has(t.name)) fail(`\`${t.name}\` declared twice`, { t: 'id', v: t.name, line: t.line });
+    if (typeNames.has(t.name)) fail(`${short(t.name)} declared twice`, { t: 'id', v: t.name, line: t.line });
     typeNames.add(t.name);
   }
 

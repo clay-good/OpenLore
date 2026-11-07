@@ -185,21 +185,25 @@ function nodeImplMap(arg: string): Array<{ key: string; fn?: string; base?: stri
  * `import * as e from`, `const { f, g: h } = require(…)`, `const i = require(…)`. Read on masked
  * text, with every clause bounded, so a hostile file stays linear.
  */
-function importedNames(text: string): Set<string> {
-  const out = new Set<string>();
-  const addClause = (clause: string) => {
+function importedNames(text: string): Map<string, string | null> {
+  // Local name → the name it was exported under, or `null` when that is not a function name this
+  // file states (a default import, a namespace, a whole module from `require`).
+  const out = new Map<string, string | null>();
+  const addClause = (clause: string, destructure: 'as' | ':') => {
     const braces = /\{([^}]*)\}/.exec(clause);
     if (braces) {
       for (const part of braces[1].split(',')) {
-        const local = /(?:^|\s(?:as)\s+|:\s*)([A-Za-z_$][\w$]*)\s*$/.exec(part.trim()) ?? /^([A-Za-z_$][\w$]*)$/.exec(part.trim());
-        if (local) out.add(local[1]);
+        const p = part.trim().replace(/^type\s+/, '');
+        const aliased = (destructure === 'as' ? /^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/ : /^([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)$/).exec(p);
+        if (aliased) { out.set(aliased[2], aliased[1]); continue; }
+        if (/^[A-Za-z_$][\w$]*$/.test(p)) out.set(p, p);
       }
     }
     const rest = clause.replace(/\{[^}]*\}/, '');
-    for (const m of rest.matchAll(/(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)/g)) if (m[1] !== 'type' && m[1] !== 'as') out.add(m[1]);
+    for (const m of rest.matchAll(/(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)/g)) if (m[1] !== 'type' && m[1] !== 'as' && !out.has(m[1])) out.set(m[1], null);
   };
-  for (const m of text.matchAll(/\bimport\s+([^;'"`]{1,500}?)\s+from\s*['"]/g)) addClause(m[1]);
-  for (const m of text.matchAll(/\b(?:const|let|var)\s+(\{[^}]{0,500}\}|[A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(/g)) addClause(m[1]);
+  for (const m of text.matchAll(/\bimport\s+([^;'"`]{1,500}?)\s+from\s*['"]/g)) addClause(m[1], 'as');
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+(\{[^}]{0,500}\}|[A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(/g)) addClause(m[1], ':');
   return out;
 }
 
@@ -216,7 +220,7 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
   const out: GrpcRegistration[] = [];
-  let imports: Set<string> | undefined;
+  let imports: Map<string, string | null> | undefined;
   const pattern = runtime === 'go' ? /\bRegister([A-Z]\w*)Server\s*\(/g
     : runtime === 'python' ? /\badd_(\w+)Servicer_to_server\s*\(/g
       : /\.addService\s*\(/g;
@@ -260,7 +264,16 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
       // Whether each handler is IMPORTED into this file: only then may it be looked for outside
       // it. A same-named function elsewhere that this file never imports is not its handler.
       imports ??= importedNames(text);
-      const methods = parsed?.map(({ base, ...e }) => (base && imports!.has(base) ? { ...e, imported: true as const } : e));
+      const methods = parsed?.map(({ base, ...e }) => {
+        if (!base || !imports!.has(base)) return e;
+        const exported = imports!.get(base);
+        // The handler itself is the imported binding: look it up by the name it was EXPORTED
+        // under (`import { getOrder as get }` names `getOrder`), never by the local alias, which
+        // can name an unrelated function elsewhere. A default import states no such name.
+        if (base === e.fn) return exported ? { ...e, fn: exported, imported: true as const } : e;
+        // `impl.listOrders` on an imported module: the member is named as written.
+        return { ...e, imported: true as const };
+      });
       out.push({ file, line, runtime, service: svc ? svc[1] : bare!, ...(bare ? { descriptor: false as const } : {}), ...(methods ? { methods } : { notLiteral: `the implementation is \`${(args[1] ?? '').slice(0, 60)}\`, not an object literal` }) });
     }
   }

@@ -309,7 +309,7 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
         // Node: each map entry names its own function, so one that binds nothing is said per RPC.
         if (reg.runtime === 'node') {
           out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'implementation-not-found',
-            detail: `\`${fnName}\` is neither defined in ${reg.file} nor imported by it` });
+            detail: w.imported ? `\`${fnName}\` is imported by ${reg.file} from a module that is not indexed here` : `\`${fnName}\` is neither defined in ${reg.file} nor imported by it` });
         }
         continue; // Go/Python: not implemented here (a server embedding Unimplemented…): left unbound
       }

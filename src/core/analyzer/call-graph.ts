@@ -6744,7 +6744,7 @@ export class CallGraphBuilder {
           grpcRegistrations,
           // The candidates a registration could mean: for Go and Python, methods of the registered
           // type; for Node, functions of the name the implementation map gives. The projector
-          // picks the one in the registration's file, then its directory, then the only one.
+          // picks among them only where the registration's own scope allows (`pick`).
           resolveGrpcImplementation: (reg, name) => trie.findBySimpleName(name).filter(n =>
             !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !isGeneratedGrpcStub(n.filePath)
             && runtimeLanguages[reg.runtime].has(n.language)

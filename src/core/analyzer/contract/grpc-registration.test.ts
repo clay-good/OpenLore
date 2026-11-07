@@ -269,3 +269,23 @@ server.addService(proto.orders.v1.OrderService.service, { getOrder, listOrders, 
     expect(r[0].implType).toBeUndefined();
   });
 });
+
+describe('scanGrpcRegistrations: round-4 review — aliased imports', () => {
+  it('an aliased import is looked up by the name it was exported under, never by the alias', () => {
+    const esm = scanGrpcRegistrations('srv/server.js', `import { getOrder as get } from './handlers';
+server.addService(proto.shop.v1.OrderService.service, { getOrder: get });
+`);
+    expect(esm[0].methods).toEqual([{ key: 'getOrder', fn: 'getOrder', imported: true }]);
+    const cjs = scanGrpcRegistrations('srv/server.js', `const { getOrder: g } = require('./handlers');
+server.addService(proto.shop.v1.OrderService.service, { getOrder: g });
+`);
+    expect(cjs[0].methods).toEqual([{ key: 'getOrder', fn: 'getOrder', imported: true }]);
+  });
+
+  it('a default import names no exported function, so it is not looked for elsewhere', () => {
+    const r = scanGrpcRegistrations('srv/server.js', `import handler from './handlers';
+server.addService(proto.shop.v1.OrderService.service, { getOrder: handler });
+`);
+    expect(r[0].methods).toEqual([{ key: 'getOrder', fn: 'handler' }]);
+  });
+});
