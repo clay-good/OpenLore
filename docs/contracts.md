@@ -183,6 +183,8 @@ The rules refuse rather than guess:
 - A Go or Python registration none of whose methods is found where it may be, and a Node map entry
   whose handler is neither defined nor imported in the registration's file, are
   `implementation-not-found`.
+- A Node handler imported into the registration's file binds only in the module it was imported
+  from; a package or path-alias import binds nothing.
 - Node keys match the RPC name, its lower-camel form, or grpc-js's lodash `camelCase`
   (`GetHTTPStatus` → `getHttpStatus`).
 - Node's static-codegen form, `addService(services.GreeterService, { … })`, is read too, and binds
@@ -234,6 +236,101 @@ number:
 Messages and RPCs are matched by full name across files, so moving a message to another file is
 not a change; renaming the package changes every wire name, so everything is removed and added.
 A gRPC finding names no consumer — client call sites are not read — and says so.
+
+## GraphQL
+
+Every `.graphql`, `.graphqls` and `.gql` file is read with a hand-written SDL reader. A file that
+holds only operations and fragments is a **client document**, not a schema: it is listed under
+`skippedCandidates` with that reason. All schema files read are merged into **one schema**, as one
+server sees them — `extend type Query { … }` in another file adds to `Query`; a type two files
+define is ambiguous and binds nothing. A type only ever extended — a Federation 1 subgraph's
+`extend type Query` and `extend type User @key(…)` — is this repository's contract and is compared
+as one. When any file defines `schema { … }`, the roots are exactly the ones it names.
+
+| GraphQL concept | OpenLore graph primitive |
+|---|---|
+| A root field (`order` on the query root) | an operation node `Query.order`, `language: GraphQL` |
+| An object, interface, input, enum, union or scalar type | a node named by the type, `Order` |
+| The types a field, an argument, a union member or an implemented interface names | `references_schema` edges |
+| The function a resolver map names for a root field | an `implements_endpoint` edge, **function → operation** |
+
+Directives other than `@deprecated` are outside the model: each one is named in the projection's
+`notes`, and hashed so a change to one is graded `potentially-breaking`, never "no change".
+
+### Which code resolves an operation
+
+A schema-first server names the function behind each root field in one literal place:
+
+| Runtime | Resolver map | `Query.order` is resolved by |
+|---|---|---|
+| JS/TS (Apollo, Yoga, graphql-tools) | `{ Query: { order: getOrder } }`, `const Query = { order() {…} }` | `getOrder`, or the method itself |
+| Python (Ariadne) | `@query.field("order")` on `def resolve_order`, `query.set_field("order", fn)` | the decorated or named function |
+
+The same refusals as for gRPC apply. A named function binds in the map's own file — a top-level
+function or a method written in the map, never a class method, and never the member of a local
+object (`repo.find`); an IMPORTED one
+binds only in the module it was imported from (by its exported name) — never a same-named function
+elsewhere, and a package or path-alias import binds nothing (`implementation-not-found`). An arrow
+function or lambda is `inline-implementation`; two candidates are `ambiguous-implementation`; a
+spread, or a root set from a variable or a call (`Query: queryResolvers`), is `not-literal`; a key
+the schema does not declare is `unknown-field`. Apollo's `x: { subscribe: fn }` binds `fn`.
+
+Not every `Query: {…}` is a server's. Client configuration is skipped: a file importing a GraphQL
+client (`@apollo/client`, `urql`, Relay…) and no server, and objects inside client constructors
+(`cacheExchange`, `ApolloClient`, `InMemoryCache`) or under client keys (`typePolicies`, `updates`,
+`optimistic`), and permission and middleware maps (`graphql-shield`, `graphql-middleware`). So are TypeScript resolver TYPES (`interface Resolvers { Query: … }`), stories and
+mocks, and a `const Query = {…}` in a file that is not about resolvers. Maps in comments, strings,
+test files and `*.generated.*` files are not read, and neither are schemas under test or fixture
+paths — a fixture's `type Query` would make the real root ambiguous. A root type defined in two
+files is reported as not assessed, which `find_dead_code` repeats.
+
+An import is followed one level through a barrel (`export * from './feature'`, `export { a as b }
+from …`, a Python package's `__init__.py`); when the module is indexed but does not define or
+directly re-export the name, the detail says so. A file that writes its OWN schema inline
+(``typeDefs: `type Query {…}` ``, Ariadne `gql("""…""")`) serves that schema, so its maps are not bound
+to the repository's SDL; neither are files importing a mocking library (`msw`,
+`@graphql-tools/mock`). A schema inside a Relay project's own directory that its config names (`"relay": { "schema": … }`)
+is the compiler's copy of a server's schema, and a file whose types sit beside `@client`
+operations is Apollo local state: `analyze` reads neither as this repository's contract, and lists
+both under `skippedCandidates`. `certify_service_contract` never drops a schema on a config's say-so —
+it grades the file and names the Relay link in its boundaries. One schema per repository means
+a monorepo with several servers' SDL makes their shared roots ambiguous — disclosed, not guessed.
+
+Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
+bound: a type field is not a node.
+
+Known boundaries, disclosed where they bite: a schema a frontend vendors for graphql-codegen or
+`apollo.config.js` (not Relay) is graded as this repository's contract; an Ariadne bindable created
+in one module and decorated in another is not followed (its operations stay unbound); a map in a
+directory holding an inline schema is not bound to the repository's SDL; and an operation two maps
+bind keeps both edges, with a note naming it. Code-first servers (Strawberry, Graphene, Nexus,
+gqlgen) have no resolver map, so their operations are listed in `unboundGraphqlOperations` — "not
+bound", never "not served".
+
+### Breaking changes
+
+Operations are matched by root **kind** and field name — a client writes `query { order }`, never
+the root type's name, so renaming `Query` to `RootQuery` is not a change. Nullability follows
+variance:
+
+| Change | Class |
+|---|---|
+| An operation or a field removed; an argument removed | `breaking` |
+| An output made nullable (`String!` → `String`), or a type changed | `breaking` |
+| An output made non-null (`String` → `String!`), including inside a list | `non-breaking` |
+| An argument or input field made required, or a required one added | `breaking` |
+| An argument or input field made optional, or an optional one added | `non-breaking` |
+| A non-null argument or input field losing its default (it is now required) | `breaking` |
+| A default value added, changed or removed otherwise (compared canonically: `{a: 1, b: 2}` = `{b: 2, a: 1}`, `1` = `1.0`) | `dangerous` |
+| An enum value or union member added (a client switching over it may not handle it) | `dangerous` |
+| An interface newly implemented | `dangerous` |
+| An enum value or union member removed; an interface no longer implemented | `breaking` |
+| A directive definition removed, a location removed from it, `repeatable` removed, or a required argument added | `breaking` |
+| Deprecation of an operation, field, argument or enum value | `dangerous` |
+| A directive other than `@deprecated` used on an element or on `schema` changed | `potentially-breaking` |
+| A type or root defined in two files (on either side), or roots named differently by two files | `potentially-breaking` — not compared |
+
+A GraphQL finding names no consumer — client operations are not read — and says so.
 
 ## Generated clients
 
@@ -354,6 +451,6 @@ scan cap, or parses with no operation the reader recognizes is named rather than
 
 ## Not read
 
-Per-FIELD nodes (named schemas are projected; individual properties are not); protobuf and
-GraphQL; registry or network fetches; runtime traffic; contract tests; code generation; any
-LLM.
+Per-FIELD nodes (named schemas are projected; individual properties are not); gRPC client calls
+and GraphQL client operations as consumers; code-first GraphQL servers (no SDL); registry or
+network fetches; runtime traffic; contract tests; code generation; any LLM.

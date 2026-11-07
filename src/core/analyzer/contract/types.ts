@@ -12,12 +12,23 @@
  */
 
 /** Schema-format tags a contract node can carry as its `language`. */
-export type ContractLanguage = 'OpenAPI' | 'Protobuf';
+export type ContractLanguage = 'OpenAPI' | 'Protobuf' | 'GraphQL';
 
 /** All contract language tags (single source of truth for gating). */
-export const CONTRACT_LANGUAGES: readonly ContractLanguage[] = ['OpenAPI', 'Protobuf'];
+export const CONTRACT_LANGUAGES: readonly ContractLanguage[] = ['OpenAPI', 'Protobuf', 'GraphQL'];
 
 const CONTRACT_LANGUAGE_SET: ReadonlySet<string> = new Set<string>(CONTRACT_LANGUAGES);
+
+/**
+ * Whether a GraphQL schema file sits under an explicit FIXTURE path. Such a schema describes a fake
+ * service: read as the contract, its `type Query` makes the real root ambiguous and unbinds every
+ * resolver. Deliberately narrow — `tests/`, `e2e/` and `test/` often hold a real service's schema —
+ * and applied to GraphQL only: protobuf resolves through imports, so a fixture `.proto` shadows
+ * nothing and is read as before.
+ */
+export function isFixtureSchemaPath(path: string): boolean {
+  return /(?:^|\/)(?:__tests__|__fixtures__|fixtures?|test-?data|testdata)\//i.test(path) || /\.(?:test|spec)\.(?:graphqls?|gql)$/i.test(path);
+}
 
 /** Whether a node's language tag is an interface-contract format. */
 export function isContractLanguage(language: string | undefined): boolean {

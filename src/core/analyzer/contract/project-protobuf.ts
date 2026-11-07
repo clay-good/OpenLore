@@ -17,7 +17,7 @@
 
 import type { CallEdge, FunctionNode } from '../call-graph-types.js';
 import { readProtobuf, resolveProtoTypes, type ProtoDocument, type ProtoRpc, type ProtoService } from './protobuf.js';
-import type { GrpcRegistration } from './grpc-registration.js';
+import { isImportedModule, type GrpcRegistration, type ImportTarget } from './grpc-registration.js';
 
 /** `.proto` files read per build. Kept apart from the OpenAPI cap: protobuf schemas come in many small files. */
 export const MAX_PROTO_FILES = 500;
@@ -48,6 +48,8 @@ export interface ProtobufProjectionInput {
    * `reg.implType`; for Node, the functions of that name. The projector picks among them.
    */
   resolveImplementation: (reg: GrpcRegistration, name: string) => readonly FunctionNode[];
+  /** Where an import names a function: its module, one level of re-export followed. */
+  importTargets?: (fromFile: string, specifier: string, name: string) => readonly ImportTarget[];
 }
 
 export interface ProtobufProjection {
@@ -105,8 +107,8 @@ const dirName = (f: string) => dirOf(f).replace(/\/$/, '').split('/').pop() ?? '
  *                       differs from the directory binds nothing)
  *   Python, bare `C`    the registration's own file, else the only one anywhere (an import)
  *   Python, `mod.C`     a module named `mod`
- *   Node                the registration's own file, else — only when the file imports the
- *                       handler — the only one anywhere
+ *   Node                the registration's own file; an IMPORTED handler only in the module it
+ *                       was imported from (one barrel re-export followed)
  */
 function inScope(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): readonly FunctionNode[] {
   if (reg.runtime === 'go') {
@@ -116,10 +118,11 @@ function inScope(reg: GrpcRegistration, candidates: readonly FunctionNode[], imp
   if (reg.runtime === 'python' && reg.implQualifier !== undefined) {
     return candidates.filter(n => moduleName(n.filePath) === reg.implQualifier);
   }
+  // Node: an imported handler's candidates are already narrowed to its module; a local one is
+  // looked for in this file only.
+  if (reg.runtime === 'node') return imported ? candidates : candidates.filter(n => n.filePath === reg.file);
   const local = candidates.filter(n => n.filePath === reg.file);
-  if (local.length || reg.runtime === 'python') return local.length ? local : candidates;
-  // Node: a handler outside the registration's file only when this file imports it.
-  return imported ? candidates : [];
+  return local.length ? local : candidates;
 }
 
 function pick(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): FunctionNode | 'ambiguous' | undefined {
@@ -290,14 +293,18 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     // Linear in RPCs and map keys: one key map per registration, and each RPC's candidates
     // resolved once (a registration × RPCs × keys product made one hostile repository cost 68 s).
     const byKey = new Map((reg.methods ?? []).map(e => [e.key, e] as const));
-    const work: Array<{ rpc: ProtoRpc; target: FunctionNode; fnName?: string; imported: boolean; inline: boolean; found: FunctionNode[] }> = [];
+    const work: Array<{ rpc: ProtoRpc; target: FunctionNode; fnName?: string; imported: boolean; from?: string; inline: boolean; found: FunctionNode[] }> = [];
     for (const rpc of service.rpcs) {
       const target = rpcNodes.get(nodeId(doc.file, rpc.address));
       if (!target) continue; // past the cap
       if (reg.runtime !== 'node') { work.push({ rpc, target, fnName: rpc.name, imported: false, inline: false, found: [...input.resolveImplementation(reg, rpc.name)] }); continue; }
       const entry = byKey.get(rpc.name) ?? byKey.get(lowerFirst(rpc.name)) ?? byKey.get(lodashCamel(rpc.name));
       if (!entry) continue; // not in the map: left unbound
-      work.push({ rpc, target, ...(entry.fn ? { fnName: entry.fn } : {}), imported: entry.imported === true, inline: !entry.fn,
+      if (entry.notFollowed) {
+        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'implementation-not-found', detail: entry.notFollowed });
+        continue;
+      }
+      work.push({ rpc, target, ...(entry.fn ? { fnName: entry.fn } : {}), imported: entry.imported === true, ...(entry.from ? { from: entry.from } : {}), inline: !entry.fn,
         found: entry.fn ? [...input.resolveImplementation(reg, entry.fn)] : [] });
     }
     // Python: a class found in the registration's own file for any RPC is THE class, so an RPC it
@@ -322,7 +329,16 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
         out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'inline-implementation' });
         continue;
       }
-      const impl = pick(reg, homeIsLocal ? w.found.filter(n => n.filePath === reg.file) : w.found, w.imported);
+      // An imported Node handler is looked for only in the module it was imported from (one barrel
+      // re-export followed).
+      const targets = reg.runtime === 'node' && w.imported && w.from !== undefined && w.fnName !== undefined && input.importTargets
+        ? input.importTargets(reg.file, w.from, w.fnName) : undefined;
+      const found = reg.runtime === 'node' && w.imported
+        ? (targets
+          ? targets.flatMap(t => input.resolveImplementation(reg, t.name).filter(n => n.filePath === t.file))
+          : w.found.filter(n => w.from !== undefined && isImportedModule(reg.file, w.from, n.filePath)))
+        : w.found;
+      const impl = pick(reg, homeIsLocal ? found.filter(n => n.filePath === reg.file) : found, w.imported);
       if (impl) anyCandidate = true;
       if (impl === 'ambiguous') {
         out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'ambiguous-implementation', detail: `more than one \`${fnName}\`${reg.implType ? ` on ${reg.implType}` : ''}` });
@@ -332,7 +348,9 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
         // Node: each map entry names its own function, so one that binds nothing is said per RPC.
         if (reg.runtime === 'node') {
           out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'implementation-not-found',
-            detail: w.imported ? `\`${fnName}\` is imported by ${reg.file} from a module that is not indexed here` : `\`${fnName}\` is neither defined in ${reg.file} nor imported by it` });
+            detail: !w.imported ? `\`${fnName}\` is neither defined in ${reg.file} nor imported by it`
+              : targets?.length ? `\`${fnName}\` is imported from '${w.from}', which is indexed but neither defines nor directly re-exports it`
+                : `\`${fnName}\` is imported by ${reg.file} from '${w.from}', which is not indexed here (a package or a path alias)` });
         }
         continue; // Go/Python: not implemented here (a server embedding Unimplemented…): left unbound
       }
