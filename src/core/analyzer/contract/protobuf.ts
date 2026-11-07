@@ -113,6 +113,8 @@ export interface ProtoDocument {
   format: 'protobuf-3';
   package: string;
   imports: string[];
+  /** The imports written `import public`: re-exported to whoever imports this file. */
+  publicImports: string[];
   services: ProtoService[];
   messages: ProtoMessage[];
   enums: ProtoEnum[];
@@ -387,6 +389,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   }
   let packageSeen = false;
   const imports: string[] = [];
+  const publicImports: string[] = [];
   const services: ProtoService[] = [];
   const messages: ProtoMessage[] = [];
   const enums: ProtoEnum[] = [];
@@ -568,8 +571,11 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
         break;
       }
       case 'import': {
-        if (isId('public') || isId('weak')) next();
-        imports.push(stringLit('an import path').v);
+        const isPublic = isId('public');
+        if (isPublic || isId('weak')) next();
+        const path = stringLit('an import path').v;
+        imports.push(path);
+        if (isPublic) publicImports.push(path);
         expectSym(';');
         break;
       }
@@ -590,7 +596,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
 
   const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   return {
-    file, format: 'protobuf-3', package: pkg, imports: imports.sort(),
+    file, format: 'protobuf-3', package: pkg, imports: imports.sort(), publicImports: publicImports.sort(),
     services: services.sort(byName).map(s => ({ ...s, rpcs: s.rpcs.sort(byName) })),
     messages: messages.sort(byName).map(m => ({ ...m, fields: m.fields.sort((a, b) => a.number - b.number) })),
     enums: enums.sort(byName),
@@ -615,33 +621,70 @@ export interface UnresolvedProtoType { file: string; line: number; written: stri
  * plus every reference that did not resolve.
  */
 export function resolveProtoTypes(docs: readonly ProtoDocument[]): { docs: ProtoDocument[]; unresolved: UnresolvedProtoType[] } {
-  const declared = new Map<string, number>();
-  const packages = new Set<string>();
-  for (const d of docs) {
-    for (const t of [...d.messages, ...d.enums]) declared.set(t.name, (declared.get(t.name) ?? 0) + 1);
-    const parts = d.package ? d.package.split('.') : [];
-    for (let i = 1; i <= parts.length; i++) packages.add(parts.slice(0, i).join('.'));
-  }
-  // A scope component can be a package or a message: either may hold the next name.
-  // A service is a scope too: protoc stops at it, and finding no type inside, reports an error.
-  const services = new Set(docs.flatMap(d => d.services.map(s => s.name)));
-  const isScope = (n: string) => declared.has(n) || packages.has(n) || services.has(n);
-  const resolve = (ref: ProtoTypeRef): { name?: string; reason?: UnresolvedProtoType['reason'] } => {
-    const settle = (n: string) => (declared.get(n) === 1 ? { name: n } : declared.has(n) ? { reason: 'ambiguous' as const } : { reason: 'undeclared' as const });
-    if (ref.written.startsWith('.')) return settle(ref.written.slice(1));
-    const [first, ...rest] = ref.written.split('.');
-    const scope = ref.scope ? ref.scope.split('.') : [];
-    for (let i = scope.length; i >= 0; i--) {
-      const head = [...scope.slice(0, i), first].join('.');
-      // A one-component name must find a TYPE: protoc skips a package of that name and keeps
-      // looking outward. Only a compound name's first component may be a package.
-      if (rest.length ? !isScope(head) : !declared.has(head)) continue;
-      return settle(rest.length ? `${head}.${rest.join('.')}` : head);
+  // An import path names a file relative to an include root this reader does not know, so it
+  // matches every read file whose path ENDS with it on a segment boundary.
+  const bySuffix = new Map<string, number[]>();
+  docs.forEach((d, i) => {
+    const parts = d.file.split('/');
+    for (let k = 0; k < parts.length; k++) {
+      const suffix = parts.slice(k).join('/');
+      bySuffix.set(suffix, [...(bySuffix.get(suffix) ?? []), i]);
     }
-    return { reason: 'undeclared' };
+  });
+  const importsOf = (i: number, which: 'imports' | 'publicImports') => docs[i][which].flatMap(p => bySuffix.get(p) ?? []);
+  /**
+   * The files a file can name types from, as protoc allows: itself, its direct imports, and
+   * whatever those re-export through `import public`, transitively. A file it does not import
+   * is invisible to it — otherwise adding an unrelated file whose package shadows a scope
+   * changed what an untouched field resolves to, and graded that as breaking.
+   */
+  const visibleFrom = (i: number): Set<number> => {
+    const out = new Set<number>([i]);
+    const stack = importsOf(i, 'imports');
+    while (stack.length) {
+      const j = stack.pop()!;
+      if (out.has(j)) continue;
+      out.add(j);
+      stack.push(...importsOf(j, 'publicImports'));
+    }
+    return out;
+  };
+  const declaredIn = new Map<string, number[]>();
+  docs.forEach((d, i) => {
+    for (const t of [...d.messages, ...d.enums]) declaredIn.set(t.name, [...(declaredIn.get(t.name) ?? []), i]);
+  });
+  const servicesIn = new Map<string, number[]>();
+  docs.forEach((d, i) => { for (const sv of d.services) servicesIn.set(sv.name, [...(servicesIn.get(sv.name) ?? []), i]); });
+
+  const resolverFor = (i: number) => {
+    const visible = visibleFrom(i);
+    const packages = new Set<string>();
+    for (const j of visible) {
+      const parts = docs[j].package ? docs[j].package.split('.') : [];
+      for (let k = 1; k <= parts.length; k++) packages.add(parts.slice(0, k).join('.'));
+    }
+    /** How many visible files declare `n`. */
+    const count = (n: string) => (declaredIn.get(n) ?? []).filter(j => visible.has(j)).length;
+    // A scope component can be a package or a message: either may hold the next name.
+    // A service is a scope too: protoc stops at it, and finding no type inside, reports an error.
+    const isScope = (n: string) => count(n) > 0 || packages.has(n) || (servicesIn.get(n) ?? []).some(j => visible.has(j));
+    return (ref: ProtoTypeRef): { name?: string; reason?: UnresolvedProtoType['reason'] } => {
+      const settle = (n: string) => { const c = count(n); return c === 1 ? { name: n } : c > 1 ? { reason: 'ambiguous' as const } : { reason: 'undeclared' as const }; };
+      if (ref.written.startsWith('.')) return settle(ref.written.slice(1));
+      const [first, ...rest] = ref.written.split('.');
+      const scope = ref.scope ? ref.scope.split('.') : [];
+      for (let k = scope.length; k >= 0; k--) {
+        const head = [...scope.slice(0, k), first].join('.');
+        // A one-component name must find a TYPE: protoc skips a package of that name and keeps
+        // looking outward. Only a compound name's first component may be a package.
+        if (rest.length ? !isScope(head) : count(head) === 0) continue;
+        return settle(rest.length ? `${head}.${rest.join('.')}` : head);
+      }
+      return { reason: 'undeclared' };
+    };
   };
   const unresolved: UnresolvedProtoType[] = [];
-  const out = docs.map(d => ({
+  const out = docs.map((d, i) => { const resolve = resolverFor(i); return {
     ...d,
     messages: d.messages.map(m => ({
       ...m,
@@ -664,6 +707,6 @@ export function resolveProtoTypes(docs: readonly ProtoDocument[]): { docs: Proto
         return { ...rpc, ...(req.name ? { requestType: req.name } : {}), ...(res.name ? { responseType: res.name } : {}) };
       }),
     })),
-  }));
+  }; });
   return { docs: out, unresolved };
 }

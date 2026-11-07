@@ -347,6 +347,7 @@ message Outer { message Inner {} .p.Inner abs = 1; .Inner missing = 2; }`]);
     const r = res(
       ['common.proto', `${P3}package shop.common; message Money { int64 u = 1; } enum Currency { C0 = 0; }`],
       ['orders.proto', `${P3}package shop.orders;
+import "common.proto";
 message Order {
   shop.common.Money total = 1;
   common.Currency cur = 2;
@@ -369,7 +370,7 @@ service S { rpc Get(Order) returns (common.Money); }`],
     const r = res(
       ['a.proto', `${P3}package p; message Dup {}`],
       ['b.proto', `${P3}package p; message Dup {}`],
-      ['c.proto', `${P3}package p; message Use { Dup d = 1; } service S { rpc X(Dup) returns (Use); }`],
+      ['c.proto', `${P3}package p; import "a.proto"; import "b.proto"; message Use { Dup d = 1; } service S { rpc X(Dup) returns (Use); }`],
     );
     expect(field(r, 'p.Use', 'd').resolved).toBeUndefined();
     const rpc = r.docs.find(d => d.file === 'c.proto')!.services[0].rpcs[0];
@@ -410,7 +411,7 @@ message Outer {
     const r = res(
       ['sub.proto', `${P3}package p.Thing; message Unrelated {}`],
       ['top.proto', `${P3}message Thing {}`],
-      ['use.proto', `${P3}package p; message M { Thing t = 1; }`],
+      ['use.proto', `${P3}package p; import "sub.proto"; import "top.proto"; message M { Thing t = 1; }`],
     );
     expect(field(r, 'p.M', 't').resolved).toBe('Thing');
     expect(r.unresolved).toEqual([]);
@@ -460,5 +461,35 @@ describe('readProtobuf: round-1 review regressions', () => {
       ok('syntax = "proto3";\npackage Svc;\nmessage X {}'),
     ].map(d => d));
     expect(docs.unresolved.map(u => u.written)).toEqual(['Svc.X']);
+  });
+});
+
+describe('resolveProtoTypes: imports decide what a file can see (round-2 review)', () => {
+  const ok = (file: string, text: string) => { const r = readProtobuf(file, text); if ('error' in r) throw new Error(r.error); return r; };
+  const MONEY = 'syntax = "proto3";\npackage acme.common.v1;\nmessage Money { string currency = 1; }\n';
+  const ORDERS = 'syntax = "proto3";\npackage acme.orders.v1;\nimport "acme/common/v1/money.proto";\nmessage Order { common.v1.Money total = 1; }\n';
+  const LEGACY = 'syntax = "proto3";\npackage acme.orders.common.v1;\nmessage Money { double amount = 1; }\n';
+  const totalOf = (docs: ProtoDocument[]) => docs.find(d => d.file.endsWith('orders.proto'))!.messages[0].fields[0].resolved;
+
+  it('an unrelated file whose package shadows a scope does not change what a field resolves to', () => {
+    const base = resolveProtoTypes([ok('acme/common/v1/money.proto', MONEY), ok('acme/orders/v1/orders.proto', ORDERS)]).docs;
+    const head = resolveProtoTypes([ok('acme/common/v1/money.proto', MONEY), ok('acme/orders/v1/orders.proto', ORDERS), ok('acme/orders/common/v1/legacy.proto', LEGACY)]).docs;
+    expect(totalOf(base)).toBe('acme.common.v1.Money');
+    expect(totalOf(head)).toBe('acme.common.v1.Money');
+  });
+
+  it('an import path matches the file it names under any include root; public imports re-export', () => {
+    const r = resolveProtoTypes([
+      ok('proto/acme/common/v1/money.proto', MONEY),
+      ok('proto/acme/reexport.proto', 'syntax = "proto3";\npackage acme;\nimport public "acme/common/v1/money.proto";\n'),
+      ok('proto/acme/orders/v1/orders.proto', ORDERS.replace('import "acme/common/v1/money.proto";', 'import "acme/reexport.proto";')),
+    ]);
+    expect(totalOf(r.docs)).toBe('acme.common.v1.Money');
+    expect(r.unresolved).toEqual([]);
+  });
+
+  it('a type in a file that is not imported is not visible', () => {
+    const r = resolveProtoTypes([ok('a.proto', 'syntax = "proto3";\npackage p;\nmessage A {}\n'), ok('b.proto', 'syntax = "proto3";\npackage p;\nmessage B { A a = 1; }\n')]);
+    expect(r.unresolved.map(u => [u.written, u.reason])).toEqual([['A', 'undeclared']]);
   });
 });

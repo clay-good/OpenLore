@@ -119,7 +119,7 @@ describe('diffProtobuf', () => {
     expect(rules(extra)).toEqual(['type-added orders.v1.Refund']);
     expect(diffProtobuf(side({ 'orders.proto': extra }), side({ 'orders.proto': BASE })).map(c => c.rule)).toEqual(['type-removed']);
     const split = {
-      'orders.proto': BASE.replace('message GetOrderRequest { string id = 1; }\n', ''),
+      'orders.proto': BASE.replace('message GetOrderRequest { string id = 1; }\n', '').replace('import "google/protobuf/timestamp.proto";', 'import "google/protobuf/timestamp.proto";\nimport "requests.proto";'),
       'requests.proto': 'syntax = "proto3";\npackage orders.v1;\nmessage GetOrderRequest { string id = 1; }\n',
     };
     expect(diffProtobuf(side({ 'orders.proto': BASE }), side(split))).toEqual([]);

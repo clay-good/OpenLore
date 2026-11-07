@@ -45,7 +45,7 @@ import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
 import { generatedClientFunctionsFor } from './contract/generated-client.js';
-import { scanGrpcRegistrations, type GrpcRegistration } from './contract/grpc-registration.js';
+import { scanGrpcRegistrations, isGeneratedGrpcStub, type GrpcRegistration } from './contract/grpc-registration.js';
 import { isProtobufPath } from './contract/protobuf.js';
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
@@ -6746,7 +6746,7 @@ export class CallGraphBuilder {
           // type; for Node, functions of the name the implementation map gives. The projector
           // picks the one in the registration's file, then its directory, then the only one.
           resolveGrpcImplementation: (reg, name) => trie.findBySimpleName(name).filter(n =>
-            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath)
+            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !isGeneratedGrpcStub(n.filePath)
             && runtimeLanguages[reg.runtime].has(n.language)
             && (reg.implType === undefined || n.className === reg.implType)),
           files: this.contractFiles,

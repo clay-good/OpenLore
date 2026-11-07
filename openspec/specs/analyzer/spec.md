@@ -8345,7 +8345,8 @@ The analyzer SHALL deterministically discover interface-schema files — OpenAPI
 documents by their top-level key, and every `.proto` file — and read each into a normalized element
 model for rule-table diffing. For protobuf that model SHALL hold RPCs, messages under their full
 names with numbered fields, enums with their values, and `reserved` numbers and names, with type
-names resolved across files by protobuf's own scoping rule. Discovery scope SHALL be visible, and a
+names resolved by protobuf's own scoping rule over the file and the files it imports (and what
+those re-export with `import public`) — never over a file it does not import. Discovery scope SHALL be visible, and a
 file that cannot be read SHALL be unread with the reason, never omitted.
 
 #### Scenario: Discovery scope is visible
@@ -8371,8 +8372,8 @@ file that cannot be read SHALL be unread with the reason, never omitted.
 
 #### Scenario: Protobuf types resolve by scope, across files
 
-- **GIVEN** `orders.proto` in package `orders.v1` whose `Order` has a field of type `Status`, and
-  `status.proto` in the same package declaring `enum Status`
+- **GIVEN** `orders.proto` in package `orders.v1`, importing `status.proto`, whose `Order` has a
+  field of type `Status`, and `status.proto` in the same package declaring `enum Status`
 - **WHEN** the repository is analyzed
 - **THEN** `orders.v1.Order` has a `references_schema` edge to `orders.v1.Status`; a field typed
   `google.protobuf.Timestamp` with no such file in the repository, or a name declared in two files,

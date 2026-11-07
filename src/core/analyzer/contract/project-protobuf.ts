@@ -36,7 +36,7 @@ export interface UnresolvedRegistration {
   service: string;
   /** The RPC, when the failure is about one method rather than the whole registration. */
   rpc?: string;
-  reason: 'not-literal' | 'unknown-service' | 'ambiguous-service' | 'ambiguous-implementation' | 'inline-implementation';
+  reason: 'not-literal' | 'unknown-service' | 'ambiguous-service' | 'ambiguous-implementation' | 'inline-implementation' | 'implementation-not-found';
   detail?: string;
 }
 
@@ -69,6 +69,14 @@ export interface ProtobufProjection {
 const nodeId = (file: string, name: string) => `${file}::${name}`;
 const dirOf = (f: string) => f.slice(0, f.lastIndexOf('/') + 1);
 const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+/**
+ * The method key grpc-js / proto-loader derives from an RPC name with lodash's `camelCase`:
+ * `GetHTTPStatus` → `getHttpStatus`. An acronym is one word, so `lowerFirst` alone misses it.
+ */
+const lodashCamel = (s: string): string => {
+  const words = s.match(/[A-Z]{2,}(?=[A-Z][a-z]+[0-9]*|\b|[0-9_])|[A-Z]?[a-z]+[0-9]*|[A-Z]+|[0-9]+/g) ?? [];
+  return words.map((w, i) => (i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join('');
+};
 const byPath = (a: { path: string }, b: { path: string }) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
 const declarationNode = (file: string, name: string, line: number, signature: string): FunctionNode => ({
@@ -242,7 +250,11 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     // registration only if that service is declared: `addService` is a common method name.
     if (!svc.name && reg.descriptor === false && svc.reason === 'unknown-service') continue;
     if (!svc.name) {
-      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: reg.service, reason: svc.reason!, ...(svc.candidates ? { detail: svc.candidates.sort().join(', ') } : {}) });
+      // An unread `.proto` may be the one declaring it (an editions file, a syntax error): say so,
+      // rather than imply the schema lives in another repository.
+      const detail = svc.candidates ? svc.candidates.sort().join(', ')
+        : out.unreadSpecifications.length ? `${out.unreadSpecifications.length} .proto file(s) here could not be read and may declare it` : undefined;
+      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: reg.service, reason: svc.reason!, ...(detail ? { detail } : {}) });
       continue;
     }
     const decls = servicesByName.get(svc.name)!;
@@ -256,12 +268,26 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       continue;
     }
     const { doc, service } = decls[0];
+    // Where the registered type lives is settled once, for the whole registration: a class found
+    // in the registration's own file for any RPC is THE class, so an RPC it does not implement is
+    // not looked for in a same-named class elsewhere (review: a servicer named like the service
+    // took the rest from the generated client class).
+    const fnNameFor = (rpc: ProtoRpc): string | undefined => {
+      if (reg.runtime !== 'node') return rpc.name;
+      const keys = [rpc.name, lowerFirst(rpc.name), lodashCamel(rpc.name)];
+      return keys.map(k => reg.methods?.find(e => e.key === k)).find(Boolean)?.fn;
+    };
+    const homeIsLocal = reg.runtime !== 'go' && reg.implQualifier === undefined && service.rpcs.some(rpc => {
+      const name = fnNameFor(rpc);
+      return !!name && input.resolveImplementation(reg, name).some(n => n.filePath === reg.file);
+    });
+    let anyCandidate = false;
     for (const rpc of service.rpcs) {
       const target = rpcNodes.get(nodeId(doc.file, rpc.address));
       if (!target) continue; // past the cap
       let fnName: string | undefined;
       if (reg.runtime === 'node') {
-        const entry = reg.methods?.find(e => e.key === rpc.name) ?? reg.methods?.find(e => e.key === lowerFirst(rpc.name));
+        const entry = [rpc.name, lowerFirst(rpc.name), lodashCamel(rpc.name)].map(k => reg.methods?.find(e => e.key === k)).find(Boolean);
         if (!entry) continue; // not in the map: left unbound
         if (!entry.fn) {
           out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'inline-implementation' });
@@ -269,7 +295,9 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
         }
         fnName = entry.fn;
       } else fnName = rpc.name;
-      const impl = pick(reg, input.resolveImplementation(reg, fnName));
+      const found = input.resolveImplementation(reg, fnName);
+      const impl = pick(reg, homeIsLocal ? found.filter(n => n.filePath === reg.file) : found);
+      if (impl) anyCandidate = true;
       if (impl === 'ambiguous') {
         out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'ambiguous-implementation', detail: `more than one \`${fnName}\`${reg.implType ? ` on ${reg.implType}` : ''}` });
         continue;
@@ -277,6 +305,13 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       if (!impl) continue; // not implemented here (a Go server embedding Unimplemented…): left unbound
       pushEdge(impl, target, 'implements_endpoint', impl.startLine ?? reg.line, GRPC_REGISTRATION_BINDING);
       bound.add(target.id);
+    }
+    // Not one method of the registered type was found anywhere it may be — an import alias that
+    // differs from the directory, an aliased Python import, methods all from an embedded type.
+    // The implementation then reads as dead code, so the registration is named.
+    if (!anyCandidate && reg.runtime !== 'node') {
+      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, reason: 'implementation-not-found',
+        detail: `no method of \`${reg.implQualifier ? `${reg.implQualifier}.` : ''}${reg.implType}\` named after an RPC was found where the registration says it is` });
     }
   }
   out.unboundRpcs = [...rpcNodes.values()].filter(n => !bound.has(n.id)).map(n => `${n.name} (${n.filePath}:${n.startLine})`).sort();

@@ -60,6 +60,13 @@ const MAX_ARG_CHARS = 16_384;
 /** Generated gRPC stubs: they define the registration function rather than call it. */
 const GENERATED = /(?:_grpc\.pb\.go|\.pb\.go|_pb2_grpc\.py|_pb2\.py|_grpc_pb\.[cm]?[jt]s|_pb\.[cm]?[jt]s)$/i;
 
+/**
+ * Whether a file is a generated gRPC stub. A stub is never an implementation either: Python's
+ * `*_pb2_grpc.py` declares a client class named exactly like the service, with every RPC as a
+ * method — the name a hand-written servicer usually has too.
+ */
+export const isGeneratedGrpcStub = (file: string): boolean => GENERATED.test(file);
+
 /** Which runtime a file's registrations are read for. */
 function runtimeOf(file: string): GrpcRuntime | undefined {
   if (/\.go$/i.test(file)) return 'go';

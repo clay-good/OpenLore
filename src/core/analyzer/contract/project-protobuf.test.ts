@@ -480,3 +480,56 @@ describe('one format never withholds the other', () => {
     expect(p.truncations).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'proto-file-cap' })]));
   });
 });
+
+describe('round-2 review regressions', () => {
+  const GREETER = `syntax = "proto3";
+package helloworld;
+message HelloRequest { string name = 1; }
+service Greeter {
+  rpc SayHello(HelloRequest) returns (HelloRequest);
+  rpc SayHelloStreamReply(HelloRequest) returns (stream HelloRequest);
+  rpc GetHTTPStatus(HelloRequest) returns (HelloRequest);
+}
+`;
+  const greeter = (partial: Partial<ProtobufProjectionInput>) => projectProtobuf({
+    files: [{ path: 'protos/helloworld.proto', content: GREETER }], registrations: [], resolveImplementation: () => [], ...partial,
+  });
+
+  it('a servicer found in the registration\'s own file is THE class: a same-named class elsewhere supplies nothing', () => {
+    const p = greeter({
+      registrations: [{ file: 'py/greeter_server.py', line: 9, runtime: 'python', service: 'Greeter', implType: 'Greeter' }],
+      resolveImplementation: resolverOver([
+        fn('py/greeter_server.py::Greeter.SayHello', { language: 'Python', className: 'Greeter' }),
+        fn('py/other.py::Greeter.SayHelloStreamReply', { language: 'Python', className: 'Greeter' }),
+      ]),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['py/greeter_server.py::Greeter.SayHello -> protos/helloworld.proto::/helloworld.Greeter/SayHello']);
+    expect(p.unboundRpcs.map(r => r.split(' ')[0])).toEqual(['/helloworld.Greeter/GetHTTPStatus', '/helloworld.Greeter/SayHelloStreamReply']);
+  });
+
+  it('a registration whose type is found nowhere it may be is disclosed, not silent', () => {
+    const p = greeter({
+      registrations: [{ file: 'cmd/main.go', line: 4, runtime: 'go', service: 'Greeter', implType: 'Service', implQualifier: 'orders' }],
+      resolveImplementation: resolverOver([fn('internal/orders-svc/impl.go::Service.SayHello', { className: 'Service' })]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations.map(r => r.reason)).toEqual(['implementation-not-found']);
+  });
+
+  it('a grpc-js key in lodash camelCase binds an acronym RPC', () => {
+    const p = greeter({
+      registrations: [{ file: 'srv.js', line: 2, runtime: 'node', service: 'helloworld.Greeter', methods: [{ key: 'getHttpStatus', fn: 'status' }] }],
+      resolveImplementation: resolverOver([fn('srv.js::status', { language: 'TypeScript', className: undefined })]),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['srv.js::status -> protos/helloworld.proto::/helloworld.Greeter/GetHTTPStatus']);
+  });
+
+  it('an unknown service names the unread .proto files that may declare it', () => {
+    const p = projectProtobuf({
+      files: [{ path: 'a.proto', content: 'edition = "2023";\npackage x;\nservice RouteGuide {}\n' }, { path: 'b.proto', content: GREETER }],
+      registrations: [{ file: 'main.go', line: 3, runtime: 'go', service: 'RouteGuide', implType: 's' }],
+      resolveImplementation: () => [],
+    });
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'unknown-service', detail: expect.stringContaining('could not be read and may declare it') })]);
+  });
+});
