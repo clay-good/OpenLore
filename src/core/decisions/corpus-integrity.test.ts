@@ -207,6 +207,53 @@ describe('evaluateCorpusGraph', () => {
     });
   });
 
+  it('does not read a requirement heading or its mirrored copy as a citation', () => {
+    const main = artifact('main', 'requirement', 'ReportWorkspaceActivity', {
+      identityScope: 'workspace',
+      text: '### Requirement: ReportWorkspaceActivity\nThe system SHALL report activity.',
+    });
+    const delta = artifact('delta', 'requirement', 'ReportWorkspaceActivity', {
+      identityScope: 'workspace@change:accounts',
+      text: '### Requirement: ReportWorkspaceActivity\nReportWorkspaceActivity SHALL also name the account.',
+    });
+    const spaced = artifact('spaced', 'requirement', 'Browse server directories', {
+      identityScope: 'browse',
+      text: '   ####  Requirement: Browse server directories\nThe system SHALL list folders.',
+    });
+    const spacedDelta = artifact('spaced-delta', 'requirement', 'Browse server directories', {
+      identityScope: 'browse@change:accounts',
+      text: '### Requirement: Browse server directories\nThe system SHALL list only owned folders.',
+    });
+    const findings = evaluateCorpusGraph({ artifacts: [main, delta, spaced, spacedDelta], edges: [] })
+      .filter((finding) => finding.code === 'corpus-reference-undeclared');
+
+    expect(findings).toEqual([]);
+  });
+
+  it('still suggests a requirement named in prose, and in a proposal outside its headings', () => {
+    const target = artifact('target', 'requirement', 'OpenAProjectByBrowsing', {
+      identityScope: 'projects',
+      text: '### Requirement: OpenAProjectByBrowsing\nThe system SHALL open a project.',
+    });
+    const citing = artifact('citing', 'requirement', 'ReportWorkspaceActivity', {
+      identityScope: 'workspace',
+      text: '### Requirement: ReportWorkspaceActivity\nActivity starts after OpenAProjectByBrowsing.',
+    });
+    const headingOnly = artifact('proposal-heading', 'proposal', 'heading-only', {
+      text: '# Proposal\n### Requirement: OpenAProjectByBrowsing\nNo prose mention.',
+    });
+    const proseProposal = artifact('proposal-prose', 'proposal', 'prose', {
+      text: '# Proposal\nThis change extends OpenAProjectByBrowsing.',
+    });
+    const findings = evaluateCorpusGraph({ artifacts: [target, citing, headingOnly, proseProposal], edges: [] })
+      .filter((finding) => finding.code === 'corpus-reference-undeclared');
+
+    expect(findings.map((finding) => [finding.subject, finding.discriminator])).toEqual([
+      ['proposal:proposal-prose.md#prose', 'proposal-cites-requirement:OpenAProjectByBrowsing'],
+      ['requirement:citing.md#ReportWorkspaceActivity', 'spec-cites-requirement:OpenAProjectByBrowsing'],
+    ]);
+  });
+
   it('is byte-deterministic regardless of artifact and edge input order', () => {
     const req = artifact('req', 'requirement', 'R');
     const decision = artifact('decision', 'decision', 'aaaaaaaa');
@@ -503,6 +550,29 @@ describe('detectCorpusIntegrity', () => {
       subject: expect.stringContaining('#Second'),
       discriminator: 'spec-cites-requirement:First',
     }));
+  });
+
+  it('reports no reference for a requirement mirrored in an active change delta', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-corpus-mirrored-'));
+    await mkdir(join(root, 'openspec', 'specs', 'workspace'), { recursive: true });
+    await mkdir(join(root, 'openspec', 'changes', 'accounts', 'specs', 'workspace'), { recursive: true });
+    await writeFile(join(root, 'openspec', 'specs', 'workspace', 'spec.md'), [
+      '# Workspace', '## Requirements',
+      '### Requirement: OpenAProjectByBrowsing', 'The system SHALL open a project.',
+      '### Requirement: ReportWorkspaceActivity', 'The system SHALL report activity.', '',
+    ].join('\n'));
+    await writeFile(join(root, 'openspec', 'changes', 'accounts', 'specs', 'workspace', 'spec.md'), [
+      '# Delta', '## MODIFIED Requirements',
+      '### Requirement: OpenAProjectByBrowsing', 'The system SHALL open only owned projects.',
+      '### Requirement: ReportWorkspaceActivity', 'Activity starts after OpenAProjectByBrowsing.', '',
+    ].join('\n'));
+
+    const undeclared = (await detectCorpusIntegrity(root))
+      .filter((finding) => finding.code === 'corpus-reference-undeclared');
+    expect(undeclared.map((finding) => [finding.subject, finding.discriminator])).toEqual([[
+      'requirement:openspec/changes/accounts/specs/workspace/spec.md#ReportWorkspaceActivity',
+      'spec-cites-requirement:OpenAProjectByBrowsing',
+    ]]);
   });
 
   it('preserves duplicate durable decisions and competing prospective domains', async () => {

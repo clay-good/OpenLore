@@ -304,7 +304,13 @@ export function supersessionCycleMembers(graph: CorpusGraph): string[] {
   return supersessionCycles(graph).flat().sort(stableCompare);
 }
 
-function withoutFencedCodeAndReferenceLines(text: string): string {
+/**
+ * The prose a source may cite from: fenced code, metadata reference lines, and
+ * requirement headings are removed. A heading names the block it opens, so a
+ * copy of the same requirement elsewhere (another domain, or a change's delta)
+ * must not read it as a citation.
+ */
+function mentionableProse(text: string): string {
   let fenced = false;
   return text.split('\n').map((line) => {
     if (/^\s*(```|~~~)/.test(line)) {
@@ -313,6 +319,7 @@ function withoutFencedCodeAndReferenceLines(text: string): string {
     }
     if (fenced) return '';
     if (/^>\s*(?:Decision recorded|Decision pointer|Decision citation|Symbol anchor|File anchor|Corpus edge)\s*:/i.test(line)) return '';
+    if (/^ {0,3}#{1,6}[ \t]+Requirement:/.test(line)) return '';
     return line;
   }).join('\n');
 }
@@ -460,6 +467,8 @@ export function evaluateCorpusGraph(graph: CorpusGraph): GovernanceFinding[] {
 
   // Exact mentioned-but-unlinked suggestions. Only identifier/name targets are
   // considered; paths, titles, fuzzy matches, and self mentions are excluded.
+  // A self mention includes a same-named requirement in another scope (a
+  // mirrored copy), since a requirement naming itself does not cite a peer.
   const mentionTargets = graph.artifacts.filter((artifact) => artifact.type === 'decision' || artifact.type === 'requirement');
   const mentionIdentifiers = mentionTargets.map((target) => target.identifier);
   const mentionSources = graph.artifacts.filter((source) =>
@@ -469,13 +478,14 @@ export function evaluateCorpusGraph(graph: CorpusGraph): GovernanceFinding[] {
   }
   for (const source of mentionSources) {
     if (!source.text || (source.type !== 'requirement' && source.type !== 'proposal')) continue;
-    const prose = withoutFencedCodeAndReferenceLines(source.text);
+    const prose = mentionableProse(source.text);
     const mentioned = exactMentions(prose, mentionIdentifiers);
     const already = declaredTargets.get(source.key) ?? new Set<string>();
     const seenTargets = new Set<string>();
     for (const target of mentionTargets) {
       const mentionIdentity = identityKey(target);
       if (target.key === source.key || already.has(target.identifier) || seenTargets.has(mentionIdentity)) continue;
+      if (target.type === source.type && target.identifier === source.identifier) continue;
       const edgeKind = suggestedEdge(source, target);
       if (!edgeKind || !mentioned.has(target.identifier)) continue;
       seenTargets.add(mentionIdentity);
@@ -1135,7 +1145,7 @@ export async function detectCorpusIntegrity(
       try {
         const deltaSpec: SpecDocument = {
           domain: `${domain}@change:${change}`,
-          file: relative(rootPath, deltaSpecPath),
+          file: corpusRelPath(rootPath, deltaSpecPath),
           text: await readCorpusFile(rootPath, relative(rootPath, deltaSpecPath), readBudget),
         };
         for (const requirement of requirementBlocks(deltaSpec)) {
