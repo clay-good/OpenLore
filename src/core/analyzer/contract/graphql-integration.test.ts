@@ -154,4 +154,21 @@ describe('GraphQL projection through the builder', () => {
     expect(result.edges.filter(e => e.kind === 'implements_endpoint')).toEqual([]);
     expect(result.contracts?.unresolvedResolvers.items).toEqual([expect.objectContaining({ field: 'order', reason: 'implementation-not-found' })]);
   });
+
+  it('a literal the map does not resolve to a function never binds a same-named function (round-4 review)', async () => {
+    const code = [
+      { path: 'src/r.ts', language: 'TypeScript', content: 'function find() { return 1; }\nconst repo = makeRepo();\nexport const resolvers = { Query: { find: repo.find } };\n' },
+      { path: 'app/s.py', language: 'Python', content: 'from ariadne import QueryType\nquery = QueryType()\ndef make_resolver():\n    return None\nquery.set_field("orders", make_resolver())\n' },
+    ];
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'schema.graphql', content: 'type Query { find: Int orders: Int }' }] }).build(code);
+    expect(result.edges.filter(e => e.kind === 'implements_endpoint')).toEqual([]);
+    expect(result.contracts?.unresolvedResolvers.items.map(u => `${u.field} ${u.reason}`).sort()).toEqual(['find implementation-not-found', 'orders implementation-not-found']);
+  });
+
+  it('a gRPC handler that is a member of a local object binds nothing (round-4 review)', async () => {
+    const code = [{ path: 'srv/server.js', language: 'JavaScript', content: 'function getOrder() {}\nconst impl = new OrderImpl();\nfunction main() { server.addService(proto.orders.v1.OrderService.service, { getOrder: impl.getOrder }); }\n' }];
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'orders.proto', content: 'syntax = "proto3";\npackage orders.v1;\nmessage M {}\nservice OrderService { rpc GetOrder(M) returns (M); }\n' }] }).build(code);
+    expect(result.edges.filter(e => e.kind === 'implements_endpoint')).toEqual([]);
+    expect(result.contracts?.unresolvedRegistrations.items).toEqual([expect.objectContaining({ rpc: 'GetOrder', reason: 'implementation-not-found' })]);
+  });
 });

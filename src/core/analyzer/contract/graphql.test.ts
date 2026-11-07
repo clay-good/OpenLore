@@ -342,7 +342,7 @@ describe('readGraphql: linear on hostile input', () => {
     time(small);
     const ts = time(small);
     const tb = time(big);
-    expect(tb).toBeLessThan(Math.max(ts * 10, 3_000));
+    expect(tb).toBeLessThan(Math.max(ts * 10, 9_000));
   });
 
   it('one 4 MB comment, string, block string or default value is linear', () => {

@@ -300,6 +300,10 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       if (reg.runtime !== 'node') { work.push({ rpc, target, fnName: rpc.name, imported: false, inline: false, found: [...input.resolveImplementation(reg, rpc.name)] }); continue; }
       const entry = byKey.get(rpc.name) ?? byKey.get(lowerFirst(rpc.name)) ?? byKey.get(lodashCamel(rpc.name));
       if (!entry) continue; // not in the map: left unbound
+      if (entry.notFollowed) {
+        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'implementation-not-found', detail: entry.notFollowed });
+        continue;
+      }
       work.push({ rpc, target, ...(entry.fn ? { fnName: entry.fn } : {}), imported: entry.imported === true, ...(entry.from ? { from: entry.from } : {}), inline: !entry.fn,
         found: entry.fn ? [...input.resolveImplementation(reg, entry.fn)] : [] });
     }

@@ -47,7 +47,7 @@ export interface GrpcRegistration {
    */
   descriptor?: false;
   /** Node: each key of the implementation map, with the function it names (absent = written inline). */
-  methods?: Array<{ key: string; fn?: string; imported?: true; from?: string }>;
+  methods?: Array<{ key: string; fn?: string; imported?: true; from?: string; notFollowed?: string }>;
   /** Why the implementation is not written literally at the registration (a variable, a factory call). */
   notLiteral?: string;
 }
@@ -292,7 +292,10 @@ export function createImportResolver(files: readonly string[], contentOf: (file:
     else if (/\.pyw?$/.test(f)) {
       const stem = f.replace(/\.pyw?$/, '');
       add(pyByStem, stem, f);
-      add(pyByBase, stem.slice(stem.lastIndexOf('/') + 1), f);
+      // A package's `__init__` is indexed under its package name, so an absolute import looks at
+      // the few files that can match, never every `__init__.py` in the repository.
+      const leaf = stem.slice(stem.lastIndexOf('/') + 1);
+      add(pyByBase, leaf === '__init__' ? stem.slice(0, -'/__init__'.length).split('/').pop() ?? '' : leaf, f);
     }
   }
   const jsModules = (from: string, spec: string): string[] => {
@@ -305,7 +308,7 @@ export function createImportResolver(files: readonly string[], contentOf: (file:
     if (!t) return [];
     if (t.relative) return [...(pyByStem.get(t.path) ?? []), ...(pyByStem.get(`${t.path}/__init__`) ?? [])];
     const last = t.path.slice(t.path.lastIndexOf('/') + 1);
-    const candidates = [...(pyByBase.get(last) ?? []), ...(pyByBase.get('__init__') ?? [])];
+    const candidates = pyByBase.get(last) ?? [];
     return candidates.filter(f => isImportedPythonModule(from, module, f));
   };
   type Barrel = { named: Map<string, Array<{ spec: string; orig: string }>>; star: string[] };
@@ -359,14 +362,6 @@ export function createImportResolver(files: readonly string[], contentOf: (file:
     const seen = new Set<string>();
     return out.filter(t => { const k = `${t.file}\0${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
   };
-}
-
-/** One import, resolved over `files` (see {@link createImportResolver}). */
-export function importTargets(
-  fromFile: string, specifier: string, name: string, runtime: 'node' | 'python',
-  files: readonly string[], contentOf: (file: string) => string | undefined,
-): ImportTarget[] {
-  return createImportResolver(files, contentOf)(fromFile, specifier, name, runtime);
 }
 
 /** Every gRPC server registration in one source file. */
@@ -427,6 +422,8 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
       // it. A same-named function elsewhere that this file never imports is not its handler.
       imports ??= importedNames(text);
       const methods = parsed?.map(({ base, ...e }) => {
+        // `impl.getOrder` on a LOCAL object: the member of a value, which no function node is.
+        if (base && base !== e.fn && !imports!.has(base)) return { ...e, notFollowed: `\`${base}.${e.fn}\` names a member of \`${base}\`, which is not an import` };
         if (!base || !imports!.has(base)) return e;
         const { exported, from } = imports!.get(base)!;
         // The handler itself is the imported binding: look it up by the name it was EXPORTED

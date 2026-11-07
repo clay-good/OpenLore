@@ -138,7 +138,7 @@ server.addService(proto.orders.v1.OrderService.service, {
       methods: [
         { key: 'getOrder', fn: 'getOrder' },
         { key: 'listOrders', fn: 'list' },
-        { key: 'cancel', fn: 'cancelOrder' },
+        { key: 'cancel', fn: 'cancelOrder', notFollowed: '`handlers.cancelOrder` names a member of `handlers`, which is not an import' },
         { key: 'watch' },
         { key: 'ship' },
         { key: 'refund', fn: 'refund' },

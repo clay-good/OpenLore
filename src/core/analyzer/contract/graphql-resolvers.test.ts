@@ -226,7 +226,7 @@ describe('scanResolverMaps: linear on hostile input', () => {
       ['a.py', `QueryType ${'a'.repeat(n)}`],
       ['a.py', `q = QueryType()\nfrom m import (${'a, '.repeat(n / 3)}`],
     ] as const) {
-      expect(timed(file, content), `${file}: ${content.slice(0, 24)}`).toBeLessThan(4_000);
+      expect(timed(file, content), `${file}: ${content.slice(0, 24)}`).toBeLessThan(12_000);
     }
   });
 

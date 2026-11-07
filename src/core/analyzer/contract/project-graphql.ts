@@ -193,6 +193,9 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
         continue;
       }
       if (!e.fn) { out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'inline-implementation' }); continue; }
+      // A member of a local object, an expression, an attribute of a non-import: the literal does
+      // not name a function this file defines, so no same-named function stands in for it.
+      if (e.notFollowed) { out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'implementation-not-found', detail: e.notFollowed }); continue; }
       const found = input.resolveImplementation(map, e.fn);
       // An imported function is looked for in the module it was imported FROM, and only there — a
       // same-named function in this file or anywhere else is not it. Otherwise, this file only.

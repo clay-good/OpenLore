@@ -1,6 +1,6 @@
 # Contract graph projection: schema elements in the graph, the briefings, and more formats
 
-> Status: PROPOSED (2026-11-01). Split from `add-service-contract-certification`, whose OpenAPI
+> Status: COMPLETE (2026-11-07; proposed 2026-11-01). Split from `add-service-contract-certification`, whose OpenAPI
 > phase shipped `certify_service_contract` (reader, rule table, parity, in-repo consumer join).
 > Research: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. The briefings' first slice (operations served
 > by routes in scope, in `orient` and `blast_radius`) shipped in `add-contract-briefings`; the payload check in
