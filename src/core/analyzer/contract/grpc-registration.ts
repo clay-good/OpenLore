@@ -210,6 +210,49 @@ export function importedNames(text: string): Map<string, ImportedName> {
 
 export interface ImportedName { exported: string | null; from: string }
 
+/** A file and the name a function is defined under in it. */
+export interface ImportTarget { file: string; name: string }
+
+/**
+ * The files (and names) an import of `name` from `specifier` in `fromFile` can mean: the module the
+ * specifier names, and — ONE level — the modules it re-exports `name` from (`export { a as name }
+ * from './x'`, `export * from './x'`, a Python package's `__init__.py` doing `from .x import a as
+ * name`). A barrel `index.ts` is the common case; following further would be guessing at a chain.
+ */
+export function importTargets(
+  fromFile: string, specifier: string, name: string, runtime: 'node' | 'python',
+  files: readonly string[], contentOf: (file: string) => string | undefined,
+): ImportTarget[] {
+  const isModule = (from: string, spec: string, f: string) => (runtime === 'node' ? isImportedModule(from, spec, f) : isImportedPythonModule(from, spec, f));
+  const modules = files.filter(f => isModule(fromFile, specifier, f));
+  const out: ImportTarget[] = modules.map(file => ({ file, name }));
+  for (const m of modules) {
+    const text = contentOf(m);
+    if (text === undefined) continue;
+    if (runtime === 'node') {
+      const masked = maskNonCode(text, 'js');
+      for (const r of masked.matchAll(/\bexport\s*\{([^}]{0,2000})\}\s*from\s*['"]([^'"\n]{1,500})['"]/g)) {
+        for (const part of r[1].split(',')) {
+          const a = /^\s*(?:type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/.exec(part);
+          if (a && (a[2] ?? a[1]) === name) for (const f of files) if (isModule(m, r[2], f)) out.push({ file: f, name: a[1] });
+        }
+      }
+      for (const r of masked.matchAll(/\bexport\s*\*\s*from\s*['"]([^'"\n]{1,500})['"]/g)) {
+        for (const f of files) if (isModule(m, r[1], f)) out.push({ file: f, name });
+      }
+    } else if (/(?:^|\/)__init__\.pyw?$/.test(m)) {
+      for (const r of maskNonCode(text, 'python').matchAll(/^[ \t]*from[ \t]+(\.+[\w.]*)[ \t]+import[ \t]+(\([^)]{0,2000}\)|[^\n]{1,500})/gm)) {
+        for (const part of r[2].replace(/[()]/g, '').split(',')) {
+          const a = /^\s*([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(part);
+          if (a && (a[2] ?? a[1]) === name) for (const f of files) if (isModule(m, r[1], f)) out.push({ file: f, name: a[1] });
+        }
+      }
+    }
+  }
+  const seen = new Set<string>();
+  return out.filter(t => { const k = `${t.file}\0${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
 const posixNormalize = (path: string): string => {
   const out: string[] = [];
   for (const seg of path.split('/')) {
@@ -228,7 +271,7 @@ const posixNormalize = (path: string): string => {
 export function isImportedModule(fromFile: string, specifier: string, file: string): boolean {
   if (!specifier.startsWith('.')) return false;
   const dir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/')) : '';
-  const base = posixNormalize(`${dir}/${specifier}`).replace(/\.(?:[cm]?js|jsx)$/, '');
+  const base = posixNormalize(`${dir}/${specifier}`).replace(/\.(?:[cm]?[jt]s|[jt]sx)$/, '');
   const stem = file.replace(/\.(?:[cm]?[jt]sx?|d\.ts)$/, '');
   return stem === base || stem === `${base}/index`;
 }

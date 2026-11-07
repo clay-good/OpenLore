@@ -515,7 +515,8 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     // specification, or a projection that was not assessed, has the same effect
     // (change: add-contract-node-projection).
     ...((cg.contracts?.unresolvedBindings.total || cg.contracts?.unreadSpecifications.total || cg.contracts?.notAssessed?.length
-      || cg.contracts?.unresolvedRegistrations?.total || cg.contracts?.unresolvedResolvers?.total) ? {
+      || cg.contracts?.unresolvedRegistrations?.total || cg.contracts?.unresolvedResolvers?.total
+      || cg.contracts?.unboundGraphqlOperations?.total || cg.contracts?.unboundRpcs?.total) ? {
       contractRootsNotAssessed: {
         unresolvedBindings: cg.contracts.unresolvedBindings.total,
         // A gRPC registration that named a service but bound no method (a variable, a factory

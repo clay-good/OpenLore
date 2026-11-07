@@ -19,6 +19,15 @@ export const CONTRACT_LANGUAGES: readonly ContractLanguage[] = ['OpenAPI', 'Prot
 
 const CONTRACT_LANGUAGE_SET: ReadonlySet<string> = new Set<string>(CONTRACT_LANGUAGES);
 
+/**
+ * Whether a schema file sits under a test or fixture path. Such a schema describes a fake service:
+ * read as the contract it makes the real root types ambiguous (GraphQL) or shadows real messages
+ * (protobuf). Applied to `.proto` and GraphQL only — an OpenAPI document under `spec/` is real.
+ */
+export function isFixtureSchemaPath(path: string): boolean {
+  return /(?:^|\/)(?:__tests__|__fixtures__|fixtures?|tests?|e2e|test-?data|testdata)\//i.test(path) || /\.(?:test|spec)\.(?:graphqls?|gql|proto)$/i.test(path);
+}
+
 /** Whether a node's language tag is an interface-contract format. */
 export function isContractLanguage(language: string | undefined): boolean {
   return !!language && CONTRACT_LANGUAGE_SET.has(language);

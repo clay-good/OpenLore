@@ -1490,7 +1490,9 @@ export class AnalysisArtifactGenerator {
     const { MAX_PROTO_FILES } = await import('./contract/project-protobuf.js');
     const { isProtobufPath } = await import('./contract/protobuf.js');
     const { isGraphqlPath } = await import('./contract/graphql.js');
-    const { MAX_GRAPHQL_FILES } = await import('./contract/project-graphql.js');
+    const { isFixtureSchemaPath } = await import('./contract/types.js');
+    const { MAX_GRAPHQL_CANDIDATES } = await import('./contract/project-graphql.js');
+    const { relaySchemaPaths } = await import('./contract/graphql.js');
     const { readBuildOutputMap } = await import('./iac/build-output.js');
     /** Total specification bytes retained across the walk. */
     const MAX_CONTRACT_BYTES = 64 * 1024 * 1024;
@@ -1554,6 +1556,16 @@ export class AnalysisArtifactGenerator {
     /** GraphQL schema files retained and past a bound, counted apart for the same reason. */
     let graphqlFiles = 0;
     let graphqlFilesOmitted = 0;
+    /** `package.json` / `relay.config.*` texts: they name the schema a Relay COMPILER reads. */
+    const relayConfigs: Array<{ path: string; content: string }> = [];
+    /**
+     * Drop the schema a Relay config names: it is the compiler's copy of a server's schema (often
+     * GitHub's), and read as this repository's contract it would grade the vendor's API.
+     */
+    const withoutClientSchemas = (files: typeof contractFiles) => {
+      const client = relaySchemaPaths(relayConfigs);
+      return client.size ? files.filter(f => !client.has(f.path)) : files;
+    };
     // Files whose UTF-8 decode was lossy (contained U+FFFD) — a parse-health signal captured at the
     // one central read, since the call-graph extractors never see the raw bytes (change:
     // add-parse-health-boundary-disclosure).
@@ -1622,7 +1634,7 @@ export class AnalysisArtifactGenerator {
         // carried truncated so it is reported unread for its size rather than absent.
         // A schema under a test or fixture path describes a fake service: read as the contract, it
         // makes the real root types ambiguous and silently unbinds every resolver.
-        const fixtureSchema = isTest || /(?:^|\/)(?:__fixtures__|fixtures?|test-?data|testdata)\//i.test(file.path);
+        const fixtureSchema = isTest || isFixtureSchemaPath(file.path);
         if (isProtobufPath(file.path) && !fixtureSchema) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
@@ -1637,7 +1649,7 @@ export class AnalysisArtifactGenerator {
         if (isGraphqlPath(file.path) && !fixtureSchema) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
-          if (graphqlFiles < MAX_GRAPHQL_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+          if (graphqlFiles < MAX_GRAPHQL_CANDIDATES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
             graphqlFiles++;
             contractBytes += retained;
             contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
@@ -1647,6 +1659,7 @@ export class AnalysisArtifactGenerator {
         // The project's own build-output mapping, for binding a deployed `dist/…` handler to its
         // source (change: add-iac-deploy-binding-commands).
         if (file.path === 'tsconfig.json' || file.path === 'package.json') buildOutputConfigs.set(file.path, content);
+        if (/(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts))$/.test(file.path)) relayConfigs.push({ path: file.path, content });
 
         // Signatures: exclude test files
         if (!isTest) {
@@ -1725,7 +1738,7 @@ export class AnalysisArtifactGenerator {
       const builder = new CallGraphBuilder({
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
-        ...(contractFiles.length ? { contractFiles } : {}),
+        ...(contractFiles.length ? { contractFiles: withoutClientSchemas(contractFiles) } : {}),
         ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
         ...(protoFilesOmitted ? { protoFilesOmitted } : {}),
         ...(graphqlFilesOmitted ? { graphqlFilesOmitted } : {}),

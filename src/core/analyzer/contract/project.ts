@@ -29,9 +29,9 @@ import { readOpenApi, looksLikeOpenApi, HTTP_METHODS, type ContractDocument } fr
 import { isProtobufPath } from './protobuf.js';
 import { projectProtobuf, MAX_PROTO_FILES, type UnresolvedRegistration } from './project-protobuf.js';
 import { isGraphqlPath } from './graphql.js';
-import { projectGraphql, MAX_GRAPHQL_FILES, type UnresolvedResolver } from './project-graphql.js';
+import { projectGraphql, MAX_GRAPHQL_CANDIDATES, type UnresolvedResolver } from './project-graphql.js';
 import type { ResolverMap } from './graphql-resolvers.js';
-import type { GrpcRegistration } from './grpc-registration.js';
+import type { GrpcRegistration, ImportTarget } from './grpc-registration.js';
 
 /** Specification files read per build. */
 export const MAX_CONTRACT_FILES = 50;
@@ -240,6 +240,8 @@ export interface ContractProjectionInput {
   generatedClientFunctions?: (specPath: string) => ReadonlyMap<string, readonly FunctionNode[]>;
   /** gRPC server registrations in the indexed source, for binding protobuf RPCs to their implementation. */
   grpcRegistrations?: readonly GrpcRegistration[];
+  /** Where an import names a function, one barrel re-export followed (gRPC Node, GraphQL). */
+  importTargets?: (fromFile: string, specifier: string, name: string, runtime: 'node' | 'python') => readonly ImportTarget[];
   /** The resolver maps in the indexed source for the given root type names (GraphQL). */
   graphqlResolverMaps?: (roots: readonly string[]) => readonly ResolverMap[];
   /** The code functions of a name a resolver entry could mean. */
@@ -313,18 +315,20 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       files: protoRead,
       registrations: input.grpcRegistrations ?? [],
       resolveImplementation: input.resolveGrpcImplementation ?? (() => []),
+      ...(input.importTargets ? { importTargets: (from: string, spec: string, name: string) => input.importTargets!(from, spec, name, 'node') } : {}),
     })
     : undefined;
   // ── GraphQL (change: add-contract-graph-projection) ──────────────────────
   // Its own half too, merged in `finish`: a GraphQL operation has no method or path.
   const gqlCandidates = [...input.files].filter(f => isGraphqlPath(f.path))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  const gqlRead = gqlCandidates.slice(0, MAX_GRAPHQL_FILES);
+  const gqlRead = gqlCandidates.slice(0, MAX_GRAPHQL_CANDIDATES);
   const gql = gqlRead.length
     ? projectGraphql({
       files: gqlRead,
       resolverMaps: input.graphqlResolverMaps ?? (() => []),
       resolveImplementation: input.resolveGraphqlImplementation ?? (() => []),
+      ...(input.importTargets ? { importTargets: input.importTargets } : {}),
     })
     : undefined;
   const gqlNotAssessed = [...(gql?.notAssessed ?? [])];
@@ -349,7 +353,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     }
     const gqlWithheld = gqlNotAssessed.length > 0;
     for (const reason of gqlNotAssessed) notAssessed.add(reason);
-    if (gqlUnread > 0) truncations.push({ reason: 'graphql-file-cap', cap: MAX_GRAPHQL_FILES, seen: gqlCandidates.length + (input.graphqlFilesOmitted ?? 0) });
+    if (gqlUnread > 0) truncations.push({ reason: 'graphql-file-cap', cap: MAX_GRAPHQL_CANDIDATES, seen: gqlCandidates.length + (input.graphqlFilesOmitted ?? 0) });
     for (const t of gql?.truncations ?? []) truncations.push(t);
     for (const n of gql?.notes ?? []) notes.add(n);
     const unread = [...p.unreadSpecifications.items, ...(proto?.unreadSpecifications ?? []), ...(gql?.unreadSpecifications ?? [])];

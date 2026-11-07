@@ -17,7 +17,7 @@
 
 import type { CallEdge, FunctionNode } from '../call-graph-types.js';
 import { readProtobuf, resolveProtoTypes, type ProtoDocument, type ProtoRpc, type ProtoService } from './protobuf.js';
-import { isImportedModule, type GrpcRegistration } from './grpc-registration.js';
+import { isImportedModule, type GrpcRegistration, type ImportTarget } from './grpc-registration.js';
 
 /** `.proto` files read per build. Kept apart from the OpenAPI cap: protobuf schemas come in many small files. */
 export const MAX_PROTO_FILES = 500;
@@ -48,6 +48,8 @@ export interface ProtobufProjectionInput {
    * `reg.implType`; for Node, the functions of that name. The projector picks among them.
    */
   resolveImplementation: (reg: GrpcRegistration, name: string) => readonly FunctionNode[];
+  /** Where an import names a function: its module, one level of re-export followed. */
+  importTargets?: (fromFile: string, specifier: string, name: string) => readonly ImportTarget[];
 }
 
 export interface ProtobufProjection {
@@ -105,8 +107,8 @@ const dirName = (f: string) => dirOf(f).replace(/\/$/, '').split('/').pop() ?? '
  *                       differs from the directory binds nothing)
  *   Python, bare `C`    the registration's own file, else the only one anywhere (an import)
  *   Python, `mod.C`     a module named `mod`
- *   Node                the registration's own file, else — only when the file imports the
- *                       handler — the only one anywhere
+ *   Node                the registration's own file; an IMPORTED handler only in the module it
+ *                       was imported from (one barrel re-export followed)
  */
 function inScope(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): readonly FunctionNode[] {
   if (reg.runtime === 'go') {
@@ -324,8 +326,13 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
         continue;
       }
       // An imported Node handler is looked for only in the module it was imported from.
+      // The module an imported handler comes from, and one barrel re-export of it.
+      const targets = reg.runtime === 'node' && w.imported && w.from !== undefined && w.fnName !== undefined && input.importTargets
+        ? input.importTargets(reg.file, w.from, w.fnName) : undefined;
       const found = reg.runtime === 'node' && w.imported
-        ? w.found.filter(n => w.from !== undefined && isImportedModule(reg.file, w.from, n.filePath))
+        ? (targets
+          ? targets.flatMap(t => input.resolveImplementation(reg, t.name).filter(n => n.filePath === t.file))
+          : w.found.filter(n => w.from !== undefined && isImportedModule(reg.file, w.from, n.filePath)))
         : w.found;
       const impl = pick(reg, homeIsLocal ? found.filter(n => n.filePath === reg.file) : found, w.imported);
       if (impl) anyCandidate = true;
@@ -337,7 +344,9 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
         // Node: each map entry names its own function, so one that binds nothing is said per RPC.
         if (reg.runtime === 'node') {
           out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'implementation-not-found',
-            detail: w.imported ? `\`${fnName}\` is imported by ${reg.file} from '${w.from}', which is not indexed here (a package, a path alias, or a module without that function)` : `\`${fnName}\` is neither defined in ${reg.file} nor imported by it` });
+            detail: !w.imported ? `\`${fnName}\` is neither defined in ${reg.file} nor imported by it`
+              : targets?.length ? `\`${fnName}\` is imported from '${w.from}', which is indexed but neither defines nor directly re-exports it`
+                : `\`${fnName}\` is imported by ${reg.file} from '${w.from}', which is not indexed here (a package or a path alias)` });
         }
         continue; // Go/Python: not implemented here (a server embedding Unimplemented…): left unbound
       }

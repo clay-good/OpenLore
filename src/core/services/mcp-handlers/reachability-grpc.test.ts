@@ -57,4 +57,11 @@ describe('find_dead_code with gRPC registrations', () => {
     expect(r.contractRootsNotAssessed?.unresolvedRegistrations).toBe(1);
     expect(r.contractRootsNotAssessed?.unresolvedRegistrationItems.map(i => i.reason)).toEqual(['not-literal']);
   });
+
+  it('unbound GraphQL operations alone are named (a code-first resolver is not silently dead)', async () => {
+    const impl = node('server.go::queryResolver.User', 'User', { className: 'queryResolver' });
+    await write([impl], [], disclosure({ unboundGraphqlOperations: { items: ['Query.user (schema.graphql:1)'], total: 1 } }));
+    const r = await handleFindDeadCode({ directory: root }) as { contractRootsNotAssessed?: { unboundGraphqlOperations: number } };
+    expect(r.contractRootsNotAssessed?.unboundGraphqlOperations).toBe(1);
+  });
 });

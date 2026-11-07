@@ -55,7 +55,15 @@ const MAX_MATCHES_PER_FILE = 1_000;
 
 const GENERATED = /(?:\.generated\.[cm]?[jt]sx?|__generated__\/)/i;
 /** Stories and mocks hold fake resolvers for a fake server. */
-const NOT_A_SERVER = /(?:\.stories\.[cm]?[jt]sx?$|(?:^|\/)(?:__mocks__|mocks?)\/)/i;
+const NOT_A_SERVER = /(?:\.stories\.[cm]?[jt]sx?$|(?:^|\/)(?:__mocks__|mocks?)\/|(?:^|\/)mocks?\.[cm]?[jt]sx?$)/i;
+/** Mocking libraries: a resolver object in a file that imports one resolves a fake schema. */
+const MOCK_PACKAGES = /^(?:msw|@graphql-tools\/mock|graphql-tools\/mock|@mswjs\/)/;
+/**
+ * A file that writes its OWN schema inline (`typeDefs: \`type Query {…}\``, `buildSchema(…)`)
+ * serves that schema, not one read from a `.graphql` file: its resolver maps belong to it, and
+ * binding them to the repository's SDL by field name would link one app's code to another's API.
+ */
+const INLINE_SDL = /(?:\btypeDefs\b|\btype_defs\b|\bgql\s*`|\bgql\s*\(\s*(?:"""|'''|")|\bgraphql\s*`|\bbuildSchema\s*\(|\bcreateSchema\s*\(|\bmakeExecutableSchema\s*\(|\bmake_executable_schema\s*\()[\s\S]{0,4000}?\btype\s+(?:Query|Mutation|Subscription)\b/;
 
 function runtimeOf(file: string): ResolverRuntime | undefined {
   if (/\.[cm]?[jt]sx?$/i.test(file)) return 'node';
@@ -78,7 +86,7 @@ function objectAt(text: string, open: number): string | undefined {
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** GraphQL client libraries: their `Query: {…}` objects are cache policies and local resolvers. */
-const CLIENT_PACKAGES = /^(?:@apollo\/client|apollo-client|apollo-boost|apollo-cache-inmemory|apollo-link-state|urql|@urql\/|relay-runtime|react-relay|graphql-request|@tanstack\/|graphql-hooks)/;
+const CLIENT_PACKAGES = /^(?:@apollo\/client|apollo-client|apollo-boost|apollo-cache-inmemory|apollo-link-state|urql|@urql\/|relay-runtime|react-relay)/;
 /** GraphQL server libraries. */
 const SERVER_PACKAGES = /^(?:@apollo\/server|apollo-server|@apollo\/subgraph|graphql-yoga|@graphql-yoga\/|@graphql-tools\/|graphql-tools|mercurius|express-graphql|graphql-http|@envelop\/|graphql-helix|@nestjs\/graphql)/;
 /** Calls and keys whose `Query: {…}` is client configuration, not a server resolver map. */
@@ -146,6 +154,7 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
   const rootSet = new Set(roots);
   // Cheap gate before masking: a root name must appear literally.
   if (!roots.some(r => content.includes(r)) && !(runtime === 'python' && /\b(?:QueryType|MutationType|SubscriptionType|ObjectType)\b/.test(content))) return [];
+  if (INLINE_SDL.test(content) && /["'`]\s*(?:extend\s+)?type\s+(?:Query|Mutation|Subscription)\b|`[^`]{0,4000}?\btype\s+(?:Query|Mutation|Subscription)\b/.test(content)) return [];
   const masked = maskNonCode(content, runtime === 'python' ? 'python' : 'js');
   const text = runtime === 'node' ? restoreQuotedKeys(content, masked) : masked;
   const starts = [0];
@@ -157,11 +166,16 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
     const imports = importedNames(text);
     const specifiers = [...new Set([...imports.values()].map(i => i.from))];
     // A file that imports a GraphQL CLIENT and no server is client code: its `Query: {…}` objects
-    // are cache policies and local resolvers (urql, Apollo Client), never the server's.
-    if (specifiers.some(f => CLIENT_PACKAGES.test(f)) && !specifiers.some(f => SERVER_PACKAGES.test(f))) return out;
-    // `const Query = {…}` is a resolver object only in a file that is about resolvers: a SQL
-    // statement map named `Query` is not one.
-    const resolverFile = /\bresolvers\b/i.test(text) || specifiers.some(f => SERVER_PACKAGES.test(f));
+    // are cache policies and local resolvers (urql, Apollo Client), never the server's. A type-only
+    // import is no client at run time, and a request library (`graphql-request`) a server uses to
+    // call another service is not a client cache.
+    const valueSpecifiers = [...text.matchAll(/\bimport\s+(?!type\b)[^;'"`]{0,500}?\bfrom\s*['"]([^'"\n]{1,500})['"]|\bimport\s*['"]([^'"\n]{1,500})['"]|\brequire\s*\(\s*['"]([^'"\n]{1,500})['"]/g)].map(m => m[1] ?? m[2] ?? m[3]);
+    if (valueSpecifiers.some(f => CLIENT_PACKAGES.test(f)) && !specifiers.some(f => SERVER_PACKAGES.test(f))) return out;
+    if (valueSpecifiers.some(f => MOCK_PACKAGES.test(f))) return out;
+    // `const Query = {…}` is a resolver object only in a file that is about resolvers — by its text,
+    // its imports, or its path (`resolvers/Query.ts`, `graphql/mutation.ts`): a SQL statement map
+    // named `Query` is not one.
+    const resolverFile = /\bresolvers\b/i.test(text) || specifiers.some(f => SERVER_PACKAGES.test(f)) || /resolver|graphql|schema/i.test(file);
     const entryOf = (key: string, fn: string | undefined, base: string | undefined, line: number): ResolverEntry => {
       if (!fn) return { field: key, line };
       const imp = base ? imports.get(base) : undefined;
@@ -188,6 +202,10 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
       if (clientContext(text, m.index!)) continue;
       // The root key's own line: the `{` or `,` the match starts at may sit on the line before.
       const line = lineAt(starts, m.index! + m[0].indexOf(root, 1));
+      // `Query: OperationTypeNode.QUERY`, `Query: true`: a value, not resolvers. A resolver map
+      // built elsewhere is a lower-case variable or a call (`queryResolvers`, `mergeResolvers(…)`).
+      if (m[2] && m[2] !== '{' && !/^[a-z_$][\w$]*\s*\(?$/.test(m[2]) ) continue;
+      if (m[2] && /^(?:true|false|null|undefined)\b/.test(m[2])) continue;
       if (m[2] && m[2] !== '{') {
         // `Query: queryResolvers`, `Query: mergeResolvers(…)`: the map is built elsewhere.
         out.push({ file, line, runtime, root, entries: [], notLiteral: `the ${root} resolvers are \`${m[2].replace(/\s*\($/, '(…)').slice(0, 60)}\`, not an object written here` });
@@ -199,7 +217,7 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
       if (!parsed) { out.push({ file, line, runtime, root, entries: [], notLiteral: obj ? 'the resolver object has a spread or a computed key' : 'the resolver object could not be read' }); continue; }
       // Apollo subscriptions: `orderCreated: { subscribe: subscribeOrders }`.
       const subscribe = new Map<string, string>();
-      for (const sm of (obj ?? '').matchAll(/([A-Za-z_$][\w$]*)\s*:\s*\{\s*subscribe\s*:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*[,}]/g)) subscribe.set(sm[1], sm[2]);
+      for (const sm of (obj ?? '').matchAll(/([A-Za-z_$][\w$]*)\s*:\s*\{[^{}]{0,500}?\bsubscribe\s*:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*[,}]/g)) subscribe.set(sm[1], sm[2]);
       const entries: ResolverEntry[] = parsed.map(({ key, fn, base }) => {
         const sub = !fn ? subscribe.get(key) : undefined;
         if (sub) return entryOf(key, sub.slice(sub.lastIndexOf('.') + 1), sub.split('.')[0], line);

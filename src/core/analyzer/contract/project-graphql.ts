@@ -15,10 +15,12 @@
 import type { CallEdge, FunctionNode } from '../call-graph-types.js';
 import { readGraphql, mergeGraphqlSchema, namedType, isBuiltInScalar, type GqlDocument } from './graphql.js';
 import type { ResolverMap } from './graphql-resolvers.js';
-import { isImportedModule, isImportedPythonModule } from './grpc-registration.js';
+import { isImportedModule, isImportedPythonModule, type ImportTarget } from './grpc-registration.js';
 
-/** GraphQL schema files read per build. */
+/** GraphQL SCHEMA files read per build (client documents cost no slot). */
 export const MAX_GRAPHQL_FILES = 500;
+/** GraphQL files of any kind examined per build: a frontend holds many query documents. */
+export const MAX_GRAPHQL_CANDIDATES = MAX_GRAPHQL_FILES * 4;
 const MAX_GRAPHQL_OPERATIONS = 2_000;
 const MAX_GRAPHQL_TYPES = 4_000;
 
@@ -40,6 +42,8 @@ export interface GraphqlProjectionInput {
   resolverMaps: (roots: readonly string[]) => readonly ResolverMap[];
   /** The code functions of a name a resolver entry could mean. */
   resolveImplementation: (map: ResolverMap, name: string) => readonly FunctionNode[];
+  /** Where an import names a function: its module, one level of re-export followed. */
+  importTargets?: (fromFile: string, specifier: string, name: string, runtime: 'node' | 'python') => readonly ImportTarget[];
 }
 
 export interface GraphqlProjection {
@@ -54,7 +58,7 @@ export interface GraphqlProjection {
   notAssessed: string[];
   /** After-the-fact disclosures that withhold nothing. */
   notes: string[];
-  truncations: Array<{ reason: 'operation-cap' | 'schema-cap'; cap: number; seen: number }>;
+  truncations: Array<{ reason: 'operation-cap' | 'schema-cap' | 'graphql-file-cap'; cap: number; seen: number }>;
 }
 
 const nodeId = (file: string, name: string) => `${file}::${name}`;
@@ -70,11 +74,17 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
     unboundOperations: [], notAssessed: [], notes: [], truncations: [],
   };
   const docs: GqlDocument[] = [];
+  let pastCap = 0;
   for (const f of [...input.files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     const r = readGraphql(f.path, f.content);
     if ('error' in r) out.unreadSpecifications.push({ file: f.path, reason: r.error });
     else if ('clientDocument' in r) out.clientDocuments.push(f.path);
+    else if (docs.length >= MAX_GRAPHQL_FILES) pastCap++;
     else docs.push(r);
+  }
+  if (pastCap) {
+    out.truncations.push({ reason: 'graphql-file-cap', cap: MAX_GRAPHQL_FILES, seen: docs.length + pastCap });
+    out.notAssessed.push(`${pastCap} GraphQL schema file(s) past the cap of ${MAX_GRAPHQL_FILES} were not read`);
   }
   // An unread schema file may define the very type or root field a resolver names.
   if (out.unreadSpecifications.length) out.notAssessed.push(`${out.unreadSpecifications.length} GraphQL schema file(s) could not be read`);
@@ -131,7 +141,7 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
       opsSeen++;
       if (operationNodes.size >= MAX_GRAPHQL_OPERATIONS) continue;
       const address = `${root.name}.${f.name}`;
-      const args = f.args.map(a => `${a.name}: ${a.type}`).join(', ');
+      const args = f.args.map(a => `${a.name}: ${a.type}${a.defaultValue !== undefined ? ` = ${a.defaultValue}` : ''}`).join(', ');
       const node = declarationNode(f.file ?? root.file, address, f.line, `${kind} ${f.name}${args ? `(${args})` : ''}: ${f.type}`);
       operationNodes.set(address, node);
       out.nodes.push(node);
@@ -186,17 +196,23 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
       const found = input.resolveImplementation(map, e.fn);
       // An imported function is looked for in the module it was imported FROM, and only there — a
       // same-named function in this file or anywhere else is not it. Otherwise, this file only.
-      const scope = e.imported
-        ? found.filter(n => (e.from !== undefined && isImportedModule(map.file, e.from, n.filePath))
-          || (e.module !== undefined && isImportedPythonModule(map.file, e.module, n.filePath)))
-        : found.filter(n => n.filePath === map.file);
+      const spec = e.from ?? e.module;
+      const targets = e.imported && spec !== undefined && input.importTargets ? input.importTargets(map.file, spec, e.fn, map.runtime) : undefined;
+      const scope = !e.imported
+        ? found.filter(n => n.filePath === map.file)
+        : targets
+          ? targets.flatMap(t => (t.name === e.fn ? found : input.resolveImplementation(map, t.name)).filter(n => n.filePath === t.file))
+          : found.filter(n => (e.from !== undefined && isImportedModule(map.file, e.from, n.filePath))
+            || (e.module !== undefined && isImportedPythonModule(map.file, e.module, n.filePath)));
       if (scope.length > 1) {
         out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'ambiguous-implementation', detail: `more than one \`${e.fn}\`` });
         continue;
       }
       if (!scope.length) {
         out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'implementation-not-found',
-          detail: e.notFollowed ?? (e.imported ? `\`${e.fn}\` is imported by ${map.file} from '${e.from ?? e.module}', which is not indexed here (a package, a path alias, or a module without that function)` : `\`${e.fn}\` is neither defined in ${map.file} nor imported by it`) });
+          detail: e.notFollowed ?? (!e.imported ? `\`${e.fn}\` is neither defined in ${map.file} nor imported by it`
+            : targets?.length ? `\`${e.fn}\` is imported from '${spec}', which is indexed but neither defines nor directly re-exports it`
+              : `\`${e.fn}\` is imported by ${map.file} from '${spec}', which is not indexed here (a package or a path alias)`) });
         continue;
       }
       pushEdge(scope[0], target, 'implements_endpoint', scope[0].startLine ?? e.line, GRAPHQL_RESOLVER_BINDING);

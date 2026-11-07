@@ -312,6 +312,7 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
     return out;
   };
 
+  const clientDirective = toks.some((t, k) => t.t === 'name' && t.v === 'client' && toks[k - 1]?.t === 'punct' && toks[k - 1].v === '@');
   const roots: GqlDocument['roots'] = {};
   const types: GqlType[] = [];
   const directiveDefs: GqlDirectiveDef[] = [];
@@ -453,7 +454,10 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
     types.push(t);
   }
 
+  // Operations using `@client` beside type definitions are Apollo local state: the types extend a
+  // CLIENT cache, not a server's API. The whole file is a client document.
   if (sawExecutable && !sawTypeSystem) return { file, clientDocument: true };
+  if (sawExecutable && clientDirective) return { file, clientDocument: true };
   if (sawExecutable) unassessed.add('operations in a schema file');
   const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   return {
@@ -497,8 +501,10 @@ export interface GqlSchema {
   ambiguous: Array<{ name: string; files: string[]; fingerprint: string }>;
   /** `extend`s of a type no file read defines (projected as extension-only types). */
   orphanExtensions: Array<{ name: string; file: string }>;
-  /** Directive definitions by name; one defined in two files is a conflict and absent. */
+  /** Directive definitions by name; one defined in two files is absent (see `ambiguousDirectives`). */
   directives: Map<string, GqlDirectiveDef & { file: string }>;
+  /** Directives defined in more than one file, with a fingerprint of all their definitions. */
+  ambiguousDirectives: Array<{ name: string; files: string[]; fingerprint: string }>;
   /** A hash of every directive on `schema` / `extend schema`. */
   schemaDirectivesHash: string;
   conflicts: string[];
@@ -589,15 +595,41 @@ export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
     base.extendedIn = [...new Set(base.extendedIn)].sort();
   }
   const directives: GqlSchema['directives'] = new Map();
+  const ambiguousDirectives: GqlSchema['ambiguousDirectives'] = [];
   for (const [name, at] of directiveAt) {
-    if (at.length > 1) { conflicts.push(`directive @${name} is defined in more than one file`); continue; }
+    if (at.length > 1) {
+      ambiguousDirectives.push({ name, files: at.map(x => x.file).sort(), fingerprint: fingerprintOf(at.map(({ file: _f, ...d }) => fingerprintOf(d)).sort()) });
+      continue;
+    }
     directives.set(name, at[0]);
   }
   return {
     types, roots, rootConflicts: [...rootConflicts].sort(), ambiguous: ambiguous.sort((a, b) => (a.name < b.name ? -1 : 1)),
-    orphanExtensions, directives, schemaDirectivesHash: schemaDirectives.length ? sha(schemaDirectives.sort().join('|')) : NO_DIRECTIVES,
+    orphanExtensions, directives, ambiguousDirectives: ambiguousDirectives.sort((a, b) => (a.name < b.name ? -1 : 1)), schemaDirectivesHash: schemaDirectives.length ? sha(schemaDirectives.sort().join('|')) : NO_DIRECTIVES,
     conflicts: conflicts.sort(),
   };
+}
+
+/**
+ * The schema paths Relay configs name (`"relay": { "schema": "./schema/schema.graphql" }` in a
+ * `package.json`, `schema: '…'` in `relay.config.*`), resolved from the config's directory.
+ */
+export function relaySchemaPaths(configs: ReadonlyArray<{ path: string; content: string }>): Set<string> {
+  const out = new Set<string>();
+  for (const c of configs) {
+    const dir = c.path.includes('/') ? c.path.slice(0, c.path.lastIndexOf('/')) : '';
+    const body = /package\.json$/.test(c.path) ? /"relay"\s*:\s*\{([^}]{0,4000})\}/.exec(c.content)?.[1] : c.content;
+    if (!body) continue;
+    const m = /["']?schema["']?\s*:\s*["']([^"'\n]{1,500})["']/.exec(body);
+    if (!m) continue;
+    const parts: string[] = [];
+    for (const seg of `${dir}/${m[1]}`.split('/')) {
+      if (!seg || seg === '.') continue;
+      if (seg === '..') parts.pop(); else parts.push(seg);
+    }
+    out.add(parts.join('/'));
+  }
+  return out;
 }
 
 /** The named type inside a type reference: `[Order!]!` → `Order`. */

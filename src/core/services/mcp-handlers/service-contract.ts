@@ -30,8 +30,9 @@ import { diffContracts, contractParity, contractBump, type ContractChange, type 
 import { readProtobuf, resolveProtoTypes, isProtobufPath, type ProtoDocument } from '../../analyzer/contract/protobuf.js';
 import { diffProtobuf } from '../contract/protobuf-diff.js';
 import { MAX_PROTO_FILES } from '../../analyzer/contract/project-protobuf.js';
-import { readGraphql, mergeGraphqlSchema, isGraphqlPath, type GqlDocument } from '../../analyzer/contract/graphql.js';
+import { readGraphql, mergeGraphqlSchema, isGraphqlPath, relaySchemaPaths, type GqlDocument } from '../../analyzer/contract/graphql.js';
 import { diffGraphql } from '../contract/graphql-diff.js';
+import { isFixtureSchemaPath } from '../../analyzer/contract/types.js';
 import { MAX_GRAPHQL_FILES } from '../../analyzer/contract/project-graphql.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { classifyFindings, effectivePolicy, type GovernanceFinding } from './enforcement-policy.js';
@@ -179,12 +180,12 @@ function parseGraphqlSide(candidates: string[], texts: Map<string, string>, unre
   // The cap counts SCHEMAS: a frontend's hundreds of query documents must not push its schema out.
   let schemas = 0;
   for (const file of candidates.slice(0, MAX_CANDIDATES)) {
-    if (schemas >= MAX_GRAPHQL_FILES) { scope.capped = true; break; }
     const text = texts.get(file);
     if (text === undefined) continue;
-    scope.examined.add(file);
     const r = readGraphql(file, text);
-    if (!('clientDocument' in r)) schemas++;
+    // Client documents are read past the cap too (they cost no schema slot); a schema past it is not.
+    if (!('clientDocument' in r)) { if (schemas >= MAX_GRAPHQL_FILES) { scope.capped = true; continue; } schemas++; }
+    scope.examined.add(file);
     if ('error' in r) scope.unreadable.push({ file, reason: r.error });
     else if ('clientDocument' in r) scope.clientDocuments.push(file);
     else scope.docs.push(r);
@@ -195,8 +196,9 @@ function parseGraphqlSide(candidates: string[], texts: Map<string, string>, unre
 /** The candidates each scan reads: YAML/JSON, `.proto` and GraphQL in separate windows. */
 const windows = (listed: readonly string[]) => {
   const yaml = listed.filter(f => !isProtobufPath(f) && !isGraphqlPath(f));
-  const proto = listed.filter(f => isProtobufPath(f));
-  const graphql = listed.filter(f => isGraphqlPath(f));
+  // The same fixture rule as `analyze`: a test schema is a fake service, not this repository's contract.
+  const proto = listed.filter(f => isProtobufPath(f) && !isFixtureSchemaPath(f));
+  const graphql = listed.filter(f => isGraphqlPath(f) && !isFixtureSchemaPath(f));
   return { yaml, proto, graphql, read: [...yaml.slice(0, MAX_CANDIDATES), ...proto.slice(0, MAX_PROTO_FILES), ...graphql.slice(0, MAX_CANDIDATES)] };
 };
 
@@ -217,8 +219,18 @@ export async function headSpecsCached(root: string): Promise<SpecSide> {
   return side;
 }
 
+/** The schema a Relay compiler config names: a vendor schema copy, not this repository's contract. */
+async function clientSchemas(root: string): Promise<Set<string>> {
+  const configs: Array<{ path: string; content: string }> = [];
+  for (const path of ['package.json', 'relay.config.json', 'relay.config.js', 'relay.config.cjs', 'relay.config.mjs', 'relay.config.ts']) {
+    try { configs.push({ path, content: await readFileConfined(root, path, 1024 * 1024) }); } catch { /* absent */ }
+  }
+  return relaySchemaPaths(configs);
+}
+
 export async function headSpecs(root: string, listed?: string[]): Promise<SpecSide> {
-  const w = windows(listed ?? await workingFiles(root, SPEC_EXT));
+  const client = await clientSchemas(root);
+  const w = windows((listed ?? await workingFiles(root, SPEC_EXT)).filter(f => !client.has(f)));
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
   const protoUnread: SpecSide['unread'] = [];
@@ -248,7 +260,8 @@ async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
   const prefix = (await getRepoPrefix(root)) ?? '';
   const full = listing.split('\0').filter(f => f && f.startsWith(prefix) && SPEC_EXT.test(f.slice(prefix.length)) && !SKIP_DIR.test(f.slice(prefix.length)))
     .map(f => f.slice(prefix.length)).sort(sortStr);
-  const w = windows(full);
+  const client = await clientSchemas(root);
+  const w = windows(full.filter(f => !client.has(f)));
   const paths = w.read.map(f => prefix + f);
   const blobs = await readBlobsAtRef(root, commit, paths).catch(() => readBlobsPerFile(root, commit, paths));
   const texts = new Map<string, string>();
@@ -584,7 +597,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   if (head.unread.length) boundaries.push(`${head.unread.length} YAML/JSON file(s) could not be read (over ${MAX_SPEC_BYTES / 1024 / 1024} MB, a link out of the repository, or an I/O error); a specification among them is not assessed.`);
   if (head.proto.capped) boundaries.push(`Past the protobuf cap (${MAX_PROTO_FILES} files), ${head.proto.candidates.size - head.proto.examined.size} .proto file(s) were not read.`);
   if (head.proto.unread.length) boundaries.push(`${head.proto.unread.length} .proto file(s) could not be read (over ${MAX_SPEC_BYTES / 1024 / 1024} MB, a link out of the repository, or an I/O error), so their schemas are not assessed.`);
-  if (head.graphql.capped) boundaries.push(`Past the GraphQL cap (${MAX_GRAPHQL_FILES} files), ${head.graphql.candidates.size - head.graphql.examined.size} GraphQL file(s) were not read.`);
+  if (head.graphql.capped) boundaries.push(`Past the GraphQL cap (${MAX_GRAPHQL_FILES} schema files, ${MAX_CANDIDATES} files read), ${head.graphql.candidates.size - head.graphql.examined.size} GraphQL file(s) were not read.`);
   if (head.graphql.unread.length) boundaries.push(`${head.graphql.unread.length} GraphQL file(s) could not be read, so their schemas are not assessed.`);
   const notAssessed = [...head.unreadable, ...head.proto.unreadable, ...head.graphql.unreadable].map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
   // Bounded and screened: a file can name thousands of distinct directives.

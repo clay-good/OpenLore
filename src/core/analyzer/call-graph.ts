@@ -45,7 +45,7 @@ import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
 import { generatedClientFunctionsFor } from './contract/generated-client.js';
-import { scanGrpcRegistrations, isGeneratedGrpcStub, type GrpcRegistration } from './contract/grpc-registration.js';
+import { scanGrpcRegistrations, isGeneratedGrpcStub, importTargets, type GrpcRegistration, type ImportTarget } from './contract/grpc-registration.js';
 import { isProtobufPath } from './contract/protobuf.js';
 import { isGraphqlPath } from './contract/graphql.js';
 import { scanResolverMaps, type ResolverMap } from './contract/graphql-resolvers.js';
@@ -6759,6 +6759,16 @@ export class CallGraphBuilder {
           filesOmitted: this.contractFilesOmitted,
           protoFilesOmitted: this.protoFilesOmitted,
           graphqlFilesOmitted: this.graphqlFilesOmitted,
+          importTargets: (() => {
+            const memo = new Map<string, readonly ImportTarget[]>();
+            const files = [...fileContents.keys()];
+            return (from: string, spec: string, name: string, runtime: 'node' | 'python') => {
+              const key = `${runtime}\0${from}\0${spec}\0${name}`;
+              let hit = memo.get(key);
+              if (!hit) { hit = importTargets(from, spec, name, runtime, files, f => fileContents.get(f)); memo.set(key, hit); }
+              return hit;
+            };
+          })(),
           // Resolver maps are read only when a GraphQL file is in hand, and only for the root type
           // names the schema has (the projector passes them). Test files are skipped.
           graphqlResolverMaps: roots => {

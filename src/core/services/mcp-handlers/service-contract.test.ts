@@ -717,4 +717,11 @@ enum Status { OPEN CLOSED }
     const reason = (r.notAssessed as Array<{ reason: string }>).find(n => n.reason.startsWith('outside the model'))!.reason;
     expect(reason).toContain('and 38 more');
   });
+
+  it('GraphQL round-2 review: a fixture schema does not make the real root ambiguous', async () => {
+    const root = repo({ 'schema/schema.graphql': 'type Query { a: Int b: Int }\n', 'test/fixtures/schema.graphql': 'type Query { fake: Int }\n' });
+    write(root, 'schema/schema.graphql', 'type Query { a: Int }\n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    expect((r.changes as { items: Array<{ rule: string }> }).items.map(c => c.rule)).toEqual(['operation-removed']);
+  });
 });

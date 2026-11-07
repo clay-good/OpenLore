@@ -537,11 +537,11 @@ describe('mergeGraphqlSchema: roots, extension-only types, ambiguity fingerprint
     expect(fp('type O { id: ID }', 'type O { sku: String }', 'extend type O { x: Int }')).not.toBe(base);
   });
 
-  it('merges directive definitions by name; one defined in two files is a conflict and absent', () => {
+  it('merges directive definitions by name; one defined in two files is ambiguous, with a fingerprint', () => {
     const s = mergeGraphqlSchema([doc('a.graphql', 'directive @a on FIELD\ndirective @b on FIELD'), doc('b.graphql', 'directive @b on OBJECT')]);
     expect([...s.directives.keys()]).toEqual(['a']);
     expect(s.directives.get('a')!.file).toBe('a.graphql');
-    expect(s.conflicts).toEqual(['directive @b is defined in more than one file']);
+    expect(s.ambiguousDirectives).toEqual([{ name: 'b', files: ['a.graphql', 'b.graphql'], fingerprint: expect.any(String) }]);
   });
 
   it('folds every file\'s schema directives into one hash', () => {

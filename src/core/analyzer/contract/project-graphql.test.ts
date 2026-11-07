@@ -7,7 +7,7 @@
  * ambiguous implementation, a function that is not there, an unread file, a client document.
  */
 import { describe, it, expect } from 'vitest';
-import { projectGraphql, GRAPHQL_RESOLVER_BINDING, MAX_GRAPHQL_FILES, type GraphqlProjectionInput } from './project-graphql.js';
+import { projectGraphql, GRAPHQL_RESOLVER_BINDING, MAX_GRAPHQL_FILES, MAX_GRAPHQL_CANDIDATES, type GraphqlProjectionInput } from './project-graphql.js';
 import { projectContracts, contractDisclosure, type ContractProjectionInput } from './project.js';
 import { scanResolverMaps, type ResolverMap } from './graphql-resolvers.js';
 import type { FunctionNode } from '../call-graph-types.js';
@@ -83,7 +83,7 @@ describe('projectGraphql: nodes', () => {
     ]);
     const n = Object.fromEntries(p.nodes.map(x => [x.name, x]));
     expect(n['Query.order']).toMatchObject({ id: 'graphql/schema.graphql::Query.order', filePath: 'graphql/schema.graphql', language: 'GraphQL', startLine: 4, signature: 'query order(id: ID!): Order' });
-    expect(n['Query.orders'].signature).toBe('query orders(filter: OrderFilter, first: Int): [Order!]!');
+    expect(n['Query.orders'].signature).toBe('query orders(filter: OrderFilter, first: Int = 10): [Order!]!');
     expect(n['Mutation.cancelOrder'].signature).toBe('mutation cancelOrder(id: ID!): Order');
     // A field added by `extend` in another file lives in that file.
     expect(n['Query.health']).toMatchObject({ filePath: 'graphql/ext.graphql', startLine: 1 });
@@ -214,7 +214,7 @@ describe('projectGraphql: implements_endpoint from resolver maps', () => {
     expect(p.edges.find(e => e.kind === 'implements_endpoint')!.line).toBe(30);
     expect(p.unresolvedResolvers.map(u => `${u.field} ${u.reason}${u.detail ? `: ${u.detail}` : ''}`)).toEqual([
       'me ambiguous-implementation: more than one `dup`',
-      "search implementation-not-found: `gone` is imported by src/resolvers.ts from './gone', which is not indexed here (a package, a path alias, or a module without that function)",
+      "search implementation-not-found: `gone` is imported by src/resolvers.ts from './gone', which is not indexed here (a package or a path alias)",
     ]);
   });
 
@@ -359,7 +359,7 @@ describe('projectGraphql through projectContracts', () => {
     const p = viaContracts({ graphqlFilesOmitted: 3 });
     expect(p.unboundGraphqlOperations.total).toBe(0);
     expect(p.notAssessed).toEqual(expect.arrayContaining(['3 GraphQL file(s) past the file cap were not read']));
-    expect(p.truncations).toEqual(expect.arrayContaining([{ reason: 'graphql-file-cap', cap: MAX_GRAPHQL_FILES, seen: 5 }]));
+    expect(p.truncations).toEqual(expect.arrayContaining([{ reason: 'graphql-file-cap', cap: MAX_GRAPHQL_CANDIDATES, seen: 5 }]));
   });
 
   it('stops at the GraphQL file cap and discloses it', () => {
@@ -391,7 +391,7 @@ export const resolvers = { Mutation: { cancelOrder } };
 `, [fn('src/legacy/cancel.ts::cancelOrder')]);
     expect(edgesOf(p, 'implements_endpoint')).toEqual([]);
     expect(reasons(p)).toEqual([
-      "Mutation.cancelOrder implementation-not-found: `cancelOrder` is imported by src/resolvers.ts from 'some-external-lib', which is not indexed here (a package, a path alias, or a module without that function)",
+      "Mutation.cancelOrder implementation-not-found: `cancelOrder` is imported by src/resolvers.ts from 'some-external-lib', which is not indexed here (a package or a path alias)",
     ]);
   });
 
@@ -403,7 +403,7 @@ query.set_field("search", resolve_stats)
 `, [fn('app/stats.py::resolve_stats', { language: 'Python' })]);
     expect(edgesOf(p, 'implements_endpoint')).toEqual([]);
     expect(reasons(p)).toEqual([
-      "Query.search implementation-not-found: `resolve_stats` is imported by app/schema.py from 'external_pkg', which is not indexed here (a package, a path alias, or a module without that function)",
+      "Query.search implementation-not-found: `resolve_stats` is imported by app/schema.py from 'external_pkg', which is not indexed here (a package or a path alias)",
     ]);
   });
 

@@ -565,7 +565,7 @@ describe('round-4 review', () => {
       resolveImplementation: () => [],
     });
     expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found',
-      detail: "`getOrder` is imported by srv/server.js from './handlers', which is not indexed here (a package, a path alias, or a module without that function)" })]);
+      detail: "`getOrder` is imported by srv/server.js from './handlers', which is not indexed here (a package or a path alias)" })]);
   });
 
   it('an imported handler binds only in the module it was imported from', () => {

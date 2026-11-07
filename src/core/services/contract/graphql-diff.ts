@@ -203,15 +203,27 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
     out.push(change(h.files[0], name, 1, 'schema-unassessed', `${name} is new and defined in more than one file at head, so it is not compared`));
   }
   // ── Directive definitions: a client writes them in its operations ──
+  // A directive defined in two files (each subgraph declaring `@key`) is compared by fingerprint,
+  // like an ambiguous type: never read as removed or added.
+  const bAmbD = new Map(base.ambiguousDirectives.map(a => [a.name, a]));
+  const hAmbD = new Map(head.ambiguousDirectives.map(a => [a.name, a]));
+  for (const name of new Set([...bAmbD.keys(), ...hAmbD.keys()])) {
+    const b = bAmbD.get(name);
+    const h = hAmbD.get(name);
+    if (b && h && b.fingerprint === h.fingerprint) continue;
+    const files = (h ?? b)!.files;
+    out.push(change(files[0], `@${name}`, 1, 'schema-unassessed', `directive @${name} is defined in more than one file ${b && h ? 'on both sides and changed' : h ? 'at head' : 'at the base revision'}, so it is not compared`));
+  }
   for (const [name, d] of head.directives) {
     const address = `@${name}`;
     const old = base.directives.get(name);
+    if (bAmbD.has(name)) continue;
     if (!old) { out.push(change(d.file, address, d.line, 'directive-added', `directive @${name} added`)); continue; }
     for (const loc of old.locations) if (!d.locations.includes(loc)) out.push(change(d.file, address, d.line, 'directive-location-removed', `directive @${name} no longer allowed on ${loc}`, loc));
     if (old.repeatable && !d.repeatable) out.push(change(d.file, address, d.line, 'directive-repeatable-removed', `directive @${name} is no longer repeatable`));
     diffArgs(d.file, address, d.line, old.args, d.args, out);
   }
-  for (const [name, old] of base.directives) if (!head.directives.has(name)) out.push(change(old.file, `@${name}`, old.line, 'directive-removed', `directive @${name} removed`));
+  for (const [name, old] of base.directives) if (!head.directives.has(name) && !hAmbD.has(name)) out.push(change(old.file, `@${name}`, old.line, 'directive-removed', `directive @${name} removed`));
   if (base.schemaDirectivesHash !== head.schemaDirectivesHash) {
     out.push(change('', 'schema', 1, 'schema-unassessed', 'a directive on `schema` changed (directives are outside the model)'));
   }
