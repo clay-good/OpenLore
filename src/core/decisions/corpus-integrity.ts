@@ -1145,7 +1145,7 @@ export async function detectCorpusIntegrity(
       try {
         const deltaSpec: SpecDocument = {
           domain: `${domain}@change:${change}`,
-          file: relative(rootPath, deltaSpecPath),
+          file: corpusRelPath(rootPath, deltaSpecPath),
           text: await readCorpusFile(rootPath, relative(rootPath, deltaSpecPath), readBudget),
         };
         for (const requirement of requirementBlocks(deltaSpec)) {
