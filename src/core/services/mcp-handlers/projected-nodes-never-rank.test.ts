@@ -57,6 +57,12 @@ const OPERATIONS: FunctionNode[] = [
   }),
 ];
 
+/** A protobuf service about orders: RPCs and messages (change: add-contract-graph-projection). */
+const PROTOBUF: FunctionNode[] = [
+  makeNode({ id: 'orders.proto::/orders.v1.OrderService/CreateOrder', name: '/orders.v1.OrderService/CreateOrder', filePath: 'orders.proto', language: 'Protobuf', signature: 'rpc CreateOrder(CreateOrderRequest) returns (Order)' }),
+  ...Array.from({ length: 8 }, (_, i) => makeNode({ id: `orders.proto::orders.v1.Order${i}`, name: `orders.v1.Order${i}`, filePath: 'orders.proto', language: 'Protobuf', signature: `message Order${i}` })),
+];
+
 describe('projected declarations never rank as code', () => {
   let projectDir: string;
   let outputDir: string;
@@ -67,7 +73,7 @@ describe('projected declarations never rank as code', () => {
     vi.stubEnv('EMBED_BASE_URL', '');
     vi.stubEnv('EMBED_MODEL', '');
     _resetVectorIndexCachesForTesting();
-    await VectorIndex.build(outputDir, [...CODE, ...SCHEMAS, ...OPERATIONS], [], new Set(), new Set(), null);
+    await VectorIndex.build(outputDir, [...CODE, ...SCHEMAS, ...OPERATIONS, ...PROTOBUF], [], new Set(), new Set(), null);
     _resetVectorIndexCachesForTesting();
   });
 
@@ -84,6 +90,7 @@ describe('projected declarations never rank as code', () => {
 
     expect(res.results.length).toBeGreaterThan(0);
     expect(res.results.map(r => r.language)).not.toContain('OpenAPI');
+    expect(res.results.map(r => r.language)).not.toContain('Protobuf');
     expect(res.results.map(r => r.name)).toContain('createOrder');
   });
 
@@ -109,6 +116,7 @@ describe('projected declarations never rank as code', () => {
     // An agent cannot insert a step into a JSON schema; recommending one is a wrong answer
     // delivered with the product's confidence behind it.
     expect(res.candidates.map(c => c.language)).not.toContain('OpenAPI');
+    expect(res.candidates.map(c => c.language)).not.toContain('Protobuf');
   });
 
   it('orient briefs on the code in scope, not on the document that mentions it', async () => {
@@ -120,6 +128,7 @@ describe('projected declarations never rank as code', () => {
 
     expect(res.relevantFunctions.length).toBeGreaterThan(0);
     expect(res.relevantFunctions.map(f => f.language ?? '')).not.toContain('OpenAPI');
-    for (const p of res.insertionPoints ?? []) expect(p.language ?? '').not.toBe('OpenAPI');
+    expect(res.relevantFunctions.map(f => f.language ?? '')).not.toContain('Protobuf');
+    for (const p of res.insertionPoints ?? []) expect(['OpenAPI', 'Protobuf']).not.toContain(p.language ?? '');
   });
 });

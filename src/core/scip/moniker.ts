@@ -61,6 +61,9 @@ export function scipLanguageName(openloreLanguage: string): string {
       return 'CPP';
     case 'C#':
       return 'CSharp';
+    // A `.proto` file's RPCs and messages (change: add-contract-graph-projection).
+    case 'Protobuf':
+      return 'Protobuf';
     default:
       // 'unknown' and anything SCIP lacks an enum value for.
       return '';

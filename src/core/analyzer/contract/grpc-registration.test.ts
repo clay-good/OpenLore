@@ -21,7 +21,7 @@ func main() {
 `;
     expect(scanGrpcRegistrations('cmd/server/main.go', src)).toEqual([
       { file: 'cmd/server/main.go', line: 5, runtime: 'go', service: 'OrderService', implType: 'orderServer' },
-      { file: 'cmd/server/main.go', line: 6, runtime: 'go', service: 'Billing', implType: 'Server' },
+      { file: 'cmd/server/main.go', line: 6, runtime: 'go', service: 'Billing', implType: 'Server', implQualifier: 'billing' },
       { file: 'cmd/server/main.go', line: 7, runtime: 'go', service: 'Health', implType: 'healthImpl' },
     ]);
   });
@@ -82,7 +82,7 @@ def serve():
 `;
     expect(scanGrpcRegistrations('app/server.py', src)).toEqual([
       { file: 'app/server.py', line: 7, runtime: 'python', service: 'OrderService', implType: 'OrderServicer' },
-      { file: 'app/server.py', line: 8, runtime: 'python', service: 'Billing', implType: 'BillingServicer' },
+      { file: 'app/server.py', line: 8, runtime: 'python', service: 'Billing', implType: 'BillingServicer', implQualifier: 'billing' },
     ]);
   });
 
@@ -158,12 +158,33 @@ server.addService(pkg.C.service, makeImpl());
     ]);
   });
 
-  it('does not report an addService without a generated `.service` descriptor', () => {
+  it('reads the static-codegen form (a service object, no `.service`) as a candidate the projector confirms', () => {
     const src = `container.addService(LoggerService, { log });
-server.addService(OrderServiceService, impl);
+server.addService(services.GreeterService, { sayHello });
 registry.addService('orders', handler);
 `;
-    expect(scanGrpcRegistrations('s.ts', src)).toEqual([]);
+    expect(scanGrpcRegistrations('s.ts', src)).toEqual([
+      { file: 's.ts', line: 1, runtime: 'node', service: 'LoggerService', descriptor: false, methods: [{ key: 'log', fn: 'log' }] },
+      { file: 's.ts', line: 2, runtime: 'node', service: 'services.GreeterService', descriptor: false, methods: [{ key: 'sayHello', fn: 'sayHello' }] },
+    ]);
+  });
+
+  it('a Go service named `…Handler` is read; grpc-gateway\'s three-argument form is not; nor a method declaration', () => {
+    const src = `package main
+func (r *Reg) RegisterFooServer(s grpc.ServiceRegistrar, f FooServer) {}
+func main() {
+	pb.RegisterEventHandlerServer(s, &h{})
+	gw.RegisterOrderServiceHandlerServer(ctx, mux, &orderServer{})
+}
+`;
+    expect(scanGrpcRegistrations('main.go', src)).toEqual([{ file: 'main.go', line: 4, runtime: 'go', service: 'EventHandler', implType: 'h' }]);
+  });
+
+  it('the markers are linear on an adversarial word', () => {
+    const t = Date.now();
+    scanGrpcRegistrations('x.go', `var s = "${'Register'.repeat(80_000)}"`);
+    scanGrpcRegistrations('x.py', `s = "${'add_'.repeat(160_000)}"`);
+    expect(Date.now() - t).toBeLessThan(1_500);
   });
 
   it('does not read a registration in a comment, string or template literal', () => {

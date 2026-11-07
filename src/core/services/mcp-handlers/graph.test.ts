@@ -1629,3 +1629,19 @@ describe('confidenceBoundary wiring — handleTraceExecutionPath', () => {
     expect(r.confidenceBoundary.complete).toBe(true); // empty basis, current index
   });
 });
+
+describe('leaf and low-risk lists hold code only (change: add-contract-graph-projection)', () => {
+  it('a projected declaration is neither a leaf nor a refactor candidate, and its binding is not a call', async () => {
+    const nodes = [
+      makeNode({ id: 'srv/main.go::orderServer.GetOrder', fanIn: 0, fanOut: 0 }),
+      makeNode({ id: 'orders.proto::/orders.v1.OrderService/GetOrder', language: 'Protobuf', fanIn: 0, fanOut: 0 }),
+      makeNode({ id: 'orders.proto::orders.v1.Order', language: 'Protobuf', fanIn: 0, fanOut: 0 }),
+    ];
+    const edges = [{ ...makeEdge('srv/main.go::orderServer.GetOrder', 'orders.proto::/orders.v1.OrderService/GetOrder'), kind: 'implements_endpoint' as const }];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
+    const leaves = await handleGetLeafFunctions('/tmp/proj') as { leaves: Array<{ language: string; file: string }> };
+    expect(leaves.leaves.map(l => l.file)).toEqual(['srv/main.go']);
+    const low = await handleGetLowRiskRefactorCandidates('/tmp/proj') as { candidates: Array<{ language: string }> };
+    expect(low.candidates.map(c => c.language)).not.toContain('Protobuf');
+  });
+});

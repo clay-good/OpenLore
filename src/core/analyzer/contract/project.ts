@@ -130,6 +130,12 @@ export interface ContractDisclosure {
    * computed, NOT because nothing is unmatched.
    */
   notAssessed?: string[];
+  /**
+   * What was said after the fact and withholds nothing: references that drew no edge, elements
+   * outside the model. Kept out of `notAssessed`, which consumers read as "a binding may be
+   * missing" — an unresolved `google.protobuf.Timestamp` leaves every handler bound.
+   */
+  notes?: string[];
   /** Every cap the projection stopped at (both can fire in one build). */
   truncations?: Array<{ reason: 'file-cap' | 'proto-file-cap' | 'operation-cap' | 'schema-cap'; cap: number; seen: number }>;
 }
@@ -171,6 +177,7 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     unboundRpcs: p.unboundRpcs,
     skippedCandidates: p.skippedCandidates,
     ...(p.notAssessed ? { notAssessed: p.notAssessed } : {}),
+    ...(p.notes ? { notes: p.notes } : {}),
     ...(p.truncations ? { truncations: p.truncations } : {}),
   };
   const lists: Array<Disclosed<unknown>> = [
@@ -178,7 +185,7 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     rest.unreadSpecifications, rest.unboundClientCalls, rest.ambiguousAddresses,
     rest.unresolvedGeneratedBindings, rest.unresolvedRegistrations, rest.unboundRpcs, rest.skippedCandidates,
   ];
-  const silent = lists.every(l => l.total === 0) && !rest.notAssessed && !rest.truncations;
+  const silent = lists.every(l => l.total === 0) && !rest.notAssessed && !rest.notes && !rest.truncations;
   return silent ? undefined : rest;
 }
 
@@ -269,6 +276,7 @@ interface Indexed { node: FunctionNode; doc: ContractDocument; segments: string[
  */
 export function projectContracts(input: ContractProjectionInput): ProjectedContracts {
   const notAssessed = new Set<string>(input.extractionNotAssessed ?? []);
+  const notes = new Set<string>();
   const truncations: NonNullable<ContractDisclosure['truncations']> = [];
   const omitted = input.filesOmitted ?? 0;
 
@@ -298,10 +306,10 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     for (const reason of protoNotAssessed) notAssessed.add(reason);
     if (protoUnread > 0) truncations.push({ reason: 'proto-file-cap', cap: MAX_PROTO_FILES, seen: protoCandidates.length + (input.protoFilesOmitted ?? 0) });
     for (const t of proto?.truncations ?? []) truncations.push(t);
-    if (proto?.outsideModel.length) notAssessed.add(`protobuf elements outside the model were not read: ${proto.outsideModel.join(', ')}`);
+    if (proto?.outsideModel.length) notes.add(`protobuf elements outside the model were not read: ${proto.outsideModel.join(', ')}`);
     if (proto?.unresolvedTypes) {
       // Said after the fact, like an unresolved `$ref`: it draws no edge, and withholds nothing.
-      notAssessed.add(`${proto.unresolvedTypes} protobuf type reference(s) resolve to no type projected from the files read (an import from outside this repository such as \`google.protobuf.*\`, a name declared in two files, or a type past the cap), so no edge was drawn for them`);
+      notes.add(`${proto.unresolvedTypes} protobuf type reference(s) resolve to no type projected from the files read (an import from outside this repository such as \`google.protobuf.*\`, a name declared in two files, or a type past the cap), so no edge was drawn for them`);
     }
     return {
       ...p,
@@ -313,6 +321,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       unresolvedRegistrations: bound(proto?.unresolvedRegistrations ?? []),
       unboundRpcs: proto && !protoWithheld ? bound(proto.unboundRpcs) : none(),
       ...(notAssessed.size ? { notAssessed: [...notAssessed].sort() } : {}),
+      ...(notes.size ? { notes: [...notes].sort() } : {}),
       ...(truncations.length ? { truncations } : {}),
     };
   };
@@ -685,7 +694,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     }
   }
   if (unresolvedRefs.size) {
-    notAssessed.add(`${unresolvedRefs.size} \`$ref\`(s) name a schema that was not projected — undeclared by this document, or past the schema cap — so no edge was drawn for them`);
+    notes.add(`${unresolvedRefs.size} \`$ref\`(s) name a schema that was not projected — undeclared by this document, or past the schema cap — so no edge was drawn for them`);
   }
 
   return finish({

@@ -33,12 +33,27 @@ export interface GrpcRegistration {
   service: string;
   /** Go, Python: the implementing type, as written (its last component). */
   implType?: string;
+  /**
+   * The package (Go) or module (Python) the type was qualified with — `v2` in `&v2.OrderServer{}`.
+   * Absent when written bare. It decides WHERE the type may be: a bare Go type is in the
+   * registration's own package, a qualified one is not.
+   */
+  implQualifier?: string;
+  /**
+   * Node: `false` when the first argument is a service object rather than a `.service`
+   * descriptor (`addService(services.GreeterService, …)`, the grpc-tools and ts-proto form). Such a
+   * call is a gRPC registration only if it names a declared service, so an unknown one is dropped
+   * rather than disclosed — `addService` is a common method name.
+   */
+  descriptor?: false;
   /** Node: each key of the implementation map, with the function it names (absent = written inline). */
   methods?: Array<{ key: string; fn?: string }>;
   /** Why the implementation is not written literally at the registration (a variable, a factory call). */
   notLiteral?: string;
 }
 
+/** Registration-shaped calls examined per file: a real file has a handful. */
+const MAX_MATCHES_PER_FILE = 1_000;
 /** Characters of argument text read per registration: a registration is short. */
 const MAX_ARG_CHARS = 16_384;
 
@@ -95,19 +110,25 @@ function lineAt(starts: readonly number[], offset: number): number {
 const IDENT_PATH = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
 const last = (path: string) => path.slice(path.lastIndexOf('.') + 1);
 
+/** The type a written name means, with the qualifier it was written under (if any). */
+const qualified = (path: string): { implType: string; implQualifier?: string } => {
+  const i = path.lastIndexOf('.');
+  return i < 0 ? { implType: path } : { implType: path.slice(i + 1), implQualifier: path.slice(0, i).split('.').pop()! };
+};
+
 /** Go: `&T{…}`, `T{…}`, `&pkg.T{}`, `new(T)` name a type; anything else does not. */
-function goImplType(arg: string): string | undefined {
+function goImplType(arg: string): { implType: string; implQualifier?: string } | undefined {
   const m = /^&?\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\{[\s\S]*\}$/.exec(arg) ?? /^new\s*\(\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\)$/.exec(arg);
-  return m ? last(m[1]) : undefined;
+  return m ? qualified(m[1]) : undefined;
 }
 
 /** Python: `Cls()`, `mod.Cls(args)` name a class; a variable or a factory call's result does not. */
-function pythonImplType(arg: string): string | undefined {
+function pythonImplType(arg: string): { implType: string; implQualifier?: string } | undefined {
   const m = /^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\([\s\S]*\)$/.exec(arg);
   if (!m) return undefined;
-  const cls = last(m[1]);
+  const q = qualified(m[1]);
   // A lower-case callee is a factory function by Python convention, not the class itself.
-  return /^[A-Z]/.test(cls) ? cls : undefined;
+  return /^[A-Z]/.test(q.implType) ? q : undefined;
 }
 
 /** Node: the keys of an object-literal implementation map, each with the function it names. */
@@ -149,7 +170,9 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
   const runtime = runtimeOf(file);
   if (!runtime || GENERATED.test(file)) return [];
   // Cheap gate before masking: the generated registration names appear literally.
-  const marker = runtime === 'go' ? /Register\w+Server\b/ : runtime === 'python' ? /add_\w+Servicer_to_server\b/ : /\.addService\b/;
+  // Anchored at a word boundary: unanchored, `\w+` retried from every position of a long word,
+  // which made one adversarial line quadratic.
+  const marker = runtime === 'go' ? /\bRegister\w+Server\b/ : runtime === 'python' ? /\badd_\w+Servicer_to_server\b/ : /\.addService\b/;
   if (!marker.test(content)) return [];
   const text = maskNonCode(content, runtime === 'python' ? 'python' : 'js');
   const starts = [0];
@@ -158,13 +181,19 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
   const pattern = runtime === 'go' ? /\bRegister([A-Z]\w*)Server\s*\(/g
     : runtime === 'python' ? /\badd_(\w+)Servicer_to_server\s*\(/g
       : /\.addService\s*\(/g;
+  let seen = 0;
   for (const m of text.matchAll(pattern)) {
+    if (++seen > MAX_MATCHES_PER_FILE) break;
     const at = m.index!;
-    // The generated stub's own definition, not a call.
-    if (/\b(?:func|def)\s+$/.test(text.slice(Math.max(0, at - 16), at))) continue;
-    // grpc-gateway's `Register…HandlerServer` registers an HTTP proxy, not a gRPC server.
-    if (runtime === 'go' && m[1].endsWith('Handler')) continue;
+    // The generated stub's own definition (or any method of that name), not a call.
+    if (/\b(?:func\s*(?:\([^()\n]*\)\s*)?|def\s+)$/.test(text.slice(Math.max(0, at - 120), at))) continue;
+    // Node: a call whose first argument is not a dotted name is not a registration. Checked on a
+    // short slice before the bounded argument read, which costs up to 16 K characters per call.
+    if (runtime === 'node' && !/^\s*[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*,/.test(text.slice(at + m[0].length, at + m[0].length + 512))) continue;
     const args = callArgs(text, at + m[0].length - 1);
+    // grpc-gateway's `Register…HandlerServer(ctx, mux, server)` registers an HTTP proxy, not a
+    // gRPC server. It takes three arguments; a real service named `…Handler` takes two.
+    if (runtime === 'go' && m[1].endsWith('Handler') && args?.length === 3) continue;
     const line = lineAt(starts, at);
     if (!args) {
       // Node names its service in the first argument, not the matched name: read it from the
@@ -177,17 +206,19 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
     }
     if (runtime === 'go') {
       const impl = args[1] !== undefined ? goImplType(args[1]) : undefined;
-      out.push({ file, line, runtime, service: m[1], ...(impl ? { implType: impl } : { notLiteral: `the implementation is \`${(args[1] ?? '').slice(0, 60)}\`, not a type written at the registration` }) });
+      out.push({ file, line, runtime, service: m[1], ...(impl ?? { notLiteral: `the implementation is \`${(args[1] ?? '').slice(0, 60)}\`, not a type written at the registration` }) });
     } else if (runtime === 'python') {
       const impl = args[0] !== undefined ? pythonImplType(args[0]) : undefined;
-      out.push({ file, line, runtime, service: m[1], ...(impl ? { implType: impl } : { notLiteral: `the servicer is \`${(args[0] ?? '').slice(0, 60)}\`, not a class instantiated at the registration` }) });
+      out.push({ file, line, runtime, service: m[1], ...(impl ?? { notLiteral: `the servicer is \`${(args[0] ?? '').slice(0, 60)}\`, not a class instantiated at the registration` }) });
     } else {
       const svc = /^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.service$/.exec(args[0] ?? '');
-      // `addService` is a common method name; without the generated `.service` descriptor it is
-      // not a gRPC registration at all, so it is not reported.
-      if (!svc) continue;
+      // Without the `.service` descriptor, the first argument may still be the service object the
+      // static generators export (`services.GreeterService`); the projector keeps it only when it
+      // names a declared service.
+      const bare = !svc && IDENT_PATH.test(args[0] ?? '') ? args[0] : undefined;
+      if (!svc && !bare) continue;
       const methods = args[1] !== undefined ? nodeImplMap(args[1]) : undefined;
-      out.push({ file, line, runtime, service: svc[1], ...(methods ? { methods } : { notLiteral: `the implementation is \`${(args[1] ?? '').slice(0, 60)}\`, not an object literal` }) });
+      out.push({ file, line, runtime, service: svc ? svc[1] : bare!, ...(bare ? { descriptor: false as const } : {}), ...(methods ? { methods } : { notLiteral: `the implementation is \`${(args[1] ?? '').slice(0, 60)}\`, not an object literal` }) });
     }
   }
   return out;

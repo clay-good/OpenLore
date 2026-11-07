@@ -332,7 +332,7 @@ app.post('/orders', createOrder);
     const from = result.edges.filter(e => e.kind === 'references_schema')
       .map(e => result.nodes.get(e.calleeId)?.name);
     expect(from).not.toContain('#/components/schemas/Missing');
-    expect(result.contracts?.notAssessed?.join(' ') ?? '').toMatch(/not projected|unresolved \$ref/);
+    expect(result.contracts?.notes?.join(" ") ?? "").toMatch(/not projected|unresolved \$ref/);
   });
 
   it('follows a component-level parameter or response through to the schema it names', async () => {

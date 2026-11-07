@@ -79,19 +79,37 @@ const declarationNode = (file: string, name: string, line: number, signature: st
 const rpcSignature = (rpc: ProtoRpc) =>
   `rpc ${rpc.name}(${rpc.clientStreaming ? 'stream ' : ''}${rpc.request.written}) returns (${rpc.serverStreaming ? 'stream ' : ''}${rpc.response.written})`;
 
+/** A module's name as Python imports it: `svc/servicer.py` and `svc/servicer/__init__.py` are `servicer`. */
+const moduleName = (f: string) => {
+  const base = f.slice(f.lastIndexOf('/') + 1).replace(/\.pyw?$/i, '');
+  return base === '__init__' ? (dirOf(f).replace(/\/$/, '').split('/').pop() ?? '') : base;
+};
+/** The last segment of a file's directory: a Go package's conventional name. */
+const dirName = (f: string) => dirOf(f).replace(/\/$/, '').split('/').pop() ?? '';
+
 /**
- * The ONE implementation among `candidates`: the one in the registration's own file, else the
- * one in its directory (a Go package, a Python package), else the only one anywhere. Two at the
- * same level is an ambiguity, never a pick.
+ * The ONE implementation among `candidates`, where the registration's own scope says it may be.
+ * Two in the same place is an ambiguity, never a pick; a candidate outside that place is never
+ * taken just because it is the only one.
+ *
+ *   Go, bare `T`        the registration's own package (its directory) — nowhere else
+ *   Go, `pkg.T`         another package whose directory is named `pkg` (an import alias that
+ *                       differs from the directory binds nothing)
+ *   Python, bare `C`    the registration's own file, else the only one anywhere (an import)
+ *   Python, `mod.C`     a module named `mod`
+ *   Node                the registration's own file, else the only one anywhere (an import)
  */
 function pick(reg: GrpcRegistration, candidates: readonly FunctionNode[]): FunctionNode | 'ambiguous' | undefined {
-  if (!candidates.length) return undefined;
-  for (const level of [(n: FunctionNode) => n.filePath === reg.file, (n: FunctionNode) => dirOf(n.filePath) === dirOf(reg.file), () => true]) {
-    const at = candidates.filter(level);
-    if (at.length === 1) return at[0];
-    if (at.length > 1) return 'ambiguous';
+  const one = (at: readonly FunctionNode[]) => (at.length === 1 ? at[0] : at.length > 1 ? 'ambiguous' as const : undefined);
+  if (reg.runtime === 'go') {
+    if (reg.implQualifier === undefined) return one(candidates.filter(n => dirOf(n.filePath) === dirOf(reg.file)));
+    return one(candidates.filter(n => dirOf(n.filePath) !== dirOf(reg.file) && dirName(n.filePath) === reg.implQualifier));
   }
-  return undefined;
+  if (reg.runtime === 'python' && reg.implQualifier !== undefined) {
+    return one(candidates.filter(n => moduleName(n.filePath) === reg.implQualifier));
+  }
+  const local = candidates.filter(n => n.filePath === reg.file);
+  return local.length ? one(local) : one(candidates);
 }
 
 export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProjection {
@@ -220,6 +238,9 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
   const registrations = [...input.registrations].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line);
   for (const reg of registrations) {
     const svc = serviceFor(reg);
+    // A Node call naming a service object rather than a `.service` descriptor is a gRPC
+    // registration only if that service is declared: `addService` is a common method name.
+    if (!svc.name && reg.descriptor === false) continue;
     if (!svc.name) {
       out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: reg.service, reason: svc.reason!, ...(svc.candidates ? { detail: svc.candidates.sort().join(', ') } : {}) });
       continue;

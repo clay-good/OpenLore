@@ -161,13 +161,19 @@ The rules refuse rather than guess:
 - A service named by two packages, or declared in two files, binds nothing (`ambiguous-service`).
   A service no file read declares — its `.proto` lives in another repository — is
   `unknown-service`.
-- The implementing method is looked for in the registration's file, then its directory, then
-  anywhere; two at the same level bind nothing (`ambiguous-implementation`).
+- The implementing method is looked for only where the registration's own scope says the type
+  is. Go: a bare `orderServer` is in the registration's own package (its directory) and nowhere
+  else; `v2.OrderServer` is in another package whose directory is named `v2`. Python: a bare class
+  is in the registration's file or, failing that, the only one anywhere; `servicer.OrderServicer` is
+  in a module named `servicer`. Node: the registration's file, else the only one anywhere. Two
+  candidates in that scope bind nothing (`ambiguous-implementation`); a lone candidate outside it
+  is never taken.
+- Node's static-codegen form, `addService(services.GreeterService, { … })`, is read too, and binds
+  only when it names a declared service — `addService` is a common method name.
 - Registrations in comments, strings and test files are not read, and generated stubs are skipped:
   they define the registration function rather than call it.
-- Other styles are not read: Go `s.RegisterService(&pb.X_ServiceDesc, impl)`, grpc-tools static
-  stubs (`server.addService(OrderServiceService, impl)`), Python keyword arguments, and quoted keys in
-  a Node implementation map. Their RPCs stay in `unboundRpcs`.
+- Other styles are not read: Go `s.RegisterService(&pb.X_ServiceDesc, impl)`, Python keyword
+  arguments, and quoted keys in a Node implementation map. Their RPCs stay in `unboundRpcs`.
 
 What did not bind is in the build result: `unresolvedRegistrations` (with the reasons above) and
 `unboundRpcs`. Registrations are read in **Go, Python and Node only**, so an RPC served from Java
@@ -175,7 +181,14 @@ or C# is in `unboundRpcs` too: that list means "not bound", never "not implement
 calls are not read, so a protobuf RPC has no `consumes_endpoint` edge.
 
 A method that serves an RPC is invoked from outside the code, so — like an HTTP handler — it is a
-reachability root rather than a dead-code candidate.
+reachability root rather than a dead-code candidate. A registration that bound nothing leaves its
+implementation unrooted, so `find_dead_code` names it under `contractRootsNotAssessed`. What is
+said after the fact and withholds nothing — a type imported from outside the repository, an
+`extend` block — is under `notes`, not `notAssessed`.
+
+Registrations are read when the repository is analyzed. Like a specification, they are not
+re-read by the watcher's per-file rebuild, so run `openlore analyze` after changing which type a
+registration names.
 
 ### Breaking changes
 

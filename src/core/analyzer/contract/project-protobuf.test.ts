@@ -215,20 +215,43 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
     ]);
   });
 
-  it('prefers the registration\'s file, then its directory, then the only candidate', () => {
+  it('a bare Go type binds only in the registration\'s own package; a qualified one only in that package', () => {
     const sameFile = fn('cmd/server/main.go::orderServer.GetOrder');
     const sameDir = fn('cmd/server/impl.go::orderServer.GetOrder');
     const elsewhere = fn('internal/orders/server.go::orderServer.GetOrder');
-    const other = fn('internal/billing/server.go::orderServer.GetOrder');
-    const target = (code: FunctionNode[]) => direct({ resolveImplementation: resolverOver(code) })
-      .edges.filter(e => e.kind === 'implements_endpoint').map(e => e.callerId);
-    expect(target([elsewhere, sameDir, sameFile])).toEqual(['cmd/server/main.go::orderServer.GetOrder']);
+    const target = (code: FunctionNode[], reg: Partial<GrpcRegistration> = {}) =>
+      direct({ registrations: [goReg(reg)], resolveImplementation: resolverOver(code) })
+        .edges.filter(e => e.kind === 'implements_endpoint').map(e => e.callerId);
     expect(target([elsewhere, sameDir])).toEqual(['cmd/server/impl.go::orderServer.GetOrder']);
-    expect(target([elsewhere])).toEqual(['internal/orders/server.go::orderServer.GetOrder']);
-    // Two candidates, neither in the registration's file or directory: no pick.
-    const p = direct({ resolveImplementation: resolverOver([elsewhere, other]) });
-    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
-    expect(p.unresolvedRegistrations.map(r => r.reason)).toEqual(['ambiguous-implementation']);
+    expect(target([sameFile, sameDir])).toEqual([]); // two in one package: ambiguous
+    // Another binary's unregistered type of the same name is never taken (review round 1).
+    expect(target([elsewhere])).toEqual([]);
+    // `&orders.orderServer{}`: the package named `orders`, never the registration's own.
+    expect(target([sameDir, elsewhere], { implQualifier: 'orders' })).toEqual(['internal/orders/server.go::orderServer.GetOrder']);
+    expect(target([sameDir], { implQualifier: 'orders' })).toEqual([]);
+  });
+
+  it('a qualified Python class binds only in the module it names', () => {
+    const legacy = fn('py/legacy/servicer.py::OrderServicer.GetOrder', { language: 'Python' });
+    const svc = fn('py/svc/servicer.py::OrderServicer.GetOrder', { language: 'Python' });
+    const reg = { file: 'py/legacy/serve.py', line: 5, runtime: 'python' as const, service: 'OrderService', implType: 'OrderServicer', implQualifier: 'servicer' };
+    const both = direct({ registrations: [reg], resolveImplementation: resolverOver([legacy, svc]) });
+    expect(both.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(both.unresolvedRegistrations.map(r => r.reason)).toEqual(['ambiguous-implementation']);
+    const one = direct({ registrations: [{ ...reg, implQualifier: 'other' }], resolveImplementation: resolverOver([legacy]) });
+    expect(one.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+  });
+
+  it('a static-codegen Node registration binds a declared service and drops an unknown one silently', () => {
+    const p = direct({
+      registrations: [
+        { file: 'srv/main.js', line: 3, runtime: 'node', service: 'services.OrderServiceService', descriptor: false, methods: [{ key: 'getOrder', fn: 'getOrder' }] },
+        { file: 'srv/main.js', line: 4, runtime: 'node', service: 'LoggerService', descriptor: false, methods: [{ key: 'log', fn: 'log' }] },
+      ],
+      resolveImplementation: resolverOver([fn('srv/main.js::getOrder', { language: 'TypeScript', className: undefined })]),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['srv/main.js::getOrder -> proto/orders.proto::/shop.orders.v1.OrderService/GetOrder']);
+    expect(p.unresolvedRegistrations).toEqual([]);
   });
 
   it('binds a Python servicer by its class', () => {
@@ -353,7 +376,8 @@ describe('projectContracts with protobuf', () => {
     expect(p.unboundRpcs).toEqual({ items: [], total: 0 });
     expect(p.unresolvedRegistrations).toEqual({ items: [], total: 0 });
     // The unresolved google.protobuf import is said, and withholds nothing.
-    expect(p.notAssessed).toEqual([expect.stringMatching(/^1 protobuf type reference\(s\) resolve to no type/)]);
+    expect(p.notes).toEqual([expect.stringMatching(/^1 protobuf type reference\(s\) resolve to no type/)]);
+    expect(p.notAssessed).toBeUndefined();
   });
 
   it('discloses unbound RPCs and unresolved registrations, bounded with totals', () => {
@@ -444,7 +468,7 @@ describe('one format never withholds the other', () => {
       files: [{ path: 'proto/orders.proto', content: ORDERS.replace('enum Status', 'extend google.protobuf.MethodOptions { string scope = 50001; }\nenum Status') }, { path: 'proto/common.proto', content: COMMON }],
       grpcRegistrations: [],
     });
-    expect(p.notAssessed).toEqual(expect.arrayContaining([expect.stringContaining('outside the model were not read: extend')]));
+    expect(p.notes).toEqual(expect.arrayContaining([expect.stringContaining('outside the model were not read: extend')]));
     expect(p.unboundRpcs.total).toBe(2);
   });
 
