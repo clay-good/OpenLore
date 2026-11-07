@@ -45,7 +45,7 @@ import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
 import { generatedClientFunctionsFor } from './contract/generated-client.js';
-import { scanGrpcRegistrations, isGeneratedGrpcStub, importTargets, type GrpcRegistration, type ImportTarget } from './contract/grpc-registration.js';
+import { scanGrpcRegistrations, isGeneratedGrpcStub, createImportResolver, type GrpcRegistration, type ImportTarget } from './contract/grpc-registration.js';
 import { isProtobufPath } from './contract/protobuf.js';
 import { isGraphqlPath } from './contract/graphql.js';
 import { scanResolverMaps, type ResolverMap } from './contract/graphql-resolvers.js';
@@ -5669,6 +5669,8 @@ export interface CallGraphBuilderOptions {
   protoFilesOmitted?: number;
   /** GraphQL files the walk did not retain. */
   graphqlFilesOmitted?: number;
+  /** Schema files deliberately not read (fixtures, a Relay compiler's copy), each with why. */
+  contractFilesSkipped?: ReadonlyArray<{ file: string; reason: string }>;
   /**
    * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
    * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
@@ -5688,6 +5690,7 @@ export class CallGraphBuilder {
   private readonly contractFilesOmitted: number;
   private readonly protoFilesOmitted: number;
   private readonly graphqlFilesOmitted: number;
+  private readonly contractFilesSkipped: ReadonlyArray<{ file: string; reason: string }>;
   private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
@@ -5699,6 +5702,7 @@ export class CallGraphBuilder {
     this.contractFilesOmitted = options.contractFilesOmitted ?? 0;
     this.protoFilesOmitted = options.protoFilesOmitted ?? 0;
     this.graphqlFilesOmitted = options.graphqlFilesOmitted ?? 0;
+    this.contractFilesSkipped = options.contractFilesSkipped ?? [];
     this.buildOutput = options.buildOutput;
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
@@ -6754,18 +6758,24 @@ export class CallGraphBuilder {
           resolveGrpcImplementation: (reg, name) => trie.findBySimpleName(name).filter(n =>
             !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !isGeneratedGrpcStub(n.filePath)
             && runtimeLanguages[reg.runtime].has(n.language)
-            && (reg.implType === undefined || n.className === reg.implType)),
+            && (reg.implType === undefined ? !n.className : n.className === reg.implType)),
           files: this.contractFiles,
           filesOmitted: this.contractFilesOmitted,
           protoFilesOmitted: this.protoFilesOmitted,
           graphqlFilesOmitted: this.graphqlFilesOmitted,
+          ...(this.contractFilesSkipped.length ? { skippedFiles: this.contractFilesSkipped } : {}),
           importTargets: (() => {
+            // Built lazily, once: a repository with no imported handler never indexes its files.
+            let resolve: ReturnType<typeof createImportResolver> | undefined;
             const memo = new Map<string, readonly ImportTarget[]>();
-            const files = [...fileContents.keys()];
             return (from: string, spec: string, name: string, runtime: 'node' | 'python') => {
               const key = `${runtime}\0${from}\0${spec}\0${name}`;
               let hit = memo.get(key);
-              if (!hit) { hit = importTargets(from, spec, name, runtime, files, f => fileContents.get(f)); memo.set(key, hit); }
+              if (!hit) {
+                resolve ??= createImportResolver([...fileContents.keys()], f => fileContents.get(f));
+                hit = resolve(from, spec, name, runtime);
+                memo.set(key, hit);
+              }
               return hit;
             };
           })(),
@@ -6780,8 +6790,10 @@ export class CallGraphBuilder {
             }
             return maps;
           },
+          // A function a map names is a top-level function or an object-literal method — never a
+          // CLASS method (`class OrderRepo { getOrder() }`), which a map cannot name bare.
           resolveGraphqlImplementation: (map, name) => trie.findBySimpleName(name).filter(n =>
-            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath)
+            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !n.className
             && (map.runtime === 'python' ? n.language === 'Python' : n.language === 'TypeScript' || n.language === 'JavaScript')),
           ...(extractionNotAssessed.size ? { extractionNotAssessed: [...extractionNotAssessed] } : {}),
           routes: httpRoutes,

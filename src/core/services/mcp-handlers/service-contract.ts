@@ -229,8 +229,7 @@ async function clientSchemas(root: string): Promise<Set<string>> {
 }
 
 export async function headSpecs(root: string, listed?: string[]): Promise<SpecSide> {
-  const client = await clientSchemas(root);
-  const w = windows((listed ?? await workingFiles(root, SPEC_EXT)).filter(f => !client.has(f)));
+  const w = windows(listed ?? await workingFiles(root, SPEC_EXT));
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
   const protoUnread: SpecSide['unread'] = [];
@@ -260,8 +259,7 @@ async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
   const prefix = (await getRepoPrefix(root)) ?? '';
   const full = listing.split('\0').filter(f => f && f.startsWith(prefix) && SPEC_EXT.test(f.slice(prefix.length)) && !SKIP_DIR.test(f.slice(prefix.length)))
     .map(f => f.slice(prefix.length)).sort(sortStr);
-  const client = await clientSchemas(root);
-  const w = windows(full.filter(f => !client.has(f)));
+  const w = windows(full);
   const paths = w.read.map(f => prefix + f);
   const blobs = await readBlobsAtRef(root, commit, paths).catch(() => readBlobsPerFile(root, commit, paths));
   const texts = new Map<string, string>();
@@ -548,7 +546,7 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
       if (body.kind === 'absent') {
         findings.push({ code: 'contract-payload-missing-required', severity: 'warning', source: 'service-contract', subject: emittedText(`${site.file}:${site.line}`),
           discriminator: address, message: emittedText(`${site.file}:${site.line} calls ${address} with no request body; the specification (${o.file}:${o.op.line}) requires ${required.join(', ')}.`),
-          location: { path: site.file, line: site.line } });
+          location: { path: emittedText(site.file), line: site.line } });
         continue;
       }
       if (body.kind === 'not-literal') { notAssessed.push({ file: site.file, line: site.line, operation: emittedText(address), reason: body.reason }); continue; }
@@ -556,7 +554,7 @@ async function checkPayloads(root: string, docs: readonly ContractDocument[], fi
       if (!missing.length) { conforming++; continue; }
       findings.push({ code: 'contract-payload-missing-required', severity: 'warning', source: 'service-contract', subject: emittedText(`${site.file}:${site.line}`),
         discriminator: address, message: emittedText(`${site.file}:${site.line} calls ${address} without required body propert${missing.length === 1 ? 'y' : 'ies'} ${missing.join(', ')} (${o.file}:${o.op.line}).`),
-        location: { path: site.file, line: site.line } });
+        location: { path: emittedText(site.file), line: site.line } });
     }
   }
   if (capped) boundaries.push(`Request bodies were read at the first ${MAX_PAYLOAD_SITES} call sites only.`);
@@ -598,6 +596,12 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   if (head.proto.capped) boundaries.push(`Past the protobuf cap (${MAX_PROTO_FILES} files), ${head.proto.candidates.size - head.proto.examined.size} .proto file(s) were not read.`);
   if (head.proto.unread.length) boundaries.push(`${head.proto.unread.length} .proto file(s) could not be read (over ${MAX_SPEC_BYTES / 1024 / 1024} MB, a link out of the repository, or an I/O error), so their schemas are not assessed.`);
   if (head.graphql.capped) boundaries.push(`Past the GraphQL cap (${MAX_GRAPHQL_FILES} schema files, ${MAX_CANDIDATES} files read), ${head.graphql.candidates.size - head.graphql.examined.size} GraphQL file(s) were not read.`);
+  {
+    // Graded all the same — never dropped on a config's say-so — but named, so a frontend reading
+    // these as its own breaking changes knows they may be a vendor's schema.
+    const relay = [...await clientSchemas(root)].filter(f => head.graphql.candidates.has(f));
+    if (relay.length) boundaries.push(emittedText(`${relay.join(', ')} ${relay.length === 1 ? 'is' : 'are'} named by a Relay compiler config: possibly a copy of another service's schema, graded here as this repository's.`));
+  }
   if (head.graphql.unread.length) boundaries.push(`${head.graphql.unread.length} GraphQL file(s) could not be read, so their schemas are not assessed.`);
   const notAssessed = [...head.unreadable, ...head.proto.unreadable, ...head.graphql.unreadable].map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
   // Bounded and screened: a file can name thousands of distinct directives.
@@ -649,13 +653,13 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     for (const u of p.declaredUnimplemented) {
       findings.push({ code: 'contract-declared-unimplemented', severity: 'warning', source: 'service-contract', subject: emittedText(u.address),
         message: emittedText(`${u.address} is declared in ${u.file}:${u.line} but no indexed route handler serves it.`),
-        location: { path: u.file, line: u.line } });
+        location: { path: emittedText(u.file), line: u.line } });
     }
     for (const u of p.implementedUndeclared) {
       const subject = `${u.file}::${u.method} ${u.path}`;
       findings.push({ code: 'contract-implemented-undeclared', severity: 'warning', source: 'service-contract', subject: emittedText(subject),
         message: emittedText(`${u.method} ${u.path} (in ${u.file}) is under a path the specification covers, but the specification does not declare it.`),
-        location: { path: u.file } });
+        location: { path: emittedText(u.file) } });
     }
     if (p.dynamic) boundaries.push(`${p.dynamic} route handler(s) with a dynamic path were not compared with the specifications.`);
     parity = { assessed: true, matched: p.matched, declaredUnimplemented: p.declaredUnimplemented.length, implementedUndeclared: p.implementedUndeclared.length };
@@ -824,7 +828,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
         findings.push({
           code: 'contract-breaking', severity: c.class === 'breaking' ? 'error' : 'warning', source: 'service-contract', subject: emittedText(subject),
           discriminator: c.rule, message: emittedText(`${c.detail} (${c.rule}, ${c.class}); ${format} consumers are not assessed.`),
-          location: { path: c.file, line: c.line },
+          location: { path: emittedText(c.file), line: c.line },
         });
         continue;
       }
@@ -845,7 +849,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       findings.push({
         code: 'contract-breaking', severity: c.class === 'breaking' ? 'error' : 'warning', source: 'service-contract', subject: emittedText(subject),
         discriminator: c.rule, message: emittedText(`${c.detail} (${c.rule}, ${c.class})${where}.`),
-        location: { path: c.file, line: c.line },
+        location: { path: emittedText(c.file), line: c.line },
       });
     }
     if (federated) {

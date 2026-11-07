@@ -16,9 +16,16 @@ All notable changes to OpenLore are documented here. This project adheres to
   `implements_endpoint` edge, so it is a reachability root. Inline resolvers, spreads, unknown
   fields and functions neither local nor imported are disclosed in `unresolvedResolvers`.
 - **`certify_service_contract` grades GraphQL changes** with variance-aware rows: an output may only
-  become non-null, an input only optional; removals, a required argument and a narrowed output are
+  become non-null, an input only optional; removals, a required argument and an output made nullable are
   `breaking`; an added enum value or union member is `dangerous`. GraphQL consumers are a disclosed
   boundary. The index schema version is now 17.
+- **An imported handler binds only in the module it was imported from**, one barrel re-export
+  followed — for gRPC Node registrations too, which previously took any same-named function in the
+  repository. A package or path-alias import binds nothing and says so.
+- **Schemas under test or fixture paths are not read** (`.proto` and GraphQL), and are listed under
+  `skippedCandidates`: a fixture's `type Query` made the real root ambiguous.
+- `find_dead_code` names unbound GraphQL operations and gRPC RPCs, so a code-first resolver or a
+  handler registered in an unread style is not reported dead without a word.
 
 ### Protobuf schemas are read
 

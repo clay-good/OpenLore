@@ -67,6 +67,32 @@ describe('GraphQL schema: round-2 semantics', () => {
   });
   it('the schema a Relay config names is the compiler\'s copy', () => {
     expect([...relaySchemaPaths([{ path: 'package.json', content: '{"relay": {"src": "./src", "schema": "./schema/schema.graphql"}}' }])]).toEqual(['schema/schema.graphql']);
-    expect([...relaySchemaPaths([{ path: 'web/relay.config.js', content: "module.exports = { schema: '../data/schema.graphql' };" }])]).toEqual(['data/schema.graphql']);
+    expect([...relaySchemaPaths([{ path: 'web/relay.config.js', content: "module.exports = { schema: './data/schema.graphql' };" }])]).toEqual(['web/data/schema.graphql']);
+    // A path climbing out of the Relay project names someone else's schema — often this repository's
+    // own server — and is never dropped on the config's say-so (round-3 security review).
+    expect([...relaySchemaPaths([{ path: 'web/relay.config.js', content: "module.exports = { schema: '../api/schema.graphql' };" }])]).toEqual([]);
+    expect([...relaySchemaPaths([{ path: 'package.json', content: '{"relay":{"schema":"../../../schema.graphql"}}' }])]).toEqual([]);
+  });
+});
+
+describe('round-3 review', () => {
+  const roots = ['Query', 'Mutation', 'Subscription'];
+  it('a member of a local object is not followed; middleware and shield maps are not resolvers', () => {
+    const m = scanResolverMaps('src/resolvers.ts', 'const repo = {};\nfunction find() {}\nexport const resolvers = { Query: { lookup: repo.find } };\n', roots);
+    expect(m[0].entries).toEqual([expect.objectContaining({ field: 'lookup', notFollowed: expect.stringContaining('member of `repo`') })]);
+    expect(scanResolverMaps('src/permissions.ts', "import { applyMiddleware } from 'graphql-middleware';\nconst logInput = async () => {};\nexport const middleware = { Query: { search: logInput } };\n", roots)).toEqual([]);
+    expect(scanResolverMaps('src/perm.ts', 'function isAuthenticated() {}\nexport const permissions = shield({ Query: { orders: isAuthenticated } });\n', roots)).toEqual([]);
+  });
+  it('a Python decorator naming its field with a variable is disclosed', () => {
+    const r = scanResolverMaps('app.py', 'query = QueryType()\nFIELD = "x"\n@query.field(FIELD)\ndef r(*_): ...\n', roots);
+    expect(r).toEqual([expect.objectContaining({ notLiteral: expect.stringContaining('variable') })]);
+  });
+  it('one hostile barrel resolves in linear time', () => {
+    const list = Array.from({ length: 2_000 }, (_, i) => `src/m${i}.ts`);
+    const barrel = Array.from({ length: 300 }, () => `export { ${Array.from({ length: 180 }, () => 'a as h0').join(', ')} } from "./m1";`).join('\n');
+    const content: Record<string, string> = { 'src/barrel/index.ts': barrel };
+    const t = Date.now();
+    importTargets('src/resolvers.ts', './barrel', 'h0', 'node', [...list, 'src/barrel/index.ts'], f => content[f]);
+    expect(Date.now() - t).toBeLessThan(2_000);
   });
 });

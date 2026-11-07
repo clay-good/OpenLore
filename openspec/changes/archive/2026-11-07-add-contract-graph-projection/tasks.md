@@ -17,11 +17,11 @@
 - [x] `verify_change` carries payload findings — shipped in `add-verify-change-payload-findings`
 
 ## Formats
-- [x] protobuf v3 reader, implements edges from generated-server registrations, rule-table additions (field number/type, `reserved`, removed RPC) — shipped in `add-contract-protobuf-reader`; gRPC client calls (`consumes_endpoint`) deliberately not read, a disclosed boundary
-- [x] GraphQL SDL reader, implements edges from literal resolver maps; directives unassessed — shipped in `add-contract-graphql-reader`; GraphQL client operations as consumers are a disclosed boundary
+- [x] protobuf v3 reader, implements edges from generated-server registrations, rule-table additions (field number/type, `reserved`, removed RPC) — shipped in PR #687; gRPC client calls (`consumes_endpoint`) deliberately not read, a disclosed boundary
+- [x] GraphQL SDL reader, implements edges from literal resolver maps; directives unassessed — shipped in PR #688; GraphQL client operations as consumers are a disclosed boundary
 
 ## Spec
-- [x] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL) — added with the protobuf half (plus RpcsAreBoundToTheImplementationTheirServerRegistrationNames, and `mcp-handlers` ProtobufChangesAreGradedByWireIdentity) in `add-contract-protobuf-reader`; the GraphQL half (plus GraphqlOperationsAreBoundToTheirResolverMaps, and `mcp-handlers` GraphqlChangesAreGradedByVariance) shipped in `add-contract-graphql-reader`
+- [x] `analyzer` delta: ADD ContractSchemasAreDiscoveredAndNormalized (protobuf, GraphQL) — added with the protobuf half (plus RpcsAreBoundToTheImplementationTheirServerRegistrationNames, and `mcp-handlers` ProtobufChangesAreGradedByWireIdentity) in PR #687; the GraphQL half (plus GraphqlOperationsAreBoundToTheirResolverMaps, and `mcp-handlers` GraphqlChangesAreGradedByVariance) shipped in PR #688
 - [x] `analyzer` delta: ADD ContractElementsAreGraphNodesBoundToHandlers + ContractReferencesAreStructuralAndAttributedByAddress, and broaden ContractElementsAreNotRankedAsCode to every surface that ranks or counts code — shipped in `add-contract-schema-elements`
 - [x] `analyzer` delta: ADD ClientCallsAreBoundToTheOperationsTheyConsume — the generated-client half shipped; the path-matching half shipped in `add-contract-node-projection`
 - [x] `mcp-handlers` delta: ADD ChangedSpecificationsAndFederatedConsumersSurface — the changed-specification half shipped as `ChangedSpecificationsSurfaceTheirBoundCode`; federated consumers shipped in `add-contract-federated-consumers` (#681)

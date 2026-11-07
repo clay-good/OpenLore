@@ -325,8 +325,8 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
         out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'inline-implementation' });
         continue;
       }
-      // An imported Node handler is looked for only in the module it was imported from.
-      // The module an imported handler comes from, and one barrel re-export of it.
+      // An imported Node handler is looked for only in the module it was imported from (one barrel
+      // re-export followed).
       const targets = reg.runtime === 'node' && w.imported && w.from !== undefined && w.fnName !== undefined && input.importTargets
         ? input.importTargets(reg.file, w.from, w.fnName) : undefined;
       const found = reg.runtime === 'node' && w.imported

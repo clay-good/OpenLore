@@ -212,6 +212,8 @@ export interface ContractProjectionInput {
   protoFilesOmitted?: number;
   /** GraphQL schema files the caller did not retain: they withhold GraphQL conclusions only. */
   graphqlFilesOmitted?: number;
+  /** Schema files the caller deliberately did not pass (fixtures, a Relay copy), each with why. */
+  skippedFiles?: ReadonlyArray<{ file: string; reason: string }>;
   /** Server route registrations from the HTTP route parser. */
   routes: readonly RouteDefinition[];
   /** Client call sites from the HTTP projection. */
@@ -360,7 +362,10 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     const unreadTotal = p.unreadSpecifications.total + (proto?.unreadSpecifications.length ?? 0) + (gql?.unreadSpecifications.length ?? 0);
     // A GraphQL client document (operations and fragments) is a file that looked like a schema
     // and is not one: it belongs with the other skipped candidates, with why.
-    const clientDocs = (gql?.clientDocuments ?? []).map(file => ({ file, reason: 'a GraphQL client document (operations and fragments), not a schema' }));
+    const clientDocs = [
+      ...(gql?.clientDocuments ?? []).map(file => ({ file, reason: 'a GraphQL client document (operations and fragments), not a schema' })),
+      ...(input.skippedFiles ?? []),
+    ];
     return {
       ...p,
       nodes: [...p.nodes, ...(proto?.nodes ?? []), ...(gql?.nodes ?? [])],

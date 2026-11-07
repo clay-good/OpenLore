@@ -8,7 +8,11 @@
 > `implements_endpoint` / `consumes_endpoint` edges and the `contractSchemas` capability shipped in
 > `add-contract-node-projection`, which leaves the element model below (fields, messages, types),
 > protobuf, GraphQL, generated clients, the changed-specification briefing, and federated consumers. The
-> protobuf reader shipped in `add-contract-protobuf-reader`; GraphQL remains.
+> protobuf reader shipped in PR #687 and the GraphQL reader in PR #688; the change is complete.
+> Per-FIELD nodes were deliberately not projected (named schemas, messages and types are): the
+> property-level verdict belongs to `certify_service_contract`. The `mcp-handlers` delta shipped as
+> `ChangedSpecificationsSurfaceTheirBoundCode` and, for federated consumers, inside
+> `ContractVerdictsJoinConsumersConservatively`.
 
 ## Why
 

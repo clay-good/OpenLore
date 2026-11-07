@@ -65,6 +65,9 @@ function diffArgs(file: string, address: string, line: number, before: GqlArg[],
       continue;
     }
     const c = inputChange(b.type, a.type);
+    // A non-null argument losing its default is now required; gaining one, optional.
+    if (c === 'same' && required(a) && !required(b)) { out.push(change(file, address, a.line, 'param-made-required', `argument \`${n}\`: default ${b.defaultValue} removed, so it is now required`, el)); continue; }
+    if (c === 'same' && !required(a) && required(b)) { out.push(change(file, address, a.line, 'input-made-optional', `argument \`${n}\`: default ${a.defaultValue} added, so it is now optional`, el)); continue; }
     if (c === 'looser') out.push(change(file, address, a.line, 'input-made-optional', `argument \`${n}\`: ${b.type} → ${a.type}`, el));
     // Stricter with a default: omitting it still works, but an explicit `null` is now refused.
     else if (c === 'required') out.push(change(file, address, a.line, a.defaultValue !== undefined ? 'field-type-changed' : 'param-made-required', `argument \`${n}\`: ${b.type} → ${a.type}`, el));
@@ -100,6 +103,8 @@ function diffType(b: GqlMergedType, t: GqlMergedType, out: ContractChange[]): vo
     }
     if (t.kind === 'input') {
       const c = inputChange(old.type, f.type);
+      if (c === 'same' && required(f) && !required(old)) { push('param-made-required', `field \`${n}\`: default ${old.defaultValue} removed, so it is now required`, f.line, el, fileOf(t, f)); continue; }
+      if (c === 'same' && !required(f) && required(old)) { push('input-made-optional', `field \`${n}\`: default ${f.defaultValue} added, so it is now optional`, f.line, el, fileOf(t, f)); continue; }
       if (c === 'looser') push('input-made-optional', `field \`${n}\`: ${old.type} → ${f.type}`, f.line, el, fileOf(t, f));
       else if (c === 'required') push(f.defaultValue !== undefined ? 'field-type-changed' : 'param-made-required', `field \`${n}\`: ${old.type} → ${f.type}`, f.line, el, fileOf(t, f));
       else if (c === 'changed') push('field-type-changed', `field \`${n}\`: ${old.type} → ${f.type}`, f.line, el, fileOf(t, f));

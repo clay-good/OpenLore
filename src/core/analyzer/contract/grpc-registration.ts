@@ -80,7 +80,7 @@ function runtimeOf(file: string): GrpcRuntime | undefined {
  * The text is already masked, so no string or comment can unbalance it. Undefined when the call
  * does not close within the bound.
  */
-export function callArgs(text: string, open: number): string[] | undefined {
+function callArgs(text: string, open: number): string[] | undefined {
   const args: string[] = [];
   let depth = 0;
   let start = open + 1;
@@ -213,67 +213,46 @@ export interface ImportedName { exported: string | null; from: string }
 /** A file and the name a function is defined under in it. */
 export interface ImportTarget { file: string; name: string }
 
-/**
- * The files (and names) an import of `name` from `specifier` in `fromFile` can mean: the module the
- * specifier names, and — ONE level — the modules it re-exports `name` from (`export { a as name }
- * from './x'`, `export * from './x'`, a Python package's `__init__.py` doing `from .x import a as
- * name`). A barrel `index.ts` is the common case; following further would be guessing at a chain.
- */
-export function importTargets(
-  fromFile: string, specifier: string, name: string, runtime: 'node' | 'python',
-  files: readonly string[], contentOf: (file: string) => string | undefined,
-): ImportTarget[] {
-  const isModule = (from: string, spec: string, f: string) => (runtime === 'node' ? isImportedModule(from, spec, f) : isImportedPythonModule(from, spec, f));
-  const modules = files.filter(f => isModule(fromFile, specifier, f));
-  const out: ImportTarget[] = modules.map(file => ({ file, name }));
-  for (const m of modules) {
-    const text = contentOf(m);
-    if (text === undefined) continue;
-    if (runtime === 'node') {
-      const masked = maskNonCode(text, 'js');
-      for (const r of masked.matchAll(/\bexport\s*\{([^}]{0,2000})\}\s*from\s*['"]([^'"\n]{1,500})['"]/g)) {
-        for (const part of r[1].split(',')) {
-          const a = /^\s*(?:type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/.exec(part);
-          if (a && (a[2] ?? a[1]) === name) for (const f of files) if (isModule(m, r[2], f)) out.push({ file: f, name: a[1] });
-        }
-      }
-      for (const r of masked.matchAll(/\bexport\s*\*\s*from\s*['"]([^'"\n]{1,500})['"]/g)) {
-        for (const f of files) if (isModule(m, r[1], f)) out.push({ file: f, name });
-      }
-    } else if (/(?:^|\/)__init__\.pyw?$/.test(m)) {
-      for (const r of maskNonCode(text, 'python').matchAll(/^[ \t]*from[ \t]+(\.+[\w.]*)[ \t]+import[ \t]+(\([^)]{0,2000}\)|[^\n]{1,500})/gm)) {
-        for (const part of r[2].replace(/[()]/g, '').split(',')) {
-          const a = /^\s*([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(part);
-          if (a && (a[2] ?? a[1]) === name) for (const f of files) if (isModule(m, r[1], f)) out.push({ file: f, name: a[1] });
-        }
-      }
-    }
-  }
-  const seen = new Set<string>();
-  return out.filter(t => { const k = `${t.file}\0${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
-}
-
-const posixNormalize = (path: string): string => {
+/** A repository-relative path normalized, or `undefined` when it climbs above the root. */
+const posixNormalize = (path: string): string | undefined => {
   const out: string[] = [];
   for (const seg of path.split('/')) {
     if (seg === '' || seg === '.') continue;
-    if (seg === '..') { if (out.length && out[out.length - 1] !== '..') out.pop(); else out.push('..'); } else out.push(seg);
+    if (seg === '..') { if (!out.length) return undefined; out.pop(); } else out.push(seg);
   }
   return out.join('/');
 };
 
+/** The extensionless path a relative JS/TS specifier names, or `undefined` (a package, an escape). */
+function jsModuleBase(fromFile: string, specifier: string): string | undefined {
+  if (!specifier.startsWith('.')) return undefined;
+  const dir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/')) : '';
+  return posixNormalize(`${dir}/${specifier}`)?.replace(/\.(?:[cm]?[jt]s|[jt]sx)$/, '');
+}
+
+/** The module path a Python `from` names (`app/resolvers`), relative ones resolved; `undefined` past the root. */
+function pythonModulePath(fromFile: string, module: string): { path: string; relative: boolean } | undefined {
+  const dots = /^\.*/.exec(module)![0].length;
+  const rest = module.slice(dots).split('.').filter(Boolean).join('/');
+  if (!dots) return rest ? { path: rest, relative: false } : undefined;
+  const parts = fromFile.split('/').slice(0, -1);
+  if (dots - 1 > parts.length) return undefined;
+  const up = parts.slice(0, parts.length - (dots - 1));
+  const path = [...up, ...(rest ? [rest] : [])].join('/');
+  return path ? { path, relative: true } : undefined;
+}
+
 /**
  * Whether `file` is the module a JS/TS import of `specifier` from `fromFile` names. Only RELATIVE
- * specifiers resolve here (`./orders`, `../db/orders.js`); a package or a path alias names a module
- * this check cannot locate, so nothing in the repository is that import — which is the point: a
- * same-named function elsewhere is NOT the imported one.
+ * specifiers resolve here (`./orders`, `../db/orders.js`); a package, a path alias, or a path that
+ * climbs above the repository root names a module this check cannot locate — so a same-named
+ * function elsewhere is NOT the imported one.
  */
 export function isImportedModule(fromFile: string, specifier: string, file: string): boolean {
-  if (!specifier.startsWith('.')) return false;
-  const dir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/')) : '';
-  const base = posixNormalize(`${dir}/${specifier}`).replace(/\.(?:[cm]?[jt]s|[jt]sx)$/, '');
-  const stem = file.replace(/\.(?:[cm]?[jt]sx?|d\.ts)$/, '');
-  return stem === base || stem === `${base}/index`;
+  const base = jsModuleBase(fromFile, specifier);
+  if (base === undefined) return false;
+  const stem = file.replace(/\.(?:[cm]?[jt]sx?)$/, '');
+  return stem === base || stem === (base ? `${base}/index` : 'index');
 }
 
 /**
@@ -282,18 +261,112 @@ export function isImportedModule(fromFile: string, specifier: string, file: stri
  * suffix. `<module>.py` or `<module>/__init__.py`.
  */
 export function isImportedPythonModule(fromFile: string, module: string, file: string): boolean {
-  const dots = /^\.*/.exec(module)![0].length;
-  const rest = module.slice(dots).split('.').filter(Boolean).join('/');
-  let target: string;
-  if (dots) {
-    const parts = fromFile.split('/').slice(0, -1);
-    const up = parts.slice(0, Math.max(0, parts.length - (dots - 1)));
-    target = [...up, ...(rest ? [rest] : [])].join('/');
-  } else target = rest;
+  const target = pythonModulePath(fromFile, module);
   if (!target) return false;
   const stem = file.replace(/\.pyw?$/, '');
-  const matches = (t: string) => stem === t || stem.endsWith(`/${t}`);
-  return dots ? (stem === target || stem === `${target}/__init__`) : (matches(target) || matches(`${target}/__init__`));
+  if (target.relative) return stem === target.path || stem === `${target.path}/__init__`;
+  const t = target.path;
+  return stem === t || stem.endsWith(`/${t}`) || stem === `${t}/__init__` || stem.endsWith(`/${t}/__init__`);
+}
+
+/** Re-export parts read per barrel, and files a module lookup may return: bounded, so one hostile barrel cannot stall a build. */
+const MAX_REEXPORT_PARTS = 2_000;
+
+/**
+ * An import resolver over one set of files: the files (and names) an import of `name` from
+ * `specifier` in `fromFile` can mean — the module the specifier names, and ONE level of re-export
+ * (`export { a as name } from './x'`, `export * from './x'`, a Python package's `__init__.py` doing
+ * `from .x import a as name`). A barrel `index.ts` is the common case; following further would be
+ * guessing at a chain.
+ *
+ * Indexed once: modules are looked up by path stem, and each barrel's re-exports are parsed once,
+ * so the cost is linear in the files and the imports, never their product.
+ */
+export function createImportResolver(files: readonly string[], contentOf: (file: string) => string | undefined) {
+  const jsByStem = new Map<string, string[]>();
+  const pyByStem = new Map<string, string[]>();
+  const pyByBase = new Map<string, string[]>();
+  const add = (m: Map<string, string[]>, k: string, f: string) => { const at = m.get(k); if (at) at.push(f); else m.set(k, [f]); };
+  for (const f of files) {
+    if (/\.[cm]?[jt]sx?$/.test(f)) add(jsByStem, f.replace(/\.(?:[cm]?[jt]sx?)$/, ''), f);
+    else if (/\.pyw?$/.test(f)) {
+      const stem = f.replace(/\.pyw?$/, '');
+      add(pyByStem, stem, f);
+      add(pyByBase, stem.slice(stem.lastIndexOf('/') + 1), f);
+    }
+  }
+  const jsModules = (from: string, spec: string): string[] => {
+    const base = jsModuleBase(from, spec);
+    if (base === undefined) return [];
+    return [...(jsByStem.get(base) ?? []), ...(jsByStem.get(base ? `${base}/index` : 'index') ?? [])];
+  };
+  const pyModules = (from: string, module: string): string[] => {
+    const t = pythonModulePath(from, module);
+    if (!t) return [];
+    if (t.relative) return [...(pyByStem.get(t.path) ?? []), ...(pyByStem.get(`${t.path}/__init__`) ?? [])];
+    const last = t.path.slice(t.path.lastIndexOf('/') + 1);
+    const candidates = [...(pyByBase.get(last) ?? []), ...(pyByBase.get('__init__') ?? [])];
+    return candidates.filter(f => isImportedPythonModule(from, module, f));
+  };
+  type Barrel = { named: Map<string, Array<{ spec: string; orig: string }>>; star: string[] };
+  const barrels = new Map<string, Barrel>();
+  const barrelOf = (m: string, runtime: 'node' | 'python'): Barrel => {
+    const hit = barrels.get(m);
+    if (hit) return hit;
+    const b: Barrel = { named: new Map(), star: [] };
+    barrels.set(m, b);
+    const text = contentOf(m);
+    if (text === undefined) return b;
+    let parts = 0;
+    const name = (exported: string, spec: string, orig: string) => {
+      if (++parts > MAX_REEXPORT_PARTS) return;
+      const at = b.named.get(exported);
+      if (at) { if (at.length < 8) at.push({ spec, orig }); } else b.named.set(exported, [{ spec, orig }]);
+    };
+    if (runtime === 'node') {
+      const masked = maskNonCode(text, 'js');
+      for (const r of masked.matchAll(/\bexport\s*\{([^}]{0,2000})\}\s*from\s*['"]([^'"\n]{1,500})['"]/g)) {
+        if (parts > MAX_REEXPORT_PARTS) break;
+        for (const part of r[1].split(',')) {
+          const a = /^\s*(?:type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/.exec(part);
+          if (a) name(a[2] ?? a[1], r[2], a[1]);
+        }
+      }
+      for (const r of masked.matchAll(/\bexport\s*\*\s*from\s*['"]([^'"\n]{1,500})['"]/g)) {
+        if (b.star.length >= MAX_REEXPORT_PARTS) break;
+        if (!b.star.includes(r[1])) b.star.push(r[1]);
+      }
+    } else if (/(?:^|\/)__init__\.pyw?$/.test(m)) {
+      for (const r of maskNonCode(text, 'python').matchAll(/^[ \t]*from[ \t]+(\.+[\w.]*)[ \t]+import[ \t]+(\([^)]{0,2000}\)|[^\n]{1,500})/gm)) {
+        if (parts > MAX_REEXPORT_PARTS) break;
+        for (const part of r[2].replace(/[()]/g, '').split(',')) {
+          const a = /^\s*([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(part);
+          if (a) name(a[2] ?? a[1], r[1], a[1]);
+        }
+      }
+    }
+    return b;
+  };
+  return (fromFile: string, specifier: string, name: string, runtime: 'node' | 'python'): ImportTarget[] => {
+    const modulesOf = (from: string, spec: string) => (runtime === 'node' ? jsModules(from, spec) : pyModules(from, spec));
+    const modules = modulesOf(fromFile, specifier);
+    const out: ImportTarget[] = modules.map(file => ({ file, name }));
+    for (const m of modules) {
+      const b = barrelOf(m, runtime);
+      for (const r of b.named.get(name) ?? []) for (const f of modulesOf(m, r.spec)) out.push({ file: f, name: r.orig });
+      for (const spec of b.star) for (const f of modulesOf(m, spec)) out.push({ file: f, name });
+    }
+    const seen = new Set<string>();
+    return out.filter(t => { const k = `${t.file}\0${t.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  };
+}
+
+/** One import, resolved over `files` (see {@link createImportResolver}). */
+export function importTargets(
+  fromFile: string, specifier: string, name: string, runtime: 'node' | 'python',
+  files: readonly string[], contentOf: (file: string) => string | undefined,
+): ImportTarget[] {
+  return createImportResolver(files, contentOf)(fromFile, specifier, name, runtime);
 }
 
 /** Every gRPC server registration in one source file. */

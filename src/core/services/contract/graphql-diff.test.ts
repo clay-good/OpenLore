@@ -173,7 +173,8 @@ describe('diffGraphql: arguments (input position)', () => {
   });
 
   it('removing the default of a non-null argument makes it required', () => {
-    expect(at('Int! = 1', 'Int!')).toEqual(['arg-default-changed dangerous']);
+    expect(at('Int! = 1', 'Int!')).toEqual(['param-made-required breaking']);
+    expect(at('Int!', 'Int! = 1')).toEqual(['input-made-optional non-breaking']);
   });
 });
 
@@ -224,7 +225,7 @@ describe('diffGraphql: types', () => {
     expect(cs.map(c => `${c.rule} ${c.class} ${c.element}`)).toEqual(['union-member-added dangerous C', 'union-member-removed breaking B']);
   });
 
-  it('interfaces: implementing one more is non-breaking, one fewer is breaking; interface fields are outputs', () => {
+  it('interfaces: implementing one more is dangerous, one fewer is breaking; interface fields are outputs', () => {
     const base = 'interface N { id: ID }\ninterface M { m: Int }\ntype T implements N { id: ID m: Int }';
     expect(diff(base, base.replace('implements N', 'implements N & M')).map(c => `${c.rule} ${c.class} ${c.element}`)).toEqual(['interface-added dangerous M']);
     expect(diff(base.replace('implements N', 'implements N & M'), base).map(c => `${c.rule} ${c.class} ${c.element}`)).toEqual(['interface-removed breaking M']);

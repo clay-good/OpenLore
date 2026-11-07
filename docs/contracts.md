@@ -266,7 +266,9 @@ A schema-first server names the function behind each root field in one literal p
 | JS/TS (Apollo, Yoga, graphql-tools) | `{ Query: { order: getOrder } }`, `const Query = { order() {…} }` | `getOrder`, or the method itself |
 | Python (Ariadne) | `@query.field("order")` on `def resolve_order`, `query.set_field("order", fn)` | the decorated or named function |
 
-The same refusals as for gRPC apply. A named function binds in the map's own file; an IMPORTED one
+The same refusals as for gRPC apply. A named function binds in the map's own file — a top-level
+function or a method written in the map, never a class method, and never the member of a local
+object (`repo.find`); an IMPORTED one
 binds only in the module it was imported from (by its exported name) — never a same-named function
 elsewhere, and a package or path-alias import binds nothing (`implementation-not-found`). An arrow
 function or lambda is `inline-implementation`; two candidates are `ambiguous-implementation`; a
@@ -276,7 +278,7 @@ the schema does not declare is `unknown-field`. Apollo's `x: { subscribe: fn }` 
 Not every `Query: {…}` is a server's. Client configuration is skipped: a file importing a GraphQL
 client (`@apollo/client`, `urql`, Relay…) and no server, and objects inside client constructors
 (`cacheExchange`, `ApolloClient`, `InMemoryCache`) or under client keys (`typePolicies`, `updates`,
-`optimistic`). So are TypeScript resolver TYPES (`interface Resolvers { Query: … }`), stories and
+`optimistic`), and permission and middleware maps (`graphql-shield`, `graphql-middleware`). So are TypeScript resolver TYPES (`interface Resolvers { Query: … }`), stories and
 mocks, and a `const Query = {…}` in a file that is not about resolvers. Maps in comments, strings,
 test files and `*.generated.*` files are not read, and neither are schemas under test or fixture
 paths — a fixture's `type Query` would make the real root ambiguous. A root type defined in two
@@ -285,11 +287,13 @@ files is reported as not assessed, which `find_dead_code` repeats.
 An import is followed one level through a barrel (`export * from './feature'`, `export { a as b }
 from …`, a Python package's `__init__.py`); when the module is indexed but does not define or
 directly re-export the name, the detail says so. A file that writes its OWN schema inline
-(`typeDefs: `type Query {…}``, Ariadne `gql("""…""")`) serves that schema, so its maps are not bound
+(``typeDefs: `type Query {…}` ``, Ariadne `gql("""…""")`) serves that schema, so its maps are not bound
 to the repository's SDL; neither are files importing a mocking library (`msw`,
-`@graphql-tools/mock`). A schema that a Relay config names (`"relay": { "schema": … }`) is the
-compiler's copy of a server's schema, and a file whose types sit beside `@client` operations is
-Apollo local state: neither is read as this repository's contract. One schema per repository means
+`@graphql-tools/mock`). A schema inside a Relay project's own directory that its config names (`"relay": { "schema": … }`)
+is the compiler's copy of a server's schema, and a file whose types sit beside `@client`
+operations is Apollo local state: `analyze` reads neither as this repository's contract, and lists
+both under `skippedCandidates`. `certify_service_contract` never drops a schema on a config's say-so —
+it grades the file and names the Relay link in its boundaries. One schema per repository means
 a monorepo with several servers' SDL makes their shared roots ambiguous — disclosed, not guessed.
 
 Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
@@ -310,7 +314,8 @@ variance:
 | An output made non-null (`String` → `String!`), including inside a list | `non-breaking` |
 | An argument or input field made required, or a required one added | `breaking` |
 | An argument or input field made optional, or an optional one added | `non-breaking` |
-| A default value added, changed or removed (compared canonically: `{a: 1, b: 2}` = `{b: 2, a: 1}`, `1` = `1.0`) | `dangerous` |
+| A non-null argument or input field losing its default (it is now required) | `breaking` |
+| A default value added, changed or removed otherwise (compared canonically: `{a: 1, b: 2}` = `{b: 2, a: 1}`, `1` = `1.0`) | `dangerous` |
 | An enum value or union member added (a client switching over it may not handle it) | `dangerous` |
 | An interface newly implemented | `dangerous` |
 | An enum value or union member removed; an interface no longer implemented | `breaking` |

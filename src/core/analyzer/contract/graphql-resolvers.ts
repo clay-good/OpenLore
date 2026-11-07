@@ -57,7 +57,7 @@ const GENERATED = /(?:\.generated\.[cm]?[jt]sx?|__generated__\/)/i;
 /** Stories and mocks hold fake resolvers for a fake server. */
 const NOT_A_SERVER = /(?:\.stories\.[cm]?[jt]sx?$|(?:^|\/)(?:__mocks__|mocks?)\/|(?:^|\/)mocks?\.[cm]?[jt]sx?$)/i;
 /** Mocking libraries: a resolver object in a file that imports one resolves a fake schema. */
-const MOCK_PACKAGES = /^(?:msw|@graphql-tools\/mock|graphql-tools\/mock|@mswjs\/)/;
+const MOCK_PACKAGES = /^(?:msw|@graphql-tools\/mock|graphql-tools\/mock|@mswjs\/|graphql-shield|graphql-middleware)/;
 /**
  * A file that writes its OWN schema inline (`typeDefs: \`type Query {…}\``, `buildSchema(…)`)
  * serves that schema, not one read from a `.graphql` file: its resolver maps belong to it, and
@@ -90,8 +90,8 @@ const CLIENT_PACKAGES = /^(?:@apollo\/client|apollo-client|apollo-boost|apollo-c
 /** GraphQL server libraries. */
 const SERVER_PACKAGES = /^(?:@apollo\/server|apollo-server|@apollo\/subgraph|graphql-yoga|@graphql-yoga\/|@graphql-tools\/|graphql-tools|mercurius|express-graphql|graphql-http|@envelop\/|graphql-helix|@nestjs\/graphql)/;
 /** Calls and keys whose `Query: {…}` is client configuration, not a server resolver map. */
-const CLIENT_CALLS = new Set(['cacheExchange', 'offlineExchange', 'ApolloClient', 'InMemoryCache', 'withClientState', 'createClient', 'makeVar']);
-const CLIENT_KEYS = new Set(['typePolicies', 'updates', 'optimistic', 'keys', 'fields', 'mocks', 'cacheConfig']);
+const CLIENT_CALLS = new Set(['cacheExchange', 'offlineExchange', 'ApolloClient', 'InMemoryCache', 'withClientState', 'createClient', 'makeVar', 'shield', 'applyMiddleware', 'addMocksToSchema']);
+const CLIENT_KEYS = new Set(['typePolicies', 'updates', 'optimistic', 'keys', 'fields', 'mocks', 'cacheConfig', 'middleware', 'permissions', 'rules']);
 /** How far back the enclosing context of a match is read. */
 const CONTEXT_CHARS = 4_000;
 
@@ -154,7 +154,8 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
   const rootSet = new Set(roots);
   // Cheap gate before masking: a root name must appear literally.
   if (!roots.some(r => content.includes(r)) && !(runtime === 'python' && /\b(?:QueryType|MutationType|SubscriptionType|ObjectType)\b/.test(content))) return [];
-  if (INLINE_SDL.test(content) && /["'`]\s*(?:extend\s+)?type\s+(?:Query|Mutation|Subscription)\b|`[^`]{0,4000}?\btype\s+(?:Query|Mutation|Subscription)\b/.test(content)) return [];
+  // The cheap test first: only a file holding a root type in a string pays for the slower one.
+  if (/["'`]\s*(?:extend\s+)?type\s+(?:Query|Mutation|Subscription)\b|`[^`]{0,4000}?\btype\s+(?:Query|Mutation|Subscription)\b/.test(content) && INLINE_SDL.test(content)) return [];
   const masked = maskNonCode(content, runtime === 'python' ? 'python' : 'js');
   const text = runtime === 'node' ? restoreQuotedKeys(content, masked) : masked;
   const starts = [0];
@@ -179,7 +180,12 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
     const entryOf = (key: string, fn: string | undefined, base: string | undefined, line: number): ResolverEntry => {
       if (!fn) return { field: key, line };
       const imp = base ? imports.get(base) : undefined;
-      if (!imp) return { field: key, fn, line };
+      if (!imp) {
+        // `repo.find` on a LOCAL object: the member of a value, not a function this file defines —
+        // a same-named function elsewhere in the file is not it.
+        if (base && base !== fn) return { field: key, fn, notFollowed: `\`${base}.${fn}\` names a member of \`${base}\`, which is not an import`, line };
+        return { field: key, fn, line };
+      }
       if (base === fn) {
         // Looked up by the name it was exported under, in the module it was imported from.
         return imp.exported
@@ -269,7 +275,11 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
     const after = m.index! + m[0].length;
     const field = /^\s*["']([A-Za-z_]\w*)["']\s*\)/.exec(content.slice(after, after + 300));
     const def = /^[^\n]*\n(?:\s*@[^\n]*\n){0,8}\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/.exec(text.slice(after, after + 2_000));
-    if (!field) continue;
+    if (!field) {
+      // `@query.field(FIELD)`: the field is a variable, so which operation it resolves is unknown.
+      out.push({ file, line: lineAt(starts, m.index!), runtime, root: holders.get(m[1])!.root, entries: [], notLiteral: 'a `@….field(…)` decorator names its field with a variable, not a string' });
+      continue;
+    }
     mapFor(m[1]).entries.push({ field: field[1], ...(def ? { fn: def[1] } : {}), line: lineAt(starts, m.index!) });
   }
   // `query.set_field("orders", resolve_orders)`.
@@ -280,6 +290,11 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
     if (!args) continue;
     const value = args[2] && args[2] !== 'lambda' ? args[2] : undefined;
     const line = lineAt(starts, m.index!);
+    // `RESOLVERS["list"]`, `make_resolver()`: an expression, not a function named here.
+    if (value && /^\s*[[(]/.test(content.slice(after + args[0].length, after + args[0].length + 4))) {
+      mapFor(m[1]).entries.push({ field: args[1], fn: value, notFollowed: `\`${value}…\` is an expression, not a function named here`, line });
+      continue;
+    }
     if (!value) { mapFor(m[1]).entries.push({ field: args[1], line }); continue; }
     const parts = value.split('.');
     const fn = parts[parts.length - 1];

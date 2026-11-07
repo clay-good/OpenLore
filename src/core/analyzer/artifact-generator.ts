@@ -1562,9 +1562,12 @@ export class AnalysisArtifactGenerator {
      * Drop the schema a Relay config names: it is the compiler's copy of a server's schema (often
      * GitHub's), and read as this repository's contract it would grade the vendor's API.
      */
+    const skippedContractFiles: Array<{ file: string; reason: string }> = [];
     const withoutClientSchemas = (files: typeof contractFiles) => {
       const client = relaySchemaPaths(relayConfigs);
-      return client.size ? files.filter(f => !client.has(f.path)) : files;
+      if (!client.size) return files;
+      for (const f of files) if (client.has(f.path)) skippedContractFiles.push({ file: f.path, reason: 'the schema a Relay compiler config names: a copy of a server\'s schema, not this repository\'s contract' });
+      return files.filter(f => !client.has(f.path));
     };
     // Files whose UTF-8 decode was lossy (contained U+FFFD) — a parse-health signal captured at the
     // one central read, since the call-graph extractors never see the raw bytes (change:
@@ -1635,6 +1638,10 @@ export class AnalysisArtifactGenerator {
         // A schema under a test or fixture path describes a fake service: read as the contract, it
         // makes the real root types ambiguous and silently unbinds every resolver.
         const fixtureSchema = isTest || isFixtureSchemaPath(file.path);
+        if ((isProtobufPath(file.path) || isGraphqlPath(file.path)) && fixtureSchema) {
+          // Named, not dropped: discovery scope stays visible.
+          skippedContractFiles.push({ file: file.path, reason: 'a schema under a test or fixture path, not this repository\'s contract' });
+        }
         if (isProtobufPath(file.path) && !fixtureSchema) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
@@ -1739,6 +1746,7 @@ export class AnalysisArtifactGenerator {
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
         ...(contractFiles.length ? { contractFiles: withoutClientSchemas(contractFiles) } : {}),
+        ...(skippedContractFiles.length ? { contractFilesSkipped: skippedContractFiles } : {}),
         ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
         ...(protoFilesOmitted ? { protoFilesOmitted } : {}),
         ...(graphqlFilesOmitted ? { graphqlFilesOmitted } : {}),

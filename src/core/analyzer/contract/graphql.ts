@@ -100,7 +100,7 @@ export interface GqlDocument {
   schemaDirectivesHash: string;
   directiveDefs: GqlDirectiveDef[];
   types: GqlType[];
-  /** Constructs outside the model: custom directives by name, directive definitions, operations in a schema file. */
+  /** Constructs outside the model: custom directives used, by name, and operations in a schema file. */
   unassessed: string[];
 }
 
@@ -365,7 +365,7 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
       continue;
     }
     if (kw!.v === 'directive' && !extension) {
-      // A directive definition: outside the model, and its arguments and locations are skipped.
+      // A directive definition: its arguments, `repeatable` and locations are modeled and diffed.
       sawTypeSystem = true;
       next();
       expect('@');
@@ -622,12 +622,17 @@ export function relaySchemaPaths(configs: ReadonlyArray<{ path: string; content:
     if (!body) continue;
     const m = /["']?schema["']?\s*:\s*["']([^"'\n]{1,500})["']/.exec(body);
     if (!m) continue;
+    // Only a schema INSIDE the config's own directory is the Relay project's copy. A path that climbs
+    // out of it — `../api/schema.graphql`, or past the repository root — names someone else's
+    // schema (often this repository's own server), which must never be dropped on its say-so.
     const parts: string[] = [];
-    for (const seg of `${dir}/${m[1]}`.split('/')) {
+    let escaped = false;
+    for (const seg of m[1].split('/')) {
       if (!seg || seg === '.') continue;
-      if (seg === '..') parts.pop(); else parts.push(seg);
+      if (seg === '..') { if (!parts.length) { escaped = true; break; } parts.pop(); } else parts.push(seg);
     }
-    out.add(parts.join('/'));
+    if (escaped || !parts.length) continue;
+    out.add([...(dir ? [dir] : []), ...parts].join('/'));
   }
   return out;
 }

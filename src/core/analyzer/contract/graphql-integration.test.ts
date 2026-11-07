@@ -144,4 +144,14 @@ describe('GraphQL projection through the builder', () => {
     expect(result.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
     expect(result.contracts?.skippedCandidates.items).toEqual(expect.arrayContaining([expect.objectContaining({ file: 'web/ops.graphql' })]));
   });
+
+  it('a class method of the imported name is never the resolver (round-3 review)', async () => {
+    const code = [
+      { path: 'src/orders.ts', language: 'TypeScript', content: 'export const getOrder = authorized(() => repo.getOrder());\nclass OrderRepo { getOrder() { return 1; } }\n' },
+      { path: 'src/resolvers.ts', language: 'TypeScript', content: "import { getOrder } from './orders';\nexport const resolvers = { Query: { order: getOrder } };\n" },
+    ];
+    const result = await new CallGraphBuilder({ contractFiles: [{ path: 'schema.graphql', content: 'type Query { order: Int }' }] }).build(code);
+    expect(result.edges.filter(e => e.kind === 'implements_endpoint')).toEqual([]);
+    expect(result.contracts?.unresolvedResolvers.items).toEqual([expect.objectContaining({ field: 'order', reason: 'implementation-not-found' })]);
+  });
 });
