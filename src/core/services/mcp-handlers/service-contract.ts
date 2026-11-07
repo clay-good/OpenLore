@@ -98,6 +98,8 @@ async function workingFiles(root: string, ext: RegExp): Promise<string[]> {
 }
 
 const MAX_CANDIDATES = MAX_SPEC_FILES * 10;
+/** Total `.proto` text held per revision, the same bound the analyzer's walk applies. */
+const MAX_PROTO_TOTAL_BYTES = 64 * 1024 * 1024;
 
 /** What one revision's scan of one format examined, read, and could not read. */
 interface ScanScope {
@@ -194,10 +196,15 @@ export async function headSpecs(root: string, listed?: string[]): Promise<SpecSi
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
   const protoUnread: SpecSide['unread'] = [];
+  let protoBytes = 0;
   for (const f of w.read) {
+    // The `.proto` texts held at once are bounded in total too: 500 files of 4 MB each is 2 GB.
+    if (isProtobufPath(f) && protoBytes > MAX_PROTO_TOTAL_BYTES) { protoUnread.push({ file: f, reason: 'past the total .proto byte budget' }); continue; }
     try {
       // An oversized file, or a link out of the repository, throws: it is listed as unread.
-      texts.set(f, await readFileConfined(root, f, MAX_SPEC_BYTES));
+      const text = await readFileConfined(root, f, MAX_SPEC_BYTES);
+      if (isProtobufPath(f)) protoBytes += text.length;
+      texts.set(f, text);
     } catch (e) {
       (isProtobufPath(f) ? protoUnread : unread).push({ file: f, reason: e instanceof Error ? e.message.split('\n')[0] : String(e) });
     }
@@ -218,8 +225,10 @@ async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
   const protoUnread: SpecSide['unread'] = [];
+  let protoBytes = 0;
   for (const f of w.read) {
     const t = blobs.get(prefix + f);
+    if (t !== undefined && isProtobufPath(f) && (protoBytes += t.length) > MAX_PROTO_TOTAL_BYTES) { protoUnread.push({ file: f, reason: 'past the total .proto byte budget' }); continue; }
     if (t === undefined) (isProtobufPath(f) ? protoUnread : unread).push({ file: f, reason: 'could not be read at the base revision' });
     else texts.set(f, t);
   }
@@ -753,7 +762,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       if (!federated.census.repos.length) {
         boundaries.push('No sibling repository was censused, so a consumer outside this repository is not assessed.');
       }
-    } else {
+    } else if (httpChanges.length) {
       boundaries.push('Consumers outside this repository are not assessed; pass `federation: true` to census indexed sibling repositories.');
     }
     changesOut = {
@@ -762,7 +771,9 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       items: changes.slice(0, limit).map(c => ({
         ...c, file: emittedText(c.file), address: emittedText(c.address), detail: emittedText(c.detail),
         ...(c.element ? { element: emittedText(c.element) } : {}),
-        consumers: consumers.get(c.address) ?? [],
+        // A protobuf change names no consumer list at all: gRPC call sites are not read, and an
+        // empty list would read as "no callers".
+        ...(protoAddresses.has(c.address) ? { consumersNotAssessed: 'gRPC client call sites are not read' } : { consumers: consumers.get(c.address) ?? [] }),
         // A COUNT here, and the sites themselves in one top-level list below. Nesting them per
         // item put 25-per-sibling inside `changes.items`, which the response trimmer cannot
         // reach into (it shrinks top-level arrays only) — so at the default `maxResults` a

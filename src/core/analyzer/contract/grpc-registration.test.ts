@@ -247,3 +247,25 @@ describe('scanGrpcRegistrations: robustness', () => {
     expect(Date.now() - start).toBeLessThan(10_000);
   });
 });
+
+describe('scanGrpcRegistrations: round-3 review', () => {
+  it('marks a Node handler that the file imports, and only those', () => {
+    const src = `import { listOrders } from './handlers';
+const impl = require('./impl');
+function getOrder(call, cb) {}
+server.addService(proto.orders.v1.OrderService.service, { getOrder, listOrders, del: impl.del, other: elsewhere });
+`;
+    expect(scanGrpcRegistrations('srv/server.js', src)[0].methods).toEqual([
+      { key: 'getOrder', fn: 'getOrder' },
+      { key: 'listOrders', fn: 'listOrders', imported: true },
+      { key: 'del', fn: 'del', imported: true },
+      { key: 'other', fn: 'elsewhere' },
+    ]);
+  });
+
+  it('a Python constructor followed by a chained call is not literal', () => {
+    const r = scanGrpcRegistrations('s.py', 'add_GreeterServicer_to_server(Impl(cfg).wrap(), server)\n');
+    expect(r[0]).toMatchObject({ service: 'Greeter', notLiteral: expect.any(String) });
+    expect(r[0].implType).toBeUndefined();
+  });
+});

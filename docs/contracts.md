@@ -138,7 +138,10 @@ written for this — no `protoc`, no grammar, no network.
 
 Type names are resolved with protobuf's own scoping rule, across every `.proto` file read: the
 first part of a name is looked up from the innermost scope outward, and a leading dot means "from
-the root". A name declared in two files binds nothing, and a type imported from outside the
+the root". A file sees only its own declarations and those of the files it imports (plus what they
+re-export with `import public`); an import path matches a read file whose path ends with it. So
+adding an unrelated file whose package shadows a scope never changes what an untouched field
+resolves to. A name declared in two visible files binds nothing, and a type imported from outside the
 repository (`google.protobuf.Timestamp`) draws no edge — both are disclosed. Fields are not nodes,
 for the same reason as above.
 
@@ -159,15 +162,26 @@ The rules refuse rather than guess:
   an object literal. A variable or a factory call (`NewServer()`) names no type, so the
   registration is disclosed as `not-literal`.
 - A service named by two packages, or declared in two files, binds nothing (`ambiguous-service`).
-  A service no file read declares — its `.proto` lives in another repository — is
-  `unknown-service`.
+  A service no file read declares — its `.proto` lives in another repository, or in a file that
+  could not be read, which the detail then says — is `unknown-service`. A service path that names a
+  package (`proto.billing.v2.PaymentService`) binds only to that full name, never to a same-named
+  service in another package.
 - The implementing method is looked for only where the registration's own scope says the type
   is. Go: a bare `orderServer` is in the registration's own package (its directory) and nowhere
   else; `v2.OrderServer` is in another package whose directory is named `v2`. Python: a bare class
   is in the registration's file or, failing that, the only one anywhere; `servicer.OrderServicer` is
-  in a module named `servicer`. Node: the registration's file, else the only one anywhere. Two
-  candidates in that scope bind nothing (`ambiguous-implementation`); a lone candidate outside it
-  is never taken.
+  in a module named `servicer`. Node: the registration's file, else — only when the file imports
+  that handler — the only one anywhere. Two candidates in that scope bind nothing
+  (`ambiguous-implementation`); a lone candidate outside it is never taken.
+- Generated stubs are never candidates (Python's `*_pb2_grpc.py` holds a client class named exactly
+  like the service), and once a Python servicer class is found in the registration's own file, an
+  RPC it does not implement is not looked for elsewhere. Inheritance is not followed: a method
+  defined on a base class in another file is not bound.
+- A Go or Python registration none of whose methods is found where it may be, and a Node map entry
+  whose handler is neither defined nor imported in the registration's file, are
+  `implementation-not-found`.
+- Node keys match the RPC name, its lower-camel form, or grpc-js's lodash `camelCase`
+  (`GetHTTPStatus` → `getHttpStatus`).
 - Node's static-codegen form, `addService(services.GreeterService, { … })`, is read too, and binds
   only when it names a declared service — `addService` is a common method name.
 - Registrations in comments, strings and test files are not read, and generated stubs are skipped:

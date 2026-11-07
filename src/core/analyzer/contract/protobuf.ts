@@ -23,6 +23,15 @@ export const isProtobufPath = (path: string): boolean => /\.proto$/i.test(path);
 const MAX_FIELD_NUMBER = 536_870_911;
 /** The largest enum value (an int32); `max` in an enum's `reserved` range. */
 const MAX_ENUM_VALUE = 2_147_483_647;
+/** The longest name read, in characters and in dotted parts; past either the file is unread. */
+const MAX_NAME_CHARS = 1_024;
+const MAX_NAME_PARTS = 64;
+/**
+ * A token as an error message names it. Never the raw text of a string literal, and never more
+ * than a bounded prefix of anything else: a parse error is served back to an agent, and repeating
+ * attacker-chosen text there is a free channel into its context.
+ */
+const shown = (t: Tok | undefined): string => (!t ? 'end of file' : t.t === 'str' ? 'a string literal' : `\`${t.v.length > 40 ? `${t.v.slice(0, 40)}…` : t.v}\``);
 /** Nesting depth of messages read at most: deeper is unreadable, never a stack overflow. */
 const MAX_NESTING = 64;
 
@@ -266,10 +275,13 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   const next = (): Tok => toks[p++] ?? fail('unexpected end of file');
   const isSym = (v: string, k = 0) => peek(k)?.t === 'sym' && peek(k)?.v === v;
   const isId = (v: string, k = 0) => peek(k)?.t === 'id' && peek(k)?.v === v;
-  const expectSym = (v: string): Tok => (isSym(v) ? next() : fail(`expected \`${v}\`, found \`${peek()?.v ?? 'end of file'}\``));
+  const expectSym = (v: string): Tok => (isSym(v) ? next() : fail(`expected \`${v}\`, found ${shown(peek())}`));
   const ident = (what: string): Tok => {
-    const t = peek()?.t === 'id' ? next() : fail(`expected ${what}, found \`${peek()?.v ?? 'end of file'}\``);
-    if (/\.\.|\.$/.test(t.v)) fail(`\`${t.v}\` is not a valid name`, t);
+    const t = peek()?.t === 'id' ? next() : fail(`expected ${what}, found ${shown(peek())}`);
+    if (/\.\.|\.$/.test(t.v)) fail(`${shown(t)} is not a valid name`, t);
+    // Bounded, so resolving a name stays linear: a package of 64,000 components made the scope
+    // walk quadratic per reference and ran a 128 KB file out of memory.
+    if (t.v.length > MAX_NAME_CHARS || t.v.split('.').length > MAX_NAME_PARTS) fail(`a name longer than ${MAX_NAME_CHARS} characters or ${MAX_NAME_PARTS} parts`, t);
     return t;
   };
   /** One string literal, adjacent literals joined as protoc joins them (`"proto" "3"`). */
@@ -283,7 +295,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   /** A name with no dots (a message, field, service, or RPC name). */
   const simpleIdent = (what: string): Tok => {
     const t = ident(what);
-    if (t.v.includes('.')) fail(`expected ${what}, found \`${t.v}\``, t);
+    if (t.v.includes('.')) fail(`expected ${what}, found ${shown(t)}`, t);
     return t;
   };
 
@@ -340,7 +352,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
     const neg = isSym('-') ? (next(), true) : false;
     const t = next();
     const v = t.t === 'num' ? intValue(t.v) : undefined;
-    if (v === undefined) fail(`expected ${what}, found \`${t.v}\``, t);
+    if (v === undefined) fail(`expected ${what}, found ${shown(t)}`, t);
     return neg ? -v! : v!;
   };
   const reservedStatement = (into: ProtoReserved, max: number): void => {
@@ -369,7 +381,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   next();
   expectSym('=');
   const syntax = stringLit('a syntax string');
-  if (syntax.v !== 'proto3') fail(`\`syntax = "${syntax.v}"\` is not read; only proto3 is`, syntax);
+  if (syntax.v !== 'proto3') fail(`\`syntax = "${syntax.v.length > 16 ? 'a long string' : syntax.v.replace(/[^\w.]/g, '?')}"\` is not read; only proto3 is`, syntax);
   expectSym(';');
 
   // `package` applies to the whole file wherever it is written, so it is found before any
@@ -518,7 +530,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
     while (!isSym('}')) {
       if (isSym(';')) { next(); continue; }
       if (isId('option')) { next(); serviceOptions.push(optionStatement().text); continue; }
-      if (!isId('rpc')) fail(`expected \`rpc\` in service ${nameTok.v}, found \`${peek()?.v ?? 'end of file'}\``);
+      if (!isId('rpc')) fail(`expected \`rpc\` in service ${nameTok.v}, found ${shown(peek())}`);
       next();
       const rname = simpleIdent('an RPC name');
       if (rpcNames.has(rname.v)) fail(`rpc \`${rname.v}\` declared twice in ${sname}`, rname);
@@ -561,7 +573,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   while (p < toks.length) {
     if (isSym(';')) { next(); continue; }
     const kw = next();
-    if (kw.t !== 'id') fail(`unexpected \`${kw.v}\``, kw);
+    if (kw.t !== 'id') fail(`unexpected ${shown(kw)}`, kw);
     switch (kw.v) {
       case 'package': {
         // Read by the prescan above; checked here so a malformed statement is still an error.
@@ -584,7 +596,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       case 'enum': enumBody(pkg, simpleIdent('an enum name')); break;
       case 'service': serviceBody(simpleIdent('a service name')); break;
       case 'extend': ident('an extended type'); unassessed.add('extend'); skipBlock(); break;
-      default: fail(`unexpected \`${kw.v}\` at the top level`, kw);
+      default: fail(`unexpected ${shown(kw)} at the top level`, kw);
     }
   }
 
@@ -622,16 +634,24 @@ export interface UnresolvedProtoType { file: string; line: number; written: stri
  */
 export function resolveProtoTypes(docs: readonly ProtoDocument[]): { docs: ProtoDocument[]; unresolved: UnresolvedProtoType[] } {
   // An import path names a file relative to an include root this reader does not know, so it
-  // matches every read file whose path ENDS with it on a segment boundary.
-  const bySuffix = new Map<string, number[]>();
+  // matches every read file whose path ENDS with it on a segment boundary. Indexed by basename and
+  // checked with `endsWith`, never by enumerating every suffix (quadratic in path depth).
+  const byBase = new Map<string, number[]>();
   docs.forEach((d, i) => {
-    const parts = d.file.split('/');
-    for (let k = 0; k < parts.length; k++) {
-      const suffix = parts.slice(k).join('/');
-      bySuffix.set(suffix, [...(bySuffix.get(suffix) ?? []), i]);
-    }
+    const base = d.file.slice(d.file.lastIndexOf('/') + 1);
+    const at = byBase.get(base);
+    if (at) at.push(i); else byBase.set(base, [i]);
   });
-  const importsOf = (i: number, which: 'imports' | 'publicImports') => docs[i][which].flatMap(p => bySuffix.get(p) ?? []);
+  const importMemo = new Map<string, number[]>();
+  const filesFor = (p: string): number[] => {
+    let hit = importMemo.get(p);
+    if (!hit) {
+      hit = (byBase.get(p.slice(p.lastIndexOf('/') + 1)) ?? []).filter(i => docs[i].file === p || docs[i].file.endsWith(`/${p}`));
+      importMemo.set(p, hit);
+    }
+    return hit;
+  };
+  const importsOf = (i: number, which: 'imports' | 'publicImports') => docs[i][which].flatMap(filesFor);
   /**
    * The files a file can name types from, as protoc allows: itself, its direct imports, and
    * whatever those re-export through `import public`, transitively. A file it does not import
@@ -651,10 +671,10 @@ export function resolveProtoTypes(docs: readonly ProtoDocument[]): { docs: Proto
   };
   const declaredIn = new Map<string, number[]>();
   docs.forEach((d, i) => {
-    for (const t of [...d.messages, ...d.enums]) declaredIn.set(t.name, [...(declaredIn.get(t.name) ?? []), i]);
+    for (const t of [...d.messages, ...d.enums]) { const at = declaredIn.get(t.name); if (at) at.push(i); else declaredIn.set(t.name, [i]); }
   });
   const servicesIn = new Map<string, number[]>();
-  docs.forEach((d, i) => { for (const sv of d.services) servicesIn.set(sv.name, [...(servicesIn.get(sv.name) ?? []), i]); });
+  docs.forEach((d, i) => { for (const sv of d.services) { const at = servicesIn.get(sv.name); if (at) at.push(i); else servicesIn.set(sv.name, [i]); } });
 
   const resolverFor = (i: number) => {
     const visible = visibleFrom(i);

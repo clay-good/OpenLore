@@ -47,7 +47,7 @@ export interface GrpcRegistration {
    */
   descriptor?: false;
   /** Node: each key of the implementation map, with the function it names (absent = written inline). */
-  methods?: Array<{ key: string; fn?: string }>;
+  methods?: Array<{ key: string; fn?: string; imported?: true }>;
   /** Why the implementation is not written literally at the registration (a variable, a factory call). */
   notLiteral?: string;
 }
@@ -131,15 +131,23 @@ function goImplType(arg: string): { implType: string; implQualifier?: string } |
 
 /** Python: `Cls()`, `mod.Cls(args)` name a class; a variable or a factory call's result does not. */
 function pythonImplType(arg: string): { implType: string; implQualifier?: string } | undefined {
-  const m = /^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\([\s\S]*\)$/.exec(arg);
+  const m = /^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/.exec(arg);
   if (!m) return undefined;
+  // The constructor call must be the whole argument: `Impl(cfg).wrap()` registers whatever
+  // `wrap` returns, not an `Impl`.
+  let depth = 0;
+  for (let i = m[0].length - 1; i < arg.length; i++) {
+    if (arg[i] === '(' || arg[i] === '[' || arg[i] === '{') depth++;
+    else if (arg[i] === ')' || arg[i] === ']' || arg[i] === '}') { depth--; if (depth === 0 && i !== arg.length - 1) return undefined; }
+  }
+  if (depth !== 0) return undefined;
   const q = qualified(m[1]);
   // A lower-case callee is a factory function by Python convention, not the class itself.
   return /^[A-Z]/.test(q.implType) ? q : undefined;
 }
 
 /** Node: the keys of an object-literal implementation map, each with the function it names. */
-function nodeImplMap(arg: string): Array<{ key: string; fn?: string }> | undefined {
+function nodeImplMap(arg: string): Array<{ key: string; fn?: string; base?: string }> | undefined {
   if (!arg.startsWith('{') || !arg.endsWith('}')) return undefined;
   const body = arg.slice(1, -1);
   const entries: string[] = [];
@@ -151,17 +159,17 @@ function nodeImplMap(arg: string): Array<{ key: string; fn?: string }> | undefin
     if (c === '(' || c === '[' || c === '{') depth++;
     else if (c === ')' || c === ']' || c === '}') depth--;
   }
-  const out: Array<{ key: string; fn?: string }> = [];
+  const out: Array<{ key: string; fn?: string; base?: string }> = [];
   for (const e of entries) {
     if (!e) continue;
     // A spread copies an unknown set of keys: the map is not literal.
     if (e.startsWith('...')) return undefined;
     const shorthand = /^([A-Za-z_$][\w$]*)$/.exec(e);
-    if (shorthand) { out.push({ key: shorthand[1], fn: shorthand[1] }); continue; }
+    if (shorthand) { out.push({ key: shorthand[1], fn: shorthand[1], base: shorthand[1] }); continue; }
     const pair = /^["']?([A-Za-z_$][\w$]*)["']?\s*:\s*([\s\S]+)$/.exec(e);
     if (pair) {
       const value = pair[2].trim();
-      out.push(IDENT_PATH.test(value) ? { key: pair[1], fn: last(value) } : { key: pair[1] });
+      out.push(IDENT_PATH.test(value) ? { key: pair[1], fn: last(value), base: value.split('.')[0] } : { key: pair[1] });
       continue;
     }
     // A method written in the map (`getOrder(call, cb) { … }`): the function is inline.
@@ -169,6 +177,29 @@ function nodeImplMap(arg: string): Array<{ key: string; fn?: string }> | undefin
     if (method) { out.push({ key: method[1], fn: method[1] }); continue; }
     return undefined;
   }
+  return out;
+}
+
+/**
+ * The names a JavaScript/TypeScript module binds from imports: `import a, { b, c as d } from`,
+ * `import * as e from`, `const { f, g: h } = require(…)`, `const i = require(…)`. Read on masked
+ * text, with every clause bounded, so a hostile file stays linear.
+ */
+function importedNames(text: string): Set<string> {
+  const out = new Set<string>();
+  const addClause = (clause: string) => {
+    const braces = /\{([^}]*)\}/.exec(clause);
+    if (braces) {
+      for (const part of braces[1].split(',')) {
+        const local = /(?:^|\s(?:as)\s+|:\s*)([A-Za-z_$][\w$]*)\s*$/.exec(part.trim()) ?? /^([A-Za-z_$][\w$]*)$/.exec(part.trim());
+        if (local) out.add(local[1]);
+      }
+    }
+    const rest = clause.replace(/\{[^}]*\}/, '');
+    for (const m of rest.matchAll(/(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)/g)) if (m[1] !== 'type' && m[1] !== 'as') out.add(m[1]);
+  };
+  for (const m of text.matchAll(/\bimport\s+([^;'"`]{1,500}?)\s+from\s*['"]/g)) addClause(m[1]);
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+(\{[^}]{0,500}\}|[A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(/g)) addClause(m[1]);
   return out;
 }
 
@@ -185,6 +216,7 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
   const out: GrpcRegistration[] = [];
+  let imports: Set<string> | undefined;
   const pattern = runtime === 'go' ? /\bRegister([A-Z]\w*)Server\s*\(/g
     : runtime === 'python' ? /\badd_(\w+)Servicer_to_server\s*\(/g
       : /\.addService\s*\(/g;
@@ -224,7 +256,11 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
       // names a declared service.
       const bare = !svc && IDENT_PATH.test(args[0] ?? '') ? args[0] : undefined;
       if (!svc && !bare) continue;
-      const methods = args[1] !== undefined ? nodeImplMap(args[1]) : undefined;
+      const parsed = args[1] !== undefined ? nodeImplMap(args[1]) : undefined;
+      // Whether each handler is IMPORTED into this file: only then may it be looked for outside
+      // it. A same-named function elsewhere that this file never imports is not its handler.
+      imports ??= importedNames(text);
+      const methods = parsed?.map(({ base, ...e }) => (base && imports!.has(base) ? { ...e, imported: true as const } : e));
       out.push({ file, line, runtime, service: svc ? svc[1] : bare!, ...(bare ? { descriptor: false as const } : {}), ...(methods ? { methods } : { notLiteral: `the implementation is \`${(args[1] ?? '').slice(0, 60)}\`, not an object literal` }) });
     }
   }

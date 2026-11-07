@@ -500,9 +500,12 @@ service OrderService {
     const root = repo({ 'proto/orders.proto': PROTO });
     write(root, 'proto/orders.proto', PROTO.replace('  rpc DeleteOrder(GetOrderRequest) returns (Order);\n', '').replace(' int64 total = 2;', ''));
     const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
-    const changes = r.changes as { items: Array<{ rule: string; address: string; consumers: unknown[] }>; suggestedBump: string };
+    const changes = r.changes as { items: Array<{ rule: string; address: string; consumers?: unknown[]; consumersNotAssessed?: string }>; suggestedBump: string };
     expect(changes.items.map(c => `${c.rule} ${c.address}`)).toEqual(['rpc-removed /orders.v1.OrderService/DeleteOrder', 'field-removed orders.v1.Order']);
-    expect(changes.items.every(c => Array.isArray(c.consumers) && c.consumers.length === 0)).toBe(true);
+    // No empty consumer list that would read as "no callers".
+    expect(changes.items.every(c => c.consumers === undefined && c.consumersNotAssessed)).toBe(true);
+    expect(r.boundaries).not.toEqual(expect.arrayContaining([expect.stringContaining('pass `federation: true`')]));
+    expect(renderServiceContract(r)).toContain('consumers not assessed');
     expect(changes.suggestedBump).toBe('major');
     const breaking = (r.findings as Array<{ code: string; subject: string; message: string }>).filter(f => f.code === 'contract-breaking');
     expect(breaking.map(f => f.subject).sort()).toEqual(['/orders.v1.OrderService/DeleteOrder', 'orders.v1.Order field 2 (total)']);

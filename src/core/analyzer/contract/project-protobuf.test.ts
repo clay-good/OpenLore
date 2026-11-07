@@ -267,7 +267,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
   describe('Node grpc-js', () => {
     const nodeReg = (partial: Partial<GrpcRegistration> = {}): GrpcRegistration => ({
       file: 'src/server.js', line: 4, runtime: 'node', service: 'proto.shop.orders.v1.OrderService',
-      methods: [{ key: 'getOrder', fn: 'getOrder' }, { key: 'ListOrders', fn: 'listAll' }], ...partial,
+      methods: [{ key: 'getOrder', fn: 'getOrder', imported: true }, { key: 'ListOrders', fn: 'listAll', imported: true }], ...partial,
     });
     const code = [fn('src/handlers.js::getOrder', { language: 'JavaScript' }), fn('src/handlers.js::listAll', { language: 'JavaScript' })];
 
@@ -297,6 +297,30 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
       }]);
       expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
       expect(p.unboundRpcs).toHaveLength(2);
+    });
+
+    it('a handler defined elsewhere and NOT imported is never bound; it is disclosed', () => {
+      const p = direct({ registrations: [nodeReg({ methods: [{ key: 'getOrder', fn: 'getOrder' }] })], resolveImplementation: resolverOver(code) });
+      expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+      expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ rpc: 'GetOrder', reason: 'implementation-not-found' })]);
+    });
+
+    it('a map mixing local and imported handlers binds both', () => {
+      const local = fn('src/server.js::getOrder', { language: 'JavaScript' });
+      const p = direct({
+        registrations: [nodeReg({ methods: [{ key: 'getOrder', fn: 'getOrder' }, { key: 'listOrders', fn: 'listAll', imported: true }] })],
+        resolveImplementation: resolverOver([local, ...code]),
+      });
+      expect(edgesOf(p, 'implements_endpoint')).toEqual([
+        'src/handlers.js::listAll -> proto/orders.proto::/shop.orders.v1.OrderService/ListOrders',
+        'src/server.js::getOrder -> proto/orders.proto::/shop.orders.v1.OrderService/GetOrder',
+      ]);
+    });
+
+    it('a path naming another package never falls back to the simple name', () => {
+      const p = direct({ registrations: [nodeReg({ service: 'proto.billing.v2.OrderService' })], resolveImplementation: resolverOver(code) });
+      expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+      expect(p.unresolvedRegistrations.map(r => r.reason)).toEqual(['unknown-service']);
     });
 
     it('discloses a service suffix that names no declared service', () => {

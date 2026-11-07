@@ -147,8 +147,16 @@ function diffEnum(file: string, b: ProtoEnum, e: ProtoEnum, out: ContractChange[
   const push = (rule: ContractRule, detail: string, line: number, element?: string) => out.push(change(file, e.name, line, rule, detail, element));
   const was = new Map(b.values.map(v => [v.name, v]));
   const now = new Map(e.values.map(v => [v.name, v]));
-  const wasNumbers = new Set(b.values.map(v => v.number));
-  const nowNumbers = new Set(e.values.map(v => v.number));
+  // Names by number on each side, built once: a renamed enum of 40,000 values was quadratic.
+  const namesByNumber = (vs: ProtoEnum['values']) => {
+    const m = new Map<number, string[]>();
+    for (const v of vs) { const at = m.get(v.number); if (at) at.push(v.name); else m.set(v.number, [v.name]); }
+    return m;
+  };
+  const wasByNumber = namesByNumber(b.values);
+  const nowByNumber = namesByNumber(e.values);
+  const wasNumbers = new Set(wasByNumber.keys());
+  const nowNumbers = new Set(nowByNumber.keys());
   const baseReserved = reservedOf(b.reserved);
   const headReserved = reservedOf(e.reserved);
   for (const [name, v] of now) {
@@ -158,7 +166,7 @@ function diffEnum(file: string, b: ProtoEnum, e: ProtoEnum, out: ContractChange[
       else if (!wasNumbers.has(v.number)) push('enum-value-added', `enum value ${name} = ${v.number} added`, v.line, name);
       // A new name on a number the base had and still has under its old name: a new alias.
       // (When the old name is gone, it is a rename, reported once below.)
-      else if (b.values.some(x => x.number === v.number && now.has(x.name))) push('enum-value-added', `enum value ${name} = ${v.number} added as an alias`, v.line, name);
+      else if ((wasByNumber.get(v.number) ?? []).some(n => now.has(n))) push('enum-value-added', `enum value ${name} = ${v.number} added as an alias`, v.line, name);
       continue;
     }
     if (old.number !== v.number) push('enum-value-number-changed', `enum value ${name}: ${old.number} → ${v.number}`, v.line, name);
@@ -169,7 +177,7 @@ function diffEnum(file: string, b: ProtoEnum, e: ProtoEnum, out: ContractChange[
     if (now.has(name)) continue;
     // The number survives under another name: the wire still works, JSON and text do not.
     if (nowNumbers.has(old.number)) {
-      const into = e.values.filter(v => v.number === old.number && !was.has(v.name)).map(v => v.name);
+      const into = (nowByNumber.get(old.number) ?? []).filter(n => !was.has(n));
       push('enum-value-renamed', `enum value ${name} = ${old.number} ${into.length ? `renamed to ${into.join(', ')}` : 'removed; another name keeps its number'}`, e.line, name);
       continue;
     }

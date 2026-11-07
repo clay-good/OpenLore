@@ -8368,7 +8368,8 @@ file that cannot be read SHALL be unread with the reason, never omitted.
 
 - **GIVEN** a `.proto` file that declares an `extend` block
 - **WHEN** the repository is analyzed
-- **THEN** `extend` is listed as not assessed, and the rest of the file is read
+- **THEN** `extend` is named as outside the model (under the projection's `notes`, which withhold
+  no conclusion), and the rest of the file is read
 
 #### Scenario: Protobuf types resolve by scope, across files
 

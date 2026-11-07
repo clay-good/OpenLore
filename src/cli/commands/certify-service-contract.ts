@@ -27,7 +27,7 @@ export interface CertifyServiceContractCliOptions {
 }
 
 interface Finding { code: string; severity: string; subject: string; message: string; enforcementClass?: string }
-interface Change { address: string; rule: string; class: string; element?: string; detail: string; consumers: Array<{ file: string; line: number }> }
+interface Change { address: string; rule: string; class: string; element?: string; detail: string; consumers?: Array<{ file: string; line: number }>; consumersNotAssessed?: string }
 
 /** Every string in `v`, sanitized for one terminal line (control characters and line breaks removed). */
 function clean(v: unknown): unknown {
@@ -54,7 +54,8 @@ export function renderServiceContract(result: Record<string, unknown>): string {
     if (changes.baseRefFallback) lines.push(`⚠ base '${changes.baseRefFallback.requested}' did not resolve; compared with '${changes.baseRefFallback.resolved}'`);
     for (const c of changes.items) {
       lines.push(`  ${c.class.padEnd(20)} ${c.rule.padEnd(30)} ${c.address}${c.element ? ` ${c.element}` : ''}`);
-      for (const w of c.consumers.slice(0, 5)) lines.push(`      called from ${w.file}:${w.line}`);
+      for (const w of (c.consumers ?? []).slice(0, 5)) lines.push(`      called from ${w.file}:${w.line}`);
+      if (c.consumersNotAssessed) lines.push(`      consumers not assessed: ${c.consumersNotAssessed}`);
     }
     if (changes.omitted) lines.push(`  … ${changes.omitted} more`);
     lines.push(changes.suggestedBump ? `Suggested version bump: ${changes.suggestedBump}` : `Suggested version bump withheld: ${changes.suggestedBumpWithheld ?? 'not proven'}`);

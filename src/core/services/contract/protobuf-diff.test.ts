@@ -219,3 +219,14 @@ describe('diffProtobuf: round-2 review regressions', () => {
     expect(r('enum E { option allow_alias = true; A = 0; B = 1; }', 'enum E { option allow_alias = true; A = 0; B = 1; C = 1; }')).toEqual(['enum-value-added C']);
   });
 });
+
+describe('diffProtobuf: round-3 security review', () => {
+  it('renaming every value of a large enum is linear', () => {
+    const n = 40_000;
+    const enumOf = (prefix: string) => `syntax = "proto3";\npackage p;\nenum E { ${Array.from({ length: n }, (_, i) => `${prefix}${i} = ${i};`).join(' ')} }\n`;
+    const t = Date.now();
+    const d = diffProtobuf(side({ 'x.proto': enumOf('X') }), side({ 'x.proto': enumOf('Y') }));
+    expect(d).toHaveLength(n);
+    expect(Date.now() - t).toBeLessThan(3_000);
+  });
+});
