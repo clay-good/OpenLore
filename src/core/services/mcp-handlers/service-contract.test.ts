@@ -685,4 +685,36 @@ enum Status { OPEN CLOSED }
     expect(changes.suggestedBump).toBe('major');
     expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('Past the GraphQL cap')]));
   }, 60_000);
+
+  it('GraphQL round-1 review: client documents neither fill the cap nor count as specification changes', async () => {
+    const files: Record<string, string> = { 'z/schema.graphql': 'type Query { a: Int b: Int }\n' };
+    for (let i = 0; i < 600; i++) files[`a/op${String(i).padStart(3, '0')}.graphql`] = `query Q${i} { a }\n`;
+    const root = repo(files);
+    write(root, 'z/schema.graphql', 'type Query { a: Int }\n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    expect((r.changes as { items: Array<{ rule: string }> }).items.map(c => c.rule)).toEqual(['operation-removed']);
+    const client = (r.notAssessed as Array<{ reason: string }>).filter(n => n.reason.includes('client document'));
+    expect(client).toHaveLength(1);
+    expect(client[0].reason).toContain('600 GraphQL client document(s)');
+    const { changedContractsForSpecFiles } = await import('../contract/contract-briefing.js');
+    expect(await changedContractsForSpecFiles(root, ['a/op001.graphql'])).toBeUndefined();
+  }, 60_000);
+
+  it('GraphQL round-1 review: a type moved into a file that does not parse is not reported removed', async () => {
+    const root = repo({ 'schema.graphql': 'type Query { order: Order }\ntype Order { id: ID! }\ntype Status { x: Int }\n' });
+    write(root, 'schema.graphql', 'type Query { order: Order }\ntype Order { id: ID! }\n');
+    write(root, 'types.graphql', 'type Status { x: Int \n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const items = (r.changes as { items: Array<{ rule: string; class: string }> }).items;
+    expect(items.every(c => c.rule !== 'type-removed')).toBe(true);
+    expect((r.changes as { suggestedBump: string | null }).suggestedBump).toBeNull();
+  });
+
+  it('GraphQL round-1 review: the outside-the-model list is bounded', async () => {
+    const dirs = Array.from({ length: 50 }, (_, i) => `@d${i}`).join(' ');
+    const root = repo({ 'schema.graphql': `type Query { a: Int ${dirs} }\n` });
+    const r = await handleCertifyServiceContract({ directory: root });
+    const reason = (r.notAssessed as Array<{ reason: string }>).find(n => n.reason.startsWith('outside the model'))!.reason;
+    expect(reason).toContain('and 38 more');
+  });
 });

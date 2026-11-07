@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { projectGraphql, GRAPHQL_RESOLVER_BINDING, MAX_GRAPHQL_FILES, type GraphqlProjectionInput } from './project-graphql.js';
 import { projectContracts, contractDisclosure, type ContractProjectionInput } from './project.js';
-import type { ResolverMap } from './graphql-resolvers.js';
+import { scanResolverMaps, type ResolverMap } from './graphql-resolvers.js';
 import type { FunctionNode } from '../call-graph-types.js';
 
 const SCHEMA = `schema { query: Query, mutation: Mutation }
@@ -202,24 +202,56 @@ describe('projectGraphql: implements_endpoint from resolver maps', () => {
     expect(p.unboundOperations).toHaveLength(6);
   });
 
-  it('an imported name is looked for outside the file, and refused when more than one matches', () => {
-    const p = direct({}, [map({ entries: [
-      { field: 'health', fn: 'cancel', imported: true, line: 9 },
-      { field: 'me', fn: 'dup', imported: true, line: 7 },
-      { field: 'search', fn: 'gone', imported: true, line: 8 },
+  it('an imported name is looked for in the module it was imported from, and refused when more than one matches there', () => {
+    const code = [...CODE, fn('src/dup.ts::dup'), fn('src/dup/index.ts::dup')];
+    const p = direct({ resolveImplementation: byName(code) }, [map({ entries: [
+      { field: 'health', fn: 'cancel', imported: true, from: './orders/service', line: 9 },
+      // `./dup` names both `src/dup.ts` and `src/dup/index.ts`: two candidates in the named module.
+      { field: 'me', fn: 'dup', imported: true, from: './dup', line: 7 },
+      { field: 'search', fn: 'gone', imported: true, from: './gone', line: 8 },
     ] })]);
     expect(edgesOf(p, 'implements_endpoint')).toEqual(['src/orders/service.ts::cancel -> graphql/ext.graphql::Query.health']);
     expect(p.edges.find(e => e.kind === 'implements_endpoint')!.line).toBe(30);
     expect(p.unresolvedResolvers.map(u => `${u.field} ${u.reason}${u.detail ? `: ${u.detail}` : ''}`)).toEqual([
       'me ambiguous-implementation: more than one `dup`',
-      'search implementation-not-found: `gone` is imported by src/resolvers.ts from a module that is not indexed here',
+      "search implementation-not-found: `gone` is imported by src/resolvers.ts from './gone', which is not indexed here (a package, a path alias, or a module without that function)",
     ]);
   });
 
-  it('a function in the map\'s own file wins over a same-named import elsewhere', () => {
+  it('an imported name never binds a same-named function in another module, nor in the map\'s own file', () => {
     const code = [...CODE, fn('src/elsewhere.ts::getOrder')];
-    const p = direct({ resolveImplementation: byName(code) }, [map({ entries: [{ field: 'order', fn: 'getOrder', imported: true, line: 4 }] })]);
-    expect(edgesOf(p, 'implements_endpoint')).toEqual(['src/resolvers.ts::getOrder -> graphql/schema.graphql::Query.order']);
+    // Imported from `./elsewhere`: the map file's own `getOrder` is not it.
+    const p = direct({ resolveImplementation: byName(code) }, [map({ entries: [{ field: 'order', fn: 'getOrder', imported: true, from: './elsewhere', line: 4 }] })]);
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['src/elsewhere.ts::getOrder -> graphql/schema.graphql::Query.order']);
+    // Imported from a module that does not hold it: nothing binds, not the local one, not the other.
+    const q = direct({ resolveImplementation: byName(code) }, [map({ entries: [{ field: 'order', fn: 'getOrder', imported: true, from: './other', line: 4 }] })]);
+    expect(edgesOf(q, 'implements_endpoint')).toEqual([]);
+    expect(q.unresolvedResolvers.map(u => u.reason)).toEqual(['implementation-not-found']);
+  });
+
+  it('a name that is not imported binds only in the map\'s own file', () => {
+    const code = [fn('src/elsewhere.ts::getOrder')];
+    const p = direct({ resolveImplementation: byName(code) }, [map({ entries: [{ field: 'order', fn: 'getOrder', line: 4 }] })]);
+    expect(edgesOf(p, 'implements_endpoint')).toEqual([]);
+    expect(p.unresolvedResolvers[0]).toMatchObject({ reason: 'implementation-not-found', detail: '`getOrder` is neither defined in src/resolvers.ts nor imported by it' });
+  });
+
+  it('a Python import binds only in the module it names (relative or absolute)', () => {
+    const code = [fn('app/orders.py::resolve_order'), fn('app/api/orders.py::resolve_order'), fn('lib/pkg/__init__.py::resolve_all')];
+    const py = (entries: ResolverMap['entries']) => direct({ resolveImplementation: byName(code) }, [map({ file: 'app/api/schema.py', runtime: 'python', entries })]);
+    expect(edgesOf(py([{ field: 'order', fn: 'resolve_order', imported: true, module: '..orders', line: 4 }]), 'implements_endpoint'))
+      .toEqual(['app/orders.py::resolve_order -> graphql/schema.graphql::Query.order']);
+    expect(edgesOf(py([{ field: 'order', fn: 'resolve_order', imported: true, module: '.orders', line: 4 }]), 'implements_endpoint'))
+      .toEqual(['app/api/orders.py::resolve_order -> graphql/schema.graphql::Query.order']);
+    expect(edgesOf(py([{ field: 'orders', fn: 'resolve_all', imported: true, module: 'pkg', line: 4 }]), 'implements_endpoint'))
+      .toEqual(['lib/pkg/__init__.py::resolve_all -> graphql/schema.graphql::Query.orders']);
+  });
+
+  it('an entry that is not followed says why', () => {
+    const p = direct({}, [map({ entries: [{ field: 'order', fn: 'handler', notFollowed: "`handler` is a default or namespace import of './h', which is not followed", line: 4 }] })]);
+    expect(p.unresolvedResolvers).toEqual([
+      { file: 'src/resolvers.ts', line: 4, root: 'Query', field: 'order', reason: 'implementation-not-found', detail: "`handler` is a default or namespace import of './h', which is not followed" },
+    ]);
   });
 
   it('a map for a root type that is a client-visible name but not a root binds nothing', () => {
@@ -341,5 +373,67 @@ describe('projectGraphql through projectContracts', () => {
     const OPENAPI = 'openapi: 3.0.0\ninfo: {title: t, version: "1"}\npaths:\n  /a:\n    get:\n      responses: {"200": {description: ok}}\n';
     const p = viaContracts({ files: [{ path: 'api/openapi.yaml', content: OPENAPI }, { path: 'g/bad.graphql', content: 'type {' }] }, []);
     expect(p.unmatchedOperations.total).toBe(1);
+  });
+});
+
+describe('projectGraphql: resolver binding from scanned source (review repros)', () => {
+  const SDL = 'type Query { me: User search(term: String!): [Int] }\ntype Mutation { cancelOrder(id: ID!): Int }\ntype User { id: ID! }';
+  const project = (file: string, content: string, code: FunctionNode[]) => projectGraphql({
+    files: [{ path: 'schema.graphql', content: SDL }],
+    resolverMaps: roots => scanResolverMaps(file, content, roots),
+    resolveImplementation: byName(code),
+  });
+  const reasons = (p: ReturnType<typeof project>) => p.unresolvedResolvers.map(u => `${u.root}.${u.field} ${u.reason}: ${u.detail}`);
+
+  it('a handler imported from a package does not bind a same-named repository function', () => {
+    const p = project('src/resolvers.ts', `import { cancelOrder } from 'some-external-lib';
+export const resolvers = { Mutation: { cancelOrder } };
+`, [fn('src/legacy/cancel.ts::cancelOrder')]);
+    expect(edgesOf(p, 'implements_endpoint')).toEqual([]);
+    expect(reasons(p)).toEqual([
+      "Mutation.cancelOrder implementation-not-found: `cancelOrder` is imported by src/resolvers.ts from 'some-external-lib', which is not indexed here (a package, a path alias, or a module without that function)",
+    ]);
+  });
+
+  it('a Python handler imported from an outside package does not bind a same-named repository function', () => {
+    const p = project('app/schema.py', `from ariadne import QueryType
+from external_pkg import resolve_stats
+query = QueryType()
+query.set_field("search", resolve_stats)
+`, [fn('app/stats.py::resolve_stats', { language: 'Python' })]);
+    expect(edgesOf(p, 'implements_endpoint')).toEqual([]);
+    expect(reasons(p)).toEqual([
+      "Query.search implementation-not-found: `resolve_stats` is imported by app/schema.py from 'external_pkg', which is not indexed here (a package, a path alias, or a module without that function)",
+    ]);
+  });
+
+  it('an imported handler beats a same-named class method in the map\'s own file', () => {
+    const p = project('src/resolvers.ts', `import { getUserFromDb } from './users';
+class UserService { getUserFromDb() { return null; } }
+export const resolvers = { Query: { me: getUserFromDb } };
+`, [fn('src/users.ts::getUserFromDb'), fn('src/resolvers.ts::UserService.getUserFromDb', { name: 'getUserFromDb', className: 'UserService' })]);
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['src/users.ts::getUserFromDb -> schema.graphql::Query.me']);
+    expect(p.unresolvedResolvers).toEqual([]);
+  });
+
+  it('Python `set_field` with a module attribute binds in that module', () => {
+    const p = project('app/schema.py', `from ariadne import QueryType
+import app.orders_mod as orders_mod
+query = QueryType()
+query.set_field("search", orders_mod.resolve_search)
+`, [fn('app/orders_mod.py::resolve_search', { language: 'Python' }), fn('app/other.py::resolve_search', { language: 'Python' })]);
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['app/orders_mod.py::resolve_search -> schema.graphql::Query.search']);
+    expect(p.unresolvedResolvers).toEqual([]);
+  });
+
+  it('an Apollo subscription `{ subscribe: fn }` binds fn', () => {
+    const p = projectGraphql({
+      files: [{ path: 'schema.graphql', content: 'type Query { a: Int }\ntype Subscription { orderCreated: Int }' }],
+      resolverMaps: roots => scanResolverMaps('src/resolvers.ts', `function subscribeOrders() {}
+export const resolvers = { Subscription: { orderCreated: { subscribe: subscribeOrders } } };
+`, roots),
+      resolveImplementation: byName([fn('src/resolvers.ts::subscribeOrders')]),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['src/resolvers.ts::subscribeOrders -> schema.graphql::Subscription.orderCreated']);
   });
 });

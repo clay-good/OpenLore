@@ -49,8 +49,13 @@ function cancelOrder() {}
     expect(maps.every(m => m.runtime === 'node' && m.file === 'src/resolvers.ts' && !m.notLiteral)).toBe(true);
   });
 
-  it('reads a root object held in its own variable, typed or not', () => {
-    expect(entries(scan('q.ts', 'export const Query: QueryResolvers<Ctx> = { order: getOrder };\nlet Mutation = { cancel };'))).toEqual([
+  it('reads a root object held in its own variable, typed or not, in a file about resolvers', () => {
+    const src = 'export const Query: QueryResolvers<Ctx> = { order: getOrder };\nlet Mutation = { cancel };';
+    expect(entries(scan('q.ts', `${src}\nexport const resolvers = { Query, Mutation };`))).toEqual([
+      'Query.order -> getOrder', 'Mutation.cancel -> cancel',
+    ]);
+    // A file importing a GraphQL server package is about resolvers too.
+    expect(entries(scan('q.ts', `import { ApolloServer } from '@apollo/server';\n${src}`))).toEqual([
       'Query.order -> getOrder', 'Mutation.cancel -> cancel',
     ]);
   });
@@ -227,6 +232,120 @@ describe('scanResolverMaps: linear on hostile input', () => {
 
   it('caps the matches examined per file', () => {
     const maps = scan('a.ts', 'const r = { Query: { a: f } };\n'.repeat(1_500));
-    expect(maps).toHaveLength(1_000);
+    // 1,000 maps read, then one not-literal receipt that names the cap.
+    expect(maps).toHaveLength(1_001);
+    expect(maps.slice(0, 1_000).every(m => !m.notLiteral && m.entries.length === 1)).toBe(true);
+    expect(maps[1_000]).toEqual(expect.objectContaining({ line: 1_001, root: 'Query', entries: [], notLiteral: expect.stringContaining('more than 1000') }));
+  });
+});
+
+describe('scanResolverMaps: imports carry their module', () => {
+  it('a named import carries its specifier; a default or namespace import used directly is not followed', () => {
+    const maps = scan('src/resolvers.ts', `import { getOrder as go } from './orders';
+import handler from './handler';
+import * as all from './all';
+const { cancel } = require('../cancel');
+export const resolvers = { Query: { order: go, h: handler, a: all, x: all.find }, Mutation: { cancel } };
+`);
+    expect(maps.flatMap(m => m.entries.map(({ line: _l, ...e }) => e))).toEqual([
+      { field: 'order', fn: 'getOrder', imported: true, from: './orders' },
+      { field: 'h', fn: 'handler', notFollowed: "`handler` is a default or namespace import of './handler', which is not followed" },
+      { field: 'a', fn: 'all', notFollowed: "`all` is a default or namespace import of './all', which is not followed" },
+      { field: 'x', fn: 'find', imported: true, from: './all' },
+      { field: 'cancel', fn: 'cancel', imported: true, from: '../cancel' },
+    ]);
+  });
+
+  it('a Python `from X import` carries the module it names', () => {
+    const maps = scan('app/schema.py', 'from ariadne import QueryType\nfrom ..orders import resolve_order as ro\nfrom external_pkg import resolve_stats\nquery = QueryType()\nquery.set_field("order", ro)\nquery.set_field("stats", resolve_stats)\n');
+    expect(maps[0].entries.map(({ line: _l, ...e }) => e)).toEqual([
+      { field: 'order', fn: 'resolve_order', imported: true, module: '..orders' },
+      { field: 'stats', fn: 'resolve_stats', imported: true, module: 'external_pkg' },
+    ]);
+  });
+
+  it('Python `set_field` with a module attribute resolves the module the name holds', () => {
+    const maps = scan('app/schema.py', `from ariadne import QueryType
+import app.orders_mod as orders_mod
+from app import other
+query = QueryType()
+query.set_field("search", orders_mod.resolve_search)
+query.set_field("other", other.resolve_other)
+query.set_field("unknown", nowhere.resolve_x)
+`);
+    expect(maps[0].entries.map(({ line: _l, ...e }) => e)).toEqual([
+      { field: 'search', fn: 'resolve_search', imported: true, module: 'app.orders_mod' },
+      { field: 'other', fn: 'resolve_other', imported: true, module: 'app.other' },
+      { field: 'unknown', fn: 'resolve_x', notFollowed: '`nowhere.resolve_x` names an attribute of `nowhere`, which is not an import this file states' },
+    ]);
+  });
+});
+
+describe('scanResolverMaps: client code, mocks and types are not server resolvers (review repros)', () => {
+  it('urql `cacheExchange` resolvers and updates bind nothing', () => {
+    const src = `import { cacheExchange } from '@urql/exchange-graphcache';
+import { createClient } from 'urql';
+export const client = createClient({ exchanges: [cacheExchange({ resolvers: { Query: { todo: f } }, updates: { Mutation: { addTodo: g } } })] });
+`;
+    expect(scan('src/client.ts', src)).toEqual([]);
+    // Even without the client import, the enclosing `cacheExchange(…)` call marks it client configuration.
+    expect(scan('src/cache.ts', 'const resolvers = 1;\nexport const c = cacheExchange({ resolvers: { Query: { todo: f } }, updates: { Mutation: { addTodo: g } } });')).toEqual([]);
+  });
+
+  it('Apollo Client local resolvers and type policies bind nothing', () => {
+    expect(scan('src/apollo.ts', `import { ApolloClient, InMemoryCache } from '@apollo/client';
+export const client = new ApolloClient({ cache: new InMemoryCache(), resolvers: { Query: { isLoggedIn: readLogin } } });
+`)).toEqual([]);
+    expect(scan('src/apollo.ts', `const resolvers = {};
+export const client = new ApolloClient({ resolvers: { Query: { isLoggedIn: readLogin } } });
+export const cache = new InMemoryCache({ typePolicies: { Query: { fields: { me: readMe } } } });
+`)).toEqual([]);
+  });
+
+  it('a file importing both a client and a server package is still read', () => {
+    const src = `import { gql } from '@apollo/client';
+import { ApolloServer } from '@apollo/server';
+const resolvers = { Query: { order: getOrder } };
+`;
+    expect(entries(scan('src/server.ts', src))).toEqual(['Query.order -> getOrder']);
+  });
+
+  it('stories and mock servers bind nothing', () => {
+    const src = 'const resolvers = { Query: { order: getOrder } };';
+    expect(scan('src/Order.stories.ts', src)).toEqual([]);
+    expect(scan('src/Order.stories.tsx', src)).toEqual([]);
+    expect(scan('src/mocks/server.ts', src)).toEqual([]);
+    expect(scan('src/__mocks__/server.ts', src)).toEqual([]);
+    expect(scan('mock/server.ts', src)).toEqual([]);
+  });
+
+  it('`export const Query = {…}` in a file not about resolvers binds nothing', () => {
+    expect(scan('src/selectors.ts', 'export const Query = { orders: selectOrders };')).toEqual([]);
+    // The same object as a key of a map is still read.
+    expect(entries(scan('src/x.ts', 'export default { Query: { orders: selectOrders } };'))).toEqual(['Query.orders -> selectOrders']);
+  });
+
+  it('a root bound to an identifier or a call is disclosed as not literal', () => {
+    const maps = scan('src/resolvers.ts', 'const resolvers = {\n  Query: queryResolvers,\n  Mutation: mergeResolvers(a, b),\n};');
+    expect(maps).toEqual([
+      { file: 'src/resolvers.ts', line: 2, runtime: 'node', root: 'Query', entries: [], notLiteral: 'the Query resolvers are `queryResolvers`, not an object written here' },
+      { file: 'src/resolvers.ts', line: 3, runtime: 'node', root: 'Mutation', entries: [], notLiteral: 'the Mutation resolvers are `mergeResolvers(…)`, not an object written here' },
+    ]);
+  });
+
+  it('a resolver TYPE (an interface or a type alias) yields nothing', () => {
+    expect(scan('src/types.ts', 'export interface Resolvers { Query: { order: X } }')).toEqual([]);
+    expect(scan('src/types.ts', 'export interface Resolvers<C> extends Base { Query: { order: X } }')).toEqual([]);
+    expect(scan('src/types.ts', 'export type Resolvers = { Query: { order: X }; Mutation: QueryRes };')).toEqual([]);
+  });
+
+  it('an Apollo subscription `{ subscribe: fn }` names fn, imported or not', () => {
+    const maps = scan('src/resolvers.ts', `import { subscribeOrders } from './pubsub';
+export const resolvers = { Subscription: { orderCreated: { subscribe: subscribeOrders }, orderPaid: { subscribe: () => it } } };
+`);
+    expect(maps.flatMap(m => m.entries.map(({ line: _l, ...e }) => e))).toEqual([
+      { field: 'orderCreated', fn: 'subscribeOrders', imported: true, from: './pubsub' },
+      { field: 'orderPaid' },
+    ]);
   });
 });

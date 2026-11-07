@@ -6,7 +6,7 @@
  * a registration written in a comment or a string, or an `addService` that is not grpc-js.
  */
 import { describe, it, expect } from 'vitest';
-import { scanGrpcRegistrations } from './grpc-registration.js';
+import { scanGrpcRegistrations, importedNames, isImportedModule, isImportedPythonModule } from './grpc-registration.js';
 
 describe('scanGrpcRegistrations: Go', () => {
   it('reads the service and the literal implementation type', () => {
@@ -257,8 +257,8 @@ server.addService(proto.orders.v1.OrderService.service, { getOrder, listOrders, 
 `;
     expect(scanGrpcRegistrations('srv/server.js', src)[0].methods).toEqual([
       { key: 'getOrder', fn: 'getOrder' },
-      { key: 'listOrders', fn: 'listOrders', imported: true },
-      { key: 'del', fn: 'del', imported: true },
+      { key: 'listOrders', fn: 'listOrders', imported: true, from: './handlers' },
+      { key: 'del', fn: 'del', imported: true, from: './impl' },
       { key: 'other', fn: 'elsewhere' },
     ]);
   });
@@ -275,11 +275,11 @@ describe('scanGrpcRegistrations: round-4 review — aliased imports', () => {
     const esm = scanGrpcRegistrations('srv/server.js', `import { getOrder as get } from './handlers';
 server.addService(proto.shop.v1.OrderService.service, { getOrder: get });
 `);
-    expect(esm[0].methods).toEqual([{ key: 'getOrder', fn: 'getOrder', imported: true }]);
+    expect(esm[0].methods).toEqual([{ key: 'getOrder', fn: 'getOrder', imported: true, from: './handlers' }]);
     const cjs = scanGrpcRegistrations('srv/server.js', `const { getOrder: g } = require('./handlers');
 server.addService(proto.shop.v1.OrderService.service, { getOrder: g });
 `);
-    expect(cjs[0].methods).toEqual([{ key: 'getOrder', fn: 'getOrder', imported: true }]);
+    expect(cjs[0].methods).toEqual([{ key: 'getOrder', fn: 'getOrder', imported: true, from: './handlers' }]);
   });
 
   it('a default import names no exported function, so it is not looked for elsewhere', () => {
@@ -287,5 +287,44 @@ server.addService(proto.shop.v1.OrderService.service, { getOrder: g });
 server.addService(proto.shop.v1.OrderService.service, { getOrder: handler });
 `);
     expect(r[0].methods).toEqual([{ key: 'getOrder', fn: 'handler' }]);
+  });
+});
+
+describe('importedNames and module resolution', () => {
+  it('maps each local name to the name it was exported under and the module it came from', () => {
+    const m = importedNames(`import { a, b as c, type T } from './x';
+import d, * as ns from "pkg";
+const { e, f: g } = require('../y');
+const h = await import('./z');
+`);
+    expect(Object.fromEntries(m)).toEqual({
+      a: { exported: 'a', from: './x' }, c: { exported: 'b', from: './x' }, T: { exported: 'T', from: './x' },
+      d: { exported: null, from: 'pkg' }, ns: { exported: null, from: 'pkg' },
+      e: { exported: 'e', from: '../y' }, g: { exported: 'f', from: '../y' },
+      h: { exported: null, from: './z' },
+    });
+  });
+
+  it('isImportedModule resolves only relative specifiers, with extensions and index files', () => {
+    expect(isImportedModule('src/api/resolvers.ts', './orders', 'src/api/orders.ts')).toBe(true);
+    expect(isImportedModule('src/api/resolvers.ts', './orders.js', 'src/api/orders.ts')).toBe(true);
+    expect(isImportedModule('src/api/resolvers.ts', '../db', 'src/db/index.tsx')).toBe(true);
+    for (const ext of ['js', 'mjs', 'cjs']) expect(isImportedModule('src/r.ts', './o', `src/o.${ext}`)).toBe(true);
+    expect(isImportedModule('src/api/resolvers.ts', './orders', 'src/orders.ts')).toBe(false);
+    expect(isImportedModule('src/api/resolvers.ts', './orders', 'src/api/orders/extra.ts')).toBe(false);
+    // A package or a path alias names nothing in the repository.
+    expect(isImportedModule('src/r.ts', 'orders', 'orders.ts')).toBe(false);
+    expect(isImportedModule('src/r.ts', '@/orders', 'src/orders.ts')).toBe(false);
+  });
+
+  it('isImportedPythonModule resolves relative dots from the package and absolute paths as a suffix', () => {
+    expect(isImportedPythonModule('app/api/schema.py', '.orders', 'app/api/orders.py')).toBe(true);
+    expect(isImportedPythonModule('app/api/schema.py', '..orders', 'app/orders.py')).toBe(true);
+    expect(isImportedPythonModule('app/api/schema.py', '..orders', 'app/api/orders.py')).toBe(false);
+    expect(isImportedPythonModule('app/api/schema.py', '.', 'app/api/__init__.py')).toBe(true);
+    expect(isImportedPythonModule('app/schema.py', 'app.orders', 'src/app/orders.py')).toBe(true);
+    expect(isImportedPythonModule('app/schema.py', 'app.orders', 'app/orders/__init__.py')).toBe(true);
+    expect(isImportedPythonModule('app/schema.py', 'app.orders', 'myapp/orders.py')).toBe(false);
+    expect(isImportedPythonModule('app/schema.py', 'external_pkg', 'app/stats.py')).toBe(false);
   });
 });

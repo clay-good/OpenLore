@@ -541,6 +541,10 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
             ...(u.field ? { field: emittedText(u.field) } : {}),
           })),
         } : {}),
+        // Operations and RPCs no resolver map or registration binds: the code that serves them (a
+        // code-first server, a style not read) is not rooted by them, so it may be listed here.
+        ...(cg.contracts.unboundGraphqlOperations?.total ? { unboundGraphqlOperations: cg.contracts.unboundGraphqlOperations.total } : {}),
+        ...(cg.contracts.unboundRpcs?.total ? { unboundRpcs: cg.contracts.unboundRpcs.total } : {}),
         ...(cg.contracts.notAssessed?.length ? { notAssessed: cg.contracts.notAssessed.map(emittedText) } : {}),
         ...(cg.contracts.notes?.length ? { notes: cg.contracts.notes.map(emittedText) } : {}),
         note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',

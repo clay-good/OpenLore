@@ -118,8 +118,8 @@ extend type RootQuery { me: Order }
     const filter = type(d, 'OrderFilter');
     expect(filter.fields.map(f => [f.name, f.type, f.defaultValue, f.deprecated])).toEqual([
       ['status', 'Status', 'OPEN', false],
-      ['ids', '[ID!]', '[ "a" "b" ]', false],
-      ['range', 'Range', '{ from : 1 to : -2.5e3 }', false],
+      ['ids', '[ID!]', '["a","b"]', false],
+      ['range', 'Range', '{from:1,to:-2500}', false],
       ['old', 'Int', undefined, true],
     ]);
     expect(type(d, 'Status').values.map(v => `${v.name}${v.deprecated ? '*' : ''}`)).toEqual(['OPEN', 'CLOSED*', 'BACKORDER']);
@@ -151,9 +151,10 @@ extend type RootQuery { me: Order }
     expect(strip(described)).toBe(strip(plain));
   });
 
-  it('reads directive definitions as outside the model, and an empty or comment-only file as an empty schema', () => {
+  it('reads directive definitions into the model (their uses stay outside it), and an empty or comment-only file as an empty schema', () => {
     const d = read('directive @auth(requires: Role = ADMIN) repeatable on | FIELD_DEFINITION | OBJECT\ntype T { a: Int @auth }');
-    expect(d.unassessed).toEqual(['@auth', 'directive @auth']);
+    expect(d.unassessed).toEqual(['@auth']);
+    expect(d.directiveDefs.map(x => x.name)).toEqual(['auth']);
     expect(read('').types).toEqual([]);
     expect(read('# nothing here\n').types).toEqual([]);
   });
@@ -273,7 +274,7 @@ describe('readGraphql: refusals', () => {
     expect(fails('type A { a: Int }}')).toMatch(/unexpected `}`/);
     expect(fails('union U = ')).toMatch(/end of file|expected a union member/);
     expect(fails('type A implements { a: Int }')).toMatch(/expected an interface name/);
-    expect(fails('input A { a: [Int] = [1, 2 }')).toMatch(/unbalanced/);
+    expect(fails('input A { a: [Int] = [1, 2 }')).toMatch(/expected a value/);
     expect(fails('input A { a: [Int] = [1, 2')).toMatch(/end of file/);
   });
 
@@ -400,7 +401,7 @@ describe('mergeGraphqlSchema', () => {
       doc('ext.graphql', 'extend type Order { extra: Int }\nextend type Ghost { x: Int }'),
     ]);
     expect(s.types.has('Order')).toBe(false);
-    expect(s.ambiguous).toEqual([{ name: 'Order', files: ['svc-a/schema.graphql', 'svc-b/schema.graphql'] }]);
+    expect(s.ambiguous).toEqual([{ name: 'Order', files: ['svc-a/schema.graphql', 'svc-b/schema.graphql'], fingerprint: expect.any(String) }]);
     expect(s.orphanExtensions).toEqual([{ name: 'Ghost', file: 'ext.graphql' }]);
   });
 
@@ -416,12 +417,14 @@ describe('mergeGraphqlSchema', () => {
     expect(s.types.get('Query')!.fields.map(f => f.type)).toEqual(['Int']);
   });
 
-  it('a root named differently in two files is a conflict; the first file wins', () => {
+  it('a root named differently in two files is a conflict, and no root of that kind is guessed', () => {
     const s = mergeGraphqlSchema([
       doc('b.graphql', 'schema { query: Q2 }'),
       doc('a.graphql', 'schema { query: Q1 }'),
     ]);
-    expect(s.roots.query).toBe('Q1');
+    // Conflicting roots are not guessed between: the kind has no root, and the conflict is named.
+    expect(s.roots.query).toBeUndefined();
+    expect(s.rootConflicts).toEqual(['query']);
     expect(s.conflicts).toEqual(['the query root is `Q1` in one file and `Q2` in another']);
   });
 
@@ -455,5 +458,95 @@ describe('mergeGraphqlSchema', () => {
     const one = mergeGraphqlSchema([doc('a.graphql', 'type T { id: ID }'), doc('b.graphql', 'extend type T @shareable { x: Int }'), doc('c.graphql', 'extend type T @tag(name: "t") { y: Int }')]);
     const two = mergeGraphqlSchema([doc('a.graphql', 'type T { id: ID }'), doc('z.graphql', 'extend type T @shareable { x: Int }'), doc('c.graphql', 'extend type T @tag(name: "t") { y: Int }')]);
     expect(two.types.get('T')!.directivesHash).toBe(one.types.get('T')!.directivesHash);
+  });
+});
+
+describe('readGraphql: directive definitions, schema directives and default values', () => {
+  it('models a directive definition: arguments, repeatable, and sorted unique locations', () => {
+    const d = read('directive @auth(role: Role! = ADMIN, scopes: [String]) repeatable on | OBJECT | FIELD_DEFINITION | OBJECT\ndirective @plain on FIELD');
+    expect(d.directiveDefs.map(x => ({ ...x, args: x.args.map(a => `${a.name}: ${a.type}${a.defaultValue !== undefined ? ` = ${a.defaultValue}` : ''}`) }))).toEqual([
+      { name: 'auth', args: ['role: Role! = ADMIN', 'scopes: [String]'], repeatable: true, locations: ['FIELD_DEFINITION', 'OBJECT'], line: 1 },
+      { name: 'plain', args: [], repeatable: false, locations: ['FIELD'], line: 2 },
+    ]);
+    expect(d.unassessed).toEqual([]);
+  });
+
+  it('hashes the directives on `schema` and `extend schema`, and records a schema definition', () => {
+    const a = read('schema @link(url: "a") { query: Query }\ntype Query { x: Int }');
+    const b = read('schema @link(url: "b") { query: Query }\ntype Query { x: Int }');
+    const none = read('schema { query: Query }\ntype Query { x: Int }');
+    expect(a.hasSchemaDefinition).toBe(true);
+    expect(a.schemaDirectivesHash).not.toBe(b.schemaDirectivesHash);
+    expect(a.schemaDirectivesHash).not.toBe(none.schemaDirectivesHash);
+    expect(read('extend schema @link(url: "a")').schemaDirectivesHash).not.toBe(read('type Q { a: Int }').schemaDirectivesHash);
+    expect(read('extend schema @link(url: "a")').hasSchemaDefinition).toBe(false);
+  });
+
+  it('writes default values in canonical form: object fields sorted, numbers as numbers', () => {
+    const dv = (t: string) => type(read(`input I { a: ${t} }`), 'I').fields[0].defaultValue;
+    expect(dv('F = {b: 2, a: 1}')).toBe(dv('F = { a: 1, b: 2 }'));
+    expect(dv('F = {b: 2, a: 1}')).toBe('{a:1,b:2}');
+    expect(dv('Float = 1.0')).toBe(dv('Float = 1'));
+    expect(dv('Float = 1e3')).toBe('1000');
+    expect(dv('[F] = [{y: [1, 2], x: "s"}]')).toBe('[{x:"s",y:[1,2]}]');
+    expect(dv('Int = 1')).not.toBe(dv('Int = 2'));
+  });
+
+  it('a duplicate argument name, a root named twice, or a second `schema` definition is unreadable', () => {
+    expect(fails('type Q { a(x: Int, x: String): Int }')).toMatch(/argument `x` declared twice on Q\.a/);
+    expect(fails('directive @d(x: Int, x: Int) on FIELD')).toMatch(/argument `x` declared twice on @d/);
+    expect(fails('schema { query: A query: B }')).toMatch(/the query root is named twice/);
+    expect(fails('schema { query: A }\nschema { mutation: B }')).toMatch(/a second `schema` definition/);
+    // An `extend schema` beside a definition is fine.
+    expect(read('schema { query: A }\nextend schema { mutation: B }').roots).toEqual({ query: 'A', mutation: 'B' });
+  });
+});
+
+describe('mergeGraphqlSchema: roots, extension-only types, ambiguity fingerprints, directives', () => {
+  const doc = (file: string, text: string) => read(text, file);
+
+  it('with a `schema` definition anywhere, only the roots it names exist', () => {
+    const s = mergeGraphqlSchema([doc('a.graphql', 'schema { query: Query }\ntype Query { a: Mutation }\ntype Mutation { m: Int }')]);
+    expect(s.roots).toEqual({ query: 'Query' });
+    // Without one, the default names apply.
+    expect(mergeGraphqlSchema([doc('a.graphql', 'type Query { a: Int }')]).roots).toEqual({ query: 'Query', mutation: 'Mutation', subscription: 'Subscription' });
+    // An `extend schema` alone is not a definition: the defaults stay, overridden by what it names.
+    expect(mergeGraphqlSchema([doc('a.graphql', 'extend schema { subscription: Events }')]).roots).toEqual({ query: 'Query', mutation: 'Mutation', subscription: 'Events' });
+  });
+
+  it('a type only extended (Federation 1) is merged as an extension-only type', () => {
+    const s = mergeGraphqlSchema([
+      doc('a.graphql', 'extend type Query { me: User }\ntype User { id: ID! }'),
+      doc('b.graphql', 'extend type Query { topProducts: Int }'),
+    ]);
+    const q = s.types.get('Query')!;
+    expect(q.extensionOnly).toBe(true);
+    expect(q.extension).toBe(false);
+    expect(q.file).toBe('a.graphql');
+    expect(q.extendedIn).toEqual(['b.graphql']);
+    expect(q.fields.map(f => `${f.name}@${f.file ?? '-'}`)).toEqual(['me@-', 'topProducts@b.graphql']);
+    expect(s.types.get('User')!.extensionOnly).toBeUndefined();
+    expect(s.orphanExtensions).toEqual([{ name: 'Query', file: 'a.graphql' }, { name: 'Query', file: 'b.graphql' }]);
+  });
+
+  it('an ambiguous type carries a fingerprint of all its definitions and extensions, blind to line numbers', () => {
+    const fp = (a: string, b: string, ext = '') => mergeGraphqlSchema([doc('a.graphql', a), doc('b.graphql', b), ...(ext ? [doc('e.graphql', ext)] : [])]).ambiguous[0].fingerprint;
+    const base = fp('type O { id: ID }', 'type O { sku: String }');
+    expect(fp('\n\ntype O { id: ID }', 'type O { sku: String }')).toBe(base);
+    expect(fp('type O { id: ID! }', 'type O { sku: String }')).not.toBe(base);
+    expect(fp('type O { id: ID }', 'type O { sku: String }', 'extend type O { x: Int }')).not.toBe(base);
+  });
+
+  it('merges directive definitions by name; one defined in two files is a conflict and absent', () => {
+    const s = mergeGraphqlSchema([doc('a.graphql', 'directive @a on FIELD\ndirective @b on FIELD'), doc('b.graphql', 'directive @b on OBJECT')]);
+    expect([...s.directives.keys()]).toEqual(['a']);
+    expect(s.directives.get('a')!.file).toBe('a.graphql');
+    expect(s.conflicts).toEqual(['directive @b is defined in more than one file']);
+  });
+
+  it('folds every file\'s schema directives into one hash', () => {
+    const h = (...texts: string[]) => mergeGraphqlSchema(texts.map((t, i) => doc(`${i}.graphql`, t))).schemaDirectivesHash;
+    expect(h('extend schema @link(url: "a")', 'extend schema @link(url: "b")')).toBe(h('extend schema @link(url: "b")', 'extend schema @link(url: "a")'));
+    expect(h('extend schema @link(url: "a")')).not.toBe(h('extend schema @link(url: "b")'));
   });
 });

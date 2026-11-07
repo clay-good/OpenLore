@@ -77,11 +77,28 @@ export interface GqlType {
   directivesHash: string;
 }
 
+/** A directive definition: `directive @auth(role: Role!) repeatable on FIELD_DEFINITION | OBJECT`. */
+export interface GqlDirectiveDef {
+  name: string;
+  args: GqlArg[];
+  repeatable: boolean;
+  locations: string[];
+  line: number;
+}
+
 export interface GqlDocument {
   file: string;
   format: 'graphql-sdl';
   /** Root operation types the file names in `schema { … }` (or `extend schema`). */
   roots: Partial<Record<'query' | 'mutation' | 'subscription', string>>;
+  /**
+   * Whether the file holds a `schema { … }` DEFINITION (not an `extend schema`). A schema with
+   * one has exactly the roots it names: the default names apply only when no file defines one.
+   */
+  hasSchemaDefinition: boolean;
+  /** A hash of the directives on `schema` / `extend schema` (Federation's `@link`, …). */
+  schemaDirectivesHash: string;
+  directiveDefs: GqlDirectiveDef[];
   types: GqlType[];
   /** Constructs outside the model: custom directives by name, directive definitions, operations in a schema file. */
   unassessed: string[];
@@ -104,6 +121,8 @@ function tokenize(text: string): Tok[] {
   while (i < n) {
     const c = text[i];
     if (c === '\n') { line++; i++; continue; }
+    // A lone carriage return is a line terminator too (CRLF counts once, at its `\n`).
+    if (c === '\r') { if (text[i + 1] !== '\n') line++; i++; continue; }
     // Commas are insignificant in GraphQL, exactly like whitespace.
     if (c === ' ' || c === '\t' || c === '\r' || c === ',' || c === '﻿') { i++; continue; }
     if (c === '#') { while (i < n && text[i] !== '\n') i++; continue; }
@@ -224,13 +243,34 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
     } while (stack.length);
     return parts.join(' ');
   };
-  /** A value literal (a default value or a directive argument), as normalized text. */
-  const value = (): string => {
-    if (is('$')) { next(); return `$${name('a variable name').v}`; }
-    if (is('-')) { next(); }
+  /**
+   * A value literal (a default value), in canonical form: object fields sorted, numbers as
+   * numbers. `{a: 1, b: 2}` and `{b: 2, a: 1}` — or `1` and `1.0` — are one default, not a change.
+   */
+  const value = (depth = 0): string => {
+    if (depth > MAX_LIST_DEPTH) fail(`a value nested deeper than ${MAX_LIST_DEPTH}`);
     const t = peek();
-    if (t?.t === 'str') { next(); return JSON.stringify(t.v); }
-    return skipGroup();
+    if (!t) return fail('unexpected end of file');
+    if (is('$')) { next(); return `$${name('a variable name').v}`; }
+    if (is('[')) {
+      next();
+      const items: string[] = [];
+      while (!is(']')) items.push(value(depth + 1));
+      expect(']');
+      return `[${items.join(',')}]`;
+    }
+    if (is('{')) {
+      next();
+      const fields: Array<[string, string]> = [];
+      while (!is('}')) { const k = name('an input field name').v; expect(':'); fields.push([k, value(depth + 1)]); }
+      expect('}');
+      return `{${fields.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => `${k}:${v}`).join(',')}}`;
+    }
+    next();
+    if (t.t === 'str') return JSON.stringify(t.v);
+    if (t.t === 'num') { const n = Number(t.v); return Number.isFinite(n) ? String(n) : t.v; }
+    if (t.t === 'name') return t.v;
+    return fail(`expected a value, found ${shown(t)}`, t);
   };
   /** Directives: whether `@deprecated` is among them, and a hash of the others. */
   const directives = (): { deprecated: boolean; hash: string } => {
@@ -274,6 +314,9 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
 
   const roots: GqlDocument['roots'] = {};
   const types: GqlType[] = [];
+  const directiveDefs: GqlDirectiveDef[] = [];
+  const schemaDirectives: string[] = [];
+  let hasSchemaDefinition = false;
   let sawTypeSystem = false;
   let sawExecutable = false;
 
@@ -299,15 +342,23 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
     }
     if (kw!.v === 'schema') {
       sawTypeSystem = true;
+      if (!extension) {
+        // A document defines its schema once; a second definition is refused, as graphql-js does.
+        if (hasSchemaDefinition) fail('a second `schema` definition', kw);
+        hasSchemaDefinition = true;
+      }
       next();
-      directives();
+      const d = directives();
+      if (d.hash !== NO_DIRECTIVES) schemaDirectives.push(d.hash);
       if (!is('{')) { if (extension) continue; fail('expected `{` after `schema`'); }
       next();
       while (!is('}')) {
         const op = name('`query`, `mutation` or `subscription`');
         if (op.v !== 'query' && op.v !== 'mutation' && op.v !== 'subscription') fail(`unexpected ${shown(op)} in \`schema\``, op);
+        const kind = op.v as 'query' | 'mutation' | 'subscription';
+        if (roots[kind]) fail(`the ${kind} root is named twice`, op);
         expect(':');
-        roots[op.v as 'query' | 'mutation' | 'subscription'] = name('a type name').v;
+        roots[kind] = name('a type name').v;
       }
       expect('}');
       continue;
@@ -317,14 +368,26 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
       sawTypeSystem = true;
       next();
       expect('@');
-      unassessed.add(`directive @${name('a directive name').v}`);
-      if (is('(')) skipGroup();
-      if (isName('repeatable')) next();
+      const dn = name('a directive name');
+      const args: GqlArg[] = [];
+      if (is('(')) {
+        next();
+        const seenArgs = new Set<string>();
+        while (!is(')')) {
+          const a = inputValue();
+          if (seenArgs.has(a.name)) fail(`argument \`${a.name}\` declared twice on @${dn.v}`);
+          seenArgs.add(a.name);
+          args.push(a);
+        }
+        expect(')');
+      }
+      const repeatable = isName('repeatable') ? (next(), true) : false;
       if (!isName('on')) fail('expected `on` in a directive definition');
       next();
       if (is('|')) next();
-      name('a directive location');
-      while (is('|')) { next(); name('a directive location'); }
+      const locations = [name('a directive location').v];
+      while (is('|')) { next(); locations.push(name('a directive location').v); }
+      directiveDefs.push({ name: dn.v, args, repeatable, locations: [...new Set(locations)].sort(), line: dn.line });
       continue;
     }
     const kind = TYPE_KEYWORDS[kw!.v];
@@ -358,7 +421,14 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
         const args: GqlArg[] = [];
         if (is('(')) {
           next();
-          while (!is(')')) args.push(inputValue());
+          const seenArgs = new Set<string>();
+          while (!is(')')) {
+            const a = inputValue();
+            // A repeated argument name would let the last one silently win every comparison.
+            if (seenArgs.has(a.name)) fail(`argument \`${a.name}\` declared twice on ${t.name}.${f.v}`);
+            seenArgs.add(a.name);
+            args.push(a);
+          }
           expect(')');
         }
         expect(':');
@@ -387,7 +457,9 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
   if (sawExecutable) unassessed.add('operations in a schema file');
   const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   return {
-    file, format: 'graphql-sdl', roots,
+    file, format: 'graphql-sdl', roots, hasSchemaDefinition,
+    schemaDirectivesHash: schemaDirectives.length ? sha(schemaDirectives.sort().join('|')) : NO_DIRECTIVES,
+    directiveDefs: directiveDefs.sort(byName),
     types: types.sort((a, b) => byName(a, b) || Number(a.extension) - Number(b.extension) || a.line - b.line),
     unassessed: [...unassessed].sort(),
   };
@@ -397,83 +469,135 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
 
 /** A merged type, with the files that define and extend it. */
 export interface GqlMergedType extends GqlType {
-  /** The file holding the definition (not an extension). */
+  /** The file holding the definition (not an extension), or the first extension's file. */
   file: string;
   /** Files that extend it, sorted. */
   extendedIn: string[];
+  /**
+   * No file read defines it; only `extend`s do. A Federation 1 subgraph writes
+   * `extend type Query { … }` and `extend type User @key(…)` for types the gateway defines, so the
+   * extensions ARE this repository's contract and are compared as such.
+   */
+  extensionOnly?: true;
 }
+
+export type GqlRootKind = 'query' | 'mutation' | 'subscription';
 
 export interface GqlSchema {
   /** Types by name, definitions with their extensions folded in. A name defined twice is absent. */
   types: Map<string, GqlMergedType>;
-  /** Root operation type names (defaults `Query`, `Mutation`, `Subscription`). */
-  roots: Record<'query' | 'mutation' | 'subscription', string>;
-  /** Names defined in more than one file: ambiguous, so nothing binds to them. */
-  ambiguous: Array<{ name: string; files: string[] }>;
-  /** `extend` of a type no file read defines, and fields an extension declares twice. */
+  /**
+   * Root operation type names. When a file defines `schema { … }`, exactly the roots it names;
+   * otherwise the default names `Query`, `Mutation`, `Subscription` (as GraphQL itself says).
+   */
+  roots: Partial<Record<GqlRootKind, string>>;
+  /** Root kinds two files name differently: no root of that kind is assessed. */
+  rootConflicts: GqlRootKind[];
+  /** Names defined in more than one file, with a fingerprint of all their definitions. */
+  ambiguous: Array<{ name: string; files: string[]; fingerprint: string }>;
+  /** `extend`s of a type no file read defines (projected as extension-only types). */
   orphanExtensions: Array<{ name: string; file: string }>;
+  /** Directive definitions by name; one defined in two files is a conflict and absent. */
+  directives: Map<string, GqlDirectiveDef & { file: string }>;
+  /** A hash of every directive on `schema` / `extend schema`. */
+  schemaDirectivesHash: string;
   conflicts: string[];
 }
+
+/** A definition's content for comparison: everything but its line numbers. */
+const fingerprintOf = (x: unknown): string => sha(JSON.stringify(x, (k, v) => (k === 'line' ? undefined : v)));
 
 /**
  * Merge every read document into ONE schema, as a GraphQL server does: one global namespace,
  * definitions and their `extend`s folded together. A name defined in two files — two services'
  * schemas in one repository, or a copy beside its source — is ambiguous and dropped from the
- * merged map, never guessed between.
+ * merged map, never guessed between; its fingerprint is kept so a change to it is still seen.
  */
 export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
   const defs = new Map<string, Array<{ file: string; t: GqlType }>>();
   const exts = new Map<string, Array<{ file: string; t: GqlType }>>();
-  const roots: GqlSchema['roots'] = { query: 'Query', mutation: 'Mutation', subscription: 'Subscription' };
-  const declaredRoots: Partial<GqlSchema['roots']> = {};
+  const declaredRoots: Partial<Record<GqlRootKind, string>> = {};
+  const rootConflicts = new Set<GqlRootKind>();
   const conflicts: string[] = [];
+  const directiveAt = new Map<string, Array<GqlDirectiveDef & { file: string }>>();
+  const schemaDirectives: string[] = [];
+  let defined = false;
   for (const d of [...docs].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))) {
-    for (const [op, type] of Object.entries(d.roots) as Array<['query' | 'mutation' | 'subscription', string]>) {
-      if (declaredRoots[op] && declaredRoots[op] !== type) conflicts.push(`the ${op} root is \`${declaredRoots[op]}\` in one file and \`${type}\` in another`);
-      else declaredRoots[op] = type;
+    if (d.hasSchemaDefinition) defined = true;
+    if (d.schemaDirectivesHash !== NO_DIRECTIVES) schemaDirectives.push(d.schemaDirectivesHash);
+    for (const [op, type] of Object.entries(d.roots) as Array<[GqlRootKind, string]>) {
+      if (declaredRoots[op] && declaredRoots[op] !== type) {
+        rootConflicts.add(op);
+        conflicts.push(`the ${op} root is \`${declaredRoots[op]}\` in one file and \`${type}\` in another`);
+      } else declaredRoots[op] = type;
     }
     for (const t of d.types) {
       const into = t.extension ? exts : defs;
       const at = into.get(t.name);
       if (at) at.push({ file: d.file, t }); else into.set(t.name, [{ file: d.file, t }]);
     }
+    for (const dd of d.directiveDefs) {
+      const at = directiveAt.get(dd.name);
+      if (at) at.push({ ...dd, file: d.file }); else directiveAt.set(dd.name, [{ ...dd, file: d.file }]);
+    }
   }
-  Object.assign(roots, declaredRoots);
+  // With a `schema` definition anywhere, exactly the roots named; without one, the defaults.
+  const roots: GqlSchema['roots'] = defined ? { ...declaredRoots } : { query: 'Query', mutation: 'Mutation', subscription: 'Subscription', ...declaredRoots };
+  for (const k of rootConflicts) delete roots[k];
   const types = new Map<string, GqlMergedType>();
   const ambiguous: GqlSchema['ambiguous'] = [];
   for (const [name, at] of defs) {
-    if (at.length > 1) { ambiguous.push({ name, files: at.map(x => x.file).sort() }); continue; }
+    if (at.length > 1) {
+      ambiguous.push({ name, files: at.map(x => x.file).sort(), fingerprint: fingerprintOf([...at.map(x => x.t), ...(exts.get(name) ?? []).map(x => x.t)].map(fingerprintOf).sort()) });
+      continue;
+    }
     const { file, t } = at[0];
     types.set(name, { ...t, file, extendedIn: [], fields: [...t.fields], values: [...t.values], members: [...t.members], interfaces: [...t.interfaces] });
   }
   const orphanExtensions: GqlSchema['orphanExtensions'] = [];
   for (const [name, at] of exts) {
-    const base = types.get(name);
+    let base = types.get(name);
     if (!base) {
-      if (!defs.has(name)) for (const x of at) orphanExtensions.push({ name, file: x.file });
-      continue;
+      if (defs.has(name)) continue; // ambiguous: in its fingerprint
+      for (const x of at) orphanExtensions.push({ name, file: x.file });
+      // Extension-only: the first extension stands for the definition the gateway holds.
+      const first = at[0];
+      base = { ...first.t, extension: false, file: first.file, extendedIn: [], extensionOnly: true, fields: [], values: [], members: [], interfaces: [], directivesHash: NO_DIRECTIVES };
+      types.set(name, base);
     }
     const extDirectives: string[] = [];
+    // Built once per type, not once per extension: thousands of `extend type Query` were quadratic.
+    const fieldNames = new Set(base.fields.map(f => f.name));
+    const valueNames = new Set(base.values.map(v => v.name));
+    const memberNames = new Set(base.members);
+    const interfaceNames = new Set(base.interfaces);
     for (const { file, t } of at) {
       if (t.kind !== base.kind) { conflicts.push(`\`extend ${t.kind} ${name}\` in ${file} extends a ${base.kind}`); continue; }
-      base.extendedIn.push(file);
-      const fieldNames = new Set(base.fields.map(f => f.name));
+      if (file !== base.file || !base.extensionOnly) base.extendedIn.push(file);
       for (const f of t.fields) {
         if (fieldNames.has(f.name)) conflicts.push(`field \`${name}.${f.name}\` is declared twice (an extension in ${file})`);
         else { fieldNames.add(f.name); base.fields.push(file === base.file ? f : { ...f, file }); }
       }
-      const valueNames = new Set(base.values.map(v => v.name));
       for (const v of t.values) if (!valueNames.has(v.name)) { valueNames.add(v.name); base.values.push(v); }
-      for (const m of t.members) if (!base.members.includes(m)) base.members.push(m);
-      for (const i of t.interfaces) if (!base.interfaces.includes(i)) base.interfaces.push(i);
+      for (const m of t.members) if (!memberNames.has(m)) { memberNames.add(m); base.members.push(m); }
+      for (const i of t.interfaces) if (!interfaceNames.has(i)) { interfaceNames.add(i); base.interfaces.push(i); }
       if (t.directivesHash !== NO_DIRECTIVES) extDirectives.push(t.directivesHash);
     }
     // Folded in independent of file order, and only when an extension carries a directive: moving
     // fields into a bare `extend`, or an extension to another file, changes no directive.
     if (extDirectives.length) base.directivesHash = sha([base.directivesHash, ...extDirectives.sort()].join('|'));
-    base.extendedIn.sort();
+    base.extendedIn = [...new Set(base.extendedIn)].sort();
   }
-  return { types, roots, ambiguous: ambiguous.sort((a, b) => (a.name < b.name ? -1 : 1)), orphanExtensions, conflicts: conflicts.sort() };
+  const directives: GqlSchema['directives'] = new Map();
+  for (const [name, at] of directiveAt) {
+    if (at.length > 1) { conflicts.push(`directive @${name} is defined in more than one file`); continue; }
+    directives.set(name, at[0]);
+  }
+  return {
+    types, roots, rootConflicts: [...rootConflicts].sort(), ambiguous: ambiguous.sort((a, b) => (a.name < b.name ? -1 : 1)),
+    orphanExtensions, directives, schemaDirectivesHash: schemaDirectives.length ? sha(schemaDirectives.sort().join('|')) : NO_DIRECTIVES,
+    conflicts: conflicts.sort(),
+  };
 }
 
 /** The named type inside a type reference: `[Order!]!` → `Order`. */

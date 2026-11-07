@@ -1620,7 +1620,10 @@ export class AnalysisArtifactGenerator {
         // Protobuf definitions (change: add-contract-graph-projection): every `.proto` file is a
         // schema, so no sniff is needed. Same byte bound as above; a file past the reader's cap is
         // carried truncated so it is reported unread for its size rather than absent.
-        if (isProtobufPath(file.path)) {
+        // A schema under a test or fixture path describes a fake service: read as the contract, it
+        // makes the real root types ambiguous and silently unbinds every resolver.
+        const fixtureSchema = isTest || /(?:^|\/)(?:__fixtures__|fixtures?|test-?data|testdata)\//i.test(file.path);
+        if (isProtobufPath(file.path) && !fixtureSchema) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
           if (protoFiles < MAX_PROTO_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
@@ -1631,7 +1634,7 @@ export class AnalysisArtifactGenerator {
         }
         // GraphQL SDL (change: add-contract-graph-projection): every `.graphql` / `.graphqls` /
         // `.gql` file is a candidate; the reader tells a schema from a client document.
-        if (isGraphqlPath(file.path)) {
+        if (isGraphqlPath(file.path) && !fixtureSchema) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
           if (graphqlFiles < MAX_GRAPHQL_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {

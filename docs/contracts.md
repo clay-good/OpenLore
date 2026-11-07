@@ -183,6 +183,8 @@ The rules refuse rather than guess:
 - A Go or Python registration none of whose methods is found where it may be, and a Node map entry
   whose handler is neither defined nor imported in the registration's file, are
   `implementation-not-found`.
+- A Node handler imported into the registration's file binds only in the module it was imported
+  from; a package or path-alias import binds nothing.
 - Node keys match the RPC name, its lower-camel form, or grpc-js's lodash `camelCase`
   (`GetHTTPStatus` → `getHttpStatus`).
 - Node's static-codegen form, `addService(services.GreeterService, { … })`, is read too, and binds
@@ -241,7 +243,9 @@ Every `.graphql`, `.graphqls` and `.gql` file is read with a hand-written SDL re
 holds only operations and fragments is a **client document**, not a schema: it is listed under
 `skippedCandidates` with that reason. All schema files read are merged into **one schema**, as one
 server sees them — `extend type Query { … }` in another file adds to `Query`; a type two files
-define is ambiguous and binds nothing.
+define is ambiguous and binds nothing. A type only ever extended — a Federation 1 subgraph's
+`extend type Query` and `extend type User @key(…)` — is this repository's contract and is compared
+as one. When any file defines `schema { … }`, the roots are exactly the ones it names.
 
 | GraphQL concept | OpenLore graph primitive |
 |---|---|
@@ -262,11 +266,24 @@ A schema-first server names the function behind each root field in one literal p
 | JS/TS (Apollo, Yoga, graphql-tools) | `{ Query: { order: getOrder } }`, `const Query = { order() {…} }` | `getOrder`, or the method itself |
 | Python (Ariadne) | `@query.field("order")` on `def resolve_order`, `query.set_field("order", fn)` | the decorated or named function |
 
-The same refusals as for gRPC apply: a function outside the map's file binds only when that file
-imports it (looked up by its exported name); an arrow function or lambda is
-`inline-implementation`; two candidates are `ambiguous-implementation`; a spread in the map is
-`not-literal`; a key the schema does not declare is `unknown-field`. Maps in comments, strings,
-test files and `*.generated.*` files are not read. Code-first servers (Strawberry, Graphene, Nexus,
+The same refusals as for gRPC apply. A named function binds in the map's own file; an IMPORTED one
+binds only in the module it was imported from (by its exported name) — never a same-named function
+elsewhere, and a package or path-alias import binds nothing (`implementation-not-found`). An arrow
+function or lambda is `inline-implementation`; two candidates are `ambiguous-implementation`; a
+spread, or a root set from a variable or a call (`Query: queryResolvers`), is `not-literal`; a key
+the schema does not declare is `unknown-field`. Apollo's `x: { subscribe: fn }` binds `fn`.
+
+Not every `Query: {…}` is a server's. Client configuration is skipped: a file importing a GraphQL
+client (`@apollo/client`, `urql`, Relay…) and no server, and objects inside client constructors
+(`cacheExchange`, `ApolloClient`, `InMemoryCache`) or under client keys (`typePolicies`, `updates`,
+`optimistic`). So are TypeScript resolver TYPES (`interface Resolvers { Query: … }`), stories and
+mocks, and a `const Query = {…}` in a file that is not about resolvers. Maps in comments, strings,
+test files and `*.generated.*` files are not read, and neither are schemas under test or fixture
+paths — a fixture's `type Query` would make the real root ambiguous. A root type defined in two
+files is reported as not assessed, which `find_dead_code` repeats.
+
+Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
+bound: a type field is not a node. Code-first servers (Strawberry, Graphene, Nexus,
 gqlgen) have no resolver map, so their operations are listed in `unboundGraphqlOperations` — "not
 bound", never "not served".
 
@@ -283,11 +300,14 @@ variance:
 | An output made non-null (`String` → `String!`), including inside a list | `non-breaking` |
 | An argument or input field made required, or a required one added | `breaking` |
 | An argument or input field made optional, or an optional one added | `non-breaking` |
-| A default value changed | `dangerous` |
+| A default value added, changed or removed (compared canonically: `{a: 1, b: 2}` = `{b: 2, a: 1}`, `1` = `1.0`) | `dangerous` |
 | An enum value or union member added (a client switching over it may not handle it) | `dangerous` |
+| An interface newly implemented | `dangerous` |
 | An enum value or union member removed; an interface no longer implemented | `breaking` |
+| A directive definition removed, a location removed from it, `repeatable` removed, or a required argument added | `breaking` |
 | Deprecation of an operation, field, argument or enum value | `dangerous` |
-| A directive other than `@deprecated` changed | `potentially-breaking` |
+| A directive other than `@deprecated` used on an element or on `schema` changed | `potentially-breaking` |
+| A type or root defined in two files (on either side), or roots named differently by two files | `potentially-breaking` — not compared |
 
 A GraphQL finding names no consumer — client operations are not read — and says so.
 

@@ -26,8 +26,14 @@ export interface ResolverEntry {
   field: string;
   /** The function it names; absent when written inline (an arrow function, a lambda). */
   fn?: string;
-  /** Node: the function is imported into the map's file, so it may be looked for outside it. */
+  /** The function is imported into the map's file: it is looked for only in the module named. */
   imported?: true;
+  /** JS/TS: the import's module specifier (`./orders`). */
+  from?: string;
+  /** Python: the imported module (`.resolvers`, `app.resolvers`). */
+  module?: string;
+  /** Why a named function is not followed (a default import names no exported function). */
+  notFollowed?: string;
   line: number;
 }
 
@@ -48,6 +54,8 @@ const MAX_MAP_CHARS = 65_536;
 const MAX_MATCHES_PER_FILE = 1_000;
 
 const GENERATED = /(?:\.generated\.[cm]?[jt]sx?|__generated__\/)/i;
+/** Stories and mocks hold fake resolvers for a fake server. */
+const NOT_A_SERVER = /(?:\.stories\.[cm]?[jt]sx?$|(?:^|\/)(?:__mocks__|mocks?)\/)/i;
 
 function runtimeOf(file: string): ResolverRuntime | undefined {
   if (/\.[cm]?[jt]sx?$/i.test(file)) return 'node';
@@ -68,6 +76,44 @@ function objectAt(text: string, open: number): string | undefined {
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** GraphQL client libraries: their `Query: {…}` objects are cache policies and local resolvers. */
+const CLIENT_PACKAGES = /^(?:@apollo\/client|apollo-client|apollo-boost|apollo-cache-inmemory|apollo-link-state|urql|@urql\/|relay-runtime|react-relay|graphql-request|@tanstack\/|graphql-hooks)/;
+/** GraphQL server libraries. */
+const SERVER_PACKAGES = /^(?:@apollo\/server|apollo-server|@apollo\/subgraph|graphql-yoga|@graphql-yoga\/|@graphql-tools\/|graphql-tools|mercurius|express-graphql|graphql-http|@envelop\/|graphql-helix|@nestjs\/graphql)/;
+/** Calls and keys whose `Query: {…}` is client configuration, not a server resolver map. */
+const CLIENT_CALLS = new Set(['cacheExchange', 'offlineExchange', 'ApolloClient', 'InMemoryCache', 'withClientState', 'createClient', 'makeVar']);
+const CLIENT_KEYS = new Set(['typePolicies', 'updates', 'optimistic', 'keys', 'fields', 'mocks', 'cacheConfig']);
+/** How far back the enclosing context of a match is read. */
+const CONTEXT_CHARS = 4_000;
+
+/**
+ * Whether the object a match sits in is client configuration or a type declaration: an enclosing
+ * call to a client constructor, an enclosing key like `typePolicies`, or a TypeScript
+ * `interface` / `type … =` (a resolver TYPE, not a resolver). Read backward over a bounded window,
+ * stepping over balanced groups, so it stays linear per match.
+ */
+function clientContext(text: string, at: number): boolean {
+  let depth = 0;
+  const stop = Math.max(0, at - CONTEXT_CHARS);
+  for (let i = at; i >= stop; i--) {
+    const c = text[i];
+    if (c === '}' || c === ')' || c === ']') { depth++; continue; }
+    if (c !== '{' && c !== '(' && c !== '[') continue;
+    if (depth > 0) { depth--; continue; }
+    // An unmatched opener: what precedes it names the enclosing construct.
+    const before = text.slice(Math.max(stop, i - 200), i);
+    if (c === '(') {
+      const call = /([A-Za-z_$][\w$]*)\s*(?:<[^<>]{0,100}>)?\s*$/.exec(before)?.[1];
+      if (call && CLIENT_CALLS.has(call)) return true;
+    } else if (c === '{') {
+      const key = /([A-Za-z_$][\w$]*)\s*["']?\s*:\s*$/.exec(before)?.[1];
+      if (key && CLIENT_KEYS.has(key)) return true;
+      if (/\b(?:interface\s+[A-Za-z_$][\w$]*(?:\s*<[^{]{0,200}>)?(?:\s+extends\s+[^{]{1,200})?|type\s+[A-Za-z_$][\w$]*(?:\s*<[^=]{0,200}>)?\s*=)\s*$/.test(before)) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Masking blanks every string, so a quoted key (`"Query": {`, `'order': getOrder`) would be lost.
@@ -96,7 +142,7 @@ function restoreQuotedKeys(content: string, masked: string): string {
  */
 export function scanResolverMaps(file: string, content: string, roots: readonly string[]): ResolverMap[] {
   const runtime = runtimeOf(file);
-  if (!runtime || GENERATED.test(file) || !roots.length) return [];
+  if (!runtime || GENERATED.test(file) || NOT_A_SERVER.test(file) || !roots.length) return [];
   const rootSet = new Set(roots);
   // Cheap gate before masking: a root name must appear literally.
   if (!roots.some(r => content.includes(r)) && !(runtime === 'python' && /\b(?:QueryType|MutationType|SubscriptionType|ObjectType)\b/.test(content))) return [];
@@ -108,29 +154,56 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
   const alt = roots.map(escapeRe).join('|');
 
   if (runtime === 'node') {
-    let imports: Map<string, string | null> | undefined;
+    const imports = importedNames(text);
+    const specifiers = [...new Set([...imports.values()].map(i => i.from))];
+    // A file that imports a GraphQL CLIENT and no server is client code: its `Query: {…}` objects
+    // are cache policies and local resolvers (urql, Apollo Client), never the server's.
+    if (specifiers.some(f => CLIENT_PACKAGES.test(f)) && !specifiers.some(f => SERVER_PACKAGES.test(f))) return out;
+    // `const Query = {…}` is a resolver object only in a file that is about resolvers: a SQL
+    // statement map named `Query` is not one.
+    const resolverFile = /\bresolvers\b/i.test(text) || specifiers.some(f => SERVER_PACKAGES.test(f));
+    const entryOf = (key: string, fn: string | undefined, base: string | undefined, line: number): ResolverEntry => {
+      if (!fn) return { field: key, line };
+      const imp = base ? imports.get(base) : undefined;
+      if (!imp) return { field: key, fn, line };
+      if (base === fn) {
+        // Looked up by the name it was exported under, in the module it was imported from.
+        return imp.exported
+          ? { field: key, fn: imp.exported, imported: true as const, from: imp.from, line }
+          : { field: key, fn, notFollowed: `\`${fn}\` is a default or namespace import of '${imp.from}', which is not followed`, line };
+      }
+      return { field: key, fn, imported: true as const, from: imp.from, line };
+    };
     let seen = 0;
-    // `Query: {` as an object key, or `const Query = {` as a variable.
-    const pattern = new RegExp(`(?:[{,]\\s*["']?(${alt})["']?\\s*:|\\b(?:const|let|var)\\s+(${alt})\\s*(?::[^=]{0,200})?=)\\s*\\{`, 'g');
+    // `Query: {` as an object key, `const Query = {` as a variable, or `Query: someIdentifier`.
+    const pattern = new RegExp(`(?:[{,]\\s*["']?(${alt})["']?\\s*:\\s*(\\{|[A-Za-z_$][\\w$.]*\\s*\\(?)|\\b(?:const|let|var)\\s+(${alt})\\s*(?::[^=;{}\\n]{0,200})?=\\s*\\{)`, 'g');
     for (const m of text.matchAll(pattern)) {
-      if (++seen > MAX_MATCHES_PER_FILE) break;
-      const root = m[1] ?? m[2];
+      if (++seen > MAX_MATCHES_PER_FILE) {
+        out.push({ file, line: lineAt(starts, m.index!), runtime, root: m[1] ?? m[3], entries: [], notLiteral: `more than ${MAX_MATCHES_PER_FILE} resolver-shaped objects in one file; the rest were not read` });
+        break;
+      }
+      const root = m[1] ?? m[3];
       if (!rootSet.has(root)) continue;
+      if (m[3] && !resolverFile) continue;
+      if (clientContext(text, m.index!)) continue;
+      // The root key's own line: the `{` or `,` the match starts at may sit on the line before.
+      const line = lineAt(starts, m.index! + m[0].indexOf(root, 1));
+      if (m[2] && m[2] !== '{') {
+        // `Query: queryResolvers`, `Query: mergeResolvers(…)`: the map is built elsewhere.
+        out.push({ file, line, runtime, root, entries: [], notLiteral: `the ${root} resolvers are \`${m[2].replace(/\s*\($/, '(…)').slice(0, 60)}\`, not an object written here` });
+        continue;
+      }
       const open = m.index! + m[0].length - 1;
-      const line = lineAt(starts, open);
       const obj = objectAt(text, open);
       const parsed = obj ? nodeImplMap(obj) : undefined;
       if (!parsed) { out.push({ file, line, runtime, root, entries: [], notLiteral: obj ? 'the resolver object has a spread or a computed key' : 'the resolver object could not be read' }); continue; }
-      imports ??= importedNames(text);
+      // Apollo subscriptions: `orderCreated: { subscribe: subscribeOrders }`.
+      const subscribe = new Map<string, string>();
+      for (const sm of (obj ?? '').matchAll(/([A-Za-z_$][\w$]*)\s*:\s*\{\s*subscribe\s*:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*[,}]/g)) subscribe.set(sm[1], sm[2]);
       const entries: ResolverEntry[] = parsed.map(({ key, fn, base }) => {
-        if (!fn) return { field: key, line };
-        if (base && imports!.has(base)) {
-          const exported = imports!.get(base);
-          // Looked up by the name it was exported under, never by a local alias.
-          if (base === fn) return exported ? { field: key, fn: exported, imported: true as const, line } : { field: key, fn, line };
-          return { field: key, fn, imported: true as const, line };
-        }
-        return { field: key, fn, line };
+        const sub = !fn ? subscribe.get(key) : undefined;
+        if (sub) return entryOf(key, sub.slice(sub.lastIndexOf('.') + 1), sub.split('.')[0], line);
+        return entryOf(key, fn, base, line);
       });
       out.push({ file, line, runtime, root, entries });
     }
@@ -154,13 +227,16 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
   if (!holders.size) return out;
   // `from m import a, b as c` / `from m import (a, b)`: a resolver passed to `set_field` by a name
   // imported here may be looked for outside the file, under the name it was exported as.
-  const pyImports = new Map<string, string>();
-  for (const m of text.matchAll(/^[ \t]*from[ \t]+[\w.]+[ \t]+import[ \t]+(\([^)]{0,2000}\)|[^\n]{1,500})/gm)) {
-    for (const part of m[1].replace(/[()]/g, '').split(',')) {
+  const pyImports = new Map<string, { exported: string; module: string }>();
+  for (const m of text.matchAll(/^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]+(\([^)]{0,2000}\)|[^\n]{1,500})/gm)) {
+    for (const part of m[2].replace(/[()]/g, '').split(',')) {
       const a = /^\s*([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(part);
-      if (a) pyImports.set(a[2] ?? a[1], a[1]);
+      if (a) pyImports.set(a[2] ?? a[1], { exported: a[1], module: m[1] });
     }
   }
+  // `import app.resolvers as r` / `import resolvers`: a module bound to a name.
+  const pyModules = new Map<string, string>();
+  for (const m of text.matchAll(/^[ \t]*import[ \t]+([\w.]+)(?:[ \t]+as[ \t]+([A-Za-z_]\w*))?[ \t]*$/gm)) pyModules.set(m[2] ?? m[1].split('.')[0], m[2] ? m[1] : m[1].split('.')[0]);
   const maps = new Map<string, ResolverMap>();
   const mapFor = (v: string) => {
     let r = maps.get(v);
@@ -182,11 +258,28 @@ export function scanResolverMaps(file: string, content: string, roots: readonly 
   for (const m of text.matchAll(new RegExp(`\\b(${vars})\\s*\\.\\s*set_field\\s*\\(`, 'g'))) {
     if (++seen > MAX_MATCHES_PER_FILE) break;
     const after = m.index! + m[0].length;
-    const args = /^\s*["']([A-Za-z_]\w*)["']\s*,\s*([A-Za-z_]\w*)?/.exec(content.slice(after, after + 300));
+    const args = /^\s*["']([A-Za-z_]\w*)["']\s*,\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?/.exec(content.slice(after, after + 300));
     if (!args) continue;
-    const fn = args[2] && args[2] !== 'lambda' ? args[2] : undefined;
-    const exported = fn ? pyImports.get(fn) : undefined;
-    mapFor(m[1]).entries.push({ field: args[1], ...(fn ? (exported ? { fn: exported, imported: true as const } : { fn }) : {}), line: lineAt(starts, m.index!) });
+    const value = args[2] && args[2] !== 'lambda' ? args[2] : undefined;
+    const line = lineAt(starts, m.index!);
+    if (!value) { mapFor(m[1]).entries.push({ field: args[1], line }); continue; }
+    const parts = value.split('.');
+    const fn = parts[parts.length - 1];
+    let entry: ResolverEntry;
+    if (parts.length === 1) {
+      const imp = pyImports.get(fn);
+      entry = imp ? { field: args[1], fn: imp.exported, imported: true, module: imp.module, line } : { field: args[1], fn, line };
+    } else {
+      // `orders_mod.resolve_search`: the function `resolve_search` of the module the name holds.
+      const head = parts[0];
+      const viaFrom = pyImports.get(head);
+      const module = viaFrom ? `${viaFrom.module}${viaFrom.module.endsWith('.') ? '' : '.'}${viaFrom.exported}` : pyModules.get(head);
+      const qualified = parts.slice(1, -1).join('.');
+      entry = module
+        ? { field: args[1], fn, imported: true, module: qualified ? `${module}.${qualified}` : module, line }
+        : { field: args[1], fn, notFollowed: `\`${value}\` names an attribute of \`${head}\`, which is not an import this file states`, line };
+    }
+    mapFor(m[1]).entries.push(entry);
   }
   return out;
 }

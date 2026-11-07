@@ -101,6 +101,7 @@ async function workingFiles(root: string, ext: RegExp): Promise<string[]> {
 }
 
 const MAX_CANDIDATES = MAX_SPEC_FILES * 10;
+type ScanScopeLike = { capped: boolean; unreadable: unknown[]; unread: unknown[] };
 /** Total `.proto` text held per revision, the same bound the analyzer's walk applies. */
 const MAX_PROTO_TOTAL_BYTES = 64 * 1024 * 1024;
 
@@ -174,12 +175,16 @@ function parseProtoSide(candidates: string[], texts: Map<string, string>, unread
 
 /** Parse the GraphQL candidates, up to the GraphQL cap. A client document is set aside, not unread. */
 function parseGraphqlSide(candidates: string[], texts: Map<string, string>, unread: SpecSide['unread']): SpecSide['graphql'] {
-  const scope: SpecSide['graphql'] = { docs: [], clientDocuments: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_GRAPHQL_FILES };
-  for (const file of candidates.slice(0, MAX_GRAPHQL_FILES)) {
+  const scope: SpecSide['graphql'] = { docs: [], clientDocuments: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_CANDIDATES };
+  // The cap counts SCHEMAS: a frontend's hundreds of query documents must not push its schema out.
+  let schemas = 0;
+  for (const file of candidates.slice(0, MAX_CANDIDATES)) {
+    if (schemas >= MAX_GRAPHQL_FILES) { scope.capped = true; break; }
     const text = texts.get(file);
     if (text === undefined) continue;
     scope.examined.add(file);
     const r = readGraphql(file, text);
+    if (!('clientDocument' in r)) schemas++;
     if ('error' in r) scope.unreadable.push({ file, reason: r.error });
     else if ('clientDocument' in r) scope.clientDocuments.push(file);
     else scope.docs.push(r);
@@ -192,7 +197,7 @@ const windows = (listed: readonly string[]) => {
   const yaml = listed.filter(f => !isProtobufPath(f) && !isGraphqlPath(f));
   const proto = listed.filter(f => isProtobufPath(f));
   const graphql = listed.filter(f => isGraphqlPath(f));
-  return { yaml, proto, graphql, read: [...yaml.slice(0, MAX_CANDIDATES), ...proto.slice(0, MAX_PROTO_FILES), ...graphql.slice(0, MAX_GRAPHQL_FILES)] };
+  return { yaml, proto, graphql, read: [...yaml.slice(0, MAX_CANDIDATES), ...proto.slice(0, MAX_PROTO_FILES), ...graphql.slice(0, MAX_CANDIDATES)] };
 };
 
 let headCache: { root: string; stamps: string; side: SpecSide } | undefined;
@@ -582,7 +587,10 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   if (head.graphql.capped) boundaries.push(`Past the GraphQL cap (${MAX_GRAPHQL_FILES} files), ${head.graphql.candidates.size - head.graphql.examined.size} GraphQL file(s) were not read.`);
   if (head.graphql.unread.length) boundaries.push(`${head.graphql.unread.length} GraphQL file(s) could not be read, so their schemas are not assessed.`);
   const notAssessed = [...head.unreadable, ...head.proto.unreadable, ...head.graphql.unreadable].map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
-  for (const d of [...head.docs, ...head.proto.docs, ...head.graphql.docs]) if (d.unassessed.length) notAssessed.push({ file: emittedText(d.file), reason: `outside the model: ${d.unassessed.join(', ')}` });
+  // Bounded and screened: a file can name thousands of distinct directives.
+  for (const d of [...head.docs, ...head.proto.docs, ...head.graphql.docs]) {
+    if (d.unassessed.length) notAssessed.push({ file: emittedText(d.file), reason: emittedText(`outside the model: ${d.unassessed.slice(0, 12).join(', ')}${d.unassessed.length > 12 ? ` and ${d.unassessed.length - 12} more` : ''}`) });
+  }
 
   const findings: GovernanceFinding[] = [];
   const specs: Array<Record<string, unknown>> = [
@@ -601,8 +609,16 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       }));
     })(),
   ];
-  for (const f of head.graphql.clientDocuments.slice(0, limit)) {
-    notAssessed.push({ file: emittedText(f), reason: 'a GraphQL client document (operations and fragments), not a schema' });
+  {
+    // What the merged GraphQL schema could not settle is named, not left to the analyze notes.
+    const merged = mergeGraphqlSchema(head.graphql.docs);
+    for (const a of merged.ambiguous.slice(0, limit)) notAssessed.push({ file: emittedText(a.files[0]), reason: emittedText(`GraphQL type ${a.name} is defined in more than one file (${a.files.slice(0, 3).join(', ')}), so nothing binds to it`) });
+    for (const c of merged.conflicts.slice(0, limit)) notAssessed.push({ file: '(graphql schema)', reason: emittedText(c) });
+  }
+  if (head.graphql.clientDocuments.length) {
+    // One entry, not one per file: a frontend holds hundreds of query documents.
+    const docs = head.graphql.clientDocuments;
+    notAssessed.push({ file: emittedText(docs[0]), reason: emittedText(`${docs.length} GraphQL client document(s) (operations and fragments) are not schemas${docs.length > 1 ? `: ${docs.slice(0, 3).join(', ')}${docs.length > 3 ? ', …' : ''}` : ''}`) });
   }
 
   // ── Parity against the indexed route handlers ──
@@ -713,13 +729,18 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     const httpChanges = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file))).map(cappedBy(head.capped, base.capped));
     // Protobuf (change: add-contract-graph-projection): its own rules, and no consumer join —
     // a gRPC client call names no method and path, so the HTTP call-site census cannot find it.
+    // GraphQL is one schema merged from every file, so a side with a schema file it could not read
+    // may hold what moved there: a removal at an incomplete head (or an addition over an incomplete
+    // base) is not known to be one. Protobuf resolves through imports and keeps the cap-only rule —
+    // a vendored proto2 file beside it is common and hides nothing.
+    const incomplete = (scope: ScanScopeLike) => scope.capped || scope.unreadable.length > 0 || scope.unread.length > 0;
     const protoChanges = diffProtobuf(base.proto.docs.filter(d => protoComparable(d.file)), head.proto.docs.filter(d => protoComparable(d.file))).map(cappedBy(head.proto.capped, base.proto.capped));
     if (protoChanges.some(c => c.class === 'breaking' || c.class === 'dangerous')) {
       boundaries.push('gRPC client call sites are not read, so a breaking protobuf change names no consumer, in this repository or another.');
     }
     const gqlDocsOf = (side: SpecSide) => side.graphql.docs.filter(d => gqlComparable(d.file));
     const graphqlChanges = (head.graphql.docs.length || base.graphql.docs.length)
-      ? diffGraphql(mergeGraphqlSchema(gqlDocsOf(base)), mergeGraphqlSchema(gqlDocsOf(head))).map(cappedBy(head.graphql.capped, base.graphql.capped))
+      ? diffGraphql(mergeGraphqlSchema(gqlDocsOf(base)), mergeGraphqlSchema(gqlDocsOf(head))).map(cappedBy(incomplete(head.graphql), incomplete(base.graphql)))
       : [];
     if (graphqlChanges.some(c => c.class === 'breaking' || c.class === 'dangerous')) {
       boundaries.push('GraphQL client operations are not read, so a breaking GraphQL change names no consumer, in this repository or another.');
@@ -878,7 +899,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       ...(() => {
         const schema = mergeGraphqlSchema(head.graphql.docs);
         return (['query', 'mutation', 'subscription'] as const).flatMap(kind => {
-          const root = schema.types.get(schema.roots[kind]);
+          const root = schema.types.get(schema.roots[kind] ?? "");
           return (root?.fields ?? []).map(f => ({ file: emittedText(f.file ?? root!.file), address: emittedText(`${root!.name}.${f.name}`), line: f.line, ...(f.deprecated ? { deprecated: true } : {}) }));
         });
       })(),
@@ -899,7 +920,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     findings: shown,
     ...(kept.length > shown.length ? { findingsOmitted: kept.length - shown.length } : {}),
     gated: gate.gated,
-    ...(notAssessed.length ? { notAssessed: notAssessed.sort((a, b) => sortStr(a.file, b.file)) } : {}),
+    ...(notAssessed.length ? { notAssessed: [...new Map(notAssessed.map(n => [`${n.file}\0${n.reason}`, n])).values()].sort((a, b) => sortStr(a.file, b.file)) } : {}),
     ...(boundaries.length ? { boundaries } : {}),
     note: 'OpenAPI 3.x, Swagger 2.0, protobuf v3, and GraphQL SDL. Advisory: nothing blocks unless enforcement.policy says so.',
   };

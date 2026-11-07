@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { projectProtobuf, GRPC_REGISTRATION_BINDING, MAX_PROTO_FILES, type ProtobufProjectionInput } from './project-protobuf.js';
 import { projectContracts, contractDisclosure, type ContractProjectionInput } from './project.js';
-import type { GrpcRegistration } from './grpc-registration.js';
+import { scanGrpcRegistrations, type GrpcRegistration } from './grpc-registration.js';
 import type { FunctionNode } from '../call-graph-types.js';
 
 const ORDERS = `syntax = "proto3";
@@ -267,7 +267,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
   describe('Node grpc-js', () => {
     const nodeReg = (partial: Partial<GrpcRegistration> = {}): GrpcRegistration => ({
       file: 'src/server.js', line: 4, runtime: 'node', service: 'proto.shop.orders.v1.OrderService',
-      methods: [{ key: 'getOrder', fn: 'getOrder', imported: true }, { key: 'ListOrders', fn: 'listAll', imported: true }], ...partial,
+      methods: [{ key: 'getOrder', fn: 'getOrder', imported: true, from: './handlers' }, { key: 'ListOrders', fn: 'listAll', imported: true, from: './handlers.js' }], ...partial,
     });
     const code = [fn('src/handlers.js::getOrder', { language: 'JavaScript' }), fn('src/handlers.js::listAll', { language: 'JavaScript' })];
 
@@ -308,7 +308,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
     it('a map mixing local and imported handlers binds both', () => {
       const local = fn('src/server.js::getOrder', { language: 'JavaScript' });
       const p = direct({
-        registrations: [nodeReg({ methods: [{ key: 'getOrder', fn: 'getOrder' }, { key: 'listOrders', fn: 'listAll', imported: true }] })],
+        registrations: [nodeReg({ methods: [{ key: 'getOrder', fn: 'getOrder' }, { key: 'listOrders', fn: 'listAll', imported: true, from: './handlers' }] })],
         resolveImplementation: resolverOver([local, ...code]),
       });
       expect(edgesOf(p, 'implements_endpoint')).toEqual([
@@ -559,12 +559,35 @@ service Greeter {
 });
 
 describe('round-4 review', () => {
-  it('an imported handler that is not indexed says it is imported', () => {
+  it('an imported handler that is not indexed says it is imported, and from where', () => {
     const p = direct({
-      registrations: [{ file: 'srv/server.js', line: 2, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', methods: [{ key: 'getOrder', fn: 'getOrder', imported: true }] }],
+      registrations: [{ file: 'srv/server.js', line: 2, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', methods: [{ key: 'getOrder', fn: 'getOrder', imported: true, from: './handlers' }] }],
       resolveImplementation: () => [],
     });
-    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found', detail: expect.stringContaining('from a module that is not indexed') })]);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found',
+      detail: "`getOrder` is imported by srv/server.js from './handlers', which is not indexed here (a package, a path alias, or a module without that function)" })]);
+  });
+
+  it('an imported handler binds only in the module it was imported from', () => {
+    const reg = (from: string): GrpcRegistration => ({ file: 'srv/server.js', line: 2, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', methods: [{ key: 'getOrder', fn: 'getOrder', imported: true, from }] });
+    const code = [fn('srv/handlers/index.ts::getOrder', { language: 'TypeScript' }), fn('srv/server.js::getOrder', { language: 'JavaScript' }), fn('lib/getOrder.js::getOrder', { language: 'JavaScript' })];
+    // `./handlers` resolves to `srv/handlers/index.ts`; the same-named local and the other module do not.
+    expect(edgesOf(direct({ registrations: [reg('./handlers')], resolveImplementation: resolverOver(code) }), 'implements_endpoint'))
+      .toEqual(['srv/handlers/index.ts::getOrder -> proto/orders.proto::/shop.orders.v1.OrderService/GetOrder']);
+    expect(edgesOf(direct({ registrations: [reg('../lib/getOrder')], resolveImplementation: resolverOver(code) }), 'implements_endpoint'))
+      .toEqual(['lib/getOrder.js::getOrder -> proto/orders.proto::/shop.orders.v1.OrderService/GetOrder']);
+  });
+
+  it('gRPC Node: a handler imported from a package does not bind a same-named repository function', () => {
+    const src = `import { getOrder } from 'pkg';
+server.addService(proto.shop.orders.v1.OrderService.service, { getOrder });
+`;
+    const p = direct({
+      registrations: scanGrpcRegistrations('srv/server.js', src),
+      resolveImplementation: resolverOver([fn('srv/orders.js::getOrder', { language: 'JavaScript' }), fn('pkg/index.js::getOrder', { language: 'JavaScript' })]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ rpc: 'GetOrder', reason: 'implementation-not-found', detail: expect.stringContaining("from 'pkg', which is not indexed here") })]);
   });
 });
 

@@ -47,7 +47,7 @@ export interface GrpcRegistration {
    */
   descriptor?: false;
   /** Node: each key of the implementation map, with the function it names (absent = written inline). */
-  methods?: Array<{ key: string; fn?: string; imported?: true }>;
+  methods?: Array<{ key: string; fn?: string; imported?: true; from?: string }>;
   /** Why the implementation is not written literally at the registration (a variable, a factory call). */
   notLiteral?: string;
 }
@@ -185,26 +185,72 @@ export function nodeImplMap(arg: string): Array<{ key: string; fn?: string; base
  * `import * as e from`, `const { f, g: h } = require(…)`, `const i = require(…)`. Read on masked
  * text, with every clause bounded, so a hostile file stays linear.
  */
-export function importedNames(text: string): Map<string, string | null> {
-  // Local name → the name it was exported under, or `null` when that is not a function name this
-  // file states (a default import, a namespace, a whole module from `require`).
-  const out = new Map<string, string | null>();
-  const addClause = (clause: string, destructure: 'as' | ':') => {
+export function importedNames(text: string): Map<string, ImportedName> {
+  // Local name → the name it was exported under (`null` when the file states none: a default
+  // import, a namespace, a whole module from `require`) and the module it came from.
+  const out = new Map<string, ImportedName>();
+  const addClause = (clause: string, destructure: 'as' | ':', from: string) => {
     const braces = /\{([^}]*)\}/.exec(clause);
     if (braces) {
       for (const part of braces[1].split(',')) {
         const p = part.trim().replace(/^type\s+/, '');
         const aliased = (destructure === 'as' ? /^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/ : /^([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)$/).exec(p);
-        if (aliased) { out.set(aliased[2], aliased[1]); continue; }
-        if (/^[A-Za-z_$][\w$]*$/.test(p)) out.set(p, p);
+        if (aliased) { out.set(aliased[2], { exported: aliased[1], from }); continue; }
+        if (/^[A-Za-z_$][\w$]*$/.test(p)) out.set(p, { exported: p, from });
       }
     }
     const rest = clause.replace(/\{[^}]*\}/, '');
-    for (const m of rest.matchAll(/(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)/g)) if (m[1] !== 'type' && m[1] !== 'as' && !out.has(m[1])) out.set(m[1], null);
+    for (const m of rest.matchAll(/(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)/g)) if (m[1] !== 'type' && m[1] !== 'as' && !out.has(m[1])) out.set(m[1], { exported: null, from });
   };
-  for (const m of text.matchAll(/\bimport\s+([^;'"`]{1,500}?)\s+from\s*['"]/g)) addClause(m[1], 'as');
-  for (const m of text.matchAll(/\b(?:const|let|var)\s+(\{[^}]{0,500}\}|[A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(/g)) addClause(m[1], ':');
+  // Specifiers survive the mask (it keeps module specifiers), so they are read from the same text.
+  for (const m of text.matchAll(/\bimport\s+([^;'"`]{1,500}?)\s+from\s*['"]([^'"\n]{1,500})['"]/g)) addClause(m[1], 'as', m[2]);
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+(\{[^}]{0,500}\}|[A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*['"]([^'"\n]{1,500})['"]/g)) addClause(m[1], ':', m[2]);
   return out;
+}
+
+export interface ImportedName { exported: string | null; from: string }
+
+const posixNormalize = (path: string): string => {
+  const out: string[] = [];
+  for (const seg of path.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (out.length && out[out.length - 1] !== '..') out.pop(); else out.push('..'); } else out.push(seg);
+  }
+  return out.join('/');
+};
+
+/**
+ * Whether `file` is the module a JS/TS import of `specifier` from `fromFile` names. Only RELATIVE
+ * specifiers resolve here (`./orders`, `../db/orders.js`); a package or a path alias names a module
+ * this check cannot locate, so nothing in the repository is that import — which is the point: a
+ * same-named function elsewhere is NOT the imported one.
+ */
+export function isImportedModule(fromFile: string, specifier: string, file: string): boolean {
+  if (!specifier.startsWith('.')) return false;
+  const dir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/')) : '';
+  const base = posixNormalize(`${dir}/${specifier}`).replace(/\.(?:[cm]?js|jsx)$/, '');
+  const stem = file.replace(/\.(?:[cm]?[jt]sx?|d\.ts)$/, '');
+  return stem === base || stem === `${base}/index`;
+}
+
+/**
+ * Whether `file` is the module a Python `from <module> import …` in `fromFile` names: relative
+ * (`.resolvers`, `..api.orders`) from the file's package, or absolute (`app.resolvers`) as a path
+ * suffix. `<module>.py` or `<module>/__init__.py`.
+ */
+export function isImportedPythonModule(fromFile: string, module: string, file: string): boolean {
+  const dots = /^\.*/.exec(module)![0].length;
+  const rest = module.slice(dots).split('.').filter(Boolean).join('/');
+  let target: string;
+  if (dots) {
+    const parts = fromFile.split('/').slice(0, -1);
+    const up = parts.slice(0, Math.max(0, parts.length - (dots - 1)));
+    target = [...up, ...(rest ? [rest] : [])].join('/');
+  } else target = rest;
+  if (!target) return false;
+  const stem = file.replace(/\.pyw?$/, '');
+  const matches = (t: string) => stem === t || stem.endsWith(`/${t}`);
+  return dots ? (stem === target || stem === `${target}/__init__`) : (matches(target) || matches(`${target}/__init__`));
 }
 
 /** Every gRPC server registration in one source file. */
@@ -220,7 +266,7 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
   const out: GrpcRegistration[] = [];
-  let imports: Map<string, string | null> | undefined;
+  let imports: Map<string, ImportedName> | undefined;
   const pattern = runtime === 'go' ? /\bRegister([A-Z]\w*)Server\s*\(/g
     : runtime === 'python' ? /\badd_(\w+)Servicer_to_server\s*\(/g
       : /\.addService\s*\(/g;
@@ -266,13 +312,13 @@ export function scanGrpcRegistrations(file: string, content: string): GrpcRegist
       imports ??= importedNames(text);
       const methods = parsed?.map(({ base, ...e }) => {
         if (!base || !imports!.has(base)) return e;
-        const exported = imports!.get(base);
+        const { exported, from } = imports!.get(base)!;
         // The handler itself is the imported binding: look it up by the name it was EXPORTED
-        // under (`import { getOrder as get }` names `getOrder`), never by the local alias, which
-        // can name an unrelated function elsewhere. A default import states no such name.
-        if (base === e.fn) return exported ? { ...e, fn: exported, imported: true as const } : e;
+        // under (`import { getOrder as get }` names `getOrder`), never by the local alias, and only
+        // in the module it was imported FROM. A default import states no such name.
+        if (base === e.fn) return exported ? { ...e, fn: exported, imported: true as const, from } : e;
         // `impl.listOrders` on an imported module: the member is named as written.
-        return { ...e, imported: true as const };
+        return { ...e, imported: true as const, from };
       });
       out.push({ file, line, runtime, service: svc ? svc[1] : bare!, ...(bare ? { descriptor: false as const } : {}), ...(methods ? { methods } : { notLiteral: `the implementation is \`${(args[1] ?? '').slice(0, 60)}\`, not an object literal` }) });
     }

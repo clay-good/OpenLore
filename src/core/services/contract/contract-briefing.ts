@@ -238,7 +238,9 @@ export async function changedContractsForSpecFiles(
   // served-by and consumer joins below are HTTP — so it is named, never silently passed over
   // (change: add-contract-graph-projection).
   // A changed GraphQL schema the same way (change: add-contract-graph-projection, GraphQL phase).
-  const protoChanged = changedFiles.filter(f => side.proto.candidates.has(f) || side.graphql.candidates.has(f)).sort();
+  // A GraphQL client document (a frontend's queries) is not a schema: only schema files count.
+  const clientDocs = new Set(side.graphql.clientDocuments);
+  const protoChanged = changedFiles.filter(f => side.proto.candidates.has(f) || (side.graphql.candidates.has(f) && !clientDocs.has(f))).sort();
   const protoNote = protoChanged.length
     ? `${protoChanged.length} changed .proto or GraphQL file(s) (${protoChanged.slice(0, 3).join(', ')}${protoChanged.length > 3 ? ', …' : ''}): their operations are not briefed here; the graph binds each RPC to the method its server registration names and each GraphQL root field to the function its resolver map names, and certify_service_contract with a base ref grades the change.`
     : undefined;

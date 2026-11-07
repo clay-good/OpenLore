@@ -15,6 +15,7 @@
 import type { CallEdge, FunctionNode } from '../call-graph-types.js';
 import { readGraphql, mergeGraphqlSchema, namedType, isBuiltInScalar, type GqlDocument } from './graphql.js';
 import type { ResolverMap } from './graphql-resolvers.js';
+import { isImportedModule, isImportedPythonModule } from './grpc-registration.js';
 
 /** GraphQL schema files read per build. */
 export const MAX_GRAPHQL_FILES = 500;
@@ -81,11 +82,19 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
   const schema = mergeGraphqlSchema(docs);
   const outside = [...new Set(docs.flatMap(d => d.unassessed))].sort();
   if (outside.length) out.notes.push(`GraphQL constructs outside the model were not read: ${outside.slice(0, 12).join(', ')}${outside.length > 12 ? ', …' : ''}`);
+  // A ROOT type defined twice leaves every operation of that kind unprojected: the resolvers it
+  // would bind then read as dead code, so this withholds rather than notes.
+  for (const kind of ['query', 'mutation', 'subscription'] as const) {
+    const name = schema.roots[kind];
+    const amb = name ? schema.ambiguous.find(a => a.name === name) : undefined;
+    if (amb) out.notAssessed.push(`the GraphQL ${kind} root type ${amb.name} is defined in more than one file (${amb.files.slice(0, 3).join(', ')}), so its operations are not projected`);
+  }
+  for (const kind of schema.rootConflicts) out.notAssessed.push(`the GraphQL ${kind} root is named differently in two files, so its operations are not projected`);
   if (schema.ambiguous.length) out.notes.push(`${schema.ambiguous.length} GraphQL type(s) are defined in more than one file (${schema.ambiguous.slice(0, 3).map(a => a.name).join(', ')}), so nothing binds to them`);
   if (schema.orphanExtensions.length) out.notes.push(`${schema.orphanExtensions.length} \`extend\` definition(s) extend a type no file read defines`);
   for (const c of schema.conflicts.slice(0, 5)) out.notes.push(c);
 
-  const rootNames = new Set(Object.values(schema.roots));
+  const rootNames = new Set(Object.values(schema.roots).filter((r): r is string => !!r));
   const pushEdge = (() => {
     const seen = new Set<string>();
     return (from: FunctionNode, to: FunctionNode, kind: 'implements_endpoint' | 'references_schema', line: number, synthesizedBy?: string) => {
@@ -116,7 +125,7 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
   const operationNodes = new Map<string, FunctionNode>();
   let opsSeen = 0;
   for (const kind of ['query', 'mutation', 'subscription'] as const) {
-    const root = schema.types.get(schema.roots[kind]);
+    const root = schema.types.get(schema.roots[kind] ?? "");
     if (!root) continue;
     for (const f of root.fields) {
       opsSeen++;
@@ -175,16 +184,19 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
       }
       if (!e.fn) { out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'inline-implementation' }); continue; }
       const found = input.resolveImplementation(map, e.fn);
-      const local = found.filter(n => n.filePath === map.file);
-      // A function outside the map's file only when this file imports it (Node), never by name alone.
-      const scope = local.length ? local : e.imported ? found : [];
+      // An imported function is looked for in the module it was imported FROM, and only there — a
+      // same-named function in this file or anywhere else is not it. Otherwise, this file only.
+      const scope = e.imported
+        ? found.filter(n => (e.from !== undefined && isImportedModule(map.file, e.from, n.filePath))
+          || (e.module !== undefined && isImportedPythonModule(map.file, e.module, n.filePath)))
+        : found.filter(n => n.filePath === map.file);
       if (scope.length > 1) {
         out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'ambiguous-implementation', detail: `more than one \`${e.fn}\`` });
         continue;
       }
       if (!scope.length) {
         out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'implementation-not-found',
-          detail: e.imported ? `\`${e.fn}\` is imported by ${map.file} from a module that is not indexed here` : `\`${e.fn}\` is neither defined in ${map.file} nor imported by it` });
+          detail: e.notFollowed ?? (e.imported ? `\`${e.fn}\` is imported by ${map.file} from '${e.from ?? e.module}', which is not indexed here (a package, a path alias, or a module without that function)` : `\`${e.fn}\` is neither defined in ${map.file} nor imported by it`) });
         continue;
       }
       pushEdge(scope[0], target, 'implements_endpoint', scope[0].startLine ?? e.line, GRAPHQL_RESOLVER_BINDING);

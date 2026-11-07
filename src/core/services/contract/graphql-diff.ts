@@ -118,32 +118,47 @@ function diffType(b: GqlMergedType, t: GqlMergedType, out: ContractChange[]): vo
   }
   const tValues = new Set(t.values.map(v => v.name));
   for (const v of b.values) if (!tValues.has(v.name)) push('enum-value-removed', `enum value ${v.name} removed`, t.line, v.name);
-  for (const m of t.members) if (!b.members.includes(m)) push('union-member-added', `union member ${m} added (a client switching over the union may not handle it)`, t.line, m);
-  for (const m of b.members) if (!t.members.includes(m)) push('union-member-removed', `union member ${m} removed`, t.line, m);
-  for (const i of t.interfaces) if (!b.interfaces.includes(i)) push('interface-added', `now implements ${i}`, t.line, i);
-  for (const i of b.interfaces) if (!t.interfaces.includes(i)) push('interface-removed', `no longer implements ${i}`, t.line, i);
+  const bMembers = new Set(b.members);
+  const tMembers = new Set(t.members);
+  const bInterfaces = new Set(b.interfaces);
+  const tInterfaces = new Set(t.interfaces);
+  for (const m of t.members) if (!bMembers.has(m)) push('union-member-added', `union member ${m} added (a client switching over the union may not handle it)`, t.line, m);
+  for (const m of b.members) if (!tMembers.has(m)) push('union-member-removed', `union member ${m} removed`, t.line, m);
+  for (const i of t.interfaces) if (!bInterfaces.has(i)) push('interface-added', `now implements ${i}`, t.line, i);
+  for (const i of b.interfaces) if (!tInterfaces.has(i)) push('interface-removed', `no longer implements ${i}`, t.line, i);
   if (b.directivesHash !== t.directivesHash) push('schema-unassessed', `${t.name}: a directive changed (directives are outside the model)`, t.line);
 }
 
 /** Compare the merged GraphQL schemas of two revisions. */
 export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] {
   const out: ContractChange[] = [];
-  const rootSet = (s: GqlSchema) => new Set(Object.values(s.roots));
+  const rootSet = (s: GqlSchema) => new Set(Object.values(s.roots).filter((r): r is string => !!r));
   const baseRoots = rootSet(base);
   const headRoots = rootSet(head);
+  const ambiguity = (s: GqlSchema) => new Map(s.ambiguous.map(a => [a.name, a]));
+  const bAmb = ambiguity(base);
+  const hAmb = ambiguity(head);
   // ── Operations, by root kind ──
   for (const kind of ['query', 'mutation', 'subscription'] as const) {
-    // A root type defined in two files is absent from the merged map: its fields are not compared,
-    // never read as every operation removed (or added).
-    const bAmbiguous = base.ambiguous.find(a => a.name === base.roots[kind]);
-    const hAmbiguous = head.ambiguous.find(a => a.name === head.roots[kind]);
-    if (bAmbiguous || hAmbiguous) {
-      const one = hAmbiguous ?? bAmbiguous!;
-      if (!(bAmbiguous && hAmbiguous)) out.push(change(one.files[0], one.name, 1, 'schema-unassessed', `the ${kind} root type ${one.name} is defined in more than one file ${hAmbiguous ? 'at head' : 'at the base revision'}, so its operations are not compared`));
+    // Two files naming different roots of one kind: which type is the root cannot be said.
+    if (base.rootConflicts.includes(kind) || head.rootConflicts.includes(kind)) {
+      out.push(change('', `schema.${kind}`, 1, 'schema-unassessed', `the ${kind} root is named differently in two files ${head.rootConflicts.includes(kind) ? 'at head' : 'at the base revision'}, so its operations are not compared`));
       continue;
     }
-    const b = base.types.get(base.roots[kind]);
-    const h = head.types.get(head.roots[kind]);
+    // A root type defined in two files is absent from the merged map: its fields are not compared,
+    // never read as every operation removed (or added). Ambiguous on BOTH sides, it is compared by
+    // fingerprint, so a change to it is still seen.
+    const bAmbiguous = base.roots[kind] ? bAmb.get(base.roots[kind]!) : undefined;
+    const hAmbiguous = head.roots[kind] ? hAmb.get(head.roots[kind]!) : undefined;
+    if (bAmbiguous || hAmbiguous) {
+      const one = hAmbiguous ?? bAmbiguous!;
+      if (!(bAmbiguous && hAmbiguous) || bAmbiguous.fingerprint !== hAmbiguous.fingerprint) {
+        out.push(change(one.files[0], one.name, 1, 'schema-unassessed', `the ${kind} root type ${one.name} is defined in more than one file ${hAmbiguous && bAmbiguous ? 'on both sides and changed' : hAmbiguous ? 'at head' : 'at the base revision'}, so its operations are not compared`));
+      }
+      continue;
+    }
+    const b = base.roots[kind] ? base.types.get(base.roots[kind]!) : undefined;
+    const h = head.roots[kind] ? head.types.get(head.roots[kind]!) : undefined;
     const was = new Map((b?.fields ?? []).map(f => [f.name, f]));
     const now = new Map((h?.fields ?? []).map(f => [f.name, f]));
     for (const [n, f] of now) {
@@ -163,7 +178,7 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
     const t = head.types.get(name);
     if (!t) {
       // Defined twice at head is ambiguous there, not removed.
-      if (head.ambiguous.some(a => a.name === name)) out.push(change(b.file, name, b.line, 'schema-unassessed', `${name} is defined in more than one file at head, so it is not compared`));
+      if (hAmb.has(name)) out.push(change(b.file, name, b.line, 'schema-unassessed', `${name} is defined in more than one file at head, so it is not compared`));
       else if (!headRoots.has(name)) out.push(change(b.file, name, b.line, 'type-removed', `${b.kind} ${name} removed`));
       continue;
     }
@@ -172,10 +187,34 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
   }
   for (const [name, t] of head.types) {
     if (headRoots.has(name) || base.types.has(name) || baseRoots.has(name)) continue;
-    if (base.ambiguous.some(a => a.name === name)) out.push(change(t.file, name, t.line, 'schema-unassessed', `${name} was defined in more than one file at the base revision, so it is not compared`));
+    if (bAmb.has(name)) out.push(change(t.file, name, t.line, 'schema-unassessed', `${name} was defined in more than one file at the base revision, so it is not compared`));
     else out.push(change(t.file, name, t.line, 'type-added', `${t.kind} ${name} added`));
+  }
+  // A name ambiguous on both sides (a schema beside a checked-in copy) is compared by fingerprint;
+  // one ambiguous at base and gone at head is not known to be removed.
+  for (const [name, a] of bAmb) {
+    if (baseRoots.has(name) || headRoots.has(name) || head.types.has(name)) continue;
+    const h = hAmb.get(name);
+    if (!h) out.push(change(a.files[0], name, 1, 'schema-unassessed', `${name} was defined in more than one file at the base revision and is gone at head, so its removal is not assessed`));
+    else if (h.fingerprint !== a.fingerprint) out.push(change(h.files[0], name, 1, 'schema-unassessed', `${name} is defined in more than one file on both sides and changed, so it is not compared`));
+  }
+  for (const [name, h] of hAmb) {
+    if (bAmb.has(name) || baseRoots.has(name) || headRoots.has(name) || base.types.has(name)) continue;
+    out.push(change(h.files[0], name, 1, 'schema-unassessed', `${name} is new and defined in more than one file at head, so it is not compared`));
+  }
+  // ── Directive definitions: a client writes them in its operations ──
+  for (const [name, d] of head.directives) {
+    const address = `@${name}`;
+    const old = base.directives.get(name);
+    if (!old) { out.push(change(d.file, address, d.line, 'directive-added', `directive @${name} added`)); continue; }
+    for (const loc of old.locations) if (!d.locations.includes(loc)) out.push(change(d.file, address, d.line, 'directive-location-removed', `directive @${name} no longer allowed on ${loc}`, loc));
+    if (old.repeatable && !d.repeatable) out.push(change(d.file, address, d.line, 'directive-repeatable-removed', `directive @${name} is no longer repeatable`));
+    diffArgs(d.file, address, d.line, old.args, d.args, out);
+  }
+  for (const [name, old] of base.directives) if (!head.directives.has(name)) out.push(change(old.file, `@${name}`, old.line, 'directive-removed', `directive @${name} removed`));
+  if (base.schemaDirectivesHash !== head.schemaDirectivesHash) {
+    out.push(change('', 'schema', 1, 'schema-unassessed', 'a directive on `schema` changed (directives are outside the model)'));
   }
   const sortKey = (c: ContractChange) => `${c.address}\0${c.rule}\0${c.element ?? ''}\0${c.detail}`;
   return out.sort((x, y) => (sortKey(x) < sortKey(y) ? -1 : sortKey(x) > sortKey(y) ? 1 : 0));
 }
-

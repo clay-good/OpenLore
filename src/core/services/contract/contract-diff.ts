@@ -74,7 +74,11 @@ export const CONTRACT_RULES = {
   'graphql-enum-value-added': 'dangerous',
   'union-member-added': 'dangerous',
   'union-member-removed': 'breaking',
-  'interface-added': 'non-breaking',
+  'interface-added': 'dangerous',
+  'directive-added': 'non-breaking',
+  'directive-removed': 'breaking',
+  'directive-location-removed': 'breaking',
+  'directive-repeatable-removed': 'breaking',
   'interface-removed': 'breaking',
   'enum-value-deprecated': 'dangerous',
 } as const satisfies Record<string, ContractChangeClass>;

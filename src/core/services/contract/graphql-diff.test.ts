@@ -166,6 +166,10 @@ describe('diffGraphql: arguments (input position)', () => {
     expect(at('[Int] = [1, 2]', '[Int] = [1,2]')).toEqual([]);
     expect(at('Filter = {a: 1}', 'Filter = { a : 1 }')).toEqual([]);
     expect(at('Int! = 1', 'Int! = 2')).toEqual(['arg-default-changed dangerous']);
+    // Canonical defaults: object field order and number spelling are no change.
+    expect(at('Filter = {a: 1, b: 2}', 'Filter = {b: 2, a: 1}')).toEqual([]);
+    expect(at('Float = 1', 'Float = 1.0')).toEqual([]);
+    expect(at('Filter = {a: 1, b: 2}', 'Filter = {a: 1, b: 3}')).toEqual(['arg-default-changed dangerous']);
   });
 
   it('removing the default of a non-null argument makes it required', () => {
@@ -222,7 +226,7 @@ describe('diffGraphql: types', () => {
 
   it('interfaces: implementing one more is non-breaking, one fewer is breaking; interface fields are outputs', () => {
     const base = 'interface N { id: ID }\ninterface M { m: Int }\ntype T implements N { id: ID m: Int }';
-    expect(diff(base, base.replace('implements N', 'implements N & M')).map(c => `${c.rule} ${c.class} ${c.element}`)).toEqual(['interface-added non-breaking M']);
+    expect(diff(base, base.replace('implements N', 'implements N & M')).map(c => `${c.rule} ${c.class} ${c.element}`)).toEqual(['interface-added dangerous M']);
     expect(diff(base.replace('implements N', 'implements N & M'), base).map(c => `${c.rule} ${c.class} ${c.element}`)).toEqual(['interface-removed breaking M']);
     expect(rows(diff(base, base.replace('interface N { id: ID }', 'interface N { id: ID! }')))).toEqual(['output-field-made-non-null N [field id]']);
   });
@@ -320,5 +324,82 @@ describe('diffGraphql: rule table and output', () => {
     const empty = mergeGraphqlSchema([]);
     expect(rows(diffGraphql(empty, one('type Query { a: Int }\ntype T { x: Int }')))).toEqual(['operation-added Query.a', 'type-added T']);
     expect(rows(diffGraphql(one('type Query { a: Int }\ntype T { x: Int }'), empty))).toEqual(['operation-removed Query.a', 'type-removed T']);
+  });
+});
+
+describe('diffGraphql: review repros (roots, Federation 1, ambiguity, directive definitions)', () => {
+  it('a Federation 1 subgraph that drops a field from `extend type Query` removes an operation', () => {
+    const base = 'extend type Query { me: User topProducts: Int }\ntype User { id: ID! }';
+    const head = 'extend type Query { me: User }\ntype User { id: ID! }';
+    const cs = diff(base, head);
+    expect(cs.map(c => `${c.rule} ${c.class} ${c.address}`)).toEqual(['operation-removed breaking Query.topProducts']);
+    expect(diff(base, base)).toEqual([]);
+  });
+
+  it('a type ambiguous on both sides is compared by fingerprint: changed is schema-unassessed, unchanged is nothing', () => {
+    const base = schema({ 'a.graphql': 'type Query { a: Int }\ntype Order { id: ID }', 'copy/a.graphql': 'type Order { id: ID }' });
+    const head = schema({ 'a.graphql': 'type Query { a: Int }\ntype Order { id: ID }', 'copy/a.graphql': 'type Order { id: ID total: Int }' });
+    const cs = diffGraphql(base, head);
+    expect(cs.map(c => `${c.rule} ${c.address}`)).toEqual(['schema-unassessed Order']);
+    expect(cs[0].detail).toContain('on both sides and changed');
+    expect(contractBump(cs)).toBeNull();
+    expect(diffGraphql(base, base)).toEqual([]);
+  });
+
+  it('a root type ambiguous on both sides that changes is schema-unassessed', () => {
+    const base = schema({ 'a.graphql': 'type Query { a: Int }', 'copy/a.graphql': 'type Query { a: Int }' });
+    const head = schema({ 'a.graphql': 'type Query { a: Int }', 'copy/a.graphql': 'type Query { a: String }' });
+    expect(diffGraphql(base, head).map(c => `${c.rule} ${c.address}`)).toEqual(['schema-unassessed Query']);
+    expect(diffGraphql(base, base)).toEqual([]);
+  });
+
+  it('a type ambiguous at base and gone at head, or new and ambiguous at head, is schema-unassessed', () => {
+    const amb = schema({ 'a.graphql': 'type Query { a: Int }\ntype O { id: ID }', 'b.graphql': 'type O { id: ID }' });
+    const gone = schema({ 'a.graphql': 'type Query { a: Int }' });
+    expect(diffGraphql(amb, gone).map(c => `${c.rule} ${c.address}`)).toEqual(['schema-unassessed O']);
+    expect(diffGraphql(gone, amb).map(c => `${c.rule} ${c.address}`)).toEqual(['schema-unassessed O']);
+  });
+
+  it('directive definitions: added is non-breaking; removed, a location removed, repeatable removed, a required argument added are breaking', () => {
+    const base = 'type Query { a: Int }\ndirective @auth(role: String) repeatable on FIELD | QUERY';
+    const cases: Array<[string, string]> = [
+      ['type Query { a: Int }', 'directive-removed breaking @auth'],
+      [base.replace('FIELD | QUERY', 'FIELD'), 'directive-location-removed breaking @auth'],
+      [base.replace(' repeatable', ''), 'directive-repeatable-removed breaking @auth'],
+      [base.replace('role: String', 'role: String, tenant: ID!'), 'required-param-added breaking @auth'],
+      [`${base}\ndirective @cached on FIELD`, 'directive-added non-breaking @cached'],
+    ];
+    for (const [head, want] of cases) {
+      const cs = diff(base, head);
+      expect(cs.map(c => `${c.rule} ${c.class} ${c.address}`), head).toEqual([want]);
+      expect(cs[0].class).toBe(CONTRACT_RULES[cs[0].rule]);
+    }
+    expect(diff(base, base.replace('FIELD | QUERY', 'QUERY | FIELD'))).toEqual([]);
+    expect(diff(base.replace(' repeatable', ''), base)).toEqual([]);
+    expect(diff(base, base.replace('FIELD | QUERY', 'FIELD | QUERY | MUTATION'))).toEqual([]);
+    expect(diff(base, base.replace('role: String', 'role: String!')).map(c => c.rule)).toEqual(['param-made-required']);
+  });
+
+  it('a changed directive on `schema` is schema-unassessed', () => {
+    const cs = diff('schema @link(url: "a") { query: Query }\ntype Query { a: Int }', 'schema @link(url: "b") { query: Query }\ntype Query { a: Int }');
+    expect(cs.map(c => `${c.rule} ${c.address}`)).toEqual(['schema-unassessed schema']);
+    expect(contractBump(cs)).toBeNull();
+    expect(diff('extend schema @link(url: "a")\ntype Query { a: Int }', 'extend schema @link(url: "b")\ntype Query { a: Int }').map(c => c.rule)).toEqual(['schema-unassessed']);
+  });
+
+  it('with a `schema` definition naming only `query`, a type named Mutation is an ordinary type', () => {
+    const base = 'schema { query: Query }\ntype Query { a: Mutation }\ntype Mutation { m: Int }';
+    const cs = diff(base, base.replace('m: Int', 'm: String'));
+    expect(rows(cs)).toEqual(['field-type-changed Mutation [field m]']);
+    expect(rows(diff(base, base.replace('type Mutation { m: Int }', 'type Mutation { m: Int n: Int }')))).toEqual(['field-added Mutation [field n]']);
+  });
+
+  it('roots named differently in two files are schema-unassessed for that kind, never every operation removed', () => {
+    const base = schema({ 'a.graphql': 'schema { query: Q1 }\ntype Q1 { a: Int }\ntype Q2 { b: Int }' });
+    const head = schema({ 'a.graphql': 'schema { query: Q1 }\ntype Q1 { a: Int }\ntype Q2 { b: Int }', 'b.graphql': 'extend schema { query: Q2 }' });
+    const cs = diffGraphql(base, head);
+    expect(cs.map(c => `${c.rule} ${c.class} ${c.address}`)).toEqual(['schema-unassessed potentially-breaking schema.query']);
+    expect(cs[0].detail).toContain('at head');
+    expect(diffGraphql(head, base).map(c => `${c.rule} ${c.address}`)).toEqual(['schema-unassessed schema.query']);
   });
 });
