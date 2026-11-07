@@ -5,6 +5,29 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### GraphQL schemas are read
+
+- **Every `.graphql` / `.graphqls` / `.gql` schema is read** and merged into one schema, `extend`
+  folded in: each root field becomes an operation node (`Query.order`), each named type a node, with
+  `references_schema` edges between them. A file of operations and fragments is a client document,
+  listed under `skippedCandidates`.
+- **The function a literal resolver map names is bound to its operation** — JS/TS
+  `{ Query: { order: getOrder } }` and Python Ariadne `@query.field("order")` — with an
+  `implements_endpoint` edge, so it is a reachability root. Inline resolvers, spreads, unknown
+  fields and functions neither local nor imported are disclosed in `unresolvedResolvers`.
+- **`certify_service_contract` grades GraphQL changes** with variance-aware rows: an output may only
+  become non-null, an input only optional; removals, a required argument and an output made nullable are
+  `breaking`; an added enum value or union member is `dangerous`. GraphQL consumers are a disclosed
+  boundary. The index schema version is now 17.
+- **An imported handler binds only in the module it was imported from**, one barrel re-export
+  followed — for gRPC Node registrations too, which previously took any same-named function in the
+  repository. A package or path-alias import binds nothing and says so.
+- **GraphQL schemas under fixture paths are not read** (`fixtures/`, `__tests__/`, `testdata/`,
+  `*.test.graphql`), and are listed under `skippedCandidates`: a fixture's `type Query` made the real
+  root ambiguous. `.proto` files are read wherever they are, as before.
+- `find_dead_code` names unbound GraphQL operations and gRPC RPCs, so a code-first resolver or a
+  handler registered in an unread style is not reported dead without a word.
+
 ### Protobuf schemas are read
 
 - **Every `.proto` file is read as a proto3 schema** and projected onto the graph: each RPC is a

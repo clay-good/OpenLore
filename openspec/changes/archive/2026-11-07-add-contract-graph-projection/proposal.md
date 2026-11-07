@@ -1,6 +1,6 @@
 # Contract graph projection: schema elements in the graph, the briefings, and more formats
 
-> Status: PROPOSED (2026-11-01). Split from `add-service-contract-certification`, whose OpenAPI
+> Status: COMPLETE (2026-11-07; proposed 2026-11-01). Split from `add-service-contract-certification`, whose OpenAPI
 > phase shipped `certify_service_contract` (reader, rule table, parity, in-repo consumer join).
 > Research: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. The briefings' first slice (operations served
 > by routes in scope, in `orient` and `blast_radius`) shipped in `add-contract-briefings`; the payload check in
@@ -8,7 +8,11 @@
 > `implements_endpoint` / `consumes_endpoint` edges and the `contractSchemas` capability shipped in
 > `add-contract-node-projection`, which leaves the element model below (fields, messages, types),
 > protobuf, GraphQL, generated clients, the changed-specification briefing, and federated consumers. The
-> protobuf reader shipped in `add-contract-protobuf-reader`; GraphQL remains.
+> protobuf reader shipped in PR #687 and the GraphQL reader in PR #688; the change is complete.
+> Per-FIELD nodes were deliberately not projected (named schemas, messages and types are): the
+> property-level verdict belongs to `certify_service_contract`. The `mcp-handlers` delta shipped as
+> `ChangedSpecificationsSurfaceTheirBoundCode` and, for federated consumers, inside
+> `ContractVerdictsJoinConsumersConservatively`.
 
 ## Why
 

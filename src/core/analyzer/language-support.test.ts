@@ -512,8 +512,9 @@ describe('completeness + fail-soft + determinism', () => {
     const specs: Record<string, string> = {
       OpenAPI: `openapi: 3.0.0\ninfo: { title: t, version: '1' }\npaths:\n  /ping:\n    get:\n      responses: { '200': { description: ok } }\n`,
       Protobuf: `syntax = "proto3";\npackage p;\nmessage Ping {}\nservice S { rpc Do(Ping) returns (Ping); }\n`,
+      GraphQL: `type Ping { ok: Boolean }\ntype Query { ping: Ping }\n`,
     };
-    const ext: Record<string, string> = { OpenAPI: 'yaml', Protobuf: 'proto' };
+    const ext: Record<string, string> = { OpenAPI: 'yaml', Protobuf: 'proto', GraphQL: 'graphql' };
     for (const lang of CONTRACT_LANGUAGES) {
       expect(specs[lang], `no specification fixture wired for CONTRACT_LANGUAGES member ${lang}`).toBeDefined();
     }

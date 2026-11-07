@@ -1489,6 +1489,10 @@ export class AnalysisArtifactGenerator {
     const { MAX_CONTRACT_FILES } = await import('./contract/project.js');
     const { MAX_PROTO_FILES } = await import('./contract/project-protobuf.js');
     const { isProtobufPath } = await import('./contract/protobuf.js');
+    const { isGraphqlPath } = await import('./contract/graphql.js');
+    const { isFixtureSchemaPath } = await import('./contract/types.js');
+    const { MAX_GRAPHQL_CANDIDATES } = await import('./contract/project-graphql.js');
+    const { relaySchemaPaths } = await import('./contract/graphql.js');
     const { readBuildOutputMap } = await import('./iac/build-output.js');
     /** Total specification bytes retained across the walk. */
     const MAX_CONTRACT_BYTES = 64 * 1024 * 1024;
@@ -1549,6 +1553,22 @@ export class AnalysisArtifactGenerator {
     let protoFiles = 0;
     /** `.proto` files past a bound: counted apart, so a dropped one withholds only protobuf conclusions. */
     let protoFilesOmitted = 0;
+    /** GraphQL schema files retained and past a bound, counted apart for the same reason. */
+    let graphqlFiles = 0;
+    let graphqlFilesOmitted = 0;
+    /** `package.json` / `relay.config.*` texts: they name the schema a Relay COMPILER reads. */
+    const relayConfigs: Array<{ path: string; content: string }> = [];
+    /**
+     * Drop the schema a Relay config names: it is the compiler's copy of a server's schema (often
+     * GitHub's), and read as this repository's contract it would grade the vendor's API.
+     */
+    const skippedContractFiles: Array<{ file: string; reason: string }> = [];
+    const withoutClientSchemas = (files: typeof contractFiles) => {
+      const client = relaySchemaPaths(relayConfigs);
+      if (!client.size) return files;
+      for (const f of files) if (client.has(f.path)) skippedContractFiles.push({ file: f.path, reason: 'the schema a Relay compiler config names: a copy of a server\'s schema, not this repository\'s contract' });
+      return files.filter(f => !client.has(f.path));
+    };
     // Files whose UTF-8 decode was lossy (contained U+FFFD) — a parse-health signal captured at the
     // one central read, since the call-graph extractors never see the raw bytes (change:
     // add-parse-health-boundary-disclosure).
@@ -1602,7 +1622,7 @@ export class AnalysisArtifactGenerator {
           // so a count alone let a specification-heavy monorepo hold ~200 MB of strings from the
           // walk until the build returned.
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
-          if (retainable && contractFiles.length - protoFiles < MAX_CONTRACT_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+          if (retainable && contractFiles.length - protoFiles - graphqlFiles < MAX_CONTRACT_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
             contractBytes += retained;
             contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
           } else if (retainable) {
@@ -1615,6 +1635,13 @@ export class AnalysisArtifactGenerator {
         // Protobuf definitions (change: add-contract-graph-projection): every `.proto` file is a
         // schema, so no sniff is needed. Same byte bound as above; a file past the reader's cap is
         // carried truncated so it is reported unread for its size rather than absent.
+        // A schema under a test or fixture path describes a fake service: read as the contract, it
+        // makes the real root types ambiguous and silently unbinds every resolver.
+        const fixtureSchema = isGraphqlPath(file.path) && isFixtureSchemaPath(file.path);
+        if (fixtureSchema) {
+          // Named, not dropped: discovery scope stays visible.
+          skippedContractFiles.push({ file: file.path, reason: 'a schema under a test or fixture path, not this repository\'s contract' });
+        }
         if (isProtobufPath(file.path)) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
@@ -1624,10 +1651,22 @@ export class AnalysisArtifactGenerator {
             contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
           } else protoFilesOmitted++;
         }
+        // GraphQL SDL (change: add-contract-graph-projection): every `.graphql` / `.graphqls` /
+        // `.gql` file is a candidate; the reader tells a schema from a client document.
+        if (isGraphqlPath(file.path) && !fixtureSchema) {
+          const oversized = content.length > MAX_SPEC_BYTES;
+          const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (graphqlFiles < MAX_GRAPHQL_CANDIDATES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+            graphqlFiles++;
+            contractBytes += retained;
+            contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
+          } else graphqlFilesOmitted++;
+        }
 
         // The project's own build-output mapping, for binding a deployed `dist/…` handler to its
         // source (change: add-iac-deploy-binding-commands).
         if (file.path === 'tsconfig.json' || file.path === 'package.json') buildOutputConfigs.set(file.path, content);
+        if (/(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts))$/.test(file.path)) relayConfigs.push({ path: file.path, content });
 
         // Signatures: exclude test files
         if (!isTest) {
@@ -1706,9 +1745,11 @@ export class AnalysisArtifactGenerator {
       const builder = new CallGraphBuilder({
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
-        ...(contractFiles.length ? { contractFiles } : {}),
+        ...(contractFiles.length ? { contractFiles: withoutClientSchemas(contractFiles) } : {}),
+        ...(skippedContractFiles.length ? { contractFilesSkipped: skippedContractFiles } : {}),
         ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
         ...(protoFilesOmitted ? { protoFilesOmitted } : {}),
+        ...(graphqlFilesOmitted ? { graphqlFilesOmitted } : {}),
         ...(buildOutputConfigs.size ? { buildOutput: readBuildOutputMap(buildOutputConfigs) } : {}),
       });
       // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the

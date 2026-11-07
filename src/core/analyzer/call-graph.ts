@@ -45,8 +45,10 @@ import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
 import { generatedClientFunctionsFor } from './contract/generated-client.js';
-import { scanGrpcRegistrations, isGeneratedGrpcStub, type GrpcRegistration } from './contract/grpc-registration.js';
+import { scanGrpcRegistrations, isGeneratedGrpcStub, createImportResolver, type GrpcRegistration, type ImportTarget } from './contract/grpc-registration.js';
 import { isProtobufPath } from './contract/protobuf.js';
+import { isGraphqlPath } from './contract/graphql.js';
+import { scanResolverMaps, hasInlineSdl, type ResolverMap } from './contract/graphql-resolvers.js';
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -5665,6 +5667,10 @@ export interface CallGraphBuilderOptions {
   contractFilesOmitted?: number;
   /** `.proto` files the walk did not retain (change: add-contract-graph-projection). */
   protoFilesOmitted?: number;
+  /** GraphQL files the walk did not retain. */
+  graphqlFilesOmitted?: number;
+  /** Schema files deliberately not read (fixtures, a Relay compiler's copy), each with why. */
+  contractFilesSkipped?: ReadonlyArray<{ file: string; reason: string }>;
   /**
    * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
    * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
@@ -5683,6 +5689,8 @@ export class CallGraphBuilder {
   private readonly contractFiles: ReadonlyArray<{ path: string; content: string }>;
   private readonly contractFilesOmitted: number;
   private readonly protoFilesOmitted: number;
+  private readonly graphqlFilesOmitted: number;
+  private readonly contractFilesSkipped: ReadonlyArray<{ file: string; reason: string }>;
   private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
@@ -5693,6 +5701,8 @@ export class CallGraphBuilder {
     this.contractFiles = options.contractFiles ?? [];
     this.contractFilesOmitted = options.contractFilesOmitted ?? 0;
     this.protoFilesOmitted = options.protoFilesOmitted ?? 0;
+    this.graphqlFilesOmitted = options.graphqlFilesOmitted ?? 0;
+    this.contractFilesSkipped = options.contractFilesSkipped ?? [];
     this.buildOutput = options.buildOutput;
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
@@ -6542,7 +6552,9 @@ export class CallGraphBuilder {
     // (change: add-contract-node-projection) — extracted once, here. Retained only when a
     // specification exists: on a repository with none, holding the whole route and call list
     // across Passes 3-8 would be memory spent for nothing.
-    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0;
+    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0 || this.graphqlFilesOmitted > 0
+      // A schema skipped as a fixture or a Relay copy is still disclosed when it is the only one.
+      || this.contractFilesSkipped.length > 0;
     let httpRoutes: RouteDefinition[] = [];
     let httpCalls: HttpCall[] = [];
     /** Why the route/call extraction is not complete — withholds every "unmatched" conclusion. */
@@ -6748,10 +6760,48 @@ export class CallGraphBuilder {
           resolveGrpcImplementation: (reg, name) => trie.findBySimpleName(name).filter(n =>
             !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !isGeneratedGrpcStub(n.filePath)
             && runtimeLanguages[reg.runtime].has(n.language)
-            && (reg.implType === undefined || n.className === reg.implType)),
+            && (reg.implType === undefined ? !n.className : n.className === reg.implType)),
           files: this.contractFiles,
           filesOmitted: this.contractFilesOmitted,
           protoFilesOmitted: this.protoFilesOmitted,
+          graphqlFilesOmitted: this.graphqlFilesOmitted,
+          ...(this.contractFilesSkipped.length ? { skippedFiles: this.contractFilesSkipped } : {}),
+          importTargets: (() => {
+            // Built lazily, once: a repository with no imported handler never indexes its files.
+            let resolve: ReturnType<typeof createImportResolver> | undefined;
+            const memo = new Map<string, readonly ImportTarget[]>();
+            return (from: string, spec: string, name: string, runtime: 'node' | 'python') => {
+              const key = `${runtime}\0${from}\0${spec}\0${name}`;
+              let hit = memo.get(key);
+              if (!hit) {
+                resolve ??= createImportResolver([...fileContents.keys()], f => fileContents.get(f));
+                hit = resolve(from, spec, name, runtime);
+                memo.set(key, hit);
+              }
+              return hit;
+            };
+          })(),
+          // Resolver maps are read only when a GraphQL file is in hand, and only for the root type
+          // names the schema has (the projector passes them). Test files are skipped.
+          graphqlResolverMaps: roots => {
+            if (!this.contractFiles.some(f => isGraphqlPath(f.path))) return [];
+            const maps: ResolverMap[] = [];
+            // A directory holding an inline schema (`typeDefs.ts`) serves THAT schema: maps beside it
+            // are not bound to the repository's SDL by field name.
+            const dirOf = (f: string) => f.slice(0, f.lastIndexOf('/') + 1);
+            const inlineDirs = new Set<string>();
+            for (const [file, content] of fileContents) if (!isTestFile(file) && hasInlineSdl(content)) inlineDirs.add(dirOf(file));
+            for (const [file, content] of fileContents) {
+              if (isTestFile(file) || inlineDirs.has(dirOf(file))) continue;
+              for (const m of scanResolverMaps(file, content, roots)) maps.push(m);
+            }
+            return maps;
+          },
+          // A function a map names is a top-level function or an object-literal method — never a
+          // CLASS method (`class OrderRepo { getOrder() }`), which a map cannot name bare.
+          resolveGraphqlImplementation: (map, name) => trie.findBySimpleName(name).filter(n =>
+            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !n.className
+            && (map.runtime === 'python' ? n.language === 'Python' : n.language === 'TypeScript' || n.language === 'JavaScript')),
           ...(extractionNotAssessed.size ? { extractionNotAssessed: [...extractionNotAssessed] } : {}),
           routes: httpRoutes,
           calls: httpCalls,

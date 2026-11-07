@@ -53,6 +53,15 @@ service OrderService { rpc GetOrder(GetOrderRequest) returns (Order); }
 `,
     kinds: ['implements_endpoint', 'references_schema'],
   },
+  GraphQL: {
+    file: 'schema.graphql',
+    method: 'GET',
+    path: '/unused',
+    spec: `type Order { id: ID! }
+type Query { order(id: ID!): Order }
+`,
+    kinds: ['implements_endpoint', 'references_schema'],
+  },
 };
 
 const code = (id: string): FunctionNode => ({
@@ -85,6 +94,8 @@ describe('contract projection conformance', () => {
         resolveCaller: () => code('src/client.ts::load'),
         grpcRegistrations: [{ file: 'src/server.go', line: 3, runtime: 'go', service: 'OrderService', implType: 'server' }],
         resolveGrpcImplementation: () => [{ ...code('src/server.go::server.GetOrder'), name: 'GetOrder', className: 'server', language: 'Go' }],
+        graphqlResolverMaps: () => [{ file: 'src/resolvers.ts', line: 1, runtime: 'node', root: 'Query', entries: [{ field: 'order', fn: 'getOrder', line: 2 }] }],
+        resolveGraphqlImplementation: () => [code('src/resolvers.ts::getOrder')],
       });
       expect(projection.nodes.map(n => n.language)).toContain(lang);
       expect(new Set(projection.edges.filter(e => projection.nodes.find(n => n.id === e.calleeId)?.language === lang).map(e => e.kind)))
