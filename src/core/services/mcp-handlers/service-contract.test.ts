@@ -523,4 +523,30 @@ service OrderService {
     const r = await handleCertifyServiceContract({ directory: root });
     expect(r.notAssessed).toEqual([{ file: 'proto/legacy.proto', reason: expect.stringContaining('proto2') }]);
   });
+
+  it('many .proto files never push an OpenAPI change out of the scan, or downgrade it', async () => {
+    const files: Record<string, string> = { 'z/openapi.yaml': SPEC };
+    for (let i = 0; i < 2_001; i++) files[`a/f${String(i).padStart(4, '0')}.proto`] = `syntax = "proto3";\npackage p${i};\nmessage M {}\n`;
+    const root = repo(files);
+    write(root, 'z/openapi.yaml', SPEC.replace(/ {4}delete:\n(.*\n){2}/, ''));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; class: string; address: string }>; suggestedBump: string };
+    expect(changes.items.map(c => `${c.rule} ${c.class} ${c.address}`)).toEqual(['operation-removed breaking DELETE /v1/orders/{id}']);
+    expect(changes.suggestedBump).toBe('major');
+    expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('Past the protobuf cap')]));
+  }, 60_000);
+
+  it('a changed specification that could not be compared withholds the bump', async () => {
+    const legacy = 'package legacy;\nmessage M { optional string a = 1; }\nservice S { rpc A(M) returns (M); rpc B(M) returns (M); }\n';
+    const root = repo({ 'proto/legacy.proto': legacy, 'proto/orders.proto': PROTO });
+    write(root, 'proto/legacy.proto', legacy.replace(' rpc B(M) returns (M);', ''));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { total: number; suggestedBump: string | null; suggestedBumpWithheld?: string };
+    expect(changes.total).toBe(0);
+    expect(changes.suggestedBump).toBeNull();
+    expect(changes.suggestedBumpWithheld).toContain('1 changed specification file(s) could not be compared');
+    // Unchanged, the same unreadable file hides nothing.
+    git(root, 'commit', '-qam', 'edit');
+    expect((await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD' })).changes).toMatchObject({ suggestedBump: 'patch' });
+  });
 });

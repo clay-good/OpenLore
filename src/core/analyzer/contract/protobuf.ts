@@ -76,7 +76,7 @@ export interface ProtoMessage {
   optionsHash: string;
 }
 
-export interface ProtoEnumValue { name: string; number: number; deprecated: boolean; line: number }
+export interface ProtoEnumValue { name: string; number: number; deprecated: boolean; optionsHash: string; line: number }
 
 export interface ProtoEnum {
   kind: 'enum';
@@ -106,7 +106,7 @@ export interface ProtoRpc {
   line: number;
 }
 
-export interface ProtoService { name: string; simpleName: string; line: number; rpcs: ProtoRpc[] }
+export interface ProtoService { name: string; simpleName: string; line: number; rpcs: ProtoRpc[]; optionsHash: string }
 
 export interface ProtoDocument {
   file: string;
@@ -118,6 +118,31 @@ export interface ProtoDocument {
   enums: ProtoEnum[];
   /** Element classes present in the file but outside the model (`extend`, `extensions`). */
   unassessed: string[];
+}
+
+/** Reserved ranges sorted and merged (touching ranges joined), so membership is a binary search. */
+export function mergeRanges(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out: Array<[number, number]> = [];
+  for (const [lo, hi] of sorted) {
+    const last = out[out.length - 1];
+    if (last && lo <= last[1] + 1) last[1] = Math.max(last[1], hi);
+    else out.push([lo, hi]);
+  }
+  return out;
+}
+
+/** Whether `n` is in merged ranges. */
+export function inRanges(merged: ReadonlyArray<readonly [number, number]>, n: number): boolean {
+  let lo = 0;
+  let hi = merged.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (n < merged[mid][0]) hi = mid - 1;
+    else if (n > merged[mid][1]) lo = mid + 1;
+    else return true;
+  }
+  return false;
 }
 
 // ── Tokenizer ──────────────────────────────────────────────────────────────
@@ -152,7 +177,20 @@ function tokenize(text: string): Tok[] {
       let v = '';
       while (j < n && text[j] !== c) {
         if (text[j] === '\n') throw new ProtoSyntaxError(`line ${start}: unterminated string`);
-        if (text[j] === '\\' && j + 1 < n) { v += text[j + 1]; j += 2; continue; }
+        if (text[j] === '\\' && j + 1 < n) {
+          // Decoded as protoc decodes them, so `"\x61"` and `"a"` are the same reserved name.
+          const e = text[j + 1];
+          const hex = /^[xX]([0-9a-fA-F]{1,2})/.exec(text.slice(j + 1, j + 4));
+          const oct = /^[0-7]{1,3}/.exec(text.slice(j + 1, j + 4));
+          const uni = /^u([0-9a-fA-F]{4})/.exec(text.slice(j + 1, j + 6)) ?? /^U([0-9a-fA-F]{8})/.exec(text.slice(j + 1, j + 10));
+          if (hex) { v += String.fromCharCode(parseInt(hex[1], 16)); j += 1 + hex[0].length; continue; }
+          if (oct) { v += String.fromCharCode(parseInt(oct[0], 8)); j += 1 + oct[0].length; continue; }
+          if (uni) { const cp = parseInt(uni[1], 16); v += cp <= 0x10ffff ? String.fromCodePoint(cp) : '\ufffd'; j += 1 + uni[0].length; continue; }
+          const simple: Record<string, string> = { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', f: '\f', v: '\v' };
+          v += simple[e] ?? e;
+          j += 2;
+          continue;
+        }
         v += text[j++];
       }
       if (j >= n) throw new ProtoSyntaxError(`line ${start}: unterminated string`);
@@ -227,7 +265,19 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   const isSym = (v: string, k = 0) => peek(k)?.t === 'sym' && peek(k)?.v === v;
   const isId = (v: string, k = 0) => peek(k)?.t === 'id' && peek(k)?.v === v;
   const expectSym = (v: string): Tok => (isSym(v) ? next() : fail(`expected \`${v}\`, found \`${peek()?.v ?? 'end of file'}\``));
-  const ident = (what: string): Tok => (peek()?.t === 'id' ? next() : fail(`expected ${what}, found \`${peek()?.v ?? 'end of file'}\``));
+  const ident = (what: string): Tok => {
+    const t = peek()?.t === 'id' ? next() : fail(`expected ${what}, found \`${peek()?.v ?? 'end of file'}\``);
+    if (/\.\.|\.$/.test(t.v)) fail(`\`${t.v}\` is not a valid name`, t);
+    return t;
+  };
+  /** One string literal, adjacent literals joined as protoc joins them (`"proto" "3"`). */
+  const stringLit = (what: string): Tok => {
+    const t = next();
+    if (t.t !== 'str') fail(`expected ${what}`, t);
+    let v = t.v;
+    while (peek()?.t === 'str') v += next().v;
+    return { ...t, v };
+  };
   /** A name with no dots (a message, field, service, or RPC name). */
   const simpleIdent = (what: string): Tok => {
     const t = ident(what);
@@ -293,7 +343,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   };
   const reservedStatement = (into: ProtoReserved, max: number): void => {
     for (;;) {
-      if (peek()?.t === 'str') into.names.push(next().v);
+      if (peek()?.t === 'str') into.names.push(stringLit('a reserved name').v);
       else {
         const lo = intLiteral('a field number');
         let hi = lo;
@@ -316,12 +366,26 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
   if (!isId('syntax')) fail('no `syntax` statement, so the file is proto2; only proto3 is read');
   next();
   expectSym('=');
-  const syntax = next();
-  if (syntax.t !== 'str') fail('expected a syntax string', syntax);
+  const syntax = stringLit('a syntax string');
   if (syntax.v !== 'proto3') fail(`\`syntax = "${syntax.v}"\` is not read; only proto3 is`, syntax);
   expectSym(';');
 
+  // `package` applies to the whole file wherever it is written, so it is found before any
+  // declaration is named: a message above it is still `pkg.Message`.
   let pkg = '';
+  {
+    let depth = 0;
+    for (let k = p; k < toks.length; k++) {
+      const t = toks[k];
+      if (t.t === 'sym' && t.v === '{') depth++;
+      else if (t.t === 'sym' && t.v === '}') depth--;
+      else if (depth === 0 && t.t === 'id' && t.v === 'package' && toks[k + 1]?.t === 'id' && toks[k + 2]?.t === 'sym' && toks[k + 2].v === ';') {
+        if (pkg) fail('a second `package` statement', t);
+        pkg = toks[k + 1].v;
+      }
+    }
+  }
+  let packageSeen = false;
   const imports: string[] = [];
   const services: ProtoService[] = [];
   const messages: ProtoMessage[] = [];
@@ -347,7 +411,8 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       const number = intLiteral('an enum value number');
       const opts = isSym('[') ? bracketOptions() : { deprecated: false, rest: [] };
       expectSym(';');
-      e.values.push({ name: name.v, number, deprecated: opts.deprecated, line: name.line });
+      if (number < -2147483648 || number > MAX_ENUM_VALUE) fail(`enum value ${number} is out of the int32 range`, name);
+      e.values.push({ name: name.v, number, deprecated: opts.deprecated, optionsHash: sha(opts.rest.join('\n')), line: name.line });
     }
     expectSym('}');
     e.optionsHash = sha(options.sort().join('\n'));
@@ -384,6 +449,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       expectSym('=');
       const number = intLiteral('a field number');
       if (number < 1 || number > MAX_FIELD_NUMBER) fail(`field number ${number} is out of range`, fname);
+      if (number >= 19_000 && number <= 19_999) fail(`field number ${number} is reserved for the protobuf implementation`, fname);
       const opts = isSym('[') ? bracketOptions() : { deprecated: false, rest: [] };
       expectSym(';');
       // protoc refuses both; a model holding either could not say which field a number means.
@@ -428,18 +494,27 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       field('singular');
     }
     expectSym('}');
+    // protoc refuses a field on a number or name its own message reserves.
+    const reservedNames = new Set(m.reserved.names);
+    const reservedRanges = mergeRanges(m.reserved.ranges);
+    for (const f of m.fields) {
+      if (reservedNames.has(f.name) || inRanges(reservedRanges, f.number)) {
+        fail(`field \`${f.name}\` = ${f.number} uses a number or name ${name} reserves`, { t: 'id', v: f.name, line: f.line });
+      }
+    }
     m.optionsHash = sha(options.sort().join('\n'));
   };
 
   const serviceBody = (nameTok: Tok): void => {
     const sname = full(pkg, nameTok.v);
-    const s: ProtoService = { name: sname, simpleName: nameTok.v, line: nameTok.line, rpcs: [] };
+    const s: ProtoService = { name: sname, simpleName: nameTok.v, line: nameTok.line, rpcs: [], optionsHash: '' };
+    const serviceOptions: string[] = [];
     services.push(s);
     const rpcNames = new Set<string>();
     expectSym('{');
     while (!isSym('}')) {
       if (isSym(';')) { next(); continue; }
-      if (isId('option')) { next(); optionStatement(); continue; }
+      if (isId('option')) { next(); serviceOptions.push(optionStatement().text); continue; }
       if (!isId('rpc')) fail(`expected \`rpc\` in service ${nameTok.v}, found \`${peek()?.v ?? 'end of file'}\``);
       next();
       const rname = simpleIdent('an RPC name');
@@ -477,6 +552,7 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
       });
     }
     expectSym('}');
+    s.optionsHash = sha(serviceOptions.sort().join('\n'));
   };
 
   while (p < toks.length) {
@@ -485,16 +561,15 @@ function parse(file: string, toks: Tok[]): ProtoDocument {
     if (kw.t !== 'id') fail(`unexpected \`${kw.v}\``, kw);
     switch (kw.v) {
       case 'package': {
-        if (pkg) fail('a second `package` statement', kw);
-        pkg = ident('a package name').v;
+        // Read by the prescan above; checked here so a malformed statement is still an error.
+        if (packageSeen || ident('a package name').v !== pkg) fail('a malformed or second `package` statement', kw);
+        packageSeen = true;
         expectSym(';');
         break;
       }
       case 'import': {
         if (isId('public') || isId('weak')) next();
-        const t = next();
-        if (t.t !== 'str') fail('expected an import path', t);
-        imports.push(t.v);
+        imports.push(stringLit('an import path').v);
         expectSym(';');
         break;
       }
@@ -548,7 +623,9 @@ export function resolveProtoTypes(docs: readonly ProtoDocument[]): { docs: Proto
     for (let i = 1; i <= parts.length; i++) packages.add(parts.slice(0, i).join('.'));
   }
   // A scope component can be a package or a message: either may hold the next name.
-  const isScope = (n: string) => declared.has(n) || packages.has(n);
+  // A service is a scope too: protoc stops at it, and finding no type inside, reports an error.
+  const services = new Set(docs.flatMap(d => d.services.map(s => s.name)));
+  const isScope = (n: string) => declared.has(n) || packages.has(n) || services.has(n);
   const resolve = (ref: ProtoTypeRef): { name?: string; reason?: UnresolvedProtoType['reason'] } => {
     const settle = (n: string) => (declared.get(n) === 1 ? { name: n } : declared.has(n) ? { reason: 'ambiguous' as const } : { reason: 'undeclared' as const });
     if (ref.written.startsWith('.')) return settle(ref.written.slice(1));

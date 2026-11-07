@@ -434,3 +434,31 @@ service S { rpc X(google.protobuf.Empty) returns (A); }`]);
     expect(r.docs[0].messages[0].fields[0].resolved).toBe('p.A');
   });
 });
+
+describe('readProtobuf: round-1 review regressions', () => {
+  const ok = (text: string) => { const r = readProtobuf('x.proto', text); if ('error' in r) throw new Error(r.error); return r; };
+  it('a package written after a declaration applies to the whole file', () => {
+    const d = ok('syntax = "proto3";\nmessage A {}\nservice S { rpc X(A) returns (A); }\npackage p;\n');
+    expect(d.messages.map(m => m.name)).toEqual(['p.A']);
+    expect(d.services[0].rpcs[0].address).toBe('/p.S/X');
+  });
+  it('adjacent strings are joined', () => {
+    expect(ok('syntax = "proto" "3";\nmessage M { reserved "a" "b"; }').messages[0].reserved.names).toEqual(['ab']);
+  });
+  it('protoc rejections: a reserved field number, 19000-19999, int32 overflow, badly dotted names', () => {
+    for (const bad of [
+      'message M { string a = 3; reserved 3; }',
+      'message M { string a = 19500; }',
+      'enum E { A = 0; B = 4294967296; }',
+      'message M { Foo..Bar a = 1; }',
+      'package p..q;',
+    ]) expect(readProtobuf('x.proto', `syntax = "proto3";\n${bad}\n`), bad).toHaveProperty('error');
+  });
+  it('a name whose first part is a service stops there, as protoc does', () => {
+    const docs = resolveProtoTypes([
+      ok('syntax = "proto3";\npackage p;\nmessage Q {}\nservice Svc { rpc A(Svc.X) returns (Q); }'),
+      ok('syntax = "proto3";\npackage Svc;\nmessage X {}'),
+    ].map(d => d));
+    expect(docs.unresolved.map(u => u.written)).toEqual(['Svc.X']);
+  });
+});

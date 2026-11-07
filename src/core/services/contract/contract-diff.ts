@@ -63,6 +63,8 @@ export const CONTRACT_RULES = {
   'enum-value-removed-reserved': 'dangerous',
   'enum-value-added': 'non-breaking',
   'enum-value-number-changed': 'breaking',
+  'enum-value-renamed': 'dangerous',
+  'enum-value-deprecated': 'dangerous',
 } as const satisfies Record<string, ContractChangeClass>;
 export type ContractRule = keyof typeof CONTRACT_RULES;
 

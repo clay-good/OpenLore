@@ -99,17 +99,11 @@ async function workingFiles(root: string, ext: RegExp): Promise<string[]> {
 
 const MAX_CANDIDATES = MAX_SPEC_FILES * 10;
 
-/** One revision's specifications, with what was and was not examined. */
-export interface SpecSide {
-  docs: ContractDocument[];
-  /**
-   * Protobuf schemas, types resolved across every `.proto` file of this revision (change:
-   * add-contract-graph-projection). Kept apart from `docs`: nothing HTTP applies to them.
-   */
-  protoDocs: ProtoDocument[];
+/** What one revision's scan of one format examined, read, and could not read. */
+interface ScanScope {
   /** Specifications that could not be parsed. */
   unreadable: Array<{ file: string; reason: string }>;
-  /** Every YAML/JSON candidate at this revision (examined or not). */
+  /** Every candidate of this format at this revision (examined or not). */
   candidates: Set<string>;
   /** Candidates whose text was examined. */
   examined: Set<string>;
@@ -119,26 +113,32 @@ export interface SpecSide {
   capped: boolean;
 }
 
-/** Sniff and parse candidate texts, in path order, up to the specification cap. */
-function parseSide(candidates: string[], texts: Map<string, string>, unread: SpecSide['unread']): SpecSide {
-  const side: SpecSide = { docs: [], protoDocs: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_CANDIDATES };
+/**
+ * One revision's specifications, with what was and was not examined.
+ *
+ * The top-level fields are the OpenAPI / Swagger scan of YAML and JSON files, exactly as they
+ * were before protobuf was read. `proto` is a separate scan of `.proto` files with its own window
+ * and cap (change: add-contract-graph-projection): sharing one window let a repository's protobuf
+ * files push its OpenAPI document out of the scan, and sharing one cap flag downgraded every
+ * OpenAPI removal to "may only have moved".
+ */
+export interface SpecSide extends ScanScope {
+  docs: ContractDocument[];
+  proto: ScanScope & {
+    /** Types resolved across every `.proto` file of this revision. */
+    docs: ProtoDocument[];
+  };
+}
+
+/** Sniff and parse the YAML/JSON candidates, in path order, up to the specification cap. */
+function parseSide(candidates: string[], texts: Map<string, string>, unread: SpecSide['unread'], proto: SpecSide['proto']): SpecSide {
+  const side: SpecSide = { docs: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_CANDIDATES, proto };
   let specs = 0;
-  let protos = 0;
-  const protoDocs: ProtoDocument[] = [];
   for (const file of candidates.slice(0, MAX_CANDIDATES)) {
-    // Each format has its own cap, so a repository with many `.proto` files does not stop the
-    // OpenAPI scan early (and the reverse). A file past its format's cap is left unexamined.
-    if (isProtobufPath(file) ? protos >= MAX_PROTO_FILES : specs >= MAX_SPEC_FILES) { side.capped = true; continue; }
+    if (specs >= MAX_SPEC_FILES) { side.capped = true; break; }
     const text = texts.get(file);
     if (text === undefined) continue;
     side.examined.add(file);
-    if (isProtobufPath(file)) {
-      protos++;
-      const r = readProtobuf(file, text);
-      if ('error' in r) side.unreadable.push({ file, reason: r.error });
-      else protoDocs.push(r);
-      continue;
-    }
     if (!looksLikeOpenApi(text)) continue;
     specs++;
     const r = readOpenApi(file, text); // a text over the size cap is an error here, never dropped
@@ -146,9 +146,31 @@ function parseSide(candidates: string[], texts: Map<string, string>, unread: Spe
     if ('error' in r) side.unreadable.push({ file, reason: r.error });
     else side.docs.push(r);
   }
-  side.protoDocs = resolveProtoTypes(protoDocs).docs;
   return side;
 }
+
+/** Parse the `.proto` candidates (every one is a schema), up to the protobuf cap. */
+function parseProtoSide(candidates: string[], texts: Map<string, string>, unread: SpecSide['unread']): SpecSide['proto'] {
+  const scope: SpecSide['proto'] = { docs: [], unreadable: [], candidates: new Set(candidates), examined: new Set(), unread, capped: candidates.length > MAX_PROTO_FILES };
+  const read: ProtoDocument[] = [];
+  for (const file of candidates.slice(0, MAX_PROTO_FILES)) {
+    const text = texts.get(file);
+    if (text === undefined) continue;
+    scope.examined.add(file);
+    const r = readProtobuf(file, text);
+    if ('error' in r) scope.unreadable.push({ file, reason: r.error });
+    else read.push(r);
+  }
+  scope.docs = resolveProtoTypes(read).docs;
+  return scope;
+}
+
+/** The candidates each scan reads: YAML/JSON and `.proto` in separate windows. */
+const windows = (listed: readonly string[]) => {
+  const yaml = listed.filter(f => !isProtobufPath(f));
+  const proto = listed.filter(f => isProtobufPath(f));
+  return { yaml, proto, read: [...yaml.slice(0, MAX_CANDIDATES), ...proto.slice(0, MAX_PROTO_FILES)] };
+};
 
 let headCache: { root: string; stamps: string; side: SpecSide } | undefined;
 
@@ -158,7 +180,7 @@ let headCache: { root: string; stamps: string; side: SpecSide } | undefined;
  */
 export async function headSpecsCached(root: string): Promise<SpecSide> {
   const candidates = await workingFiles(root, SPEC_EXT);
-  const stamps = candidates.slice(0, MAX_CANDIDATES).map(f => {
+  const stamps = windows(candidates).read.map(f => {
     try { const s = statSync(join(root, f)); return `${f}:${s.size}:${s.mtimeMs}:${s.ino}`; } catch { return `${f}:-`; }
   }).join('\0');
   if (headCache && headCache.root === root && headCache.stamps === stamps) return headCache.side;
@@ -168,18 +190,19 @@ export async function headSpecsCached(root: string): Promise<SpecSide> {
 }
 
 export async function headSpecs(root: string, listed?: string[]): Promise<SpecSide> {
-  const candidates = listed ?? await workingFiles(root, SPEC_EXT);
+  const w = windows(listed ?? await workingFiles(root, SPEC_EXT));
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
-  for (const f of candidates.slice(0, MAX_CANDIDATES)) {
+  const protoUnread: SpecSide['unread'] = [];
+  for (const f of w.read) {
     try {
       // An oversized file, or a link out of the repository, throws: it is listed as unread.
       texts.set(f, await readFileConfined(root, f, MAX_SPEC_BYTES));
     } catch (e) {
-      unread.push({ file: f, reason: e instanceof Error ? e.message.split('\n')[0] : String(e) });
+      (isProtobufPath(f) ? protoUnread : unread).push({ file: f, reason: e instanceof Error ? e.message.split('\n')[0] : String(e) });
     }
   }
-  return parseSide(candidates, texts, unread);
+  return parseSide(w.yaml, texts, unread, parseProtoSide(w.proto, texts, protoUnread));
 }
 
 async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
@@ -188,17 +211,19 @@ async function baseSpecs(root: string, commit: string): Promise<SpecSide> {
   const { getRepoPrefix } = await import('../../drift/git-diff.js');
   const prefix = (await getRepoPrefix(root)) ?? '';
   const full = listing.split('\0').filter(f => f && f.startsWith(prefix) && SPEC_EXT.test(f.slice(prefix.length)) && !SKIP_DIR.test(f.slice(prefix.length)))
-    .sort((x, y) => sortStr(x.slice(prefix.length), y.slice(prefix.length)));
-  const window = full.slice(0, MAX_CANDIDATES);
-  const blobs = await readBlobsAtRef(root, commit, window).catch(() => readBlobsPerFile(root, commit, window));
+    .map(f => f.slice(prefix.length)).sort(sortStr);
+  const w = windows(full);
+  const paths = w.read.map(f => prefix + f);
+  const blobs = await readBlobsAtRef(root, commit, paths).catch(() => readBlobsPerFile(root, commit, paths));
   const texts = new Map<string, string>();
   const unread: SpecSide['unread'] = [];
-  for (const p of window) {
-    const t = blobs.get(p);
-    if (t === undefined) unread.push({ file: p.slice(prefix.length), reason: 'could not be read at the base revision' });
-    else texts.set(p.slice(prefix.length), t);
+  const protoUnread: SpecSide['unread'] = [];
+  for (const f of w.read) {
+    const t = blobs.get(prefix + f);
+    if (t === undefined) (isProtobufPath(f) ? protoUnread : unread).push({ file: f, reason: 'could not be read at the base revision' });
+    else texts.set(f, t);
   }
-  return parseSide(full.map(p => p.slice(prefix.length)), texts, unread);
+  return parseSide(w.yaml, texts, unread, parseProtoSide(w.proto, texts, protoUnread));
 }
 
 /** The route inventory written by `analyze` (undefined when absent). */
@@ -513,13 +538,15 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   const head = await headSpecs(root);
   if (head.capped) boundaries.push(`Past the scan cap (${MAX_CANDIDATES} YAML/JSON files or ${MAX_SPEC_FILES} specifications), ${head.candidates.size - head.examined.size} file(s) were not checked for a specification.`);
   if (head.unread.length) boundaries.push(`${head.unread.length} YAML/JSON file(s) could not be read (over ${MAX_SPEC_BYTES / 1024 / 1024} MB, a link out of the repository, or an I/O error); a specification among them is not assessed.`);
-  const notAssessed = head.unreadable.map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
-  for (const d of [...head.docs, ...head.protoDocs]) if (d.unassessed.length) notAssessed.push({ file: emittedText(d.file), reason: `outside the model: ${d.unassessed.join(', ')}` });
+  if (head.proto.capped) boundaries.push(`Past the protobuf cap (${MAX_PROTO_FILES} files), ${head.proto.candidates.size - head.proto.examined.size} .proto file(s) were not read.`);
+  if (head.proto.unread.length) boundaries.push(`${head.proto.unread.length} .proto file(s) could not be read (over ${MAX_SPEC_BYTES / 1024 / 1024} MB, a link out of the repository, or an I/O error), so their schemas are not assessed.`);
+  const notAssessed = [...head.unreadable, ...head.proto.unreadable].map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
+  for (const d of [...head.docs, ...head.proto.docs]) if (d.unassessed.length) notAssessed.push({ file: emittedText(d.file), reason: `outside the model: ${d.unassessed.join(', ')}` });
 
   const findings: GovernanceFinding[] = [];
   const specs: Array<Record<string, unknown>> = [
     ...head.docs.map(d => ({ file: emittedText(d.file), format: d.format, basePath: d.basePath || '/', operations: d.operations.length })),
-    ...head.protoDocs.map(d => ({
+    ...head.proto.docs.map(d => ({
       file: emittedText(d.file), format: d.format, ...(d.package ? { package: emittedText(d.package) } : {}),
       operations: d.services.reduce((n, s) => n + s.rpcs.length, 0), types: d.messages.length + d.enums.length,
     })),
@@ -529,7 +556,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
   const routes = await indexedRoutes(root);
   let parity: Record<string, unknown>;
   if (!head.docs.length) {
-    parity = { assessed: false, reason: head.protoDocs.length
+    parity = { assessed: false, reason: head.proto.docs.length
       ? 'no OpenAPI or Swagger document was found; protobuf RPCs are bound to their implementation in the graph by server registration, not compared with routes'
       : 'no OpenAPI or Swagger document was found' };
   }
@@ -571,7 +598,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     let commit = res.resolved;
     try { commit = (await git(root, ['merge-base', res.resolved, 'HEAD'])).trim() || res.resolved; } catch { /* unrelated histories: the base tip */ }
     const base = await baseSpecs(root, commit);
-    for (const u of base.unreadable) notAssessed.push({ file: emittedText(u.file), reason: `at the base revision: ${emittedText(u.reason)}` });
+    for (const u of [...base.unreadable, ...base.proto.unreadable]) notAssessed.push({ file: emittedText(u.file), reason: `at the base revision: ${emittedText(u.reason)}` });
     if (base.capped && !head.capped) boundaries.push(`At the base revision, files past the scan cap were not checked for a specification.`);
     // A file is compared only when each side either examined it or does not have it at all: a
     // specification unparseable, unread, or past a cap on one side would otherwise read as
@@ -579,34 +606,63 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     const unparsed = new Set([...head.unreadable, ...base.unreadable, ...head.unread, ...base.unread].map(u => u.file));
     // A file that is a specification on one side and read but not a specification on the other
     // (reformatted past the sniff, a version key removed) cannot be compared either.
-    const specFiles = (side: SpecSide) => new Set([...side.docs.map(d => d.file), ...side.protoDocs.map(d => d.file), ...side.unreadable.map(u => u.file)]);
+    const specFiles = (side: SpecSide) => new Set([...side.docs.map(d => d.file), ...side.unreadable.map(u => u.file)]);
     const headSpec = specFiles(head);
     const baseSpec = specFiles(base);
     const lostSpec = (f: string) => (headSpec.has(f) && base.examined.has(f) && !baseSpec.has(f)) || (baseSpec.has(f) && head.examined.has(f) && !headSpec.has(f));
     const comparable = (file: string) => !unparsed.has(file) && !lostSpec(file)
       && (head.examined.has(file) || !head.candidates.has(file)) && (base.examined.has(file) || !base.candidates.has(file));
-    const docFiles = new Set([...head.docs, ...base.docs, ...head.protoDocs, ...base.protoDocs].map(d => d.file));
+    const docFiles = new Set([...head.docs, ...base.docs].map(d => d.file));
     for (const u of [...head.unread, ...base.unread]) if (docFiles.has(u.file)) notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
+    /** Specification files present on a side but not compared, for the bump below. */
+    const notCompared = new Set<string>([...head.unreadable, ...base.unreadable].map(u => u.file));
     for (const f of docFiles) {
       if (unparsed.has(f) || comparable(f)) continue;
+      notCompared.add(f);
       notAssessed.push({ file: emittedText(f), reason: lostSpec(f) ? 'reads as a specification on one side only, so it is not compared' : 'past the scan cap on one side, so it is not compared' });
     }
+    // Protobuf has its own scan scope, so its comparability is its own: every `.proto` file is a
+    // schema, so there is no "a specification on one side only" case.
+    const protoUnparsed = new Set([...head.proto.unreadable, ...base.proto.unreadable, ...head.proto.unread, ...base.proto.unread].map(u => u.file));
+    const protoComparable = (file: string) => !protoUnparsed.has(file)
+      && (head.proto.examined.has(file) || !head.proto.candidates.has(file)) && (base.proto.examined.has(file) || !base.proto.candidates.has(file));
+    for (const u of [...head.proto.unread, ...base.proto.unread]) notAssessed.push({ file: emittedText(u.file), reason: emittedText(`unread on one side: ${u.reason}`) });
+    for (const f of protoUnparsed) notCompared.add(f);
+    for (const f of new Set([...head.proto.docs, ...base.proto.docs].map(d => d.file))) {
+      if (protoUnparsed.has(f) || protoComparable(f)) continue;
+      notCompared.add(f);
+      notAssessed.push({ file: emittedText(f), reason: 'past the protobuf cap on one side, so it is not compared' });
+    }
+    if (base.proto.capped && !head.proto.capped) boundaries.push('At the base revision, .proto files past the protobuf cap were not read.');
     // With a cap reached, an operation missing on the capped side may only have moved past the cap.
     const removedRule = new Set(['operation-removed', 'rpc-removed', 'type-removed']);
     const addedRule = new Set(['operation-added', 'rpc-added', 'type-added']);
-    const capped = (c: ContractChange): ContractChange =>
-      (removedRule.has(c.rule) && head.capped) || (addedRule.has(c.rule) && base.capped)
+    // Each format's own cap: a protobuf cap says nothing about where an OpenAPI operation went.
+    const cappedBy = (headCapped: boolean, baseCapped: boolean) => (c: ContractChange): ContractChange =>
+      (removedRule.has(c.rule) && headCapped) || (addedRule.has(c.rule) && baseCapped)
         ? { ...c, rule: 'schema-unassessed' as const, class: 'potentially-breaking' as const, detail: `${c.detail} (a scan cap was reached, so it may only have moved)` }
         : c;
-    const httpChanges = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file))).map(capped);
+    const httpChanges = diffContracts(base.docs.filter(d => comparable(d.file)), head.docs.filter(d => comparable(d.file))).map(cappedBy(head.capped, base.capped));
     // Protobuf (change: add-contract-graph-projection): its own rules, and no consumer join —
     // a gRPC client call names no method and path, so the HTTP call-site census cannot find it.
-    const protoChanges = diffProtobuf(base.protoDocs.filter(d => comparable(d.file)), head.protoDocs.filter(d => comparable(d.file))).map(capped);
+    const protoChanges = diffProtobuf(base.proto.docs.filter(d => protoComparable(d.file)), head.proto.docs.filter(d => protoComparable(d.file))).map(cappedBy(head.proto.capped, base.proto.capped));
     const protoAddresses = new Set(protoChanges.map(c => c.address));
     if (protoChanges.some(c => c.class === 'breaking' || c.class === 'dangerous')) {
       boundaries.push('gRPC client call sites are not read, so a breaking protobuf change names no consumer, in this repository or another.');
     }
     const changes = [...httpChanges, ...protoChanges];
+    // A specification that changed but could not be compared (proto2, a parse error, a cap) holds
+    // changes no rule saw, so no bump is proven. One that did not change hides nothing.
+    let uncomparedChanged = 0;
+    if (notCompared.size) {
+      const files = [...notCompared].sort(sortStr).slice(0, 500);
+      const onBothSides = (f: string) => (base.candidates.has(f) || base.proto.candidates.has(f)) && (head.candidates.has(f) || head.proto.candidates.has(f));
+      let diffed: Set<string> | undefined;
+      try {
+        diffed = new Set((await git(root, gitPathArgs('diff', '--relative', '--name-only', '-z', commit, '--', ...files))).split('\0').filter(Boolean));
+      } catch { /* unknown: every one counts as changed */ }
+      uncomparedChanged = files.filter(f => !diffed || !onBothSides(f) || diffed.has(f)).length + (notCompared.size - files.length);
+    }
     const consumers = await consumersOf(root, httpChanges, [...head.docs, ...base.docs], boundaries);
     await attachReachingTests(root, consumers, boundaries);
     // A service's consumers are usually in OTHER repositories, so "no caller in this repository"
@@ -710,8 +766,10 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
           : {}),
       })),
       ...(changes.length > limit ? { omitted: changes.length - limit } : {}),
-      suggestedBump: contractBump(changes),
-      ...(contractBump(changes) === null ? { suggestedBumpWithheld: 'a change is outside the model, so compatibility is not proven' } : {}),
+      suggestedBump: uncomparedChanged ? null : contractBump(changes),
+      ...(uncomparedChanged
+        ? { suggestedBumpWithheld: `${uncomparedChanged} changed specification file(s) could not be compared, so compatibility is not proven` }
+        : contractBump(changes) === null ? { suggestedBumpWithheld: 'a change is outside the model, so compatibility is not proven' } : {}),
     };
   }
 
@@ -733,7 +791,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     specs,
     surface: [
       ...head.docs.flatMap(d => d.operations.map(o => ({ file: emittedText(d.file), address: emittedText(o.address), line: o.line, ...(o.operationId ? { operationId: emittedText(o.operationId) } : {}), ...(o.deprecated ? { deprecated: true } : {}) }))),
-      ...head.protoDocs.flatMap(d => d.services.flatMap(s => s.rpcs.map(r => ({ file: emittedText(d.file), address: emittedText(r.address), line: r.line, ...(r.deprecated ? { deprecated: true } : {}) })))),
+      ...head.proto.docs.flatMap(d => d.services.flatMap(s => s.rpcs.map(r => ({ file: emittedText(d.file), address: emittedText(r.address), line: r.line, ...(r.deprecated ? { deprecated: true } : {}) })))),
     ].slice(0, limit),
     parity,
     payload,

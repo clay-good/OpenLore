@@ -12,7 +12,7 @@
  * custom option) — is `schema-unassessed`, never silently "no change".
  */
 
-import type { ProtoDocument, ProtoEnum, ProtoField, ProtoMessage, ProtoReserved, ProtoRpc } from '../../analyzer/contract/protobuf.js';
+import { mergeRanges, inRanges, type ProtoDocument, type ProtoEnum, type ProtoField, type ProtoMessage, type ProtoReserved, type ProtoRpc, type ProtoService } from '../../analyzer/contract/protobuf.js';
 import { CONTRACT_RULES, type ContractChange, type ContractRule } from './contract-diff.js';
 
 type Located<T> = { file: string; el: T };
@@ -20,7 +20,10 @@ type Located<T> = { file: string; el: T };
 const change = (file: string, address: string, line: number, rule: ContractRule, detail: string, element?: string): ContractChange =>
   ({ file, address, rule, class: CONTRACT_RULES[rule], ...(element ? { element } : {}), detail, line });
 
-const reservedNumber = (r: ProtoReserved, n: number) => r.ranges.some(([lo, hi]) => n >= lo && n <= hi);
+/** A revision's reservations, merged once so each lookup is a binary search. */
+interface Reserved { ranges: Array<[number, number]>; names: Set<string> }
+const reservedOf = (r: ProtoReserved): Reserved => ({ ranges: mergeRanges(r.ranges), names: new Set(r.names) });
+const reservedNumber = (r: Reserved, n: number) => inRanges(r.ranges, n);
 
 /**
  * A field's type as compared: the resolved full name when both sides resolved it, otherwise the
@@ -45,83 +48,140 @@ function diffMessage(file: string, b: ProtoMessage, m: ProtoMessage, out: Contra
   const push = (rule: ContractRule, detail: string, line: number, element?: string) => out.push(change(file, m.name, line, rule, detail, element));
   const was = new Map(b.fields.map(f => [f.number, f]));
   const now = new Map(m.fields.map(f => [f.number, f]));
-  const nowByName = new Map(m.fields.map(f => [f.name, f]));
   const wasByName = new Map(b.fields.map(f => [f.name, f]));
+  const nowByName = new Map(m.fields.map(f => [f.name, f]));
+  const baseReserved = reservedOf(b.reserved);
+  const headReserved = reservedOf(m.reserved);
+  /**
+   * Each base `oneof` mapped to the head `oneof` its surviving members share. A oneof's NAME is on
+   * neither the wire nor JSON, so a renamed oneof is the same oneof; members split across two head
+   * oneofs map to none, so every one of them is reported.
+   */
+  const oneofMap = new Map<string, string | null>();
+  for (const old of b.fields) {
+    if (!old.oneof) continue;
+    const into = now.get(old.number)?.oneof;
+    if (!into) continue;
+    const prior = oneofMap.get(old.oneof);
+    oneofMap.set(old.oneof, prior === undefined || prior === into ? into : null);
+  }
+  const sameOneof = (old: ProtoField, f: ProtoField): boolean =>
+    (!old.oneof || !f.oneof) ? old.oneof === f.oneof : oneofMap.get(old.oneof) === f.oneof;
   for (const [n, f] of now) {
     const old = was.get(n);
+    const sameName = wasByName.get(f.name);
+    // The same name under another number is a different field on the wire, whatever now sits on
+    // its old number — a swap of two fields' numbers is two of these, never two renames.
+    if (sameName && sameName.number !== n) {
+      push('field-number-changed', `field \`${f.name}\`: number ${sameName.number} → ${n}`, f.line, fieldLabel(f));
+      continue;
+    }
     if (!old) {
-      const moved = wasByName.get(f.name);
-      // The same name under a new number: a different field on the wire.
-      if (moved && !now.has(moved.number)) push('field-number-changed', `field \`${f.name}\`: number ${moved.number} → ${n}`, f.line, fieldLabel(f));
-      else if (reservedNumber(b.reserved, n) || b.reserved.names.includes(f.name)) push('reserved-number-reused', `field ${n} (\`${f.name}\`) uses a number or name the previous revision reserved`, f.line, fieldLabel(f));
+      if (reservedNumber(baseReserved, n) || baseReserved.names.has(f.name)) push('reserved-number-reused', `field ${n} (\`${f.name}\`) uses a number or name the previous revision reserved`, f.line, fieldLabel(f));
       else push('field-added', `field ${n} (\`${f.name}\`) added`, f.line, fieldLabel(f));
       continue;
     }
-    if (old.name !== f.name) push('field-renamed', `field ${n}: \`${old.name}\` → \`${f.name}\``, f.line, fieldLabel(f));
+    if (old.name !== f.name) {
+      // The field that held this number moved to another one: that move is the breaking change,
+      // reported on it; this is a new field on the freed number.
+      if (nowByName.has(old.name)) { push('field-added', `field ${n} (\`${f.name}\`) added on the number \`${old.name}\` used`, f.line, fieldLabel(f)); continue; }
+      push('field-renamed', `field ${n}: \`${old.name}\` → \`${f.name}\``, f.line, fieldLabel(f));
+    }
     const same = sameType(old, f);
     if (same === false) push('field-type-changed', `field ${n} (\`${f.name}\`): ${old.resolved ?? old.type} → ${f.resolved ?? f.type}`, f.line, fieldLabel(f));
     else if (same === undefined) push('schema-unassessed', `field ${n} (\`${f.name}\`): the type \`${old.type}\` → \`${f.type}\` does not resolve on both sides, so it is not compared`, f.line, fieldLabel(f));
     if (kind(old) !== kind(f)) push('field-label-changed', `field ${n} (\`${f.name}\`): ${kind(old)} → ${kind(f)}`, f.line, fieldLabel(f));
     else if ((old.label === 'optional') !== (f.label === 'optional')) push('field-presence-changed', `field ${n} (\`${f.name}\`): ${old.label === 'optional' ? 'explicit presence removed' : 'explicit presence added'}`, f.line, fieldLabel(f));
-    if (old.oneof !== f.oneof) push('field-oneof-changed', `field ${n} (\`${f.name}\`): oneof ${old.oneof ?? '(none)'} → ${f.oneof ?? '(none)'}`, f.line, fieldLabel(f));
+    if (!sameOneof(old, f)) push('field-oneof-changed', `field ${n} (\`${f.name}\`): oneof ${old.oneof ?? '(none)'} → ${f.oneof ?? '(none)'}`, f.line, fieldLabel(f));
     if (f.deprecated && !old.deprecated) push('field-deprecated', `field ${n} (\`${f.name}\`) is now deprecated`, f.line, fieldLabel(f));
     if (old.optionsHash !== f.optionsHash) push('schema-unassessed', `field ${n} (\`${f.name}\`): its options changed outside the model (json_name, packed, or a custom option)`, f.line, fieldLabel(f));
   }
   for (const [n, old] of was) {
     if (now.has(n)) continue;
-    const moved = nowByName.get(old.name);
-    if (moved && !was.has(moved.number)) continue; // reported as field-number-changed above
-    const reserved = reservedNumber(m.reserved, n);
+    if (nowByName.has(old.name)) continue; // moved: reported as field-number-changed above
+    const reserved = reservedNumber(headReserved, n);
     push(reserved ? 'field-removed-reserved' : 'field-removed',
       reserved ? `field ${n} (\`${old.name}\`) removed; its number is reserved`
         : `field ${n} (\`${old.name}\`) removed without reserving its number, so a later field can reuse it`,
       m.line, fieldLabel(old));
   }
-  diffReserved(b.reserved, m.reserved, (detail) => push('reserved-removed', detail, m.line));
+  diffReserved(baseReserved, headReserved, (detail) => push('reserved-removed', detail, m.line));
   if (b.optionsHash !== m.optionsHash) push('schema-unassessed', `message ${m.name}: its options changed outside the model`, m.line);
 }
 
-function diffReserved(b: ProtoReserved, a: ProtoReserved, report: (detail: string) => void): void {
-  // A number reserved before and not now. Checked per range endpoint and per number for small
-  // ranges; a dropped part of a large range is found through its endpoints.
+/** Up to this many dropped numbers or ranges are named in one detail. */
+const MAX_LISTED = 10;
+
+/** Reservations the base made that the head no longer makes: the set difference of the ranges. */
+function diffReserved(b: Reserved, a: Reserved, report: (detail: string) => void): void {
   const dropped: string[] = [];
+  let total = 0;
+  // Both lists are merged and sorted: one linear sweep.
+  let j = 0;
   for (const [lo, hi] of b.ranges) {
-    const probe = hi - lo <= 64 ? Array.from({ length: hi - lo + 1 }, (_, i) => lo + i) : [lo, hi];
-    const lost = probe.filter(n => !reservedNumber(a, n));
-    if (lost.length) dropped.push(lost.length === probe.length && lo !== hi ? `${lo} to ${hi}` : lost.join(', '));
+    let cur = lo;
+    while (j < a.ranges.length && a.ranges[j][1] < cur) j++;
+    for (let k = j; cur <= hi; k++) {
+      const next = a.ranges[k];
+      const gapEnd = next ? Math.min(hi, next[0] - 1) : hi;
+      if (gapEnd >= cur) { total++; if (dropped.length < MAX_LISTED) dropped.push(cur === gapEnd ? `${cur}` : `${cur} to ${gapEnd}`); }
+      if (!next || next[0] > hi) break;
+      cur = next[1] + 1;
+    }
   }
-  for (const name of b.names) if (!a.names.includes(name)) dropped.push(`"${name}"`);
-  if (dropped.length) report(`reservation removed for ${dropped.join(', ')}, so it can be reused`);
+  for (const name of b.names) {
+    if (a.names.has(name)) continue;
+    total++;
+    if (dropped.length < MAX_LISTED) dropped.push(`"${name}"`);
+  }
+  if (total) report(`reservation removed for ${dropped.join(', ')}${total > dropped.length ? ` and ${total - dropped.length} more` : ''}, so it can be reused`);
 }
 
 function diffEnum(file: string, b: ProtoEnum, e: ProtoEnum, out: ContractChange[]): void {
   const push = (rule: ContractRule, detail: string, line: number, element?: string) => out.push(change(file, e.name, line, rule, detail, element));
   const was = new Map(b.values.map(v => [v.name, v]));
   const now = new Map(e.values.map(v => [v.name, v]));
+  const wasNumbers = new Set(b.values.map(v => v.number));
+  const nowNumbers = new Set(e.values.map(v => v.number));
+  const baseReserved = reservedOf(b.reserved);
+  const headReserved = reservedOf(e.reserved);
   for (const [name, v] of now) {
     const old = was.get(name);
-    if (!old) push(reservedNumber(b.reserved, v.number) || b.reserved.names.includes(name) ? 'reserved-number-reused' : 'enum-value-added',
-      `enum value ${name} = ${v.number} added`, v.line, name);
-    else if (old.number !== v.number) push('enum-value-number-changed', `enum value ${name}: ${old.number} → ${v.number}`, v.line, name);
+    if (!old) {
+      if (reservedNumber(baseReserved, v.number) || baseReserved.names.has(name)) push('reserved-number-reused', `enum value ${name} = ${v.number} uses a number or name the previous revision reserved`, v.line, name);
+      // A new name on a number the base already had: a rename or a new alias, reported once below.
+      else if (!wasNumbers.has(v.number)) push('enum-value-added', `enum value ${name} = ${v.number} added`, v.line, name);
+      continue;
+    }
+    if (old.number !== v.number) push('enum-value-number-changed', `enum value ${name}: ${old.number} → ${v.number}`, v.line, name);
+    if (v.deprecated && !old.deprecated) push('enum-value-deprecated', `enum value ${name} is now deprecated`, v.line, name);
+    if (old.optionsHash !== v.optionsHash) push('schema-unassessed', `enum value ${name}: its options changed outside the model`, v.line, name);
   }
   for (const [name, old] of was) {
     if (now.has(name)) continue;
-    const reserved = reservedNumber(e.reserved, old.number) || e.reserved.names.includes(name);
-    push(reserved ? 'enum-value-removed-reserved' : 'enum-value-removed', `enum value ${name} = ${old.number} removed${reserved ? '; it is reserved' : ''}`, e.line, name);
+    // The number survives under another name: the wire still works, JSON and text do not.
+    if (nowNumbers.has(old.number)) {
+      const into = e.values.filter(v => v.number === old.number && !was.has(v.name)).map(v => v.name);
+      push('enum-value-renamed', `enum value ${name} = ${old.number} ${into.length ? `renamed to ${into.join(', ')}` : 'removed; another name keeps its number'}`, e.line, name);
+      continue;
+    }
+    // Safe only when the NUMBER is reserved: a reserved name alone leaves the number free to reuse.
+    const reserved = reservedNumber(headReserved, old.number);
+    push(reserved ? 'enum-value-removed-reserved' : 'enum-value-removed', `enum value ${name} = ${old.number} removed${reserved ? '; its number is reserved' : ''}`, e.line, name);
   }
-  diffReserved(b.reserved, e.reserved, (detail) => push('reserved-removed', detail, e.line));
+  diffReserved(baseReserved, headReserved, (detail) => push('reserved-removed', detail, e.line));
   if (b.optionsHash !== e.optionsHash) push('schema-unassessed', `enum ${e.name}: its options changed outside the model`, e.line);
 }
 
 function diffRpc(file: string, b: ProtoRpc, r: ProtoRpc, out: ContractChange[]): void {
-  const push = (rule: ContractRule, detail: string) => out.push(change(file, r.address, r.line, rule, detail));
+  const push = (rule: ContractRule, detail: string, element?: string) => out.push(change(file, r.address, r.line, rule, detail, element));
   if (r.deprecated && !b.deprecated) push('rpc-deprecated', `rpc ${r.address} is now deprecated`);
   for (const [side, bt, rt, bw, rw] of [
     ['request', b.requestType, r.requestType, b.request.written, r.request.written],
     ['response', b.responseType, r.responseType, b.response.written, r.response.written],
   ] as const) {
-    if (bt && rt) { if (bt !== rt) push('rpc-type-changed', `rpc ${r.address}: ${side} ${bt} → ${rt}`); }
-    else if (bw !== rw || (bt ?? '') !== (rt ?? '')) push('schema-unassessed', `rpc ${r.address}: the ${side} type does not resolve on both sides, so it is not compared`);
+    if (bt && rt) { if (bt !== rt) push('rpc-type-changed', `rpc ${r.address}: ${side} ${bt} → ${rt}`, side); }
+    else if (bw !== rw || (bt ?? '') !== (rt ?? '')) push('schema-unassessed', `rpc ${r.address}: the ${side} type does not resolve on both sides, so it is not compared`, side);
   }
   if (b.clientStreaming !== r.clientStreaming || b.serverStreaming !== r.serverStreaming) {
     const mode = (x: ProtoRpc) => `${x.clientStreaming ? 'stream ' : ''}request, ${x.serverStreaming ? 'stream ' : ''}response`;
@@ -134,12 +194,16 @@ function diffRpc(file: string, b: ProtoRpc, r: ProtoRpc, out: ContractChange[]):
 function index(docs: readonly ProtoDocument[]) {
   const types = new Map<string, Array<Located<ProtoMessage | ProtoEnum>>>();
   const rpcs = new Map<string, Array<Located<ProtoRpc>>>();
+  const services = new Map<string, Array<Located<ProtoService>>>();
   const add = <T>(m: Map<string, Array<Located<T>>>, k: string, v: Located<T>) => m.set(k, [...(m.get(k) ?? []), v]);
   for (const d of docs) {
     for (const t of [...d.messages, ...d.enums]) add(types, t.name, { file: d.file, el: t });
-    for (const s of d.services) for (const r of s.rpcs) add(rpcs, r.address, { file: d.file, el: r });
+    for (const s of d.services) {
+      add(services, s.name, { file: d.file, el: s });
+      for (const r of s.rpcs) add(rpcs, r.address, { file: d.file, el: r });
+    }
   }
-  return { types, rpcs };
+  return { types, rpcs, services };
 }
 
 /** A content key for an element declared in more than one file (no file, no line). */
@@ -182,6 +246,12 @@ export function diffProtobuf(base: readonly ProtoDocument[], head: readonly Prot
   }
   for (const [address, ns] of now.rpcs) {
     if (!was.rpcs.has(address)) out.push(change(ns[0].file, address, ns[0].el.line, 'rpc-added', `rpc ${address} added`));
+  }
+  // A service's own options (`option deprecated = true;`, a custom option) are compared by hash.
+  for (const [name, ns] of now.services) {
+    const bs = was.services.get(name);
+    if (bs?.length !== 1 || ns.length !== 1) continue; // removed services surface as removed RPCs
+    if (bs[0].el.optionsHash !== ns[0].el.optionsHash) out.push(change(ns[0].file, name, ns[0].el.line, 'schema-unassessed', `service ${name}: its options changed outside the model`));
   }
   const sortKey = (c: ContractChange) => `${c.address}\0${c.rule}\0${c.element ?? ''}\0${c.detail}`;
   return out.sort((x, y) => (sortKey(x) < sortKey(y) ? -1 : sortKey(x) > sortKey(y) ? 1 : 0));

@@ -74,11 +74,14 @@ describe('diffProtobuf', () => {
   });
 
   it('reusing a reserved number or name is breaking; dropping a reservation is dangerous', () => {
-    expect(rules(BASE.replace('string id = 1;\n  int64', 'string id = 1;\n  string coupon = 11;\n  int64'))).toEqual(['reserved-number-reused orders.v1.Order field 11 (coupon)']);
-    expect(rules(BASE.replace('string id = 1;\n  int64', 'string id = 1;\n  string legacy = 30;\n  int64'))).toEqual(['reserved-number-reused orders.v1.Order field 30 (legacy)']);
+    // A head that reuses a number must also drop its reservation (protoc refuses otherwise).
+    expect(rules(BASE.replace('string id = 1;\n  int64', 'string id = 1;\n  string coupon = 11;\n  int64').replace('reserved 10 to 12, 20;', 'reserved 10, 12, 20;')))
+      .toEqual(['reserved-number-reused orders.v1.Order field 11 (coupon)', 'reserved-removed orders.v1.Order']);
+    expect(rules(BASE.replace('string id = 1;\n  int64', 'string id = 1;\n  string legacy = 30;\n  int64').replace('reserved "legacy";', '')))
+      .toEqual(['reserved-number-reused orders.v1.Order field 30 (legacy)', 'reserved-removed orders.v1.Order']);
     const dropped = diff(BASE.replace('reserved 10 to 12, 20;', 'reserved 10, 20;'));
     expect(dropped.map(c => c.rule)).toEqual(['reserved-removed']);
-    expect(dropped[0].detail).toContain('11, 12');
+    expect(dropped[0].detail).toContain('11 to 12');
   });
 
   it('a type referenced by a different name that resolves to the same type is no change', () => {
@@ -107,7 +110,7 @@ describe('diffProtobuf', () => {
     expect(rules(BASE.replace('rpc DeleteOrder(GetOrderRequest) returns (Order);', 'rpc DeleteOrder(GetOrderRequest) returns (Order) { option deprecated = true; }')))
       .toEqual(['rpc-deprecated /orders.v1.OrderService/DeleteOrder']);
     expect(rules(BASE.replace('rpc DeleteOrder(GetOrderRequest) returns (Order);', 'rpc DeleteOrder(GetOrderRequest) returns (GetOrderRequest);')))
-      .toEqual(['rpc-type-changed /orders.v1.OrderService/DeleteOrder']);
+      .toEqual(['rpc-type-changed /orders.v1.OrderService/DeleteOrder response']);
     expect(rules(BASE.replace('returns (stream Order)', 'returns (Order)'))).toEqual(['rpc-streaming-changed /orders.v1.OrderService/WatchOrders']);
   });
 
@@ -140,5 +143,60 @@ describe('diffProtobuf', () => {
     expect(diffProtobuf(before, side({ 'a.proto': dup, 'b.proto': dup }))).toEqual([]);
     const changed = diffProtobuf(before, side({ 'a.proto': dup, 'b.proto': dup.replace('string a', 'int32 a') }));
     expect(changed.map(c => c.rule)).toEqual(['schema-unassessed']);
+  });
+});
+
+describe('diffProtobuf: round-1 review regressions', () => {
+  const msg = (body: string) => `syntax = "proto3";\npackage p;\n${body}\n`;
+  const r = (b: string, h: string) => diffProtobuf(side({ 'x.proto': msg(b) }), side({ 'x.proto': msg(h) })).map(c => `${c.rule}${c.element ? ` ${c.element}` : ''}`);
+
+  it('a swap of two fields\' numbers is two number changes, never two renames', () => {
+    expect(r('message M { string a = 1; string b = 2; }', 'message M { string a = 2; string b = 1; }'))
+      .toEqual(['field-number-changed field 1 (b)', 'field-number-changed field 2 (a)']);
+  });
+
+  it('a field moved to a new number with its old number refilled is a number change', () => {
+    expect(r('message M { string a = 1; }', 'message M { string b = 1; string a = 2; }'))
+      .toEqual(['field-added field 1 (b)', 'field-number-changed field 2 (a)']);
+  });
+
+  it('a number dropped from the middle of a large reserved range is seen', () => {
+    const d = diffProtobuf(side({ 'x.proto': msg('message M { reserved 1 to 1000; }') }), side({ 'x.proto': msg('message M { reserved 1 to 499, 501 to 1000; }') }));
+    expect(d.map(c => c.rule)).toEqual(['reserved-removed']);
+    expect(d[0].detail).toContain('500');
+    const max = diffProtobuf(side({ 'x.proto': msg('message M { reserved 100 to max; }') }), side({ 'x.proto': msg('message M { reserved 100 to 200, 300 to max; }') }));
+    expect(max[0].detail).toContain('201 to 299');
+  });
+
+  it('comparing many reservations is linear, not quadratic', () => {
+    const many = `message M { reserved ${Array.from({ length: 20_000 }, (_, i) => `${i * 100 + 1} to ${i * 100 + 65}`).join(', ')}; }`;
+    const t = Date.now();
+    expect(diffProtobuf(side({ 'x.proto': msg(many) }), side({ 'x.proto': msg(many) }))).toEqual([]);
+    expect(Date.now() - t).toBeLessThan(2_000);
+  });
+
+  it('enum value options and deprecation are compared; service options too', () => {
+    expect(r('enum E { A = 0; B = 1; }', 'enum E { A = 0; B = 1 [deprecated = true]; }')).toEqual(['enum-value-deprecated B']);
+    expect(r('enum E { A = 0; B = 1; }', 'enum E { A = 0; B = 1 [(x) = 3]; }')).toEqual(['schema-unassessed B']);
+    expect(r('message Q {}\nservice S { rpc X(Q) returns (Q); }', 'message Q {}\nservice S { option deprecated = true; rpc X(Q) returns (Q); }')).toEqual(['schema-unassessed']);
+  });
+
+  it('an enum value removed with only its NAME reserved is breaking; a rename is dangerous', () => {
+    expect(r('enum E { A = 0; B = 1; }', 'enum E { A = 0; reserved "B"; }')).toEqual(['enum-value-removed B']);
+    expect(r('enum E { A = 0; B = 1; }', 'enum E { A = 0; C = 1; }')).toEqual(['enum-value-renamed B']);
+  });
+
+  it('renaming a oneof is not a change; moving a field out of it is', () => {
+    expect(r('message M { oneof o { int32 a = 1; int32 b = 2; } }', 'message M { oneof q { int32 a = 1; int32 b = 2; } }')).toEqual([]);
+    expect(r('message M { oneof o { int32 a = 1; int32 b = 2; } }', 'message M { int32 a = 1; oneof o { int32 b = 2; } }')).toEqual(['field-oneof-changed field 1 (a)']);
+  });
+
+  it('string escapes are decoded: "\\x61" is the reserved name "a"', () => {
+    expect(r('message M { reserved "a"; }', 'message M { reserved "\\x61"; }')).toEqual([]);
+  });
+
+  it('both rpc type changes carry their side as the element', () => {
+    expect(r('message A {}\nmessage B {}\nservice S { rpc X(A) returns (A); }', 'message A {}\nmessage B {}\nservice S { rpc X(B) returns (B); }'))
+      .toEqual(['rpc-type-changed request', 'rpc-type-changed response']);
   });
 });
