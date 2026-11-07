@@ -476,3 +476,91 @@ paths: {}
     expect(census.repos, 'the service is already censused as itself').toEqual([]);
   });
 });
+
+describe('certify_service_contract: protobuf (change: add-contract-graph-projection)', () => {
+  const PROTO = `syntax = "proto3";
+package orders.v1;
+message GetOrderRequest { string id = 1; }
+message Order { string id = 1; int64 total = 2; }
+service OrderService {
+  rpc GetOrder(GetOrderRequest) returns (Order);
+  rpc DeleteOrder(GetOrderRequest) returns (Order);
+}
+`;
+
+  it('lists RPCs on the surface and the file among the specifications', async () => {
+    const root = repo({ 'proto/orders.proto': PROTO });
+    const r = await handleCertifyServiceContract({ directory: root });
+    expect(r.specs).toEqual([{ file: 'proto/orders.proto', format: 'protobuf-3', package: 'orders.v1', operations: 2, types: 2 }]);
+    expect((r.surface as Array<{ address: string }>).map(s => s.address)).toEqual(['/orders.v1.OrderService/DeleteOrder', '/orders.v1.OrderService/GetOrder']);
+    expect(r.parity).toMatchObject({ assessed: false, reason: expect.stringContaining('protobuf RPCs are bound') });
+  });
+
+  it('with a base ref: protobuf verdicts, findings, and the consumer boundary', async () => {
+    const root = repo({ 'proto/orders.proto': PROTO });
+    write(root, 'proto/orders.proto', PROTO.replace('  rpc DeleteOrder(GetOrderRequest) returns (Order);\n', '').replace(' int64 total = 2;', ''));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; address: string; consumers?: unknown[]; consumersNotAssessed?: string }>; suggestedBump: string };
+    expect(changes.items.map(c => `${c.rule} ${c.address}`)).toEqual(['rpc-removed /orders.v1.OrderService/DeleteOrder', 'field-removed orders.v1.Order']);
+    // No empty consumer list that would read as "no callers".
+    expect(changes.items.every(c => c.consumers === undefined && c.consumersNotAssessed)).toBe(true);
+    expect(r.boundaries).not.toEqual(expect.arrayContaining([expect.stringContaining('pass `federation: true`')]));
+    expect(renderServiceContract(r)).toContain('consumers not assessed');
+    expect(changes.suggestedBump).toBe('major');
+    const breaking = (r.findings as Array<{ code: string; subject: string; message: string }>).filter(f => f.code === 'contract-breaking');
+    expect(breaking.map(f => f.subject).sort()).toEqual(['/orders.v1.OrderService/DeleteOrder', 'orders.v1.Order field 2 (total)']);
+    expect(breaking.every(f => f.message.includes('gRPC consumers are not assessed'))).toBe(true);
+    expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('gRPC client call sites are not read')]));
+  });
+
+  it('an unreadable .proto is not assessed, never "no changes"', async () => {
+    const root = repo({ 'proto/orders.proto': PROTO });
+    write(root, 'proto/orders.proto', PROTO.replace('service OrderService {', 'service OrderService {{'));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    expect((r.changes as { total: number }).total).toBe(0);
+    expect(r.notAssessed).toEqual([{ file: 'proto/orders.proto', reason: expect.stringContaining('line 5') }]);
+  });
+
+  it('a proto2 file is unread with that reason', async () => {
+    const root = repo({ 'proto/legacy.proto': 'package legacy;\nmessage M { optional string a = 1; }\n' });
+    const r = await handleCertifyServiceContract({ directory: root });
+    expect(r.notAssessed).toEqual([{ file: 'proto/legacy.proto', reason: expect.stringContaining('proto2') }]);
+  });
+
+  it('many .proto files never push an OpenAPI change out of the scan, or downgrade it', async () => {
+    const files: Record<string, string> = { 'z/openapi.yaml': SPEC };
+    for (let i = 0; i < 2_001; i++) files[`a/f${String(i).padStart(4, '0')}.proto`] = `syntax = "proto3";\npackage p${i};\nmessage M {}\n`;
+    const root = repo(files);
+    write(root, 'z/openapi.yaml', SPEC.replace(/ {4}delete:\n(.*\n){2}/, ''));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; class: string; address: string }>; suggestedBump: string };
+    expect(changes.items.map(c => `${c.rule} ${c.class} ${c.address}`)).toEqual(['operation-removed breaking DELETE /v1/orders/{id}']);
+    expect(changes.suggestedBump).toBe('major');
+    expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('Past the protobuf cap')]));
+  }, 60_000);
+
+  it('a changed specification that could not be compared withholds the bump', async () => {
+    const legacy = 'package legacy;\nmessage M { optional string a = 1; }\nservice S { rpc A(M) returns (M); rpc B(M) returns (M); }\n';
+    const root = repo({ 'proto/legacy.proto': legacy, 'proto/orders.proto': PROTO });
+    write(root, 'proto/legacy.proto', legacy.replace(' rpc B(M) returns (M);', ''));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { total: number; suggestedBump: string | null; suggestedBumpWithheld?: string };
+    expect(changes.total).toBe(0);
+    expect(changes.suggestedBump).toBeNull();
+    expect(changes.suggestedBumpWithheld).toContain('1 changed specification file(s) could not be compared');
+    // Unchanged, the same unreadable file hides nothing.
+    git(root, 'commit', '-qam', 'edit');
+    expect((await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD' })).changes).toMatchObject({ suggestedBump: 'patch' });
+  });
+
+  it('many unchanged uncomparable files do not withhold the bump; a changed .proto past the cap does', async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 502; i++) files[`legacy/f${String(i).padStart(4, '0')}.proto`] = `package l${i};\nmessage M { optional string a = 1; }\n`;
+    const root = repo(files);
+    expect((await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD' })).changes).toMatchObject({ suggestedBump: 'patch' });
+    // The last file sorts past the protobuf cap: never read, but changed.
+    write(root, 'legacy/f0501.proto', 'package l501;\n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'HEAD' });
+    expect(r.changes).toMatchObject({ suggestedBump: null, suggestedBumpWithheld: expect.stringContaining('1 changed specification file(s)') });
+  }, 60_000);
+});

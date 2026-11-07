@@ -514,15 +514,27 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     // so a handler that really does serve a declared endpoint can appear dead; an unread
     // specification, or a projection that was not assessed, has the same effect
     // (change: add-contract-node-projection).
-    ...((cg.contracts?.unresolvedBindings.total || cg.contracts?.unreadSpecifications.total || cg.contracts?.notAssessed?.length) ? {
+    ...((cg.contracts?.unresolvedBindings.total || cg.contracts?.unreadSpecifications.total || cg.contracts?.notAssessed?.length
+      || cg.contracts?.unresolvedRegistrations?.total) ? {
       contractRootsNotAssessed: {
         unresolvedBindings: cg.contracts.unresolvedBindings.total,
+        // A gRPC registration that named a service but bound no method (a variable, a factory
+        // call, an ambiguous type) leaves the implementation unrooted, exactly as an unresolved
+        // route does (change: add-contract-graph-projection).
+        ...(cg.contracts.unresolvedRegistrations?.total ? {
+          unresolvedRegistrations: cg.contracts.unresolvedRegistrations.total,
+          unresolvedRegistrationItems: cg.contracts.unresolvedRegistrations.items.slice(0, 10).map(u => ({
+            file: emittedText(u.file), line: u.line, service: emittedText(u.service), reason: u.reason,
+            ...(u.rpc ? { rpc: emittedText(u.rpc) } : {}),
+          })),
+        } : {}),
         unresolvedBindingItems: cg.contracts.unresolvedBindings.items.slice(0, 10).map(u => ({
           file: emittedText(u.file), line: u.line, method: emittedText(u.method),
           path: emittedText(u.path), operation: emittedText(u.operation),
         })),
         unreadSpecifications: cg.contracts.unreadSpecifications.items.slice(0, 5).map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) })),
         ...(cg.contracts.notAssessed?.length ? { notAssessed: cg.contracts.notAssessed.map(emittedText) } : {}),
+        ...(cg.contracts.notes?.length ? { notes: cg.contracts.notes.map(emittedText) } : {}),
         note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',
       },
     } : {}),

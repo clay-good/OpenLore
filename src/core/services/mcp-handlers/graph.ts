@@ -50,6 +50,7 @@ import type { DecisionNode } from '../../decisions/project.js';
 import { decisionContentProvenance } from '../served-content.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { isContractLanguage } from '../../analyzer/contract/types.js';
+import { isProjectedLanguage, isDeclarationEdgeKind } from '../../analyzer/projected-language.js';
 import { getFileGodFunctions, extractSubgraph } from '../../analyzer/subgraph-extractor.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import {
@@ -1217,7 +1218,8 @@ export async function handleGetLowRiskRefactorCandidates(
   let candidates = cg.nodes.filter(n => {
     const fanIn  = n.fanIn  ?? 0;
     const fanOut = n.fanOut ?? 0;
-    return !n.isExternal && !n.isTest && fanIn <= LOW_RISK_MAX_FAN_IN && fanOut <= LOW_RISK_MAX_FAN_OUT && !hubIds.has(n.id) && !entryIds.has(n.id);
+    // A projected declaration (an RPC, a schema, a resource) is not code to rename or rewrite.
+    return !n.isExternal && !n.isTest && !isProjectedLanguage(n.language) && fanIn <= LOW_RISK_MAX_FAN_IN && fanOut <= LOW_RISK_MAX_FAN_OUT && !hubIds.has(n.id) && !entryIds.has(n.id);
   });
 
   if (filePattern) candidates = candidates.filter(n => n.filePath.includes(filePattern));
@@ -1258,8 +1260,10 @@ export async function handleGetLeafFunctions(
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph as SerializedCallGraph;
-  const hasOutgoing = new Set(cg.edges.filter(e => e.calleeId).map(e => e.callerId));
-  let leaves = cg.nodes.filter(n => !n.isExternal && !n.isTest && !hasOutgoing.has(n.id));
+  // A declaration binding (handler → the operation it serves) is not a call, so it does not make
+  // its caller a non-leaf; and a projected declaration is not a function at all.
+  const hasOutgoing = new Set(cg.edges.filter(e => e.calleeId && !isDeclarationEdgeKind(e.kind)).map(e => e.callerId));
+  let leaves = cg.nodes.filter(n => !n.isExternal && !n.isTest && !isProjectedLanguage(n.language) && !hasOutgoing.has(n.id));
 
   if (filePattern) leaves = leaves.filter(n => n.filePath.includes(filePattern));
 

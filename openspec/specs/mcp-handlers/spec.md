@@ -3936,6 +3936,41 @@ parsed SHALL be listed as not assessed with the reason, never treated as empty o
 - **THEN** the file is listed under `notAssessed` with the reason, and none of its operations is
   reported as removed
 
+### Requirement: ProtobufChangesAreGradedByWireIdentity
+
+`certify_service_contract` SHALL grade `.proto` changes against the base revision with protobuf
+rows in the same closed rule table, matching fields by NUMBER (their wire identity) and messages,
+enums and RPCs by full name across files. A change the table cannot prove compatible SHALL be
+`potentially-breaking`, and because gRPC client call sites are not read, a protobuf finding SHALL
+say its consumers are not assessed.
+
+#### Scenario: A removed field without a reservation
+
+- **GIVEN** a base revision whose `Order` declares `int64 total = 2`, and a working tree that
+  removes it without `reserved 2`
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports `field-removed` as `breaking` with a `contract-breaking` finding saying gRPC
+  consumers are not assessed, and suggests a major bump
+
+#### Scenario: A removed field whose number is reserved
+
+- **GIVEN** the same removal with `reserved 2` added
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports `field-removed-reserved` as `dangerous`; reusing number 2 later is
+  `reserved-number-reused`, `breaking`
+
+#### Scenario: A rename keeps the wire
+
+- **GIVEN** field 1 renamed from `id` to `order_id` with its number and type unchanged
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports `field-renamed` as `dangerous`, and nothing as removed or added
+
+#### Scenario: A move between files is no change
+
+- **GIVEN** a message moved from `orders.proto` to `requests.proto` in the same package
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports no change for that message
+
 ### Requirement: ContractVerdictsJoinConsumersConservatively
 
 With a base ref, `certify_service_contract` SHALL classify each changed element against the

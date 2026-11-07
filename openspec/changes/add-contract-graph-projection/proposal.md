@@ -7,7 +7,8 @@
 > `certify_service_contract` shipped in `add-contract-payload-check`; operations as graph nodes with the
 > `implements_endpoint` / `consumes_endpoint` edges and the `contractSchemas` capability shipped in
 > `add-contract-node-projection`, which leaves the element model below (fields, messages, types),
-> protobuf, GraphQL, generated clients, the changed-specification briefing, and federated consumers.
+> protobuf, GraphQL, generated clients, the changed-specification briefing, and federated consumers. The
+> protobuf reader shipped in `add-contract-protobuf-reader`; GraphQL remains.
 
 ## Why
 

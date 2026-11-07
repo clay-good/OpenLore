@@ -27,7 +27,7 @@ export interface CertifyServiceContractCliOptions {
 }
 
 interface Finding { code: string; severity: string; subject: string; message: string; enforcementClass?: string }
-interface Change { address: string; rule: string; class: string; element?: string; detail: string; consumers: Array<{ file: string; line: number }> }
+interface Change { address: string; rule: string; class: string; element?: string; detail: string; consumers?: Array<{ file: string; line: number }>; consumersNotAssessed?: string }
 
 /** Every string in `v`, sanitized for one terminal line (control characters and line breaks removed). */
 function clean(v: unknown): unknown {
@@ -42,7 +42,7 @@ export function renderServiceContract(result: Record<string, unknown>): string {
   const r = clean(result) as Record<string, unknown>;
   const lines: string[] = [];
   const specs = (r.specs as Array<{ file: string; format: string; operations: number }>) ?? [];
-  if (!specs.length) lines.push('No OpenAPI or Swagger document found.');
+  if (!specs.length) lines.push('No OpenAPI, Swagger, or protobuf schema found.');
   for (const s of specs) lines.push(`📄 ${s.file} (${s.format}): ${s.operations} operation(s)`);
   const parity = r.parity as { assessed: boolean; reason?: string; matched?: number; declaredUnimplemented?: number; implementedUndeclared?: number };
   if (parity?.assessed) {
@@ -54,7 +54,8 @@ export function renderServiceContract(result: Record<string, unknown>): string {
     if (changes.baseRefFallback) lines.push(`⚠ base '${changes.baseRefFallback.requested}' did not resolve; compared with '${changes.baseRefFallback.resolved}'`);
     for (const c of changes.items) {
       lines.push(`  ${c.class.padEnd(20)} ${c.rule.padEnd(30)} ${c.address}${c.element ? ` ${c.element}` : ''}`);
-      for (const w of c.consumers.slice(0, 5)) lines.push(`      called from ${w.file}:${w.line}`);
+      for (const w of (c.consumers ?? []).slice(0, 5)) lines.push(`      called from ${w.file}:${w.line}`);
+      if (c.consumersNotAssessed) lines.push(`      consumers not assessed: ${c.consumersNotAssessed}`);
     }
     if (changes.omitted) lines.push(`  … ${changes.omitted} more`);
     lines.push(changes.suggestedBump ? `Suggested version bump: ${changes.suggestedBump}` : `Suggested version bump withheld: ${changes.suggestedBumpWithheld ?? 'not proven'}`);
@@ -95,7 +96,7 @@ export async function runCertifyServiceContractCli(opts: CertifyServiceContractC
 }
 
 export const certifyServiceContractCommand = new Command('certify-service-contract')
-  .description('Certify OpenAPI/Swagger contracts against the code: declared operations and parity with the indexed route handlers (no --base), or the breaking-change verdict for each changed element with its in-repo callers (--base <ref>). Read-only, advisory.')
+  .description('Certify OpenAPI/Swagger and protobuf contracts against the code: declared operations and parity with the indexed route handlers (no --base), or the breaking-change verdict for each changed element with its in-repo callers (--base <ref>). Read-only, advisory.')
   .option('--base <ref>', 'Compare the specifications with this ref (its merge-base with HEAD)')
   .option('--max <n>', 'Cap on each listed item kind (default 100, max 1000)', (v) => parseInt(v, 10))
   .option('--allow-base-fallback', 'When --base does not resolve, compare with the default branch instead of erroring (disclosed)', false)

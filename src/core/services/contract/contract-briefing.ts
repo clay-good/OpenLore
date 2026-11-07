@@ -234,9 +234,24 @@ export async function changedContractsForSpecFiles(
   // Past the scan cap a changed specification may never have been examined, so the cap is a
   // reason to brief, not a footnote on a briefing that does not happen.
   const cappedMayHide = side.capped && changedFiles.some(f => side.candidates.has(f) && !side.examined.has(f));
-  if (!docs.length && !unreadableChanged.length && !unreadChanged.length && !cappedMayHide) return undefined;
+  // A changed `.proto` file is a specification change too. Its RPCs are not briefed here — the
+  // served-by and consumer joins below are HTTP — so it is named, never silently passed over
+  // (change: add-contract-graph-projection).
+  const protoChanged = changedFiles.filter(f => side.proto.candidates.has(f)).sort();
+  const protoNote = protoChanged.length
+    ? `${protoChanged.length} changed .proto file(s) (${protoChanged.slice(0, 3).join(', ')}${protoChanged.length > 3 ? ', …' : ''}): their RPCs are not briefed here; the graph binds each RPC to the method its server registration names, and certify_service_contract with a base ref grades the change.`
+    : undefined;
+  if (!docs.length && !unreadableChanged.length && !unreadChanged.length && !cappedMayHide) {
+    if (!protoNote) return undefined;
+    const { emittedText } = await import('../generated-file-guard.js');
+    return {
+      specs: protoChanged.map(emittedText), elements: [], notAssessed: [emittedText(protoNote)],
+      note: 'Contract elements declared by the specification files this diff changed. This is a blast radius, NOT a verdict. Run certify_service_contract with a base ref for the breaking/dangerous verdict per changed element.',
+    };
+  }
 
   const notAssessed: string[] = [];
+  if (protoNote) notAssessed.push(protoNote); // screened with the rest at emission
   for (const u of unreadableChanged) {
     notAssessed.push(`${u.file} could not be parsed (${u.reason}), so its operations were not assessed.`);
   }

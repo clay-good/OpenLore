@@ -3,8 +3,9 @@
  *
  * The `contractSchemas` capability is claimed for every member of `CONTRACT_LANGUAGES`. This
  * drives the real projector against a minimal realistic specification for each one and asserts
- * the projection genuinely fires — an operation becomes a node tagged with that format, AND both
- * edge kinds are produced. A coverage guard fails if `CONTRACT_LANGUAGES` grows without a
+ * the projection genuinely fires — an operation becomes a node tagged with that format, AND the
+ * edge kinds that format binds are produced (protobuf binds the server side only: a gRPC client
+ * call is a disclosed boundary, so it produces no `consumes_endpoint`). A coverage guard fails if `CONTRACT_LANGUAGES` grows without a
  * fixture, so the matrix can never silently over-claim (the sibling of
  * `iac/iac-projection-conformance.test.ts`).
  */
@@ -19,6 +20,8 @@ interface FormatCase {
   file: string;
   method: string;
   path: string;
+  /** The edge kinds the format must produce. */
+  kinds: string[];
 }
 
 const CASES: Record<string, FormatCase> = {
@@ -36,6 +39,19 @@ paths:
       operationId: getOrder
       responses: { '200': { description: ok } }
 `,
+    kinds: ['implements_endpoint', 'consumes_endpoint'],
+  },
+  Protobuf: {
+    file: 'proto/orders.proto',
+    method: 'GET',
+    path: '/unused',
+    spec: `syntax = "proto3";
+package orders.v1;
+message GetOrderRequest { string id = 1; }
+message Order { string id = 1; }
+service OrderService { rpc GetOrder(GetOrderRequest) returns (Order); }
+`,
+    kinds: ['implements_endpoint', 'references_schema'],
   },
 };
 
@@ -67,10 +83,12 @@ describe('contract projection conformance', () => {
         }],
         resolveHandler: () => code('src/routes.ts::handler'),
         resolveCaller: () => code('src/client.ts::load'),
+        grpcRegistrations: [{ file: 'src/server.go', line: 3, runtime: 'go', service: 'OrderService', implType: 'server' }],
+        resolveGrpcImplementation: () => [{ ...code('src/server.go::server.GetOrder'), name: 'GetOrder', className: 'server', language: 'Go' }],
       });
       expect(projection.nodes.map(n => n.language)).toContain(lang);
-      expect(new Set(projection.edges.map(e => e.kind)))
-        .toEqual(new Set(['implements_endpoint', 'consumes_endpoint']));
+      expect(new Set(projection.edges.filter(e => projection.nodes.find(n => n.id === e.calleeId)?.language === lang).map(e => e.kind)))
+        .toEqual(new Set(c.kinds));
     });
   }
 });
