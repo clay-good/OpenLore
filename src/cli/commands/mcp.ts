@@ -1971,7 +1971,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'certify_service_contract',
     description:
-      'USE THIS WHEN: you change an OpenAPI/Swagger or protobuf schema or the code serving it. Unlike ' +
+      'USE THIS WHEN: you change an OpenAPI, protobuf or GraphQL schema or the code serving it. Unlike ' +
       'certify_public_surface (exported code), this certifies the HTTP contract. No baseRef: declared ' +
       'operations and parity with indexed route handlers. With baseRef: a closed-table verdict per ' +
       'changed element vs the merge-base (breaking | dangerous | non-breaking | potentially-breaking), ' +

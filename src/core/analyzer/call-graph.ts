@@ -47,6 +47,8 @@ import { projectContracts, contractDisclosure, emptyContractProjection, type Pro
 import { generatedClientFunctionsFor } from './contract/generated-client.js';
 import { scanGrpcRegistrations, isGeneratedGrpcStub, type GrpcRegistration } from './contract/grpc-registration.js';
 import { isProtobufPath } from './contract/protobuf.js';
+import { isGraphqlPath } from './contract/graphql.js';
+import { scanResolverMaps, type ResolverMap } from './contract/graphql-resolvers.js';
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -5665,6 +5667,8 @@ export interface CallGraphBuilderOptions {
   contractFilesOmitted?: number;
   /** `.proto` files the walk did not retain (change: add-contract-graph-projection). */
   protoFilesOmitted?: number;
+  /** GraphQL files the walk did not retain. */
+  graphqlFilesOmitted?: number;
   /**
    * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
    * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
@@ -5683,6 +5687,7 @@ export class CallGraphBuilder {
   private readonly contractFiles: ReadonlyArray<{ path: string; content: string }>;
   private readonly contractFilesOmitted: number;
   private readonly protoFilesOmitted: number;
+  private readonly graphqlFilesOmitted: number;
   private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
@@ -5693,6 +5698,7 @@ export class CallGraphBuilder {
     this.contractFiles = options.contractFiles ?? [];
     this.contractFilesOmitted = options.contractFilesOmitted ?? 0;
     this.protoFilesOmitted = options.protoFilesOmitted ?? 0;
+    this.graphqlFilesOmitted = options.graphqlFilesOmitted ?? 0;
     this.buildOutput = options.buildOutput;
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
@@ -6542,7 +6548,7 @@ export class CallGraphBuilder {
     // (change: add-contract-node-projection) — extracted once, here. Retained only when a
     // specification exists: on a repository with none, holding the whole route and call list
     // across Passes 3-8 would be memory spent for nothing.
-    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0;
+    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0 || this.graphqlFilesOmitted > 0;
     let httpRoutes: RouteDefinition[] = [];
     let httpCalls: HttpCall[] = [];
     /** Why the route/call extraction is not complete — withholds every "unmatched" conclusion. */
@@ -6752,6 +6758,21 @@ export class CallGraphBuilder {
           files: this.contractFiles,
           filesOmitted: this.contractFilesOmitted,
           protoFilesOmitted: this.protoFilesOmitted,
+          graphqlFilesOmitted: this.graphqlFilesOmitted,
+          // Resolver maps are read only when a GraphQL file is in hand, and only for the root type
+          // names the schema has (the projector passes them). Test files are skipped.
+          graphqlResolverMaps: roots => {
+            if (!this.contractFiles.some(f => isGraphqlPath(f.path))) return [];
+            const maps: ResolverMap[] = [];
+            for (const [file, content] of fileContents) {
+              if (isTestFile(file)) continue;
+              for (const m of scanResolverMaps(file, content, roots)) maps.push(m);
+            }
+            return maps;
+          },
+          resolveGraphqlImplementation: (map, name) => trie.findBySimpleName(name).filter(n =>
+            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath)
+            && (map.runtime === 'python' ? n.language === 'Python' : n.language === 'TypeScript' || n.language === 'JavaScript')),
           ...(extractionNotAssessed.size ? { extractionNotAssessed: [...extractionNotAssessed] } : {}),
           routes: httpRoutes,
           calls: httpCalls,

@@ -3936,6 +3936,28 @@ parsed SHALL be listed as not assessed with the reason, never treated as empty o
 - **THEN** the file is listed under `notAssessed` with the reason, and none of its operations is
   reported as removed
 
+### Requirement: GraphqlChangesAreGradedByVariance
+
+`certify_service_contract` SHALL grade GraphQL schema changes against the base revision with
+GraphQL rows in the same closed rule table, matching operations by root kind and field name and
+types by name. An output SHALL be allowed to become stricter (non-null) and never looser; an
+argument or input field SHALL be allowed to become looser (optional) and never stricter. A directive
+other than `@deprecated` that changed SHALL be `potentially-breaking`, and because client operations
+are not read, a GraphQL finding SHALL say its consumers are not assessed.
+
+#### Scenario: Nullability follows variance
+
+- **GIVEN** `Order.total: Float` made `Float!`, and `Query.orders` given a new argument `status: Status!`
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** the first is `output-field-made-non-null` (`non-breaking`) and the second
+  `required-param-added` (`breaking`), and the bump is major
+
+#### Scenario: A renamed root type is not a change
+
+- **GIVEN** `schema { query: RootQuery }` replacing `type Query` with the same fields
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** no operation is reported removed or added
+
 ### Requirement: ProtobufChangesAreGradedByWireIdentity
 
 `certify_service_contract` SHALL grade `.proto` changes against the base revision with protobuf

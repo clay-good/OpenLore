@@ -64,6 +64,18 @@ export const CONTRACT_RULES = {
   'enum-value-added': 'non-breaking',
   'enum-value-number-changed': 'breaking',
   'enum-value-renamed': 'dangerous',
+  // GraphQL (change: add-contract-graph-projection). Outputs may only get stricter, inputs only
+  // looser; a removed argument fails every client still sending it.
+  'arg-removed': 'breaking',
+  'arg-default-changed': 'dangerous',
+  'output-field-made-non-null': 'non-breaking',
+  'input-made-optional': 'non-breaking',
+  'required-input-field-added': 'breaking',
+  'graphql-enum-value-added': 'dangerous',
+  'union-member-added': 'dangerous',
+  'union-member-removed': 'breaking',
+  'interface-added': 'non-breaking',
+  'interface-removed': 'breaking',
   'enum-value-deprecated': 'dangerous',
 } as const satisfies Record<string, ContractChangeClass>;
 export type ContractRule = keyof typeof CONTRACT_RULES;

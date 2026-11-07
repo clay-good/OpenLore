@@ -5,6 +5,21 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### GraphQL schemas are read
+
+- **Every `.graphql` / `.graphqls` / `.gql` schema is read** and merged into one schema, `extend`
+  folded in: each root field becomes an operation node (`Query.order`), each named type a node, with
+  `references_schema` edges between them. A file of operations and fragments is a client document,
+  listed under `skippedCandidates`.
+- **The function a literal resolver map names is bound to its operation** — JS/TS
+  `{ Query: { order: getOrder } }` and Python Ariadne `@query.field("order")` — with an
+  `implements_endpoint` edge, so it is a reachability root. Inline resolvers, spreads, unknown
+  fields and functions neither local nor imported are disclosed in `unresolvedResolvers`.
+- **`certify_service_contract` grades GraphQL changes** with variance-aware rows: an output may only
+  become non-null, an input only optional; removals, a required argument and a narrowed output are
+  `breaking`; an added enum value or union member is `dangerous`. GraphQL consumers are a disclosed
+  boundary. The index schema version is now 17.
+
 ### Protobuf schemas are read
 
 - **Every `.proto` file is read as a proto3 schema** and projected onto the graph: each RPC is a

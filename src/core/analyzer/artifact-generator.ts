@@ -1489,6 +1489,8 @@ export class AnalysisArtifactGenerator {
     const { MAX_CONTRACT_FILES } = await import('./contract/project.js');
     const { MAX_PROTO_FILES } = await import('./contract/project-protobuf.js');
     const { isProtobufPath } = await import('./contract/protobuf.js');
+    const { isGraphqlPath } = await import('./contract/graphql.js');
+    const { MAX_GRAPHQL_FILES } = await import('./contract/project-graphql.js');
     const { readBuildOutputMap } = await import('./iac/build-output.js');
     /** Total specification bytes retained across the walk. */
     const MAX_CONTRACT_BYTES = 64 * 1024 * 1024;
@@ -1549,6 +1551,9 @@ export class AnalysisArtifactGenerator {
     let protoFiles = 0;
     /** `.proto` files past a bound: counted apart, so a dropped one withholds only protobuf conclusions. */
     let protoFilesOmitted = 0;
+    /** GraphQL schema files retained and past a bound, counted apart for the same reason. */
+    let graphqlFiles = 0;
+    let graphqlFilesOmitted = 0;
     // Files whose UTF-8 decode was lossy (contained U+FFFD) — a parse-health signal captured at the
     // one central read, since the call-graph extractors never see the raw bytes (change:
     // add-parse-health-boundary-disclosure).
@@ -1602,7 +1607,7 @@ export class AnalysisArtifactGenerator {
           // so a count alone let a specification-heavy monorepo hold ~200 MB of strings from the
           // walk until the build returned.
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
-          if (retainable && contractFiles.length - protoFiles < MAX_CONTRACT_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+          if (retainable && contractFiles.length - protoFiles - graphqlFiles < MAX_CONTRACT_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
             contractBytes += retained;
             contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
           } else if (retainable) {
@@ -1623,6 +1628,17 @@ export class AnalysisArtifactGenerator {
             contractBytes += retained;
             contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
           } else protoFilesOmitted++;
+        }
+        // GraphQL SDL (change: add-contract-graph-projection): every `.graphql` / `.graphqls` /
+        // `.gql` file is a candidate; the reader tells a schema from a client document.
+        if (isGraphqlPath(file.path)) {
+          const oversized = content.length > MAX_SPEC_BYTES;
+          const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (graphqlFiles < MAX_GRAPHQL_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+            graphqlFiles++;
+            contractBytes += retained;
+            contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
+          } else graphqlFilesOmitted++;
         }
 
         // The project's own build-output mapping, for binding a deployed `dist/…` handler to its
@@ -1709,6 +1725,7 @@ export class AnalysisArtifactGenerator {
         ...(contractFiles.length ? { contractFiles } : {}),
         ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
         ...(protoFilesOmitted ? { protoFilesOmitted } : {}),
+        ...(graphqlFilesOmitted ? { graphqlFilesOmitted } : {}),
         ...(buildOutputConfigs.size ? { buildOutput: readBuildOutputMap(buildOutputConfigs) } : {}),
       });
       // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the

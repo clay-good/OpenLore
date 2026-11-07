@@ -235,6 +235,62 @@ Messages and RPCs are matched by full name across files, so moving a message to 
 not a change; renaming the package changes every wire name, so everything is removed and added.
 A gRPC finding names no consumer — client call sites are not read — and says so.
 
+## GraphQL
+
+Every `.graphql`, `.graphqls` and `.gql` file is read with a hand-written SDL reader. A file that
+holds only operations and fragments is a **client document**, not a schema: it is listed under
+`skippedCandidates` with that reason. All schema files read are merged into **one schema**, as one
+server sees them — `extend type Query { … }` in another file adds to `Query`; a type two files
+define is ambiguous and binds nothing.
+
+| GraphQL concept | OpenLore graph primitive |
+|---|---|
+| A root field (`order` on the query root) | an operation node `Query.order`, `language: GraphQL` |
+| An object, interface, input, enum, union or scalar type | a node named by the type, `Order` |
+| The types a field, an argument, a union member or an implemented interface names | `references_schema` edges |
+| The function a resolver map names for a root field | an `implements_endpoint` edge, **function → operation** |
+
+Directives other than `@deprecated` are outside the model: each one is named in the projection's
+`notes`, and hashed so a change to one is graded `potentially-breaking`, never "no change".
+
+### Which code resolves an operation
+
+A schema-first server names the function behind each root field in one literal place:
+
+| Runtime | Resolver map | `Query.order` is resolved by |
+|---|---|---|
+| JS/TS (Apollo, Yoga, graphql-tools) | `{ Query: { order: getOrder } }`, `const Query = { order() {…} }` | `getOrder`, or the method itself |
+| Python (Ariadne) | `@query.field("order")` on `def resolve_order`, `query.set_field("order", fn)` | the decorated or named function |
+
+The same refusals as for gRPC apply: a function outside the map's file binds only when that file
+imports it (looked up by its exported name); an arrow function or lambda is
+`inline-implementation`; two candidates are `ambiguous-implementation`; a spread in the map is
+`not-literal`; a key the schema does not declare is `unknown-field`. Maps in comments, strings,
+test files and `*.generated.*` files are not read. Code-first servers (Strawberry, Graphene, Nexus,
+gqlgen) have no resolver map, so their operations are listed in `unboundGraphqlOperations` — "not
+bound", never "not served".
+
+### Breaking changes
+
+Operations are matched by root **kind** and field name — a client writes `query { order }`, never
+the root type's name, so renaming `Query` to `RootQuery` is not a change. Nullability follows
+variance:
+
+| Change | Class |
+|---|---|
+| An operation or a field removed; an argument removed | `breaking` |
+| An output made nullable (`String!` → `String`), or a type changed | `breaking` |
+| An output made non-null (`String` → `String!`), including inside a list | `non-breaking` |
+| An argument or input field made required, or a required one added | `breaking` |
+| An argument or input field made optional, or an optional one added | `non-breaking` |
+| A default value changed | `dangerous` |
+| An enum value or union member added (a client switching over it may not handle it) | `dangerous` |
+| An enum value or union member removed; an interface no longer implemented | `breaking` |
+| Deprecation of an operation, field, argument or enum value | `dangerous` |
+| A directive other than `@deprecated` changed | `potentially-breaking` |
+
+A GraphQL finding names no consumer — client operations are not read — and says so.
+
 ## Generated clients
 
 A generated API client builds its URL from a base variable —
@@ -354,6 +410,6 @@ scan cap, or parses with no operation the reader recognizes is named rather than
 
 ## Not read
 
-Per-FIELD nodes (named schemas are projected; individual properties are not); protobuf and
-GraphQL; registry or network fetches; runtime traffic; contract tests; code generation; any
-LLM.
+Per-FIELD nodes (named schemas are projected; individual properties are not); gRPC client calls
+and GraphQL client operations as consumers; code-first GraphQL servers (no SDL); registry or
+network fetches; runtime traffic; contract tests; code generation; any LLM.

@@ -28,6 +28,9 @@ import { normalizeUrl } from '../http-route-parser.js';
 import { readOpenApi, looksLikeOpenApi, HTTP_METHODS, type ContractDocument } from './openapi.js';
 import { isProtobufPath } from './protobuf.js';
 import { projectProtobuf, MAX_PROTO_FILES, type UnresolvedRegistration } from './project-protobuf.js';
+import { isGraphqlPath } from './graphql.js';
+import { projectGraphql, MAX_GRAPHQL_FILES, type UnresolvedResolver } from './project-graphql.js';
+import type { ResolverMap } from './graphql-resolvers.js';
 import type { GrpcRegistration } from './grpc-registration.js';
 
 /** Specification files read per build. */
@@ -123,6 +126,13 @@ export interface ContractDisclosure {
    * "not implemented".
    */
   unboundRpcs: Disclosed<string>;
+  /** GraphQL resolver-map entries that name an operation but could not be bound to it. */
+  unresolvedResolvers: Disclosed<UnresolvedResolver>;
+  /**
+   * GraphQL operations (root fields) no resolver map binds. Maps are read in JS/TS and Python
+   * (Ariadne) only, and code-first servers have none, so this is "not bound", never "not served".
+   */
+  unboundGraphqlOperations: Disclosed<string>;
   /**
    * Set when a conclusion is WITHHELD because an input was not assessed — the route extraction
    * failed or degraded, a specification could not be read, or the operation cap stopped the
@@ -137,7 +147,7 @@ export interface ContractDisclosure {
    */
   notes?: string[];
   /** Every cap the projection stopped at (both can fire in one build). */
-  truncations?: Array<{ reason: 'file-cap' | 'proto-file-cap' | 'operation-cap' | 'schema-cap'; cap: number; seen: number }>;
+  truncations?: Array<{ reason: 'file-cap' | 'proto-file-cap' | 'graphql-file-cap' | 'operation-cap' | 'schema-cap'; cap: number; seen: number }>;
 }
 
 export interface ProjectedContracts extends ContractDisclosure {
@@ -159,6 +169,7 @@ function empty(): ProjectedContracts {
     unmatchedOperations: none(), unmatchedRoutes: none(), unresolvedBindings: none(),
     unreadSpecifications: none(), unboundClientCalls: none(), ambiguousAddresses: none(),
     unresolvedGeneratedBindings: none(), unresolvedRegistrations: none(), unboundRpcs: none(),
+    unresolvedResolvers: none(), unboundGraphqlOperations: none(),
     skippedCandidates: none(),
   };
 }
@@ -175,6 +186,8 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     unresolvedGeneratedBindings: p.unresolvedGeneratedBindings,
     unresolvedRegistrations: p.unresolvedRegistrations,
     unboundRpcs: p.unboundRpcs,
+    unresolvedResolvers: p.unresolvedResolvers,
+    unboundGraphqlOperations: p.unboundGraphqlOperations,
     skippedCandidates: p.skippedCandidates,
     ...(p.notAssessed ? { notAssessed: p.notAssessed } : {}),
     ...(p.notes ? { notes: p.notes } : {}),
@@ -184,6 +197,7 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     rest.unmatchedOperations, rest.unmatchedRoutes, rest.unresolvedBindings,
     rest.unreadSpecifications, rest.unboundClientCalls, rest.ambiguousAddresses,
     rest.unresolvedGeneratedBindings, rest.unresolvedRegistrations, rest.unboundRpcs, rest.skippedCandidates,
+    rest.unresolvedResolvers, rest.unboundGraphqlOperations,
   ];
   const silent = lists.every(l => l.total === 0) && !rest.notAssessed && !rest.notes && !rest.truncations;
   return silent ? undefined : rest;
@@ -196,6 +210,8 @@ export interface ContractProjectionInput {
   filesOmitted?: number;
   /** `.proto` files the caller did not retain: they withhold protobuf conclusions only. */
   protoFilesOmitted?: number;
+  /** GraphQL schema files the caller did not retain: they withhold GraphQL conclusions only. */
+  graphqlFilesOmitted?: number;
   /** Server route registrations from the HTTP route parser. */
   routes: readonly RouteDefinition[];
   /** Client call sites from the HTTP projection. */
@@ -224,6 +240,10 @@ export interface ContractProjectionInput {
   generatedClientFunctions?: (specPath: string) => ReadonlyMap<string, readonly FunctionNode[]>;
   /** gRPC server registrations in the indexed source, for binding protobuf RPCs to their implementation. */
   grpcRegistrations?: readonly GrpcRegistration[];
+  /** The resolver maps in the indexed source for the given root type names (GraphQL). */
+  graphqlResolverMaps?: (roots: readonly string[]) => readonly ResolverMap[];
+  /** The code functions of a name a resolver entry could mean. */
+  resolveGraphqlImplementation?: (map: ResolverMap, name: string) => readonly FunctionNode[];
   /** The code functions a registration could mean by a name (see `ProtobufProjectionInput`). */
   resolveGrpcImplementation?: (reg: GrpcRegistration, name: string) => readonly FunctionNode[];
 }
@@ -295,6 +315,22 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       resolveImplementation: input.resolveGrpcImplementation ?? (() => []),
     })
     : undefined;
+  // ── GraphQL (change: add-contract-graph-projection) ──────────────────────
+  // Its own half too, merged in `finish`: a GraphQL operation has no method or path.
+  const gqlCandidates = [...input.files].filter(f => isGraphqlPath(f.path))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const gqlRead = gqlCandidates.slice(0, MAX_GRAPHQL_FILES);
+  const gql = gqlRead.length
+    ? projectGraphql({
+      files: gqlRead,
+      resolverMaps: input.graphqlResolverMaps ?? (() => []),
+      resolveImplementation: input.resolveGraphqlImplementation ?? (() => []),
+    })
+    : undefined;
+  const gqlNotAssessed = [...(gql?.notAssessed ?? [])];
+  const gqlUnread = gqlCandidates.length - gqlRead.length + (input.graphqlFilesOmitted ?? 0);
+  if (gqlUnread > 0) gqlNotAssessed.push(`${gqlUnread} GraphQL file(s) past the file cap were not read`);
+
   /** Why a protobuf conclusion is withheld. Kept apart: an unread `.proto` declares no HTTP operation. */
   const protoNotAssessed = [...(proto?.notAssessed ?? [])];
   const protoUnread = protoCandidates.length - protoRead.length + (input.protoFilesOmitted ?? 0);
@@ -311,15 +347,28 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       // Said after the fact, like an unresolved `$ref`: it draws no edge, and withholds nothing.
       notes.add(`${proto.unresolvedTypes} protobuf type reference(s) resolve to no type projected from the files read (an import from outside this repository such as \`google.protobuf.*\`, a name declared in two files, or a type past the cap), so no edge was drawn for them`);
     }
+    const gqlWithheld = gqlNotAssessed.length > 0;
+    for (const reason of gqlNotAssessed) notAssessed.add(reason);
+    if (gqlUnread > 0) truncations.push({ reason: 'graphql-file-cap', cap: MAX_GRAPHQL_FILES, seen: gqlCandidates.length + (input.graphqlFilesOmitted ?? 0) });
+    for (const t of gql?.truncations ?? []) truncations.push(t);
+    for (const n of gql?.notes ?? []) notes.add(n);
+    const unread = [...p.unreadSpecifications.items, ...(proto?.unreadSpecifications ?? []), ...(gql?.unreadSpecifications ?? [])];
+    const unreadTotal = p.unreadSpecifications.total + (proto?.unreadSpecifications.length ?? 0) + (gql?.unreadSpecifications.length ?? 0);
+    // A GraphQL client document (operations and fragments) is a file that looked like a schema
+    // and is not one: it belongs with the other skipped candidates, with why.
+    const clientDocs = (gql?.clientDocuments ?? []).map(file => ({ file, reason: 'a GraphQL client document (operations and fragments), not a schema' }));
     return {
       ...p,
-      nodes: proto ? [...p.nodes, ...proto.nodes] : p.nodes,
-      edges: proto ? [...p.edges, ...proto.edges] : p.edges,
-      unreadSpecifications: proto?.unreadSpecifications.length
-        ? bound([...p.unreadSpecifications.items, ...proto.unreadSpecifications], p.unreadSpecifications.total + proto.unreadSpecifications.length)
-        : p.unreadSpecifications,
+      nodes: [...p.nodes, ...(proto?.nodes ?? []), ...(gql?.nodes ?? [])],
+      edges: [...p.edges, ...(proto?.edges ?? []), ...(gql?.edges ?? [])],
+      unreadSpecifications: unreadTotal !== p.unreadSpecifications.total ? bound(unread, unreadTotal) : p.unreadSpecifications,
+      skippedCandidates: clientDocs.length
+        ? bound([...p.skippedCandidates.items, ...clientDocs], p.skippedCandidates.total + clientDocs.length)
+        : p.skippedCandidates,
       unresolvedRegistrations: bound(proto?.unresolvedRegistrations ?? []),
       unboundRpcs: proto && !protoWithheld ? bound(proto.unboundRpcs) : none(),
+      unresolvedResolvers: bound(gql?.unresolvedResolvers ?? []),
+      unboundGraphqlOperations: gql && !gqlWithheld ? bound(gql.unboundOperations) : none(),
       ...(notAssessed.size ? { notAssessed: [...notAssessed].sort() } : {}),
       ...(notes.size ? { notes: [...notes].sort() } : {}),
       ...(truncations.length ? { truncations } : {}),
@@ -327,7 +376,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   };
 
   const candidates = [...input.files]
-    .filter(f => !isProtobufPath(f.path) && looksLikeOpenApi(f.content))
+    .filter(f => !isProtobufPath(f.path) && !isGraphqlPath(f.path) && looksLikeOpenApi(f.content))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   // Defensive: the caller caps RETENTION (it holds the content); this caps reading. Either cap
   // means a candidate that could declare what a route serves was never read.
@@ -703,6 +752,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
     unresolvedGeneratedBindings: bound(generatedBindings),
     // Set by `finish` from the protobuf half.
     unresolvedRegistrations: none(), unboundRpcs: none(),
+    unresolvedResolvers: none(), unboundGraphqlOperations: none(),
     skippedCandidates: bound(skippedCandidates),
     unmatchedOperations: withheld ? none() : bound(unmatchedOperations),
     unmatchedRoutes: withheld ? none() : bound(unmatchedRoutes),

@@ -12,10 +12,10 @@
  */
 
 /** Schema-format tags a contract node can carry as its `language`. */
-export type ContractLanguage = 'OpenAPI' | 'Protobuf';
+export type ContractLanguage = 'OpenAPI' | 'Protobuf' | 'GraphQL';
 
 /** All contract language tags (single source of truth for gating). */
-export const CONTRACT_LANGUAGES: readonly ContractLanguage[] = ['OpenAPI', 'Protobuf'];
+export const CONTRACT_LANGUAGES: readonly ContractLanguage[] = ['OpenAPI', 'Protobuf', 'GraphQL'];
 
 const CONTRACT_LANGUAGE_SET: ReadonlySet<string> = new Set<string>(CONTRACT_LANGUAGES);
 

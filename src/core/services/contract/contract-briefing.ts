@@ -237,9 +237,10 @@ export async function changedContractsForSpecFiles(
   // A changed `.proto` file is a specification change too. Its RPCs are not briefed here — the
   // served-by and consumer joins below are HTTP — so it is named, never silently passed over
   // (change: add-contract-graph-projection).
-  const protoChanged = changedFiles.filter(f => side.proto.candidates.has(f)).sort();
+  // A changed GraphQL schema the same way (change: add-contract-graph-projection, GraphQL phase).
+  const protoChanged = changedFiles.filter(f => side.proto.candidates.has(f) || side.graphql.candidates.has(f)).sort();
   const protoNote = protoChanged.length
-    ? `${protoChanged.length} changed .proto file(s) (${protoChanged.slice(0, 3).join(', ')}${protoChanged.length > 3 ? ', …' : ''}): their RPCs are not briefed here; the graph binds each RPC to the method its server registration names, and certify_service_contract with a base ref grades the change.`
+    ? `${protoChanged.length} changed .proto or GraphQL file(s) (${protoChanged.slice(0, 3).join(', ')}${protoChanged.length > 3 ? ', …' : ''}): their operations are not briefed here; the graph binds each RPC to the method its server registration names and each GraphQL root field to the function its resolver map names, and certify_service_contract with a base ref grades the change.`
     : undefined;
   if (!docs.length && !unreadableChanged.length && !unreadChanged.length && !cappedMayHide) {
     if (!protoNote) return undefined;

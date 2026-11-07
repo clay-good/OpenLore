@@ -8342,8 +8342,11 @@ same-basename source file.
 ### Requirement: ContractSchemasAreDiscoveredAndNormalized
 
 The analyzer SHALL deterministically discover interface-schema files — OpenAPI and Swagger
-documents by their top-level key, and every `.proto` file — and read each into a normalized element
-model for rule-table diffing. For protobuf that model SHALL hold RPCs, messages under their full
+documents by their top-level key, every `.proto` file, and every GraphQL SDL file (`.graphql`,
+`.graphqls`, `.gql`) — and read each into a normalized element model for rule-table diffing. A
+GraphQL file holding only operations and fragments is a client document and SHALL be listed as a
+skipped candidate, not read as an empty schema; GraphQL files SHALL be merged into one schema, with
+`extend` folded into its definition and a type two files define treated as ambiguous. For protobuf that model SHALL hold RPCs, messages under their full
 names with numbered fields, enums with their values, and `reserved` numbers and names, with type
 names resolved by protobuf's own scoping rule over the file and the files it imports (and what
 those re-export with `import public`) — never over a file it does not import. Discovery scope SHALL be visible, and a
@@ -8356,6 +8359,12 @@ file that cannot be read SHALL be unread with the reason, never omitted.
 - **WHEN** the repository is analyzed
 - **THEN** the two schemas are projected, and the third is listed under `skippedCandidates` with
   the reason it was excluded
+
+#### Scenario: A GraphQL client document is not a schema
+
+- **GIVEN** `web/queries.graphql` holding `query GetOrder { order(id: 1) { id } }` only
+- **WHEN** the repository is analyzed
+- **THEN** it is listed under `skippedCandidates` as a client document, and declares no type
 
 #### Scenario: Parse failure is unread, not empty
 
@@ -8417,6 +8426,36 @@ unbound is listed as not bound, never as not implemented.
 - **WHEN** the two graphs are compared
 - **THEN** every code function's fan-in and fan-out, the entry points and the hubs are identical,
   and no protobuf node appears among them
+
+### Requirement: GraphqlOperationsAreBoundToTheirResolverMaps
+
+Each root field of a GraphQL schema SHALL be a graph node named `<RootType>.<field>`, and each other
+named type a node named by the type, all `language: GraphQL`. A function SHALL be bound to an
+operation by an `implements_endpoint` edge only through a literal resolver map that names it for
+that root field (JS/TS object maps, Python Ariadne bindables); every entry that cannot be bound SHALL
+be disclosed with the reason, and an operation no map binds SHALL be listed as not bound, never as
+not served.
+
+#### Scenario: An Apollo resolver map binds its functions
+
+- **GIVEN** `type Query { order(id: ID!): Order }` and `const resolvers = { Query: { order: getOrder } }`
+  with `getOrder` defined in the same file
+- **WHEN** the repository is analyzed
+- **THEN** an `implements_endpoint` edge runs from `getOrder` to `Query.order`, and `getOrder` is not
+  a dead-code candidate
+
+#### Scenario: An extension in another file is the same root
+
+- **GIVEN** `extend type Query { search: [Result!]! }` in a second schema file and a map entry
+  `search: searchAll` whose function the map's file imports
+- **WHEN** the repository is analyzed
+- **THEN** `Query.search` is an operation node in the second file and `searchAll` is bound to it
+
+#### Scenario: An inline resolver is disclosed
+
+- **GIVEN** `{ Query: { orders: () => [] } }`
+- **WHEN** the repository is analyzed
+- **THEN** no edge is drawn for `Query.orders`, and the entry is disclosed as `inline-implementation`
 
 ## Sub-components
 

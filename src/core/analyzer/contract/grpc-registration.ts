@@ -80,7 +80,7 @@ function runtimeOf(file: string): GrpcRuntime | undefined {
  * The text is already masked, so no string or comment can unbalance it. Undefined when the call
  * does not close within the bound.
  */
-function callArgs(text: string, open: number): string[] | undefined {
+export function callArgs(text: string, open: number): string[] | undefined {
   const args: string[] = [];
   let depth = 0;
   let start = open + 1;
@@ -104,7 +104,7 @@ function callArgs(text: string, open: number): string[] | undefined {
 }
 
 /** 1-based line of an offset, from a precomputed list of line starts. */
-function lineAt(starts: readonly number[], offset: number): number {
+export function lineAt(starts: readonly number[], offset: number): number {
   let lo = 0;
   let hi = starts.length - 1;
   while (lo < hi) {
@@ -147,7 +147,7 @@ function pythonImplType(arg: string): { implType: string; implQualifier?: string
 }
 
 /** Node: the keys of an object-literal implementation map, each with the function it names. */
-function nodeImplMap(arg: string): Array<{ key: string; fn?: string; base?: string }> | undefined {
+export function nodeImplMap(arg: string): Array<{ key: string; fn?: string; base?: string }> | undefined {
   if (!arg.startsWith('{') || !arg.endsWith('}')) return undefined;
   const body = arg.slice(1, -1);
   const entries: string[] = [];
@@ -185,7 +185,7 @@ function nodeImplMap(arg: string): Array<{ key: string; fn?: string; base?: stri
  * `import * as e from`, `const { f, g: h } = require(…)`, `const i = require(…)`. Read on masked
  * text, with every clause bounded, so a hostile file stays linear.
  */
-function importedNames(text: string): Map<string, string | null> {
+export function importedNames(text: string): Map<string, string | null> {
   // Local name → the name it was exported under, or `null` when that is not a function name this
   // file states (a default import, a namespace, a whole module from `require`).
   const out = new Map<string, string | null>();

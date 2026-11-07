@@ -515,7 +515,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     // specification, or a projection that was not assessed, has the same effect
     // (change: add-contract-node-projection).
     ...((cg.contracts?.unresolvedBindings.total || cg.contracts?.unreadSpecifications.total || cg.contracts?.notAssessed?.length
-      || cg.contracts?.unresolvedRegistrations?.total) ? {
+      || cg.contracts?.unresolvedRegistrations?.total || cg.contracts?.unresolvedResolvers?.total) ? {
       contractRootsNotAssessed: {
         unresolvedBindings: cg.contracts.unresolvedBindings.total,
         // A gRPC registration that named a service but bound no method (a variable, a factory
@@ -533,6 +533,14 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
           path: emittedText(u.path), operation: emittedText(u.operation),
         })),
         unreadSpecifications: cg.contracts.unreadSpecifications.items.slice(0, 5).map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) })),
+        // A GraphQL resolver-map entry that bound nothing leaves its function unrooted the same way.
+        ...(cg.contracts.unresolvedResolvers?.total ? {
+          unresolvedResolvers: cg.contracts.unresolvedResolvers.total,
+          unresolvedResolverItems: cg.contracts.unresolvedResolvers.items.slice(0, 10).map(u => ({
+            file: emittedText(u.file), line: u.line, root: emittedText(u.root), reason: u.reason,
+            ...(u.field ? { field: emittedText(u.field) } : {}),
+          })),
+        } : {}),
         ...(cg.contracts.notAssessed?.length ? { notAssessed: cg.contracts.notAssessed.map(emittedText) } : {}),
         ...(cg.contracts.notes?.length ? { notes: cg.contracts.notes.map(emittedText) } : {}),
         note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',
