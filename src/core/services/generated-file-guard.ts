@@ -19,6 +19,7 @@
  */
 
 import { readdir, open, realpath, type FileHandle } from 'node:fs/promises';
+import { YAML_QUIET } from '../analyzer/yaml-diagnostics.js';
 import { constants } from 'node:fs';
 import { posix, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -772,7 +773,7 @@ export function packageScripts(text: string): Array<{ name: string; command: str
 /** `run:` steps of a GitHub Actions workflow with their raw working directory (step, job, then workflow default). */
 export function workflowRuns(text: string): Array<{ jobId: string; step: number; command: string; wd: unknown }> {
   let doc: unknown;
-  try { doc = parseYaml(text); } catch { return []; }
+  try { doc = parseYaml(text, { ...YAML_QUIET }); } catch { return []; }
   const jobs = (doc as { jobs?: unknown } | null)?.jobs;
   if (!jobs || typeof jobs !== 'object') return [];
   const out: Array<{ jobId: string; step: number; command: string; wd: unknown }> = [];

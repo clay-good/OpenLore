@@ -5,6 +5,18 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### The in-toto statement we emit is checked
+
+- **`certify_provenance` with `format: "in-toto"` now validates the envelope it emits** against the
+  in-toto Statement v1 shape, locally and with no new dependency (`validateInTotoStatement`), and
+  discloses the outcome as a named `statementValidation` receipt — conformant, or the reasons a
+  consumer's verifier would reject it.
+- **The check is structural only, and says so.** It verifies no signature, none of the predicate's
+  own fields, and not that the `subject` digest identifies an artifact — that digest is the content
+  address of the predicate body, so an in-toto verifier resolving it against a built artifact will
+  not match. The note, the tool description and the docs now state this plainly.
+- **Fixed a false claim**: the JSON note advertised a `--format in-toto` CLI flag; there is no
+  `openlore certify-provenance` command. It now names the tool's `format` option.
 ### Removed
 
 - The OpenSpec plugin manifest (`plugin-manifest` command and schema); the OpenSpec host side was never built.

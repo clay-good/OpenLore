@@ -33,9 +33,10 @@
  * synthesized edges and get the strict directly-resolved reachability instead.
  */
 
-import { emittedText } from '../generated-file-guard.js';
+import { emittedText, classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
+import { loadRouteInventoryRoots, routeHandlerReason, type RouteInventoryRoots } from './route-inventory-roots.js';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
 import { loadTraversalIndex } from './traversal.js';
@@ -48,6 +49,7 @@ import {
   qualificationReason,
 } from './dynamic-boundary-disclosure.js';
 import { isProjectedLanguage } from '../../analyzer/projected-language.js';
+import { isContractLanguage } from '../../analyzer/contract/types.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -127,6 +129,50 @@ export function wiringKey(filePath: string): string {
 /** A code node we can reason about (not external, not infrastructure). */
 function isCodeNode(n: FunctionNode): boolean {
   return !n.isExternal && !isProjectedLanguage(n.language);
+}
+
+/**
+ * A TypeScript ambient declaration file (change: root-framework-routes).
+ *
+ * Every function-shaped thing in a `.d.ts` is a BODYLESS type declaration
+ * (`public static create(properties?: ITrace): Trace;`) — there is no code there to
+ * be dead, so calling it dead is a category error, not a false negative. The
+ * extractor still makes a node for it (another agent owns that walk, and the node is
+ * useful for signatures and the public surface); this is the narrowest predicate that
+ * keeps such a node out of a deadness verdict, and it is deliberately file-shaped
+ * rather than body-shaped so it needs nothing the graph does not already carry.
+ */
+function isAmbientDeclarationFile(filePath: string): boolean {
+  return /\.d\.(ts|mts|cts)$/i.test(filePath.replaceAll('\\', '/'));
+}
+
+/** A graph file path in the generated-file guard's own key spelling. */
+function generatedKey(filePath: string): string {
+  return posix.normalize(filePath.replaceAll('\\', '/')).replace(/^\.\/+/, '').replace(/^\/+/, '');
+}
+
+/** Distinct candidate files classified against the generated-file guard, at most. */
+const MAX_GENERATED_CLASSIFIED = 5_000;
+
+/**
+ * Classify the candidates' own files against the generated-file guard (change:
+ * root-framework-routes). A generated file's symbols are driven by whatever generated
+ * them — protobuf reflection, Go struct embedding, a runtime registry — never by a
+ * direct in-repo call, so a `high` verdict over them carries no signal. They stay
+ * candidates (that is the honest answer: nothing here proves a caller), but the
+ * confidence is capped and the rule that capped it is named.
+ */
+async function generatedFactsForCandidates(absDir: string, files: readonly string[]): Promise<{
+  facts: Map<string, GeneratedFileFact>; boundaries: string[];
+}> {
+  const distinct = [...new Set(files)].sort();
+  const capped = distinct.length > MAX_GENERATED_CLASSIFIED;
+  const { facts, boundaries } = await classifyGeneratedFiles(absDir, distinct.slice(0, MAX_GENERATED_CLASSIFIED))
+    .catch(() => ({ facts: new Map<string, GeneratedFileFact>(), boundaries: ['The generated-file guard could not run, so a generated file\'s symbols may be rated as if hand-written.'] }));
+  if (capped) {
+    boundaries.push(`Candidates span ${distinct.length} files; only the first ${MAX_GENERATED_CLASSIFIED} were classified against the generated-file guard, so a generated file past that point may be rated as if hand-written.`);
+  }
+  return { facts, boundaries };
 }
 
 /**
@@ -304,14 +350,21 @@ export async function deadCodeIds(
   const traversal = await loadTraversalIndex(absDir, cg);
   const handlerRootIds = externallyInvokedHandlerIds(cg, !strict);
   const wiredFiles = opts?.externalWiring ?? (await loadExternalWiring(absDir)).byFile;
+  const codeNodes = cg.nodes.filter(isCodeNode);
+  // Framework route handlers from the route inventory (change: root-framework-routes).
+  // Applied in strict mode too: an inventoried route is a decorator literally above the
+  // declaration, not a synthesized edge, so `directResolvedOnly` does not exclude it.
+  const routeRoots = await loadRouteInventoryRoots(absDir, codeNodes);
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
-    !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) || wiredFiles.has(wiringKey(n.filePath)) ||
+    !!n.isTest || handlerRootIds.has(n.id) || routeRoots.rootIds.has(n.id) || isMainLike(n) ||
+    wiredFiles.has(wiringKey(n.filePath)) ||
     (importedNames !== null && importedNames.has(n.name));
-  const codeNodes = cg.nodes.filter(isCodeNode);
   const seedIds = codeNodes.filter(isRoot).map(r => r.id).sort();
   const live = traversal.reachAll(seedIds, 'forward', { directResolvedOnly: strict });
-  return new Set(codeNodes.filter(n => !n.isTest && !live.has(n.id)).map(n => n.id));
+  return new Set(codeNodes
+    .filter(n => !n.isTest && !live.has(n.id) && !isAmbientDeclarationFile(n.filePath))
+    .map(n => n.id));
 }
 
 export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unknown> {
@@ -368,17 +421,37 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // invokes (package.json, tsconfig, test-runner config, CI run steps).
   const httpHandlerIds = externallyInvokedHandlerIds(cg, !input.directResolvedOnly);
   const deployedIds = new Set(cg.edges.filter(e => e.kind === 'deploys_symbol' && e.calleeId).map(e => e.calleeId));
+  // An `implements_endpoint` edge has THREE producers — an OpenAPI/HTTP route, a gRPC server
+  // registration, and a GraphQL resolver map — so the roots it keeps live are not all HTTP
+  // handlers. Label each by the PROTOCOL of the contract it serves, read positively off the
+  // callee contract node's `language` ('OpenAPI' | 'Protobuf' | 'GraphQL'), never by absence.
+  const grpcHandlerIds = new Set<string>();
+  const graphqlResolverIds = new Set<string>();
+  for (const e of cg.edges) {
+    if (e.kind !== 'implements_endpoint' || !e.calleeId) continue;
+    const language = nodeMap.get(e.calleeId)?.language;
+    if (!isContractLanguage(language)) continue;
+    if (language === 'Protobuf') grpcHandlerIds.add(e.callerId);
+    else if (language === 'GraphQL') graphqlResolverIds.add(e.callerId);
+  }
   const wiring = await loadExternalWiring(absDir);
   const isWired = (n: FunctionNode) => wiring.byFile.has(wiringKey(n.filePath));
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
+
+  const codeNodes = cg.nodes.filter(isCodeNode);
+  // Framework route handlers the route inventory already found (change: root-framework-routes) —
+  // `get_route_inventory` and this answer read the same build and must not contradict each other.
+  // Only a handler that pins to exactly ONE declaration in its file is rooted; every refusal is
+  // counted in `routeRootsNotAssessed` rather than guessed.
+  const routeRoots: RouteInventoryRoots = await loadRouteInventoryRoots(absDir, codeNodes);
   const isRoot = (n: FunctionNode): boolean =>
     !!n.isTest ||
     httpHandlerIds.has(n.id) ||
+    routeRoots.rootIds.has(n.id) ||
     isMainLike(n) ||
     isWired(n) ||
     (importedNames !== null && importedNames.has(n.name));
 
-  const codeNodes = cg.nodes.filter(isCodeNode);
   const roots = codeNodes.filter(isRoot);
   const seedIds = [...roots].map(r => r.id).sort();
   const live = traversal.reachAll(seedIds, 'forward', edgeFilter);
@@ -466,6 +539,12 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         : {}),
     };
   }
+  // A `.d.ts` declaration is bodyless — there is no code there to be dead, so it is not a
+  // candidate at all (change: root-framework-routes). Disclosed as a count (within the same
+  // `filePattern` scope as the candidates), not dropped silently.
+  const ambientDeclarations = candidates.filter(n => isAmbientDeclarationFile(n.filePath));
+  candidates = candidates.filter(n => !isAmbientDeclarationFile(n.filePath));
+  const generated = await generatedFactsForCandidates(absDir, candidates.map(n => n.filePath));
   const parseHealthReport = await loadParseHealthReport(absDir);
   const scriptContainerFiles = new Set(
     (parseHealthReport?.scriptContainers ?? [])
@@ -483,7 +562,10 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       else reasons.push('reachable only from other candidate-dead code');
       if (importedNames !== null && !importedNames.has(n.name)) reasons.push('not imported by name from any other file');
       if (moduleUsed) reasons.push('but its module IS imported elsewhere (symbol-level usage unresolved — e.g. namespace/default import or external API)');
-      reasons.push('not a test, route handler, or main entry');
+      // The inventory's own word overrides the generic clause: a symbol it calls a route
+      // handler must never be told it is "not a route handler" (change: root-framework-routes).
+      if (routeRoots.namedButUnresolvedIds.has(n.id)) reasons.push(routeHandlerReason());
+      else reasons.push('not a test, route handler, or main entry');
 
       // Conservative: a symbol whose module is consumed elsewhere can't be high —
       // named-import detection misses namespace/default/re-export usage.
@@ -508,6 +590,20 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (ambiguousCandidateIds.has(n.id)) {
         confidence = 'low';
         reasons.push('listed as a candidate by an unresolved-ambiguous call site — a potential caller was not bound, so it may be live');
+      }
+
+      // An inventoried handler the join refused to pin may well be the one serving the route.
+      if (routeRoots.namedButUnresolvedIds.has(n.id)) confidence = 'low';
+
+      // A generated file's symbols are driven by whatever generated them, never by a direct
+      // in-repo call — `high` over them carries no signal (change: root-framework-routes).
+      const gen = generated.facts.get(generatedKey(n.filePath));
+      if (gen) {
+        confidence = 'low';
+        const why = gen.kind === 'vendored'
+          ? 'third-party code vendored into this repository, whose callers need not be in it'
+          : 'its symbols are driven by whatever generated them (reflection, embedding, a runtime registry), not by an in-repo call';
+        reasons.push(`in a ${gen.kind} file (${gen.rule} rule, matched ${JSON.stringify(gen.matched)}, certainty ${gen.certainty}) — ${why}`);
       }
 
       // A symbol a gRPC registration or a GraphQL resolver map NAMED, whose binding the projection
@@ -645,7 +741,14 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     rootKinds: {
       tests: roots.filter(r => r.isTest).length,
       imported: importedNames !== null ? roots.filter(r => !r.isTest && importedNames.has(r.name)).length : 0,
-      httpHandlers: roots.filter(r => httpHandlerIds.has(r.id) && !deployedIds.has(r.id)).length,
+      // The three contract counts are disjoint by precedence (gRPC → GraphQL → HTTP), the way
+      // `deployed` already takes precedence over all of them. `httpHandlers` is the HTTP lane AND
+      // the fallback lane: a binding whose contract node carries no readable format tag stays here
+      // rather than dropping out of every count. Every framework the route inventory names is an
+      // HTTP routing framework, so its roots count in the HTTP lane too.
+      grpcHandlers: roots.filter(r => grpcHandlerIds.has(r.id) && !deployedIds.has(r.id)).length,
+      graphqlResolvers: roots.filter(r => graphqlResolverIds.has(r.id) && !deployedIds.has(r.id) && !grpcHandlerIds.has(r.id)).length,
+      httpHandlers: roots.filter(r => (httpHandlerIds.has(r.id) || routeRoots.rootIds.has(r.id)) && !deployedIds.has(r.id) && !grpcHandlerIds.has(r.id) && !graphqlResolverIds.has(r.id)).length,
       externallyWired: roots.filter(isWired).length,
       deployed: roots.filter(r => deployedIds.has(r.id)).length,
     },
@@ -708,6 +811,24 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here — a candidate a refused registration or resolver names by symbol or class, or that is declared in the file of one whose implementation argument could not be read, is never rated high-confidence dead. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',
       },
     } : {}),
+    // What the route-inventory join rooted, and every route it refused to pin to one declaration
+    // (change: root-framework-routes).
+    routeInventoryRoots: {
+      routesRead: routeRoots.routesRead,
+      rooted: routeRoots.rootIds.size,
+      byFramework: routeRoots.byFramework,
+      ...(routeRoots.artifactBoundary ? { boundary: routeRoots.artifactBoundary } : {}),
+    },
+    ...(routeRoots.notAssessed ? { routeRootsNotAssessed: routeRoots.notAssessed } : {}),
+    // `.d.ts` declarations are bodyless type declarations, not code — excluded from the
+    // candidate set rather than rated, and counted here so the exclusion is visible.
+    ...(ambientDeclarations.length > 0 ? {
+      declarationsExcluded: {
+        count: ambientDeclarations.length,
+        files: [...new Set(ambientDeclarations.map(n => n.filePath))].sort().slice(0, 20),
+        note: 'Declarations in TypeScript ambient declaration files (`.d.ts`) are bodyless — there is no code in them to be dead — so they are not dead-code candidates. Use `certify_public_surface` for the exported contract\'s shape.',
+      },
+    } : {}),
     // Receipts for every config-wired file that kept code live, and every config reference that
     // could not be resolved (change: add-framework-entry-point-adapters).
     externalWiring: externalWiringBlock(wiring.report, roots.filter(isWired)),
@@ -717,7 +838,11 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     truncated: finalRanked.length > limit ? finalRanked.length - limit : 0,
     coverage: { languages, exportSignal },
     ...(federationBlock ? { federation: federationBlock } : {}),
-    soundness: deadCodeSoundness(exportSignal, languages, wiring.report, unboundContract),
+    soundness: deadCodeSoundness(exportSignal, languages, wiring.report, unboundContract, [
+      ...(routeRoots.artifactBoundary ? [routeRoots.artifactBoundary] : []),
+      ...(routeRoots.notAssessed ? [`${routeRoots.notAssessed.total} inventoried route(s) did not pin to one declaration, so they rooted nothing (see routeRootsNotAssessed) — a handler that really serves a route can appear here.`] : []),
+      ...generated.boundaries,
+    ]),
     ...(parseHealthNote ? { parseHealthBoundary: parseHealthNote } : {}),
     confidenceBoundary: assembleBoundary({
       ...boundaryParts,
@@ -756,6 +881,7 @@ function deadCodeSoundness(
   languages: string[],
   wiring?: ExternalWiringReport,
   contract?: UnboundContractScope,
+  extra: readonly string[] = [],
 ): { posture: string; caveats: string[] } {
   const caveats = [
     'These are CANDIDATES, not deletion authority — never auto-delete based on this.',
@@ -778,5 +904,6 @@ function deadCodeSoundness(
   if (dynamic.length > 0) {
     caveats.push(`Dynamic languages present (${dynamic.join(', ')}): implicit exports and runtime dispatch make deadness unreliable — those candidates are capped at low confidence.`);
   }
+  caveats.push(...extra);
   return { posture: 'candidates-not-authority', caveats };
 }

@@ -693,7 +693,10 @@ describe('tools/list payload budget (spec-28)', () => {
     // (measured 107,279 B; change: add-service-contract-certification).
     // declare_footprint adds one conclusion tool: 107,800 → 109,300 B
     // (measured 108,500 B; change: add-peer-footprint-board).
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(109_300);
+    // certify_provenance's in-toto validation wording lengthens an existing tool's
+    // description, not a new tool: 109,300 → 110,500 B (measured 109,350 B;
+    // change: add-change-provenance-certificate).
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(110_500);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

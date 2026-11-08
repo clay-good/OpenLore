@@ -27,6 +27,7 @@
  */
 
 import type Parser from 'tree-sitter';
+import { importGrammar } from './grammar-entry.js';
 import { usesTsxGrammar } from './language-detection.js';
 import { readNamedChildren } from './ast-children.js';
 import { parseWithBudget, type BudgetableParser } from './extraction-budget.js';
@@ -322,7 +323,7 @@ export async function getExceptionParser(
       case 'JavaScript': {
         if (usesTsxGrammar(filePath)) {
           if (!_tsxParser) {
-            const m = await import('tree-sitter-typescript');
+            const m = await importGrammar('tree-sitter-typescript');
             _tsxParser = new NP();
             _tsxParser.setLanguage(
               ((m.default ?? m) as { tsx: object }).tsx as Parser.Language,
@@ -331,7 +332,7 @@ export async function getExceptionParser(
           return _tsxParser!;
         }
         if (!_tsParser) {
-          const m = await import('tree-sitter-typescript');
+          const m = await importGrammar('tree-sitter-typescript');
           _tsParser = new NP();
           _tsParser.setLanguage(
             ((m.default ?? m) as { typescript: object }).typescript as Parser.Language,
@@ -341,22 +342,22 @@ export async function getExceptionParser(
       }
       case 'Python': {
         if (!_pyParser) {
-          const m = await import('tree-sitter-python');
+          const m = await importGrammar('tree-sitter-python');
           _pyParser = new NP();
           _pyParser.setLanguage((m.default ?? m) as Parser.Language);
         }
         return _pyParser!;
       }
       case 'Go': {
-        if (!_goParser) { const m = await import('tree-sitter-go'); _goParser = new NP(); _goParser.setLanguage((m.default ?? m) as Parser.Language); }
+        if (!_goParser) { const m = await importGrammar('tree-sitter-go'); _goParser = new NP(); _goParser.setLanguage((m.default ?? m) as Parser.Language); }
         return _goParser;
       }
       case 'Java': {
-        if (!_javaParser) { const m = await import('tree-sitter-java'); _javaParser = new NP(); _javaParser.setLanguage((m.default ?? m) as Parser.Language); }
+        if (!_javaParser) { const m = await importGrammar('tree-sitter-java'); _javaParser = new NP(); _javaParser.setLanguage((m.default ?? m) as Parser.Language); }
         return _javaParser;
       }
       case 'C#': {
-        if (!_csharpParser) { const m = await import('tree-sitter-c-sharp'); _csharpParser = new NP(); _csharpParser.setLanguage((m.default ?? m) as Parser.Language); }
+        if (!_csharpParser) { const m = await importGrammar('tree-sitter-c-sharp'); _csharpParser = new NP(); _csharpParser.setLanguage((m.default ?? m) as Parser.Language); }
         return _csharpParser;
       }
       default:

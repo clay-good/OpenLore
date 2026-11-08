@@ -10,6 +10,7 @@
  */
 
 import type Parser from 'tree-sitter';
+import { importGrammar } from './grammar-entry.js';
 import { detectLanguage, usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './extraction-budget.js';
 
@@ -46,7 +47,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
       case 'javascript': {
         if (usesTsxGrammar(filePath)) {
           if (!_tsxParser) {
-            const m = await import('tree-sitter-typescript');
+            const m = await importGrammar('tree-sitter-typescript');
             _tsxParser = new NP();
             _tsxParser.setLanguage(
               ((m.default ?? m) as { tsx: object }).tsx as Parser.Language
@@ -55,7 +56,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
           return _tsxParser!;
         }
         if (!_tsParser) {
-          const m = await import('tree-sitter-typescript');
+          const m = await importGrammar('tree-sitter-typescript');
           _tsParser = new NP();
           _tsParser.setLanguage(
             ((m.default ?? m) as { typescript: object }).typescript as Parser.Language
@@ -65,7 +66,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
       }
       case 'python': {
         if (!_pyParser) {
-          const m = await import('tree-sitter-python');
+          const m = await importGrammar('tree-sitter-python');
           _pyParser = new NP();
           _pyParser.setLanguage((m.default ?? m) as Parser.Language);
         }
@@ -73,7 +74,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
       }
       case 'go': {
         if (!_goParser) {
-          const m = await import('tree-sitter-go');
+          const m = await importGrammar('tree-sitter-go');
           _goParser = new NP();
           _goParser.setLanguage((m.default ?? m) as Parser.Language);
         }
@@ -81,7 +82,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
       }
       case 'rust': {
         if (!_rustParser) {
-          const m = await import('tree-sitter-rust');
+          const m = await importGrammar('tree-sitter-rust');
           _rustParser = new NP();
           _rustParser.setLanguage((m.default ?? m) as Parser.Language);
         }
@@ -89,7 +90,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
       }
       case 'ruby': {
         if (!_rubyParser) {
-          const m = await import('tree-sitter-ruby');
+          const m = await importGrammar('tree-sitter-ruby');
           _rubyParser = new NP();
           _rubyParser.setLanguage((m.default ?? m) as Parser.Language);
         }
@@ -97,7 +98,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
       }
       case 'java': {
         if (!_javaParser) {
-          const m = await import('tree-sitter-java');
+          const m = await importGrammar('tree-sitter-java');
           _javaParser = new NP();
           _javaParser.setLanguage((m.default ?? m) as Parser.Language);
         }

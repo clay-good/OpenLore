@@ -16,6 +16,7 @@
  */
 
 import { parseDocument } from 'yaml';
+import { YAML_QUIET } from '../yaml-diagnostics.js';
 import type { IacGraph, IacReference } from './types.js';
 import { emptyIacGraph } from './types.js';
 
@@ -183,7 +184,7 @@ function lineOfPath(doc: ReturnType<typeof parseDocument>, content: string, path
  */
 function readYaml(content: string): { doc: ReturnType<typeof parseDocument>; js: Record<string, unknown> } | undefined {
   try {
-    const doc = parseDocument(maskExpressions(content), { merge: true });
+    const doc = parseDocument(maskExpressions(content), { ...YAML_QUIET, merge: true });
     if (doc.errors && doc.errors.length > 0) return undefined;
     const js = doc.toJS() as Record<string, unknown> | null;
     return js && typeof js === 'object' ? { doc, js } : undefined;

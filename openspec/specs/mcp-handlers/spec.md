@@ -4245,6 +4245,43 @@ inventory exists or no server route is indexed.
 - **WHEN** parity runs
 - **THEN** only `/v1/orders/export` is reported as `contract-implemented-undeclared`
 
+### Requirement: EnvImpactFollowsAHelperOneHopAndCountsTheRest
+
+`analyze_env_impact` SHALL report, as read sites, the call sites whose string literal names the
+variable and that were followed one hop into a same-file helper that performs the read — located to
+the CALL SITE's file and line, each carrying the helper it was followed through. It SHALL NOT present
+such a site as a direct read.
+
+Because a name reaching a read through a function parameter is followed one hop only, `boundaries`
+SHALL ALWAYS state that limit, and SHALL COUNT the environment reads in the repository whose key is
+not a literal and that could not be followed — with their files, lines, key expressions, and the
+reason each was refused — so the result's remaining shortfall is evidence rather than a caveat. The
+boundary SHALL be present even when nothing could be followed and nothing was left unfollowed. When
+the census could not read the repository's in-scope files, or a bound of its own was reached, that
+SHALL be disclosed rather than reported as a count of zero.
+
+#### Scenario: A followed call site is a read site, with the helper disclosed
+
+- **GIVEN** a Go file calling `mustMapEnv(&svc.addr, "PRODUCT_CATALOG_SERVICE_ADDR")` and defining
+  `mustMapEnv` with `os.Getenv(envKey)` in the same file
+- **WHEN** `analyze_env_impact` runs for `PRODUCT_CATALOG_SERVICE_ADDR`
+- **THEN** the call site's file and line are reported as a read site, with the helper named, and
+  `boundaries` says the name was followed one hop through a same-file helper
+
+#### Scenario: Unfollowed reads are counted with their evidence
+
+- **GIVEN** a repository with an environment read whose key is a parameter no call site passes a
+  literal to
+- **WHEN** `analyze_env_impact` runs for any variable
+- **THEN** `boundaries` states that read sites are a lower bound and names how many such reads were
+  seen in how many files, and the sites are listed with their reason
+
+#### Scenario: The one-hop limit is stated even with nothing to follow
+
+- **GIVEN** a repository whose every environment read names its variable with a literal
+- **WHEN** `analyze_env_impact` runs
+- **THEN** `boundaries` still states the one-hop limit and says no unfollowed read was found
+
 ### Requirement: EnvImpactNamesIacDeclarationSites
 
 `analyze_env_impact` SHALL report, in `declaredBy`, each infrastructure site in the repository that
@@ -4406,6 +4443,78 @@ function in `unresolvedDeployBindings` with the reason.
   caller of `handler`
 - **WHEN** `find_dead_code` runs
 - **THEN** `handler` is not a dead-code candidate, and `rootKinds.deployed` counts it
+
+### Requirement: ContractRootsAreCountedByProtocol
+
+`find_dead_code` SHALL label a root kept live by an `implements_endpoint` edge by the protocol of
+the contract element it serves, read from that element's own format tag: `rootKinds.grpcHandlers`
+for a protobuf RPC, `rootKinds.graphqlResolvers` for a GraphQL field, and `rootKinds.httpHandlers`
+for an HTTP route. The three counts SHALL be disjoint, with `rootKinds.deployed` taking precedence
+over all of them. `httpHandlers` SHALL remain the fallback lane: a binding whose contract node
+carries no readable format tag is counted there. `rootKinds` as a whole is not a partition — a root
+in a config-wired file is counted under `externallyWired` as well as under every other kind it
+matches — and this requirement does not make it one.
+
+#### Scenario: A gRPC method is not counted as an HTTP handler
+
+- **GIVEN** a Go method bound to a protobuf RPC by an `implements_endpoint` edge
+- **WHEN** `find_dead_code` runs
+- **THEN** `rootKinds.grpcHandlers` counts it and `rootKinds.httpHandlers` does not
+
+#### Scenario: A GraphQL resolver is not counted as an HTTP handler
+
+- **GIVEN** a resolver bound to a GraphQL field by an `implements_endpoint` edge
+- **WHEN** `find_dead_code` runs
+- **THEN** `rootKinds.graphqlResolvers` counts it and `rootKinds.httpHandlers` does not
+
+### Requirement: FrameworkRouteHandlersAreLiveFromTheRouteInventory
+`get_route_inventory` and `find_dead_code` read the same build and SHALL NOT contradict each
+other. `find_dead_code` SHALL join the `route-inventory.json` written by `analyze` into its
+liveness roots, resolving each inventoried route to a graph node by file and handler name, and
+SHALL count the resolved roots in `rootKinds.httpHandlers` with a `routeInventoryRoots` receipt.
+A handler SHALL be rooted ONLY when it resolves to exactly one declaration in that file: a
+handler resolving to several declarations, to none, in a file not in the index, with no name, or
+past the join's route cap SHALL NOT be rooted, SHALL be counted by reason in
+`routeRootsNotAssessed`, and SHALL never be guessed — a root attributed to the wrong declaration
+would make real dead code look live. A candidate the inventory names as a handler SHALL NOT carry
+the reason "not a route handler" and SHALL NOT be rated `high`. An absent, oversized, truncated,
+or non-JSON inventory SHALL degrade to the edge-derived roots WITH a stated boundary, never
+crash and never read as "no routes".
+#### Scenario: A decorator route with no declared contract is not dead
+- **GIVEN** a `@Controller()` class whose `@Get('broadcast')` method has no in-repo caller and no
+  declared OpenAPI operation (`contractSource: "none"`)
+- **THEN** the method is not a dead-code candidate and `rootKinds.httpHandlers` counts it
+#### Scenario: A Next.js App Router route handler is not dead
+- **GIVEN** `export async function POST` in `app/api/graphql/route.ts` with no in-repo caller
+- **THEN** `POST` is not a dead-code candidate
+#### Scenario: A handler that cannot be pinned is disclosed, not guessed
+- **GIVEN** an inventoried route whose handler name matches two declarations in its file
+- **THEN** neither declaration is rooted, both are capped at `low` with the inventory named as the
+  reason, and `routeRootsNotAssessed` counts the route under `ambiguous`
+#### Scenario: A corrupt inventory degrades with a disclosure
+- **GIVEN** a `route-inventory.json` that is absent or truncated mid-JSON
+- **THEN** the answer is the edge-derived one it had before the join, and
+  `routeInventoryRoots.boundary` states that the inventory could not be read
+### Requirement: AmbientDeclarationsAreNotDeadCodeCandidates
+A function-shaped symbol in a TypeScript ambient declaration file (`.d.ts`, `.d.mts`, `.d.cts`)
+is a bodyless type declaration: there is no code in it to be dead. `find_dead_code` and every
+conclusion built on its dead set (`report_coverage_gaps`, `get_landmarks`, `verify_claim`) SHALL
+NOT report such a symbol as a dead-code candidate at any confidence, and SHALL count the
+exclusion in `declarationsExcluded` rather than drop it silently.
+#### Scenario: A declared static method is not dead code
+- **GIVEN** `public static create(properties?: ITrace): Trace;` in a `.d.ts` file, with no caller
+- **THEN** `create` is absent from `candidateDead` and `declarationsExcluded.count` includes it
+### Requirement: GeneratedFileSymbolsAreNeverHighConfidenceDead
+A generated file's symbols are driven by whatever generated them — protobuf reflection, Go struct
+embedding, a runtime registry — not by a direct in-repo call. `find_dead_code` SHALL classify each
+candidate's file through the generated-file guard and SHALL cap a candidate in a generated,
+vendored, or lockfile-classified file at `low`, naming the guard's rule, what matched, and its
+certainty in the reason. Such symbols MAY remain candidates (nothing proves a caller), but SHALL
+NOT be asserted `high`. A guard rule that could not run SHALL be disclosed as a caveat.
+#### Scenario: Protobuf plumbing is not asserted dead
+- **GIVEN** a `*.pb.go` file whose header reads `Code generated by protoc-gen-go. DO NOT EDIT.`
+  and whose `ProtoReflect` method has no in-repo caller
+- **THEN** `ProtoReflect` is rated `low`, and the reason names the `header-marker` rule
 
 ### Requirement: PeersAreToldWhenASymbolTheyReadChanges
 

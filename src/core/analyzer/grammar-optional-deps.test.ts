@@ -18,8 +18,11 @@ const ROOT = join(__dirname, '..', '..', '..');
 
 function extractSoftLoadedPackages(): string[] {
   const src = readFileSync(join(ROOT, 'src', 'core', 'analyzer', 'call-graph.ts'), 'utf-8');
-  // Match: loadGrammarSoft('X', () => import('tree-sitter-foo'), ...)
-  const re = /loadGrammarSoft\('[^']+',\s*\(\)\s*=>\s*import\('(tree-sitter-[^']+)'\)/g;
+  // Match: loadGrammarSoft('X', () => importGrammar('tree-sitter-foo'), ...)
+  // `importGrammar` imports the grammar's explicit entry file rather than its
+  // extension-less `"main"` (DEP0151); a bare `import(...)` is still accepted
+  // here so the guard keeps working if a site is ever written that way.
+  const re = /loadGrammarSoft\('[^']+',\s*\(\)\s*=>\s*(?:importGrammar|import)\('(tree-sitter-[^']+)'\)/g;
   const packages: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {

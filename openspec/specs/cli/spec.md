@@ -1181,12 +1181,33 @@ user": the postinstall hint SHALL stay exactly `openlore install` (which now wir
 scope by default), and every EXPLICIT repo wiring SHALL include the decisions pre-commit hook,
 so the single entrypoint yields structural navigation and the governance trail with no
 additional command or flag. Autopilot (non-blocking, trail-only) mode SHALL be set only when
-install wires a gate for the FIRST time in a repository: an absent `governance.autopilot` means
-blocking review, so a repository that already carries an OpenLore commit gate SHALL keep the
-mode it was configured with, and an explicit `governance.autopilot: false` SHALL never be
-flipped. Install SHALL skip the gate entirely, with a stated reason and without failing, when
-OpenLore resolves inside the repository — a commit gate must not execute code the repository
-can change.
+install wires a gate for the FIRST time in a repository: in a configuration that EXISTS, an absent
+`governance.autopilot` means blocking review, so a repository that already carries an OpenLore
+commit gate SHALL keep the mode it was configured with, and an explicit `governance.autopilot:
+false` SHALL never be flipped. A repository with NO configuration at all — the `--no-analyze` and
+`openlore setup` paths, which run no `init` — SHALL receive a NON-BLOCKING gate: blocking is a
+setting, and the absence of the file that would record it is not a choice to block. Install SHALL
+NOT create a configuration on those paths, because that is the `init` the user declined. Install
+SHALL report the mode the gate was ACTUALLY installed in, resolved through the single autopilot
+resolver every gate check reads, so the summary can never contradict the installed state. Install
+SHALL skip the gate entirely, with a stated reason and without failing, when OpenLore resolves
+inside the repository — a commit gate must not execute code the repository can change.
+
+#### Scenario: `--no-analyze` installs a gate that does not block, and says so
+
+- **GIVEN** a git repository with no `.openlore/config.json`
+- **WHEN** `openlore install --no-analyze` runs
+- **THEN** a decisions commit gate is installed, no configuration file is created, and the gate
+  resolves to autopilot — a commit with pending drafts exits 0
+- **AND** the summary states the non-blocking mode and never also states that commits will be
+  gated
+
+#### Scenario: A blocking gate is reported as blocking
+
+- **GIVEN** a repository whose configuration sets `governance.autopilot: false`
+- **WHEN** `openlore install` wires the gate
+- **THEN** the summary names the blocking review mode and does not claim that no commit is
+  blocked by default
 
 #### Scenario: Installing the package does not touch the project
 
@@ -1340,6 +1361,47 @@ done-reading glyph).
 - **GIVEN** a decision store whose decisions are all `verified` (awaiting human review)
 - **WHEN** `openlore decisions --list` renders them
 - **THEN** the rows read as awaiting review, visually distinct from approved/synced, with a legend
+
+### Requirement: ConsoleReportsAreBoundedAndDisclosed
+
+Console report lines whose length is a property of the ANALYZED REPOSITORY rather than of OpenLore —
+a cycle's (strongly-connected component's) participant chain, a clone group's member list, the
+detected-domain and workspace-shard inventories — SHALL be capped at a fixed number of names and
+SHALL disclose the exact number withheld in the house `… and N more <noun>s` form. The cap is a
+RENDERING cap only: what is computed and what the JSON artifacts store is unchanged, and every
+capped report names the artifact that holds the full set. A quiet truncation (an ellipsis with no
+count, or a dropped tail) is never acceptable. Guard tests SHALL assert both the rendered line's
+length and the exact omitted count.
+
+Third-party libraries SHALL NOT write diagnostics to OpenLore's terminal. Where a dependency offers
+a diagnostic-routing option it SHALL be passed at the level that silences WARNINGS ONLY (`yaml`'s
+`logLevel: 'error'`, never `'silent'`, which would also stop it throwing on a malformed document),
+and where a dependency's
+warning is provoked by OpenLore's own import or call shape the call SHALL be changed so the warning
+does not arise (native tree-sitter grammars are imported by their resolved entry FILE, never by an
+extension-less package `main`, so Node emits no `DEP0151`). Information a suppressed warning
+carried SHALL remain reachable on OpenLore's own logger at `debug` (`--verbose`) level, never
+discarded. Node's warning channel is never silenced globally.
+
+#### Scenario: A thousand-symbol cycle renders as one readable line
+
+- **GIVEN** a repository whose strongly-connected component names 1,347 functions
+- **WHEN** `openlore analyze` renders its refactoring report
+- **THEN** the `⚠ Cycle:` line names a fixed few symbols and states `… and 1339 more symbols`
+- **AND** `refactor-priorities.json` still lists every participant
+
+#### Scenario: A library warning does not reach the terminal but stays reachable
+
+- **GIVEN** a Helm template whose masked form makes `yaml` stringify a collection-valued map key
+- **WHEN** `openlore analyze` parses it
+- **THEN** nothing is written to the process warning channel by the library
+- **AND** `--verbose` reports the stringified key, with its file path, on OpenLore's own logger
+
+#### Scenario: Our own grammar import emits no deprecation warning
+
+- **WHEN** OpenLore loads a native tree-sitter grammar
+- **THEN** it imports the entry file the package's `main` resolves to, so no `[DEP0151]`
+  DeprecationWarning is emitted, and no Node warning is suppressed to achieve it
 
 ### Requirement: DefaultPresetHasOneSource
 
@@ -1809,6 +1871,46 @@ with an optional next step — including any secondary precondition of that step
 - **GIVEN** a repository with an initialized `.openlore/` store
 - **WHEN** `openlore install --uninstall` completes
 - **THEN** the summary lists `.openlore/` as kept and shows how to delete it
+
+### Requirement: UninstallDisclosesTheUserScopeItRemoves
+
+A removal that touches the USER scope rewrites files outside the repository the command was run in
+and affects every repository on the machine. Each reported change SHALL name its ABSOLUTE path and
+its scope, so a user-scope file can never be mistaken for a repo-local file of the same name, and a
+user-scope removal SHALL additionally state, in words, that it affects all repositories and name
+`--repo-only` as the way to uninstall one repository only. The install direction already states its
+all-repositories consequence; the removal direction SHALL state it at least as plainly.
+
+#### Scenario: A per-repo uninstall says that it unwired every repository
+
+- **GIVEN** a user-scope install, and `openlore install --uninstall` run inside one repository
+- **WHEN** the command strips the OpenLore entries from the user-scope configuration
+- **THEN** the reported change names the absolute path of that file and marks it as user scope
+- **AND** the summary states that this affects all repositories and names `--repo-only`
+
+#### Scenario: `--repo-only` makes no all-repositories claim
+
+- **GIVEN** `openlore install --uninstall --repo-only`
+- **WHEN** the command completes
+- **THEN** the user-scope entries are left in place, the summary says so, and no
+  all-repositories consequence is stated
+
+### Requirement: PreviewsNeverPrintUntouchedConfiguration
+
+`--dry-run` previews render files that hold the user's private configuration and credentials
+(`~/.claude.json` carries an `signedInAccount` block and per-MCP-server `env` blocks). A preview SHALL
+show only the ACTUAL changed hunks, each inside a bounded context window, and SHALL NOT render an
+untouched key merely because it lies between two changed lines. Every rendered line SHALL pass
+through the repository's secret redaction first, so a credential inside a genuinely changed hunk is
+never echoed. A changed region too large to diff precisely SHALL be reported as such with a bounded
+excerpt, never dumped.
+
+#### Scenario: A key-order shift does not print the file
+
+- **GIVEN** a large user-scope configuration whose OpenLore-managed keys changed and were re-ordered
+- **WHEN** `openlore install --dry-run` previews it
+- **THEN** the preview is bounded, and untouched keys far from the change — including the
+  `signedInAccount` block and other servers' `env` values — do not appear
 
 ### Requirement: DoctorsConfigVerdictIsSupportedByItsEvidence
 
@@ -3184,9 +3286,27 @@ opt-outs as auto-initialization.
 
 When background auto-initialization creates a repository's configuration, it SHALL record
 `governance.autopilot: true` in it, unless a blocking decisions gate is installed or the directory is
-a linked worktree whose main checkout sets the key. An absent key SHALL keep meaning blocking review,
-so a gate OpenLore cannot see (a CI-only gate, a hook manager, a fresh clone) never turns into
-auto-accept. The resolved mode and its reason SHALL be reported wherever governance state is shown.
+a linked worktree whose main checkout sets the key. An absent key IN A CONFIGURATION THAT EXISTS
+SHALL keep meaning blocking review, so a gate OpenLore cannot see (a CI-only gate, a hook manager, a
+fresh clone with empty hooks) never turns into auto-accept. The complete ABSENCE of a configuration
+SHALL resolve, FOR THE GATE, to autopilot instead: governance is advisory and never blocks by
+default, "blocking" is a setting, and a gate with nowhere to read that setting from was never
+configured to block. It SHALL NOT resolve to auto-ACCEPT on record there: an unconfigured repository
+has no spec corpus to sync an accepted decision into, so a recorded decision still waits as a draft,
+and the single stated reason SHALL name both halves. The resolved mode and its reason SHALL be
+reported wherever governance state is shown.
+
+#### Scenario: A gate with nowhere to read a setting from does not block
+
+- **GIVEN** a repository with no `.openlore/config.json` — `openlore install --no-analyze` or
+  `openlore setup`, or a clone whose `.openlore/` is gitignored
+- **WHEN** the commit gate runs
+- **THEN** the mode is autopilot with a reason naming the missing configuration, decisions are
+  recorded, and the commit is not blocked
+- **AND** a decision recorded in that repository still waits as a draft, because auto-accepting it
+  is a different question from unblocking a commit
+- **AND** blocking review stays reachable by running `openlore init` and setting
+  `governance.autopilot: false`
 
 #### Scenario: A repository nobody configured runs on autopilot
 

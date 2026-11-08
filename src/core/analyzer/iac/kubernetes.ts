@@ -8,6 +8,7 @@
  */
 
 import { LineCounter, parseAllDocuments } from 'yaml';
+import { YAML_QUIET, reportStringifiedCollectionKeys } from '../yaml-diagnostics.js';
 import type { IacGraph, IacReference, IacResource } from './types.js';
 import { emptyIacGraph } from './types.js';
 
@@ -36,10 +37,11 @@ export function extractKubernetes(
     const lc = new LineCounter();
     let docs;
     try {
-      docs = parseAllDocuments(file.content, { lineCounter: lc });
+      docs = parseAllDocuments(file.content, { ...YAML_QUIET, lineCounter: lc });
     } catch {
       continue;
     }
+    reportStringifiedCollectionKeys(docs, file.path);
     for (const doc of docs) {
       const obj = doc.toJS() as Record<string, unknown> | null;
       if (!obj || typeof obj !== 'object') continue;

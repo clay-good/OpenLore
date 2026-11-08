@@ -138,6 +138,8 @@ const dirName = (f: string) => dirOf(f).replace(/\/$/, '').split('/').pop() ?? '
  *   Python, `mod.C`     a module named `mod`
  *   Node                the registration's own file; an IMPORTED handler only in the module it
  *                       was imported from (one barrel re-export followed)
+ *   Node, `new C()`     the registration's own file, or — when `C` is imported — only the module
+ *                       `implFrom` names; narrowed by the caller, then passed through here
  */
 function inScope(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): readonly FunctionNode[] {
   if (reg.runtime === 'go') {
@@ -341,11 +343,34 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     // Linear in RPCs and map keys: one key map per registration, and each RPC's candidates
     // resolved once (a registration × RPCs × keys product made one hostile repository cost 68 s).
     const byKey = new Map((reg.methods ?? []).map(e => [e.key, e] as const));
+    // A Node registration that instantiated a class (`new MyHandlers()`): no map names the
+    // methods, so each RPC is looked for as a method of that class, under the same key ladder
+    // grpc-js derives. Scoped to where the registration says the class is, and nowhere else.
+    const nodeClass = reg.runtime === 'node' && reg.implType !== undefined && reg.methods === undefined;
+    const classTargets = nodeClass && reg.implFrom !== undefined && input.importTargets
+      ? new Set(input.importTargets(reg.file, reg.implFrom, reg.implType!).map(t => t.file))
+      : undefined;
+    /** Whether a candidate method sits where the instantiated class may be. */
+    const classScoped = (n: FunctionNode): boolean =>
+      reg.implFrom === undefined ? n.filePath === reg.file
+        : classTargets ? classTargets.has(n.filePath)
+          : isImportedModule(reg.file, reg.implFrom, n.filePath);
     const work: Array<{ rpc: ProtoRpc; target: FunctionNode; fnName?: string; imported: boolean; from?: string; inline: boolean; found: FunctionNode[] }> = [];
     for (const rpc of service.rpcs) {
       const target = rpcNodes.get(nodeId(doc.file, rpc.address));
       if (!target) continue; // past the cap
       if (reg.runtime !== 'node') { work.push({ rpc, target, fnName: rpc.name, imported: false, inline: false, found: [...input.resolveImplementation(reg, rpc.name)] }); continue; }
+      if (nodeClass) {
+        // The same ladder a literal map's keys are matched by, tried in order: the first name the
+        // class defines is the method serving this RPC.
+        for (const name of [...new Set([rpc.name, lowerFirst(rpc.name), lodashCamel(rpc.name)])]) {
+          const found = input.resolveImplementation(reg, name).filter(classScoped);
+          if (!found.length) continue;
+          work.push({ rpc, target, fnName: name, imported: true, inline: false, found: [...found] });
+          break;
+        }
+        continue;
+      }
       const entry = byKey.get(rpc.name) ?? byKey.get(lowerFirst(rpc.name)) ?? byKey.get(lodashCamel(rpc.name));
       if (!entry) continue; // not in the map: left unbound
       if (entry.notFollowed) {
@@ -359,6 +384,16 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     // does not implement is not looked for in a same-named class elsewhere (a servicer named like
     // the service took the rest from the generated client class).
     const homeIsLocal = reg.runtime === 'python' && reg.implQualifier === undefined && work.some(w => w.found.some(n => n.filePath === reg.file));
+    if (nodeClass) {
+      // One registration names ONE class, so its methods are in one file. Two files declaring a
+      // class of that name where the registration says it is binds nothing, as for Go and Python.
+      const homes = new Set(work.flatMap(w => w.found.map(n => n.filePath)));
+      if (homes.size > 1) {
+        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, reason: 'ambiguous-implementation',
+          detail: `\`${reg.implType}\` is defined in more than one place: ${[...homes].sort().slice(0, 4).join(', ')}` });
+        continue;
+      }
+    }
     if (reg.runtime !== 'node') {
       const homes = new Set(work.flatMap(w => inScope(reg, homeIsLocal ? w.found.filter(n => n.filePath === reg.file) : w.found).map(n => homeOf(reg, n))));
       if (homes.size > 1) {
@@ -379,9 +414,10 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       }
       // An imported Node handler is looked for only in the module it was imported from (one barrel
       // re-export followed).
-      const targets = reg.runtime === 'node' && w.imported && w.from !== undefined && w.fnName !== undefined && input.importTargets
+      const targets = reg.runtime === 'node' && !nodeClass && w.imported && w.from !== undefined && w.fnName !== undefined && input.importTargets
         ? input.importTargets(reg.file, w.from, w.fnName) : undefined;
-      const found = reg.runtime === 'node' && w.imported
+      // A class instance's candidates were scoped to the class's own module already.
+      const found = reg.runtime === 'node' && w.imported && !nodeClass
         ? (targets
           ? targets.flatMap(t => input.resolveImplementation(reg, t.name).filter(n => n.filePath === t.file))
           : w.found.filter(n => w.from !== undefined && isImportedModule(reg.file, w.from, n.filePath)))
@@ -394,11 +430,13 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       }
       if (!impl) {
         // Node: each map entry names its own function, so one that binds nothing is said per RPC.
-        if (reg.runtime === 'node') {
+        // A class instance names no methods, so an RPC it does not implement is said once for the
+        // whole registration below, as for Go and Python.
+        if (reg.runtime === 'node' && !nodeClass) {
           out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, ...(fnName ? { symbol: fnName } : {}), reason: 'implementation-not-found',
             detail: !w.imported ? `\`${fnName}\` is neither defined in ${reg.file} nor imported by it`
               : targets?.length ? `\`${fnName}\` is imported from '${w.from}', which is indexed but neither defines nor directly re-exports it`
-                : `\`${fnName}\` is imported by ${reg.file} from '${w.from}', which is not indexed here (a package or a path alias)` });
+                : `\`${fnName}\` is imported by ${reg.file} from '${w.from}', which is not indexed here (a package, or a specifier no declared path alias resolves to one module)` });
         }
         continue; // Go/Python: not implemented here (a server embedding Unimplemented…): left unbound
       }
@@ -408,9 +446,12 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     // Not one method of the registered type was found anywhere it may be — an import alias that
     // differs from the directory, an aliased Python import, methods all from an embedded or base
     // type. The implementation then reads as dead code, so the registration is named.
-    if (!anyCandidate && reg.runtime !== 'node') {
+    if (!anyCandidate && (reg.runtime !== 'node' || nodeClass)) {
+      const where = nodeClass
+        ? reg.implFrom === undefined ? ` in ${reg.file}` : ` in the module '${reg.implFrom}' it is imported from`
+        : ' where the registration says it is';
       out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, ...classDisclosure(reg), reason: 'implementation-not-found',
-        detail: `no method of \`${reg.implQualifier ? `${reg.implQualifier}.` : ''}${reg.implType}\` named after an RPC was found where the registration says it is` });
+        detail: `no method of \`${reg.implQualifier ? `${reg.implQualifier}.` : ''}${reg.implType}\` named after an RPC was found${where}` });
     }
   }
   out.unboundRpcs = [...rpcNodes.values()].filter(n => !bound.has(n.id)).map(n => `${n.name} (${n.filePath}:${n.startLine})`).sort();
