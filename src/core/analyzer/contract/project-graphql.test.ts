@@ -198,7 +198,7 @@ describe('projectGraphql: schema universes (change: scope-graphql-schema-univers
     expect(edgesOf(p, 'implements_endpoint')).toEqual(['packages/a/src/r.ts::getOrder -> packages/a/schema.graphql::Query.order']);
     // The map in no project sees `Query.order` declared by two projects: disclosed, never guessed.
     expect(p.unresolvedResolvers).toEqual([
-      { file: 'outside/r.ts', line: 2, root: 'Query', field: 'order', reason: 'ambiguous-implementation', detail: expect.stringContaining('declared by 2 projects') },
+      { file: 'outside/r.ts', line: 2, root: 'Query', field: 'order', symbol: 'getOrder', reason: 'ambiguous-implementation', detail: expect.stringContaining('declared by 2 projects') },
     ]);
   });
 
