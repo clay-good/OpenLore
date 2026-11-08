@@ -133,7 +133,7 @@ live registry.
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 8 | 3,562 | 3,720 |
 | `substrate` | 15 | 5,248 | 5,500 |
-| `full` | 83 | 27,325 | 28,400 |
+| `full` | 83 | 27,338 | 28,400 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
