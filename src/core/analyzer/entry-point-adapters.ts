@@ -12,8 +12,15 @@
  * a redirect target, or heredoc content is not wiring. What an adapter cannot resolve is a disclosed
  * boundary, never a guess: a variable or `${{ }}` expression, a glob, a `cd` it cannot follow, a module
  * run by name, a missing target, a path outside the repository, a build output with no mapped source,
- * or a config it cannot read or parse. Not read at all (disclosed by the consumers): workspace-member
- * manifests, framework routing conventions, and any other config format.
+ * or a config it cannot read or parse. Not read at all (disclosed by the consumers): framework routing
+ * conventions, and any other config format.
+ *
+ * In a workspace monorepo the manifests a root config DECLARES as workspace members are read with the
+ * same package.json adapter, each reference resolved against that manifest's own directory and
+ * receipted with its own path (change: add-workspace-manifest-wiring). Only the declared set is read —
+ * the `workspaces` field (array or `{ packages: [...] }`) and `pnpm-workspace.yaml`'s `packages:` — and
+ * that limit is disclosed whenever a repository declares workspaces: a manifest outside the declared
+ * set contributes nothing. The tree is never searched for manifests, so no root is ever invented.
  */
 
 import { opendir, readdir, stat } from 'node:fs/promises';
@@ -70,6 +77,14 @@ const MAX_KEY_MATCHES_PER_CONFIG = 20;
 /** Distinct boundaries kept from one config file; more is counted. */
 const MAX_BOUNDARIES_PER_CONFIG = 100;
 const MAX_REPORTED_BOUNDARIES = 50;
+/** Declared workspace manifests read beyond the root one; more is disclosed with an exact count. */
+const MAX_WORKSPACE_MANIFESTS = 256;
+/** Patterns taken from one workspace declaration; more is disclosed. */
+const MAX_WORKSPACE_PATTERNS = 64;
+/** Directory entries a repository's whole workspace-glob expansion may scan; more is disclosed. */
+const MAX_WORKSPACE_DIR_ENTRIES = 20_000;
+/** Levels a `**` segment descends. */
+const MAX_WORKSPACE_GLOB_DEPTH = 8;
 
 const TEST_RUNNER_CONFIGS = [
   'vitest.config.ts', 'vitest.config.mts', 'vitest.config.js', 'vitest.config.mjs', 'vitest.config.cjs',
@@ -155,6 +170,8 @@ interface Reference extends WiringReceipt {
 class Collector {
   readonly references: Reference[] = [];
   readonly boundaries: WiringBoundary[] = [];
+  /** Standing limits of what is read at all — reported ahead of the resolved-reference boundaries. */
+  readonly disclosures: WiringBoundary[] = [];
   /** Boundaries dropped by the per-config cap. */
   droppedBoundaries = 0;
   private referencesPerConfig = new Map<string, number>();
@@ -174,6 +191,17 @@ class Collector {
     }
   }
 
+  /**
+   * A standing limit of the reader itself, not an unresolved reference: kept out of the per-config cap
+   * and listed first, so truncation can never hide what is not read at all.
+   */
+  disclose(boundary: WiringBoundary): void {
+    const key = JSON.stringify([boundary.config, boundary.key, boundary.reference, boundary.reason]);
+    if (this.seenBoundaries.has(key)) return;
+    this.seenBoundaries.add(key);
+    this.disclosures.push(boundary);
+  }
+
   boundary(boundary: WiringBoundary): void {
     const key = JSON.stringify([boundary.config, boundary.key, boundary.reference, boundary.reason]);
     if (this.seenBoundaries.has(key)) return;
@@ -191,7 +219,8 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
   const out = new Collector();
 
   const tsconfig = await readTsconfig(root, out);
-  await readPackageJson(root, out);
+  const rootManifest = await readPackageJson(root, out);
+  await readWorkspaceManifests(root, rootManifest, out);
   await readTestRunnerConfigs(root, out);
   await readWorkflows(root, out);
 
@@ -218,8 +247,11 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
   const wired = [...receiptsByFile]
     .map(([file, receipts]) => ({ file, receipts: receipts.sort(compareReceipts) }))
     .sort((a, b) => compareText(a.file, b.file));
-  const boundaries = out.boundaries
-    .sort((a, b) => compareReceipts(a, b) || compareText(a.reference, b.reference) || compareText(a.reason, b.reason));
+  const boundaries = [
+    ...out.disclosures,
+    ...out.boundaries
+      .sort((a, b) => compareReceipts(a, b) || compareText(a.reference, b.reference) || compareText(a.reason, b.reason)),
+  ];
   return {
     wired,
     boundaries: boundaries.slice(0, MAX_REPORTED_BOUNDARIES),
@@ -229,23 +261,29 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
 
 // ── package.json ──────────────────────────────────────────────────────────────
 
-async function readPackageJson(root: string, out: Collector): Promise<void> {
-  const config = 'package.json';
+/**
+ * One package manifest, read at `config` (the root `package.json`, or a declared workspace member's).
+ * Every reference it holds is resolved against the manifest's OWN directory and receipted with its own
+ * path, so a nested `"main": "index.js"` names that package's file and never the repository root's.
+ * Returns the parsed manifest, for the caller that reads its workspace declaration.
+ */
+async function readPackageJson(root: string, out: Collector, config = 'package.json'): Promise<Record<string, unknown> | null> {
   const manifest = await readJsonConfig(root, config, out);
-  if (!manifest) return;
+  if (!manifest) return null;
+  const dir = manifestDirectory(config);
   const add = (key: string, value: unknown) => {
-    if (typeof value === 'string' && value.length > 0) out.reference({ config, key, reference: value });
+    if (typeof value === 'string' && value.length > 0) out.reference({ config, key, reference: inDirectory(dir, value) });
   };
 
   if (typeof manifest.bin === 'string') add('bin', manifest.bin);
   else if (isRecord(manifest.bin)) for (const [name, value] of Object.entries(manifest.bin)) add(`bin.${name}`, value);
   add('main', manifest.main);
   add('module', manifest.module);
-  collectExports(manifest.exports, 'exports', out);
+  collectExports(manifest.exports, 'exports', out, config, dir);
 
   if (isRecord(manifest.scripts)) {
     for (const [name, command] of Object.entries(manifest.scripts)) {
-      if (typeof command === 'string') commandReferences(command, config, `scripts.${name}`, undefined, out);
+      if (typeof command === 'string') commandReferences(command, config, `scripts.${name}`, dir, out);
     }
   }
   if (isRecord(manifest.jest)) {
@@ -255,18 +293,301 @@ async function readPackageJson(root: string, out: Collector): Promise<void> {
       }
     }
   }
+  return manifest;
+}
+
+/** The directory a config file lives in, repository-relative; `undefined` at the repository root. */
+function manifestDirectory(config: string): string | undefined {
+  const dir = posix.dirname(config);
+  return dir === '.' || dir === '' || dir === '/' ? undefined : dir;
+}
+
+/**
+ * A reference as written in a config, resolved against that config's directory. An absolute path is
+ * left alone — prefixing it would invent a repository file that was never named.
+ */
+function inDirectory(dir: string | undefined, reference: string): string {
+  const path = reference.replaceAll('\\', '/');
+  if (!dir || path.startsWith('/') || /^[A-Za-z]:/.test(path)) return reference;
+  return posix.join(dir, path);
 }
 
 /** Every string target in an `exports` map, keyed by its condition path; `*` patterns are boundaries. */
-function collectExports(value: unknown, key: string, out: Collector): void {
+function collectExports(value: unknown, key: string, out: Collector, config: string, dir: string | undefined): void {
   if (typeof value === 'string') {
     if (/\.d\.[cm]?ts$/.test(value) || value.endsWith('package.json')) return;
-    if (value.includes('*')) out.boundary({ config: 'package.json', key, reference: value, reason: 'dynamic-reference' });
-    else out.reference({ config: 'package.json', key, reference: value });
+    if (value.includes('*')) out.boundary({ config, key, reference: value, reason: 'dynamic-reference' });
+    else out.reference({ config, key, reference: inDirectory(dir, value) });
     return;
   }
-  if (Array.isArray(value)) value.forEach((item, i) => collectExports(item, `${key}[${i}]`, out));
-  else if (isRecord(value)) for (const [k, v] of Object.entries(value)) collectExports(v, `${key}["${k}"]`, out);
+  if (Array.isArray(value)) value.forEach((item, i) => collectExports(item, `${key}[${i}]`, out, config, dir));
+  else if (isRecord(value)) for (const [k, v] of Object.entries(value)) collectExports(v, `${key}["${k}"]`, out, config, dir);
+}
+
+// ── declared workspace manifests ──────────────────────────────────────────────
+
+/** One workspace pattern, with the config and key that declared it. */
+interface WorkspacePattern extends WiringReceipt {
+  pattern: string;
+  /** A `!`-prefixed pattern: the members it names are not workspace members. */
+  negated: boolean;
+}
+
+/** Directory entries a repository's whole workspace expansion may still scan. */
+interface ExpansionBudget {
+  entries: number;
+  exhausted: boolean;
+}
+
+/**
+ * Every manifest a root config DECLARES as a workspace member, read with the package.json adapter.
+ *
+ * Only declared patterns are followed — an exact glob in `workspaces` or `pnpm-workspace.yaml` — so a
+ * member is evidence the repository itself wrote down, never a manifest found by searching the tree.
+ * That limit is disclosed whenever workspaces are declared, because a manifest outside the declared
+ * set contributes nothing and code wired only there can still read as dead.
+ */
+async function readWorkspaceManifests(
+  root: string,
+  rootManifest: Record<string, unknown> | null,
+  out: Collector,
+): Promise<void> {
+  const patterns = await workspacePatterns(root, rootManifest, out);
+  if (patterns.length === 0) return;
+  const declaration: WiringReceipt = { config: patterns[0].config, key: patterns[0].key };
+  out.disclose({
+    ...declaration,
+    reference: 'only the package.json manifests of declared workspace members are read',
+    reason: 'unsupported-form',
+  });
+
+  const budget: ExpansionBudget = { entries: 0, exhausted: false };
+  // Exclusions are expanded FIRST, so the shared budget can never starve them into a member that the
+  // repository said is not one.
+  const excluded = new Set<string>();
+  let exclusionsComplete = true;
+  for (const pattern of patterns.filter(p => p.negated)) {
+    const dirs = await expandWorkspacePattern(root, pattern, budget, out);
+    if (dirs === null) exclusionsComplete = false;
+    else for (const dir of dirs) excluded.add(dir);
+  }
+  // FAIL CLOSED. An exclusion this reader cannot expand means it cannot tell which directories the
+  // repository took OUT of its workspace set, and reading one anyway would make a member the
+  // repository excluded into a liveness root. Nothing is read instead, and the reason is disclosed.
+  if (!exclusionsComplete || budget.exhausted) {
+    out.disclose({
+      ...declaration,
+      reference: budget.exhausted
+        ? `workspace exclusion patterns could not be expanded within ${MAX_WORKSPACE_DIR_ENTRIES} directory entries; no workspace manifest was read`
+        : 'a workspace exclusion pattern could not be expanded; no workspace manifest was read',
+      reason: 'unsupported-form',
+    });
+    return;
+  }
+
+  const included = new Set<string>();
+  for (const pattern of patterns.filter(p => !p.negated)) {
+    // A pattern this reader cannot expand leaves its members unread — the sound direction — and is
+    // already disclosed as its own boundary.
+    for (const dir of await expandWorkspacePattern(root, pattern, budget, out) ?? []) {
+      if (dir.length > 0 && !excluded.has(dir)) included.add(dir);
+    }
+  }
+  if (budget.exhausted) {
+    out.disclose({
+      ...declaration,
+      reference: `workspace patterns stopped expanding after ${MAX_WORKSPACE_DIR_ENTRIES} directory entries; members beyond that are not read`,
+      reason: 'unsupported-form',
+    });
+  }
+
+  const manifests: string[] = [];
+  for (const dir of [...included].sort(compareText)) {
+    const relative = posix.join(dir, 'package.json');
+    const absolute = join(root, relative);
+    let isFile: boolean;
+    try {
+      // Only a regular file is a manifest: a FIFO or a directory at that path is not read. A path that
+      // runs through a non-directory simply has no manifest — it is not an escape.
+      isFile = (await stat(absolute)).isFile();
+    } catch {
+      continue;
+    }
+    if (!isFile) continue;
+    // `stat` followed links, so confinement is checked on where the manifest REALLY is.
+    if (!isConfinedPath(root, absolute)) {
+      out.boundary({ ...declaration, reference: relative, reason: 'outside-repository' });
+      continue;
+    }
+    manifests.push(relative);
+  }
+  if (manifests.length > MAX_WORKSPACE_MANIFESTS) {
+    out.disclose({
+      ...declaration,
+      reference: `${manifests.length - MAX_WORKSPACE_MANIFESTS} of ${manifests.length} declared workspace manifests were not read (cap ${MAX_WORKSPACE_MANIFESTS})`,
+      reason: 'unsupported-form',
+    });
+  }
+  for (const manifest of manifests.slice(0, MAX_WORKSPACE_MANIFESTS)) {
+    await readPackageJson(root, out, manifest);
+  }
+}
+
+/** The workspace patterns the root manifest and `pnpm-workspace.yaml` declare. */
+async function workspacePatterns(
+  root: string,
+  rootManifest: Record<string, unknown> | null,
+  out: Collector,
+): Promise<WorkspacePattern[]> {
+  const patterns: WorkspacePattern[] = [];
+  const take = (config: string, key: string, value: unknown): void => {
+    if (value === undefined || value === null) return;
+    if (!Array.isArray(value)) {
+      out.boundary({ config, key, reference: `${key} is not a list of patterns`, reason: 'unsupported-form' });
+      return;
+    }
+    let taken = 0;
+    for (const item of value) {
+      if (typeof item !== 'string' || item.trim().length === 0) {
+        out.boundary({ config, key, reference: String(item).slice(0, 120), reason: 'unsupported-form' });
+        continue;
+      }
+      if (++taken > MAX_WORKSPACE_PATTERNS) {
+        out.disclose({ config, key, reference: `more than ${MAX_WORKSPACE_PATTERNS} workspace patterns`, reason: 'unsupported-form' });
+        break;
+      }
+      const negated = item.startsWith('!');
+      patterns.push({ config, key, pattern: (negated ? item.slice(1) : item).trim(), negated });
+    }
+  };
+
+  if (rootManifest && rootManifest.workspaces !== undefined) {
+    // npm and yarn take an array; yarn also takes `{ "packages": [...] }`.
+    if (isRecord(rootManifest.workspaces)) take('package.json', 'workspaces.packages', rootManifest.workspaces.packages);
+    else take('package.json', 'workspaces', rootManifest.workspaces);
+  }
+
+  const config = 'pnpm-workspace.yaml';
+  const source = await readConfig(root, config, out);
+  if (source !== null) {
+    let document: unknown;
+    try {
+      const parsed = parseDocument(source, { merge: false });
+      if (parsed.errors.length > 0) throw new Error('invalid YAML');
+      document = parsed.toJS({ maxAliasCount: 100 });
+    } catch {
+      out.boundary({ config, key: '', reference: config, reason: 'unparsed-config' });
+      document = undefined;
+    }
+    if (isRecord(document)) take(config, 'packages', document.packages);
+    else if (document !== undefined) out.boundary({ config, key: 'packages', reference: config, reason: 'unparsed-config' });
+  }
+  return patterns;
+}
+
+/**
+ * The repository directories one declared pattern names. Expansion is segment by segment over real
+ * directories, bounded by `budget`; a symlinked directory is never followed (it can leave the
+ * repository or cycle), and `node_modules` and dot-directories are not members. A pattern that leaves
+ * the repository, or uses a form this reader does not expand, is a disclosed boundary and returns
+ * `null` — REFUSED, which a caller must not read as "names nothing".
+ */
+async function expandWorkspacePattern(
+  root: string,
+  pattern: WorkspacePattern,
+  budget: ExpansionBudget,
+  out: Collector,
+): Promise<string[] | null> {
+  const receipt: WiringReceipt = { config: pattern.config, key: pattern.key };
+  const normalized = pattern.pattern.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  const segments = normalized.split('/').filter(segment => segment.length > 0 && segment !== '.');
+  if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || segments.includes('..')) {
+    out.boundary({ ...receipt, reference: pattern.pattern, reason: 'outside-repository' });
+    return null;
+  }
+  // A pattern that names the repository root itself (`.`): the root manifest is already read.
+  if (segments.length === 0) return [];
+  // Brace lists, character classes, and extglobs (`@(a|b)`) are not expanded: a member they would name
+  // is left unread rather than guessed at.
+  // A `!` still inside the pattern (a double negation, or a `!` after whitespace) is a form this
+  // reader does not expand: refusing it keeps an exclusion from silently matching nothing.
+  if (segments.some(segment => /[[\]{}!]/.test(segment) || /[@+?*]\(/.test(segment))) {
+    out.boundary({ ...receipt, reference: pattern.pattern, reason: 'unsupported-form' });
+    return null;
+  }
+
+  let current = [''];
+  for (const segment of segments) {
+    const next: string[] = [];
+    if (segment === '**') {
+      for (const dir of current) {
+        next.push(dir);
+        let frontier = [dir];
+        for (let depth = 0; depth < MAX_WORKSPACE_GLOB_DEPTH && frontier.length > 0 && !budget.exhausted; depth++) {
+          const children: string[] = [];
+          for (const parent of frontier) children.push(...await childDirectories(root, parent, budget));
+          next.push(...children);
+          frontier = children;
+        }
+        if (budget.exhausted) break;
+      }
+    } else if (segment.includes('*') || segment.includes('?')) {
+      for (const dir of current) {
+        for (const child of await childDirectories(root, dir, budget)) {
+          if (matchesGlobSegment(segment, posix.basename(child))) next.push(child);
+        }
+        if (budget.exhausted) break;
+      }
+    } else {
+      for (const dir of current) next.push(dir.length > 0 ? posix.join(dir, segment) : segment);
+    }
+    current = [...new Set(next)];
+    if (budget.exhausted || current.length === 0) break;
+  }
+  return current.filter(dir => dir.length > 0);
+}
+
+/** The subdirectories of one repository directory, charged to `budget`. */
+async function childDirectories(root: string, dir: string, budget: ExpansionBudget): Promise<string[]> {
+  if (budget.exhausted) return [];
+  const absolute = join(root, dir);
+  if (!isConfinedPath(root, absolute)) return [];
+  let entries;
+  try {
+    entries = await readdir(absolute, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const children: string[] = [];
+  for (const entry of entries) {
+    if (++budget.entries > MAX_WORKSPACE_DIR_ENTRIES) {
+      budget.exhausted = true;
+      break;
+    }
+    // `isDirectory()` is false for a symlink, so a link out of the repository or a cycle is not followed.
+    if (!entry.isDirectory() || entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    children.push(dir.length > 0 ? posix.join(dir, entry.name) : entry.name);
+  }
+  return children;
+}
+
+/**
+ * Whether one path segment matches a glob of `*` and `?`. Matched with the two-pointer algorithm, so
+ * a pattern of many stars costs O(pattern × name) rather than backtracking exponentially.
+ */
+function matchesGlobSegment(pattern: string, name: string): boolean {
+  let p = 0;
+  let n = 0;
+  let star = -1;
+  let afterStar = 0;
+  while (n < name.length) {
+    if (p < pattern.length && (pattern[p] === '?' || pattern[p] === name[n])) { p++; n++; continue; }
+    if (p < pattern.length && pattern[p] === '*') { star = p++; afterStar = n; continue; }
+    if (star >= 0) { p = star + 1; n = ++afterStar; continue; }
+    return false;
+  }
+  while (p < pattern.length && pattern[p] === '*') p++;
+  return p === pattern.length;
 }
 
 // ── shell commands ────────────────────────────────────────────────────────────
@@ -319,7 +640,7 @@ function commandReferences(
           out.boundary({ config, key, reference: path, reason: 'unsupported-form' });
         } else {
           out.reference({
-            config, key, reference: workingDirectory ? posix.join(workingDirectory, path) : path,
+            config, key, reference: inDirectory(workingDirectory, path),
             ...(item.resolvesLikeNode ? { resolvesLikeNode: true } : {}),
           });
         }

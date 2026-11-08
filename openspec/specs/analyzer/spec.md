@@ -6745,11 +6745,55 @@ conclusions SHALL say so. An adapter SHALL only ever add evidence of use and SHA
 deadness. A reference built from a variable, expression, or glob, an unsupported command form, a
 missing or unmapped target, a path outside the repository, and a config that cannot be read or parsed
 SHALL surface as disclosed boundaries with a reason, never as guesses; reading SHALL not follow links
-or block on non-regular files. Config formats outside the supported set — workspace-member manifests,
-framework route conventions, and others — SHALL be named as unread in the caveats. Downstream
+or block on non-regular files. Config formats outside the supported set — framework route conventions
+and others — SHALL be named as unread in the caveats. Downstream
 conclusions SHALL consume the evidence: a config-wired untested gap carries its receipt and is not
 flagged also-dead, and the entry-points digest separates entry points in files a config invokes from
 those no read config invokes.
+
+In a workspace monorepo the package.json adapter SHALL also read the manifests a root config DECLARES
+as workspace members — the root `workspaces` field (array form or `{ packages: [...] }`) and
+`pnpm-workspace.yaml`'s `packages:`, including `!` exclusions — and SHALL NOT search the tree for
+manifests, so a root is only ever a file a config names. Each member manifest's references SHALL
+resolve against THAT manifest's own directory and SHALL be receipted with that manifest's own path.
+Reading SHALL be bounded — the glob expansion over real directories, its `**` depth, the number of
+patterns, and the number of member manifests read (with an exact count of those left unread) — and
+SHALL never follow a symlinked directory or a pattern that leaves the repository (confined with the
+repository's own path-confinement helper). A pattern form the reader does not expand (a brace list,
+character class, or extglob) and a member manifest that cannot be read or parsed SHALL be disclosed
+boundaries naming the member's own path. Whenever a repository declares workspaces, the standing limit
+— that only declared member manifests are read, so a manifest outside the declared set contributes
+nothing — SHALL be disclosed in the boundaries channel even when nothing was capped, and SHALL be
+listed ahead of the resolved-reference boundaries so truncation cannot hide it.
+
+#### Scenario: A declared workspace member's script wires its own file
+
+- **GIVEN** a root package.json declaring `workspaces: ["benchmark"]` and `benchmark/package.json`
+  whose `scripts.start` runs `node start-server.ts`
+- **WHEN** `find_dead_code` runs
+- **THEN** the functions in `benchmark/start-server.ts` are `externally-wired` roots, and the receipt
+  names `benchmark/package.json` and the `scripts.start` key
+
+#### Scenario: A member's relative reference resolves against the member's directory
+
+- **GIVEN** `benchmark/envelop/package.json` whose script runs `node ./app.js`, and an unrelated
+  `app.js` at the repository root
+- **WHEN** the adapters run
+- **THEN** `benchmark/envelop/app.js` is wired and the root's `app.js` gains no evidence
+
+#### Scenario: A manifest outside the declared set contributes nothing, and the limit is disclosed
+
+- **GIVEN** a root declaring `workspaces: ["packages/*"]` and a `tools/package.json` whose `bin` names
+  `tools/helper.js`
+- **WHEN** the adapters run
+- **THEN** `tools/helper.js` gains no evidence, and the boundaries disclose that only the manifests of
+  declared workspace members are read
+
+#### Scenario: A workspace pattern that leaves the repository is refused
+
+- **GIVEN** a root declaring `workspaces: ["../*"]` with a manifest outside the repository
+- **WHEN** the adapters run
+- **THEN** nothing outside the repository is read and the pattern is an `outside-repository` boundary
 
 #### Scenario: A bin-wired CLI entry is not a dead-code candidate
 
