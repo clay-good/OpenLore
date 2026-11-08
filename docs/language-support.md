@@ -128,7 +128,8 @@ Lua used to share that lane and no longer does: it moved to the maintained
 for every supported platform. That migration is what lifted the `web-tree-sitter` pin — the old
 `tree-sitter-wasms` binaries were rejected by every loader from 0.26 onward, with an empty-message
 throw that silently removed both languages from the call graph — and it hands Lua two capabilities
-the WASM lane cannot offer: trustworthy parse-health and an enforceable parse budget. Dart's
+the WASM lane cannot offer: trustworthy parse-health and an enforceable in-parse deadline (the rest
+of the per-file extraction budget is language-independent and applies to the WASM lane too). Dart's
 binaries moved to the `@repomix/tree-sitter-wasms` rebuild, whose parse trees are byte-identical to
 the old ones. Both halves of the remaining lane are pinned exactly, and a guard test fails if
 either is loosened to a range, so loader and binaries can never drift apart unreviewed.

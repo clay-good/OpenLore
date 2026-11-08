@@ -40,7 +40,7 @@ import {
   type GoErrorFacts,
 } from '../../analyzer/exception-flow.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge, AmbiguousCallSite } from '../../analyzer/call-graph.js';
-import { parseWithBudget, type BudgetableParser } from '../../analyzer/parse-budget.js';
+import { parseWithBudget, type BudgetableParser } from '../../analyzer/extraction-budget.js';
 import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 
 export interface AnalyzeErrorPropagationInput {

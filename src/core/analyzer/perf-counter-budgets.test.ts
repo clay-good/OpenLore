@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { measurePerfWorkForTests, recordPerfWork } from './perf-counters.js';
 import { writeJsonAtomicStreaming } from './json-stream.js';
-import { parseWithBudget } from './parse-budget.js';
+import { parseWithBudget } from './extraction-budget.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { EdgeStore } from '../services/edge-store.js';
 import { buildAdjacency } from '../services/mcp-handlers/graph.js';

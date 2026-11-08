@@ -33,7 +33,7 @@ import {
   type ExtractionResponse,
 } from './extraction-pool.js';
 import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract, type FileExtractResult } from './call-graph.js';
-import { ParseBudgetExceededError } from './parse-budget.js';
+import { ExtractionBudgetExceededError } from './extraction-budget.js';
 import {
   EXTRACTION_POOL_MAX,
   EXTRACTION_POOL_MIN_FILES,
@@ -159,7 +159,7 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
           }
           if (opts.budgetOverrunOn?.(file)) {
             opts.completionLog?.push(id);
-            send({ type: 'failed', id: replyId, message: new ParseBudgetExceededError(20_001, 20_000).message });
+            send({ type: 'failed', id: replyId, message: new ExtractionBudgetExceededError(20_001, 20_000).message });
             return;
           }
           if (opts.faultsOn?.(file)) {

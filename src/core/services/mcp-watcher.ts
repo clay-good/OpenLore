@@ -61,7 +61,7 @@ import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '.
 import { invalidateVectorIndexCaches } from '../analyzer/vector-index.js';
 import { isSpecIndexLockTimeoutError, SpecVectorIndex } from '../analyzer/spec-vector-index.js';
 import { buildParseHealthReport, type ParseHealthReport, type FileParseHealth } from '../analyzer/parse-health.js';
-import { parseBudgetOverrunMs } from '../analyzer/parse-budget.js';
+import { extractionBudgetOverrunMs } from '../analyzer/extraction-budget.js';
 import {
   extractScriptContainer,
   summarizeScriptContainers,
@@ -2616,7 +2616,7 @@ export class McpWatcher {
           // this splices into `parse-health.json` is indistinguishable from the one a full analyze
           // would have written for the same file (change:
           // fix-analyze-native-abort-and-file-cost-budget). Two producers, one vocabulary.
-          const overrunBudgetMs = parseBudgetOverrunMs((err as Error | undefined)?.message);
+          const overrunBudgetMs = extractionBudgetOverrunMs((err as Error | undefined)?.message);
           health = {
             filePath: f.rel, language, errorCount: 0, missingCount: 0, errorLines: [],
             parseFailed: true,

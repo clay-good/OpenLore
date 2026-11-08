@@ -67,7 +67,7 @@ import {
 } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { sanitizeForTerminal } from '../../utils/misc.js';
-import { parseBudgetOverrunMs } from './parse-budget.js';
+import { extractionBudgetOverrunMs } from './extraction-budget.js';
 
 /** One Pass-1 input record — the same shape `CallGraphBuilder.build` receives. */
 export interface ExtractionFile {
@@ -740,7 +740,7 @@ async function runPooled<T>(
         // fix-analyze-native-abort-and-file-cost-budget). It is still recorded and disclosed by
         // the builder, exactly as a serial-lane overrun is.
         const budgetOverrun = outcome.status === 'error'
-          && parseBudgetOverrunMs((outcome.error as Error | undefined)?.message) !== undefined;
+          && extractionBudgetOverrunMs((outcome.error as Error | undefined)?.message) !== undefined;
         // Any OTHER failure is a claim about the FILE made from inside a lane whose own defects
         // are indistinguishable from it — an unloadable per-language grammar, a result that would
         // not structured-clone back across the channel, a binding that misbehaves in one isolate.
