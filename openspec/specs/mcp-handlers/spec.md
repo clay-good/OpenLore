@@ -3936,6 +3936,55 @@ parsed SHALL be listed as not assessed with the reason, never treated as empty o
 - **THEN** the file is listed under `notAssessed` with the reason, and none of its operations is
   reported as removed
 
+### Requirement: SchemaDiscoveryExclusionsAndProvenanceAreDisclosed
+
+No discovered schema SHALL become silently absent from `certify_service_contract`, and nothing
+SHALL be dropped on a guess.
+
+A directory-name rule (`node_modules/`, `vendor/`, `dist/`, `build/`, `.git/`) SHALL apply to
+UNTRACKED files only, because a tracked file is part of the repository by definition;
+`node_modules/` SHALL be the one named exception applied to tracked files too, since a committed
+dependency tree is another project's contract. Every file the rule excludes SHALL be named in one
+`boundaries` line with the count and the first few paths, and the same rule SHALL be applied to
+the working tree and to the base revision, so an exclusion never reads as an addition or a removal.
+
+Each graded schema SHALL carry its provenance when it looks generated or vendored — `kind`, the
+rule that `matched`, and a `certainty` of `declared` (a generator header the file itself carries,
+read from a bounded head) or `path-pattern` (a path guess, never reported as `declared`). A
+client-toolchain config (Relay, Apollo, graphql-config, `.graphqlrc*`, GraphQL Code Generator)
+naming a schema SHALL produce one `boundaries` line naming that config, and SHALL NEVER cause a
+schema to be dropped, downgraded or excluded from grading. A config SHALL NOT be read as naming a
+schema outside the config's own directory. Every list cut at a cap SHALL carry its omitted count.
+
+#### Scenario: A tracked schema under build/ is graded; an untracked one under dist/ is named
+
+- **GIVEN** a tracked `google/devtools/build/v1/build_events.proto` and an untracked `dist/y.proto`
+- **WHEN** `certify_service_contract` runs
+- **THEN** the tracked file is read and graded, and the untracked one is named in a `boundaries`
+  line with the count, rather than vanishing from the result
+
+#### Scenario: A generated copy is graded with its provenance
+
+- **GIVEN** `src/__generated__/schema.graphql` with a root field removed since the base revision
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** its `specs` entry carries `provenance` of `kind: generated`, `matched: __generated__/`,
+  `certainty: path-pattern`, and the removal is still graded `operation-removed` with a major bump
+
+#### Scenario: A config names a schema but never drops one
+
+- **GIVEN** an `apollo.config.js` naming `./schema.graphql`, and a `web/graphql.config.yml` naming
+  `../schema.graphql`
+- **WHEN** `certify_service_contract` runs with a base ref
+- **THEN** one `boundaries` line names the Apollo config and the schema it named, the second
+  config is not read as naming that schema at all, and the schema is graded either way
+
+#### Scenario: A cap carries its omitted count
+
+- **GIVEN** a schema whose surface holds more operations than `maxResults`
+- **WHEN** `certify_service_contract` runs
+- **THEN** `surfaceOmitted` carries the number past the cap, and a repository holding GraphQL
+  client documents and no schema still discloses them under `notAssessed`
+
 ### Requirement: GraphqlChangesAreGradedByVariance
 
 `certify_service_contract` SHALL grade GraphQL schema changes against the base revision with
