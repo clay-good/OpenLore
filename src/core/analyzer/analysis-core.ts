@@ -379,19 +379,19 @@ export async function runAnalysisCore(
       status: 'warning',
       detail: `${oversizedByPath.size} file(s) exceeded the ${Math.round(SOURCE_SCAN_MAX_FILE_BYTES / 1024 / 1024)} MB enrichment scan cap; inventory counts are a lower bound.`,
     });
+    // PERSIST the exclusion, don't just emit it. `SOURCE_SCAN_MAX_FILE_BYTES`'s contract comment
+    // says a file excluded here "is disclosed by analyze, never silently dropped" — and the only
+    // disclosure was this transient progress line, so `doctor`, `orient` and `search_code` all
+    // read the repository as fully read (change: fix-retrieval-coverage-over-unread-content).
+    generator.recordEnrichmentSizeCaps(
+      [...oversizedByPath.keys()]
+        .sort()
+        .map(absolutePath => [
+          relative(rootPath, absolutePath) || absolutePath,
+          detectLanguage(absolutePath),
+        ] as [string, string]),
+    );
   }
-  // PERSIST the exclusion, don't just emit it. `SOURCE_SCAN_MAX_FILE_BYTES`'s contract comment
-  // says a file excluded here "is disclosed by analyze, never silently dropped" — and the only
-  // disclosure was this transient progress line, so `doctor`, `orient` and `search_code` all
-  // reported the repository as fully read (change: fix-retrieval-coverage-over-unread-content).
-  generator.recordEnrichmentSizeCaps(
-    [...oversizedByPath.keys()]
-      .sort()
-      .map(absolutePath => [
-        relative(rootPath, absolutePath) || absolutePath,
-        detectLanguage(absolutePath),
-      ] as [string, string]),
-  );
   emit({ stage: 'extractors', status: 'complete' });
 
   const inventories = { uiComponents, schemas, routeInventory, middleware, envVars };
