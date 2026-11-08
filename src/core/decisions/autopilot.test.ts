@@ -87,8 +87,17 @@ describe('resolveAutopilotMode', () => {
     expect(await resolveAutopilotMode(dir, CONFIG, { gateRunning: true })).toMatchObject({ autopilot: false, source: 'blocking-gate' });
   });
 
-  it('is off where OpenLore was never set up (no config)', async () => {
-    expect(await resolveAutopilotMode(dir, null)).toMatchObject({ autopilot: false, source: 'no-config' });
+  it('is ON where OpenLore was never set up — a gate with nowhere to read a setting cannot block', async () => {
+    // DELIBERATELY INVERTED (change: fix-install-never-blocks-by-default). This used to assert
+    // `autopilot: false`, which made the ABSENCE of a config the strictest posture on the
+    // machine: `openlore install --no-analyze` runs no init, so it installed a gate that blocked
+    // every commit while the same run printed "no commit is blocked by default". Governance is
+    // advisory and never blocks by default; "blocking" is a setting, and with no config nothing
+    // set it. Blocking stays reachable via an explicit `governance.autopilot: false`.
+    expect(await resolveAutopilotMode(dir, null)).toMatchObject({ autopilot: true, source: 'no-config' });
+    // Including when the gate itself is the caller — the hook path that actually blocks.
+    expect(await resolveAutopilotMode(dir, null, { gateRunning: true }))
+      .toMatchObject({ autopilot: true, source: 'no-config' });
   });
 
   it("a linked worktree follows the main checkout's choice when its own config has none", async () => {

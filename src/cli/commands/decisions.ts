@@ -304,6 +304,29 @@ export async function runPostCommitDecisionCheck(rootPath: string): Promise<void
 // Re-exported: `openlore install` reads it from here (change: unify-onboarding-entrypoint).
 export { hasOpenLoreCommitGate };
 
+/**
+ * Emit a blocked-commit verdict: one human sentence on stderr, the machine payload on stdout.
+ *
+ * The gate used to print its payload and nothing else, so a human whose commit had just failed
+ * saw a bare `{"gated": true, "reason": "drafts_pending_consolidation", ...}` with no statement
+ * of what happened or what to do. stdout stays pure JSON for the agent; the sentence goes to
+ * stderr, which is where git shows hook output (change: fix-install-never-blocks-by-default).
+ *
+ * `remedy` names a command that works from the state the gate is running in. Every verdict
+ * offers `git commit --no-verify`, the one remedy that always works, because a blocking gate
+ * must never be a trap.
+ */
+function writeGateVerdict(payload: { message: string }, remedy: string): void {
+  logger.warning(
+    `Commit blocked by the OpenLore decisions gate: ${payload.message} ${remedy} `
+    + 'This gate blocks because governance.autopilot is false in .openlore/config.json; '
+    + 'set it to true (the default) for a trail that records decisions without blocking. '
+    + 'To commit now without review: git commit --no-verify',
+  );
+  process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+  process.exitCode = 1;
+}
+
 export async function installPreCommitHook(
   rootPath: string,
   /**
@@ -504,7 +527,12 @@ export async function uninstallClaudeHook(rootPath: string): Promise<void> {
  */
 export async function runAutopilotGate(
   rootPath: string,
-  config: NonNullable<Awaited<ReturnType<typeof readOpenLoreConfig>>>,
+  /**
+   * `null` when the repository has no `.openlore/config.json`. Autopilot still runs there —
+   * it just has no configured `openspecPath`, so the spec sync is skipped and the trail is
+   * still written (change: fix-install-never-blocks-by-default).
+   */
+  config: Awaited<ReturnType<typeof readOpenLoreConfig>>,
   jsonMode: boolean,
   unassessed: readonly PendingDecision[] = [],
 ): Promise<void> {
@@ -542,7 +570,7 @@ export async function runAutopilotGate(
     let syncedCount = 0;
     let syncErrors: Array<{ id: string; error: string }> = [];
     if (accepted.length > 0 || approved.length > 0) {
-      const openspecPath = resolveOpenspecDir(rootPath, config.openspecPath);
+      const openspecPath = resolveOpenspecDir(rootPath, config?.openspecPath);
       if (await fileExists(join(openspecPath, OPENSPEC_SPECS_SUBDIR))) {
         const specMap = await buildSpecMap({ rootPath, openspecPath });
         const { result } = await syncApprovedDecisions(store, {
@@ -1268,7 +1296,11 @@ the ledger. Review the trail with: openlore decisions review
     if (options.gate && !options.consolidate) {
       // Decision autopilot: accept + sync + trail, never block. (add-decision-autopilot)
       const gateConfig = await readOpenLoreConfig(rootPath);
-      if (gateConfig && (await resolveAutopilotMode(rootPath, gateConfig, { gateRunning: true })).autopilot) {
+      // The resolver is consulted even with NO config: a missing config is not evidence that
+      // someone chose blocking review, and short-circuiting on it here is what let a gate block
+      // a commit in a repository that had nowhere to record a mode
+      // (change: fix-install-never-blocks-by-default).
+      if ((await resolveAutopilotMode(rootPath, gateConfig, { gateRunning: true })).autopilot) {
         await runAutopilotGate(rootPath, gateConfig, options.json);
         return;
       }
@@ -1327,8 +1359,7 @@ the ledger. Review the trail with: openlore decisions review
           approved: approved.map((d) => ({ id: d.id, title: d.title })),
           actions: { sync: 'openlore decisions --sync' },
         };
-        process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
-        process.exitCode = 1;
+        writeGateVerdict(payload, 'Write them to the specs with: openlore decisions --sync.');
         return;
       }
 
@@ -1346,8 +1377,11 @@ the ledger. Review the trail with: openlore decisions review
             skip: 'git commit --no-verify',
           },
         };
-        process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
-        process.exitCode = 1;
+        writeGateVerdict(
+          payload,
+          'Consolidate them with: openlore decisions --consolidate (this one needs a configured '
+          + 'LLM provider — see `openlore llm --help`).',
+        );
         return;
       }
 
@@ -1362,8 +1396,10 @@ the ledger. Review the trail with: openlore decisions review
             skip: 'git commit --no-verify',
           },
         };
-        process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
-        process.exitCode = 1;
+        writeGateVerdict(
+          payload,
+          'Record one with: openlore decisions record --title "<decision>" --rationale "<why>".',
+        );
         return;
       }
 
@@ -1401,6 +1437,9 @@ the ledger. Review the trail with: openlore decisions review
       const payload = {
         gated: true,
         reason: GATE_REASONS.VERIFIED,
+        // Every gated payload carries a human `message`; this one used to be the only
+        // verdict with none (change: fix-install-never-blocks-by-default).
+        message: `${verified.length} verified decision(s) await review before committing.`,
         verified: verified.map((d) => ({
           id: d.id,
           title: d.title,
@@ -1421,8 +1460,7 @@ the ledger. Review the trail with: openlore decisions review
           sync: 'openlore decisions --sync',
         },
       };
-      process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
-      process.exitCode = 1;
+      writeGateVerdict(payload, 'Review them with: openlore decisions --approve <id> (or --reject <id>).');
       return;
     }
 

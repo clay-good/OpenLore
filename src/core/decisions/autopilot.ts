@@ -118,7 +118,20 @@ export async function resolveAutopilotMode(
     };
   }
   if (!config) {
-    return { autopilot: false, reason: 'no .openlore/config.json — run "openlore init" first', source: 'no-config' };
+    // NON-BLOCKING, deliberately. Governance is advisory evidence and never blocks by default
+    // (openspec/specs/overview — the deterministic-substrate north star), and "blocking" is a
+    // SETTING: a gate with nowhere to read that setting from cannot have been configured to
+    // block. Returning `false` here made the absence of a file the strictest posture on the
+    // machine, which is how `openlore install --no-analyze` (no init, so no config) installed a
+    // blocking gate while printing "no commit is blocked by default", and how a fresh clone of a
+    // repository whose `.openlore/` is gitignored inherited a blocking gate nobody chose. Opt in
+    // with { "governance": { "autopilot": false } } (change: fix-install-never-blocks-by-default).
+    return {
+      autopilot: true,
+      reason: 'no .openlore/config.json to configure a blocking gate in — decisions are recorded and no '
+        + 'commit is blocked; run "openlore init" and set governance.autopilot: false to require review',
+      source: 'no-config',
+    };
   }
   if (opts.gateRunning || (await hasOpenLoreCommitGate(rootPath))) {
     return {
