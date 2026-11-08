@@ -201,7 +201,12 @@ describe('Pass-1 late-fact reuse', () => {
       else process.env.OPENLORE_NO_WORKERS = priorNoWorkers;
     }
     expect(__getAnalyzerWorkCountersForTests().parses).toBe(0);
-    expect(pooled.extractionLane).toMatchObject({ lane: 'pooled', workerFallbackFiles: [], laneDefectFiles: [] });
+    expect(pooled.extractionLane).toMatchObject({
+      lane: 'pooled', workerFallbackFiles: [], laneDefectFiles: [],
+      // Both lanes agreed about every file, so nothing had to be re-checked (change:
+      // fix-recheck-failed-worker-extractions).
+      workerFailureDefectFiles: [], failureRechecks: 0, laneRetiredAfterFailures: false,
+    });
     expect(JSON.stringify(serializeCallGraph(pooled))).toBe(JSON.stringify(serializeCallGraph(serial)));
     expect(pooled.inheritanceEdges).toContainEqual(expect.objectContaining({ kind: 'extends' }));
     expect(pooled.edges.some(edge => edge.synthesizedBy === 'event-channel')).toBe(true);

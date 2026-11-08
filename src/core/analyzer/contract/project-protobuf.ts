@@ -36,6 +36,35 @@ export interface UnresolvedRegistration {
   service: string;
   /** The RPC, when the failure is about one method rather than the whole registration. */
   rpc?: string;
+  /**
+   * The function name the registration WROTE at this position and this projection refused to bind.
+   * Carried so a consumer can say WHICH symbol was left unrooted — `find_dead_code` reads it to
+   * keep an unbound handler out of its high-confidence verdicts. Set only where a literal named a
+   * function: never for Go or Python, whose registrations name a type, not a method (the method
+   * name there comes from the schema by convention, and claiming the registration named it would
+   * be a false claim and a repository-wide false match).
+   */
+  symbol?: string;
+  /**
+   * Every function name a literal handler map wrote, for a refusal decided BEFORE the map was
+   * consulted (the service name resolved to nothing or to two declarations). Those names are
+   * exactly what the binding would have rooted, so naming them caps precisely instead of falling
+   * back to the whole file.
+   */
+  symbols?: string[];
+  /**
+   * The implementation type the registration named (`reg.implType`), when it named one. For Go and
+   * Python the registration names a class whose methods serve the RPCs, so the class — not one
+   * function — is what was left unbound.
+   */
+  className?: string;
+  /**
+   * The ONE directory `className` can live in, where the projection's own scope rule proves it: a
+   * Go registration naming an unqualified type can only mean its own package. Absent where no such
+   * proof exists (a qualified Go type, any Python type), so a consumer narrows exactly as far as is
+   * sound — never further, which would silently drop a cap that is owed.
+   */
+  classDir?: string;
   reason: 'not-literal' | 'unknown-service' | 'ambiguous-service' | 'ambiguous-implementation' | 'inline-implementation' | 'implementation-not-found';
   detail?: string;
 }
@@ -124,6 +153,25 @@ function inScope(reg: GrpcRegistration, candidates: readonly FunctionNode[], imp
   const local = candidates.filter(n => n.filePath === reg.file);
   return local.length ? local : candidates;
 }
+
+/**
+ * What a refusal names about the registered implementation class, for the disclosure. `classDir` is
+ * set only where {@link inScope} proves the class can live nowhere else — a Go registration naming
+ * an unqualified type means its own package and nothing else. Every other shape stays unscoped,
+ * because narrowing without a proof would drop a cap that is owed.
+ */
+const classDisclosure = (reg: GrpcRegistration): { className?: string; classDir?: string } =>
+  reg.implType === undefined ? {}
+    : {
+      className: reg.implType,
+      ...(reg.runtime === 'go' && reg.implQualifier === undefined ? { classDir: dirOf(reg.file) } : {}),
+    };
+
+/** Every function name a literal handler map wrote, for a refusal decided before the map was read. */
+const mapSymbols = (reg: GrpcRegistration): { symbols?: string[] } => {
+  const named = [...new Set((reg.methods ?? []).map(m => m.fn).filter((f): f is string => !!f))].sort();
+  return named.length ? { symbols: named } : {};
+};
 
 function pick(reg: GrpcRegistration, candidates: readonly FunctionNode[], imported = false): FunctionNode | 'ambiguous' | undefined {
   const at = inScope(reg, candidates, imported);
@@ -276,13 +324,13 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       // rather than imply the schema lives in another repository.
       const detail = svc.candidates ? svc.candidates.sort().join(', ')
         : out.unreadSpecifications.length ? `${out.unreadSpecifications.length} .proto file(s) here could not be read and may declare it` : undefined;
-      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: reg.service, reason: svc.reason!, ...(detail ? { detail } : {}) });
+      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: reg.service, ...mapSymbols(reg), ...classDisclosure(reg), reason: svc.reason!, ...(detail ? { detail } : {}) });
       continue;
     }
     const decls = servicesByName.get(svc.name)!;
     if (decls.length > 1) {
       // Two files declaring one service: which file's RPCs it serves cannot be said.
-      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, reason: 'ambiguous-service', detail: decls.map(x => x.doc.file).sort().join(', ') });
+      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, ...mapSymbols(reg), ...classDisclosure(reg), reason: 'ambiguous-service', detail: decls.map(x => x.doc.file).sort().join(', ') });
       continue;
     }
     if (reg.notLiteral) {
@@ -301,7 +349,7 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       const entry = byKey.get(rpc.name) ?? byKey.get(lowerFirst(rpc.name)) ?? byKey.get(lodashCamel(rpc.name));
       if (!entry) continue; // not in the map: left unbound
       if (entry.notFollowed) {
-        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'implementation-not-found', detail: entry.notFollowed });
+        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, ...(entry.fn ? { symbol: entry.fn } : {}), reason: 'implementation-not-found', detail: entry.notFollowed });
         continue;
       }
       work.push({ rpc, target, ...(entry.fn ? { fnName: entry.fn } : {}), imported: entry.imported === true, ...(entry.from ? { from: entry.from } : {}), inline: !entry.fn,
@@ -314,7 +362,7 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     if (reg.runtime !== 'node') {
       const homes = new Set(work.flatMap(w => inScope(reg, homeIsLocal ? w.found.filter(n => n.filePath === reg.file) : w.found).map(n => homeOf(reg, n))));
       if (homes.size > 1) {
-        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, reason: 'ambiguous-implementation',
+        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, ...classDisclosure(reg), reason: 'ambiguous-implementation',
           detail: `\`${reg.implQualifier ? `${reg.implQualifier}.` : ''}${reg.implType}\` is defined in more than one place: ${[...homes].sort().slice(0, 4).join(', ')}` });
         continue;
       }
@@ -341,13 +389,13 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
       const impl = pick(reg, homeIsLocal ? found.filter(n => n.filePath === reg.file) : found, w.imported);
       if (impl) anyCandidate = true;
       if (impl === 'ambiguous') {
-        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'ambiguous-implementation', detail: `more than one \`${fnName}\`${reg.implType ? ` on ${reg.implType}` : ''}` });
+        out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, ...(reg.runtime === 'node' && fnName ? { symbol: fnName } : {}), ...classDisclosure(reg), reason: 'ambiguous-implementation', detail: `more than one \`${fnName}\`${reg.implType ? ` on ${reg.implType}` : ''}` });
         continue;
       }
       if (!impl) {
         // Node: each map entry names its own function, so one that binds nothing is said per RPC.
         if (reg.runtime === 'node') {
-          out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, reason: 'implementation-not-found',
+          out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, rpc: rpc.name, ...(fnName ? { symbol: fnName } : {}), reason: 'implementation-not-found',
             detail: !w.imported ? `\`${fnName}\` is neither defined in ${reg.file} nor imported by it`
               : targets?.length ? `\`${fnName}\` is imported from '${w.from}', which is indexed but neither defines nor directly re-exports it`
                 : `\`${fnName}\` is imported by ${reg.file} from '${w.from}', which is not indexed here (a package or a path alias)` });
@@ -361,7 +409,7 @@ export function projectProtobuf(input: ProtobufProjectionInput): ProtobufProject
     // differs from the directory, an aliased Python import, methods all from an embedded or base
     // type. The implementation then reads as dead code, so the registration is named.
     if (!anyCandidate && reg.runtime !== 'node') {
-      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, reason: 'implementation-not-found',
+      out.unresolvedRegistrations.push({ file: reg.file, line: reg.line, service: svc.name, ...classDisclosure(reg), reason: 'implementation-not-found',
         detail: `no method of \`${reg.implQualifier ? `${reg.implQualifier}.` : ''}${reg.implType}\` named after an RPC was found where the registration says it is` });
     }
   }

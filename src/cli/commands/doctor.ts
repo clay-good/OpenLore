@@ -89,6 +89,7 @@ import {
 } from '../git-hooks.js';
 import { assessWiring, missingLauncherPaths } from '../install/wiring-scope.js';
 import { openloreCliEntry } from '../../utils/platform-command.js';
+import { jsonOutput } from '../output.js';
 
 
 // ============================================================================
@@ -1322,7 +1323,7 @@ Checks performed:
     if (options.json) {
       // Strip the internal `remediation` field so the --json contract is
       // byte-compatible with pre-`--fix` output (bare doctor stays read-only).
-      console.log(JSON.stringify(checks.map(({ remediation: _r, ...c }) => c), null, 2));
+      console.log(jsonOutput(checks.map(({ remediation: _r, ...c }) => c)));
       return;
     }
 

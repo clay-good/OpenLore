@@ -19,18 +19,26 @@
  *     which is also the fallback executor.
  *  3. **Fail-soft, never fail-different.** A worker that dies mid-file leaves its slot
  *     empty and the file is re-extracted on the main thread. A worker that cannot start,
- *     or fails its startup health probe, disables the lane wholesale. An extractor that
- *     *throws inside* a worker is reported as an error for that file — exactly what the
- *     serial lane would record — and is NOT retried, so a deterministic parse failure
- *     costs the same in both lanes.
- *  4. **An unproven silence is never trusted.** The extractors return an empty result
+ *     or fails its startup health probe, disables the lane wholesale.
+ *  4. **A worker's FAILURE is never the file's verdict** (change:
+ *     fix-recheck-failed-worker-extractions). A thread that answers "this file failed" is making a
+ *     claim about the FILE from inside a lane whose own defects look exactly like that answer — a
+ *     grammar that did not load here, a result that would not structured-clone across the channel,
+ *     a fault in this isolate. So a worker failure is re-checked on the main thread, the reference
+ *     implementation, and only the MAIN THREAD's own failure is ever recorded as this file's. The
+ *     one exception is a file abandoned at the per-file PARSE BUDGET: that bound is a property of
+ *     the file and the main thread would spend it again reaching the same nothing. The cost of the
+ *     re-check is bounded by {@link EXTRACTION_POOL_FAILURE_RECHECK_CAP}, past which the pool is
+ *     retired and the rest of the build runs on the main thread — one serial pass, never an
+ *     incomplete graph.
+ *  5. **An unproven silence is never trusted.** The extractors return an empty result
  *     (rather than throwing) when a grammar is unavailable, so a worker whose grammar for
  *     some language failed to load in ITS thread would report every file of that language
  *     as containing nothing — and the merge would read that as "no symbols here". A startup
  *     probe cannot close this (it proves one grammar; the other ~20 load lazily per thread),
  *     so the pool re-checks an empty result on the main thread until that worker has PROVEN
  *     it can extract that language. See {@link runPooled}.
- *  5. **Nothing here writes to stdout.** `openlore mcp` speaks JSON-RPC over stdout, and
+ *  6. **Nothing here writes to stdout.** `openlore mcp` speaks JSON-RPC over stdout, and
  *     `build()` runs inside it. Workers keep their stdout off the parent's, relay their
  *     logging as messages, and the lane's own disclosure is returned on the build result
  *     for the CLI to render — never logged from the builder.
@@ -54,6 +62,7 @@ import {
   EXTRACTION_POOL_STARTUP_TIMEOUT_MS,
   EXTRACTION_POOL_REQUEST_TIMEOUT_MS,
   EXTRACTION_POOL_TERMINATE_TIMEOUT_MS,
+  EXTRACTION_POOL_FAILURE_RECHECK_CAP,
   SLOW_FILE_DISCLOSURE_MS,
 } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
@@ -109,9 +118,35 @@ export interface ExtractionLaneDisclosure {
    */
   laneDefectFiles: string[];
   /**
+   * Files a worker reported as FAILING where the main thread then extracted them — the worker
+   * blamed the source for a defect in the thread that was reading it (change:
+   * fix-recheck-failed-worker-extractions).
+   *
+   * Kept separate from {@link laneDefectFiles} because the two say different things to a human: a
+   * worker that reported NOTHING went quietly blind, while a worker that reported a FAILURE
+   * actively asserted a parse failure that is not true of the file. Both are worker-local defects
+   * whose facts are whole (the main-thread result is the one used), and both are disclosed loudly.
+   */
+  workerFailureDefectFiles: string[];
+  /**
+   * How many worker-reported failures were re-checked on the main thread. Bounded by
+   * {@link EXTRACTION_POOL_FAILURE_RECHECK_CAP}; this is the duplicated-extraction cost of never
+   * taking a worker's word for a parse failure. Zero on a healthy run.
+   */
+  failureRechecks: number;
+  /**
+   * The failure-recheck cap fired: the pool stopped claiming files and the remainder of the build
+   * was extracted on the main thread. The graph is complete; the run was slower than it should
+   * have been, and the lane is systematically broken.
+   */
+  laneRetiredAfterFailures: boolean;
+  /**
    * How many worker answers were re-checked on the main thread because that worker had not
-   * yet proven it can extract that language — an empty result, or a throw. Routine, not a
-   * degradation: the cost of never trusting an unproven worker. See {@link runPooled}.
+   * yet proven it can extract that language — an EMPTY result for an unproven language. Routine,
+   * not a degradation: the cost of never trusting an unproven worker. See {@link runPooled}.
+   *
+   * A worker FAILURE is no longer counted here: it is never trusted, proven language or not, and
+   * is counted in {@link failureRechecks} instead.
    */
   unprovenRechecks: number;
   /**
@@ -347,7 +382,8 @@ export async function extractFilesForPass1<T>(
       outcomes,
       disclosure: {
         lane: 'serial', poolSize: 0, serialReason: reason,
-        workerFallbackFiles: [], laneDefectFiles: [], unprovenRechecks: 0,
+        workerFallbackFiles: [], laneDefectFiles: [], workerFailureDefectFiles: [],
+        failureRechecks: 0, laneRetiredAfterFailures: false, unprovenRechecks: 0,
         slowFiles: boundSlowFiles(slow),
       },
     };
@@ -453,7 +489,15 @@ function createNodeWorker(entry: ResolvedWorkerEntry, probeLanguage?: string): E
 }
 
 /** Why a slot was left for the main thread to fill. */
-type UnfilledReason = 'worker-died' | 'unproven';
+type UnfilledReason =
+  /** The worker holding it died, wedged past its deadline, or faulted inside the thread. */
+  | 'worker-died'
+  /** The worker reported an EMPTY result for a language it has not proven it can extract. */
+  | 'unproven'
+  /** The worker reported a FAILURE — never this file's verdict until the main thread agrees. */
+  | 'worker-failed'
+  /** The pool was retired at the failure-recheck cap before any worker claimed this file. */
+  | 'lane-retired';
 
 /**
  * Drive the pool. Returns `undefined` when not a single worker could be brought up
@@ -477,6 +521,38 @@ type UnfilledReason = 'worker-died' | 'unproven';
  * arrive before each worker's first real result per language — near zero on a healthy run,
  * and full main-thread coverage exactly when a worker is broken. If the main thread then
  * finds facts where the worker found none, that is a real defect and is disclosed loudly.
+ *
+ * ## Never claim a parse failure on a worker's word alone
+ *
+ * The same argument applies with more force to a worker that reports a FAILURE (change:
+ * fix-recheck-failed-worker-extractions). An empty answer at least looks like a file with nothing
+ * in it; a failure is an active claim that the SOURCE cannot be parsed, and it is recorded in
+ * `parse-health.json` as `parse-failure` — described in `call-graph.ts` as "a cause we cannot
+ * prove". Every known worker-local defect reaches the parent through that one message: a
+ * per-language grammar `import` that resolved on the main thread but not in this isolate, a
+ * successfully extracted result that would not structured-clone across the channel, a native
+ * binding misbehaving in one thread. The startup probe cannot close any of them, and "this worker
+ * already proved the language" does not either — the grpc-go case this change fixes was a
+ * worker that had extracted hundreds of Go files before failing on one.
+ *
+ * So a worker failure is NEVER written into a slot. The file is re-extracted on the main thread,
+ * and whatever the main thread says is the answer: if it extracts the file, the worker's claim was
+ * a lane defect and is disclosed as one; if it fails too, the failure is a real property of the
+ * file and is recorded exactly as a serial run would record it. `parse-failure` therefore only
+ * ever rests on the main thread's own attempt.
+ *
+ * Two exceptions, both because they are NOT claims about the file's parsability:
+ *  - A **parse-budget overrun** carries its own reason and elapsed time. The bound is a property
+ *    of the file, and the main thread would spend it again reaching the same nothing — one bound,
+ *    not two.
+ *  - A **worker fault** (the `uncaughtException` boundary) is already routed to the main thread by
+ *    the stronger `worker-died` path, which also retires the thread.
+ *
+ * The cost is one extra extraction per failed file, bounded by
+ * {@link EXTRACTION_POOL_FAILURE_RECHECK_CAP}: past the cap the workers stop claiming files and
+ * everything left runs on the main thread ONCE. So a lane that fails everything costs about one
+ * serial pass plus the cap, and still yields a complete graph — a slower complete answer in
+ * preference to a fast quietly incomplete one.
  */
 async function runPooled<T>(
   files: ExtractionFile[],
@@ -497,6 +573,18 @@ async function runPooled<T>(
   let started = 0;
   /** A worker was dropped because it ran out of time, not because it refused to work. */
   let sawStartupTimeout = false;
+  /**
+   * Worker-reported failures seen so far, across the whole pool. Counted HERE rather than in the
+   * main-thread fill below, because it is what decides — while the pool is still running — that
+   * the lane has failed often enough to stop using it.
+   */
+  let workerFailuresSeen = 0;
+  /**
+   * The failure-recheck cap fired. Every worker stops claiming files; the rest of the build is
+   * extracted once, on the main thread. Shared across the pool so one worker's discovery that the
+   * lane is broken is not re-paid by its siblings.
+   */
+  let laneRetired = false;
   /** Grammar-unavailable warnings relayed from workers, deduped across the pool. */
   const relayedWarnings = new Set<string>();
   /** Files that took longer than the disclosure threshold, on either lane. */
@@ -610,7 +698,10 @@ async function runPooled<T>(
     started++;
 
     try {
-      while (!dead) {
+      // `!laneRetired`: once the failure-recheck cap has fired the pool has proven unreliable, so
+      // no worker claims another file. Everything left falls to the main-thread fill below and is
+      // extracted exactly ONCE — which is what bounds the cost of never trusting a failure.
+      while (!dead && !laneRetired) {
         const index = cursor;
         if (index >= files.length) break;
         cursor = index + 1;
@@ -645,26 +736,37 @@ async function runPooled<T>(
         }
         // A file abandoned at the PARSE BUDGET is a property of the file, not of the worker, and
         // the main thread would spend the identical budget reaching the identical nothing. Trust
-        // it — the unproven-language recheck below must not turn one bound into two (change:
+        // it — the recheck below must not turn one bound into two (change:
         // fix-analyze-native-abort-and-file-cost-budget). It is still recorded and disclosed by
         // the builder, exactly as a serial-lane overrun is.
         const budgetOverrun = outcome.status === 'error'
           && extractionBudgetOverrunMs((outcome.error as Error | undefined)?.message) !== undefined;
-        // A worker that cannot handle a language reports it two ways, and BOTH are
-        // indistinguishable from a real answer: an empty result (the core binding failed to
-        // load) or a throw (the per-language grammar `import` failed — those loads are not
-        // wrapped). Neither is trusted until this worker has actually produced facts for the
+        // Any OTHER failure is a claim about the FILE made from inside a lane whose own defects
+        // are indistinguishable from it — an unloadable per-language grammar, a result that would
+        // not structured-clone back across the channel, a binding that misbehaves in one isolate.
+        // It is never trusted, proven language or not: the main thread extracts the file and its
+        // verdict is the one recorded, so `parse-failure` only ever rests on the reference
+        // implementation's own attempt (change: fix-recheck-failed-worker-extractions).
+        if (outcome.status === 'error' && !budgetOverrun) {
+          unfilled[index] = 'worker-failed';
+          // Past the cap the lane has failed often enough that re-checking file by file would
+          // shadow the whole build. Retire the pool instead: the remainder is extracted once, on
+          // the main thread, so the duplicated work stays bounded and the graph stays complete.
+          if (++workerFailuresSeen >= EXTRACTION_POOL_FAILURE_RECHECK_CAP) laneRetired = true;
+          continue;
+        }
+        // A worker that cannot handle a language can also report it as an EMPTY result (the core
+        // binding failed to load), which is indistinguishable from a file that genuinely contains
+        // nothing. That is not trusted until this worker has actually produced facts for the
         // language; until then the main thread decides.
         const producedFacts = outcome.status === 'ok'
           && outcome.value !== undefined
           && !isEmptyResult(outcome.value);
         if (producedFacts) {
           proven.add(file.language);
-        } else if (!budgetOverrun && (outcome.status !== 'ok' || isEmptyResult(outcome.value))) {
-          if (!proven.has(file.language)) {
-            unfilled[index] = 'unproven';
-            continue;
-          }
+        } else if (outcome.status === 'ok' && isEmptyResult(outcome.value) && !proven.has(file.language)) {
+          unfilled[index] = 'unproven';
+          continue;
         }
         slots[index] = outcome;
       }
@@ -688,23 +790,42 @@ async function runPooled<T>(
   // Fill every slot the pool left, on the main thread, in input order.
   const workerFallbackFiles: string[] = [];
   const laneDefectFiles: string[] = [];
+  const workerFailureDefectFiles: string[] = [];
   let unprovenRechecks = 0;
+  let failureRechecks = 0;
   for (let i = 0; i < files.length; i++) {
     if (slots[i] !== undefined) continue;
-    // A slot with no recorded reason belongs to a file no worker ever claimed (every
-    // worker died first) — the same situation as a worker dying while holding it.
-    const reason = unfilled[i] ?? 'worker-died';
+    // A slot with no recorded reason belongs to a file no worker ever claimed: either the pool was
+    // retired at the failure cap before reaching it, or every worker died first — which is the
+    // same situation as a worker dying while holding it.
+    const reason = unfilled[i] ?? (laneRetired ? 'lane-retired' : 'worker-died');
     const outcome = await runSerial(files[i], serialExtract, slow);
-    if (reason === 'worker-died') {
-      workerFallbackFiles.push(files[i].path);
-    } else {
-      unprovenRechecks++;
-      // The worker reported nothing (empty, or a throw) and the main thread found real
-      // facts: a worker-local extraction defect, not an empty or unparseable file.
-      const mainThreadFoundFacts = outcome.status === 'ok'
-        && outcome.value !== undefined
-        && !isEmptyResult(outcome.value);
-      if (mainThreadFoundFacts) laneDefectFiles.push(files[i].path);
+    const mainThreadFoundFacts = outcome.status === 'ok'
+      && outcome.value !== undefined
+      && !isEmptyResult(outcome.value);
+    switch (reason) {
+      case 'worker-died':
+        workerFallbackFiles.push(files[i].path);
+        break;
+      case 'lane-retired':
+        // Not a per-file degradation: this file was never given to a worker at all. The retirement
+        // itself is disclosed once, on the lane, rather than once per remaining file.
+        break;
+      case 'unproven':
+        unprovenRechecks++;
+        // The worker reported an empty result and the main thread found real facts: a
+        // worker-local extraction defect, not an empty file.
+        if (mainThreadFoundFacts) laneDefectFiles.push(files[i].path);
+        break;
+      case 'worker-failed':
+        failureRechecks++;
+        // The worker asserted this file failed and the main thread extracted it. Even a clean
+        // EMPTY result counts: the two lanes disagreed about whether the file parses at all,
+        // which is a defect in the lane either way. When the main thread fails too, nothing is
+        // recorded here and `outcome` carries the main thread's own error — which is the only
+        // thing a `parse-failure` is ever allowed to rest on.
+        if (outcome.status === 'ok') workerFailureDefectFiles.push(files[i].path);
+        break;
     }
     slots[i] = outcome;
   }
@@ -712,8 +833,9 @@ async function runPooled<T>(
   return {
     outcomes: slots as Array<ExtractOutcome<T>>,
     disclosure: {
-      lane: 'pooled', poolSize: started, workerFallbackFiles, laneDefectFiles, unprovenRechecks,
-      slowFiles: boundSlowFiles(slow),
+      lane: 'pooled', poolSize: started, workerFallbackFiles, laneDefectFiles,
+      workerFailureDefectFiles, failureRechecks, laneRetiredAfterFailures: laneRetired,
+      unprovenRechecks, slowFiles: boundSlowFiles(slow),
     },
   };
 }
@@ -810,13 +932,28 @@ export function describeExtractionLane(d: ExtractionLaneDisclosure): string | un
 
   if (d.lane === 'pooled') {
     const parts: string[] = [];
-    // A worker that reported nothing (an empty result OR a throw) where the main thread
-    // found facts is the one outcome meaning something was actually WRONG with a worker,
-    // so it leads. Both outcomes are reported when both happened.
+    // A worker contradicted the main thread: the one class of outcome meaning something was
+    // actually WRONG with a worker, so it leads. The two shapes are worded apart on purpose — a
+    // worker that reported NOTHING went quietly blind, while a worker that reported a FAILURE
+    // asserted a parse failure that is not true of the file, and a reader chasing a missing
+    // `parse-failure` record needs to know which one happened. Every applicable part is reported.
+    if (d.workerFailureDefectFiles.length > 0) {
+      parts.push(
+        `extraction worker reported a parse failure for ${d.workerFailureDefectFiles.length} file(s) that the `
+        + `main thread extracted fine (e.g. ${d.workerFailureDefectFiles[0]}); the main-thread result was used `
+        + `and no parse failure was recorded. Set OPENLORE_NO_WORKERS=1 if this recurs`,
+      );
+    }
     if (d.laneDefectFiles.length > 0) {
       parts.push(
         `extraction worker reported no symbols for ${d.laneDefectFiles.length} file(s) that do contain symbols `
         + `(e.g. ${d.laneDefectFiles[0]}); the main-thread result was used. Set OPENLORE_NO_WORKERS=1 if this recurs`,
+      );
+    }
+    if (d.laneRetiredAfterFailures) {
+      parts.push(
+        `extraction pool retired after ${d.failureRechecks} worker failure(s): the rest of the build was `
+        + `extracted on the main thread. Analysis is complete but slower — set OPENLORE_NO_WORKERS=1 to skip the pool`,
       );
     }
     if (d.workerFallbackFiles.length > 0) {

@@ -66,6 +66,20 @@ export const IMPORT_QUALIFIER_PREFIX = '\0qualifier:';
  */
 export const EXTERNAL_IMPORT_PREFIX = '\0external:';
 
+/**
+ * Key prefix marking a source-level QUALIFIER the file binds to a package/module this map could
+ * not resolve to an in-project file — `json` in `import "encoding/json"`, `os` in `import os`,
+ * `fs` in `import * as fs from 'node:fs'` (change: suppress-false-cha-name-only).
+ *
+ * Distinct from {@link EXTERNAL_IMPORT_PREFIX}, which records imported NAMES (a type, a function).
+ * A qualifier is what stands before the dot in `q.m()`, so a consumer looking at a receiver can
+ * decide "this receiver is not a value of an in-repo type, it is a package the source says lives
+ * outside this repository" — and REFUSE to resolve the call against same-named in-repo methods,
+ * rather than fanning onto every one of them. Recorded only when the specifier genuinely does not
+ * resolve in-project: an in-project package import binds normally and is never marked.
+ */
+export const EXTERNAL_QUALIFIER_PREFIX = '\0external-qualifier:';
+
 /** Conventional directories a package root sits under, stripped when deciding whether an absolute
  *  import names an in-project module. Declared and shallow — see {@link EXTERNAL_IMPORT_PREFIX}. */
 const PACKAGE_ROOT_PREFIXES = ['src/', 'lib/', 'app/'] as const;
@@ -283,6 +297,11 @@ function buildStaticLanguageImportMaps(
       goDirsBySuffix.set(suffix, dirs);
     }
   }
+  /** Package names declared at the repository root — the module's own root package (see below). */
+  const goRootPackageNames = new Set<string>();
+  for (const [dir, pkg] of goPackageByDir) {
+    if (dir === '.' || dir === '' || dir === '/') goRootPackageNames.add(pkg);
+  }
   for (const f of files.filter(f => f.language === 'Go')) {
     const fileMap = new Map<string, string>();
     const ownDir = posix.dirname(f.path);
@@ -301,6 +320,21 @@ function buildStaticLanguageImportMaps(
       fileMap.set(alias, target);
       const importedPackage = goPackageByDir.get(target);
       if (importedPackage) fileMap.set(`${GO_IMPORT_PACKAGE_PREFIX}${alias}`, importedPackage);
+    }
+    // Every import the resolution above could NOT place inside this repository binds a qualifier
+    // that reaches outside it (`json` from `encoding/json`). Recorded so a receiver-based resolver
+    // can refuse `json.Unmarshal(...)` instead of fanning it onto in-repo `Unmarshal` methods
+    // (change: suppress-false-cha-name-only). An in-project import is bound above and skipped here.
+    // One specifier the suffix index structurally CANNOT place: the module's OWN path
+    // (`google.golang.org/grpc` in grpc-go), which names the repository ROOT — a directory with no
+    // path segment to suffix-match. Marking it external refuses `s.RegisterService(...)` where
+    // `s grpc.ServiceRegistrar`, deleting a TRUE edge. A specifier whose last segment is the root
+    // package's own name is therefore never marked; the cost of the convention not holding is a
+    // missed refusal, never a wrong one.
+    for (const [alias, source] of goQualifierAliases(f.content)) {
+      if (fileMap.has(alias)) continue;
+      if (goRootPackageNames.has(source.split('/').pop() ?? '')) continue;
+      fileMap.set(`${EXTERNAL_QUALIFIER_PREFIX}${alias}`, source);
     }
     if (fileMap.size > 0) map.set(f.path, fileMap);
   }
@@ -640,6 +674,13 @@ export function buildResolvedImportMap(
         if (!aliased && (!pythonModule || !projectModules.has(pythonModule))) {
           for (const name of imp.importedNames) {
             fileMap.set(`${EXTERNAL_IMPORT_PREFIX}${name}`, imp.source);
+            // A namespace-shaped import (`import os`, `import os as o`, `import * as fs from …`)
+            // binds a QUALIFIER, not a value: `os.close()` reaches outside this repository, so a
+            // receiver-based resolver must refuse that site rather than fan onto in-repo `close`
+            // methods (change: suppress-false-cha-name-only).
+            if (imp.hasNamespace) {
+              fileMap.set(`${EXTERNAL_QUALIFIER_PREFIX}${name}`, imp.source);
+            }
           }
         }
         continue;
@@ -806,6 +847,35 @@ export function parseGoImports(
     if (alias) result.set(alias, target);
   }
   return result;
+}
+
+/**
+ * The source-level QUALIFIER each Go import of `content` binds, paired with its specifier
+ * (`json` → `encoding/json`) — every import, resolvable in-project or not
+ * (change: suppress-false-cha-name-only).
+ *
+ * Go has no `as`-less ambiguity to resolve here: an explicit alias IS the qualifier, and an
+ * unaliased import binds the imported package's declared name, which by convention (and in
+ * `go vet`'s view) is the last path segment, with a `/vN` or `.vN` major-version suffix dropped.
+ * A qualifier guessed wrongly simply fails to match any receiver, so the consequence of the
+ * convention not holding is a missed refusal — never a wrong one.
+ */
+export function goQualifierAliases(content: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const spec of goImportSpecs(content)) {
+    let alias = spec.alias;
+    if (!alias) {
+      const parts = spec.source.split('/');
+      let last = parts[parts.length - 1] ?? '';
+      // `gopkg.in/yaml.v2` → `yaml`; `example.com/mod/v3` → `mod`.
+      if (/^v\d{1,4}$/.test(last) && parts.length > 1) last = parts[parts.length - 2] ?? '';
+      last = last.replace(/\.v\d{1,4}$/, '');
+      if (!/^[A-Za-z_]\w{0,80}$/.test(last)) continue;
+      alias = last;
+    }
+    if (!out.has(alias)) out.set(alias, spec.source);
+  }
+  return out;
 }
 
 export function parseRustImports(

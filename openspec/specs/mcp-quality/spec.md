@@ -516,6 +516,74 @@ everything" from "this is everything I could see."
 > Decision recorded: 08e71184
 > Date: 2026-06-18
 
+### Requirement: NoCompleteBesideADisclosure
+
+`confidenceBoundary.complete` SHALL be DERIVED from what the answer disclosed, never asserted
+independently by a handler. `complete: true` SHALL be unsayable in the same response as an explicit
+refusal, cap, fallback, degradation or discarded input. A `complete: true` beside a disclosed gap is
+the most damaging form of a false claim, because it tells the agent not to look further — it converts
+a disclosed gap into a silent one.
+
+The derivation SHALL live at the dispatch boundary, the single point both transports and every CLI
+wrapper funnel through, as a sweep of a REGISTERED set of disclosure channels — `O(1)` in the size of
+the payload, reading named paths at most two segments deep, never walking the response. Every response
+field that means "something about this answer is incomplete" SHALL be classified: registered as a
+disclosure channel, or recorded as a non-disclosure with the reason it is not one. A structural guard
+over the boundary-carrying handlers SHALL fail when a new tool declares a disclosure-shaped field
+without classifying it.
+
+A prose field (`note`, `caveats`, `hint`, `reason`) SHALL NOT be swept automatically: each mixes
+standing methodology with live disclosure, so sweeping it would pin `complete` to `false` on every
+answer, and a flag that is always false carries no information. A handler whose live disclosure is
+prose SHALL declare it explicitly, so the derivation sees it.
+
+Where `complete` is `false`, the answer SHALL name WHICH part is incomplete — one reason per cause,
+each naming the field that holds the detail — so an agent can tell whether the gap touches the
+question it asked.
+
+#### Scenario: A refusal is never a complete answer
+
+- **GIVEN** `verify_claim` returns `verdict: "unverifiable"` because no such decision is recorded
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and `incompleteBecause` names the `verdict`
+  channel and says the answer is a refusal rather than a conclusion
+
+#### Scenario: An internally capped answer says so
+
+- **GIVEN** `briefing_since` degraded 29 of 34 files to whole-file granularity under an internal time cap
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and `incompleteBecause` names
+  `changeGranularity.reasons` and the cap that fired
+
+#### Scenario: A discarded input is a disclosed gap
+
+- **GIVEN** `recall` is called with an `asOf` that does not resolve to a commit, and discards the filter
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and the discarded filter is named as the cause
+
+#### Scenario: An empty scope is not an empty result
+
+- **GIVEN** `find_dead_code` is called with a `filePattern` that matches zero indexed files
+- **WHEN** the response is produced
+- **THEN** the answer carries a receipt saying the pattern matched zero files, and
+  `confidenceBoundary.complete` is `false` — an empty `candidateDead` over an empty scope means
+  "nothing was examined", not "nothing is dead"
+
+#### Scenario: A bounded negative answer does not assert the cause it cannot see
+
+- **GIVEN** `find_path` finds no path within its distance bound
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and the hint names the causes the search cannot
+  distinguish — unconnected endpoints, a path beyond the bound, a same-name collision — rather than
+  asserting that the endpoints are in different connected components
+
+#### Scenario: A genuinely complete answer still says so
+
+- **GIVEN** a conclusion that crossed no boundary, ran against a current index, and disclosed nothing
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `true` and no reason is attached; a standing methodology
+  caveat alone SHALL NOT flip it
+
 ### Requirement: DefaultSurfaceCopyMatchesItsContents
 
 Every published description of a tool preset — the `instructions` breadth pointer, CLI `--help`,

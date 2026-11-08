@@ -89,63 +89,6 @@
       "./skills"
     ]
   },
-  "openspec": {
-    "manifestVersion": 1,
-    "id": "openlore",
-    "namespace": "lore",
-    "displayName": "OpenLore",
-    "summary": "Persistent architectural memory and deterministic structural context for AI coding agents, computed locally from your code.",
-    "bin": "openlore",
-    "binArgs": [
-      "npx",
-      "--yes",
-      "openlore"
-    ],
-    "openspecCompat": ">=0.1.0",
-    "commands": [
-      {
-        "name": "generate",
-        "summary": "Reverse-engineer OpenSpec specs from existing code"
-      },
-      {
-        "name": "drift",
-        "summary": "Detect code/spec drift"
-      },
-      {
-        "name": "verify",
-        "summary": "Verify specs against the codebase"
-      },
-      {
-        "name": "analyze",
-        "summary": "Build the structural analysis graph (no API key)"
-      },
-      {
-        "name": "orient",
-        "summary": "One-shot structural orientation for a task"
-      },
-      {
-        "name": "digest",
-        "summary": "Emit the compact codebase digest"
-      },
-      {
-        "name": "decisions",
-        "summary": "Manage architectural decision records"
-      },
-      {
-        "name": "change-status",
-        "summary": "Compute OpenSpec change status from documented evidence"
-      }
-    ],
-    "skills": [
-      {
-        "dir": "openlore-orient",
-        "source": "skills/openlore-orient"
-      }
-    ],
-    "ownsConfigKeys": [
-      "openlore"
-    ]
-  },
   "author": "Clay Good",
   "license": "MIT",
   "repository": {
