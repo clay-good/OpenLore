@@ -177,10 +177,22 @@ describe('certify_provenance on a real repo', () => {
 
     const res = await call('certify_provenance', root, { baseRef: 'HEAD', format: 'in-toto' }) as {
       statement?: { subject: Array<{ digest: { sha256: string } }>; predicateType: string };
+      statementValidation?: { check: string; result: string; scope: string; reasons?: string[] };
       digest?: string;
+      note?: string;
     };
     expect(res.statement).toBeDefined();
     expect(res.statement!.subject[0].digest.sha256).toMatch(/^[0-9a-f]{64}$/);
+
+    // The envelope we emit is checked against the Statement v1 shape on every emission, and the
+    // outcome is disclosed as a named receipt — never silently.
+    expect(res.statementValidation?.check).toBe('in-toto-statement-v1-structural');
+    expect(res.statementValidation?.result).toBe('envelope-shape-conformant');
+    expect(res.statementValidation?.reasons).toBeUndefined();
+    // The receipt cannot be read as "this attests an artifact": its own scope says what it is not,
+    // and the note says the subject digest is not an artifact hash.
+    expect(res.statementValidation?.scope).toContain('does NOT verify');
+    expect(res.note).toContain('NOT of a built artifact');
   });
 });
 
