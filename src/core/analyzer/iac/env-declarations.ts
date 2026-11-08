@@ -17,6 +17,7 @@
  */
 
 import { LineCounter, parseAllDocuments, isAlias, isMap, isSeq, isScalar, type Document, type Node } from 'yaml';
+import { YAML_QUIET } from '../yaml-diagnostics.js';
 
 export type EnvEcosystem = 'Kubernetes' | 'Docker Compose' | 'Dockerfile' | 'Terraform' | 'CloudFormation' | 'GitHub Actions' | 'Serverless';
 
@@ -353,7 +354,7 @@ type Pair = { key: unknown; value: unknown };
 
 function yamlLike(file: { path: string; content: string; language: string }, out: EnvDeclarationScan): void {
   const lc = new LineCounter();
-  const docs = parseAllDocuments(file.content, { lineCounter: lc, uniqueKeys: false, merge: true });
+  const docs = parseAllDocuments(file.content, { ...YAML_QUIET, lineCounter: lc, uniqueKeys: false, merge: true });
   if (!Array.isArray(docs)) return;
   const eco = file.language as EnvEcosystem;
   for (const doc of docs) {

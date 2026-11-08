@@ -13,6 +13,7 @@
  */
 
 import { dirname, posix } from 'node:path';
+import { importGrammar } from './grammar-entry.js';
 import type Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
@@ -518,7 +519,7 @@ async function getTSParser(
   if (usesTsxGrammar(filePath)) {
     if (!_tsxParser) {
       const loaded = await loadCoreGrammarSoft(language, async () => {
-        const tsModule = await import('tree-sitter-typescript');
+        const tsModule = await importGrammar('tree-sitter-typescript');
         const lang = (tsModule.default as { tsx: object }).tsx;
         const parser = new NP();
         parser.setLanguage(lang as unknown as Parser.Language);
@@ -533,7 +534,7 @@ async function getTSParser(
   }
   if (!_tsParser) {
     const loaded = await loadCoreGrammarSoft(language, async () => {
-      const tsModule = await import('tree-sitter-typescript');
+      const tsModule = await importGrammar('tree-sitter-typescript');
       const lang = (tsModule.default as { typescript: object }).typescript;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -553,7 +554,7 @@ async function getPyParser(): Promise<{ parser: Parser; lang: object } | null> {
   if (grammarStatus('Python') === 'unavailable') return null;
   if (!_pyParser) {
     const loaded = await loadCoreGrammarSoft('Python', async () => {
-      const pyModule = await import('tree-sitter-python');
+      const pyModule = await importGrammar('tree-sitter-python');
       const lang = pyModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -573,7 +574,7 @@ async function getGoParser(): Promise<{ parser: Parser; lang: object } | null> {
   if (grammarStatus('Go') === 'unavailable') return null;
   if (!_goParser) {
     const loaded = await loadCoreGrammarSoft('Go', async () => {
-      const goModule = await import('tree-sitter-go');
+      const goModule = await importGrammar('tree-sitter-go');
       const lang = goModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -593,7 +594,7 @@ async function getRustParser(): Promise<{ parser: Parser; lang: object } | null>
   if (grammarStatus('Rust') === 'unavailable') return null;
   if (!_rustParser) {
     const loaded = await loadCoreGrammarSoft('Rust', async () => {
-      const rustModule = await import('tree-sitter-rust');
+      const rustModule = await importGrammar('tree-sitter-rust');
       const lang = rustModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -613,7 +614,7 @@ async function getRubyParser(): Promise<{ parser: Parser; lang: object } | null>
   if (grammarStatus('Ruby') === 'unavailable') return null;
   if (!_rubyParser) {
     const loaded = await loadCoreGrammarSoft('Ruby', async () => {
-      const rubyModule = await import('tree-sitter-ruby');
+      const rubyModule = await importGrammar('tree-sitter-ruby');
       const lang = rubyModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -633,7 +634,7 @@ async function getJavaParser(): Promise<{ parser: Parser; lang: object } | null>
   if (grammarStatus('Java') === 'unavailable') return null;
   if (!_javaParser) {
     const loaded = await loadCoreGrammarSoft('Java', async () => {
-      const javaModule = await import('tree-sitter-java');
+      const javaModule = await importGrammar('tree-sitter-java');
       const lang = javaModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -651,7 +652,7 @@ async function getPhpParser(): Promise<{ parser: Parser; lang: object } | null> 
   const NP = await loadNativeParserFor('PHP');
   if (!NP) return null;
   if (!_phpParser) {
-    const phpModule = await import('tree-sitter-php');
+    const phpModule = await importGrammar('tree-sitter-php');
     _PhpLanguage = (phpModule.default as { php: object }).php;
     _phpParser = new NP();
     _phpParser.setLanguage(_PhpLanguage as unknown as Parser.Language);
@@ -663,7 +664,7 @@ async function getCSharpParser(): Promise<{ parser: Parser; lang: object } | nul
   const NP = await loadNativeParserFor('C#');
   if (!NP) return null;
   if (!_csParser) {
-    const csModule = await import('tree-sitter-c-sharp');
+    const csModule = await importGrammar('tree-sitter-c-sharp');
     _CsLanguage = csModule.default;
     _csParser = new NP();
     _csParser.setLanguage(_CsLanguage as unknown as Parser.Language);
@@ -675,7 +676,7 @@ async function getKotlinParser(): Promise<{ parser: Parser; lang: object } | nul
   const NP = await loadNativeParserFor('Kotlin');
   if (!NP) return null;
   if (!_ktParser) {
-    const ktModule = await import('tree-sitter-kotlin');
+    const ktModule = await importGrammar('tree-sitter-kotlin');
     _KtLanguage = ktModule.default;
     _ktParser = new NP();
     _ktParser.setLanguage(_KtLanguage as unknown as Parser.Language);
@@ -687,7 +688,7 @@ async function getScalaParser(): Promise<{ parser: Parser; lang: object } | null
   const NP = await loadNativeParserFor('Scala');
   if (!NP) return null;
   if (!_scalaParser) {
-    const scalaModule = await import('tree-sitter-scala');
+    const scalaModule = await importGrammar('tree-sitter-scala');
     _ScalaLanguage = (scalaModule as { default: object }).default;
     _scalaParser = new NP();
     _scalaParser.setLanguage(_ScalaLanguage as unknown as Parser.Language);
@@ -699,7 +700,7 @@ async function getElixirParser(): Promise<{ parser: Parser; lang: object } | nul
   const NP = await loadNativeParserFor('Elixir');
   if (!NP) return null;
   if (!_exParser) {
-    const exModule = await import('tree-sitter-elixir');
+    const exModule = await importGrammar('tree-sitter-elixir');
     _ExLanguage = exModule.default;
     _exParser = new NP();
     _exParser.setLanguage(_ExLanguage as unknown as Parser.Language);
@@ -713,7 +714,7 @@ async function getCppParser(): Promise<{ parser: Parser; lang: object } | null> 
   if (grammarStatus('C++') === 'unavailable') return null;
   if (!_cppParser) {
     const loaded = await loadCoreGrammarSoft('C++', async () => {
-      const cppModule = await import('tree-sitter-cpp');
+      const cppModule = await importGrammar('tree-sitter-cpp');
       const lang = cppModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -733,7 +734,7 @@ async function getSwiftParser(): Promise<{ parser: Parser; lang: object } | null
   if (grammarStatus('Swift') === 'unavailable') return null;
   if (!_swiftParser) {
     const loaded = await loadCoreGrammarSoft('Swift', async () => {
-      const swiftModule = await import('tree-sitter-swift');
+      const swiftModule = await importGrammar('tree-sitter-swift');
       const lang = swiftModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -3010,7 +3011,7 @@ async function extractByQueries(
 // ── C# ──────────────────────────────────────────────────────────────────────
 const CSHARP_SPEC: QueryLangSpec = {
   language: 'C#',
-  loader: () => loadGrammarSoft('C#', () => import('tree-sitter-c-sharp'), m => m.default),
+  loader: () => loadGrammarSoft('C#', () => importGrammar('tree-sitter-c-sharp'), m => m.default),
   classTypes: new Set(['class_declaration', 'struct_declaration', 'record_declaration', 'interface_declaration', 'enum_declaration']),
   fnQuery: `
     (method_declaration name: (identifier) @fn.name) @fn.node
@@ -3027,7 +3028,7 @@ const CSHARP_SPEC: QueryLangSpec = {
 // ── Kotlin ──────────────────────────────────────────────────────────────────
 const KOTLIN_SPEC: QueryLangSpec = {
   language: 'Kotlin',
-  loader: () => loadGrammarSoft('Kotlin', () => import('tree-sitter-kotlin'), m => m.default),
+  loader: () => loadGrammarSoft('Kotlin', () => importGrammar('tree-sitter-kotlin'), m => m.default),
   classTypes: new Set(['class_declaration', 'object_declaration', 'interface_declaration', 'companion_object']),
   // Extension functions: `fun Foo.bar()` — the receiver user_type becomes the className.
   // The receiver is the user_type that appears BEFORE the function name. A user_type
@@ -3059,7 +3060,7 @@ const KOTLIN_SPEC: QueryLangSpec = {
 // ── PHP ─────────────────────────────────────────────────────────────────────
 const PHP_SPEC: QueryLangSpec = {
   language: 'PHP',
-  loader: () => loadGrammarSoft('PHP', () => import('tree-sitter-php'), m => (m.default as { php: object }).php),
+  loader: () => loadGrammarSoft('PHP', () => importGrammar('tree-sitter-php'), m => (m.default as { php: object }).php),
   classTypes: new Set(['class_declaration', 'trait_declaration', 'interface_declaration', 'enum_declaration']),
   fnQuery: `
     (function_definition name: (name) @fn.name) @fn.node
@@ -3077,7 +3078,7 @@ const PHP_SPEC: QueryLangSpec = {
 // ── C ───────────────────────────────────────────────────────────────────────
 const C_SPEC: QueryLangSpec = {
   language: 'C',
-  loader: () => loadGrammarSoft('C', () => import('tree-sitter-c'), m => m.default),
+  loader: () => loadGrammarSoft('C', () => importGrammar('tree-sitter-c'), m => m.default),
   classTypes: new Set(), // C has no classes — file scope is the implicit grouping
   fnQuery: `
     (function_definition declarator: (function_declarator declarator: (identifier) @fn.name)) @fn.node
@@ -3090,7 +3091,7 @@ const C_SPEC: QueryLangSpec = {
 // ── Scala ───────────────────────────────────────────────────────────────────
 const SCALA_SPEC: QueryLangSpec = {
   language: 'Scala',
-  loader: () => loadGrammarSoft('Scala', () => import('tree-sitter-scala'), m => m.default),
+  loader: () => loadGrammarSoft('Scala', () => importGrammar('tree-sitter-scala'), m => m.default),
   classTypes: new Set(['object_definition', 'class_definition', 'trait_definition']),
   fnQuery: `
     (function_definition name: (identifier) @fn.name) @fn.node
@@ -3149,7 +3150,7 @@ const LUA_SPEC: QueryLangSpec = {
 // ── Bash ────────────────────────────────────────────────────────────────────
 const BASH_SPEC: QueryLangSpec = {
   language: 'Bash',
-  loader: () => loadGrammarSoft('Bash', () => import('tree-sitter-bash'), m => m.default),
+  loader: () => loadGrammarSoft('Bash', () => importGrammar('tree-sitter-bash'), m => m.default),
   classTypes: new Set(),
   // Only edge to project-defined functions, never external binaries (grep/ls/…).
   callFilter: (calleeName, definedNames) => definedNames.has(calleeName),
@@ -3319,7 +3320,7 @@ async function extractElixirGraph(
   filePath: string,
   content: string,
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; parseHealth?: FileParseHealth }> {
-  const loaded = await loadGrammarSoft('Elixir', () => import('tree-sitter-elixir'), m => m.default);
+  const loaded = await loadGrammarSoft('Elixir', () => importGrammar('tree-sitter-elixir'), m => m.default);
   if (!loaded) return { nodes: [], rawEdges: [] };
 
   return loaded.withTree(content, (root) => {

@@ -9,6 +9,7 @@
  */
 
 import { LineCounter, parseDocument, type ScalarTag, type CollectionTag } from 'yaml';
+import { YAML_QUIET, reportStringifiedCollectionKeys } from '../yaml-diagnostics.js';
 import type { IacGraph, IacReference, IacResource } from './types.js';
 import { emptyIacGraph } from './types.js';
 
@@ -45,10 +46,11 @@ export function extractCloudFormation(
     let doc;
     const lc = new LineCounter();
     try {
-      doc = parseDocument(file.content, { customTags: cfnTags(), lineCounter: lc });
+      doc = parseDocument(file.content, { ...YAML_QUIET, customTags: cfnTags(), lineCounter: lc });
     } catch {
       continue;
     }
+    reportStringifiedCollectionKeys(doc, file.path);
     const js = doc.toJS() as Record<string, unknown> | null;
     if (!js || typeof js !== 'object') continue;
     extractTemplate(js, file.path, doc, lc, graph);

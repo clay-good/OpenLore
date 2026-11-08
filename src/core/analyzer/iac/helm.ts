@@ -13,6 +13,7 @@
 
 import { dirname, posix as posixPath } from 'node:path';
 import { parseAllDocuments } from 'yaml';
+import { YAML_QUIET, reportStringifiedCollectionKeys } from '../yaml-diagnostics.js';
 import type { IacGraph, IacModule } from './types.js';
 import { emptyIacGraph } from './types.js';
 
@@ -54,7 +55,8 @@ function extractChart(root: string, chartFiles: InFile[], allChartRoots: string[
 
   let meta: Record<string, unknown> = {};
   try {
-    const docs = parseAllDocuments(chartYaml.content);
+    const docs = parseAllDocuments(chartYaml.content, { ...YAML_QUIET });
+    reportStringifiedCollectionKeys(docs, chartYaml.path);
     meta = (docs[0]?.toJS() ?? {}) as Record<string, unknown>;
   } catch { /* tolerate */ }
   const chartName = typeof meta.name === 'string' ? meta.name : posixPath.basename(root);
@@ -93,7 +95,9 @@ function extractChart(root: string, chartFiles: InFile[], allChartRoots: string[
   const valuePaths = new Set<string>();
   if (valuesFile) {
     try {
-      const v = (parseAllDocuments(valuesFile.content)[0]?.toJS() ?? {}) as Record<string, unknown>;
+      const valuesDocs = parseAllDocuments(valuesFile.content, { ...YAML_QUIET });
+      reportStringifiedCollectionKeys(valuesDocs, valuesFile.path);
+      const v = (valuesDocs[0]?.toJS() ?? {}) as Record<string, unknown>;
       flattenKeys(v, '', valuePaths);
     } catch { /* tolerate malformed values */ }
   }
@@ -173,10 +177,14 @@ function extractTemplateManifests(f: InFile, chartName: string, module: IacModul
   const masked = maskHelm(f.content);
   let docs;
   try {
-    docs = parseAllDocuments(masked);
+    docs = parseAllDocuments(masked, { ...YAML_QUIET });
   } catch {
     return;
   }
+  // Masking `{{ .Name }}` can leave a YAML flow map where a scalar key was, which
+  // `toJS()` stringifies. The library would warn about that on stderr; report it on
+  // our own logger instead, naming the file the library's warning never did.
+  reportStringifiedCollectionKeys(docs, f.path);
   for (const doc of docs) {
     let obj: Record<string, unknown> | null;
     try { obj = doc.toJS() as Record<string, unknown> | null; } catch { continue; }

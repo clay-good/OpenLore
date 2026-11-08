@@ -13,6 +13,7 @@
  */
 
 import { parseDocument } from 'yaml';
+import { YAML_QUIET } from '../yaml-diagnostics.js';
 import type { IacGraph, IacReference } from './types.js';
 import { emptyIacGraph } from './types.js';
 
@@ -275,7 +276,7 @@ function parseCompose(
     // `x-*: &anchor` compose extension pattern — so inherited image/depends_on/build
     // keys are present rather than left under a literal `<<` property. (It must be set
     // at parse time, not on toJS.)
-    doc = parseDocument(content, { merge: true });
+    doc = parseDocument(content, { ...YAML_QUIET, merge: true });
   } catch {
     return;
   }

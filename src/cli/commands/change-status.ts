@@ -8,6 +8,7 @@
  */
 
 import { readFile, readdir } from 'node:fs/promises';
+import { YAML_QUIET } from '../../core/analyzer/yaml-diagnostics.js';
 import { join, relative, sep } from 'node:path';
 import { Command } from 'commander';
 import { glob } from 'glob';
@@ -234,7 +235,7 @@ async function requirementReceipts(
   if (deltaPaths.length === 0) {
     const metadataPath = safeJoin(rootPath, `openspec/changes/${name}/.openspec.yaml`);
     try {
-      const metadata = parseYaml(await readFile(metadataPath, 'utf8')) as unknown;
+      const metadata = parseYaml(await readFile(metadataPath, 'utf8'), { ...YAML_QUIET }) as unknown;
       if (
         validationPasses
         &&

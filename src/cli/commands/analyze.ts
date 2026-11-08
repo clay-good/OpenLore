@@ -8,6 +8,14 @@
 import { setPriority } from 'node:os';
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
+import {
+  joinCapped,
+  omittedDisclosure,
+  CYCLE_MEMBERS_SHOWN,
+  CYCLE_LINES_SHOWN,
+  CLONE_MEMBERS_SHOWN,
+  INVENTORY_ITEMS_SHOWN,
+} from '../../utils/capped-list.js';
 import { mkdir, readFile, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -186,6 +194,51 @@ export async function readPublishedStoreFault(outputPath: string): Promise<strin
   }
 }
 
+/** One cycle as read back out of `refactor-priorities.json`. */
+export interface CycleReport {
+  size?: number;
+  participants?: Array<{ function: string; file: string }>;
+}
+
+/**
+ * Render one `⚠ Cycle:` report line.
+ *
+ * A cycle is a strongly-connected component, so its length is a property of the
+ * analyzed repository: on grpc-go one names 1,347 functions, which joined into
+ * a single 36,445-character console line. The printed chain is capped and the
+ * exact number of withheld names is disclosed; `refactor-priorities.json` keeps
+ * every participant.
+ */
+export function renderCycleLine(cycle: CycleReport): string {
+  const names = joinCapped(
+    (cycle.participants ?? []).map(p => p.function),
+    CYCLE_MEMBERS_SHOWN,
+    ' ↔ ',
+    'symbol',
+  );
+  return `⚠ Cycle: ${safe(names)}`;
+}
+
+/**
+ * Render one clone-group line for the "Top 5 Clone Groups" report.
+ *
+ * A generated-accessor group can hold hundreds of members (182 on grpc-go, an
+ * 8,333-character line). The printed member list is capped with an exact
+ * omitted count; `duplicates.json` keeps every instance.
+ */
+export function renderCloneGroupLine(group: CloneGroup): string {
+  const files = joinCapped(
+    group.instances.map((i: CloneInstance) => {
+      const fileParts = i.file.split('/');
+      return `${fileParts[fileParts.length - 2]}/${fileParts[fileParts.length - 1]}:${i.functionName}`;
+    }),
+    CLONE_MEMBERS_SHOWN,
+    '  ',
+    'member',
+  );
+  return `${safe(group.type).padEnd(10)} (${group.instances.length}x, ${group.lineCount} lines): ${safe(files)}`;
+}
+
 export function formatIndexedFunctionPopulation(result: {
   total: number;
   productionFunctions: number;
@@ -267,7 +320,7 @@ async function reportCompletedAnalysis(outputPath: string): Promise<void> {
     logger.blank();
     logger.success('Analysis Summary');
     logger.info('Files analyzed', String(repoStructure.statistics.analyzedFiles));
-    logger.info('Domains detected', repoStructure.domains.map(d => d.name).join(', ') || 'None');
+    logger.info('Domains detected', joinCapped(repoStructure.domains.map(d => d.name), INVENTORY_ITEMS_SHOWN, ', ', 'domain') || 'None');
     logger.info('Architecture', repoStructure.architecture.pattern);
   } catch (err) {
     logger.warning(`Analysis completed but its summary could not be read: ${(err as Error).message}`);
@@ -566,7 +619,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
             logger.success('Analysis Summary');
             logger.info('Files analyzed', repoStructure.statistics.analyzedFiles);
-            logger.info('Domains detected', repoStructure.domains.map((d: { name: string }) => d.name).join(', ') || 'None');
+            logger.info('Domains detected', joinCapped(repoStructure.domains.map((d: { name: string }) => d.name), INVENTORY_ITEMS_SHOWN, ', ', 'domain') || 'None');
             logger.info('Architecture', repoStructure.architecture.pattern);
             logger.blank();
 
@@ -800,10 +853,12 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
           if (rp.cycles?.length > 0) {
             console.log('');
-            for (const c of rp.cycles as Array<{ size: number; participants: Array<{ function: string; file: string }> }>) {
-              const names = c.participants.map(p => p.function).join(' ↔ ');
-              console.log(`    ⚠ Cycle: ${safe(names)}`);
+            const cycles = rp.cycles as CycleReport[];
+            for (const c of cycles.slice(0, CYCLE_LINES_SHOWN)) {
+              console.log(`    ${renderCycleLine(c)}`);
             }
+            const moreCycles = omittedDisclosure(cycles.length, CYCLE_LINES_SHOWN, 'cycle');
+            if (moreCycles) console.log(`      ${safe(moreCycles)}`);
           }
 
           console.log('');
@@ -848,12 +903,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
               .slice(0, 5);
 
             for (const group of topGroups) {
-              const files = group.instances.map((i: CloneInstance) => {
-                const fileParts = i.file.split('/');
-                return `${fileParts[fileParts.length - 2]}/${fileParts[fileParts.length - 1]}:${i.functionName}`;
-              }).join('  ');
-
-              console.log(`    ${safe(group.type).padEnd(10)} (${group.instances.length}x, ${group.lineCount} lines): ${safe(files)}`);
+              console.log(`    ${renderCloneGroupLine(group)}`);
             }
           }
 
