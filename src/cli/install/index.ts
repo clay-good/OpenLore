@@ -230,13 +230,24 @@ export function resolveUserScopeRoot(explicit?: string): string {
  * Fail-soft in every direction. Not a git repository, no config yet, an explicit
  * `autopilot: false`, an unwritable hook path — each is a one-line note, never a
  * failed install (change: unify-onboarding-entrypoint).
+ *
+ * Returns the mode it ACTUALLY installed, not the mode it set out to install. The caller
+ * prints the summary line from this value, so the summary cannot contradict the installed
+ * state the way it did when `--no-analyze` installed a blocking gate under an unconditional
+ * "no commit is blocked by default" (change: fix-install-never-blocks-by-default).
  */
-export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skipped'> {
+export interface GovernanceGateOutcome {
+  status: 'wired' | 'skipped';
+  /** Whether the installed gate is non-blocking. Meaningless when `status` is `skipped`. */
+  autopilot: boolean;
+}
+
+export async function wireGovernanceGate(cwd: string): Promise<GovernanceGateOutcome> {
   try {
     const { isGitRepository } = await import('../../core/drift/git-diff.js');
     if (!(await isGitRepository(cwd))) {
       logger.info('Decision trail', 'skipped — not a git repository, so there is no commit gate to wire');
-      return 'skipped';
+      return { status: 'skipped', autopilot: true };
     }
     const { readProjectOpenLoreConfig, writeOpenLoreConfig } = await import('../../core/services/config-manager.js');
     const config = await readProjectOpenLoreConfig(cwd);
@@ -280,12 +291,25 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
         await writeOpenLoreConfig(cwd, { ...config, governance: { ...config.governance, autopilot: true } });
       }
     } else if (!config) {
+      // `--no-analyze` and `openlore setup` both reach here: no `init` ran, so there is no
+      // config to RECORD the default in. The default itself does not depend on that file —
+      // a gate with nowhere to read `governance.autopilot` from is non-blocking, because
+      // blocking is a setting and nothing set it. Install deliberately does NOT create a
+      // config here: writing one would be performing the `init` the user declined
+      // (change: fix-install-never-blocks-by-default).
       logger.info(
         'Decision trail',
-        'installing the gate in blocking review mode — there is no .openlore/config.json to record '
-        + 'the non-blocking default in. Run "openlore install" (which inits) for the autopilot default.',
+        'no .openlore/config.json to record the mode in, so the gate takes the non-blocking default: '
+        + 'it records decisions and blocks no commit. Run "openlore init" and set '
+        + '{ "governance": { "autopilot": false } } to require blocking review here.',
       );
     }
+    // The ONE resolver every gate check reads, consulted on the config as it now stands and
+    // with `gateRunning` set exactly as the hook will set it. Install's summary is printed
+    // from this value rather than from a second, hand-rolled copy of the same rule — which is
+    // how the summary came to contradict the gate (change: fix-install-never-blocks-by-default).
+    const { resolveAutopilotMode } = await import('../../core/decisions/autopilot.js');
+    const mode = await resolveAutopilotMode(cwd, await readProjectOpenLoreConfig(cwd), { gateRunning: true });
     const { resolveTrustedHookLauncher } = await import('../git-hooks.js');
     if (!(await resolveTrustedHookLauncher(cwd))) {
       // The hook installer would print a security-flavored ERROR here. On the
@@ -296,7 +320,7 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
         'skipped — OpenLore resolves inside this repository, and a commit gate must not execute '
         + 'code the repository can change. Install OpenLore globally, then re-run to wire it.',
       );
-      return 'skipped';
+      return { status: 'skipped', autopilot: mode.autopilot };
     }
     const { installPreCommitHook } = await import('../commands/decisions.js');
     const exitCodeBefore = process.exitCode;
@@ -305,20 +329,17 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     // genuine failure as success when something earlier had already failed, and
     // comparing against zero read a successful install as failed when an earlier
     // step (a failed index build, which now runs first) had set the code.
-    const installed = await installPreCommitHook(cwd, {
-      autopilot: config?.governance?.autopilot === true
-        || (!!config && !alreadyGated && config.governance?.autopilot !== false),
-    });
+    const installed = await installPreCommitHook(cwd, { autopilot: mode.autopilot });
     if (!installed) {
       // A commit gate that could not be installed must not fail the whole install.
       process.exitCode = exitCodeBefore;
       logger.info('Decision trail', 'the commit gate could not be installed — see the message above; everything else is wired');
-      return 'skipped';
+      return { status: 'skipped', autopilot: mode.autopilot };
     }
-    return 'wired';
+    return { status: 'wired', autopilot: mode.autopilot };
   } catch (error) {
     logger.info('Decision trail', `skipped — ${(error as Error).message}`);
-    return 'skipped';
+    return { status: 'skipped', autopilot: true };
   }
 }
 
@@ -507,7 +528,8 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
       );
       return false;
     }
-    allChanges.push(...result.changes);
+    // Tagged here, once, so every summary line can state its scope and absolute path.
+    allChanges.push(...result.changes.map((change) => ({ ...change, scope: ctx.scope ?? 'repo' as const })));
     allWarnings.push(...result.warnings);
     if (result.conflict) {
       if (ctx.scope === 'user') {
@@ -623,16 +645,12 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     // meant the headline flow — a bare `openlore install` on a fresh repo — always
     // reported "no config yet" and silently skipped the decision trail
     // (change: unify-onboarding-entrypoint).
-    if (await wireGovernanceGate(cwd) === 'wired') {
-      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
-    }
+    reportGovernanceGate(await wireGovernanceGate(cwd));
     if (indexBuilt) await printProveGuidance(cwd);
   } else if (!opts.dryRun && !opts.uninstall) {
     // `--no-analyze` skipped init, so there is no config to wire governance into.
     // Try anyway: a repository that already has one still gets its trail.
-    if (await wireGovernanceGate(cwd) === 'wired') {
-      logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
-    }
+    reportGovernanceGate(await wireGovernanceGate(cwd));
     // --no-analyze skipped init too, so a bare "openlore analyze" would fail
     // ("Run openlore init first"). Advise a sequence that actually works.
     logger.info(
@@ -672,6 +690,19 @@ function reportScopes(info: {
         : `${info.globalAgents.join(', ')} ${verb} wired under ${info.home} — every git repository you open from now on reaches OpenLore, `
           + 'and builds its index in the background on first touch (opt out per repo with `"autoInit": false`)',
     );
+    // Removal is symmetric with the install, which is exactly why it must be stated as loudly:
+    // `openlore install --uninstall` run inside ONE repository unwires the user scope for ALL of
+    // them. The install side has always said so ("every git repository you open from now on…");
+    // the removal side said only "[did update] strip OpenLore entries from .claude.json", with no
+    // path, no scope, and no consequence (change: fix-install-never-blocks-by-default).
+    if (info.uninstall) {
+      logger.warning(
+        `This affects ALL repositories, not just this one: the user-scope entries under ${info.home} `
+        + `${info.dryRun ? 'would be' : 'are'} gone, so every other repository on this machine stops `
+        + 'reaching OpenLore until you run `openlore install` again. Use `--repo-only` to uninstall '
+        + 'this repository and leave the user scope in place.',
+      );
+    }
   } else if (info.attemptedUserScope) {
     // Attempted and did not come through clean. Never claim it was wired.
     logger.warning(
@@ -702,6 +733,27 @@ function reportScopes(info: {
   }
 }
 
+/**
+ * Report the decision trail using the mode the gate was ACTUALLY installed in.
+ *
+ * The non-blocking sentence used to be printed unconditionally, one line after the hook
+ * installer had printed "Commits will be gated until decisions are approved" — two
+ * conclusions, one of them false, about the same gate (change:
+ * fix-install-never-blocks-by-default).
+ */
+export function reportGovernanceGate(outcome: GovernanceGateOutcome): void {
+  if (outcome.status !== 'wired') return;
+  if (outcome.autopilot) {
+    logger.success('Decision trail on — architectural decisions are recorded and synced at commit; no commit is blocked by default.');
+    return;
+  }
+  logger.warning(
+    'Decision trail on in BLOCKING review mode — this repository sets governance.autopilot to false, '
+    + 'so a commit with unreviewed decisions will fail. Set { "governance": { "autopilot": true } } in '
+    + '.openlore/config.json for the non-blocking default, or commit with `git commit --no-verify`.',
+  );
+}
+
 function printSummary(
   changes: PlannedChange[],
   warnings: string[],
@@ -720,8 +772,13 @@ function printSummary(
           : c.kind === 'delete'
             ? `[${verb} delete]`
             : '[noop]';
-    if (c.kind === 'noop') logger.discovery(`${tag} ${c.summary}`);
-    else logger.success(`${tag} ${c.summary}`);
+    // A user-scope change is to a file outside this repository that every repository reads.
+    // Name the absolute path so it can never be mistaken for the repo-local file of the same
+    // name — a per-repo `--uninstall` reported stripping the GLOBAL `~/.claude.json` as a bare
+    // "strip OpenLore entries from .claude.json" (change: fix-install-never-blocks-by-default).
+    const line = c.scope === 'user' ? `${tag} ${c.summary} [user scope: ${c.path}]` : `${tag} ${c.summary}`;
+    if (c.kind === 'noop') logger.discovery(line);
+    else logger.success(line);
     if (dryRun && c.preview) {
       const indented = c.preview
         .split('\n')

@@ -63,24 +63,25 @@ containing no dynamic dispatch.
 
 ## How roots and confidence work
 
+A node is a **root** (assumed live) if it is a test, is imported by name from another file, serves a
+declared interface element (an HTTP route, a gRPC RPC, or a GraphQL field), is deployed by an
+infrastructure resource, is `main`-like, or lives in a file a config invokes. Reachability is a
+forward BFS from those roots.
+
 A node is a **root** (assumed live) if it is a test, is imported by name from another file, is a
 detected HTTP route handler, is a handler the **route inventory** pins to it, is `main`-like, or
 lives in a file a config invokes. Reachability is a forward BFS from those roots.
-
 ### Route-inventory roots
-
 Edge-derived roots alone are not enough. `http_endpoint`, `deploys_symbol`, `implements_endpoint`
 and synthesized `route-handler` edges all need something to bind to — a cross-language call site, a
 deploy resource, a declared OpenAPI operation, a statically-paired registration. A
 framework-decorator route with no declared contract (`contractSource: "none"`) produces **none** of
 them, so a `@Get('broadcast')` method that only Nest invokes used to read as high-confidence dead
 while `get_route_inventory` listed it as a route — two contradictory answers from one build.
-
 `route-inventory.json` is already written by `analyze`, so this is a **join, not new analysis**
 (change: `root-framework-routes`). Each inventoried route is resolved to a graph node by **file +
 handler name**, and a handler is rooted **only when it pins to exactly one declaration in that
 file**:
-
 | Outcome | What happens |
 |---|---|
 | exactly one declaration | liveness root, counted in `rootKinds.httpHandlers`, receipt in `routeInventoryRoots` |
@@ -90,30 +91,24 @@ file**:
 | no handler name, or one over 256 chars (`handler-not-named`) | not rooted, counted |
 | an absolute path or one escaping the root (`outside-repository`) | not rooted, counted |
 | past 50,000 routes (`over-cap`) | not rooted, counted |
-
 Nothing is guessed — there is deliberately no basename or path-suffix fallback. **A root attributed
 to the wrong node is worse than a disclosed unresolved handler, because it makes real dead code look
 live.** Every refusal is counted by reason in `routeRootsNotAssessed` (with up to 10 routes listed)
 and summarised as a caveat, exactly the way `contractRootsNotAssessed` discloses an unresolved
 contract binding.
-
 The join is O(routes + nodes): the file → name → ids index is built once and each route is a
 constant-time lookup. The artifact is read through the bounded untrusted-artifact reader; an absent,
 oversized, truncated, or non-JSON inventory degrades to the edge-only roots **with** a
 `routeInventoryRoots.boundary`, never a crash and never a silent "no routes". Because an inventoried
 route is a decorator literally above the declaration rather than a synthesized edge, these roots
 apply in `directResolvedOnly` mode too.
-
 Every framework the inventory names is an HTTP routing framework (nestjs, express, fastify,
 nextjs-app, fastapi, flask, django, starlette, spring, jaxrs, …), so all of these roots count under
 `rootKinds.httpHandlers`; `routeInventoryRoots.byFramework` breaks them down. No finer root label is
 clearly true from that field alone.
-
 ### Declarations and generated files are not code that can be dead
-
 Two whole categories used to be rated `high` where the verdict is a category error, not a false
 negative:
-
 - **TypeScript ambient declarations.** Every function-shaped symbol in a `.d.ts` / `.d.mts` /
   `.d.cts` is bodyless (`public static create(properties?: ITrace): Trace;`). There is no code there
   to be dead, so such a symbol is **not a candidate at any confidence** — excluded from the dead set
@@ -164,6 +159,31 @@ exact count of members left unread past the cap of 256. A member manifest's own 
 not followed. Framework routing conventions and other config formats are not read, and only POSIX
 shell workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
 repository, 36 of 1,018 entry points are in config-wired files.
+
+### A root is labelled by the protocol it serves
+
+A function that serves a *declared* interface element is a root: whoever calls that element invokes
+it, in this repository or outside it. That binding is one edge kind (`implements_endpoint`) with
+three producers, so the count names the protocol rather than assuming HTTP:
+
+| Count | Where the root comes from |
+|-------|---------------------------|
+| `rootKinds.grpcHandlers` | a gRPC RPC — a method a protobuf `service` RPC is bound to through a server registration |
+| `rootKinds.graphqlResolvers` | a GraphQL field — a resolver a literal resolver map names for a schema field |
+| `rootKinds.httpHandlers` | an HTTP route — an OpenAPI/Swagger operation a route registration serves, a cross-language `http_endpoint` edge, or a synthesized framework route handler (the last only outside strict `directResolvedOnly` mode) |
+
+A gRPC or GraphQL binding is identified POSITIVELY, by the bound contract node's own format tag
+(`Protobuf` / `GraphQL`) — never inferred from the absence of the other protocols. The three are made disjoint by
+precedence (gRPC → GraphQL → HTTP), as `deployed` already takes precedence over all of them: a
+function that serves both a proto RPC and a GraphQL field is counted once, under `grpcHandlers`.
+`httpHandlers` is the fallback lane as well as the HTTP lane — a binding whose contract node carries
+no readable format tag is counted there, so read it as "an HTTP route, or a contract binding whose
+format could not be read".
+
+`rootKinds` is not a partition, and this split does not make it one — `externallyWired` carries no
+exclusions at all, so a jest setup file's functions are counted under both `tests` and
+`externallyWired`, and an imported route handler under both `imported` and `httpHandlers`. The split
+only stops a non-HTTP binding being labelled HTTP.
 
 Confidence is deliberately conservative — the bias is toward **false-live over false-dead**:
 
@@ -247,6 +267,8 @@ Report output:
 ```jsonc
 {
   "stats": { "analyzed": 1455, "roots": 399, "reachable": 790, "candidateDead": 665 },
+  "rootKinds": { "tests": 0, "imported": 393, "grpcHandlers": 0, "graphqlResolvers": 0, "httpHandlers": 0, "externallyWired": 4, "deployed": 0 },
+
   "rootKinds": { "tests": 0, "imported": 393, "httpHandlers": 0, "externallyWired": 4 },
   "routeInventoryRoots": { "routesRead": 494, "rooted": 486, "byFramework": { "nestjs": 483, "express": 2, "fastify": 1 } },
   "routeRootsNotAssessed": {

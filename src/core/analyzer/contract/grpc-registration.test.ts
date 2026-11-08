@@ -6,7 +6,7 @@
  * a registration written in a comment or a string, or an `addService` that is not grpc-js.
  */
 import { describe, it, expect } from 'vitest';
-import { scanGrpcRegistrations, importedNames, isImportedModule, isImportedPythonModule } from './grpc-registration.js';
+import { scanGrpcRegistrations, importedNames, isImportedModule, isImportedPythonModule, readPathAliases, aliasModuleBase } from './grpc-registration.js';
 
 describe('scanGrpcRegistrations: Go', () => {
   it('reads the service and the literal implementation type', () => {
@@ -282,6 +282,91 @@ server.addService(proto.shop.v1.OrderService.service, { getOrder: g });
     expect(cjs[0].methods).toEqual([{ key: 'getOrder', fn: 'getOrder', imported: true, from: './handlers' }]);
   });
 
+  it('a class instantiated at the registration names its implementing type', () => {
+    const local = scanGrpcRegistrations('srv/server.ts', `class MyHandlers { getOrder() {} }
+server.addService(proto.shop.v1.OrderService.service, new MyHandlers());
+`);
+    expect(local[0]).toMatchObject({ implType: 'MyHandlers' });
+    expect(local[0].implFrom).toBeUndefined();
+    expect(local[0].notLiteral).toBeUndefined();
+    // An imported class is looked up by the name it was EXPORTED under, with the module it is in.
+    const imported = scanGrpcRegistrations('srv/server.ts', `import { MyHandlers as H } from '@app/handlers';
+server.addService(proto.shop.v1.OrderService.service, new H(cfg));
+`);
+    expect(imported[0]).toMatchObject({ implType: 'MyHandlers', implFrom: '@app/handlers' });
+    // A namespace member names a declared class in that module.
+    const ns = scanGrpcRegistrations('srv/server.ts', `import * as impl from './handlers';
+server.addService(proto.shop.v1.OrderService.service, new impl.MyHandlers());
+`);
+    expect(ns[0]).toMatchObject({ implType: 'MyHandlers', implFrom: './handlers' });
+  });
+
+  it('a value that is not a class written at the registration stays disclosed', () => {
+    const cases = [
+      'new MyHandlers().wrap()', 'new MyHandlers(cfg).handlers', 'this.handlers', 'impl.handlers',
+      'makeHandlers()', 'new handlers[kind]()',
+    ];
+    for (const arg of cases) {
+      const r = scanGrpcRegistrations('srv/server.ts', `server.addService(proto.shop.v1.OrderService.service, ${arg});\n`);
+      expect(r[0], arg).toMatchObject({ notLiteral: expect.any(String) });
+      expect(r[0].implType, arg).toBeUndefined();
+    }
+    // A default or whole-module import does not name the class it holds.
+    const def = scanGrpcRegistrations('srv/server.ts', `import Handlers from './handlers';
+server.addService(proto.shop.v1.OrderService.service, new Handlers());
+`);
+    expect(def[0].implType).toBeUndefined();
+    expect(def[0].notLiteral).toContain('does not name the class it declares');
+  });
+
+  it('a local name bound once to an object literal is read as that literal', () => {
+    const r = scanGrpcRegistrations('srv/server.js', `const { listOrders } = require('./handlers');
+function getOrder(call, cb) {}
+const serviceImplementation = {
+  getOrder,
+  listOrders,
+  del: impl.del,
+};
+server.addService(proto.shop.v1.OrderService.service, serviceImplementation);
+`);
+    expect(r[0].notLiteral).toBeUndefined();
+    expect(r[0].methods).toEqual([
+      { key: 'getOrder', fn: 'getOrder' },
+      { key: 'listOrders', fn: 'listOrders', imported: true, from: './handlers' },
+      { key: 'del', fn: 'del', notFollowed: expect.stringContaining('names a member of `impl`') },
+    ]);
+  });
+
+  it('a named implementation object whose value this file does not settle stays disclosed', () => {
+    const cases: Record<string, string> = {
+      'reassigned later': 'const impl = { getOrder };\nimpl = other;\n',
+      'a member written later': 'const impl = { getOrder };\nimpl.listOrders = listOrders;\n',
+      'Object.assign onto it': 'const impl = { getOrder };\nObject.assign(impl, more);\n',
+      'a computed write': 'const impl = { getOrder };\nimpl[key] = fn;\n',
+      'bound twice': 'if (x) { const impl = { getOrder }; }\nconst impl = { getOrder };\n',
+      'not an object literal': 'const impl = makeImpl();\n',
+      'bound inside a function': 'function main() {\n  const impl = { getOrder };\n}\n',
+      'imported from elsewhere': "import { impl } from './impl';\n",
+      'a spread inside it': 'const impl = { ...base, getOrder };\n',
+    };
+    for (const [why, head] of Object.entries(cases)) {
+      const r = scanGrpcRegistrations('srv/server.js', `${head}server.addService(proto.shop.v1.OrderService.service, impl);\n`);
+      expect(r[0].methods, why).toBeUndefined();
+      expect(r[0].notLiteral, why).toEqual(expect.any(String));
+    }
+  });
+
+  it('resolving named implementation objects stays linear in the file', () => {
+    // One registration per name, each naming a distinct local: the lookup is memoized and capped,
+    // so a file full of them cannot cost (registrations × file length).
+    const n = 400;
+    const body = Array.from({ length: n }, (_, i) => `const impl${i} = { getOrder };\nserver.addService(proto.shop.v1.OrderService.service, impl${i});`).join('\n');
+    const started = Date.now();
+    const r = scanGrpcRegistrations('srv/server.js', `${'// a long file\n'.repeat(20_000)}${body}\n`);
+    expect(r).toHaveLength(n);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
   it('a default import names no exported function, so it is not looked for elsewhere', () => {
     const r = scanGrpcRegistrations('srv/server.js', `import handler from './handlers';
 server.addService(proto.shop.v1.OrderService.service, { getOrder: handler });
@@ -312,9 +397,69 @@ const h = await import('./z');
     for (const ext of ['js', 'mjs', 'cjs']) expect(isImportedModule('src/r.ts', './o', `src/o.${ext}`)).toBe(true);
     expect(isImportedModule('src/api/resolvers.ts', './orders', 'src/orders.ts')).toBe(false);
     expect(isImportedModule('src/api/resolvers.ts', './orders', 'src/api/orders/extra.ts')).toBe(false);
-    // A package or a path alias names nothing in the repository.
+    // A package, or an alias with NO declared mapping in hand, names nothing in the repository.
+    // (With the mapping read from a tsconfig the same specifier does resolve — see below.)
     expect(isImportedModule('src/r.ts', 'orders', 'orders.ts')).toBe(false);
     expect(isImportedModule('src/r.ts', '@/orders', 'src/orders.ts')).toBe(false);
+  });
+
+  it('readPathAliases follows a declared mapping, and only an unambiguous one', () => {
+    const tsconfig = (paths: unknown, extra = '') => JSON.stringify({ compilerOptions: { baseUrl: '.', paths, ...JSON.parse(extra || '{}') } });
+    const aliases = readPathAliases(new Map([['tsconfig.json', tsconfig({ '@app/*': ['src/*'], '@/*': ['src/*'] })]]));
+    expect(aliasModuleBase(aliases, '@app/handlers')).toBe('src/handlers');
+    // The same specifier the "no mapping" case above refused now resolves, because the repository
+    // wrote the mapping down.
+    expect(isImportedModule('src/r.ts', '@/orders', 'src/orders.ts', aliases)).toBe(true);
+    expect(isImportedModule('src/r.ts', '@app/orders', 'src/orders.ts', aliases)).toBe(true);
+    expect(isImportedModule('src/r.ts', '@app/orders', 'lib/orders.ts', aliases)).toBe(false);
+    // Without the mapping in hand nothing changes.
+    expect(isImportedModule('src/r.ts', '@app/orders', 'src/orders.ts')).toBe(false);
+    // A package.json `imports` subpath, relative to the manifest's own directory.
+    const pkg = readPathAliases(new Map([['packages/api/package.json', JSON.stringify({ imports: { '#internal/*': './lib/*' } })]]));
+    expect(aliasModuleBase(pkg, '#internal/handlers')).toBe('packages/api/lib/handlers');
+    // Comments and a trailing comma are legal in a tsconfig.
+    const jsonc = readPathAliases(new Map([['tsconfig.json', '{\n // the app\n "compilerOptions": { "paths": { "@app/*": ["src/*"], } },\n}']]));
+    expect(aliasModuleBase(jsonc, '@app/x')).toBe('src/x');
+  });
+
+  it('readPathAliases refuses every mapping that is not provable from one config', () => {
+    const base = (paths: unknown) => new Map([['tsconfig.json', JSON.stringify({ compilerOptions: { paths } })]]);
+    // Several targets: which one the build picks is not written here.
+    expect(aliasModuleBase(readPathAliases(base({ '@app/*': ['src/*', 'vendor/*'] })), '@app/x')).toBeUndefined();
+    // A value that is not an array of strings is not a mapping.
+    expect(readPathAliases(base({ '@app/*': 'src/*' }))).toEqual([]);
+    expect(readPathAliases(base({ '@app/*': ['src/*', 3] }))).toEqual([]);
+    expect(readPathAliases(base({ '@app/*': [] }))).toEqual([]);
+    // A target escaping the repository root names nothing here.
+    expect(readPathAliases(base({ '@etc/*': ['../../etc/*'] }))).toEqual([]);
+    // Unparseable, or a `paths` that is not an object.
+    expect(readPathAliases(new Map([['tsconfig.json', '{ not json']]))).toEqual([]);
+    expect(readPathAliases(base(['src/*']))).toEqual([]);
+    // Two configs declaring the same pattern: which the build applies is not written down.
+    const two = readPathAliases(new Map([
+      ['tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@app/*': ['src/*'] } } })],
+      ['packages/x/tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@app/*': ['lib/*'] } } })],
+    ]));
+    expect(two).toHaveLength(2);
+    expect(aliasModuleBase(two, '@app/x')).toBeUndefined();
+    // A `package.json` conditional target, and a subpath without the `#` prefix.
+    expect(readPathAliases(new Map([['package.json', JSON.stringify({ imports: { '#a/*': { node: './lib/*' }, 'b/*': './lib/*' } })]]))).toEqual([]);
+    // A specifier past the length bound costs nothing and resolves to nothing.
+    const one = readPathAliases(base({ '@app/*': ['src/*'] }));
+    expect(aliasModuleBase(one, `@app/${'x'.repeat(200_000)}`)).toBeUndefined();
+    // A capture climbing above the root is refused after substitution too.
+    expect(aliasModuleBase(one, '@app/../../etc/passwd')).toBeUndefined();
+  });
+
+  it('readPathAliases stays linear in the declared patterns', () => {
+    const paths: Record<string, string[]> = {};
+    for (let i = 0; i < 50_000; i++) paths[`@p${i}/*`] = [`src/p${i}/*`];
+    const configs = new Map([['tsconfig.json', JSON.stringify({ compilerOptions: { paths } })]]);
+    const started = Date.now();
+    const aliases = readPathAliases(configs);
+    // Capped, so a config with 50 000 patterns cannot grow the table without bound.
+    expect(aliases.length).toBeLessThanOrEqual(2_000);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it('isImportedPythonModule resolves relative dots from the package and absolute paths as a suffix', () => {

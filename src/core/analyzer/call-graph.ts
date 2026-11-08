@@ -45,7 +45,7 @@ import { projectIacGraph } from './iac/project.js';
 import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
 import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
 import { generatedClientFunctionsFor } from './contract/generated-client.js';
-import { scanGrpcRegistrations, isGeneratedGrpcStub, createImportResolver, type GrpcRegistration, type ImportTarget } from './contract/grpc-registration.js';
+import { scanGrpcRegistrations, isGeneratedGrpcStub, createImportResolver, type GrpcRegistration, type ImportTarget, type PathAlias } from './contract/grpc-registration.js';
 import { isProtobufPath } from './contract/protobuf.js';
 import { isGraphqlPath } from './contract/graphql.js';
 import { scanResolverMaps, hasInlineSdl, type ResolverMap } from './contract/graphql-resolvers.js';
@@ -5677,6 +5677,13 @@ export interface CallGraphBuilderOptions {
    * no mapping: a built path then binds only if it is itself indexed.
    */
   buildOutput?: import('./iac/build-output.js').BuildOutputMap;
+  /**
+   * The path aliases the project DECLARED (tsconfig/jsconfig `compilerOptions.paths`, a
+   * `package.json` `imports` subpath), read by `readPathAliases` (change:
+   * fix-bind-aliased-grpc-node-handlers). Absent means none were read, and a bare specifier then
+   * resolves to nothing — as before.
+   */
+  pathAliases?: readonly PathAlias[];
 }
 
 export class CallGraphBuilder {
@@ -5692,6 +5699,7 @@ export class CallGraphBuilder {
   private readonly graphqlFilesOmitted: number;
   private readonly contractFilesSkipped: ReadonlyArray<{ file: string; reason: string }>;
   private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
+  private readonly pathAliases: readonly PathAlias[];
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
@@ -5704,6 +5712,7 @@ export class CallGraphBuilder {
     this.graphqlFilesOmitted = options.graphqlFilesOmitted ?? 0;
     this.contractFilesSkipped = options.contractFilesSkipped ?? [];
     this.buildOutput = options.buildOutput;
+    this.pathAliases = options.pathAliases ?? [];
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
       reExport: options.resolution?.reExport !== false,
@@ -6774,7 +6783,7 @@ export class CallGraphBuilder {
               const key = `${runtime}\0${from}\0${spec}\0${name}`;
               let hit = memo.get(key);
               if (!hit) {
-                resolve ??= createImportResolver([...fileContents.keys()], f => fileContents.get(f));
+                resolve ??= createImportResolver([...fileContents.keys()], f => fileContents.get(f), this.pathAliases);
                 hit = resolve(from, spec, name, runtime);
                 memo.set(key, hit);
               }

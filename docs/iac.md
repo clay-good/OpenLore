@@ -158,6 +158,24 @@ the files that still set a variable the diff stopped reading (`envDeclarations`)
 the key, the resource, the file and line, and whether a value is written there literally — never
 the value itself. The scan runs at query time over the working tree.
 
+On the code side, a variable's name is read from the literal at the read site. One idiom hides it —
+the read is in a helper and the name is passed in:
+
+```go
+mustMapEnv(&svc.productCatalogSvcAddr, "PRODUCT_CATALOG_SERVICE_ADDR")   // the name lives here
+func mustMapEnv(target *string, envKey string) { v := os.Getenv(envKey); … }   // the read lives here
+```
+
+That name is followed **exactly one hop**, and only when the binding is provable from literal text:
+the helper is a free function in the **same file**, exactly one parameter position feeds the read,
+that parameter is the whole key with no concatenation, reassignment or shadowing, and the call site
+passes a plain string literal. The read site is reported at the **call site**, where the variable is
+named, with the helper disclosed in `via`. Everything else — a variable argument, a template string,
+a computed key, a parameter with a default, a method, a same-named helper in another file, a helper
+behind another helper — is **not** followed; those reads are counted in `boundaries` with their file,
+line, key expression and the reason each was refused, so the read sites stay a disclosed lower bound
+rather than a silent one. Call sites followed per helper are capped, and the cap is disclosed.
+
 | Ecosystem | Where a variable is set |
 |-----------|-------------------------|
 | Kubernetes | a container's `env` (any `containers`, `initContainers`, `ephemeralContainers` list) |

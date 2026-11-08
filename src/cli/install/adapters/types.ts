@@ -19,6 +19,17 @@ export interface PlannedChange {
   summary: string;
   /** Optional unified-diff-ish preview for `--dry-run`. */
   preview?: string;
+  /**
+   * Which scope this change belongs to. Set by the install driver as it collects results, NOT
+   * by adapters — an adapter is handed one scope at a time and does not need to repeat it.
+   *
+   * Load-bearing for disclosure: a user-scope change rewrites a file OUTSIDE the repository the
+   * user is standing in and affects every repository on the machine, so its summary line names
+   * the absolute path and that consequence. A per-repo `install --uninstall` once reported
+   * removing the global `~/.claude.json` entries as a bare "[did update] strip OpenLore entries
+   * from .claude.json" (change: fix-install-never-blocks-by-default).
+   */
+  scope?: InstallScope;
 }
 
 /**
