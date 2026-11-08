@@ -10493,6 +10493,61 @@ class pairs, and was applied inconsistently across reachability paths.
 - **THEN** override edges are still emitted for every name-and-arity-matched override pair, and none
   are silently dropped
 
+### Sub-component: CHAReceiverOutsideRepositoryRefusal
+
+#### Requirement: CHAReceiverOutsideRepositoryRefusal
+
+The system SHALL NOT synthesize a `cha-name-only` virtual-dispatch edge for a `recv.m()` call site
+whose receiver is statically known NOT to be a value of a type defined in this repository. A
+receiver is known to be outside the repository when, and only when, the import facts already
+extracted for the caller's file say so:
+
+- `recv` is a source-level QUALIFIER the file binds to a package or module that does not resolve to
+  an in-project file (`json` from Go's `import "encoding/json"`, `os` from Python's `import os`,
+  `fs` from `import * as fs from 'node:fs'`), or
+- `recv`'s explicitly DECLARED type is qualified by such a package (`t *testing.T`,
+  `ctx context.Context`, `zf: zipfile.ZipFile`).
+
+The determination SHALL be made from import/qualifier facts only, and SHALL NOT consult any
+hard-coded list of standard-library or third-party names. A Go import specifier whose last segment
+is the name of the repository's own root package SHALL NOT be treated as outside the repository
+(the module's own path names the repository root, which has no path segment to match).
+
+A refused call site SHALL be DISCLOSED as an unresolved-ambiguous call site with
+`strategy: 'cha_receiver_outside_repo'`, naming the in-repo methods the pass declined to wire as its
+candidates, so that removing the former edges cannot promote any of those methods to
+high-confidence dead code. CHA SHALL continue to over-approximate by method name for a genuinely
+unresolved receiver whose type could be an in-repo class.
+
+#### Scenario: A standard-library call is not fanned onto same-named in-repo methods
+
+- **GIVEN** a Go file that imports `encoding/json` and calls `json.Unmarshal(...)`, and a method
+  named `Unmarshal` declared on an in-repo type
+- **WHEN** the call graph is built
+- **THEN** the call site carries only its `external::json.Unmarshal` edge and no
+  `cha-name-only` edge to the in-repo `Unmarshal`
+
+#### Scenario: A receiver whose declared type is outside the repository is refused
+
+- **GIVEN** a Go function with a parameter `t *testing.T` that calls `t.Fatalf(...)`, and an in-repo
+  method named `Fatalf`
+- **WHEN** the call graph is built
+- **THEN** no `cha-name-only` edge is synthesized to the in-repo `Fatalf`
+
+#### Scenario: A genuinely unresolved in-repo receiver still fans out
+
+- **GIVEN** a call `x.area()` whose receiver type was not recovered and is not an imported
+  non-repo qualifier, and two in-repo classes declaring `area`
+- **WHEN** the call graph is built
+- **THEN** a `cha-name-only` edge is synthesized to each of them
+
+#### Scenario: A refusal is disclosed, never silent
+
+- **GIVEN** a call site whose name-only fan-out was refused
+- **WHEN** the built graph's ambiguous call sites are inspected
+- **THEN** the site appears with `strategy: 'cha_receiver_outside_repo'` and lists the in-repo
+  methods declined as its candidates
+
 ### Sub-component: CHAProvenanceLabeling
 
 #### Requirement: CHAProvenanceLabeling
@@ -10502,7 +10557,8 @@ edges by setting its `confidence` to `synthesized` and recording the producing r
 `synthesizedBy` property, using `cha-declared-type` for a virtual-dispatch edge whose target set was
 narrowed by a statically-recovered receiver type, `cha-name-only` for a virtual-dispatch edge
 resolved by method name over the whole hierarchy (the receiver type was not statically recovered and
-the call site's argument count is not captured, so no arity narrowing is applied), and `override` for
+the call site's argument count is not captured, so no arity narrowing is applied, and the receiver is
+not known to be outside the repository — see CHAReceiverOutsideRepositoryRefusal), and `override` for
 a method-level override edge.
 Directly-resolved edges SHALL retain their existing `confidence` value and SHALL NOT carry
 `synthesizedBy`. A virtual-dispatch edge SHALL NOT introduce a new `EdgeConfidence` member or a new
