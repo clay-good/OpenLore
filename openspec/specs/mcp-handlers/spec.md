@@ -4407,6 +4407,29 @@ function in `unresolvedDeployBindings` with the reason.
 - **WHEN** `find_dead_code` runs
 - **THEN** `handler` is not a dead-code candidate, and `rootKinds.deployed` counts it
 
+### Requirement: ContractRootsAreCountedByProtocol
+
+`find_dead_code` SHALL label a root kept live by an `implements_endpoint` edge by the protocol of
+the contract element it serves, read from that element's own format tag: `rootKinds.grpcHandlers`
+for a protobuf RPC, `rootKinds.graphqlResolvers` for a GraphQL field, and `rootKinds.httpHandlers`
+for an HTTP route. The three counts SHALL be disjoint, with `rootKinds.deployed` taking precedence
+over all of them. `httpHandlers` SHALL remain the fallback lane: a binding whose contract node
+carries no readable format tag is counted there. `rootKinds` as a whole is not a partition — a root
+in a config-wired file is counted under `externallyWired` as well as under every other kind it
+matches — and this requirement does not make it one.
+
+#### Scenario: A gRPC method is not counted as an HTTP handler
+
+- **GIVEN** a Go method bound to a protobuf RPC by an `implements_endpoint` edge
+- **WHEN** `find_dead_code` runs
+- **THEN** `rootKinds.grpcHandlers` counts it and `rootKinds.httpHandlers` does not
+
+#### Scenario: A GraphQL resolver is not counted as an HTTP handler
+
+- **GIVEN** a resolver bound to a GraphQL field by an `implements_endpoint` edge
+- **WHEN** `find_dead_code` runs
+- **THEN** `rootKinds.graphqlResolvers` counts it and `rootKinds.httpHandlers` does not
+
 ### Requirement: PeersAreToldWhenASymbolTheyReadChanges
 
 When a live peer on the footprint board changes a symbol in the read-set this worktree's agent

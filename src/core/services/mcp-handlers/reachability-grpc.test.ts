@@ -84,6 +84,74 @@ describe('find_dead_code with gRPC registrations', () => {
 });
 
 /**
+ * `rootKinds` labels a root by the PROTOCOL of the contract it serves: `implements_endpoint` has
+ * three producers — OpenAPI/HTTP routes, gRPC registrations, GraphQL resolver maps — so a gRPC
+ * method or a GraphQL resolver must not be counted as an HTTP handler.
+ */
+describe('find_dead_code rootKinds by contract protocol', () => {
+  const kinds = async (): Promise<Record<string, number>> =>
+    ((await handleFindDeadCode({ directory: root })) as { rootKinds: Record<string, number> }).rootKinds;
+
+  it('a gRPC-bound implementation counts under grpcHandlers, not httpHandlers', async () => {
+    const impl = node('srv/main.go::orderServer.GetOrder', 'GetOrder', { className: 'orderServer' });
+    await write([impl, RPC], [{ callerId: impl.id, calleeId: RPC.id, calleeName: RPC.name, confidence: 'import', kind: 'implements_endpoint', synthesizedBy: 'grpc-registration' }], disclosure({}));
+    const r = await kinds();
+    expect(r.grpcHandlers).toBe(1);
+    expect(r.httpHandlers).toBe(0);
+    expect(r.graphqlResolvers).toBe(0);
+  });
+
+  it('a GraphQL resolver counts under graphqlResolvers, not httpHandlers', async () => {
+    const op = node('schema.graphql::Query.order', 'Query.order', { language: 'GraphQL' });
+    const impl = node('src/resolvers.ts::getOrder', 'getOrder', { language: 'TypeScript' });
+    await write([impl, op], [{ callerId: impl.id, calleeId: op.id, calleeName: op.name, confidence: 'import', kind: 'implements_endpoint', synthesizedBy: 'graphql-resolver' }], disclosure({}));
+    const r = await kinds();
+    expect(r.graphqlResolvers).toBe(1);
+    expect(r.httpHandlers).toBe(0);
+    expect(r.grpcHandlers).toBe(0);
+  });
+
+  it('an OpenAPI handler is still counted under httpHandlers', async () => {
+    const op = node('openapi.yaml::GET /orders/{id}', 'GET /orders/{id}', { language: 'OpenAPI' });
+    const impl = node('src/routes.ts::getOrder', 'getOrder', { language: 'TypeScript' });
+    await write([impl, op], [{ callerId: impl.id, calleeId: op.id, calleeName: op.name, confidence: 'import', kind: 'implements_endpoint' }], disclosure({}));
+    const r = await kinds();
+    expect(r.httpHandlers).toBe(1);
+    expect(r.grpcHandlers).toBe(0);
+    expect(r.graphqlResolvers).toBe(0);
+  });
+
+  it('a binding whose contract node is not in the graph falls back to httpHandlers, not to nothing', async () => {
+    // The gRPC/GraphQL lanes are entered POSITIVELY, off the callee's format tag. A callee with no
+    // readable tag (here: no node at all) therefore cannot enter them — and must not drop out of
+    // every count either, so it stays in the HTTP/fallback lane. This pins that documented lane,
+    // and makes the OpenAPI case above a real discriminator rather than a fallback coincidence.
+    const impl = node('src/routes.ts::serveSomething', 'serveSomething', { language: 'TypeScript' });
+    await write([impl], [{ callerId: impl.id, calleeId: 'gone.yaml::GET /x', calleeName: 'GET /x', confidence: 'import', kind: 'implements_endpoint' }], disclosure({}));
+    const r = await kinds();
+    expect(r.httpHandlers).toBe(1);
+    expect(r.grpcHandlers).toBe(0);
+    expect(r.graphqlResolvers).toBe(0);
+  });
+
+  it('the three contract counts stay disjoint when all three protocols are served', async () => {
+    const gqlOp = node('schema.graphql::Query.order', 'Query.order', { language: 'GraphQL' });
+    const httpOp = node('openapi.yaml::GET /orders', 'GET /orders', { language: 'OpenAPI' });
+    const grpcImpl = node('srv/main.go::orderServer.GetOrder', 'GetOrder', { className: 'orderServer' });
+    const gqlImpl = node('src/resolvers.ts::resolveOrder', 'resolveOrder', { language: 'TypeScript' });
+    const httpImpl = node('src/routes.ts::listOrders', 'listOrders', { language: 'TypeScript' });
+    await write([grpcImpl, gqlImpl, httpImpl, RPC, gqlOp, httpOp], [
+      { callerId: grpcImpl.id, calleeId: RPC.id, calleeName: RPC.name, confidence: 'import', kind: 'implements_endpoint', synthesizedBy: 'grpc-registration' },
+      { callerId: gqlImpl.id, calleeId: gqlOp.id, calleeName: gqlOp.name, confidence: 'import', kind: 'implements_endpoint', synthesizedBy: 'graphql-resolver' },
+      { callerId: httpImpl.id, calleeId: httpOp.id, calleeName: httpOp.name, confidence: 'import', kind: 'implements_endpoint' },
+    ], disclosure({}));
+    const r = await kinds();
+    expect({ grpcHandlers: r.grpcHandlers, graphqlResolvers: r.graphqlResolvers, httpHandlers: r.httpHandlers })
+      .toEqual({ grpcHandlers: 1, graphqlResolvers: 1, httpHandlers: 1 });
+  });
+});
+
+/**
  * The cap: a symbol a contract registration or resolver map NAMED, whose binding the projection
  * refused, is wired up in the source and roots nothing — so it must never be claimed confidently
  * dead (change: cap-unbound-contract-handler-confidence).
