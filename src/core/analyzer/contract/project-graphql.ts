@@ -32,6 +32,13 @@ export interface UnresolvedResolver {
   line: number;
   root: string;
   field?: string;
+  /**
+   * The function name the resolver entry NAMED and this projection refused to bind, when the
+   * literal named one. Carried so a consumer can say WHICH symbol was left unrooted —
+   * `find_dead_code` reads it to keep an unbound resolver out of its high-confidence verdicts.
+   * Absent when the entry names no function (an inline implementation, a map that is not literal).
+   */
+  symbol?: string;
   reason: 'not-literal' | 'unknown-field' | 'inline-implementation' | 'ambiguous-implementation' | 'implementation-not-found';
   detail?: string;
 }
@@ -188,14 +195,14 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
       if (!target) {
         // `__resolveType` and friends are resolver plumbing, not fields.
         if (!e.field.startsWith('__') && !schema.types.get(map.root)?.fields.some(f => f.name === e.field)) {
-          out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'unknown-field' });
+          out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, ...(e.fn ? { symbol: e.fn } : {}), reason: 'unknown-field' });
         }
         continue;
       }
       if (!e.fn) { out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'inline-implementation' }); continue; }
       // A member of a local object, an expression, an attribute of a non-import: the literal does
       // not name a function this file defines, so no same-named function stands in for it.
-      if (e.notFollowed) { out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'implementation-not-found', detail: e.notFollowed }); continue; }
+      if (e.notFollowed) { out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, ...(e.fn ? { symbol: e.fn } : {}), reason: 'implementation-not-found', detail: e.notFollowed }); continue; }
       const found = input.resolveImplementation(map, e.fn);
       // An imported function is looked for in the module it was imported FROM, and only there — a
       // same-named function in this file or anywhere else is not it. Otherwise, this file only.
@@ -208,11 +215,11 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
           : found.filter(n => (e.from !== undefined && isImportedModule(map.file, e.from, n.filePath))
             || (e.module !== undefined && isImportedPythonModule(map.file, e.module, n.filePath)));
       if (scope.length > 1) {
-        out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'ambiguous-implementation', detail: `more than one \`${e.fn}\`` });
+        out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, symbol: e.fn, reason: 'ambiguous-implementation', detail: `more than one \`${e.fn}\`` });
         continue;
       }
       if (!scope.length) {
-        out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, reason: 'implementation-not-found',
+        out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, symbol: e.fn, reason: 'implementation-not-found',
           detail: e.notFollowed ?? (!e.imported ? `\`${e.fn}\` is neither defined in ${map.file} nor imported by it`
             : targets?.length ? `\`${e.fn}\` is imported from '${spec}', which is indexed but neither defines nor directly re-exports it`
               : `\`${e.fn}\` is imported by ${map.file} from '${spec}', which is not indexed here (a package or a path alias)`) });
