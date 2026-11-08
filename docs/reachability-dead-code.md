@@ -88,6 +88,26 @@ module-scope code, so a wired file's load-time calls cannot be told from its hel
 stays false-live over false-dead. The report counts them in `rootKinds.externallyWired` and lists each
 wired file with its receipts (config file and key) in `externalWiring.files`.
 
+### A root is labelled by the protocol it serves
+
+A function that serves a *declared* interface element is a root: whoever calls that element invokes
+it, in this repository or outside it. That binding is one edge kind (`implements_endpoint`) with
+three producers, so the count names the protocol rather than assuming HTTP:
+
+| Count | Where the root comes from |
+|-------|---------------------------|
+| `rootKinds.httpHandlers` | an HTTP route — an OpenAPI/Swagger operation a route registration serves, a cross-language `http_endpoint` edge, or a synthesized framework route handler |
+| `rootKinds.grpcHandlers` | a gRPC RPC — a method a protobuf `service` RPC is bound to through a server registration |
+| `rootKinds.graphqlResolvers` | a GraphQL field — a resolver a literal resolver map names for a schema field |
+
+The protocol is read off the bound contract node's own format tag (`OpenAPI` / `Protobuf` /
+`GraphQL`), never inferred from the absence of the others. The three are made disjoint by
+precedence (gRPC → GraphQL → HTTP), as `deployed` already takes precedence over all of them.
+
+`rootKinds` as a whole was never a partition — a root can be both a test and imported, and is
+counted under each — so this split does not make it one. It only stops a non-HTTP binding being
+labelled HTTP.
+
 A reference the adapters cannot resolve is listed in `externalWiring.boundaries` with a reason and
 counted in a caveat, never guessed: `dynamic-reference` (a variable, `${{ }}` expression, or glob),
 `unsupported-form` (a module run by name, a path after a `cd`, or a config with too many references),
@@ -137,7 +157,7 @@ Report output:
 ```jsonc
 {
   "stats": { "analyzed": 1455, "roots": 399, "reachable": 790, "candidateDead": 665 },
-  "rootKinds": { "tests": 0, "imported": 393, "httpHandlers": 0, "externallyWired": 4 },
+  "rootKinds": { "tests": 0, "imported": 393, "httpHandlers": 0, "grpcHandlers": 0, "graphqlResolvers": 0, "externallyWired": 4 },
   "externalWiring": {
     "files": [{ "file": "src/cli/index.ts", "receipts": [{ "config": "package.json", "key": "bin.openlore" }], "roots": 4 }],
     "boundaries": [{ "config": "package.json", "key": "scripts.run", "reference": "$SCRIPT", "reason": "dynamic-reference" }]
