@@ -21,6 +21,7 @@ import {
 import { readAnalysisOwner } from '../../core/runtime/analysis-ownership.js';
 import { computeDiff, readGraphFingerprint } from './diff.js';
 import { scoreChangedFiles } from './score.js';
+import { jsonOutput } from '../output.js';
 import {
   buildSummary,
   renderHuman,
@@ -60,15 +61,11 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
   } catch {
     if (opts.json) {
       process.stdout.write(
-        JSON.stringify(
-          {
-            status: 'ERROR',
-            error: 'no graph found',
-            hint: 'run `openlore analyze` first',
-          },
-          null,
-          2
-        ) + '\n'
+        jsonOutput({
+          status: 'ERROR',
+          error: 'no graph found',
+          hint: 'run `openlore analyze` first',
+        }) + '\n'
       );
     } else {
       logger.error(
@@ -92,9 +89,7 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
   } catch (err) {
     const e = err as Error & { exitCode?: number };
     if (opts.json) {
-      process.stdout.write(
-        JSON.stringify({ status: 'ERROR', error: e.message }, null, 2) + '\n'
-      );
+      process.stdout.write(jsonOutput({ status: 'ERROR', error: e.message }) + '\n');
     } else {
       logger.error(e.message);
     }
@@ -129,8 +124,7 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
     if (code !== 0) {
       if (opts.json) {
         process.stdout.write(
-          JSON.stringify({ status: 'ERROR', error: 'openlore analyze --fix failed' }, null, 2) +
-            '\n'
+          jsonOutput({ status: 'ERROR', error: 'openlore analyze --fix failed' }) + '\n'
         );
       } else {
         logger.error('openlore analyze failed during --fix; manual intervention required');

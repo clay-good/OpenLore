@@ -241,6 +241,63 @@ describe('extraction pool — real worker threads', () => {
     const present = new Set(nodes.filter(n => !n.isExternal).map(n => n.language));
     expect(present.size).toBeGreaterThanOrEqual(4);
   }, 180_000);
+
+  it('matches the serial lane for code that names things after Object.prototype members', async () => {
+    // The input shape every other equivalence test in this file lacks, and the reason the defect
+    // fixed by change `fix-recheck-failed-worker-extractions` shipped past a green suite. The
+    // fixtures above are hand-written snippets whose identifiers are all `helper`/`run`/`seed`:
+    // well-behaved input that fires no source-keyed rule table and produces facts that clone
+    // trivially, so they prove the lanes identical only for code that was never going to tell them
+    // apart.
+    //
+    // Real code is not so tidy. `grpc-go`'s `test/retry_test.go` declares a local `toString`, which
+    // an unguarded `Record` lookup resolved against `Object.prototype` — handing a native FUNCTION
+    // back as a dynamic-boundary kind. On the serial lane that silently produced a kind-less site;
+    // in a worker the fact would not structured-clone, the worker answered `failed`, and the file
+    // was recorded as a parse failure and dropped from the graph. One input, two different answers.
+    //
+    // So parity is asserted here over identifiers taken from `Object.prototype`, alongside real
+    // reflective constructs, in the languages whose rule tables are keyed by source text.
+    if (!resolveWorkerEntry()) return;
+    const poisoned = ['toString', 'valueOf', 'constructor', 'hasOwnProperty', 'propertyIsEnumerable'];
+    const samples: Record<string, [string, string]> = {
+      Go: ['go', 'package main\n\nimport "reflect"\n\n'
+        + poisoned.map((n, i) => `func mk${i}() int { ${n} := func(x int) int { return x }; return ${n}(1) }\n`).join('')
+        + poisoned.map((n, i) => `func call${i}(o interface{}) { reflect.ValueOf(o).MethodByName("${n}").Call(nil) }\n`).join('')],
+      Python: ['py', poisoned.map((n, i) => `def take${i}(o):\n    return getattr(o, "${n}")()\n\n`).join('')
+        + poisoned.map((n, i) => `def ${n}_${i}(x):\n    return x\n\n`).join('')],
+      JavaScript: ['js', poisoned.map((n, i) => `export function ${n}_${i}(o) { return o["${n}"](); }\n`).join('')
+        + poisoned.map((n, i) => `export function dyn${i}() { return Reflect.get(globalThis, "${n}"); }\n`).join('')],
+      Ruby: ['rb', poisoned.map((n, i) => `def hit${i}(o)\n  o.send("${n}")\nend\n\n`).join('')],
+      Java: ['java', 'import java.lang.reflect.Method;\npublic class Poison {\n'
+        + poisoned.map((n, i) => `  Object hit${i}(Object o) throws Exception { Method m = o.getClass().getMethod("${n}"); return m.invoke(o); }\n`).join('')
+        + '}\n'],
+    };
+    const files: ExtractionFile[] = [];
+    for (const [language, [ext, src]] of Object.entries(samples)) {
+      for (let i = 0; i < 3; i++) files.push({ path: `poison${i}_${language}.${ext}`, language, content: src });
+    }
+
+    process.env.OPENLORE_NO_WORKERS = '1';
+    const serial = await buildJson(files);
+    delete process.env.OPENLORE_NO_WORKERS;
+
+    // A byte-identical graph would ALSO come out of a main-thread re-check rescuing a worker
+    // failure — which is a defect, not parity. So the lane is asserted clean as well.
+    const pooled = await new CallGraphBuilder({ extraction: { poolSize: POOL_SIZE } })
+      .build(files.map(f => ({ ...f })));
+    expect(pooled.extractionLane?.lane).toBe('pooled');
+    expect(pooled.extractionLane?.workerFailureDefectFiles).toEqual([]);
+    expect(pooled.extractionLane?.laneDefectFiles).toEqual([]);
+    expect(pooled.extractionLane?.failureRechecks).toBe(0);
+    expect(JSON.stringify(serializeCallGraph(pooled))).toBe(serial);
+
+    // Non-vacuity: these files really did extract, on both lanes, and none was excluded.
+    const nodes: Array<{ language: string; isExternal?: boolean }> = JSON.parse(serial).nodes;
+    const present = new Set(nodes.filter(n => !n.isExternal).map(n => n.language));
+    expect(present.size).toBeGreaterThanOrEqual(3);
+    expect(pooled.parseHealthByFile?.size ?? 0).toBe(0);
+  }, 180_000);
 });
 
 describe('extraction pool — the startup probe table', () => {

@@ -68,6 +68,7 @@ import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
+import { jsonOutput } from '../output.js';
 import {
   displayHookPath,
   hookManagerWarning,
@@ -323,7 +324,7 @@ function writeGateVerdict(payload: { message: string }, remedy: string): void {
     + 'set it to true (the default) for a trail that records decisions without blocking. '
     + 'To commit now without review: git commit --no-verify',
   );
-  process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+  process.stdout.write(jsonOutput(payload) + '\n');
   process.exitCode = 1;
 }
 
@@ -612,7 +613,7 @@ export async function runAutopilotGate(
       );
     }
     if (jsonMode) {
-      process.stdout.write(JSON.stringify({
+      process.stdout.write(jsonOutput({
         gated: false,
         autopilot: true,
         autoAccepted: verifiedIds.length,
@@ -626,7 +627,7 @@ export async function runAutopilotGate(
         awaitingReview: unreviewedCount,
         unevidencedAwaitingReview: unevidencedCount,
         syncErrors,
-      }, null, 2) + '\n');
+      }) + '\n');
     }
     process.exitCode = 0;
   } catch (err) {
@@ -1054,7 +1055,7 @@ the ledger. Review the trail with: openlore decisions review
         if (!options.json) {
           console.log('No architectural decisions were produced; original drafts remain pending.');
         } else {
-          process.stdout.write(JSON.stringify({ ...classifications, missing: [], dispositions: [] }, null, 2) + '\n');
+          process.stdout.write(jsonOutput({ ...classifications, missing: [], dispositions: [] }) + '\n');
         }
         if (options.gate && unresolvedUnassessed.length > 0) process.exitCode = 1;
         return;
@@ -1156,7 +1157,7 @@ the ledger. Review the trail with: openlore decisions review
       }
 
       if (options.json) {
-        process.stdout.write(JSON.stringify({ ...classifications, missing }, null, 2) + '\n');
+        process.stdout.write(jsonOutput({ ...classifications, missing }) + '\n');
         if (options.gate && classificationsBlockGate(classifications, missing.length)) process.exitCode = 1;
         return;
       }
@@ -1242,7 +1243,7 @@ the ledger. Review the trail with: openlore decisions review
             sync: 'openlore decisions --sync',
           },
         };
-        process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+        process.stdout.write(jsonOutput(payload) + '\n');
         if (payload.gated) process.exitCode = 1;
         return;
       }
@@ -1508,7 +1509,7 @@ the ledger. Review the trail with: openlore decisions review
       if (result.errors.length > 0) process.exitCode = 1;
 
       if (options.json) {
-        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+        process.stdout.write(jsonOutput(result) + '\n');
         return;
       }
 
@@ -1535,7 +1536,7 @@ the ledger. Review the trail with: openlore decisions review
       : store.decisions;
 
     if (options.json) {
-      process.stdout.write(JSON.stringify(all, null, 2) + '\n');
+      process.stdout.write(jsonOutput(all) + '\n');
       return;
     }
 
@@ -1579,7 +1580,7 @@ decisionsCommand
         malformedFindings: state.malformedFindings,
       };
       if (json) {
-        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+        process.stdout.write(jsonOutput(report) + '\n');
         return;
       }
       const adoption = report.adoption.ratio === null
@@ -1645,7 +1646,7 @@ decisionsCommand
       entries.reverse(); // newest first
 
       if (json) {
-        process.stdout.write(JSON.stringify(entries, null, 2) + '\n');
+        process.stdout.write(jsonOutput(entries) + '\n');
         return;
       }
       if (entries.length === 0) {
@@ -1683,7 +1684,7 @@ decisionsCommand
       if (!decision) {
         // An id the store has never held is "not found" — never a rejection.
         if (json) {
-          process.stdout.write(JSON.stringify({ id, found: false, note: 'No decision or draft with this id — not found, NOT rejected.' }, null, 2) + '\n');
+          process.stdout.write(jsonOutput({ id, found: false, note: 'No decision or draft with this id — not found, NOT rejected.' }) + '\n');
         } else {
           logger.warning(`No decision or draft with id ${safe(id)} — not found, NOT rejected.`);
         }
@@ -1694,7 +1695,7 @@ decisionsCommand
       const { disposition, reason, mergedIntoId } = readDisposition(decision);
       const entry = DECISION_DISPOSITION_REASONS[reason];
       if (json) {
-        process.stdout.write(JSON.stringify({
+        process.stdout.write(jsonOutput({
           id: decision.id,
           found: true,
           status: decision.status,
@@ -1708,7 +1709,7 @@ decisionsCommand
           contentOrigin: decision.contentOrigin,
           ...(decision.verificationEvidence ? { verificationEvidence: decision.verificationEvidence } : {}),
           ...(decision.authorStatement ? { authorStatement: decision.authorStatement } : {}),
-        }, null, 2) + '\n');
+        }) + '\n');
         return;
       }
 
@@ -1762,7 +1763,7 @@ decisionsCommand
     const json = Boolean(opts.json || parentOpts.json);
     const restoreStdout = json ? redirectConsoleToStderr() : null;
     const fail = (message: string): void => {
-      if (json) process.stdout.write(JSON.stringify({ error: message }, null, 2) + '\n');
+      if (json) process.stdout.write(jsonOutput({ error: message }) + '\n');
       else logger.error(`decisions record failed: ${safe(message)}`);
       process.exitCode = 1;
     };
@@ -1802,7 +1803,7 @@ decisionsCommand
       if (typeof result.error === 'string') return fail(result.error);
 
       if (json) {
-        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+        process.stdout.write(jsonOutput(result) + '\n');
         return;
       }
       if (result.alreadyDecided) logger.warning(safe(String(result.message)));
@@ -1906,7 +1907,7 @@ decisionsCommand
       const remaining = fresh.decisions.filter((d) => d.status === 'auto-approved' && !d.humanReviewedAt);
 
       if (json) {
-        process.stdout.write(JSON.stringify({
+        process.stdout.write(jsonOutput({
           reviewed: results,
           awaitingReview: remaining.map((d) => ({
             id: d.id, title: d.title, rationale: d.rationale,
@@ -1914,7 +1915,7 @@ decisionsCommand
             verificationEvidence: d.verificationEvidence,
             contentOrigin: d.contentOrigin,
           })),
-        }, null, 2) + '\n');
+        }) + '\n');
         return;
       }
 

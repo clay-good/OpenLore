@@ -12,6 +12,7 @@
 
 import { Command } from 'commander';
 import { computeCalibration, evaluateSensitivities } from '../../core/services/mcp-handlers/panic-calibration.js';
+import { jsonOutput } from '../output.js';
 
 export const panicCalibrateCommand = new Command('panic-calibrate')
   .description('Measure panic-signal accuracy against the labeled ground-truth corpus (read-only)')
@@ -24,7 +25,7 @@ export const panicCalibrateCommand = new Command('panic-calibrate')
       const sensitivities = evaluateSensitivities();
 
       if (options.json) {
-        process.stdout.write(JSON.stringify({ ...report, known_sensitivities: sensitivities }, null, 2) + '\n');
+        process.stdout.write(jsonOutput({ ...report, known_sensitivities: sensitivities }) + '\n');
       } else {
         const L: string[] = [];
         L.push('PANIC SIGNAL CALIBRATION — accuracy vs. labeled ground truth');

@@ -41,9 +41,14 @@ function clean(v: unknown): unknown {
 export function renderServiceContract(result: Record<string, unknown>): string {
   const r = clean(result) as Record<string, unknown>;
   const lines: string[] = [];
-  const specs = (r.specs as Array<{ file: string; format: string; operations: number }>) ?? [];
+  const specs = (r.specs as Array<{ file: string; format: string; operations: number; provenance?: { kind: string; matched: string; certainty: string } }>) ?? [];
   if (!specs.length) lines.push('No OpenAPI, Swagger, protobuf, or GraphQL schema found.');
-  for (const s of specs) lines.push(`📄 ${s.file} (${s.format}): ${s.operations} operation(s)`);
+  for (const s of specs) {
+    // The provenance rides on the schema's own line: graded all the same, but not read as this
+    // repository's hand-written contract without saying so.
+    const p = s.provenance ? ` — looks ${s.provenance.kind} (${s.provenance.matched}, ${s.provenance.certainty}); graded all the same` : '';
+    lines.push(`📄 ${s.file} (${s.format}): ${s.operations} operation(s)${p}`);
+  }
   const parity = r.parity as { assessed: boolean; reason?: string; matched?: number; declaredUnimplemented?: number; implementedUndeclared?: number };
   if (parity?.assessed) {
     lines.push(`Parity: ${parity.matched} matched, ${parity.declaredUnimplemented} declared but not served, ${parity.implementedUndeclared} served but not declared`);

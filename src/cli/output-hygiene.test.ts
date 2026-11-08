@@ -761,3 +761,53 @@ describe('CLI output hygiene — untrusted values reaching a terminal sink', () 
     ).toEqual([]);
   });
 });
+
+/**
+ * The machine-readable sink guard: nothing in `src/` may serialize JSON straight to a
+ * terminal stream.
+ *
+ * `--json` output is agent-facing, and it was the one output face with NO screening: the
+ * terminal-sink guard above inspects template INTERPOLATIONS, and
+ * `console.log(JSON.stringify(payload))` has none, so 30 emitters sat in plain sight while
+ * every one of them passed repository text (a decision title, a file name) through
+ * untouched. Screening the serialized document is not enough either — `JSON.stringify`
+ * escapes a real ESC to `\\u001b`, which a consumer unescapes back into a control character
+ * — so the one sanctioned serializer screens at the VALUES: `jsonOutput` (src/cli/output.ts).
+ */
+describe('CLI output hygiene — machine-readable (--json) output', () => {
+  const JSON_SINK = /(?:console\.(?:log|error|warn|info|debug)|process\.(?:stdout|stderr)\.write)\s*\(\s*JSON\.stringify/;
+
+  it('fires on the shape it is meant to catch (non-vacuity)', () => {
+    expect(JSON_SINK.test('console.log(JSON.stringify(payload, null, 2));')).toBe(true);
+    expect(JSON_SINK.test("process.stdout.write(JSON.stringify(x) + '\\n');")).toBe(true);
+    expect(JSON_SINK.test('console.log(JSON.stringify({\n')).toBe(true);
+    expect(JSON_SINK.test('console.log(jsonOutput(payload));')).toBe(false);
+    expect(JSON_SINK.test("await writeFile(p, JSON.stringify(x) + '\\n');")).toBe(false);
+  });
+
+  it('every --json emitter goes through jsonOutput', () => {
+    const srcDir = join(import.meta.dirname, '..');
+    const offenders: string[] = [];
+
+    for (const file of walkProductionTs(srcDir)) {
+      const rel = file.slice(file.indexOf(`${sep}src${sep}`) + 5).split(sep).join('/');
+      // output.ts owns the sanctioned sink; its own prose names the shape it replaces.
+      if (rel === 'cli/output.ts') continue;
+      const src = readFileSync(file, 'utf-8');
+      const lines = src.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        // Statement-scoped: match the sink's opening against the line plus the next one, so a
+        // `console.log(JSON.stringify({` split across lines is still seen.
+        if (JSON_SINK.test(`${lines[i]} ${lines[i + 1] ?? ''}`)) offenders.push(`${rel}:${i + 1}  ${lines[i].trim()}`);
+      }
+    }
+
+    expect(
+      offenders,
+      'These serialize JSON straight to a terminal stream, so repository-derived bidi overrides\n' +
+        'and zero-width characters reach the consumer raw. Use `jsonOutput(value)`\n' +
+        "(import { jsonOutput } from '../output.js'), which screens at the string values\n" +
+        'and at the document (change: screen-escapes-on-agent-paths):\n' + offenders.join('\n'),
+    ).toEqual([]);
+  });
+});

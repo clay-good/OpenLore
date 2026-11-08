@@ -18,10 +18,24 @@
  *   5. `labelChangeSignificance` (analyzer/change-significance) → one tier per symbol.
  *   6. `handleSelectTests` → the tests to run for the whole change set.
  *
- * Honest by construction: any file-level fallback is disclosed with its reason; the surprising-change
- * label is withheld when history is too shallow; truncation always carries a receipt
- * (omitted count + lowest tier reached) and never drops a higher tier for a lower
+ * Honest by construction: any file-level fallback is disclosed with its reason; truncation always
+ * carries a receipt (omitted count + lowest tier reached) and never drops a higher tier for a lower
  * one. The cursor is the base ref, never wall-clock time.
+ *
+ * WITHHOLDING A LABEL WHOSE PREMISE DOES NOT HOLD (change: fix-briefing-since-ranking-and-cost).
+ * `surprising-change` asserts "a hub whose file RARELY CHANGED BEFORE". Two cases make that premise
+ * vacuous rather than true, and in both the label is withheld (the symbol still ranks, one tier
+ * lower, with the withholding stated per entry and counted in `withholding`):
+ *   1. Repo-wide: fewer than two commits of pre-base history — no "before" at all (pre-existing).
+ *   2. PER FILE: the file is ADDED (or renamed into its path) in the briefed range and has no
+ *      pre-base churn at that path. It did not exist before, so "rarely changed before" is not a
+ *      fact about it — a brand-new file's zero churn must not be read as decades of stability.
+ * And `surprising-change` / `hub-change` / `chokepoint-change` all assert the symbol is a
+ * repository hub. A function lexically NESTED inside another function, every one of whose callers
+ * lies inside that enclosing function, is a function-local helper: its fan-in is internal to one
+ * body, so the hub-derived tiers are withheld and the significance belongs to the enclosing symbol
+ * (which is briefed on its own merits). This keeps a one-line local arrow in a new parser out of
+ * the headline without dropping it from the briefing.
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
@@ -43,12 +57,13 @@ import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import {
   labelChangeSignificance,
   tierCounts,
+  TIER_RANK,
   TIERS_BY_RANK,
   type ChangedSymbolFacts,
   type LabeledChange,
   type SignificanceTier,
 } from '../../analyzer/change-significance.js';
-import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
+import type { FunctionNode, SerializedCallGraph } from '../../analyzer/call-graph.js';
 
 export interface BriefingSinceInput {
   directory: string;
@@ -177,13 +192,35 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   // (the very change being briefed) never inflate `priorChurn`. Otherwise a dormant
   // hub hammered within the briefed range reads medium/high volatility and has its own
   // `surprising-change` tier withheld — the tier demoting itself as significance rises.
-  const coupling = await analyzeChangeCoupling(absDir, { startRef: resolvedBase });
+  // `includeCoupling: false`: this briefing reads ONLY `coupling.churn` and
+  // `coupling.stats.commitsScanned`. The co-occurrence map is the one quadratic part of the
+  // miner (O(files²) per commit) and was computed and thrown away on every call; opting out
+  // skips it. `get_change_coupling` and the analyze-time snapshot still request it.
+  const coupling = await analyzeChangeCoupling(absDir, { startRef: resolvedBase, includeCoupling: false });
   const churnByPath = new Map<string, number>();
   for (const [file, n] of coupling.churn) churnByPath.set(normPath(file), n);
   // "Rarely changed before" needs a non-degenerate history: a single (or zero)
   // commit BEFORE the range has no "before" to be rare within, so the surprise label
   // is withheld. commitsScanned now counts only the pre-base window (see startRef).
   const historyAvailable = coupling.stats.commitsScanned >= 2;
+
+  // ── 4b. Per-file "did this file exist before?" gate ─────────────────────────
+  // `churnByPath.get(...) ?? 0` alone cannot tell "absent from pre-base history" from
+  // "existed and was never touched" — the first makes the surprise premise VACUOUS, the
+  // second makes it TRUE. git's own status tells them apart: a file ADDED (or renamed into
+  // its path) in the briefed range did not exist at the base. A re-added path that DOES
+  // carry pre-base churn keeps the label — its "before" is real.
+  const newPaths = new Set<string>();
+  for (const entry of scopedEntries) {
+    if (entry.status !== 'added' && entry.status !== 'renamed') continue;
+    const local = normPath(reframeRepoPath(entry.path, repoPrefix) ?? entry.path);
+    if (!churnByPath.has(local)) newPaths.add(local);
+  }
+
+  // ── 4c. Function-local helpers (not repository hubs) ────────────────────────
+  // Only hub-labelled symbols can earn a hub-derived tier, so only they are probed.
+  const hubCandidates = changedSymbols.filter(n => (labelsById.get(n.id) ?? new Set()).has('hub'));
+  const localHelpers = findFunctionLocalHelpers(cg, hubCandidates);
 
   const facts: ChangedSymbolFacts[] = changedSymbols.map(n => {
     const labels = labelsById.get(n.id) ?? new Set<string>();
@@ -202,8 +239,54 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   });
 
   // ── 5. Label + rank (pure analyzer function) ────────────────────────────────
-  const labeled = labelChangeSignificance(facts, { historyAvailable });
+  // The labeler is a pure function of its facts plus one `historyAvailable` flag, so the
+  // per-file gate is applied by labeling the two buckets separately: symbols whose file has
+  // a real "before" with the repo-wide verdict, symbols in a brand-new file with the surprise
+  // withheld. No new tier, no new threshold — the same withholding the shallow-history case
+  // already uses, narrowed to the file it is a fact about.
+  const eligible = facts.filter(f => !newPaths.has(normPath(f.filePath)));
+  const newFileFacts = facts.filter(f => newPaths.has(normPath(f.filePath)));
+  // The counterfactual: what the new-file symbols WOULD have been tiered without the gate.
+  // Only a symbol that would genuinely have earned `surprising-change` has a label withheld
+  // — a leaf that was never in the running is not told a label was taken from it.
+  const counterfactual = new Map(
+    labelChangeSignificance(newFileFacts, { historyAvailable }).map(c => [c.id, c.tier]),
+  );
+  const labeled: BriefedChange[] = [
+    ...labelChangeSignificance(eligible, { historyAvailable }),
+    ...labelChangeSignificance(newFileFacts, { historyAvailable: false }),
+  ].map(c => {
+    const withheld: WithheldLabel[] = [];
+    let tier = c.tier;
+    if (counterfactual.get(c.id) === 'surprising-change' && tier !== 'surprising-change') {
+      withheld.push({
+        label: 'surprising-change',
+        reason: `${c.file} is added (or renamed into this path) since ${resolvedBase} and has no pre-base history at this path — "rarely changed before" is not a fact about it, so its zero prior churn cannot earn the surprise label. Ranked ${tier} on its structural labels alone.`,
+      });
+    }
+    const enclosing = localHelpers.get(c.id);
+    if (enclosing && TIER_RANK[tier] > TIER_RANK['ordinary-change']) {
+      withheld.push({
+        label: tier,
+        reason: `${c.name} is lexically nested inside ${enclosing} and every one of its callers lies inside that function — a function-local helper, not a repository hub. Its hub-derived tier is withheld; the significance belongs to the enclosing symbol. Its graph labels and fan-in are kept below as evidence.`,
+      });
+      tier = 'ordinary-change';
+    }
+    return { ...c, tier, ...(withheld.length > 0 ? { withheld } : {}) };
+  });
+  // One re-sort after the overrides, with the labeler's own comparator (tier desc, fan-in
+  // desc, then file+name) so the ranking stays byte-stable for a fixed input.
+  labeled.sort((a, b) =>
+    TIER_RANK[b.tier] - TIER_RANK[a.tier]
+    || b.evidence.fanIn - a.evidence.fanIn
+    || a.file.localeCompare(b.file)
+    || a.name.localeCompare(b.name));
   const counts = tierCounts(labeled);
+  const withholding = {
+    surpriseWithheldForNewFiles: labeled.filter(c => c.withheld?.some(w => w.label === 'surprising-change' && /added \(or renamed/.test(w.reason))).length,
+    hubTierWithheldForFunctionLocalHelpers: labeled.filter(c => localHelpers.has(c.id) && c.withheld).length,
+    newFilesWithoutPriorHistory: [...newPaths].sort().slice(0, MAX_CHANGED_FILES),
+  };
 
   // ── 6. Bounded briefing + truncation receipt (no silent cap) ────────────────
   // labeled is already sorted highest-tier-first, so slicing drops only the lowest
@@ -249,30 +332,47 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
 
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
-  const caveats: string[] = [
+  // Two of the caveats below are STANDING methodology, true of every briefing. The rest
+  // are live disclosures about THIS answer's coverage, and only those drive
+  // `confidenceBoundary.complete` (change: never-claim-complete-beside-a-refusal) — a
+  // standing note would pin `complete` to false on every answer and so say nothing.
+  const liveDisclosures: string[] = [
     ...(granularityNote ? [granularityNote] : []),
     ...(importsNote ? [importsNote] : []),
     ...(carriedCaveat(carried) ? [carriedCaveat(carried)!] : []),
+  ];
+  const caveats: string[] = [
+    ...liveDisclosures,
     'Significance is a tier label from existing classifiers (hub/orchestrator/chokepoint) plus raw evidence — not a weighted score. The caller makes the final judgment.',
     'Scope is hand-authored source code: infrastructure (IaC) resources and generated/vendored files are excluded (their change-impact has its own lens — blast_radius / analyze_impact). Non-code changed files still count toward changedFiles.',
   ];
   // The unresolved-ref disclosure leads the caveats — it changes which base every
   // number below was computed against, so it must not be buried.
   if (requestedRefUnresolved) {
-    caveats.unshift(`Requested base ref "${baseRefInput}" could not be resolved; briefed against "${resolvedBase}" instead (git's silent fallback). Pass a ref that exists to target the base you meant.`);
+    const unresolved = `Requested base ref "${baseRefInput}" could not be resolved; briefed against "${resolvedBase}" instead (git's silent fallback). Pass a ref that exists to target the base you meant.`;
+    caveats.unshift(unresolved);
+    liveDisclosures.push(unresolved);
   }
   if (!historyAvailable) {
-    caveats.push(`Git history is too shallow (${coupling.stats.commitsScanned} commit(s) scanned) to establish "rarely changed before" — the surprising-change label is withheld and those hubs rank as hub-change.`);
+    const shallow = `Git history is too shallow (${coupling.stats.commitsScanned} commit(s) scanned) to establish "rarely changed before" — the surprising-change label is withheld and those hubs rank as hub-change.`;
+    caveats.push(shallow);
+    liveDisclosures.push(shallow);
   }
   // Surprise rests on per-file churn matched by exact path. git history does not
   // follow renames, so a just-renamed (or non-ASCII-path) hub can read low churn and
   // be over-flagged surprising-change. Only disclose when the signal is actually live.
+  if (withholding.surpriseWithheldForNewFiles > 0) {
+    caveats.push(`${withholding.surpriseWithheldForNewFiles} changed symbol(s) live in ${newPaths.size} file(s) added (or renamed into their path) since ${resolvedBase} with no pre-base history there: the surprising-change label is WITHHELD for them ("rarely changed before" is vacuous for a file that did not exist) and they rank one tier lower on their structural labels alone. Each entry states this under \`withheld\`.`);
+  }
+  if (withholding.hubTierWithheldForFunctionLocalHelpers > 0) {
+    caveats.push(`${withholding.hubTierWithheldForFunctionLocalHelpers} changed symbol(s) are functions nested inside another function with every caller inside it — function-local helpers, not repository hubs. Their hub-derived tier is WITHHELD (they rank ordinary-change) and the significance is attributed to the enclosing symbol; their hub labels and fan-in are still reported as evidence.`);
+  }
   if (counts['surprising-change'] > 0) {
-    caveats.push('The surprising-change signal uses per-file churn matched by exact path; git history does not follow renames, so a just-renamed file may read as low-churn and be over-flagged surprising. Confirm against its rename history.');
+    caveats.push('The surprising-change signal uses per-file churn matched by exact path. A rename INSIDE the briefed range is detected from git status and has the label withheld, but a rename that happened BEFORE the base ref still reads as low churn at its new path and can be over-flagged surprising. Confirm against the file\'s rename history.');
   }
 
   const staleness = await computeStaleness(absDir);
-  const confidenceBoundary = assembleBoundary({ staleness, integrity: ctx?.integrity });
+  const confidenceBoundary = assembleBoundary({ staleness, integrity: ctx?.integrity, disclosures: liveDisclosures });
 
   return {
     baseRef: resolvedBase,
@@ -291,6 +391,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     truncation,
     regions,
     testsToRun,
+    withholding,
     surprisingChange: {
       available: historyAvailable,
       ...(historyAvailable ? {} : { reason: `only ${coupling.stats.commitsScanned} commit(s) of history — no "before" to be rare within` }),
@@ -300,6 +401,74 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     caveats,
     confidenceBoundary,
   };
+}
+
+/** A label this briefing refused to apply, with the premise that did not hold. */
+interface WithheldLabel {
+  label: SignificanceTier;
+  reason: string;
+}
+
+/** A labeled change plus any label this briefing withheld from it. */
+type BriefedChange = LabeledChange & { withheld?: WithheldLabel[] };
+
+/**
+ * Candidate id → enclosing function id, for every candidate that is a FUNCTION-LOCAL HELPER:
+ * lexically nested inside another indexed function in the same file (strict span containment,
+ * smallest container wins) AND called only from inside that enclosing function's span.
+ *
+ * Deliberately conservative — a nested function with even one caller outside its parent, or with
+ * no caller at all, is NOT reported, so the hub-derived tier is only ever withheld from a symbol
+ * whose whole fan-in is internal to one body. Costs one pass over the nodes of the candidates'
+ * files plus one pass over the edges; no git, no re-parse.
+ */
+function findFunctionLocalHelpers(cg: SerializedCallGraph, candidates: FunctionNode[]): Map<string, string> {
+  const out = new Map<string, string>();
+  if (candidates.length === 0) return out;
+  const files = new Set(candidates.map(n => n.filePath));
+  const byFile = new Map<string, FunctionNode[]>();
+  for (const n of cg.nodes) {
+    if (n.isExternal || !files.has(n.filePath)) continue;
+    const arr = byFile.get(n.filePath);
+    if (arr) arr.push(n); else byFile.set(n.filePath, [n]);
+  }
+  const span = (n: FunctionNode) => n.endIndex - n.startIndex;
+  const enclosingOf = new Map<string, FunctionNode>();
+  for (const c of candidates) {
+    let best: FunctionNode | undefined;
+    for (const o of byFile.get(c.filePath) ?? []) {
+      if (o.id === c.id) continue;
+      // Strictly larger container: AST spans are properly nested, so a strictly wider span
+      // that covers the candidate is an ancestor. Equal spans (a collapsed double-match) are
+      // not containment and are skipped.
+      if (o.startIndex <= c.startIndex && o.endIndex >= c.endIndex && span(o) > span(c)) {
+        if (!best || span(o) < span(best)) best = o;
+      }
+    }
+    if (best) enclosingOf.set(c.id, best);
+  }
+  if (enclosingOf.size === 0) return out;
+
+  const nodeById = new Map(cg.nodes.map(n => [n.id, n]));
+  const callersById = new Map<string, Set<string>>();
+  for (const e of cg.edges) {
+    if (!enclosingOf.has(e.calleeId)) continue;
+    const set = callersById.get(e.calleeId);
+    if (set) set.add(e.callerId); else callersById.set(e.calleeId, new Set([e.callerId]));
+  }
+  for (const [id, encl] of enclosingOf) {
+    const callers = callersById.get(id);
+    if (!callers || callers.size === 0) continue; // no caller → no hub tier to withhold anyway
+    const allInside = [...callers].every(cid => {
+      const caller = nodeById.get(cid);
+      return !!caller
+        && caller.filePath === encl.filePath
+        && caller.startIndex >= encl.startIndex
+        && caller.endIndex <= encl.endIndex;
+    });
+    if (allInside) out.set(id, encl.id);
+  }
+  return out;
 }
 
 interface TruncationReceipt {
@@ -312,7 +481,7 @@ interface TruncationReceipt {
   omittedByTier?: Record<string, number>;
 }
 
-function buildTruncationReceipt(returned: LabeledChange[], omitted: LabeledChange[]): TruncationReceipt {
+function buildTruncationReceipt(returned: BriefedChange[], omitted: BriefedChange[]): TruncationReceipt {
   const lowestTierReached = returned.length
     ? [...returned].reduce<SignificanceTier>((lo, c) =>
         TIERS_BY_RANK.indexOf(c.tier) > TIERS_BY_RANK.indexOf(lo) ? c.tier : lo, returned[0].tier)

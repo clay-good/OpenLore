@@ -25,9 +25,17 @@
  * only when `m` resolves to ≥1 implementation in the user-defined hierarchy (external
  * / stdlib types are not in it and never resolve); per-call-site fan-out is capped and
  * over-cap call sites are dropped (not partially wired) and logged.
+ *
+ * The name-only fan-out is additionally REFUSED when the receiver is statically known not to
+ * be a value of an in-repo type (change: suppress-false-cha-name-only). See
+ * {@link receiverOutsideRepository}: `json.Unmarshal(...)` is not an unpinned virtual call
+ * whose type happens to be unrecovered — the source says `json` is a package outside this
+ * repository, so fanning it onto every in-repo `Unmarshal` method contradicts a fact already
+ * computed. A refused site is DISCLOSED as an {@link ChaRefusedSite} (so the graph records an
+ * unbound call rather than silently losing one), never emitted as edges.
  */
 import type { FunctionNode, ClassNode, InheritanceEdge, CallEdge } from './call-graph.js';
-import type { ImportMap } from './import-resolver-bridge.js';
+import { EXTERNAL_QUALIFIER_PREFIX, type ImportMap } from './import-resolver-bridge.js';
 import { inferReceiverTypeAt, inferTypesFromSource } from './type-inference-engine.js';
 import { logger } from '../../utils/logger.js';
 
@@ -46,6 +54,116 @@ export interface RawMethodCall {
 }
 
 const SELF_RECEIVERS = new Set(['self', 'this', 'cls']);
+
+/**
+ * A `recv.m()` site where CHA REFUSED the name-only fan-out because the receiver is statically
+ * known not to be a value of an in-repo type (change: suppress-false-cha-name-only).
+ *
+ * Disclosed rather than dropped silently: the call site is real and unbound, so a consumer that
+ * reads the graph for liveness or blast radius must treat it as an unresolved call, not as
+ * absence. `refusedCandidateIds` are the in-repo methods the pass declined to wire, so the
+ * existing `find_dead_code` ambiguity cap keeps naming them — removing a false edge must not
+ * promote a symbol to confidently dead.
+ */
+export interface ChaRefusedSite {
+  callerId: string;
+  recv: string;
+  method: string;
+  line: number;
+  /** Why the receiver cannot be an in-repo value. */
+  reason: 'package-qualifier' | 'declared-type-outside-repo';
+  /** The non-repo package/module the receiver (or its declared type) belongs to. */
+  qualifier: string;
+  refusedCandidateIds: string[];
+}
+
+/** Receiver declarations with a package-QUALIFIED type, per language family. One bounded, linear
+ *  scan per caller body; the capture groups are (names, qualifier, type). */
+const QUALIFIED_DECLARATION_PATTERNS: Readonly<Record<string, readonly RegExp[]>> = {
+  // Go: `var ctx context.Context` and parameter/result lists `(ctx context.Context, t *testing.T)`
+  // including grouped names (`a, b sync.Mutex`). Variadic and slice/array forms included.
+  Go: [
+    /\bvar\s{1,8}([A-Za-z_]\w{0,60})\s{1,8}(?:\[\])?\*?([A-Za-z_]\w{0,60})\.([A-Za-z_]\w{0,60})/g,
+    /\(\s{0,4}((?:[A-Za-z_]\w{0,60}\s{0,4},\s{0,4}){0,8}[A-Za-z_]\w{0,60})\s{1,8}(?:\.\.\.)?(?:\[\])?\*?([A-Za-z_]\w{0,60})\.([A-Za-z_]\w{0,60})/g,
+    /,\s{0,4}((?:[A-Za-z_]\w{0,60}\s{0,4},\s{0,4}){0,8}[A-Za-z_]\w{0,60})\s{1,8}(?:\.\.\.)?(?:\[\])?\*?([A-Za-z_]\w{0,60})\.([A-Za-z_]\w{0,60})/g,
+  ],
+  // Python / TypeScript / JavaScript annotations: `zf: zipfile.ZipFile`, `(fs: nodefs.Stats)`.
+  annotated: [
+    /([A-Za-z_]\w{0,60})\s{0,4}:\s{0,4}['"]?([A-Za-z_]\w{0,60})\.([A-Za-z_]\w{0,60})/g,
+  ],
+};
+
+function qualifiedDeclarationPatterns(language: string): readonly RegExp[] {
+  if (language === 'Go') return QUALIFIED_DECLARATION_PATTERNS.Go;
+  if (language === 'Python' || language === 'TypeScript' || language === 'JavaScript') {
+    return QUALIFIED_DECLARATION_PATTERNS.annotated;
+  }
+  return [];
+}
+
+/**
+ * Receiver token → the non-repo package/module qualifying its DECLARED type, for one function
+ * body. Built in a single bounded pass per caller (then memoized), so the per-call-site check is
+ * a map lookup.
+ *
+ * Only an EXPLICITLY DECLARED type counts, and only when its qualifier is one the caller's file
+ * imports from outside this repository. That is the same rule the pass already applies when the
+ * type-inference engine recovers a receiver type that is not a hierarchy class — this just
+ * recovers the declaration in the (common, for Go) case where the engine does not. A value
+ * assigned FROM a non-repo call is deliberately NOT inferred here: that is a new inference, not
+ * better evidence for the existing rule.
+ */
+function qualifiedReceiverTypes(
+  body: string,
+  language: string,
+  fileImports: Map<string, string> | undefined,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!fileImports) return out;
+  for (const pattern of qualifiedDeclarationPatterns(language)) {
+    pattern.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(body)) !== null) {
+      const qualifier = m[2];
+      if (!fileImports.has(`${EXTERNAL_QUALIFIER_PREFIX}${qualifier}`)) continue;
+      for (const raw of m[1].split(',')) {
+        const name = raw.trim();
+        if (name && !out.has(name)) out.set(name, qualifier);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether `recv` in `recv.m()` is statically known NOT to be a value of an in-repo type — in
+ * which case no in-repo method can be the target and the name-only fan-out is a contradiction,
+ * not an over-approximation (change: suppress-false-cha-name-only).
+ *
+ * Both answers come from the import facts the extractor already computed, never from a list of
+ * standard-library names (which would rot and would be a guess about code it cannot see):
+ *
+ *  1. `recv` is a QUALIFIER the caller's file binds to a package/module that does not resolve to
+ *     an in-project file — `json` in Go's `import "encoding/json"`, `os` in Python's `import os`,
+ *     `fs` in `import * as fs from 'node:fs'`. `json.Unmarshal(...)` reaches outside the repo.
+ *  2. `recv`'s DECLARED type is qualified by such a package — `t *testing.T`, `ctx
+ *     context.Context`. Already the pass's rule whenever the inference engine recovers the type;
+ *     this recovers the declaration when it does not.
+ *
+ * Returns `undefined` when neither holds, i.e. the receiver could be an in-repo value and CHA
+ * keeps over-approximating — the recall the pass exists for.
+ */
+function receiverOutsideRepository(
+  recv: string,
+  fileImports: Map<string, string> | undefined,
+  declaredQualifiers: Map<string, string>,
+): { reason: ChaRefusedSite['reason']; qualifier: string } | undefined {
+  const asQualifier = fileImports?.get(`${EXTERNAL_QUALIFIER_PREFIX}${recv}`);
+  if (asQualifier !== undefined) return { reason: 'package-qualifier', qualifier: asQualifier };
+  const declared = declaredQualifiers.get(recv);
+  if (declared !== undefined) return { reason: 'declared-type-outside-repo', qualifier: declared };
+  return undefined;
+}
 
 /** Directory portion of a repo-relative path (posix-style separators, as used by node ids). */
 function dirOfPath(p: string): string {
@@ -322,24 +440,33 @@ function synthesizeVirtualDispatchEdges(
   nodes: Map<string, FunctionNode>,
   fileContents: Map<string, string>,
   directCalleeIdsByCaller: Map<string, Set<string>>,
+  importMap: ImportMap | undefined,
+  refused: ChaRefusedSite[],
 ): CallEdge[] {
   const edges: CallEdge[] = [];
   const emitted = new Set<string>(); // dedup `${callerId}\0${calleeId}` across call sites
   // Cache inferred receiver types per caller function body (one inference per fn).
   const typesByCaller = new Map<string, Map<string, string>>();
+  // Receiver → non-repo package qualifying its declared type, one bounded scan per caller body
+  // (change: suppress-false-cha-name-only). Cached so the per-call-site check is a map lookup.
+  const qualifiersByCaller = new Map<string, Map<string, string>>();
+  // One refusal per call site, not per declined target.
+  const refusedSites = new Set<string>();
 
   for (const call of rawMethodCalls) {
     const caller = nodes.get(call.callerId);
     if (!caller || caller.isExternal) continue;
     if (!h.declaresMethod(call.method)) continue; // bias: only user-defined methods resolve
+    const fileImports = importMap?.get(caller.filePath);
 
     // ── Recover the receiver's declared type ────────────────────────────────
     let declaredType: string | undefined;
+    let body = '';
     if (SELF_RECEIVERS.has(call.recv)) {
       declaredType = caller.className; // self/this/cls dispatch over the enclosing class subtree
     } else {
       const content = fileContents.get(caller.filePath);
-      const body = content && caller.startIndex !== undefined && caller.endIndex !== undefined
+      body = content && caller.startIndex !== undefined && caller.endIndex !== undefined
         ? content.slice(caller.startIndex, caller.endIndex)
         : '';
       if ((caller.language === 'Kotlin' || caller.language === 'Dart') && call.offset !== undefined) {
@@ -378,9 +505,38 @@ function synthesizeVirtualDispatchEdges(
         rule = 'cha-name-only';
       }
     } else {
-      // No receiver type recovered: over-approximate by method name across the whole
-      // hierarchy. Arity is NOT matched here — the call site's argument count isn't
-      // captured in RawMethodCall — so the label reflects name-only resolution.
+      // No receiver type recovered. Before over-approximating, check whether the receiver is
+      // statically known NOT to be an in-repo value at all (change:
+      // suppress-false-cha-name-only). `json.Unmarshal(...)` / `t.Fatalf(...)` are not unpinned
+      // virtual calls — the source states where `json` / `testing` live, and it is outside this
+      // repository, so every in-repo `Unmarshal` / `Fatalf` is a non-target. REFUSE and disclose.
+      let qualifiers = qualifiersByCaller.get(call.callerId);
+      if (!qualifiers) {
+        qualifiers = qualifiedReceiverTypes(body, caller.language, fileImports);
+        qualifiersByCaller.set(call.callerId, qualifiers);
+      }
+      const outside = receiverOutsideRepository(call.recv, fileImports, qualifiers);
+      if (outside) {
+        const siteKey = `${call.callerId}\0${call.line}\0${call.recv}.${call.method}`;
+        if (!refusedSites.has(siteKey)) {
+          refusedSites.add(siteKey);
+          refused.push({
+            callerId: call.callerId,
+            recv: call.recv,
+            method: call.method,
+            line: call.line,
+            reason: outside.reason,
+            qualifier: outside.qualifier,
+            refusedCandidateIds: h.methodsNamed(call.method)
+              .map(t => t.id)
+              .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+          });
+        }
+        continue;
+      }
+      // Over-approximate by method name across the whole hierarchy. Arity is NOT matched here —
+      // the call site's argument count isn't captured in RawMethodCall — so the label reflects
+      // name-only resolution.
       targets = h.methodsNamed(call.method);
       rule = 'cha-name-only';
     }
@@ -429,6 +585,10 @@ function synthesizeVirtualDispatchEdges(
  * Run the CHA synthesis pass: override edges + virtual-dispatch edges. Additive —
  * returns only new edges, never modifies the directly-resolved graph. Per-rule and
  * order-independent; a failure in one rule must not abort the other or the build.
+ *
+ * `refusedSites` are the `recv.m()` sites whose name-only fan-out was refused because the
+ * receiver is statically outside the repository; the caller discloses them as unresolved call
+ * sites (change: suppress-false-cha-name-only).
  */
 export function synthesizeTypeHierarchyEdges(input: {
   nodes: Map<string, FunctionNode>;
@@ -440,10 +600,11 @@ export function synthesizeTypeHierarchyEdges(input: {
   /** Per-file import map, so a receiver type NAME shared across files resolves to the
    *  class the caller actually imports (precise dispatch) instead of every same-named class. */
   importMap?: ImportMap;
-}): CallEdge[] {
+}): { edges: CallEdge[]; refusedSites: ChaRefusedSite[] } {
   const h = new Hierarchy(input.nodes, input.classes, input.inheritanceEdges, input.importMap);
   let overrideEdges: CallEdge[] = [];
   let dispatchEdges: CallEdge[] = [];
+  const refusedSites: ChaRefusedSite[] = [];
   try {
     overrideEdges = synthesizeOverrideEdges(h, input.nodes);
   } catch (e) {
@@ -452,9 +613,10 @@ export function synthesizeTypeHierarchyEdges(input: {
   try {
     dispatchEdges = synthesizeVirtualDispatchEdges(
       h, input.rawMethodCalls, input.nodes, input.fileContents, input.directCalleeIdsByCaller,
+      input.importMap, refusedSites,
     );
   } catch (e) {
     logger.debug(`[cha] virtual-dispatch rule failed: ${(e as Error).message}`);
   }
-  return [...overrideEdges, ...dispatchEdges];
+  return { edges: [...overrideEdges, ...dispatchEdges], refusedSites };
 }

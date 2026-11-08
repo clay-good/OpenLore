@@ -46,7 +46,7 @@ import {
 } from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
-import { assembleBoundary, computeStaleness, crossingsFromBasis, type EdgeBasis } from './confidence-boundary.js';
+import { assembleBoundary, computeStaleness, crossingsFromBasis, reconcileCompleteness, type EdgeBasis } from './confidence-boundary.js';
 
 /**
  * A basis's per-rule synthesized-edge counts, or undefined when none. A rule name that is not
@@ -545,10 +545,15 @@ export async function computeBlastRadius(
   } catch { /* additive: the briefing never fails over it */ }
 
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
-  const caveats: string[] = [
+  // The first two are STANDING methodology, true of every blast radius. Everything pushed
+  // after them is a live disclosure about THIS answer's coverage, and only those drive
+  // `confidenceBoundary.complete` (change: never-claim-complete-beside-a-refusal) — a
+  // standing caveat would pin `complete` to false forever and so say nothing.
+  const STANDING_CAVEATS = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
     'Impact and test selection can under-select through dynamic dispatch, reflection, and DI.',
   ];
+  const caveats: string[] = [...STANDING_CAVEATS];
   if (baseFellBack) {
     caveats.push(`Requested base ref "${baseRef}" did not resolve; diffed against "${resolvedBaseRef}" instead (main → master → HEAD~1 fallback).`);
   }
@@ -620,6 +625,7 @@ export async function computeBlastRadius(
     staleness,
     integrity: ctx.integrity,
     ...(extraCrossings.length ? { extraCrossings } : {}),
+    disclosures: caveats.slice(STANDING_CAVEATS.length),
   });
 
   // Federation block: forward the composed select_tests result when it ran, otherwise
@@ -705,7 +711,13 @@ export async function computeBlastRadius(
     caveats,
   };
   briefing.headline = renderHeadline(briefing);
-  return withIndexStaleness(absDir, briefing, ctx);
+  // This briefing omits the boundary when it is complete (no staleness noise on a clean
+  // index), so the dispatch-boundary sweep has nothing to reconcile. Run it here, before
+  // the omission decision, so a disclosure channel the caveats do not mirror still flips
+  // the claim rather than taking the boundary away with it.
+  const reconciled = reconcileCompleteness(briefing) as BlastRadiusBriefing;
+  if (reconciled.confidenceBoundary?.complete) delete reconciled.confidenceBoundary;
+  return withIndexStaleness(absDir, reconciled, ctx);
 }
 
 /** "1 lockfile and 2 generated files": the generated marks counted by kind, in a fixed order. */
