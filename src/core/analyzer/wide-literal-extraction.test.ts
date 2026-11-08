@@ -172,13 +172,15 @@ describe('the per-file budget bounds the whole extraction, not only the parse', 
   });
 
   it('records a wide-literal file as budget-exceeded, with no symbols and a disclosed reason', async () => {
-    // END TO END through the builder. The parse of this file takes a few hundred ms and the
-    // post-parse phases several seconds, so a 1 s budget is overrun in a post-parse phase with
-    // room to spare; a contended runner that overran in the parse instead would reach the same
-    // reason code by the other route, so the assertion cannot flake into a false pass.
-    process.env[PARSE_BUDGET_ENV] = '1000';
+    // END TO END through the builder: the reason code, the disclosure, and the missing symbols.
+    // Measured, this file costs 637 ms to extract with the budget disabled, so a 100 ms budget is
+    // overrun with ~6x of margin. WHICH phase overruns is not pinned here (the parse of a 390 KB
+    // literal is itself a sizeable slice of that 637 ms) — the three tests above pin the post-parse
+    // path directly. What this one proves is that an overrun reaches the artifact as
+    // `budget-exceeded` and costs exactly one file.
+    process.env[PARSE_BUDGET_ENV] = '100';
     const result = await new CallGraphBuilder({}).build([
-      { path: 'src/gen.go', content: wideLiteralGo(32_000), language: 'Go' },
+      { path: 'src/gen.go', content: wideLiteralGo(64_000), language: 'Go' },
       { path: 'src/ok.go', content: 'package ok\n\nfunc A() { B() }\n\nfunc B() {}\n', language: 'Go' },
     ]);
 
@@ -186,7 +188,7 @@ describe('the per-file budget bounds the whole extraction, not only the parse', 
     expect(health?.exclusion).toBe('budget-exceeded');
     expect(health?.parseFailed).toBe(true);
     // The BUDGET, not the spend: `parse-health.json` must be byte-identical across re-analyses.
-    expect(health?.budgetMs).toBe(1000);
+    expect(health?.budgetMs).toBe(100);
     // Its symbols are MISSING from the graph — which is precisely why the record above has to be
     // there for any downstream conclusion to read.
     expect([...result.nodes.values()].some(n => n.filePath === 'src/gen.go')).toBe(false);
