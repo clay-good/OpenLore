@@ -109,7 +109,7 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
     await writeDepGraph();
     const [c] = (await run()).candidateDead;
     expect(c.confidence).toBe('low');
-    expect(c.reason).toContain('its class is the implementation a contract registration named');
+    expect(c.reason).toContain('its class name matches the implementation a contract registration named');
   });
 
   it('caps a function a refused gRPC registration named by symbol', async () => {
@@ -123,7 +123,7 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
     await writeDepGraph();
     const [c] = (await run()).candidateDead;
     expect(c.confidence).toBe('low');
-    expect(c.reason).toContain('named by a contract registration or resolver map whose binding was refused');
+    expect(c.reason).toContain('a contract registration or resolver map writes this name and the binding was refused');
   });
 
   it('caps a function a refused GraphQL resolver map named', async () => {
@@ -137,7 +137,7 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
     await writeDepGraph();
     const [c] = (await run()).candidateDead;
     expect(c.confidence).toBe('low');
-    expect(c.reason).toContain('named by a contract registration or resolver map whose binding was refused');
+    expect(c.reason).toContain('a contract registration or resolver map writes this name and the binding was refused');
   });
 
   // The shape grpc/grpc-node really has: `server.addService(Echo.service, serviceImplementation)`
@@ -184,10 +184,10 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
     expect(c.reason).not.toContain('contract registration');
   });
 
-  // The disclosure lists are bounded at MAX_DISCLOSED (20) with their exact total beside them, so a
-  // repository with more refusals than that holds unbound symbols the artifact does not name. The
-  // names are unrecoverable, so the whole repository gives up `high` rather than guess.
-  it('withholds high across the repository when the disclosure is truncated past MAX_DISCLOSED', async () => {
+  // A LEGACY artifact (written before the complete name lists were carried) has only the bounded
+  // items, so a repository with more refusals than those name holds unbound symbols it cannot
+  // recover. The whole repository then gives up `high` rather than guess.
+  it('withholds high across the repository when a legacy artifact cannot name every refusal', async () => {
     const other = node('srv/util.go::unusedHelper', 'unusedHelper');
     await write([other, RPC], [], disclosure({
       unresolvedRegistrations: {
@@ -199,7 +199,7 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
     const [c] = (await run()).candidateDead;
     expect(c.name).toBe('unusedHelper');
     expect(c.confidence).toBe('medium');
-    expect(c.reason).toContain('5 further contract registration(s)/resolver(s) whose binding was refused are past the disclosure cap of 20');
+    expect(c.reason).toContain('5 refused contract binding(s) are not named by this index');
   });
 
   it('leaves a truncation-ceiling reason off a candidate already capped lower', async () => {
@@ -212,6 +212,99 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
     await writeDepGraph();
     const [c] = (await run()).candidateDead;
     expect(c.confidence).toBe('low');
-    expect(c.reason).not.toContain('past the disclosure cap');
+    expect(c.reason).not.toContain('not named by this index');
+  });
+});
+
+/**
+ * The complete name lists (`cg.contracts.unboundHandlerNames`) are what a current artifact carries,
+ * computed over every refusal rather than the 20-item reader slice. Without them the reader's cap
+ * would decide a correctness question: grpc-go discloses 43 refusals, so an items-only rule gives
+ * up that repository's entire high-confidence tier.
+ */
+describe('find_dead_code reads the complete refusal names, not the reader slice', () => {
+  const unrelated = node('srv/util.go::unusedHelper', 'unusedHelper');
+
+  it('keeps high when a current artifact names every refusal, however many there are', async () => {
+    await write([unrelated, RPC], [], disclosure({
+      unresolvedRegistrations: {
+        items: Array.from({ length: 20 }, (_, i) => ({ file: `srv/s${i}.go`, line: 1, service: `svc.S${i}`, className: `impl${i}`, reason: 'implementation-not-found' })),
+        total: 43,
+      },
+      unboundHandlerNames: {
+        symbols: [], files: [],
+        classes: Array.from({ length: 43 }, (_, i) => ({ name: `impl${i}` })),
+        truncated: 0,
+      },
+    }));
+    await writeDepGraph();
+    const r = await run() as { candidateDead: Candidate[]; contractRootsNotAssessed?: Record<string, unknown> };
+    expect(r.candidateDead[0]).toMatchObject({ name: 'unusedHelper', confidence: 'high' });
+    expect(r.contractRootsNotAssessed?.refusalsNotNamed).toBeUndefined();
+  });
+
+  it('caps the named class from the complete list even when the reader slice omits it', async () => {
+    const impl = node('srv/main.go::orderServer.GetOrder', 'GetOrder', { className: 'orderServer' });
+    await write([impl, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{ file: 'srv/other.go', line: 1, service: 'svc.Other', className: 'otherServer', reason: 'implementation-not-found' }], total: 40 },
+      unboundHandlerNames: { symbols: [], files: [], classes: [{ name: 'otherServer' }, { name: 'orderServer' }], truncated: 0 },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.confidence).toBe('low');
+    expect(c.reason).toContain('its class name matches the implementation a contract registration named');
+  });
+
+  it('narrows a class cap to the one directory the projection proves, and states which', async () => {
+    // Go, unqualified `&server{}`: `inScope` proves it can only mean the registration's own
+    // package, so a same-named struct in another package is NOT capped.
+    const here = node('greeter/main.go::server.SayHello', 'SayHello', { className: 'server' });
+    const elsewhere = node('metrics/collector.go::server.deadScrape', 'deadScrape', { className: 'server' });
+    await write([here, elsewhere, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{ file: 'greeter/main.go', line: 9, service: 'helloworld.Greeter', className: 'server', classDir: 'greeter/', reason: 'implementation-not-found' }], total: 1 },
+      unboundHandlerNames: { symbols: [], files: [], classes: [{ name: 'server', dir: 'greeter/' }], truncated: 0 },
+    }));
+    await writeDepGraph();
+    const by = Object.fromEntries((await run()).candidateDead.map(c => [c.name, c]));
+    expect(by.SayHello.confidence).toBe('low');
+    expect(by.SayHello.reason).toContain('in this directory');
+    expect(by.deadScrape.confidence).toBe('high');
+  });
+
+  it('withholds high and says so at report level when the name cap itself was reached', async () => {
+    await write([unrelated, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{ file: 'srv/s.go', line: 1, service: 'svc.S', className: 'impl', reason: 'implementation-not-found' }], total: 1 },
+      unboundHandlerNames: { symbols: [], files: [], classes: [{ name: 'impl' }], truncated: 7 },
+    }));
+    await writeDepGraph();
+    const r = await run() as unknown as { candidateDead: Candidate[]; contractRootsNotAssessed?: Record<string, unknown>; soundness: { caveats: string[] } };
+    expect(r.candidateDead[0].confidence).toBe('medium');
+    // Stated once at report level, not only on a candidate that happened to reach the high branch.
+    expect(r.contractRootsNotAssessed?.refusalsNotNamed).toBe(7);
+    expect(r.soundness.caveats.join(' ')).toContain('not named by this index');
+  });
+
+  it('states the cap is a lower bound wherever it fired', async () => {
+    const impl = node('srv/main.go::orderServer.GetOrder', 'GetOrder', { className: 'orderServer' });
+    await write([impl, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{ file: 'srv/main.go', line: 1, service: 'svc.S', className: 'orderServer', reason: 'implementation-not-found' }], total: 1 },
+      unboundHandlerNames: { symbols: [], files: [], classes: [{ name: 'orderServer' }], truncated: 0 },
+    }));
+    await writeDepGraph();
+    const r = await run() as unknown as { soundness: { caveats: string[] } };
+    expect(r.soundness.caveats.join(' ')).toContain('this cap is a LOWER BOUND');
+  });
+
+  // The name scan reads `items` whatever the `total` gate says, so it must survive shapes the
+  // report block never dereferences (it only reads items behind a truthy `total`). Without the
+  // guards these two inputs threw where the prior build answered.
+  it('degrades rather than throwing on a corrupt refusal list', async () => {
+    await write([unrelated, RPC], [], disclosure({
+      unresolvedRegistrations: { items: 5 as unknown as [], total: 0 },
+      unresolvedResolvers: { items: [null as unknown as Record<string, never>], total: 0 },
+    }));
+    await writeDepGraph();
+    const r = await run();
+    expect(r.candidateDead[0]).toMatchObject({ name: 'unusedHelper' });
   });
 });
