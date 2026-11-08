@@ -86,6 +86,7 @@ describe.skipIf(!launcherAvailable)('install never installs a blocking gate by d
     // user declined, so the non-blocking default must not depend on that file existing.
     expect(await exists(join(dir, OPENLORE_CONFIG_REL_PATH))).toBe(false);
     // The mode the gate itself will resolve, read the way the hook reads it.
+    // Read the way the HOOK reads it — that is the face that decides whether a commit blocks.
     expect(await resolveAutopilotMode(dir, null, { gateRunning: true }))
       .toMatchObject({ autopilot: true });
   });

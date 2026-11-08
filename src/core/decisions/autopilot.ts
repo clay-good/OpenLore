@@ -126,10 +126,18 @@ export async function resolveAutopilotMode(
     // blocking gate while printing "no commit is blocked by default", and how a fresh clone of a
     // repository whose `.openlore/` is gitignored inherited a blocking gate nobody chose. Opt in
     // with { "governance": { "autopilot": false } } (change: fix-install-never-blocks-by-default).
+    //
+    // Scoped to `gateRunning` on purpose. The question a GATE asks is "may I block this
+    // commit", and the answer with no config is no. The question `record_decision` asks is
+    // "may I auto-ACCEPT this decision", and the answer with no config stays no: an
+    // unconfigured repository has no spec corpus to sync an accepted decision into, so
+    // auto-accepting there would be a different and much wider change than unblocking a
+    // commit. The reason names both facts, so a reader is never told only half of it.
     return {
-      autopilot: true,
-      reason: 'no .openlore/config.json to configure a blocking gate in — decisions are recorded and no '
-        + 'commit is blocked; run "openlore init" and set governance.autopilot: false to require review',
+      autopilot: !!opts.gateRunning,
+      reason: 'no .openlore/config.json to configure a blocking gate in — the commit gate blocks nothing, '
+        + 'and a recorded decision waits as a draft; run "openlore init" (then set '
+        + 'governance.autopilot: false to require blocking review)',
       source: 'no-config',
     };
   }

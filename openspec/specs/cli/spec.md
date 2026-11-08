@@ -3248,9 +3248,12 @@ When background auto-initialization creates a repository's configuration, it SHA
 a linked worktree whose main checkout sets the key. An absent key IN A CONFIGURATION THAT EXISTS
 SHALL keep meaning blocking review, so a gate OpenLore cannot see (a CI-only gate, a hook manager, a
 fresh clone with empty hooks) never turns into auto-accept. The complete ABSENCE of a configuration
-SHALL resolve to autopilot instead: governance is advisory and never blocks by default, "blocking" is
-a setting, and a gate with nowhere to read that setting from was never configured to block. The
-resolved mode and its reason SHALL be reported wherever governance state is shown.
+SHALL resolve, FOR THE GATE, to autopilot instead: governance is advisory and never blocks by
+default, "blocking" is a setting, and a gate with nowhere to read that setting from was never
+configured to block. It SHALL NOT resolve to auto-ACCEPT on record there: an unconfigured repository
+has no spec corpus to sync an accepted decision into, so a recorded decision still waits as a draft,
+and the single stated reason SHALL name both halves. The resolved mode and its reason SHALL be
+reported wherever governance state is shown.
 
 #### Scenario: A gate with nowhere to read a setting from does not block
 
@@ -3259,6 +3262,8 @@ resolved mode and its reason SHALL be reported wherever governance state is show
 - **WHEN** the commit gate runs
 - **THEN** the mode is autopilot with a reason naming the missing configuration, decisions are
   recorded, and the commit is not blocked
+- **AND** a decision recorded in that repository still waits as a draft, because auto-accepting it
+  is a different question from unblocking a commit
 - **AND** blocking review stays reachable by running `openlore init` and setting
   `governance.autopilot: false`
 

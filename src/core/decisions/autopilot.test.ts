@@ -87,17 +87,24 @@ describe('resolveAutopilotMode', () => {
     expect(await resolveAutopilotMode(dir, CONFIG, { gateRunning: true })).toMatchObject({ autopilot: false, source: 'blocking-gate' });
   });
 
-  it('is ON where OpenLore was never set up — a gate with nowhere to read a setting cannot block', async () => {
-    // DELIBERATELY INVERTED (change: fix-install-never-blocks-by-default). This used to assert
-    // `autopilot: false`, which made the ABSENCE of a config the strictest posture on the
-    // machine: `openlore install --no-analyze` runs no init, so it installed a gate that blocked
-    // every commit while the same run printed "no commit is blocked by default". Governance is
-    // advisory and never blocks by default; "blocking" is a setting, and with no config nothing
-    // set it. Blocking stays reachable via an explicit `governance.autopilot: false`.
-    expect(await resolveAutopilotMode(dir, null)).toMatchObject({ autopilot: true, source: 'no-config' });
-    // Including when the gate itself is the caller — the hook path that actually blocks.
+  it('where OpenLore was never set up, the GATE does not block but a record still drafts', async () => {
+    // DELIBERATELY SPLIT BY FACE (change: fix-install-never-blocks-by-default).
+    //
+    // The gate face used to answer `false` here, which made the ABSENCE of a config the
+    // strictest posture on the machine: `openlore install --no-analyze` runs no init, so it
+    // installed a gate that blocked every commit while the same run printed "no commit is
+    // blocked by default". Governance is advisory and never blocks by default; "blocking" is a
+    // setting, and with no config nothing set it.
     expect(await resolveAutopilotMode(dir, null, { gateRunning: true }))
       .toMatchObject({ autopilot: true, source: 'no-config' });
+    // The ACCEPT face is unchanged: an unconfigured repository has no spec corpus to sync an
+    // accepted decision into, so `record_decision` still produces a draft. Unblocking a commit
+    // and auto-accepting a decision are different questions.
+    expect(await resolveAutopilotMode(dir, null)).toMatchObject({ autopilot: false, source: 'no-config' });
+    // And the single reason states both halves, so no caller is told only one of them.
+    const { reason } = await resolveAutopilotMode(dir, null);
+    expect(reason).toContain('the commit gate blocks nothing');
+    expect(reason).toContain('waits as a draft');
   });
 
   it("a linked worktree follows the main checkout's choice when its own config has none", async () => {
