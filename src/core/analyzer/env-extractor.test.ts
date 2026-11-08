@@ -74,7 +74,9 @@ describe('extractEnvVars', () => {
     const result = await extractEnvVars(['/root/src/frontend/main.go'], '/root');
     const entry = result.find(v => v.name === 'PRODUCT_CATALOG_SERVICE_ADDR');
     expect(entry).toBeDefined();
-    expect(entry?.files).toEqual(['src/frontend/main.go']);
+    // `relative()` yields the platform separator — normalize so the claim is about
+    // provenance, not about which OS the test runs on.
+    expect(entry?.files.map(f => f.replace(/\\/g, '/'))).toEqual(['src/frontend/main.go']);
     // The helper's own os.Getenv(envKey) names nothing — no phantom variable appears.
     expect(result.map(v => v.name)).toEqual(['PRODUCT_CATALOG_SERVICE_ADDR']);
   });
