@@ -37,6 +37,7 @@ import {
   OPENSPEC_SPECS_SUBDIR,
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
+import { jsonOutput } from '../output.js';
 
 // ============================================================================
 // DISPLAY HELPERS
@@ -44,7 +45,7 @@ import { fileExists } from '../../utils/command-helpers.js';
 
 function displayCoverageReport(report: TestCoverageReport, json: boolean): void {
   if (json) {
-    console.log(JSON.stringify(report, null, 2));
+    console.log(jsonOutput(report));
     return;
   }
 

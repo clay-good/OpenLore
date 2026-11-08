@@ -6,7 +6,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../core/services/tool-dispatch.js', () => ({ dispatchTool: mocks.dispatch }));
-vi.mock('../output.js', () => ({
+vi.mock('../output.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../output.js')>()),
   writeStdout: vi.fn(async (value: string) => { mocks.writes.push(value); }),
 }));
 
