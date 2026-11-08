@@ -429,8 +429,12 @@ export function aliasModuleBase(aliases: readonly PathAlias[], specifier: string
     hit = { alias, star: captured };
   }
   if (!hit || hit.alias.targets.length !== 1) return undefined;
-  // The capture is substituted and the result re-normalized: a specifier may carry `..`.
-  const resolved = posixNormalize(hit.alias.targets[0].replace('*', hit.star));
+  // The capture is substituted and the result re-normalized: a specifier may carry `..`. The
+  // target holds at most ONE `*` (`readPathAliases` drops any with more), and it is spliced by
+  // index rather than replaced, so this is a substitution and never a partial sanitization.
+  const target = hit.alias.targets[0];
+  const slot = target.indexOf('*');
+  const resolved = posixNormalize(slot === -1 ? target : target.slice(0, slot) + hit.star + target.slice(slot + 1));
   return resolved ? stripJsExt(resolved) : undefined;
 }
 
