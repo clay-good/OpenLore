@@ -263,10 +263,10 @@ describe('projectGraphql: implements_endpoint from resolver maps', () => {
     expect(p.unresolvedResolvers).toEqual([
       { file: 'src/other.ts', line: 1, root: 'Mutation', reason: 'not-literal', detail: 'the resolver object has a spread or a computed key' },
       { file: 'src/resolvers.ts', line: 4, root: 'Query', field: 'order', reason: 'inline-implementation' },
-      { file: 'src/resolvers.ts', line: 5, root: 'Query', field: 'nope', reason: 'unknown-field' },
-      { file: 'src/resolvers.ts', line: 7, root: 'Query', field: 'me', reason: 'implementation-not-found', detail: '`dup` is neither defined in src/resolvers.ts nor imported by it' },
-      { file: 'src/resolvers.ts', line: 8, root: 'Query', field: 'search', reason: 'implementation-not-found', detail: '`missing` is neither defined in src/resolvers.ts nor imported by it' },
-      { file: 'src/resolvers.ts', line: 9, root: 'Query', field: 'health', reason: 'implementation-not-found', detail: '`cancel` is neither defined in src/resolvers.ts nor imported by it' },
+      { file: 'src/resolvers.ts', line: 5, root: 'Query', field: 'nope', symbol: 'getOrder', reason: 'unknown-field' },
+      { file: 'src/resolvers.ts', line: 7, root: 'Query', field: 'me', symbol: 'dup', reason: 'implementation-not-found', detail: '`dup` is neither defined in src/resolvers.ts nor imported by it' },
+      { file: 'src/resolvers.ts', line: 8, root: 'Query', field: 'search', symbol: 'missing', reason: 'implementation-not-found', detail: '`missing` is neither defined in src/resolvers.ts nor imported by it' },
+      { file: 'src/resolvers.ts', line: 9, root: 'Query', field: 'health', symbol: 'cancel', reason: 'implementation-not-found', detail: '`cancel` is neither defined in src/resolvers.ts nor imported by it' },
     ]);
     expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
     expect(p.unboundOperations).toHaveLength(6);
@@ -320,7 +320,7 @@ describe('projectGraphql: implements_endpoint from resolver maps', () => {
   it('an entry that is not followed says why', () => {
     const p = direct({}, [map({ entries: [{ field: 'order', fn: 'handler', notFollowed: "`handler` is a default or namespace import of './h', which is not followed", line: 4 }] })]);
     expect(p.unresolvedResolvers).toEqual([
-      { file: 'src/resolvers.ts', line: 4, root: 'Query', field: 'order', reason: 'implementation-not-found', detail: "`handler` is a default or namespace import of './h', which is not followed" },
+      { file: 'src/resolvers.ts', line: 4, root: 'Query', field: 'order', symbol: 'handler', reason: 'implementation-not-found', detail: "`handler` is a default or namespace import of './h', which is not followed" },
     ]);
   });
 
@@ -505,5 +505,29 @@ export const resolvers = { Subscription: { orderCreated: { subscribe: subscribeO
       resolveImplementation: byName([fn('src/resolvers.ts::subscribeOrders')]),
     });
     expect(edgesOf(p, 'implements_endpoint')).toEqual(['src/resolvers.ts::subscribeOrders -> schema.graphql::Subscription.orderCreated']);
+  });
+});
+
+/**
+ * An unbound resolver entry must NAME the function it left unrooted
+ * (change: cap-unbound-contract-handler-confidence): `find_dead_code` reads it to keep that
+ * function out of its high-confidence dead verdicts.
+ */
+describe('an unbound resolver entry names the function it left unrooted', () => {
+  it('names the function a refused entry pointed at', () => {
+    const p = direct({ resolveImplementation: () => [] }, [map({ entries: [{ field: 'order', fn: 'getOrder', line: 4, imported: true, from: '@app/handlers' }] })]);
+    expect(p.unresolvedResolvers).toEqual([expect.objectContaining({ field: 'order', symbol: 'getOrder', reason: 'implementation-not-found' })]);
+  });
+
+  it('names the function an ambiguous entry pointed at', () => {
+    const two = [fn('src/resolvers.ts::dup'), fn('src/resolvers.ts::dup', { id: 'src/resolvers.ts::dup#2', startLine: 20 })];
+    const p = direct({ resolveImplementation: byName(two) }, [map({ entries: [{ field: 'order', fn: 'dup', line: 4 }] })]);
+    expect(p.unresolvedResolvers).toEqual([expect.objectContaining({ field: 'order', symbol: 'dup', reason: 'ambiguous-implementation' })]);
+  });
+
+  it('names no symbol for an inline resolver, because the literal names no function', () => {
+    const p = direct({}, [map({ entries: [{ field: 'order', line: 4 }] })]);
+    expect(p.unresolvedResolvers).toEqual([expect.objectContaining({ field: 'order', reason: 'inline-implementation' })]);
+    expect(p.unresolvedResolvers[0].symbol).toBeUndefined();
   });
 });
