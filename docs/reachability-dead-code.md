@@ -74,6 +74,7 @@ Code that only configuration invokes has no importer, so without evidence it rea
 | Config | What counts as wiring |
 |---|---|
 | root `package.json` | `bin`, `main`, `module`, `exports` targets; files run by `scripts`; `jest` setup files |
+| declared workspace manifests | the same keys, in the `package.json` of every member the root `workspaces` field (array or `{ packages: [...] }`) or `pnpm-workspace.yaml` `packages:` declares; each reference resolves against that manifest's own directory and is receipted with its own path |
 | `tsconfig.json` | `files`; `outDir` → `rootDir` maps a build output (`dist/cli/index.js`) back to its source |
 | `vitest`/`vite`/`jest` config | literal `setupFiles` / `globalSetup` values |
 | `.github/workflows/*.yml` | files run by `run:` steps, relative to the step's `working-directory` |
@@ -93,9 +94,13 @@ counted in a caveat, never guessed: `dynamic-reference` (a variable, `${{ }}` ex
 `unsupported-form` (a module run by name, a path after a `cd`, or a config with too many references),
 `target-not-found`, `build-output-unmapped` (a build output tsconfig does not map to a source),
 `outside-repository`, `unreadable-config` (a link, a non-regular file, or one over 1 MB), and
-`unparsed-config`. Workspace-member manifests,
-framework routing conventions, and other config formats are not read, and only POSIX shell
-workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
+`unparsed-config`. Only the DECLARED workspace set is read — the tree is never searched for
+manifests — so a `package.json` outside it contributes nothing; a repository that declares workspaces
+carries that limit as a standing `externalWiring.boundaries` entry, together with any pattern that
+leaves the repository (`outside-repository`), a brace list / character class / extglob pattern, and an
+exact count of members left unread past the cap of 256. A member manifest's own `workspaces` field is
+not followed. Framework routing conventions and other config formats are not read, and only POSIX
+shell workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
 repository, 36 of 1,018 entry points are in config-wired files.
 
 Confidence is deliberately conservative — the bias is toward **false-live over false-dead**:
