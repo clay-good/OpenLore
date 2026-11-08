@@ -1,0 +1,276 @@
+/**
+ * Framework route handlers as liveness roots, `.d.ts` declarations, and generated
+ * files in dead-code conclusions (change: root-framework-routes).
+ *
+ * The invariant that broke: `get_route_inventory` called a symbol a route handler
+ * while `find_dead_code` rated the SAME symbol high-confidence dead with the reason
+ * "not a test, route handler, or main entry". These tests pin the agreement.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+
+vi.mock('./utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./utils.js')>();
+  return { ...actual, validateDirectory: vi.fn(async (d: string) => d), readCachedContext: vi.fn() };
+});
+vi.mock('./parse-health-boundary.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./parse-health-boundary.js')>();
+  return { ...actual, loadParseHealthReport: vi.fn(async () => null) };
+});
+vi.mock('../../drift/git-diff.js', () => ({ getChangedFiles: vi.fn(async () => ({ files: [] })) }));
+vi.mock('../../analyzer/entry-point-adapters.js', () => ({
+  collectExternalWiring: vi.fn(async () => ({ wired: [], boundaries: [], boundariesOmitted: 0 })),
+}));
+
+import { handleFindDeadCode, deadCodeIds } from './reachability.js';
+import { handleGetRouteInventory } from './analysis.js';
+import { buildRouteInventoryRoots } from './route-inventory-roots.js';
+import { readCachedContext } from './utils.js';
+import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
+
+// ── fixture ──────────────────────────────────────────────────────────────────
+
+const NEST = 'integration/rmq/src/rmq-broadcast.controller.ts';
+const NEXT = 'app/api/graphql/route.ts';
+const AMBIG = 'src/ambiguous.ts';
+const DTS = 'packages/proto/generated/protobuf.d.ts';
+const PB = 'gen/service.pb.go';
+const ORPHAN = 'src/orphan.ts';
+
+function node(over: Partial<FunctionNode> & { id: string }): FunctionNode {
+  return {
+    name: over.id.split('::')[1] ?? over.id, filePath: over.id.split('::')[0] ?? 'x.ts',
+    isAsync: false, language: 'TypeScript', startIndex: 0, endIndex: 100, fanIn: 0, fanOut: 0, ...over,
+  };
+}
+/** Nobody calls any of these: every one has fanIn 0 and no inbound edge. */
+const NODES: FunctionNode[] = [
+  node({ id: `${NEST}::multicats`, className: 'RmqBroadcastController', startLine: 28 }),
+  node({ id: `${NEXT}::POST`, startLine: 9 }),
+  node({ id: `${NEXT}::OPTIONS`, startLine: 32 }),
+  node({ id: `${AMBIG}::handler#1`, name: 'handler', filePath: AMBIG, startLine: 4 }),
+  node({ id: `${AMBIG}::handler#2`, name: 'handler', filePath: AMBIG, startLine: 20 }),
+  node({ id: `${DTS}::Trace.create`, name: 'create', className: 'Trace', startLine: 140 }),
+  node({ id: `${PB}::Thing.ProtoReflect`, name: 'ProtoReflect', className: 'Thing', language: 'Go', startLine: 55 }),
+  node({ id: `${ORPHAN}::orphan`, startLine: 1 }),
+];
+
+const CG: SerializedCallGraph = {
+  nodes: NODES, edges: [] as CallEdge[],
+  classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
+  stats: { totalNodes: NODES.length, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 },
+};
+
+const ROUTES = [
+  // The reported defect: a `@Controller()` + `@Get('broadcast')` handler with no declared contract.
+  { method: 'GET', path: '/broadcast', framework: 'nestjs', file: NEST, handler: 'multicats', contractSource: 'none' },
+  // Next.js App Router Route Handlers.
+  { method: 'POST', path: '/api/graphql', framework: 'nextjs-app', file: NEXT, handler: 'POST', contractSource: 'none' },
+  { method: 'OPTIONS', path: '/api/graphql', framework: 'nextjs-app', file: NEXT, handler: 'OPTIONS', contractSource: 'none' },
+  // Resolves to SEVERAL declarations → never guessed.
+  { method: 'GET', path: '/ambiguous', framework: 'express', file: AMBIG, handler: 'handler', contractSource: 'none' },
+  // Resolves to NONE.
+  { method: 'GET', path: '/gone', framework: 'express', file: 'src/missing.ts', handler: 'gone', contractSource: 'none' },
+  { method: 'GET', path: '/unnamed', framework: 'express', file: NEXT, handler: '', contractSource: 'none' },
+  { method: 'GET', path: '/escape', framework: 'express', file: '../../etc/passwd', handler: 'x', contractSource: 'none' },
+];
+
+const FILES: Record<string, string> = {
+  [NEST]: "import { Controller, Get } from '@nestjs/common';\n@Controller()\nexport class RmqBroadcastController {\n  @Get('broadcast')\n  multicats() { return 1; }\n}\n",
+  [NEXT]: 'export async function POST() { return new Response(); }\nexport async function OPTIONS() { return new Response(); }\n',
+  [AMBIG]: 'export function handler() {}\nexport function handler2() {}\n',
+  [DTS]: 'export declare class Trace {\n  public static create(properties?: ITrace): Trace;\n}\n',
+  [PB]: '// Copyright 2020 the authors.\n//\n// Code generated by protoc-gen-go. DO NOT EDIT.\n\npackage gen\n\nfunc (x *Thing) ProtoReflect() {}\n',
+  [ORPHAN]: 'export function orphan() {}\n',
+};
+
+let dir: string;
+
+async function writeInventory(body: string | null): Promise<void> {
+  const path = join(dir, '.openlore', 'analysis', 'route-inventory.json');
+  if (body === null) await rm(path, { force: true });
+  else await writeFile(path, body, 'utf-8');
+}
+
+type DeadResult = {
+  stats: { analyzed: number; roots: number; candidateDead: number };
+  rootKinds: { httpHandlers: number };
+  routeInventoryRoots: { routesRead: number; rooted: number; byFramework: Record<string, number>; boundary?: string };
+  routeRootsNotAssessed?: { total: number; byReason: Record<string, number>; items: Array<{ reason: string; handler: string }> };
+  declarationsExcluded?: { count: number; files: string[] };
+  byConfidence: { high: number; medium: number; low: number };
+  candidateDead: Array<{ name: string; file: string; confidence: string; reason: string }>;
+  soundness: { caveats: string[] };
+};
+
+const dead = (): Promise<DeadResult> => handleFindDeadCode({ directory: dir, maxResults: 1000 }) as Promise<DeadResult>;
+
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'olr-routes-'));
+  await mkdir(join(dir, '.openlore', 'analysis'), { recursive: true });
+  for (const [rel, body] of Object.entries(FILES)) {
+    await mkdir(dirname(join(dir, rel)), { recursive: true });
+    await writeFile(join(dir, rel), body, 'utf-8');
+  }
+  // An empty dependency graph still counts as the `dependency-graph` export signal, so a
+  // callerless candidate CAN reach `high` — otherwise these tests could not tell a cap apart
+  // from the no-signal `medium` floor.
+  await writeFile(join(dir, '.openlore', 'analysis', 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }), 'utf-8');
+  await writeInventory(JSON.stringify({ total: ROUTES.length, byMethod: {}, byFramework: {}, routes: ROUTES }));
+  vi.mocked(readCachedContext).mockResolvedValue({ callGraph: CG } as never);
+});
+afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+// ── the defect ───────────────────────────────────────────────────────────────
+
+describe('find_dead_code roots the route inventory handlers', () => {
+  it('roots a nestjs decorator handler with no inbound edge, and never calls it dead', async () => {
+    const r = await dead();
+    expect(r.candidateDead.map(c => `${c.file}::${c.name}`)).not.toContain(`${NEST}::multicats`);
+    expect(r.routeInventoryRoots.rooted).toBe(3);
+    expect(r.routeInventoryRoots.byFramework).toEqual({ nestjs: 1, 'nextjs-app': 2 });
+    expect(r.rootKinds.httpHandlers).toBe(3);
+  });
+
+  it('roots Next.js App Router POST and OPTIONS in app/api/*/route.ts', async () => {
+    const r = await dead();
+    const listed = r.candidateDead.map(c => `${c.file}::${c.name}`);
+    expect(listed).not.toContain(`${NEXT}::POST`);
+    expect(listed).not.toContain(`${NEXT}::OPTIONS`);
+  });
+
+  it('agrees with get_route_inventory: no inventoried handler is a high candidate', async () => {
+    const r = await dead();
+    const inventoried = new Set(ROUTES.map(x => `${x.file}::${x.handler}`));
+    const contradictions = r.candidateDead
+      .filter(c => c.confidence === 'high' && inventoried.has(`${c.file}::${c.name}`));
+    expect(contradictions).toEqual([]);
+  });
+
+  it('shares the route roots with the dead set other conclusions read', async () => {
+    const ids = await deadCodeIds(dir, CG);
+    expect([...ids].sort()).toEqual([`${AMBIG}::handler#1`, `${AMBIG}::handler#2`, `${PB}::Thing.ProtoReflect`, `${ORPHAN}::orphan`].sort());
+  });
+
+  it('never says "not a route handler" about a symbol the inventory calls one', async () => {
+    const r = await dead();
+    for (const c of r.candidateDead) {
+      if (ROUTES.some(x => x.file === c.file && x.handler === c.name)) {
+        expect(c.reason).not.toMatch(/not a test, route handler, or main entry/);
+        expect(c.reason).toMatch(/the route inventory names a handler of this name/);
+      }
+    }
+  });
+});
+
+// ── refusals are counted, never guessed ──────────────────────────────────────
+
+describe('an inventoried handler that cannot be pinned', () => {
+  it('is not rooted and is disclosed with a count and a reason', async () => {
+    const r = await dead();
+    expect(r.routeRootsNotAssessed?.total).toBe(4);
+    expect(r.routeRootsNotAssessed?.byReason).toEqual({
+      ambiguous: 1, 'file-not-indexed': 1, 'handler-not-named': 1, 'outside-repository': 1,
+    });
+    expect(r.soundness.caveats.join(' ')).toMatch(/4 inventoried route\(s\) did not pin to one declaration/);
+  });
+
+  it('leaves both same-named declarations as candidates, capped at low', async () => {
+    const r = await dead();
+    const amb = r.candidateDead.filter(c => c.file === AMBIG);
+    expect(amb.map(c => c.name)).toEqual(['handler', 'handler']);
+    for (const c of amb) expect(c.confidence).toBe('low');
+  });
+
+  it('never guesses a root from a file-path suffix or a basename', () => {
+    const r = buildRouteInventoryRoots(
+      [{ method: 'GET', path: '/x', framework: 'express', file: 'other/dir/app.ts', handler: 'h' }],
+      [{ id: 'src/app.ts::h', name: 'h', filePath: 'src/app.ts' }],
+    );
+    expect([...r.rootIds]).toEqual([]);
+    expect(r.notAssessed?.byReason).toEqual({ 'file-not-indexed': 1 });
+  });
+
+  it('bounds a hostile handler name and a 10,000-route inventory', () => {
+    const many = Array.from({ length: 10_000 }, (_, i) => ({
+      method: 'GET', path: `/r${i}`, framework: 'express', file: 'src/app.ts', handler: 'h',
+    }));
+    many.push({ method: 'GET', path: '/big', framework: 'express', file: 'src/app.ts', handler: 'x'.repeat(128 * 1024) });
+    const started = Date.now();
+    const r = buildRouteInventoryRoots(many, [{ id: 'src/app.ts::h', name: 'h', filePath: 'src/app.ts' }]);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect([...r.rootIds]).toEqual(['src/app.ts::h']);
+    expect(r.notAssessed?.byReason['handler-not-named']).toBe(1);
+    expect(r.notAssessed?.items.length).toBeLessThanOrEqual(10);
+  });
+});
+
+// ── the artifact itself ──────────────────────────────────────────────────────
+
+describe('a route inventory that cannot be read', () => {
+  it('degrades to the edge-only roots with a disclosure when absent', async () => {
+    await writeInventory(null);
+    const r = await dead();
+    expect(r.routeInventoryRoots.rooted).toBe(0);
+    expect(r.routeInventoryRoots.boundary).toMatch(/absent or could not be read/);
+    expect(r.soundness.caveats.join(' ')).toMatch(/absent or could not be read/);
+    expect(r.candidateDead.map(c => c.name)).toContain('multicats');
+  });
+
+  it('degrades with a disclosure when truncated or not JSON', async () => {
+    await writeInventory('{"total": 494, "routes": [{"method":"GET"');
+    const r = await dead();
+    expect(r.routeInventoryRoots.boundary).toMatch(/not valid JSON/);
+    expect(r.routeInventoryRoots.rooted).toBe(0);
+  });
+
+  it('degrades with a disclosure when it holds no route list', async () => {
+    await writeInventory('[1,2,3]');
+    expect((await dead()).routeInventoryRoots.boundary).toMatch(/does not hold a route list/);
+  });
+
+  it('reads a route whose fields are not strings as unnamed, never coerced', async () => {
+    await writeInventory(JSON.stringify({ routes: [{ method: 1, path: null, file: { x: 1 }, handler: ['h'] }] }));
+    const r = await dead();
+    expect(r.routeInventoryRoots.rooted).toBe(0);
+    expect(r.routeRootsNotAssessed?.byReason['handler-not-named']).toBe(1);
+  });
+});
+
+// ── declarations and generated files are not code to be dead ─────────────────
+
+describe('ambient declarations and generated files', () => {
+  it('never makes a bodyless .d.ts declaration a dead candidate', async () => {
+    const r = await dead();
+    expect(r.candidateDead.map(c => c.file)).not.toContain(DTS);
+    expect(r.declarationsExcluded).toMatchObject({ count: 1, files: [DTS] });
+    expect([...await deadCodeIds(dir, CG)]).not.toContain(`${DTS}::Trace.create`);
+  });
+
+  it('never rates a generated file\'s symbol high, and names the rule', async () => {
+    const r = await dead();
+    const pb = r.candidateDead.find(c => c.file === PB);
+    expect(pb?.confidence).toBe('low');
+    expect(pb?.reason).toMatch(/in a generated file \(header-marker rule/);
+    expect(r.byConfidence.high).toBe(1);
+    expect(r.candidateDead.filter(c => c.confidence === 'high').map(c => c.name)).toEqual(['orphan']);
+  });
+});
+
+// ── the cross-tool invariant that broke ──────────────────────────────────────
+
+describe('get_route_inventory and find_dead_code do not contradict each other', () => {
+  it('lists no symbol as both an inventoried route and a high-confidence dead candidate', async () => {
+    const inv = await handleGetRouteInventory(dir) as { routes: Array<{ file: string; handler: string }> };
+    const inventoried = new Set(inv.routes.map(r => `${r.file}::${r.handler}`));
+    expect(inventoried.size).toBeGreaterThan(0);
+    const r = await dead();
+    const both = r.candidateDead
+      .filter(c => c.confidence === 'high' && inventoried.has(`${c.file}::${c.name}`))
+      .map(c => `${c.file}::${c.name} — ${c.reason}`);
+    expect(both).toEqual([]);
+  });
+});
