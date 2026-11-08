@@ -1,6 +1,6 @@
 # OpenSpec Integration Guide
 
-This document details how openlore integrates with the OpenSpec ecosystem.
+This document details how openlore integrates with the OpenSpec ecosystem. OpenSpec is supported and first-class (OpenLore is built with it), but it is optional: OpenLore's structural analysis, orientation, memory, and decision tools also work in repos that use another spec framework or no specs at all.
 
 ## Overview
 
@@ -432,67 +432,18 @@ If files are grouped wrong:
 2. Check for missing imports in source code
 3. Manually specify domains: `openlore generate --domains user,order,auth`
 
-## OpenSpec Plugin Marketplace
-
-OpenSpec is adding a plugin marketplace so optional, heavyweight "engines" can extend it without
-bloating the core. **OpenLore is the inaugural engine and the reference plugin.** This section
-documents the OpenLore side of that contract. OpenSpec discovers, surfaces, gates, and invokes
-OpenLore as a **subprocess** — it never imports OpenLore's code.
-
-```
-openspec init
-openspec lore generate      # delegates to OpenLore: code archaeology → specs
-openspec validate --specs   # core OpenSpec takes over
-```
-
-### Two manifests — do not confuse them
-
-OpenLore ships **two** unrelated "manifest" artifacts, with distinct names so they never collide:
-
-| Artifact | Command | What it is |
-|----------|---------|------------|
-| **Plugin** manifest | `openlore plugin-manifest emit\|validate` | The `"openspec"` key in `package.json`. The declarative contract the OpenSpec marketplace reads to discover/surface/gate OpenLore. |
-| **Federation** manifest | `openlore manifest emit\|validate` | `.well-known/openlore.json` — a repo's public-symbol self-description for cross-repo federation. Unrelated to the marketplace. |
-
-The plugin manifest is the `"openspec"` key in OpenLore's own `package.json` (the single source of
-truth — scannable from `node_modules` with zero extra files). Discovery needs no command; OpenSpec
-reads the static key. `openlore plugin-manifest` exists only for CI validation and non-npm
-distribution:
-
-```bash
-openlore plugin-manifest emit --json   # print the manifest (stdout only)
-openlore plugin-manifest validate      # schema + semantic check; exit 0 valid / 1 invalid / 2 not found
-```
-
-The manifest declares: `manifestVersion`, `id`, `namespace` (`lore`), `bin` (`openlore`, with an
-`npx` `binArgs` fallback), `openspecCompat`, the help-only `commands[]`, contributed `skills[]`, and
-`ownsConfigKeys` (`["openlore"]`).
-
-### Surfaced commands
-
-`commands[]` is **help/completion only** — it does not route execution (the host passes everything
-after the namespace verbatim to the bin). OpenLore surfaces the spec-relevant, externally-useful
-subcommands and omits internal/experimental (`panic-*`, `gryph-watch`, `serve`, `view`, `telemetry`)
-and host-owned lifecycle (`install`, `connect`, `setup`):
-
-`generate` · `drift` · `verify` · `analyze` · `orient` · `digest` · `decisions`
-
-Each is safe to run as a non-interactive child process: deterministic exit codes, no blocking prompts
-when stdin/stdout is not a TTY, machine output (`--json`) on **stdout** only with logs on **stderr**,
-and project-root resolution from the spawn directory.
+## Running alongside OpenSpec
 
 ### Node-version guard
 
 OpenLore requires **Node ≥22.22** (the supported dependency floor where the built-in `node:sqlite` is available
-without runtime flags); OpenSpec requires only ≥20.19. A user on Node 20/21 can run
-`openspec lore generate`, which spawns `openlore` under an unsupported Node. `engines` is advisory at
-install time and does not protect the spawn, so OpenLore **fails fast at runtime**: one legible
-stderr line naming the required and actual versions, and a stable exit code **78** — never a stack
-trace or a partial run, so the host propagates a legible failure.
+without runtime flags); OpenSpec requires only ≥20.19. When another tool spawns `openlore` under an
+unsupported Node, OpenLore **fails fast at runtime**: one legible stderr line naming the required and
+actual versions, and a stable exit code **78** — never a stack trace or a partial run.
 
 ### Config-key ownership
 
-OpenLore declares `ownsConfigKeys: ["openlore"]` and writes **only** the `openlore` key in
+OpenLore writes **only** the `openlore` key in
 `openspec/config.yaml`. When OpenSpec already created the config (host-owned keys such as `version`,
 `profile`, `delivery`, `workflows`, `featureFlags`, `plugins` are present), OpenLore splices in only
 its own block and leaves every other key and comment **byte-for-byte unchanged** — CRLF line endings,
@@ -501,41 +452,6 @@ text splice, not a YAML re-serialization. It never introduces or overwrites a ho
 skips context auto-injection (the host owns `context`). A host config that is not valid YAML is
 **refused with a clear error, never clobbered**. When no config exists, standalone OpenLore is the
 legitimate creator and may seed `schema`/`context` as before.
-
-### The MCP server stays separately wired
-
-Subprocess delegation fits OpenLore's batch/one-shot commands. OpenLore's **persistent MCP server**
-(`openlore mcp`, the long-lived process agents talk to continuously) is a different shape and is
-**not** modeled as a per-call delegated subcommand — it is wired into the agent's MCP configuration
-independently (today via `.mcp.json`) and stays there. The plugin surfaces one-shot `orient` for the
-`openspec lore orient "task"` ergonomic; the continuous orientation runtime is out of the delegation
-path by design. (A future `mcp`-capability advertisement is a Phase 2 idea.)
-
-### Recommended registry.json entry (for the OpenSpec side)
-
-When the OpenSpec curated registry lands, the inaugural OpenLore listing should be:
-
-```json
-{
-  "id": "openlore",
-  "package": "openlore",
-  "namespace": "lore",
-  "summary": "Reverse-engineer living OpenSpec specs from existing code, then keep code and specs in sync.",
-  "homepage": "https://github.com/clay-good/openlore#readme",
-  "repository": "https://github.com/clay-good/openlore",
-  "openspecCompat": ">=0.1.0"
-}
-```
-
-`openspecCompat` is kept canonical with the `@fission-ai/openspec` peer-dependency range (a CI guard
-asserts they agree) and will be pinned to the first OpenSpec release that ships the loader.
-
-### Status
-
-Phase 1 (manifest, Node-version guard, delegation-safety guarantees, config-key ownership, CI
-coherence guard, docs) is **implemented**. Handing skill/workflow distribution fully to OpenSpec and
-retiring/gating the OpenLore installer, plus the `onboard-from-code` workflow and optional `mcp`
-wiring, are **Phase 2** and land with the host loader.
 
 ## Best Practices
 
