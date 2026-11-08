@@ -28,7 +28,8 @@ import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from '.
 import { loadTraversalIndex } from './traversal.js';
 import { computeStaleness } from './confidence-boundary.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ENV_INVENTORY } from '../../../constants.js';
-import { extractEnvReadSites, type EnvVar, type EnvReadSite } from '../../analyzer/env-extractor.js';
+import { extractEnvReadSites, ENV_SOURCE_EXTENSIONS, type EnvVar, type EnvReadSite } from '../../analyzer/env-extractor.js';
+import { scanEnvHelperBindings, MAX_CALL_SITES_PER_WRAPPER } from '../../analyzer/env-helper-binding.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
 export interface AnalyzeEnvImpactInput {
@@ -44,6 +45,15 @@ const MIN_DEPTH = 1;
 const MAX_DEPTH = 30;
 /** Cap the blast-radius and test lists so a hub read does not flood the payload. */
 const MAX_LIST = 200;
+/**
+ * Files read for the unfollowed-indirect-read census. The census is repo-wide by
+ * nature — an env name this tool cannot follow is, by definition, not associated with
+ * the variable being asked about — so it is bounded by file count and disclosed when
+ * the bound bites (change: follow-env-name-through-helper).
+ */
+const MAX_CENSUS_FILES = 1500;
+/** Unfollowed sites named individually in the boundary evidence. */
+const MAX_CENSUS_EVIDENCE = 10;
 
 /** A read site mapped to its enclosing function (or module-level). */
 interface ResolvedReadSite {
@@ -52,6 +62,73 @@ interface ResolvedReadSite {
   required: boolean;
   /** Enclosing function `name::file`, or null for a module-level read. */
   enclosingFunction: string | null;
+  /** The same-file helper the name was followed through, when it was not read directly. */
+  via?: { helper: string; file: string; line: number };
+}
+
+/**
+ * Count the environment reads whose key is NOT a literal and that the one-hop rule could
+ * not follow, across the repository's in-scope source files. A counted boundary names its
+ * evidence; a generic caveat would leave an agent unable to judge the size of the gap.
+ *
+ * Read-only, bounded, and path-confined. Any failure degrades to "not counted" rather
+ * than to a claim of zero.
+ */
+async function censusUnfollowedReads(absDir: string, files: string[], name: string): Promise<{
+  counted: boolean;
+  total: number;
+  fileCount: number;
+  truncatedFiles: number;
+  evidence: Array<{ file: string; line: number; keyExpression: string; reason: string }>;
+  callSiteCapHit: boolean;
+  bindings: EnvReadSite[];
+}> {
+  const scanned = files.slice(0, MAX_CENSUS_FILES);
+  const truncatedFiles = files.length - scanned.length;
+  const evidence: Array<{ file: string; line: number; keyExpression: string; reason: string }> = [];
+  const touchedFiles = new Set<string>();
+  const bindings: EnvReadSite[] = [];
+  let total = 0;
+  let callSiteCapHit = false;
+  let read = 0;
+  for (const rel of scanned) {
+    let source: string;
+    try {
+      source = await readFileConfined(absDir, rel);
+    } catch {
+      continue;
+    }
+    read++;
+    const ext = rel.slice(rel.lastIndexOf('.')).toLowerCase();
+    let scan;
+    try {
+      scan = scanEnvHelperBindings(source, rel, ext);
+    } catch {
+      continue;
+    }
+    if (scan.callSiteCapHit) callSiteCapHit = true;
+    // The same pass that counts the shortfall also recovers the sites it CAN prove, so a
+    // bound call site is reported even when the cached inventory predates this rule and
+    // never associated the call-site file with the variable.
+    for (const b of scan.bindings) {
+      if (b.name === name) bindings.push({ name: b.name, file: b.file, line: b.line, required: b.required, via: b.via });
+    }
+    if (scan.unfollowed.length === 0) continue;
+    total += scan.unfollowed.length;
+    touchedFiles.add(rel);
+    for (const u of scan.unfollowed) {
+      if (evidence.length < MAX_CENSUS_EVIDENCE) evidence.push(u);
+    }
+  }
+  return {
+    counted: read > 0 || scanned.length === 0,
+    total,
+    fileCount: touchedFiles.size,
+    truncatedFiles,
+    evidence,
+    callSiteCapHit,
+    bindings,
+  };
 }
 
 const labelOf = (n: FunctionNode): string => `${n.name}::${n.filePath}`;
@@ -151,6 +228,15 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     ? Math.max(MIN_DEPTH, Math.min(input.maxDepth as number, MAX_DEPTH))
     : DEFAULT_DEPTH;
 
+  // ── The repository's in-scope source files, for the one-hop pass + its census ──
+  const censusFiles = [...new Set(cg.nodes.filter(n => !n.isExternal).map(n => n.filePath))]
+    .filter(f => {
+      const dot = f.lastIndexOf('.');
+      return dot >= 0 && ENV_SOURCE_EXTENSIONS.has(f.slice(dot).toLowerCase());
+    })
+    .sort();
+  const census = await censusUnfollowedReads(absDir, censusFiles, name);
+
   // ── Re-scan only the files the inventory flags for this var, line-precise ────
   const rawSites: EnvReadSite[] = [];
   for (const rel of entry.files) {
@@ -168,6 +254,16 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     }
     for (const s of extractEnvReadSites(source, rel, ext)) {
       if (s.name === name) rawSites.push(s);
+    }
+  }
+  // Merge the one-hop bindings the census proved, deduplicated against the per-file rescan.
+  {
+    const seen = new Set(rawSites.map(s => `${s.file}:${s.line}:${s.via?.line ?? ''}`));
+    for (const b of census.bindings) {
+      const key = `${b.file}:${b.line}:${b.via?.line ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rawSites.push(b);
     }
   }
 
@@ -194,10 +290,10 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
       }
     }
     if (best) {
-      resolvedSites.push({ file: s.file, line: s.line, required: s.required, enclosingFunction: labelOf(best) });
+      resolvedSites.push({ file: s.file, line: s.line, required: s.required, enclosingFunction: labelOf(best), ...(s.via ? { via: s.via } : {}) });
       readingFnIds.add(best.id);
     } else {
-      resolvedSites.push({ file: s.file, line: s.line, required: s.required, enclosingFunction: null });
+      resolvedSites.push({ file: s.file, line: s.line, required: s.required, enclosingFunction: null, ...(s.via ? { via: s.via } : {}) });
       moduleLevelCount++;
     }
   }
@@ -273,6 +369,49 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     'Config-object key reads (config.x.y, a parsed settings tree) are OUT OF SCOPE — only environment ' +
       'variable reads are analyzed.',
   );
+
+  // ── The name-through-a-parameter boundary (change: follow-env-name-through-helper) ──
+  // An env name passed as an argument is followed EXACTLY ONE HOP, and only where the
+  // binding is provable from literal text. Everything else is counted here, with its
+  // evidence, so the lower bound's remaining shortfall is a number rather than a caveat.
+  const viaSites = resolvedSites.filter(s => s.via);
+  if (viaSites.length > 0) {
+    const helpers = [...new Set(viaSites.map(s => `${s.via!.helper}::${s.via!.file}`))].sort();
+    boundaries.add(
+      `${viaSites.length} read site(s) are a call site of a helper that performs the read — the name is ` +
+        'a string literal at the call site and was followed ONE HOP into a same-file helper ' +
+        `(${helpers.slice(0, 5).join(', ')}). The reported file/line is the CALL SITE, where the ` +
+        'variable is named; the helper is disclosed per site in `via`.',
+    );
+  }
+
+  const capNote = census.callSiteCapHit
+    ? ` Per-helper call sites are capped at ${MAX_CALL_SITES_PER_WRAPPER}, and that cap was reached, so some literal call sites of a followed helper are not listed.`
+    : '';
+  const truncNote = census.truncatedFiles > 0
+    ? ` The census read the first ${MAX_CENSUS_FILES} in-scope files; ${census.truncatedFiles} more were not counted.`
+    : '';
+  if (census.total > 0) {
+    boundaries.add(
+      `An environment-variable name that reaches a read through a function parameter is followed ONE ` +
+        'HOP ONLY, and only when the helper is a same-file free function whose parameter flows straight ' +
+        'into the read and the call site passes a plain string literal. ' +
+        `${census.total} environment read(s) in ${census.fileCount} file(s) take a non-literal key that ` +
+        'could not be followed, so READ SITES ARE A LOWER BOUND: those reads name no variable here and ' +
+        'may belong to this one. See unfollowedEnvReads for the evidence.' + capNote + truncNote,
+    );
+  } else {
+    boundaries.add(
+      'An environment-variable name that reaches a read through a function parameter is followed ONE ' +
+        'HOP ONLY (a same-file free function whose parameter flows straight into the read, called with a ' +
+        'plain string literal); a two-hop helper, a computed key, a reassigned or shadowed parameter, or a ' +
+        'non-literal argument is NOT followed. ' +
+        (census.counted
+          ? 'No unfollowed non-literal environment read was found in this repository\'s in-scope files.'
+          : 'This repository\'s in-scope files could not be counted, so the size of that gap is unknown.')
+        + capNote + truncNote,
+    );
+  }
   boundaries.add(
     'Blast radius is a SOUND LOWER BOUND over the call graph: dynamic dispatch, reflection, and ' +
       'externally-consumed exports can add callers not enumerated here.',
@@ -315,6 +454,8 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     summary: {
       readSites: resolvedSites.length,
       requiredReadSites: requiredSites,
+      readSitesViaHelper: viaSites.length,
+      unfollowedEnvReads: census.total,
       moduleLevelReadSites: moduleLevelCount,
       readingFunctions: readingFnIds.size,
       declaredBy: declaredBy.length,
@@ -323,6 +464,12 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
       reachingTests: reachingTests.length,
     },
     readSites: resolvedSites,
+    ...(census.evidence.length
+      ? {
+        unfollowedEnvReads: census.evidence,
+        ...(census.total > census.evidence.length ? { unfollowedEnvReadsTruncated: census.total - census.evidence.length } : {}),
+      }
+      : {}),
     declaration,
     declaredBy: declaredBy.slice(0, MAX_LIST),
     ...(declaredBy.length > MAX_LIST ? { declaredByTruncated: declaredBy.length - MAX_LIST } : {}),
@@ -338,7 +485,10 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
       'readSites = where this env var is read (file/line/enclosing function; module-level = read at ' +
       'import time). affectedFunctions = upstream callers that transitively reach a read (the blast ' +
       'radius). reachingTests = tests to run. requiredReadSites = reads with no site-local fallback ' +
-      '(a hard break if the var is removed). declaredBy = infrastructure files that set it (key and ' +
+      '(a hard break if the var is removed). A site with `via` is a CALL SITE whose string literal ' +
+      'names the variable, followed one hop into the same-file helper that reads it. ' +
+      'unfollowedEnvReads = reads whose key is not a literal and could not be followed (the remaining ' +
+      'shortfall of the lower bound). declaredBy = infrastructure files that set it (key and ' +
       'location only, never the value). Computed live from the cached graph + a re-read of the ' +
       "var's files — re-run analyze_codebase after edits.",
   };

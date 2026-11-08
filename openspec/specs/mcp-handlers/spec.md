@@ -4245,6 +4245,43 @@ inventory exists or no server route is indexed.
 - **WHEN** parity runs
 - **THEN** only `/v1/orders/export` is reported as `contract-implemented-undeclared`
 
+### Requirement: EnvImpactFollowsAHelperOneHopAndCountsTheRest
+
+`analyze_env_impact` SHALL report, as read sites, the call sites whose string literal names the
+variable and that were followed one hop into a same-file helper that performs the read — located to
+the CALL SITE's file and line, each carrying the helper it was followed through. It SHALL NOT present
+such a site as a direct read.
+
+Because a name reaching a read through a function parameter is followed one hop only, `boundaries`
+SHALL ALWAYS state that limit, and SHALL COUNT the environment reads in the repository whose key is
+not a literal and that could not be followed — with their files, lines, key expressions, and the
+reason each was refused — so the result's remaining shortfall is evidence rather than a caveat. The
+boundary SHALL be present even when nothing could be followed and nothing was left unfollowed. When
+the census could not read the repository's in-scope files, or a bound of its own was reached, that
+SHALL be disclosed rather than reported as a count of zero.
+
+#### Scenario: A followed call site is a read site, with the helper disclosed
+
+- **GIVEN** a Go file calling `mustMapEnv(&svc.addr, "PRODUCT_CATALOG_SERVICE_ADDR")` and defining
+  `mustMapEnv` with `os.Getenv(envKey)` in the same file
+- **WHEN** `analyze_env_impact` runs for `PRODUCT_CATALOG_SERVICE_ADDR`
+- **THEN** the call site's file and line are reported as a read site, with the helper named, and
+  `boundaries` says the name was followed one hop through a same-file helper
+
+#### Scenario: Unfollowed reads are counted with their evidence
+
+- **GIVEN** a repository with an environment read whose key is a parameter no call site passes a
+  literal to
+- **WHEN** `analyze_env_impact` runs for any variable
+- **THEN** `boundaries` states that read sites are a lower bound and names how many such reads were
+  seen in how many files, and the sites are listed with their reason
+
+#### Scenario: The one-hop limit is stated even with nothing to follow
+
+- **GIVEN** a repository whose every environment read names its variable with a literal
+- **WHEN** `analyze_env_impact` runs
+- **THEN** `boundaries` still states the one-hop limit and says no unfollowed read was found
+
 ### Requirement: EnvImpactNamesIacDeclarationSites
 
 `analyze_env_impact` SHALL report, in `declaredBy`, each infrastructure site in the repository that
