@@ -118,7 +118,28 @@ export async function resolveAutopilotMode(
     };
   }
   if (!config) {
-    return { autopilot: false, reason: 'no .openlore/config.json — run "openlore init" first', source: 'no-config' };
+    // NON-BLOCKING, deliberately. Governance is advisory evidence and never blocks by default
+    // (openspec/specs/overview — the deterministic-substrate north star), and "blocking" is a
+    // SETTING: a gate with nowhere to read that setting from cannot have been configured to
+    // block. Returning `false` here made the absence of a file the strictest posture on the
+    // machine, which is how `openlore install --no-analyze` (no init, so no config) installed a
+    // blocking gate while printing "no commit is blocked by default", and how a fresh clone of a
+    // repository whose `.openlore/` is gitignored inherited a blocking gate nobody chose. Opt in
+    // with { "governance": { "autopilot": false } } (change: fix-install-never-blocks-by-default).
+    //
+    // Scoped to `gateRunning` on purpose. The question a GATE asks is "may I block this
+    // commit", and the answer with no config is no. The question `record_decision` asks is
+    // "may I auto-ACCEPT this decision", and the answer with no config stays no: an
+    // unconfigured repository has no spec corpus to sync an accepted decision into, so
+    // auto-accepting there would be a different and much wider change than unblocking a
+    // commit. The reason names both facts, so a reader is never told only half of it.
+    return {
+      autopilot: !!opts.gateRunning,
+      reason: 'no .openlore/config.json to configure a blocking gate in — the commit gate blocks nothing, '
+        + 'and a recorded decision waits as a draft; run "openlore init" (then set '
+        + 'governance.autopilot: false to require blocking review)',
+      source: 'no-config',
+    };
   }
   if (opts.gateRunning || (await hasOpenLoreCommitGate(rootPath))) {
     return {

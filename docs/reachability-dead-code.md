@@ -62,8 +62,9 @@ containing no dynamic dispatch.
 
 ## How roots and confidence work
 
-A node is a **root** (assumed live) if it is a test, is imported by name from another file, is a
-detected HTTP route handler, is `main`-like, or lives in a file a config invokes. Reachability is a
+A node is a **root** (assumed live) if it is a test, is imported by name from another file, serves a
+declared interface element (an HTTP route, a gRPC RPC, or a GraphQL field), is deployed by an
+infrastructure resource, is `main`-like, or lives in a file a config invokes. Reachability is a
 forward BFS from those roots.
 
 ### Config-wired roots
@@ -102,6 +103,31 @@ exact count of members left unread past the cap of 256. A member manifest's own 
 not followed. Framework routing conventions and other config formats are not read, and only POSIX
 shell workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
 repository, 36 of 1,018 entry points are in config-wired files.
+
+### A root is labelled by the protocol it serves
+
+A function that serves a *declared* interface element is a root: whoever calls that element invokes
+it, in this repository or outside it. That binding is one edge kind (`implements_endpoint`) with
+three producers, so the count names the protocol rather than assuming HTTP:
+
+| Count | Where the root comes from |
+|-------|---------------------------|
+| `rootKinds.grpcHandlers` | a gRPC RPC — a method a protobuf `service` RPC is bound to through a server registration |
+| `rootKinds.graphqlResolvers` | a GraphQL field — a resolver a literal resolver map names for a schema field |
+| `rootKinds.httpHandlers` | an HTTP route — an OpenAPI/Swagger operation a route registration serves, a cross-language `http_endpoint` edge, or a synthesized framework route handler (the last only outside strict `directResolvedOnly` mode) |
+
+A gRPC or GraphQL binding is identified POSITIVELY, by the bound contract node's own format tag
+(`Protobuf` / `GraphQL`) — never inferred from the absence of the other protocols. The three are made disjoint by
+precedence (gRPC → GraphQL → HTTP), as `deployed` already takes precedence over all of them: a
+function that serves both a proto RPC and a GraphQL field is counted once, under `grpcHandlers`.
+`httpHandlers` is the fallback lane as well as the HTTP lane — a binding whose contract node carries
+no readable format tag is counted there, so read it as "an HTTP route, or a contract binding whose
+format could not be read".
+
+`rootKinds` is not a partition, and this split does not make it one — `externallyWired` carries no
+exclusions at all, so a jest setup file's functions are counted under both `tests` and
+`externallyWired`, and an imported route handler under both `imported` and `httpHandlers`. The split
+only stops a non-HTTP binding being labelled HTTP.
 
 Confidence is deliberately conservative — the bias is toward **false-live over false-dead**:
 
@@ -184,7 +210,7 @@ Report output:
 ```jsonc
 {
   "stats": { "analyzed": 1455, "roots": 399, "reachable": 790, "candidateDead": 665 },
-  "rootKinds": { "tests": 0, "imported": 393, "httpHandlers": 0, "externallyWired": 4 },
+  "rootKinds": { "tests": 0, "imported": 393, "grpcHandlers": 0, "graphqlResolvers": 0, "httpHandlers": 0, "externallyWired": 4, "deployed": 0 },
   "externalWiring": {
     "files": [{ "file": "src/cli/index.ts", "receipts": [{ "config": "package.json", "key": "bin.openlore" }], "roots": 4 }],
     "boundaries": [{ "config": "package.json", "key": "scripts.run", "reference": "$SCRIPT", "reason": "dynamic-reference" }]

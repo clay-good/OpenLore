@@ -48,6 +48,7 @@ import {
   qualificationReason,
 } from './dynamic-boundary-disclosure.js';
 import { isProjectedLanguage } from '../../analyzer/projected-language.js';
+import { isContractLanguage } from '../../analyzer/contract/types.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -368,6 +369,19 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // invokes (package.json, tsconfig, test-runner config, CI run steps).
   const httpHandlerIds = externallyInvokedHandlerIds(cg, !input.directResolvedOnly);
   const deployedIds = new Set(cg.edges.filter(e => e.kind === 'deploys_symbol' && e.calleeId).map(e => e.calleeId));
+  // An `implements_endpoint` edge has THREE producers — an OpenAPI/HTTP route, a gRPC server
+  // registration, and a GraphQL resolver map — so the roots it keeps live are not all HTTP
+  // handlers. Label each by the PROTOCOL of the contract it serves, read positively off the
+  // callee contract node's `language` ('OpenAPI' | 'Protobuf' | 'GraphQL'), never by absence.
+  const grpcHandlerIds = new Set<string>();
+  const graphqlResolverIds = new Set<string>();
+  for (const e of cg.edges) {
+    if (e.kind !== 'implements_endpoint' || !e.calleeId) continue;
+    const language = nodeMap.get(e.calleeId)?.language;
+    if (!isContractLanguage(language)) continue;
+    if (language === 'Protobuf') grpcHandlerIds.add(e.callerId);
+    else if (language === 'GraphQL') graphqlResolverIds.add(e.callerId);
+  }
   const wiring = await loadExternalWiring(absDir);
   const isWired = (n: FunctionNode) => wiring.byFile.has(wiringKey(n.filePath));
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
@@ -645,7 +659,13 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     rootKinds: {
       tests: roots.filter(r => r.isTest).length,
       imported: importedNames !== null ? roots.filter(r => !r.isTest && importedNames.has(r.name)).length : 0,
-      httpHandlers: roots.filter(r => httpHandlerIds.has(r.id) && !deployedIds.has(r.id)).length,
+      // The three contract counts are disjoint by precedence (gRPC → GraphQL → HTTP), the way
+      // `deployed` already takes precedence over all of them. `httpHandlers` is the HTTP lane AND
+      // the fallback lane: a binding whose contract node carries no readable format tag stays here
+      // rather than dropping out of every count.
+      grpcHandlers: roots.filter(r => grpcHandlerIds.has(r.id) && !deployedIds.has(r.id)).length,
+      graphqlResolvers: roots.filter(r => graphqlResolverIds.has(r.id) && !deployedIds.has(r.id) && !grpcHandlerIds.has(r.id)).length,
+      httpHandlers: roots.filter(r => httpHandlerIds.has(r.id) && !deployedIds.has(r.id) && !grpcHandlerIds.has(r.id) && !graphqlResolverIds.has(r.id)).length,
       externallyWired: roots.filter(isWired).length,
       deployed: roots.filter(r => deployedIds.has(r.id)).length,
     },

@@ -14,6 +14,12 @@
 import { extname, relative, basename } from 'node:path';
 
 import {
+  scanEnvHelperBindings,
+  tsSiteRequired,
+  callHasNoDefaultArg,
+  rubyFetchRequired,
+} from './env-helper-binding.js';
+import {
   ENV_DECLARATION_FILES,
   mapFilesBounded,
   readSourceCapped,
@@ -136,6 +142,14 @@ function extractFromSource(source: string, relPath: string, ext: string): Array<
       const afterIdx = m.index + m[0].length;
       if (name) found.push({ name, required: m[1] === undefined && rubyFetchRequired(source, afterIdx) });
     }
+  }
+
+  // One hop through a helper: `mustMapEnv(&addr, "PORT")` names PORT at the CALL SITE,
+  // so the inventory must associate PORT with this file even though the read itself is
+  // in the helper (change: follow-env-name-through-helper). Bindings are same-file and
+  // literal-only; everything else stays unfollowed and is disclosed by the caller.
+  for (const b of scanEnvHelperBindings(source, relPath, ext).bindings) {
+    found.push({ name: b.name, required: b.required });
   }
 
   return found;
@@ -277,6 +291,13 @@ export interface EnvReadSite {
    * A documented heuristic, not a guarantee.
    */
   required: boolean;
+  /**
+   * Present when the variable's NAME was read from a string literal at this call site
+   * and followed ONE HOP into a same-file helper that performs the actual read. The
+   * mechanism is always disclosed rather than presented as a direct read
+   * (change: follow-env-name-through-helper).
+   */
+  via?: { helper: string; file: string; line: number };
 }
 
 /** Build a sorted array of newline byte/char offsets for O(log n) line lookup. */
@@ -294,20 +315,6 @@ function lineLookup(source: string): (idx: number) => number {
     }
     return ans + 1;
   };
-}
-
-/** JS/TS: a read has a site-local fallback when `?? `/`||` immediately follows. */
-function tsSiteRequired(source: string, afterIdx: number): boolean {
-  // Skip optional TS non-null `!`, whitespace, and transparent block comments,
-  // then look for a site-local ?? or || fallback.
-  let tail = source.slice(afterIdx);
-  while (true) {
-    const next = tail.replace(/^\s*(?:!|\/\*[\s\S]*?\*\/)/, '');
-    if (next === tail) break;
-    tail = next;
-  }
-  tail = tail.replace(/^\s*/, '');
-  return !(tail.startsWith('??') || tail.startsWith('||'));
 }
 
 /** TS/JS object destructuring reads one environment key per property. */
@@ -407,29 +414,6 @@ function splitTopLevelProperties(body: string): Array<{ text: string; offset: nu
 }
 
 /**
- * A call-form read (`os.environ.get('X'…)`, `os.getenv('X'…)`, `ENV.fetch('X'…)`)
- * is required only when it has NO default. `afterIdx` is just past the matched
- * `…('X'` — a comma before the close means a positional default follows → soft.
- */
-function callHasNoDefaultArg(source: string, afterIdx: number): boolean {
-  const tail = source.slice(afterIdx).replace(/^\s*/, '');
-  return !tail.startsWith(',');
-}
-
-/**
- * Ruby `ENV.fetch('X'…)`: required only with no default. A default can be a second
- * positional arg (`ENV.fetch('X', d)`) OR a block (`ENV.fetch('X') { d }` /
- * `ENV.fetch('X') do … end`) — both suppress the KeyError, so neither is a hard break.
- */
-function rubyFetchRequired(source: string, afterIdx: number): boolean {
-  if (!callHasNoDefaultArg(source, afterIdx)) return false; // positional default
-  // After the closing paren, a `{` or `do` is a block default.
-  const afterParen = source.slice(afterIdx).replace(/^\s*\)?\s*/, '');
-  if (afterParen.startsWith('{') || /^do\b/.test(afterParen)) return false;
-  return true;
-}
-
-/**
  * Extract every environment-variable READ site in one file, line-precise, reusing
  * the existing per-language patterns (no new grammar). Returns [] for a file in a
  * language the patterns do not cover — an honest absence, never a guessed read.
@@ -483,6 +467,11 @@ export function extractEnvReadSites(source: string, relPath: string, ext: string
     }
   }
 
-  sites.sort((a, b) => a.line - b.line || a.name.localeCompare(b.name));
+  for (const b of scanEnvHelperBindings(source, relPath, ext).bindings) {
+    sites.push({ name: b.name, file: b.file, line: b.line, required: b.required, via: b.via });
+  }
+
+  sites.sort((a, b) => a.line - b.line || a.name.localeCompare(b.name)
+    || (a.via?.line ?? 0) - (b.via?.line ?? 0));
   return sites;
 }

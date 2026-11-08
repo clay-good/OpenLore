@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { CallGraphBuilder } from '../call-graph.js';
+import { readPathAliases } from './grpc-registration.js';
 
 const PROTO = `syntax = "proto3";
 package orders.v1;
@@ -149,5 +150,98 @@ describe('protobuf projection through the builder', () => {
     expect(withProto.entryPoints.map(n => n.id).sort()).toEqual(bare.entryPoints.map(n => n.id).sort());
     expect(withProto.stats.avgFanIn).toBe(bare.stats.avgFanIn);
     expect(withProto.stats.avgFanOut).toBe(bare.stats.avgFanOut);
+  });
+});
+
+/**
+ * The binding shapes a grpc-node server actually uses (change: fix-bind-aliased-grpc-node-handlers):
+ * a class instantiated at the registration, a handler imported through a DECLARED tsconfig path
+ * alias, and the official examples' shape — a local bound once to an object literal.
+ */
+const SHOP = `syntax = "proto3";
+package shop.v1;
+
+service EchoService { rpc UnaryEcho(Msg) returns (Msg); }
+service CartService { rpc AddItem(Msg) returns (Msg); }
+service FeedService { rpc StreamFeed(Msg) returns (stream Msg); }
+
+message Msg { string id = 1; }
+`;
+
+const TSCONFIG = JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@app/*': ['src/*'] } } });
+
+const SHOP_CODE = [
+  {
+    path: 'src/echo/server.ts', language: 'TypeScript', content: `import * as grpc from '@grpc/grpc-js';
+
+class EchoHandlers {
+  unaryEcho(call: unknown, cb: (e: null, v: unknown) => void) { cb(null, call); }
+}
+
+export function main(proto: any) {
+  const server = new grpc.Server();
+  server.addService(proto.shop.v1.EchoService.service, new EchoHandlers());
+}
+`,
+  },
+  {
+    path: 'src/handlers.ts', language: 'TypeScript', content: `export function addItem(call: unknown, cb: (e: null, v: unknown) => void) { cb(null, call); }
+`,
+  },
+  {
+    path: 'src/cart/server.ts', language: 'TypeScript', content: `import { addItem } from '@app/handlers';
+
+export function main(proto: any, server: any) {
+  server.addService(proto.shop.v1.CartService.service, { addItem });
+}
+`,
+  },
+  {
+    path: 'src/feed/server.js', language: 'JavaScript', content: `function streamFeed(call) { call.end(); }
+
+const serviceImplementation = {
+  streamFeed,
+};
+
+function main(proto, server) {
+  server.addService(proto.shop.v1.FeedService.service, serviceImplementation);
+}
+
+module.exports = { main };
+`,
+  },
+];
+
+describe('grpc-node binding shapes through the builder', () => {
+  const buildShop = (withAliases: boolean) => new CallGraphBuilder({
+    contractFiles: [{ path: 'proto/shop.proto', content: SHOP }],
+    ...(withAliases ? { pathAliases: readPathAliases(new Map([['tsconfig.json', TSCONFIG]])) } : {}),
+  }).build(SHOP_CODE);
+
+  const boundOf = (result: Awaited<ReturnType<typeof buildShop>>) => result.edges
+    .filter(e => e.kind === 'implements_endpoint')
+    .map(e => {
+      const from = result.nodes.get(e.callerId)!;
+      return `${from.filePath} ${from.className ? `${from.className}.` : ''}${from.name} -> ${result.nodes.get(e.calleeId)!.name}`;
+    })
+    .sort();
+
+  it('binds a class instance, an aliased import and a named object literal', async () => {
+    const result = await buildShop(true);
+    expect(boundOf(result)).toEqual([
+      'src/echo/server.ts EchoHandlers.unaryEcho -> /shop.v1.EchoService/UnaryEcho',
+      'src/feed/server.js streamFeed -> /shop.v1.FeedService/StreamFeed',
+      'src/handlers.ts addItem -> /shop.v1.CartService/AddItem',
+    ]);
+    expect(result.contracts?.unresolvedRegistrations.total ?? 0).toBe(0);
+  });
+
+  it('without the declared mapping in hand the aliased handler stays unbound and disclosed', async () => {
+    const result = await buildShop(false);
+    expect(boundOf(result)).toEqual([
+      'src/echo/server.ts EchoHandlers.unaryEcho -> /shop.v1.EchoService/UnaryEcho',
+      'src/feed/server.js streamFeed -> /shop.v1.FeedService/StreamFeed',
+    ]);
+    expect(result.contracts?.unresolvedRegistrations.total ?? 0).toBe(1);
   });
 });
