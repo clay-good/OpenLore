@@ -74,6 +74,7 @@ Code that only configuration invokes has no importer, so without evidence it rea
 | Config | What counts as wiring |
 |---|---|
 | root `package.json` | `bin`, `main`, `module`, `exports` targets; files run by `scripts`; `jest` setup files |
+| declared workspace manifests | the same keys, in the `package.json` of every member the root `workspaces` field (array or `{ packages: [...] }`) or `pnpm-workspace.yaml` `packages:` declares; each reference resolves against that manifest's own directory and is receipted with its own path |
 | `tsconfig.json` | `files`; `outDir` → `rootDir` maps a build output (`dist/cli/index.js`) back to its source |
 | `vitest`/`vite`/`jest` config | literal `setupFiles` / `globalSetup` values |
 | `.github/workflows/*.yml` | files run by `run:` steps, relative to the step's `working-directory` |
@@ -93,9 +94,13 @@ counted in a caveat, never guessed: `dynamic-reference` (a variable, `${{ }}` ex
 `unsupported-form` (a module run by name, a path after a `cd`, or a config with too many references),
 `target-not-found`, `build-output-unmapped` (a build output tsconfig does not map to a source),
 `outside-repository`, `unreadable-config` (a link, a non-regular file, or one over 1 MB), and
-`unparsed-config`. Workspace-member manifests,
-framework routing conventions, and other config formats are not read, and only POSIX shell
-workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
+`unparsed-config`. Only the DECLARED workspace set is read — the tree is never searched for
+manifests — so a `package.json` outside it contributes nothing; a repository that declares workspaces
+carries that limit as a standing `externalWiring.boundaries` entry, together with any pattern that
+leaves the repository (`outside-repository`), a brace list / character class / extglob pattern, and an
+exact count of members left unread past the cap of 256. A member manifest's own `workspaces` field is
+not followed. Framework routing conventions and other config formats are not read, and only POSIX
+shell workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
 repository, 36 of 1,018 entry points are in config-wired files.
 
 Confidence is deliberately conservative — the bias is toward **false-live over false-dead**:
@@ -104,11 +109,36 @@ Confidence is deliberately conservative — the bias is toward **false-live over
 |------------|------|
 | `high` | static language · no internal caller · not imported by name · **and its module is not imported anywhere** |
 | `medium` | reachable only from other dead code, or no dependency-graph signal available |
-| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve), **or a dynamic-boundary site can name it** |
+| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve), **or a dynamic-boundary site can name it**, **or contract wiring names it and the binding was refused** |
 
 That last rule matters: on a real repo it cut high-confidence candidates from ~470 to ~35 — a
 symbol living in a module something else imports is never flagged `high`, because the specific
 usage may be a namespace or default import this static scan doesn't resolve.
+
+### Contract wiring the projection refused to bind
+
+A handler bound to a declared operation is a liveness root. A binding the contract projection
+**refused** roots nothing — so a gRPC `RegisterOrderServiceServer` call or a GraphQL resolver map can
+name a function literally while that function reaches no root and looks dead. Each refusal is
+disclosed as precisely as it can be, and a candidate it names is capped at `low` with the reason;
+`contractRootsNotAssessed` names the registration site.
+
+| The refusal names | Capped |
+|---|---|
+| a function (a grpc-js map entry, a resolver entry) | the candidate of that name |
+| an implementation class (a Go/Python servicer type) | the candidates of that class |
+| neither — `server.addService(Echo.service, serviceImplementation)` hands over a variable | every candidate in the file that declares the registration |
+
+File scope is the honest granularity for the third row: the registration does not contain the
+handler names at all, and a handler object is written where it is registered. It is a lower bound —
+an argument assembled in another module is not covered. An `inline-implementation` refusal caps
+nothing, because an inline function expression has no graph node to look dead.
+
+The disclosure lists are bounded (20 items, with the exact total beside them). When more bindings
+were refused than the lists name, the unnamed one could be any candidate, so the whole repository
+gives up `high` and the reason says how many refusals are past the cap. OpenAPI `unresolvedBindings`
+are not read for this: they name no symbol, and a route's `handlerName` falls back to a placeholder
+when extraction fails, so it cannot ground a match.
 
 ### Re-export / barrel resolution raises recall (fewer false-dead)
 

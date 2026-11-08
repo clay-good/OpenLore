@@ -4586,3 +4586,74 @@ only one pass over the edge list.
 - **WHEN** `orient` runs
 - **THEN** the field is absent, and neither the scope's files nor the infrastructure manifests are
   read for it
+
+### Requirement: UnboundContractHandlerIsNeverHighConfidenceDead
+
+A handler bound to a declared operation is a liveness root, so a binding the contract projection
+REFUSED to make roots nothing: a gRPC server registration or a GraphQL resolver map can name a
+function literally while that function still reaches no root. `find_dead_code` SHALL NOT report
+such a symbol in its highest-confidence dead tier, and SHALL disclose the reason.
+
+A candidate SHALL be capped at `low` when its name matches a symbol a refused registration or
+resolver entry named, or when its class matches the implementation class a refused registration
+named. A refusal that names NEITHER — the registration handed over a variable, so the handler names
+are not in it — SHALL cap every candidate in the file that declares the registration, which is the
+most precise granularity available and a disclosed lower bound: an argument assembled in another
+module is not covered. An `inline-implementation` refusal SHALL cap nothing, because an inline
+function expression has no graph node that could look dead. Each cap SHALL carry a reason naming the
+refused contract wiring and pointing at `contractRootsNotAssessed`.
+
+Because every contract disclosure is bounded with its exact total beside it, a repository whose
+refusals exceed that bound holds unbound symbols the artifact does not name. Their names are not
+recoverable, so NO candidate in that repository SHALL be rated high-confidence dead; the ceiling
+SHALL state how many refusals are past the cap. The cap only ever LOWERS a verdict — it never
+promotes a candidate, and it never removes one from the candidate set, which stays the reachability
+partition `deadCodeIds` and `find_dead_code` share.
+
+OpenAPI `unresolvedBindings` are NOT read for this cap: that disclosure names no symbol, and the
+one name a route carries substitutes a placeholder when extraction fails, so it cannot ground a
+symbol match. Those bindings stay disclosed in `contractRootsNotAssessed`.
+
+#### Scenario: A method whose class a refused gRPC registration named
+
+- **GIVEN** a Go method `orderServer.GetOrder` that reaches no liveness root, and an unresolved
+  registration naming `orderServer` as its implementation class
+- **WHEN** `find_dead_code` runs with a dependency-graph signal that does not import the method by
+  name
+- **THEN** the candidate is rated `low`, not `high`, and its reason names the refused registration
+
+#### Scenario: A registration whose implementation argument could not be read
+
+- **GIVEN** `server.addService(Echo.service, serviceImplementation)` in `examples/cancellation/server.js`,
+  disclosed as a `not-literal` refusal naming no symbol, and a candidate-dead handler declared in
+  that file
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate is rated `low` and its reason names the unreadable implementation argument
+
+#### Scenario: An inline implementation caps nothing
+
+- **GIVEN** an `inline-implementation` refusal in a file holding an unrelated candidate, and no
+  other refusal naming that file
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate keeps its `high` rating
+
+#### Scenario: A resolver a refused GraphQL resolver map named
+
+- **GIVEN** an unresolved resolver entry naming the function `order`, and a candidate-dead function
+  of that name
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate is rated `low` and its reason names the refused resolver map
+
+#### Scenario: More refusals than the disclosure names
+
+- **GIVEN** 25 unresolved registrations of which the disclosure lists 20, none naming the candidate
+- **WHEN** `find_dead_code` runs
+- **THEN** no candidate is rated `high`, and the reason states how many refusals are past the
+  disclosure cap
+
+#### Scenario: A candidate no contract wiring names is unaffected
+
+- **GIVEN** an unresolved registration naming neither the candidate's name nor its class, and no
+  truncation
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate keeps its `high` rating and carries no contract reason

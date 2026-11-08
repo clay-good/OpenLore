@@ -54,6 +54,11 @@ const WIRED: ExternalWiringReport = {
   boundariesOmitted: 0,
 };
 const NONE: ExternalWiringReport = { wired: [], boundaries: [], boundariesOmitted: 0 };
+// A file named only by a workspace member's manifest: the receipt is that manifest's own path.
+const WORKSPACE_WIRED: ExternalWiringReport = {
+  wired: [{ file: 'src/unused.ts', receipts: [{ config: 'packages/api/package.json', key: 'scripts.start' }] }],
+  boundaries: [], boundariesOmitted: 0,
+};
 
 type DeadResult = {
   candidateDead: Array<{ name: string; confidence: string; reason: string }>;
@@ -93,17 +98,28 @@ describe('find_dead_code with config-wired roots', () => {
     expect(r.externalWiring.boundaries).toEqual(WIRED.boundaries);
     const caveats = r.soundness.caveats.join(' ');
     expect(caveats).toMatch(/1 config reference\(s\) could not be resolved/);
-    expect(caveats).toMatch(/Workspace-member manifests, framework routing conventions/);
+    expect(caveats).toMatch(/A manifest outside the declared workspace set, framework routing conventions/);
   });
 
   it('states the all-functions rule only when something is wired', async () => {
     vi.mocked(collectExternalWiring).mockResolvedValue(NONE);
     const none = (await handleFindDeadCode({ directory: '/p' }) as DeadResult).soundness.caveats.join(' ');
     expect(none).not.toMatch(/Every function in a file a config invokes/);
-    expect(none).toMatch(/Workspace-member manifests/);
+    expect(none).toMatch(/A manifest outside the declared workspace set/);
     vi.mocked(collectExternalWiring).mockResolvedValue(WIRED);
     const wired = (await handleFindDeadCode({ directory: '/p' }) as DeadResult).soundness.caveats.join(' ');
     expect(wired).toMatch(/Every function in a file a config invokes is treated as live/);
+  });
+
+  it('counts a declared workspace member\'s wiring as a root, receipted with the member manifest', async () => {
+    vi.mocked(collectExternalWiring).mockResolvedValue(WORKSPACE_WIRED);
+    const r = await handleFindDeadCode({ directory: '/p' }) as DeadResult;
+    expect(r.candidateDead.map(d => d.name).sort()).toEqual(['parseFlags', 'runCli']);
+    expect(r.rootKinds.externallyWired).toBe(1);
+    expect(r.externalWiring.files).toEqual([
+      { file: 'src/unused.ts', receipts: [{ config: 'packages/api/package.json', key: 'scripts.start' }], roots: 1 },
+    ]);
+    expect(r.soundness.caveats.join(' ')).toMatch(/each DECLARED workspace member/);
   });
 
   it('shares the wired roots with the dead set other conclusions read', async () => {
