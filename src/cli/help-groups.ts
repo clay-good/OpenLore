@@ -64,7 +64,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
   },
   {
     title: 'Multi-repo & sharing',
-    commands: ['federation', 'spec-store', 'export', 'import', 'manifest', 'plugin-manifest'],
+    commands: ['federation', 'spec-store', 'export', 'import', 'manifest'],
   },
   {
     title: 'Advanced / experimental',

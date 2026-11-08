@@ -45,7 +45,6 @@
 | `openlore working-set context` | Assemble the working-set briefing for an active change across its targets (read-only, advisory) | Targets indexed |
 | `openlore impact-certificate` | Certify what the current diff opens into declared covering surfaces, before it lands (advisory; opt-in blocking) | Yes |
 | `openlore enforce` | Unified finding-enforcement gate: blocks on `blocking`, new debt under `frozen`, or an unverifiable frozen baseline (advisory by default); `--sarif <path>` also writes every classified finding as SARIF 2.1.0 | Decisions/specs present |
-| `openlore plugin-manifest emit\|validate` | Inspect/validate the OpenSpec plugin manifest (distinct from the federation `manifest`) | No |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore statusline` | Print the current search-index state for Claude Code's status line | No |
@@ -689,35 +688,13 @@ The version 3 JSON envelope adds disjoint `new[]` and `frozen[]` ratchet partiti
 
 ---
 
-## OpenSpec plugin manifest
+## Node-version guard
 
-`openlore plugin-manifest` inspects and validates the OpenSpec **plugin** manifest
-OpenLore publishes — the `"openspec"` key in its `package.json` — so the OpenSpec
-marketplace can discover, surface, gate, and invoke OpenLore as a subprocess
-without importing its code. It is **distinct** from `openlore manifest` (the
-federation `.well-known/openlore.json`); the names never collide.
-
-```bash
-openlore plugin-manifest emit            # human-readable summary
-openlore plugin-manifest emit --json     # the manifest as JSON, stdout only
-openlore plugin-manifest validate        # schema + semantic check of OpenLore's own manifest
-openlore plugin-manifest validate <dir>  # validate another package's manifest
-```
-
-`validate` exits `0` when the manifest is valid, `1` on a schema/semantic failure
-(missing required field, no `bin`/`binArgs`, non-token `namespace`, a traversing
-skill `dir`/`source`), and `2` when no manifest is found. The manifest declares the
-namespace (`lore`), the executable (`bin: openlore`), `openspecCompat` (kept
-coherent with the `@fission-ai/openspec` peer-dep range), the help-only surfaced
-commands, the contributed skill, and `ownsConfigKeys: ["openlore"]`. See
-[OPENSPEC-INTEGRATION.md](OPENSPEC-INTEGRATION.md) for the full marketplace contract.
-
-> **Node-version guard.** OpenLore requires Node ≥22.22 (the supported dependency floor where the
-> built-in `node:sqlite` is available without runtime flags). The CLI checks this before
-> any command runs; under an older Node it prints one stderr line naming the
-> required and actual versions and exits with the stable code **78** — never a
-> stack trace — so a host delegating to OpenLore (e.g. `openspec lore generate` on
-> Node 20) surfaces a clean, legible failure.
+OpenLore requires Node ≥22.22 (the supported dependency floor where the
+built-in `node:sqlite` is available without runtime flags). The CLI checks this before
+any command runs; under an older Node it prints one stderr line naming the
+required and actual versions and exits with the stable code **78** — never a
+stack trace — so a tool that spawns OpenLore surfaces a clean, legible failure.
 
 ---
 
