@@ -8443,6 +8443,9 @@ same-basename source file.
 The analyzer SHALL deterministically discover interface-schema files — OpenAPI and Swagger
 documents by their top-level key, every `.proto` file, and every GraphQL SDL file (`.graphql`,
 `.graphqls`, `.gql`) — and read each into a normalized element model for rule-table diffing. A
+schema that looks GENERATED or VENDORED — by a generator header in its bounded head, or by a path
+pattern — SHALL be disclosed with that provenance and its certainty, and SHALL still be read and
+graded: provenance annotates and never excludes. A
 GraphQL file holding only operations and fragments is a client document and SHALL be listed as a
 skipped candidate, not read as an empty schema; GraphQL files SHALL be merged into one schema, with
 `extend` folded into its definition and a type two files define treated as ambiguous. For protobuf that model SHALL hold RPCs, messages under their full
@@ -8478,6 +8481,18 @@ file that cannot be read SHALL be unread with the reason, never omitted.
 - **WHEN** the repository is analyzed
 - **THEN** `extend` is named as outside the model (under the projection's `notes`, which withhold
   no conclusion), and the rest of the file is read
+
+#### Scenario: A generated or vendored schema copy is disclosed, not dropped
+
+- **GIVEN** `src/__generated__/schema.graphql`, a `# @generated`-headed SDL, and a copy under
+  `vendor/`
+- **WHEN** the repository is analyzed
+- **THEN** each is listed under the projection's `schemaProvenance` with its `kind`
+  (`generated` / `vendored`), the rule that `matched`, and a `certainty` of `declared` for a
+  header the file itself carries or `path-pattern` for a path guess
+- **AND** every one of them is projected and graded exactly as before: provenance annotates, and
+  never drops, downgrades or excludes a schema
+- **AND** a header marker is looked for in a bounded head of the file only, never the whole text
 
 #### Scenario: Protobuf types resolve by scope, across files
 

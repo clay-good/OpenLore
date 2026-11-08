@@ -29,6 +29,7 @@ import { readOpenApi, looksLikeOpenApi, HTTP_METHODS, type ContractDocument } fr
 import { isProtobufPath } from './protobuf.js';
 import { projectProtobuf, MAX_PROTO_FILES, type UnresolvedRegistration } from './project-protobuf.js';
 import { isGraphqlPath } from './graphql.js';
+import { schemaProvenance, SCHEMA_PROVENANCE_HEAD_BYTES, type SchemaProvenance } from './types.js';
 import { projectGraphql, MAX_GRAPHQL_CANDIDATES, type UnresolvedResolver } from './project-graphql.js';
 import type { ResolverMap } from './graphql-resolvers.js';
 import type { GrpcRegistration, ImportTarget } from './grpc-registration.js';
@@ -180,6 +181,12 @@ export interface GeneratedClientBinding {
  * What the projection could not bind, carried on the build result so a consumer can say
  * "unmatched" rather than imply absence. No node, no edge — disclosure only.
  */
+/** One candidate schema's provenance, as disclosed by the projection. */
+export interface SchemaProvenanceFact extends SchemaProvenance {
+  /** Path relative to the analyzed root. */
+  file: string;
+}
+
 export interface ContractDisclosure {
   /** Operations no indexed route serves and no indexed client call consumes. */
   unmatchedOperations: Disclosed<string>;
@@ -210,6 +217,15 @@ export interface ContractDisclosure {
    * discovery scope is visible: a file the reader passed over is never silently absent.
    */
   skippedCandidates: Disclosed<UnreadSpecification>;
+  /**
+   * Candidate schemas that look GENERATED or VENDORED — a codegen output under `__generated__/`,
+   * a `# @generated`-headed SDL, a copy under `vendor/` — each with the rule that said so
+   * (change: disclose-schema-provenance).
+   *
+   * An ANNOTATION, never a drop: the schema is projected and graded exactly as before. A
+   * `path-pattern` verdict is a guess at the weaker certainty and is never reported as `declared`.
+   */
+  schemaProvenance?: Disclosed<SchemaProvenanceFact>;
   /**
    * RPCs no scanned registration binds. Registrations are read in Go, Python, and Node (grpc-js)
    * only, so an RPC served from another language is listed here too: this is "not bound", never
@@ -280,6 +296,7 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     unresolvedResolvers: p.unresolvedResolvers,
     unboundGraphqlOperations: p.unboundGraphqlOperations,
     skippedCandidates: p.skippedCandidates,
+    ...(p.schemaProvenance ? { schemaProvenance: p.schemaProvenance } : {}),
     ...(p.notAssessed ? { notAssessed: p.notAssessed } : {}),
     ...(p.notes ? { notes: p.notes } : {}),
     ...(p.truncations ? { truncations: p.truncations } : {}),
@@ -289,6 +306,7 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     rest.unreadSpecifications, rest.unboundClientCalls, rest.ambiguousAddresses,
     rest.unresolvedGeneratedBindings, rest.unresolvedRegistrations, rest.unboundRpcs, rest.skippedCandidates,
     rest.unresolvedResolvers, rest.unboundGraphqlOperations,
+    ...(rest.schemaProvenance ? [rest.schemaProvenance] : []),
   ];
   const silent = lists.every(l => l.total === 0) && !rest.notAssessed && !rest.notes && !rest.truncations;
   return silent ? undefined : rest;
@@ -457,6 +475,22 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       ...(gql?.clientDocuments ?? []).map(file => ({ file, reason: 'a GraphQL client document (operations and fragments), not a schema' })),
       ...(input.skippedFiles ?? []),
     ];
+    // Every candidate that is a SCHEMA by its own format test — not every file the caller passed:
+    // `input.files` also holds YAML/JSON that only mentions an `openapi` key somewhere, and naming
+    // a lockfile "a generated schema" would be a claim about a file no reader read. A generated or
+    // vendored copy is named here and projected all the same. The head is BOUNDED — a 10 MB SDL is
+    // never scanned whole.
+    const provenance: SchemaProvenanceFact[] = [];
+    for (const f of input.files) {
+      // Provenance first: it is cheap (a path test and a bounded head) and rare, so the format
+      // test that follows — a YAML/JSON parse for the OpenAPI case — runs only for the few files
+      // that have provenance at all, never for every candidate.
+      const v = schemaProvenance(f.path, f.content.slice(0, SCHEMA_PROVENANCE_HEAD_BYTES));
+      if (!v) continue;
+      const isSchema = isProtobufPath(f.path) || isGraphqlPath(f.path)
+        || (looksLikeOpenApi(f.content) && !!readOpenApi(f.path, f.content));
+      if (isSchema) provenance.push({ file: f.path, ...v });
+    }
     return {
       ...p,
       nodes: [...p.nodes, ...(proto?.nodes ?? []), ...(gql?.nodes ?? [])],
@@ -474,6 +508,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       unboundRpcs: proto && !protoWithheld ? bound(proto.unboundRpcs) : none(),
       unresolvedResolvers: bound(gql?.unresolvedResolvers ?? []),
       unboundGraphqlOperations: gql && !gqlWithheld ? bound(gql.unboundOperations) : none(),
+      ...(provenance.length ? { schemaProvenance: bound(provenance) } : {}),
       ...(notAssessed.size ? { notAssessed: [...notAssessed].sort() } : {}),
       ...(notes.size ? { notes: [...notes].sort() } : {}),
       ...(truncations.length ? { truncations } : {}),
