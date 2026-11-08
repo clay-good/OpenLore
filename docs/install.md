@@ -44,7 +44,10 @@ directory respectively.
 Adapters with no user-scope surface (`cursor`, `cline`, `continue`, `pi`, `agents-md`) are wired
 per repository and named as such in the summary — an honest note, never a failure.
 `openlore connect list` shows both scopes; `openlore install --uninstall` removes OpenLore-managed
-entries from both, and never deletes `~/.claude.json` or `~/.claude/settings.json` themselves. An
+entries from both, and never deletes `~/.claude.json` or `~/.claude/settings.json` themselves.
+Because it removes the user scope, running it inside one repository unwires **every** repository on
+the machine; it names the absolute path it stripped and says so. Use `--repo-only` to clean one
+repository and leave the user scope in place. An
 explicit `--agent` narrows both scopes, on install and on uninstall alike, and only a whole-install
 removal takes out the commit gate. `openlore connect remove <agent>` is **repository-scoped by
 default** — pass `--user-scope` to remove the machine-wide entries too.
@@ -113,9 +116,9 @@ The happy path needs no flags and never touches your repo on `npm install`:
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `pi`, `agents-md`. |
 | `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 83 tools. |
 | `--repo-only` | Wire this repository only — write no user-scope entries. |
-| `--dry-run` | Print the planned changes; write nothing. |
+| `--dry-run` | Print the planned changes; write nothing. Previews show only the changed hunks, in a bounded context window, with secrets redacted — an untouched key in your private configuration is never printed. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
-| `--uninstall` | Remove every OpenLore-managed block / entry. Files OpenLore created (and never had non-OpenLore content) are deleted. |
+| `--uninstall` | Remove every OpenLore-managed block / entry, in **both** scopes. Files OpenLore created (and never had non-OpenLore content) are deleted. Each reported change names its absolute path and scope, and a user-scope removal states that it affects all repositories — add `--repo-only` to uninstall this repository only. |
 
 > **Default tool surface.** A plain `openlore install` wires the read-only **`substrate`** preset:
 > 15 tools comprising the navigation core, the highest-value governance reads, and the 2 spec
@@ -226,11 +229,23 @@ specs at commit time, and no commit is ever blocked by it. That is what makes on
 structural navigation *and* a decision trail.
 
 Install sets that mode only when it wires a gate for the **first** time in a repository. A
-repository that already carries an OpenLore commit gate keeps the mode it was configured with —
-an absent `governance.autopilot` means blocking review, and install will not flip it — and an
-explicit `governance.autopilot: false` is never flipped either. `openlore install` also skips the
-gate entirely when OpenLore resolves inside the repository (a local devDependency), because a
-commit gate must not execute code the repository can change.
+repository that already carries an OpenLore commit gate keeps the mode it was configured with — in
+a configuration that exists, an absent `governance.autopilot` means blocking review, and install
+will not flip it — and an explicit `governance.autopilot: false` is never flipped either.
+
+A repository with **no** `.openlore/config.json` at all gets a **non-blocking** gate. That is the
+`openlore install --no-analyze` and `openlore setup` case: neither runs `init`, so there is nowhere
+to record the mode — and blocking is a setting, so the absence of the file that would record it is
+not a choice to block. Install does not create a configuration there either, because that is the
+`init` you declined. To require blocking review in such a repository, run `openlore init` and set
+`{ "governance": { "autopilot": false } }`.
+
+Whichever mode is installed, install reports **that** mode: the summary is printed from the same
+resolver the gate itself reads, so it cannot tell you "no commit is blocked" over a gate that
+blocks.
+
+`openlore install` also skips the gate entirely when OpenLore resolves inside the repository (a
+local devDependency), because a commit gate must not execute code the repository can change.
 
 Every other git hook below is installed explicitly and is advisory by default. All of them coexist
 in a single `.git/hooks/pre-commit`. Each installer inserts its own marked block directly after

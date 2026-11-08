@@ -17,9 +17,11 @@ cached cross-module structure; otherwise carry on.
 
 When you make a significant design choice, record it:
 `openlore decisions record --title "<decision>" --rationale "<why>"` (add
-`--files` for the files it governs). Under decision autopilot it is accepted at
-once and synced to the specs; the user reviews the trail with
-`openlore decisions review`.
+`--files` for the files it governs). Decision autopilot is the default — the gate
+records and never blocks a commit — so the decision is accepted at once and synced
+to the specs wherever a spec corpus exists; the user reviews the trail with
+`openlore decisions review`. Blocking review is opt-in
+(`{ "governance": { "autopilot": false } }` in `.openlore/config.json`).
 
 For the MCP setup, ensure `openlore mcp` is configured as an MCP server.
 See https://github.com/clay-good/OpenLore for details.
