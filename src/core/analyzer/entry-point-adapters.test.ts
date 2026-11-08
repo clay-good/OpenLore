@@ -477,6 +477,174 @@ describe('collectExternalWiring — GitHub Actions', () => {
   });
 });
 
+describe('collectExternalWiring — declared workspace manifests', () => {
+  const disclosure = (report: ExternalWiringReport) =>
+    report.boundaries.find(b => b.reference === 'only the package.json manifests of declared workspace members are read');
+
+  it('reads a manifest the root declares as a workspace member, receipted with its own path', async () => {
+    await put('benchmark/start-server.ts');
+    await put('benchmark/package.json', JSON.stringify({ scripts: { start: 'node start-server.ts' } }));
+    await put('packages/api/server.js');
+    await put('packages/api/package.json', JSON.stringify({ main: 'server.js' }));
+    await put('package.json', JSON.stringify({ workspaces: ['benchmark', 'packages/*'] }));
+
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['benchmark/start-server.ts', 'packages/api/server.js']);
+    expect(report.wired).toEqual([
+      { file: 'benchmark/start-server.ts', receipts: [{ config: 'benchmark/package.json', key: 'scripts.start' }] },
+      { file: 'packages/api/server.js', receipts: [{ config: 'packages/api/package.json', key: 'main' }] },
+    ]);
+    expect(disclosure(report)).toMatchObject({ config: 'package.json', key: 'workspaces' });
+  });
+
+  it('resolves a nested reference against the nested directory, never the repository root', async () => {
+    await put('app.js');
+    await put('shared/util.js');
+    await put('benchmark/envelop/app.js');
+    await put('benchmark/envelop/package.json', JSON.stringify({
+      scripts: { 'loadtest:start-server': 'node ./app.js', shared: 'node ../../shared/util.js', escape: 'node ../../../outside.js' },
+    }));
+    await put('package.json', JSON.stringify({ workspaces: { packages: ['benchmark/*'] } }));
+
+    const report = await collectExternalWiring(root);
+    // The root's own `app.js` is named by nothing; only the nested one is wired.
+    expect(files(report)).toEqual(['benchmark/envelop/app.js', 'shared/util.js']);
+    expect(report.wired[0].receipts).toEqual([{ config: 'benchmark/envelop/package.json', key: 'scripts.loadtest:start-server' }]);
+    expect(disclosure(report)).toMatchObject({ key: 'workspaces.packages' });
+    expect(report.boundaries).toContainEqual({
+      config: 'benchmark/envelop/package.json', key: 'scripts.escape', reference: '../outside.js', reason: 'outside-repository',
+    });
+  });
+
+  it('reads pnpm-workspace.yaml packages and honors a negated pattern', async () => {
+    await put('examples/node/app/index.js');
+    await put('examples/node/app/package.json', JSON.stringify({ bin: 'index.js' }));
+    await put('examples/bun/index.js');
+    await put('examples/bun/package.json', JSON.stringify({ bin: 'index.js' }));
+    await put('pnpm-workspace.yaml', "packages:\n  - 'examples/**/*'\n  - '!examples/bun'\n");
+
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['examples/node/app/index.js']);
+    expect(disclosure(report)).toMatchObject({ config: 'pnpm-workspace.yaml', key: 'packages' });
+  });
+
+  it('contributes nothing for a manifest outside the declared set, and says so', async () => {
+    await put('tools/helper.js');
+    await put('tools/package.json', JSON.stringify({ bin: 'helper.js' }));
+    await put('packages/a/kept.js');
+    await put('packages/a/package.json', JSON.stringify({ bin: 'kept.js' }));
+    await put('package.json', JSON.stringify({ workspaces: ['packages/*'] }));
+
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['packages/a/kept.js']);
+    expect(disclosure(report)?.reason).toBe('unsupported-form');
+  });
+
+  it('caps the manifests it reads with an exact omitted count', async () => {
+    for (let i = 0; i < 260; i++) {
+      await put(`packages/p${String(i).padStart(3, '0')}/entry.js`);
+      await put(`packages/p${String(i).padStart(3, '0')}/package.json`, JSON.stringify({ bin: 'entry.js' }));
+    }
+    await put('package.json', JSON.stringify({ workspaces: ['packages/*'] }));
+
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toHaveLength(256);
+    expect(files(report)[0]).toBe('packages/p000/entry.js');
+    expect(report.boundaries).toContainEqual({
+      config: 'package.json', key: 'workspaces',
+      reference: '4 of 260 declared workspace manifests were not read (cap 256)', reason: 'unsupported-form',
+    });
+  }, 30_000);
+
+  it('refuses a workspace pattern that leaves the repository', async () => {
+    await writeFile(join(outside, 'package.json'), JSON.stringify({ bin: 'evil.js' }));
+    await writeFile(join(outside, 'evil.js'), 'export {};\n');
+    await put('package.json', JSON.stringify({ workspaces: ['../*', '/etc', 'packages/..'] }));
+
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual([]);
+    expect(report.boundaries.filter(b => b.reason === 'outside-repository').map(b => b.reference).sort())
+      .toEqual(['../*', '/etc', 'packages/..']);
+  });
+
+  it('reads nothing when an exclusion pattern cannot be expanded, rather than reading an excluded member', async () => {
+    await put('packages/bun/index.js');
+    await put('packages/bun/package.json', JSON.stringify({ bin: 'index.js' }));
+    await put('packages/node/index.js');
+    await put('packages/node/package.json', JSON.stringify({ bin: 'index.js' }));
+    await put('package.json', JSON.stringify({ workspaces: ['packages/*', '!packages/@(bun|deno)'] }));
+
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual([]);
+    expect(report.boundaries).toContainEqual({
+      config: 'package.json', key: 'workspaces',
+      reference: 'a workspace exclusion pattern could not be expanded; no workspace manifest was read',
+      reason: 'unsupported-form',
+    });
+  });
+
+  it('discloses a member manifest it cannot parse and a pattern form it does not expand', async () => {
+    await put('packages/broken/package.json', '{ not json');
+    await put('packages/odd/package.json', JSON.stringify({ workspaces: 'packages/*' }));
+    await put('package.json', JSON.stringify({ workspaces: ['packages/*', 'a{1,2}', 'packages/@(x|y)'] }));
+
+    const report = await collectExternalWiring(root);
+    expect(report.boundaries).toContainEqual({
+      config: 'packages/broken/package.json', key: '', reference: 'packages/broken/package.json', reason: 'unparsed-config',
+    });
+    // A member manifest's own `workspaces` is not followed, so its string form is never read as one.
+    expect(report.boundaries.some(b => b.config === 'packages/odd/package.json' && b.key === 'workspaces')).toBe(false);
+    expect(report.boundaries.filter(b => b.reason === 'unsupported-form').map(b => b.reference))
+      .toEqual(expect.arrayContaining(['a{1,2}', 'packages/@(x|y)']));
+  });
+
+  it('discloses a root `workspaces` value that is not a list of patterns', async () => {
+    await put('x.js');
+    await put('package.json', JSON.stringify({ bin: 'x.js', workspaces: 'packages/*' }));
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['x.js']);
+    expect(report.boundaries).toContainEqual({
+      config: 'package.json', key: 'workspaces', reference: 'workspaces is not a list of patterns', reason: 'unsupported-form',
+    });
+  });
+
+  it('never follows a symlinked member directory, so a cycle cannot spin the expansion', async ({ skip }) => {
+    try {
+      await mkdir(join(root, 'packages'), { recursive: true });
+      await symlink(join(root, 'packages'), join(root, 'packages', 'loop'), 'dir');
+      await symlink(outside, join(root, 'packages', 'away'), 'dir');
+    } catch {
+      skip();
+      return;
+    }
+    await writeFile(join(outside, 'package.json'), JSON.stringify({ bin: 'evil.js' }));
+    await writeFile(join(outside, 'evil.js'), 'export {};\n');
+    await put('packages/real/ok.js');
+    await put('packages/real/package.json', JSON.stringify({ bin: 'ok.js' }));
+    await put('package.json', JSON.stringify({ workspaces: ['packages/**/*'] }));
+
+    const report = await collectExternalWiring(root);
+    expect(files(report)).toEqual(['packages/real/ok.js']);
+  });
+
+  it('expands a broad tree and a star-heavy pattern in bounded time', async () => {
+    for (let i = 0; i < 400; i++) await mkdir(join(root, 'packages', `d${i}`, 'deep'), { recursive: true });
+    await put('packages/d0/entry.js');
+    await put('packages/d0/package.json', JSON.stringify({ bin: 'entry.js' }));
+    await put('deep/a/b/c/d/e/f/g/h/i/j/entry.js');
+    await put('deep/a/b/c/d/e/f/g/h/i/j/package.json', JSON.stringify({ bin: 'entry.js' }));
+    await put('package.json', JSON.stringify({
+      workspaces: ['packages/**/*', `packages/${'*'.repeat(80)}d0`, 'deep/**/*'],
+    }));
+
+    const started = Date.now();
+    const report = await collectExternalWiring(root);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    // `**` descends a bounded number of levels, so a member 11 directories deep is left unread.
+    expect(files(report)).toEqual(['packages/d0/entry.js']);
+  }, 60_000);
+});
+
 describe('stripJsonComments', () => {
   it('removes comments and trailing commas without touching string contents', () => {
     const source = '{ "url": "http://x//y", /* block */ "a": [1, 2,], // line\n "b": "/*keep*/", "c": ["x, ]", "y,}"], }';
