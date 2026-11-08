@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import { handleFindDeadCode } from './reachability.js';
 import type { FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 
@@ -35,6 +35,23 @@ async function write(nodes: FunctionNode[], edges: CallEdge[], contracts: Record
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph }), 'utf-8');
 }
+
+/**
+ * A dependency graph whose named imports do NOT include the handler — the ONLY shape in which the
+ * confidence ladder reaches `high` (an absent dependency-graph artifact makes `exportSignal` `none`
+ * and caps every candidate at `medium`, so a fixture without one asserts nothing about `high`).
+ */
+async function writeDepGraph(importedNames: string[] = ['SomethingElse']): Promise<void> {
+  const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify({
+    nodes: [{ id: 'a', file: { path: 'other/a.go' } }, { id: 'b', file: { path: 'other/b.go' } }],
+    edges: [{ source: 'a', target: 'b', importedNames }],
+  }), 'utf-8');
+}
+
+type Candidate = { name: string; className: string | null; confidence: string; reason: string };
+const run = async () => (await handleFindDeadCode({ directory: root })) as { candidateDead: Candidate[] };
 
 const RPC = node('orders.proto::/orders.v1.OrderService/GetOrder', '/orders.v1.OrderService/GetOrder', { language: 'Protobuf' });
 
@@ -63,5 +80,138 @@ describe('find_dead_code with gRPC registrations', () => {
     await write([impl], [], disclosure({ unboundGraphqlOperations: { items: ['Query.user (schema.graphql:1)'], total: 1 } }));
     const r = await handleFindDeadCode({ directory: root }) as { contractRootsNotAssessed?: { unboundGraphqlOperations: number } };
     expect(r.contractRootsNotAssessed?.unboundGraphqlOperations).toBe(1);
+  });
+});
+
+/**
+ * The cap: a symbol a contract registration or resolver map NAMED, whose binding the projection
+ * refused, is wired up in the source and roots nothing — so it must never be claimed confidently
+ * dead (change: cap-unbound-contract-handler-confidence).
+ */
+describe('find_dead_code never rates an unbound contract handler high-confidence dead', () => {
+  const impl = node('srv/main.go::orderServer.GetOrder', 'GetOrder', { className: 'orderServer' });
+
+  it('reaches high confidence when no contract registration names the handler (the baseline)', async () => {
+    await write([impl, RPC], [], disclosure({}));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.name).toBe('GetOrder');
+    expect(c.confidence).toBe('high');
+  });
+
+  it('caps a method whose class a refused gRPC registration named', async () => {
+    await write([impl, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{
+        file: 'srv/main.go', line: 12, service: 'orders.v1.OrderService', className: 'orderServer',
+        reason: 'implementation-not-found', detail: 'no method of `orderServer` named after an RPC was found where the registration says it is',
+      }], total: 1 },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.confidence).toBe('low');
+    expect(c.reason).toContain('its class is the implementation a contract registration named');
+  });
+
+  it('caps a function a refused gRPC registration named by symbol', async () => {
+    const fn = node('srv/handlers.ts::getOrder', 'getOrder', { language: 'TypeScript' });
+    await write([fn, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{
+        file: 'srv/server.ts', line: 8, service: 'orders.v1.OrderService', rpc: 'GetOrder', symbol: 'getOrder',
+        reason: 'implementation-not-found', detail: "`getOrder` is imported from '@app/handlers', which is not indexed here (a package or a path alias)",
+      }], total: 1 },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.confidence).toBe('low');
+    expect(c.reason).toContain('named by a contract registration or resolver map whose binding was refused');
+  });
+
+  it('caps a function a refused GraphQL resolver map named', async () => {
+    const fn = node('srv/resolvers.ts::order', 'order', { language: 'TypeScript' });
+    await write([fn], [], disclosure({
+      unresolvedResolvers: { items: [{
+        file: 'srv/schema.ts', line: 4, root: 'Query', field: 'order', symbol: 'order',
+        reason: 'implementation-not-found', detail: "`order` is imported from '@app/resolvers', which is not indexed here (a package or a path alias)",
+      }], total: 1 },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.confidence).toBe('low');
+    expect(c.reason).toContain('named by a contract registration or resolver map whose binding was refused');
+  });
+
+  // The shape grpc/grpc-node really has: `server.addService(Echo.service, serviceImplementation)`
+  // hands over a variable, so the registration names no function and the refusal names no symbol.
+  it('caps every candidate in the file of a registration whose implementation could not be read', async () => {
+    const handler = node('examples/cancellation/server.js::bidirectionalStreamingEcho', 'bidirectionalStreamingEcho', { language: 'JavaScript' });
+    await write([handler, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{
+        file: 'examples/cancellation/server.js', line: 61, service: 'grpc.examples.echo.Echo',
+        reason: 'not-literal', detail: 'the implementation is `serviceImplementation`',
+      }], total: 1 },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.name).toBe('bidirectionalStreamingEcho');
+    expect(c.confidence).toBe('low');
+    expect(c.reason).toContain('whose implementation argument could not be read');
+  });
+
+  it('leaves another file untouched by a file-scoped cap, and spares an inline implementation', async () => {
+    const elsewhere = node('examples/other/util.js::unusedHelper', 'unusedHelper', { language: 'JavaScript' });
+    await write([elsewhere, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [
+        { file: 'examples/cancellation/server.js', line: 61, service: 'grpc.examples.echo.Echo', reason: 'not-literal', detail: 'the implementation is `serviceImplementation`' },
+        // An inline handler has no graph node, so its file is NOT capped.
+        { file: 'examples/other/util.js', line: 4, service: 'grpc.examples.echo.Echo', rpc: 'UnaryEcho', reason: 'inline-implementation' },
+      ], total: 2 },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.name).toBe('unusedHelper');
+    expect(c.confidence).toBe('high');
+  });
+
+  it('does not cap a candidate no registration names', async () => {
+    const other = node('srv/util.go::unusedHelper', 'unusedHelper');
+    await write([other, RPC], [], disclosure({
+      unresolvedRegistrations: { items: [{ file: 'srv/main.go', line: 12, service: 'orders.v1.OrderService', className: 'orderServer', reason: 'implementation-not-found' }], total: 1 },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.name).toBe('unusedHelper');
+    expect(c.confidence).toBe('high');
+    expect(c.reason).not.toContain('contract registration');
+  });
+
+  // The disclosure lists are bounded at MAX_DISCLOSED (20) with their exact total beside them, so a
+  // repository with more refusals than that holds unbound symbols the artifact does not name. The
+  // names are unrecoverable, so the whole repository gives up `high` rather than guess.
+  it('withholds high across the repository when the disclosure is truncated past MAX_DISCLOSED', async () => {
+    const other = node('srv/util.go::unusedHelper', 'unusedHelper');
+    await write([other, RPC], [], disclosure({
+      unresolvedRegistrations: {
+        items: Array.from({ length: 20 }, (_, i) => ({ file: 'srv/main.go', line: i + 1, service: `svc.S${i}`, className: `serverImpl${i}`, reason: 'implementation-not-found' })),
+        total: 25,
+      },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.name).toBe('unusedHelper');
+    expect(c.confidence).toBe('medium');
+    expect(c.reason).toContain('5 further contract registration(s)/resolver(s) whose binding was refused are past the disclosure cap of 20');
+  });
+
+  it('leaves a truncation-ceiling reason off a candidate already capped lower', async () => {
+    await write([impl, RPC], [], disclosure({
+      unresolvedRegistrations: {
+        items: Array.from({ length: 20 }, (_, i) => ({ file: 'srv/main.go', line: i + 1, service: 'orders.v1.OrderService', className: i === 0 ? 'orderServer' : `other${i}`, reason: 'implementation-not-found' })),
+        total: 40,
+      },
+    }));
+    await writeDepGraph();
+    const [c] = (await run()).candidateDead;
+    expect(c.confidence).toBe('low');
+    expect(c.reason).not.toContain('past the disclosure cap');
   });
 });
