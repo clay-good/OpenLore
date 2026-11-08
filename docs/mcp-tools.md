@@ -37,6 +37,40 @@ One caveat on "pick the block that parses": a few tools return plain text rather
 `get_signatures` is the one you are most likely to hit. For those, no block parses, and the
 payload is the block that carries no note prefix.
 
+#### `confidenceBoundary.complete` — what the answer claims about itself
+
+A conclusion carries a `confidenceBoundary` saying what it does **not** know. Its `complete` flag is
+**derived, never asserted by the tool**: `complete: true` is impossible in the same response as a
+disclosed refusal, cap, fallback, degradation or discarded input. Concretely, `complete` is `false`
+whenever the boundary itself crossed something (a synthesized-edge reliance, a dynamic-dispatch blind
+spot, a stale or degraded index, a repair in flight) **or** the response carries any registered
+disclosure channel — an `unverifiable` verdict, `notAssessed`, `truncated`, `baseRefFallback`,
+`changeGranularity.reasons`, `filePatternMatch` with `matchedFiles: 0`, `noPath`,
+`ambiguousCallSites`, `partialIndex`, and the rest of the set in `DISCLOSURE_CHANNELS`.
+
+So you can read `complete` as a single gate: `true` means "this is everything, and nothing was
+refused, capped or dropped" — safe to act on, and safe to stop looking.
+
+When it is `false`, `incompleteBecause` tells you **which** part is incomplete: one entry per cause,
+each naming the response field that holds the detail.
+
+```json
+{ "confidenceBoundary": {
+    "complete": false,
+    "incompleteBecause": [
+      { "channel": "changeGranularity.reasons",
+        "detail": "Per-symbol change detection degraded to whole-file granularity for some files (time-cap: 29) — read `changeGranularity`; the changed set is coarser than it looks." }
+    ] } }
+```
+
+Two things `complete: false` does **not** mean. It is not a quality score, and it is not a reason to
+discard the answer — a lower bound is still a sound lower bound. Read the named channel and decide
+whether that gap touches the question you asked.
+
+A standing methodology caveat does not flip it. `caveats` and `note` mix permanent methodology with
+live disclosure, so they are never read as completeness signals; a tool whose live disclosure is prose
+declares it separately. That is deliberate: a flag that was always `false` would carry no information.
+
 ### Setup
 
 **Claude Code** -- add a `.mcp.json` at your project root:

@@ -138,6 +138,26 @@ export interface RepairInProgressMarker {
   detail: string;
 }
 
+/**
+ * One named cause of an answer's incompleteness (change:
+ * never-claim-complete-beside-a-refusal).
+ *
+ * `complete: false` on its own tells an agent only that *something* is missing. Each
+ * reason names WHICH part, and points at the response field carrying the detail, so the
+ * agent can decide whether the gap touches the question it actually asked.
+ */
+export interface DisclosureReason {
+  /**
+   * The response (or boundary) field that disclosed: a registered disclosure channel's
+   * path (`notAssessed`, `changeGranularity.reasons`, …), or one of the boundary's own
+   * parts (`knownUnknowable`, `staleness`, `integrity`, `repair`), or `disclosures` for a
+   * live, handler-declared prose disclosure.
+   */
+  channel: string;
+  /** What is incomplete and where to read about it, in the boundary's own voice. */
+  detail: string;
+}
+
 export interface ConfidenceBoundary {
   /** How the traversal was grounded. Omitted for non-traversal answers (recall). */
   basis?: EdgeBasis;
@@ -150,12 +170,23 @@ export interface ConfidenceBoundary {
   /** A background repair is healing this index right now. Absent when none is running. */
   repair?: RepairInProgressMarker;
   /**
-   * True iff the computation crossed no boundary: no synthesized-edge reliance, no
-   * known-unknowable crossing, a current index, AND a reconciled (non-degraded,
-   * non-mismatched) index. The answer-level NoFalseCompleteness flag — an incomplete
-   * answer is never dressed as complete.
+   * True iff the computation crossed no boundary AND the answer disclosed no refusal,
+   * cap, fallback, degradation or discarded input: no synthesized-edge reliance, no
+   * known-unknowable crossing, a current index, a reconciled (non-degraded,
+   * non-mismatched) index, and every registered disclosure channel silent.
+   *
+   * The answer-level NoFalseCompleteness flag, and DERIVED — never asserted. A handler
+   * cannot set it: it falls out of {@link assembleBoundary}'s parts and of
+   * {@link reconcileCompleteness}'s sweep of the response's disclosure channels at the
+   * dispatch boundary. `complete: true` beside a disclosed gap is the most damaging form
+   * of the defect, because it tells the agent not to look further.
    */
   complete: boolean;
+  /**
+   * Why the answer is NOT complete — one entry per cause, each naming the field that
+   * holds the detail. Present iff `complete` is false; absent on a complete answer.
+   */
+  incompleteBecause?: DisclosureReason[];
 }
 
 /**
@@ -431,8 +462,13 @@ export async function assessStalenessForAnalysis(
 /**
  * Assemble a boundary from its parts and derive `complete`. The synthesized-edge
  * crossings are derived from the basis; callers may add extra crossings (e.g. an
- * unindexed federated repo). An answer is complete only when nothing was crossed
- * and the index is current.
+ * unindexed federated repo), and `disclosures` carries live, answer-specific prose
+ * disclosures the handler already computed (see {@link NON_DISCLOSURE_RESPONSE_FIELDS}
+ * for why a prose field is never swept automatically). An answer is complete only when
+ * nothing was crossed, the index is current, and nothing was disclosed.
+ *
+ * Every cause is named in `incompleteBecause`, so `complete: false` says WHICH part is
+ * incomplete rather than merely that something is.
  */
 export function assembleBoundary(parts: {
   basis?: EdgeBasis;
@@ -440,21 +476,287 @@ export function assembleBoundary(parts: {
   staleness?: StalenessMarker;
   integrity?: IndexIntegrity;
   repair?: RepairInProgressMarker;
+  /**
+   * Live disclosures this answer made in prose (a dropped filter, an unresolved ref, a
+   * withheld label). Standing methodology notes are NOT disclosures and must not be
+   * passed — they would make `complete` permanently false and so meaningless.
+   */
+  disclosures?: readonly string[];
 }): ConfidenceBoundary {
   const crossings = [
     ...(parts.basis ? crossingsFromBasis(parts.basis) : []),
     ...(parts.extraCrossings ?? []),
   ];
   const integrity = integrityDisclosure(parts.integrity);
+  const live = (parts.disclosures ?? []).filter((d) => typeof d === 'string' && d.trim().length > 0);
   const boundary: ConfidenceBoundary = {
-    complete: crossings.length === 0 && !parts.staleness && !integrity && !parts.repair,
+    complete: crossings.length === 0 && !parts.staleness && !integrity && !parts.repair && live.length === 0,
   };
   if (parts.basis) boundary.basis = parts.basis;
   if (crossings.length > 0) boundary.knownUnknowable = crossings;
   if (parts.staleness) boundary.staleness = parts.staleness;
   if (integrity) boundary.integrity = integrity;
   if (parts.repair) boundary.repair = parts.repair;
+  if (!boundary.complete) {
+    const reasons: DisclosureReason[] = [];
+    if (crossings.length > 0) {
+      reasons.push({
+        channel: 'knownUnknowable',
+        detail: `${crossings.length} boundary crossing(s) this answer could not see past — read confidenceBoundary.knownUnknowable.`,
+      });
+    }
+    if (parts.staleness) reasons.push({ channel: 'staleness', detail: parts.staleness.detail });
+    if (integrity) reasons.push({ channel: 'integrity', detail: integrity.detail });
+    if (parts.repair) reasons.push({ channel: 'repair', detail: parts.repair.detail });
+    for (const d of live) reasons.push({ channel: 'disclosures', detail: d });
+    boundary.incompleteBecause = reasons;
+  }
   return boundary;
+}
+
+// ===========================================================================
+// NoCompleteBesideADisclosure (mcp-quality; change:
+// never-claim-complete-beside-a-refusal)
+// ===========================================================================
+//
+// `complete: true` in the same response as an explicit refusal, cap, fallback,
+// degradation or discarded input is the most damaging form of a false claim: it tells
+// the agent not to look further, converting a DISCLOSED gap into a silent one. Five
+// independent instances shipped that way (an `unverifiable` verdict, a time-capped
+// briefing, a discarded `asOf`, a bounded `noPath`, a pattern that matched nothing).
+//
+// The rule lives HERE, as a registry swept once at the dispatch boundary, rather than
+// as a line in each handler: `dispatchTool` is the single point both transports and
+// every CLI wrapper funnel through, so a tool CANNOT opt out of it — including a tool
+// that does not exist yet. The sweep is O(1) in the size of the payload: it reads a
+// fixed list of named paths (depth 2 at most) and never walks the response.
+
+/** A response field whose presence/content means this answer disclosed a gap. */
+export interface DisclosureChannel {
+  /** Response field, or `parent.child`. Depth 2 at most — never a deep scan. */
+  path: string;
+  /** True iff this channel actually disclosed something on THIS answer. */
+  fires: (value: unknown) => boolean;
+  /** What is incomplete and where to read it, in the boundary's voice. */
+  detail: (value: unknown) => string;
+}
+
+const nonEmptyArray = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
+const nonEmptyRecord = (v: unknown): boolean => {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  for (const _k in v as Record<string, unknown>) return true;
+  return false;
+};
+const countOf = (v: unknown): number => (Array.isArray(v) ? v.length : typeof v === 'number' ? v : 0);
+
+/**
+ * Response fields that mean "this answer disclosed a gap". Each entry is an explicit
+ * predicate, never a generic truthiness test: `truncation` is present on every
+ * briefing_since answer and `truncated: 0` on every find_dead_code answer, so a blanket
+ * "field present ⇒ incomplete" rule would make `complete` permanently false — and a flag
+ * that is always false carries no information at all.
+ */
+export const DISCLOSURE_CHANNELS: readonly DisclosureChannel[] = [
+  {
+    path: 'verdict',
+    fires: (v) => v === 'unverifiable',
+    detail: () => 'The verdict is "unverifiable": this answer is a refusal, not a conclusion — read `reason`.',
+  },
+  {
+    path: 'withheld',
+    fires: (v) => v === true || (typeof v === 'string' && v.length > 0),
+    detail: (v) => `Part of this answer was withheld (${typeof v === 'string' ? v : 'see the `withheld` field'}).`,
+  },
+  {
+    path: 'unsupported',
+    fires: (v) => v === true,
+    detail: () => 'The requested subject is unsupported here, so nothing was assessed — read `reason`.',
+  },
+  {
+    path: 'notReady',
+    fires: (v) => v === true,
+    detail: () => 'The index was not ready, so no answer was computed.',
+  },
+  {
+    path: 'notAssessed',
+    fires: (v) => countOf(v) > 0,
+    detail: (v) => `${countOf(v)} item(s) could not be assessed — read \`notAssessed\`; their absence from the findings is not a clean bill.`,
+  },
+  {
+    path: 'boundaries',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} analysis boundary(ies) were crossed — read \`boundaries\`; the result is a lower bound.`,
+  },
+  {
+    path: 'truncated',
+    fires: (v) => v === true || countOf(v) > 0 || (nonEmptyRecord(v) && countOf((v as { omitted?: unknown }).omitted) > 0),
+    detail: () => 'The result list was truncated — read `truncated`; the returned set is not the whole set.',
+  },
+  {
+    path: 'truncation.bounded',
+    fires: (v) => v === true,
+    detail: () => 'The result was bounded before the whole set was returned — read `truncation`.',
+  },
+  {
+    path: 'baseRefFallback',
+    fires: nonEmptyRecord,
+    detail: (v) => {
+      const f = v as { requested?: unknown; resolved?: unknown };
+      return `The requested base ref did not resolve; this answer was computed against "${String(f.resolved)}" instead of "${String(f.requested)}".`;
+    },
+  },
+  {
+    path: 'changeGranularity.reasons',
+    fires: nonEmptyRecord,
+    detail: (v) => {
+      const entries = Object.entries(v as Record<string, unknown>)
+        .map(([k, n]) => `${k}: ${String(n)}`)
+        .sort()
+        .join(', ');
+      return `Per-symbol change detection degraded to whole-file granularity for some files (${entries}) — read \`changeGranularity\`; the changed set is coarser than it looks.`;
+    },
+  },
+  {
+    path: 'changeGranularity.fallbacks',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} file(s) fell back from per-symbol to whole-file change detection — read \`changeGranularity.fallbacks\`.`,
+  },
+  {
+    path: 'filePatternMatch',
+    fires: (v) => nonEmptyRecord(v) && (v as { matchedFiles?: unknown }).matchedFiles === 0,
+    detail: (v) => `The requested filePattern "${String((v as { pattern?: unknown }).pattern)}" matched 0 indexed files, so this answer covers an EMPTY scope — read \`filePatternMatch\`.`,
+  },
+  {
+    path: 'noPath',
+    fires: nonEmptyRecord,
+    detail: () => 'No path was found within the bounded search — read `noPath`; "not found within the bound" is not "does not exist".',
+  },
+  {
+    path: 'ambiguousCallSites',
+    fires: (v) => nonEmptyRecord(v) && countOf((v as { count?: unknown }).count) > 0,
+    detail: (v) => `${countOf((v as { count?: unknown }).count)} call site(s) the resolver refused to bind touch this answer — read \`ambiguousCallSites\`; it is a lower bound.`,
+  },
+  {
+    path: 'staleTriggeredMemories',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} triggered memory(ies) are orphaned and were not served as content — read \`staleTriggeredMemories\`.`,
+  },
+  {
+    path: 'unreconciled',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} authoritative record(s) disagree and none was selected — read \`unreconciled\`.`,
+  },
+  {
+    path: 'evidenceRefuted',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} record(s) rest on a claim that no longer holds — read \`evidenceRefuted\`.`,
+  },
+  {
+    path: 'evidenceUnverifiable',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} record(s) rest on a claim that could not be checked — read \`evidenceUnverifiable\`.`,
+  },
+  {
+    path: 'opaqueEnvSources',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} configuration source(s) could not be listed — read \`opaqueEnvSources\`; declarations there are invisible here.`,
+  },
+  {
+    path: 'partialIndex.partial',
+    fires: (v) => v === true,
+    detail: () => 'This answer was computed from a partial first-run index — read `partialIndex`.',
+  },
+];
+
+/**
+ * Response fields that LOOK disclosure-shaped but are NOT completeness signals, each with
+ * the reason it is excluded. The structural guard requires every disclosure-shaped field
+ * on the tool surface to appear either here or in {@link DISCLOSURE_CHANNELS}, so a new
+ * tool cannot introduce a third, unclassified kind.
+ */
+export const NON_DISCLOSURE_RESPONSE_FIELDS: Readonly<Record<string, string>> = {
+  // Prose channels. Each MIXES standing methodology with live disclosure in one array or
+  // string (briefing_since ships two permanent caveats; find_path's `note` explains a
+  // conclusion rather than qualifying it), so sweeping them would pin `complete` to false
+  // forever. The handlers that put live disclosures in prose declare them explicitly
+  // through `assembleBoundary({ disclosures })` instead.
+  caveats: 'Mixes standing methodology with live disclosure; handlers declare the live part via assembleBoundary({ disclosures }).',
+  note: 'Overloaded: explains a conclusion as often as it qualifies one. Declared via assembleBoundary({ disclosures }) when it discloses.',
+  notes: 'Standing methodology prose, like `caveats`.',
+  hint: 'A next-step suggestion, not a statement about this answer\'s coverage.',
+  reason: 'Explains the verdict/ranking that WAS computed; the refusal case is caught by the `verdict` channel.',
+  soundness: 'A standing posture + methodology caveats, identical on every answer of that tool.',
+  // Receipts that are present-and-empty on a healthy answer. Their firing form is
+  // registered above under the specific field that carries the count.
+  truncation: 'Present on every answer; the `truncation.bounded` channel carries the firing form.',
+  changeGranularity: 'Present whenever per-symbol detection ran; the `.reasons`/`.fallbacks` channels carry the firing form.',
+  coverage: 'Describes which languages/signals the answer used, not a gap in it.',
+  // Nested sub-receipts whose FIRING form is already a channel on the parent. The sweep
+  // reads named paths, never a payload walk, so an inner count is reached through its
+  // parent's registered channel or not at all.
+  omitted: 'An inner count of a truncation receipt; `truncated` / `truncation.bounded` carry the firing form.',
+  omittedAtLeast: 'An inner count of a bounded traversal receipt, under its own parent block.',
+  omittedByTier: 'An inner breakdown of `truncation`, which has its own channel.',
+  omittedSites: 'An inner count of a knownUnknowable crossing, which is already a boundary part.',
+  // Per-record verdicts. These qualify ONE served record, not the answer as a whole; the
+  // whole-answer gaps of the tools that emit them are declared through
+  // `assembleBoundary({ disclosures })`.
+  ambiguous: 'A per-anchor outcome on one memory record, not a statement about the recall.',
+  staleRegion: 'A per-memory freshness verdict on one record, not about the whole answer.',
+  staleRegionComposition: 'Per-memory freshness provenance on one record.',
+  staleDecisionRef: 'A per-memory signal that one record cites a superseded decision.',
+  staleFiles: 'Inner evidence of the memory-anchor findings report, under its own block.',
+  unassessedReason: 'Inner prose of the memory-anchor findings report, under its own block.',
+  // Content transforms, not structural gaps.
+  redactions: 'Secret redaction changes the text served, not what the structural conclusion covered.',
+  federationNote: 'Names an opt-in flag that does not apply to this mode; the mode\'s own answer is unaffected.',
+  unsupportedCapabilityNote: 'Descriptive capability-matrix prose, not a gap in a computed answer.',
+};
+
+/** Precomputed path segments — the sweep never splits a string at request time. */
+const CHANNEL_SEGMENTS: readonly (readonly string[])[] = DISCLOSURE_CHANNELS.map((c) => c.path.split('.'));
+
+/**
+ * Derive `confidenceBoundary.complete` from the response's disclosure channels, and name
+ * every cause in `incompleteBecause`.
+ *
+ * Applied once at the dispatch boundary, so no tool — present or future — can claim a
+ * complete answer beside a disclosed refusal, cap, fallback, degradation or discarded
+ * input. Idempotent: re-running it adds nothing new. A response with no
+ * `confidenceBoundary` is returned untouched — this reconciles a claim the answer makes,
+ * it never invents one.
+ */
+export function reconcileCompleteness(result: unknown): unknown {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  const response = result as Record<string, unknown>;
+  const boundary = response.confidenceBoundary;
+  if (!boundary || typeof boundary !== 'object' || Array.isArray(boundary)) return result;
+
+  const fired: DisclosureReason[] = [];
+  for (let i = 0; i < DISCLOSURE_CHANNELS.length; i++) {
+    const segments = CHANNEL_SEGMENTS[i];
+    let value: unknown = response[segments[0]];
+    for (let s = 1; s < segments.length && value; s++) {
+      value = typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)[segments[s]]
+        : undefined;
+    }
+    if (value === undefined || value === null) continue;
+    const channel = DISCLOSURE_CHANNELS[i];
+    if (channel.fires(value)) fired.push({ channel: channel.path, detail: channel.detail(value) });
+  }
+  if (fired.length === 0) return result;
+
+  const existing = (boundary as ConfidenceBoundary).incompleteBecause ?? [];
+  const seen = new Set(existing.map((r) => r.channel));
+  return {
+    ...response,
+    confidenceBoundary: {
+      ...(boundary as ConfidenceBoundary),
+      complete: false,
+      incompleteBecause: [...existing, ...fired.filter((r) => !seen.has(r.channel))],
+    },
+  };
 }
 
 /**
