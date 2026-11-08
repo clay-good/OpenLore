@@ -2,9 +2,8 @@
  * Fail-fast Node-version guard for the OpenLore CLI.
  *
  * Why this exists: OpenLore requires Node >=22.22, but OpenSpec requires only
- * >=20.19. When OpenLore runs as an OpenSpec plugin, a user on Node 20/21 can run
- * `openspec lore generate`, which spawns `openlore` under a Node OpenLore does not
- * support. `engines` in package.json is advisory at install time and does NOT
+ * >=20.19. A tool on Node 20/21 can spawn `openlore` under a Node OpenLore does
+ * not support. `engines` in package.json is advisory at install time and does NOT
  * protect that spawn. So we check at runtime and, below the floor, write ONE
  * legible line to stderr (required + actual versions) and exit with a stable,
  * dedicated code — never a stack trace or a partial run — so the host propagates a

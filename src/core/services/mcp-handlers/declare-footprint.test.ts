@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { handleDeclareFootprint } from './declare-footprint.js';
@@ -177,11 +177,160 @@ describe('declare_footprint', () => {
     writeFileSync(shared, '{ not json');
     await expect(recordVerification(a, { id: 'v1', verdict: 'merge-compatible', branch: 'feat-a', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [] })).rejects.toThrow(/could not be read/);
     writeFileSync(shared, JSON.stringify([
-      { id: 'bad-anchor', verdict: 'merge-compatible', branch: 'x', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [{ filePath: 5 }] },
-      { id: 'no-hash', verdict: 'merge-compatible', branch: 'x', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [{ filePath: 'src/config.ts' }] },
+      { id: 'bad-anchor', verdict: 'merge-compatible', branch: 'feat-a', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [{ filePath: 5 }] },
+      { id: 'no-hash', verdict: 'merge-compatible', branch: 'feat-a', baseCommit: 'abc', producedBy: 'certify_merge', anchors: [{ filePath: 'src/config.ts' }] },
     ]));
     const records = ((await handleFleetStatus({ directory: a })).verificationMemory as { records: Array<{ id: string; state: string }> }).records;
     expect(records).toEqual([expect.objectContaining({ id: 'no-hash', state: 'needs-reverification' })]);
+  });
+
+  // ── Fleet verification records end on the same evidence as board entries ──
+  // (change: add-fleet-record-expiry). Each case builds its own clone, so the board and the
+  // records file it touches are its own and cannot collide with another worktree's run.
+
+  /** The clone's shared records file, next to the peer board. */
+  const sharedRecords = async (root: string) => join(dirname((await boardDir(root))!), 'verification-records.json');
+  /** The live record ids and the end reasons fleet_status reports, as of `now`. */
+  const fleet = async (root: string, now?: number) => {
+    const res = await handleFleetStatus({ directory: root }, now !== undefined ? { now } : {});
+    const mem = res.verificationMemory as {
+      records: Array<{ id: string }>;
+      ended: { count: number; records?: Array<{ id: string; reason: string }> };
+      unknownPredicates?: string[];
+    };
+    return { live: mem.records.map(r => r.id).sort(), ended: mem.ended, unknown: mem.unknownPredicates ?? [] };
+  };
+  const record = (branch: string, over: Record<string, unknown> = {}) => ({
+    id: 'v1', verdict: 'blast-radius-clean' as const, branch, baseCommit: 'abc', producedBy: 'blast_radius', anchors: [], ...over,
+  });
+
+  it('a fleet record whose branch was merged into main is no longer a live verdict', async () => {
+    const { a, b } = clone();
+    // feat-a's merge-base with main, as a real commit id: the merged predicate needs one.
+    await recordVerification(a, record('feat-a', { baseCommit: git(a, 'merge-base', 'HEAD', 'main') }));
+    expect((await fleet(a)).live).toEqual(['v1']);
+
+    write(a, 'src/config.ts', CONFIG_TS + '// a\n');
+    git(a, 'commit', '-qam', 'a');
+    git(b, 'checkout', '-q', 'main');
+    git(b, 'merge', '-q', '--no-ff', '-m', 'merge', 'feat-a');
+
+    const after = await fleet(a);
+    expect(after.live).toEqual([]);
+    expect(after.ended.records).toEqual([expect.objectContaining({ id: 'v1', reason: 'branch-merged' })]);
+  });
+
+  it('a fleet record whose branch was deleted is no longer a live verdict', async () => {
+    const { a } = clone();
+    git(a, 'branch', 'tmp-x', 'main');
+    await recordVerification(a, record('tmp-x'));
+    expect((await fleet(a)).live).toEqual(['v1']);
+
+    git(a, 'branch', '-q', '-D', 'tmp-x');
+    const after = await fleet(a);
+    expect(after.live).toEqual([]);
+    expect(after.ended.records).toEqual([expect.objectContaining({ id: 'v1', reason: 'branch-deleted' })]);
+  });
+
+  it('a fleet record whose worktree was removed is no longer a live verdict', async () => {
+    const { a, b } = clone();
+    await recordVerification(b, record('feat-b'));
+    expect((await fleet(a)).live).toEqual(['v1']);
+
+    rmSync(b, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    const after = await fleet(a);
+    expect(after.live).toEqual([]);
+    expect(after.ended.records).toEqual([expect.objectContaining({ id: 'v1', reason: 'worktree-removed' })]);
+  });
+
+  it('a fleet record not re-proven within the session expiry is no longer a live verdict', async () => {
+    const { a } = clone();
+    await recordVerification(a, record('feat-a'));
+    expect((await fleet(a)).live).toEqual(['v1']);
+
+    const after = await fleet(a, Date.now() + PANIC_SESSION_EXPIRY_MS + 1000);
+    expect(after.live).toEqual([]);
+    expect(after.ended.records).toEqual([expect.objectContaining({ id: 'v1', reason: 'expired' })]);
+  });
+
+  it('a legacy fleet record with no recordedAt is never expired: the predicate is unknown, not ended', async () => {
+    const { a } = clone();
+    const shared = await sharedRecords(a);
+    mkdirSync(dirname(shared), { recursive: true });
+    // Written before the lifecycle existed: no recordedAt, no worktree, a baseCommit that is not
+    // a commit id. Every predicate that needs a field it lacks must report unknown, not "ended".
+    writeFileSync(shared, JSON.stringify([
+      { id: 'legacy', verdict: 'surface-stable', branch: 'feat-a', baseCommit: 'abc', producedBy: 'certify_public_surface', anchors: [] },
+    ]));
+    const far = await fleet(a, Date.now() + PANIC_SESSION_EXPIRY_MS * 1000);
+    expect(far.live).toEqual(['legacy']);
+    expect(far.ended.count).toBe(0);
+    expect(far.unknown.join(' ')).toMatch(/no usable recordedAt/);
+    expect(far.unknown.join(' ')).toMatch(/baseCommit is absent or not a 40-64 character hex commit id/);
+  });
+
+  it('an ended fleet record is pruned on the next write, and a new record is stamped', async () => {
+    const { a } = clone();
+    git(a, 'branch', 'tmp-x', 'main');
+    await recordVerification(a, record('tmp-x', { id: 'doomed' }));
+    git(a, 'branch', '-q', '-D', 'tmp-x');
+    await recordVerification(a, record('feat-a', { id: 'fresh' }));
+    const onDisk = JSON.parse(readFileSync(await sharedRecords(a), 'utf-8')) as Array<{ id: string; recordedAt?: string }>;
+    expect(onDisk.map(r => r.id)).toEqual(['fresh']);
+    expect(Date.parse(onDisk[0].recordedAt!)).toBeGreaterThan(0);
+  });
+
+  it('a branch that shares its name with a tag is not read as deleted', async () => {
+    const { a } = clone();
+    // git's SHORT ref form disambiguates this branch to `heads/feat-a`: matching on it would read
+    // a live branch as deleted, for a board entry and for a record alike.
+    git(a, 'tag', 'feat-a', 'main');
+    await handleDeclareFootprint({ directory: a, actorId: 'agent-a', writeSet: ['parseConfig'] });
+    const board = await readBoard(a);
+    expect(board.live.map(l => l.entry.actorId)).toEqual(['agent-a']);
+    expect(board.ended).toEqual([]);
+
+    await recordVerification(a, record('feat-a'));
+    const r = await fleet(a);
+    expect(r.live).toEqual(['v1']);
+    expect(r.ended.count).toBe(0);
+    expect(r.unknown.join(' ')).not.toMatch(/never was one|no evidence/);
+  });
+
+  it('a fleet record outside a git work tree is never read as a deleted branch', async () => {
+    // The supported legacy path: records stay in the directory's own .openlore/. Git cannot be
+    // asked about branches at all here, which is no evidence a branch was deleted.
+    const plain = realpathSync(mkdtempSync(join(tmpdir(), 'olplain-')));
+    dirs.push(plain);
+    index(plain);
+    await recordVerification(plain, record('feat-x'));
+    const r = await fleet(plain);
+    expect(r.live).toEqual(['v1']);
+    expect(r.ended.count).toBe(0);
+    expect(r.unknown.join(' ')).toMatch(/git could not list/);
+    // And the next write does not erase it.
+    await recordVerification(plain, record('feat-x', { id: 'v2' }));
+    expect((await fleet(plain)).live).toEqual(['v1', 'v2']);
+  });
+
+  it('a fleet record whose branch was never a branch of this clone is not read as deleted', async () => {
+    const { a } = clone();
+    // `branch` doubles as a task id: a name that never was a ref proves nothing when it is absent.
+    await recordVerification(a, record('task-3'));
+    const r = await fleet(a);
+    expect(r.live).toEqual(['v1']);
+    expect(r.ended.count).toBe(0);
+    expect(r.unknown.join(' ')).toMatch(/no evidence it ever was one/);
+  });
+
+  it('a record written on a real branch carries the evidence the deleted-branch rule needs', async () => {
+    const { a } = clone();
+    git(a, 'branch', 'tmp-x', 'main');
+    await recordVerification(a, record('tmp-x', { id: 'onref' }));
+    await recordVerification(a, record('task-3', { id: 'onid' }));
+    const onDisk = JSON.parse(readFileSync(await sharedRecords(a), 'utf-8')) as Array<{ id: string; branchWasLocalRef?: boolean }>;
+    expect(onDisk.find(r => r.id === 'onref')!.branchWasLocalRef).toBe(true);
+    expect(onDisk.find(r => r.id === 'onid')!.branchWasLocalRef).toBeUndefined();
   });
 
   it('includeBoard never plans this directory\'s own entry against itself', async () => {

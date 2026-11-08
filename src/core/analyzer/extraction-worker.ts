@@ -9,9 +9,16 @@
  *   parent → { type: 'extract', id, file }   worker → { type: 'result', id, value }
  *                                                   | { type: 'failed', id, message }
  *
- * It contains NO extraction logic of its own — it calls the same
- * `dispatchFileExtract` the serial lane calls, which is what makes the two lanes
- * provably identical rather than merely similar.
+ * It contains NO extraction logic of its own — it calls the same `dispatchFileExtract` the serial
+ * lane calls. That makes the two lanes share one EXTRACTOR; it does not by itself make their
+ * answers identical, and claiming it did was overstated (change:
+ * fix-recheck-failed-worker-extractions). Everything around the call differs: this thread loads its
+ * own grammars, and the answer has to survive a structured clone back to the parent. A grammar that
+ * resolves on the main thread but not here, or a fact object that will not clone, produces a
+ * different answer from identical code on identical input — which is why nothing this thread
+ * reports as a FAILURE or as an unproven SILENCE is taken as the file's verdict. Lane equivalence
+ * is a property the parent enforces by re-checking those answers on the main thread, not a property
+ * this file can assert on its own. See `extraction-pool.ts`.
  *
  * Two honesty rules are implemented here:
  *
@@ -177,10 +184,26 @@ async function main(): Promise<void> {
       inFlight = { id: msg.id, path: msg.file.path };
       try {
         const value = await dispatchFileExtract(msg.file);
-        post({ type: 'result', id: msg.id, value });
+        // SENDING sits in its own try on purpose (change: fix-recheck-failed-worker-extractions).
+        // `postMessage` structured-clones the result, so a fact object carrying anything
+        // unclonable — a function-valued field, a native handle — throws HERE, after the file
+        // extracted perfectly well. Caught by the extractor's own `catch` it would be reported as
+        // this FILE's parse failure, which is a lie about the source: it is a transport defect in
+        // this lane. The parent re-checks every worker failure on the main thread, so the file
+        // still reaches the graph either way; naming the cause is what makes that readable.
+        try {
+          post({ type: 'result', id: msg.id, value });
+        } catch (err) {
+          post({
+            type: 'failed',
+            id: msg.id,
+            message: `extracted result for ${msg.file.path} could not be sent from the extraction worker`
+              + ` — ${(err as Error).message}`,
+          });
+        }
       } catch (err) {
-        // Mirrors the serial lane: a throwing extractor is a parse failure for THIS file,
-        // recorded as such by the parent — not a reason to fall back or retry.
+        // The extractor itself threw. Answered for this file, but NOT as its verdict: the parent
+        // re-extracts it on the main thread and records only what the main thread finds.
         post({ type: 'failed', id: msg.id, message: (err as Error).message });
       } finally {
         inFlight = undefined;

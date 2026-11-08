@@ -215,7 +215,22 @@ export type ExternalKind = 'http' | 'database' | 'filesystem' | 'stdlib' | 'unkn
 export const AMBIGUOUS_CANDIDATE_CAP = 8;
 
 /** Which resolution strategy refused to bind because the candidate set was ambiguous. */
-export type AmbiguousStrategy = 'name_only' | 'self_cls' | 'type_name' | 'type_inference' | 'receiver_inferred' | 'overload';
+export type AmbiguousStrategy =
+  | 'name_only'
+  | 'self_cls'
+  | 'type_name'
+  | 'type_inference'
+  | 'receiver_inferred'
+  | 'overload'
+  /**
+   * CHA refused a `recv.m()` site's name-only fan-out because the receiver is statically known
+   * NOT to be an in-repo value — it is a package/module qualifier, or its declared type is
+   * qualified by one, that the source says lives outside this repository
+   * (change: suppress-false-cha-name-only). The in-repo methods named `m` are recorded as
+   * candidates the resolver declined to bind, so removing the former false edges cannot promote
+   * any of them to confidently dead.
+   */
+  | 'cha_receiver_outside_repo';
 
 /**
  * A call site the resolution ladder refused to bind because more than one candidate

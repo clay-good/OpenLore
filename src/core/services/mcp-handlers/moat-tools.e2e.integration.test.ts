@@ -221,7 +221,7 @@ describe('boundary and error paths (safe-for-users robustness)', () => {
     await recordVerification(root, {
       id: 'v-nograph',
       verdict: 'merge-compatible',
-      branch: 'feat/y',
+      branch: 'main',
       baseCommit: git(root, ['rev-parse', 'HEAD']).trim(),
       producedBy: 'certify_merge',
       anchors: [{ nodeId: 'src/lib.ts::parseConfig', symbolName: 'parseConfig', filePath: 'src/lib.ts', contentHash: 'deadbeef' }],
@@ -251,7 +251,7 @@ describe('fleet_status on a real repo', () => {
     await recordVerification(root, {
       id: 'v1',
       verdict: 'blast-radius-clean',
-      branch: 'feat/x',
+      branch: 'main',
       baseCommit: git(root, ['rev-parse', 'HEAD']).trim(),
       producedBy: 'blast_radius',
       anchors: [{

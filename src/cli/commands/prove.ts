@@ -40,6 +40,7 @@ import {
   type AgentRunner, type Condition, type Metrics, type Cell,
 } from '../../core/agent-eval/measure.js';
 import { estimateCells } from '../../core/agent-eval/estimate.js';
+import { jsonOutput } from '../output.js';
 import {
   estimateVocabularyRecall,
   type RetrievalRecallEstimate,
@@ -490,10 +491,10 @@ Examples:
     }
 
     if (json) {
-      console.log(JSON.stringify({
+      console.log(jsonOutput({
         ...serializeScorecard(result.scorecard!, result.meta!),
         retrievalRecall: result.retrievalRecall,
-      }, null, 2));
+      }));
     } else if (markdown) {
       const recall = result.retrievalRecall;
       console.log(renderScorecardMarkdown(result.scorecard!, result.meta!)

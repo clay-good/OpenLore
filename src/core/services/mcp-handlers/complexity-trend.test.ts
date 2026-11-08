@@ -131,7 +131,7 @@ describe('get_health_map carries the trend', () => {
       final,
     ]);
     const store = EdgeStore.open(join(root, 'graph.db'));
-    store.insertChangeCoupling({ churn: new Map([['src/grow.ts', 3]]), coupling: new Map(), stats: { commitsScanned: 3, bulkCommitsFiltered: 0, filesTracked: 1 } });
+    store.insertChangeCoupling({ churn: new Map([['src/grow.ts', 3]]), coupling: new Map(), stats: { commitsScanned: 3, bulkCommitsFiltered: 0, filesTracked: 1, couplingComputed: true, coPairsCounted: 0 } });
     const nodes = await currentNodes(root, final);
     vi.mocked(readCachedContext).mockResolvedValue({
       callGraph: { nodes, edges: [], classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [], stats: { totalNodes: nodes.length, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 } },

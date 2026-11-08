@@ -20,6 +20,7 @@ import { logger } from '../../utils/logger.js';
 // lines carry intentional \n spacing that the sanitizer would strip.
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { withQuietStdout } from '../../utils/quiet-stdout.js';
+import { jsonOutput } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
@@ -101,7 +102,11 @@ async function runInject(
       if (silentWithoutIndex) out = rest;
       else if (buildNote) out = [`[OpenLore] ${safe(buildNote)}`, rest].filter(Boolean).join('\n\n');
     }
-    if (out) console.log(out);
+    // Screened on the way out, whole-block: the framed part is already screened by
+    // frameServedContent, but the pointer line and the build note are assembled here, and this is
+    // the always-on UserPromptSubmit path. A bare console.log is invisible to the terminal-sink
+    // guard, which only inspects INTERPOLATIONS — which is why this leaked for so long.
+    if (out) console.log(safe(out, { keepNewlines: true }));
   } catch {
     // buildInjection is fail-open, but guard the print path too: never throw.
   }
@@ -115,7 +120,7 @@ async function runProposalOnly(directory: string, taskOpt: string | undefined): 
     catch { prompt = ''; }
   }
   const context = await withQuietStdout(() => buildProposalOnlyInjection(directory, prompt));
-  if (context) console.log(context);
+  if (context) console.log(safe(context, { keepNewlines: true }));
 }
 
 /**
@@ -193,20 +198,14 @@ export function autoAcceptLine(entries: ReadonlyArray<{ title: string }>): strin
 function printPrimer(directory: string, asJson: boolean, buildNote?: string, decisionsLine?: string): void {
   const ready = hasAnalysis(directory);
   if (asJson) {
-    console.log(
-      JSON.stringify(
-        {
-          openlore: ready ? 'ready' : 'no-analysis',
-          message: ready
-            ? 'OpenLore architectural memory is active. Call orient with a task before reading source files.'
-            : buildNote ?? 'OpenLore is installed but no analysis was found. Run "openlore analyze" to build the graph.',
-          usage: 'openlore orient --json --task "<task description>"',
-          ...(decisionsLine ? { decisions: decisionsLine } : {}),
-        },
-        null,
-        2
-      )
-    );
+    console.log(jsonOutput({
+      openlore: ready ? 'ready' : 'no-analysis',
+      message: ready
+        ? 'OpenLore architectural memory is active. Call orient with a task before reading source files.'
+        : buildNote ?? 'OpenLore is installed but no analysis was found. Run "openlore analyze" to build the graph.',
+      usage: 'openlore orient --json --task "<task description>"',
+      ...(decisionsLine ? { decisions: decisionsLine } : {}),
+    }));
     return;
   }
   if (ready) {
@@ -404,14 +403,14 @@ prints a short session-start primer (used by the install SessionStart hook).
       // Always emit structured results (including the "no analysis" error object)
       // on stdout so wrapper scripts can parse them — mirroring the MCP tool.
       if (asJson) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(jsonOutput(result));
       } else {
         printHuman(result);
       }
     } catch (err) {
       const message = (err as Error).message;
       if (asJson) {
-        console.log(JSON.stringify({ error: message }, null, 2));
+        console.log(jsonOutput({ error: message }));
       } else {
         logger.error(`orient failed: ${message}`);
       }
