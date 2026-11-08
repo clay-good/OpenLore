@@ -166,7 +166,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
 
   it('discloses an unknown service', () => {
     const p = direct({ registrations: [goReg({ service: 'BillingService' })] });
-    expect(p.unresolvedRegistrations).toEqual([{ file: 'cmd/server/main.go', line: 12, service: 'BillingService', reason: 'unknown-service' }]);
+    expect(p.unresolvedRegistrations).toEqual([{ file: 'cmd/server/main.go', line: 12, service: 'BillingService', className: 'orderServer', reason: 'unknown-service' }]);
     expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
   });
 
@@ -177,7 +177,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
       { path: 'proto/common.proto', content: COMMON },
     ] });
     expect(p.unresolvedRegistrations).toEqual([{
-      file: 'cmd/server/main.go', line: 12, service: 'OrderService', reason: 'ambiguous-service',
+      file: 'cmd/server/main.go', line: 12, service: 'OrderService', className: 'orderServer', reason: 'ambiguous-service',
       detail: 'shop.orders.v1.OrderService, shop.orders.v2.OrderService',
     }]);
     expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
@@ -189,7 +189,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
       { path: 'proto/common.proto', content: COMMON },
     ] });
     expect(p.unresolvedRegistrations).toEqual([{
-      file: 'cmd/server/main.go', line: 12, service: 'shop.orders.v1.OrderService', reason: 'ambiguous-service',
+      file: 'cmd/server/main.go', line: 12, service: 'shop.orders.v1.OrderService', className: 'orderServer', reason: 'ambiguous-service',
       detail: 'copy/orders.proto, proto/orders.proto',
     }]);
   });
@@ -208,7 +208,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
     ]) });
     expect(p.unresolvedRegistrations).toEqual([{
       file: 'cmd/server/main.go', line: 12, service: 'shop.orders.v1.OrderService', rpc: 'GetOrder',
-      reason: 'ambiguous-implementation', detail: 'more than one `GetOrder` on orderServer',
+      symbol: 'GetOrder', className: 'orderServer', reason: 'ambiguous-implementation', detail: 'more than one `GetOrder` on orderServer',
     }]);
     expect(edgesOf(p, 'implements_endpoint')).toEqual([
       'cmd/server/main.go::orderServer.ListOrders -> proto/orders.proto::/shop.orders.v1.OrderService/ListOrders',
@@ -407,7 +407,7 @@ describe('projectContracts with protobuf', () => {
   it('discloses unbound RPCs and unresolved registrations, bounded with totals', () => {
     const p = viaContracts({ grpcRegistrations: [goReg({ service: 'Nope' })] });
     expect(p.unboundRpcs.total).toBe(2);
-    expect(p.unresolvedRegistrations).toEqual({ items: [{ file: 'cmd/server/main.go', line: 12, service: 'Nope', reason: 'unknown-service' }], total: 1 });
+    expect(p.unresolvedRegistrations).toEqual({ items: [{ file: 'cmd/server/main.go', line: 12, service: 'Nope', className: 'orderServer', reason: 'unknown-service' }], total: 1 });
     expect(contractDisclosure(p)).toBeDefined();
   });
 
@@ -630,5 +630,37 @@ describe('round-4 e2e review: a registration names ONE type', () => {
       ]),
     });
     expect(edgesOf(p, 'implements_endpoint')).toHaveLength(2);
+  });
+});
+
+/**
+ * An unbound registration must NAME what it left unrooted, not only the service
+ * (change: cap-unbound-contract-handler-confidence). `find_dead_code` reads these fields to keep
+ * such a symbol out of its high-confidence dead verdicts, so a disclosure that names no symbol
+ * leaves the handler looking confidently dead.
+ */
+describe('an unbound registration names the symbol or class it left unrooted', () => {
+  it('Node: a per-RPC refusal names the function the map entry named', () => {
+    const p = direct({
+      registrations: [{ file: 'srv/server.js', line: 2, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', methods: [{ key: 'getOrder', fn: 'handleGetOrder', imported: true, from: './handlers' }] }],
+      resolveImplementation: () => [],
+    });
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ rpc: 'GetOrder', symbol: 'handleGetOrder', reason: 'implementation-not-found' })]);
+  });
+
+  it('Go: a registration found nowhere it may be names its implementation class', () => {
+    const p = direct({ registrations: [goReg()], resolveImplementation: () => [] });
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ className: 'orderServer', reason: 'implementation-not-found' })]);
+  });
+
+  it('a service expression that is not literal still names the class it registered', () => {
+    const p = direct({ registrations: [goReg({ notLiteral: 'the implementation is `srv`' })], resolveImplementation: resolverOver(SERVER) });
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ className: 'orderServer', reason: 'not-literal' })]);
+  });
+
+  it('an inline implementation names no symbol, because the literal names no function', () => {
+    const p = direct({ registrations: [{ file: 'src/server.js', line: 4, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', methods: [{ key: 'getOrder' }] }], resolveImplementation: () => [] });
+    expect(p.unresolvedRegistrations[0].symbol).toBeUndefined();
+    expect(p.unresolvedRegistrations[0].className).toBeUndefined();
   });
 });
