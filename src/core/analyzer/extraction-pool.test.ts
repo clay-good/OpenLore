@@ -38,6 +38,7 @@ import {
   EXTRACTION_POOL_MAX,
   EXTRACTION_POOL_MIN_FILES,
   EXTRACTION_POOL_STARTUP_TIMEOUT_MS,
+  EXTRACTION_POOL_FAILURE_RECHECK_CAP,
   SLOW_FILE_DISCLOSURE_MS,
 } from '../../constants.js';
 
@@ -101,6 +102,14 @@ interface StubOptions {
   throwsFor?: (language: string) => boolean;
   /** Answer normally for the first N files, then throw — a worker that degrades mid-run. */
   throwsAfter?: number;
+  /**
+   * Report a FAILURE for these specific files, with `failMessage`. Models the real grpc-go defect:
+   * a worker that extracts a whole language fine and then fails on ONE file, for a reason that is
+   * about the worker (a result that would not structured-clone) rather than about the source.
+   */
+  failsOn?: (file: ExtractionFile, index: number) => boolean;
+  /** The message `failsOn` answers with. */
+  failMessage?: string;
   /**
    * Report a WORKER FAULT for these files — what the worker's `uncaughtException` boundary sends
    * when something faults inside the thread rather than inside the file's extraction (change:
@@ -169,6 +178,15 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
             setTimeout(() => emit('exit', 0), 0);
             return;
           }
+          if (opts.failsOn?.(file, id)) {
+            opts.completionLog?.push(id);
+            send({
+              type: 'failed',
+              id: replyId,
+              message: opts.failMessage ?? 'function toString() { [native code] } could not be cloned.',
+            });
+            return;
+          }
           if (opts.throwsFor?.(file.language)) {
             opts.completionLog?.push(id);
             send({ type: 'failed', id: replyId, message: `Cannot find module 'tree-sitter-${file.language}'` });
@@ -220,11 +238,18 @@ function isEmpty(result: FileExtractResult | undefined): boolean {
   return result.nodes.length === 0 && result.rawEdges.length === 0 && !result.parseHealth && !result.style;
 }
 
+/** The serial lane's own outcomes for the same input — the reference every lane must match. */
+async function runSerialLane(files: ExtractionFile[]): Promise<Array<{ status: string }>> {
+  const { outcomes } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, { poolSize: 0 });
+  return outcomes;
+}
+
 /** A disclosure with the routine fields filled in, for the describe-only assertions. */
 function disclosure(partial: Partial<ExtractionLaneDisclosure>): ExtractionLaneDisclosure {
   return {
-    lane: 'serial', poolSize: 0, workerFallbackFiles: [], laneDefectFiles: [], unprovenRechecks: 0,
-    slowFiles: [], ...partial,
+    lane: 'serial', poolSize: 0, workerFallbackFiles: [], laneDefectFiles: [],
+    workerFailureDefectFiles: [], failureRechecks: 0, laneRetiredAfterFailures: false,
+    unprovenRechecks: 0, slowFiles: [], ...partial,
   };
 }
 
@@ -400,7 +425,11 @@ describe('extraction pool — fail-soft ladder', () => {
       .build(files.map(f => ({ ...f })));
     expect(result.nodes.size).toBeGreaterThan(0);
     expect(result.parseHealthByFile).toBeUndefined();
-    expect(result.extractionLane?.laneDefectFiles).toHaveLength(files.length);
+    // Counted on the failure lane rather than the unproven-silence lane since change
+    // fix-recheck-failed-worker-extractions: a worker FAILURE is not a silence, and is now
+    // re-checked whether or not the worker ever proved the language.
+    expect(result.extractionLane?.laneDefectFiles).toEqual([]);
+    expect(result.extractionLane?.workerFailureDefectFiles).toHaveLength(files.length);
     expect(JSON.stringify(serializeCallGraph(result))).toBe(await buildJson(files));
   }, 30_000);
 
@@ -513,8 +542,12 @@ describe('extraction pool — never trust an unproven silence', () => {
     });
 
     expect(d.lane).toBe('pooled');
-    expect(d.unprovenRechecks).toBe(files.length);
-    expect(d.laneDefectFiles).toHaveLength(files.length);
+    // A throw is no longer the unproven-silence guard's business: it is re-checked for being a
+    // FAILURE, proven language or not (change: fix-recheck-failed-worker-extractions). The
+    // behaviour this test exists for — no file lost, no parse failure recorded — is unchanged.
+    expect(d.unprovenRechecks).toBe(0);
+    expect(d.failureRechecks).toBe(files.length);
+    expect(d.workerFailureDefectFiles).toHaveLength(files.length);
     expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
   }, 30_000);
 
@@ -527,20 +560,25 @@ describe('extraction pool — never trust an unproven silence', () => {
     expect(pooled).toBe(await buildJson(files));
   }, 30_000);
 
-  it('trusts an error from a worker that has already proven the language', async () => {
-    // The guard must not launder every error into a re-check: once a worker has shown it
-    // can extract a language, a throw from it is a real per-file parse failure and is
-    // recorded as one — exactly as the serial lane would.
+  it('re-checks an error even from a worker that has already proven the language', async () => {
+    // Was "trusts an error from a worker that has already proven the language" — which is the
+    // asymmetry that let the grpc-go file go missing (change:
+    // fix-recheck-failed-worker-extractions). Having proven a language says the grammar loaded; it
+    // says nothing about the next file's result surviving the channel, so a failure is still never
+    // this file's verdict. These files all extract on the main thread, so every late throw is a
+    // lane defect and no parse failure is recorded.
     const files = corpus(6);
     const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
       workerFactory: stubWorkerFactory({ throwsAfter: 3 }),
       poolSize: 1,
     });
     expect(d.lane).toBe('pooled');
-    // The first three prove TypeScript; the throws that follow are believed, not re-checked.
+    // Errors are no longer the unproven-silence guard's business — they have their own lane.
     expect(d.unprovenRechecks).toBe(0);
     expect(d.laneDefectFiles).toEqual([]);
-    expect(outcomes.slice(3).every(o => o.status === 'error')).toBe(true);
+    expect(d.failureRechecks).toBe(3);
+    expect(d.workerFailureDefectFiles).toEqual(['src/mod3.ts', 'src/mod4.ts', 'src/mod5.ts']);
+    expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
   }, 30_000);
 
   it('treats a language with no extractor as a deterministic answer, not a silence', async () => {
@@ -556,6 +594,128 @@ describe('extraction pool — never trust an unproven silence', () => {
     expect(d.unprovenRechecks).toBe(0);
     expect(outcomes.every(o => o.status === 'ok' && o.value === undefined)).toBe(true);
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+
+describe('extraction pool — never claim a parse failure on a worker\'s word alone', () => {
+  it('re-extracts a file a worker FAILED on, keeps the main-thread result, and discloses the defect', async () => {
+    // The real defect, reduced (change: fix-recheck-failed-worker-extractions). A worker extracted
+    // 1,400 Go files, then answered `failed` for ONE — because the extracted facts carried a
+    // function-valued field that would not structured-clone back across the channel. The old pool
+    // wrote that failure into the slot, so the builder recorded `parse-failure` for a file the
+    // serial lane parses perfectly and the graph lost all 13 of its functions. The worker's answer
+    // is now never the file's verdict.
+    const files = corpus(40);
+    const victim = files[17].path;
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ failsOn: (f) => f.path === victim }),
+      poolSize: 2,
+    });
+
+    expect(d.lane).toBe('pooled');
+    expect(d.failureRechecks).toBe(1);
+    expect(d.workerFailureDefectFiles).toEqual([victim]);
+    expect(d.laneRetiredAfterFailures).toBe(false);
+    // The serial lane's own answer, not an error — the file is whole in the graph.
+    const serialReference = await runSerialLane(files);
+    expect(outcomes[17].status).toBe('ok');
+    expect(outcomes).toStrictEqual(serialReference);
+    // And it is disclosed in the SAME channel as the empty-result defect, worded apart from it.
+    const note = describeExtractionLane(d);
+    expect(note).toMatch(/reported a parse failure for 1 file\(s\) that the main thread extracted fine/);
+    expect(note).toContain(victim);
+    expect(note).toContain('no parse failure was recorded');
+    expect(note).toContain('OPENLORE_NO_WORKERS=1');
+    expect(note).not.toMatch(/reported no symbols/);
+  }, 60_000);
+
+  it('writes no parse-health record for a file only the WORKER could not parse', async () => {
+    // The end-to-end shape of the same thing, through the builder: `parse-health.json` must not
+    // name a file whose only failure happened inside a worker.
+    const files = corpus(40);
+    const victim = files[17].path;
+    const result = await new CallGraphBuilder({
+      extraction: { workerFactory: stubWorkerFactory({ failsOn: (f) => f.path === victim }), poolSize: 2 },
+    }).build(files.map(f => ({ ...f })));
+
+    expect(result.parseHealthByFile?.has(victim) ?? false).toBe(false);
+    expect([...result.nodes.values()].some(n => n.filePath === victim)).toBe(true);
+    expect(JSON.stringify(serializeCallGraph(result))).toBe(await buildJson(files));
+  }, 60_000);
+
+  it('still records a parse failure when the MAIN THREAD cannot parse the file either', async () => {
+    // The guard must not launder a real failure. When the reference implementation fails the same
+    // way, the failure is a property of the file and keeps its `parse-failure` classification —
+    // and it is NOT disclosed as a lane defect, because the two lanes agreed.
+    const files = corpus(40);
+    const victim = files[9].path;
+    const bothFail = async (file: ExtractionFile): Promise<FileExtractResult | undefined> => {
+      if (file.path === victim) throw new Error('really unparseable');
+      return dispatchFileExtract(file);
+    };
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, bothFail, isEmpty, {
+      workerFactory: stubWorkerFactory({ failsOn: (f) => f.path === victim }),
+      poolSize: 2,
+    });
+
+    expect(d.failureRechecks).toBe(1);
+    expect(d.workerFailureDefectFiles).toEqual([]);
+    expect(outcomes[9].status).toBe('error');
+    // The recorded message is the MAIN THREAD's own, never the worker's.
+    expect((outcomes[9] as { error: Error }).error.message).toBe('really unparseable');
+    // Nothing to tell a human about the lane: it behaved exactly as the serial lane would.
+    expect(describeExtractionLane(d)).toBeUndefined();
+  }, 60_000);
+
+  it('does NOT re-check a parse-budget overrun — that bound belongs to the file', async () => {
+    // Already covered for its own reasons below, asserted here against the NEW counter: the one
+    // failure shape that is a property of the file must not become a second full budget spend.
+    const files = corpus(40);
+    const { disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ budgetOverrunOn: (f) => f.path === files[5].path }),
+      poolSize: 2,
+    });
+    expect(d.failureRechecks).toBe(0);
+    expect(d.workerFailureDefectFiles).toEqual([]);
+  }, 60_000);
+
+  it('retires the pool at the recheck cap instead of double-extracting the whole repository', async () => {
+    // The cost bound. A lane that fails everything must not cost two full extractions of every
+    // file: past the cap the workers stop claiming files and the remainder runs on the main thread
+    // ONCE. Completeness is never the thing that gives way — every file is still extracted.
+    const files = corpus(EXTRACTION_POOL_FAILURE_RECHECK_CAP + 40);
+    const completionLog: number[] = [];
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      // `throwsAfter: 0` fails every file, but only AFTER the worker has answered — so the
+      // unproven-silence guard is not what is being measured here.
+      workerFactory: stubWorkerFactory({ failsOn: () => true, completionLog }),
+      poolSize: 1,
+    });
+
+    expect(d.laneRetiredAfterFailures).toBe(true);
+    expect(d.failureRechecks).toBe(EXTRACTION_POOL_FAILURE_RECHECK_CAP);
+    // The worker was never handed the files past the cap — that is the bound.
+    expect(completionLog.length).toBe(EXTRACTION_POOL_FAILURE_RECHECK_CAP);
+    // Yet every file is in the answer, and the answer is the serial lane's.
+    expect(outcomes).toHaveLength(files.length);
+    expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
+    expect(outcomes).toStrictEqual(await runSerialLane(files));
+    // The retirement is disclosed, with its count and its remedy.
+    const note = describeExtractionLane(d);
+    expect(note).toMatch(new RegExp(`retired after ${EXTRACTION_POOL_FAILURE_RECHECK_CAP} worker failure\\(s\\)`));
+    expect(note).toContain('extracted on the main thread');
+    expect(note).toContain('OPENLORE_NO_WORKERS=1');
+  }, 120_000);
+
+  it('a lane that fails every file still yields a graph byte-identical to the serial lane', async () => {
+    const files = corpus(EXTRACTION_POOL_FAILURE_RECHECK_CAP + 20);
+    const pooled = await buildJson(files, {
+      workerFactory: stubWorkerFactory({ failsOn: () => true }),
+      poolSize: 2,
+    });
+    expect(pooled).toBe(await buildJson(files));
+  }, 120_000);
 });
 
 describe('extraction pool — scheduling independence', () => {
