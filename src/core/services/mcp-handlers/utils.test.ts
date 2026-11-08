@@ -582,7 +582,9 @@ describe('fingerprint byte budget diagnostics', () => {
 
     expect(message).not.toContain('\nAll clear');
     expect(message).not.toContain('');
-    expect(message).toContain('data/evilAll clear: nothing to exclude[2J.ts');
+    // The whole escape sequence goes now, not only its ESC: a leftover `[2J` welds onto the
+    // next word, which is how an escape prefix evaded a word-boundary-anchored screen.
+    expect(message).toContain('data/evilAll clear: nothing to exclude.ts');
   });
 });
 

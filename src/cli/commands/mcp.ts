@@ -77,6 +77,7 @@ import {
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
 import { ensureServeDaemon, callServeTool, isServePresetRejection, type ServeEndpoint } from '../../core/services/serve-client.js';
 import { createShutdownCoordinator } from '../../utils/shutdown.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { buildToolListPayload } from '../../core/services/mcp-standing-cost.js';
 import {
   handleAnalyzeCodebase,
@@ -3388,7 +3389,12 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         }
       }
 
-      return { content };
+      // Last gate before the transport: every content item is screened, not just the result
+      // body. The freshness/panic/ledger notes are OpenLore-authored templates, but they quote
+      // repository text (a file name, a memory, a decision title), and a forged line in the note
+      // beside a verdict is the same attack as one inside it. Idempotent with the screening
+      // `capStructuredResult` already did on the body.
+      return { content: content.map((c) => ({ ...c, text: sanitizeForTerminal(c.text, { keepNewlines: true }) })) };
     } catch (err) {
       // A thrown McpError is a protocol-level error — let the SDK serialize it as a JSON-RPC
       // error response. Argument validation no longer throws one (it returns an `isError` result).

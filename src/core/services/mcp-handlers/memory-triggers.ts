@@ -26,7 +26,7 @@ import type { TraversalIndex } from '../../analyzer/condensation.js';
 import { join } from 'node:path';
 import { MAX_QUERY_LENGTH, SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
 import { readJsonArtifactCached } from './artifact-cache.js';
-import { detectInjectionShapes, type InjectionShape } from '../served-content.js';
+import { screenServedText, WITHHELD_SERVED_TEXT, type InjectionShape } from '../served-content.js';
 import { redactSecretText } from '../secret-redaction.js';
 import { isWellFormedClaim, MAX_MEMORY_CLAIMS } from './memory-claims.js';
 
@@ -92,13 +92,16 @@ const MAX_INJECTION_BYTES = 64 * 1024;
 const MAX_GLOB_CANDIDATE_LENGTH = 1024;
 
 /**
- * A string field from a stored anchor: bounded, credential-redacted, and replaced by a placeholder
- * when it reads like an instruction — anchor text is repository content too. Anything else is dropped.
+ * A string field from a stored anchor: bounded, credential-redacted, screened, and replaced by a
+ * placeholder when it reads like an instruction — anchor text is repository content too. Anything
+ * else is dropped. The screened text is what is returned, never the raw field
+ * ({@link screenServedText}).
  */
 function anchorText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const text = redactSecretText(value.slice(0, REDACTION_WINDOW)).value.slice(0, MAX_TRIGGER_TEXT_LENGTH).replace(/[\uD800-\uDBFF]$/, '');
-  return detectInjectionShapes(text).length ? '[withheld: reads like an instruction]' : text;
+  const screen = screenServedText(text);
+  return screen.withheld ? WITHHELD_SERVED_TEXT : screen.sanitized;
 }
 
 /** Only the known fields of a carry receipt, each bounded — the store is repo content. */
@@ -666,12 +669,17 @@ export function selectInjectedMemories(
     const kept = redaction.value.length > MAX_INJECTED_CONTENT_LENGTH
       ? redaction.value.slice(0, MAX_INJECTED_CONTENT_LENGTH).replace(/[\uD800-\uDBFF]$/, '')
       : redaction.value;
-    const shapes = [...new Set(detectInjectionShapes(kept).map(x => x.shape))].sort();
+    // Screened on exactly the text that would be served, not on the raw note: an escape prefix
+    // used to leave `m` against the `I` of `IGNORE` and walk the whole imperative past the screen
+    // (see screenServedText). `screen.sanitized` is what is served, so the screened and the
+    // emitted representation cannot differ.
+    const screen = screenServedText(kept);
+    const shapes = screen.shapes;
     injected.push({
       id: m.id,
       // The stored type is repo content: outside the closed set it reads as `note`, as in recall.
       type: m.type && (MEMORY_TYPES as readonly string[]).includes(m.type) ? m.type : 'note',
-      ...(shapes.length ? { contentWithheld: { reason: 'injection-shaped' as const, shapes } } : { content: kept }),
+      ...(shapes.length ? { contentWithheld: { reason: 'injection-shaped' as const, shapes } } : { content: screen.sanitized }),
       ...(redaction.redactions.count > 0 ? { redacted: redaction.redactions.count } : {}),
       firedPredicate: p,
       freshness: f.freshness,
