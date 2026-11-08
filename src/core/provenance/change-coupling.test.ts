@@ -178,3 +178,110 @@ describe('analyzeChangeCoupling — graceful degradation', () => {
     }
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Opt-out of the quadratic co-occurrence pass (change: fix-briefing-since-ranking-and-cost).
+//
+// `briefing_since` reads only `churn`, yet the miner built the full O(files²)-per-commit
+// co-occurrence map on every call and threw it away. `includeCoupling: false` skips it.
+// The assertions below are OPERATION COUNTS (`stats.coPairsCounted`), never wall-clock
+// ratios — this repository has been bitten by timing assertions flaking under load.
+// ───────────────────────────────────────────────────────────────────────────────
+describe('analyzeChangeCoupling — includeCoupling opt-out', () => {
+  let repo: string;
+
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), 'coupling-optout-'));
+    git(repo, ['init', '-q', '-b', 'main']);
+    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+    git(repo, ['config', 'commit.gpgsign', 'false']);
+    // 6 commits, each touching 20 files (just under the bulk threshold) — the worst
+    // realistic shape for the quadratic pass: 190 pairs per commit.
+    const wide = Array.from({ length: 20 }, (_, i) => `w${i}.ts`);
+    for (let c = 0; c < 6; c++) commit(repo, wide, `wide${c}`);
+  });
+
+  afterAll(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+
+  it('computes the co-occurrence map by default (get_change_coupling depends on it)', async () => {
+    const r = await analyzeChangeCoupling(repo);
+    expect(r.stats.couplingComputed).toBe(true);
+    // 6 commits × C(20,2) = 6 × 190 pair increments.
+    expect(r.stats.coPairsCounted).toBe(1140);
+    expect(r.coupling.size).toBeGreaterThan(0);
+    expect((r.coupling.get('w0.ts') ?? []).some(c => c.file === 'w1.ts')).toBe(true);
+  });
+
+  it('skips every pair operation when the caller opts out, and says so', async () => {
+    const r = await analyzeChangeCoupling(repo, { includeCoupling: false });
+    expect(r.stats.coPairsCounted).toBe(0);       // the quadratic pass did not run at all
+    expect(r.stats.couplingComputed).toBe(false); // empty by request, not by evidence
+    expect(r.coupling.size).toBe(0);
+  });
+
+  it('returns byte-identical churn and scan stats either way (the opt-out changes no answer)', async () => {
+    const full = await analyzeChangeCoupling(repo);
+    const cheap = await analyzeChangeCoupling(repo, { includeCoupling: false });
+    expect([...cheap.churn.entries()].sort()).toEqual([...full.churn.entries()].sort());
+    expect(cheap.stats.commitsScanned).toBe(full.stats.commitsScanned);
+    expect(cheap.stats.bulkCommitsFiltered).toBe(full.stats.bulkCommitsFiltered);
+    expect(cheap.stats.filesTracked).toBe(full.stats.filesTracked);
+  });
+
+  it('stays bounded by maxCommits on a long history (the scan never grows unbounded)', async () => {
+    const r = await analyzeChangeCoupling(repo, { maxCommits: 2, includeCoupling: false });
+    expect(r.stats.commitsScanned).toBeLessThanOrEqual(2);
+    expect(r.stats.coPairsCounted).toBe(0);
+  });
+});
+
+describe('analyzeChangeCoupling — hostile / degenerate histories', () => {
+  it('a two-commit repo yields churn with no pair work when opted out', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'coupling-tiny-'));
+    try {
+      git(repo, ['init', '-q', '-b', 'main']);
+      git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+      git(repo, ['config', 'commit.gpgsign', 'false']);
+      commit(repo, ['a.ts'], 'c1');
+      commit(repo, ['a.ts'], 'c2');
+      const r = await analyzeChangeCoupling(repo, { includeCoupling: false });
+      expect(r.stats.commitsScanned).toBe(2);
+      expect(r.churn.get('a.ts')).toBe(2);
+      expect(r.stats.coPairsCounted).toBe(0);
+    } finally {
+      rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+
+  it('a repo where every file is new in one commit tracks churn 1 for each', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'coupling-allnew-'));
+    try {
+      git(repo, ['init', '-q', '-b', 'main']);
+      git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+      git(repo, ['config', 'commit.gpgsign', 'false']);
+      commit(repo, ['n0.ts', 'n1.ts', 'n2.ts'], 'all new');
+      const r = await analyzeChangeCoupling(repo, { includeCoupling: false });
+      expect(r.churn.get('n0.ts')).toBe(1);
+      expect(r.stats.filesTracked).toBe(3);
+      expect(r.stats.couplingComputed).toBe(false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+
+  it('an unresolvable start ref degrades to empty and still reports the requested mode', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'coupling-badref-'));
+    try {
+      git(repo, ['init', '-q', '-b', 'main']);
+      git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+      git(repo, ['config', 'commit.gpgsign', 'false']);
+      commit(repo, ['a.ts'], 'c1');
+      const r = await analyzeChangeCoupling(repo, { startRef: '--output=/tmp/pwned', includeCoupling: false });
+      expect(r.churn.size).toBe(0);
+      expect(r.stats.couplingComputed).toBe(false);
+      expect(r.stats.coPairsCounted).toBe(0);
+    } finally {
+      rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+});
