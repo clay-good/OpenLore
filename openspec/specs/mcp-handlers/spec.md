@@ -4231,7 +4231,10 @@ live peer entry, using the existing footprint and hazard classifier plus a `dupl
 for two write-sets that create the same symbol name or file. `map_in_flight_conflicts` SHALL treat
 live entries as agent task descriptors, and `fleet_status` SHALL list them. An entry SHALL end when
 released, when its branch is merged or deleted, or when it is not refreshed within the session
-expiry rule. Entry titles SHALL be redacted and withheld when instruction-shaped, and every peer field
+expiry rule. A check git could not answer SHALL NOT end an entry: when the clone's branches cannot
+be listed, neither a deleted nor a merged branch is detected, and the entry ends on release or on the
+expiry rule. A branch whose short name git disambiguates (`heads/<name>`, when a tag shares the name)
+SHALL be matched to its branch, not read as deleted. Entry titles SHALL be redacted and withheld when instruction-shaped, and every peer field
 SHALL be served as `local-unreviewed` data. Hazards SHALL be advisory unless `enforcement.policy`
 names them blocking.
 
@@ -4405,6 +4408,65 @@ are read, their text is screened before it is served, a file that cannot be read
 over, and a record from another worktree is listed as `other-worktree`, not checked against this
 worktree's code. `plan_parallel_work` SHALL offer an option that adds live board entries from other
 worktrees to the planned tasks, named `board:<actorId>`; this directory's own entries are not added.
+
+A verification record SHALL end on the same evidence as a peer-board entry, decided by the board's
+own predicates rather than a copy of them: not re-proven within 30 minutes (the session expiry
+rule), its recorded directory removed, its branch deleted, or its branch merged into the default
+branch. A record SHOULD carry the time it was recorded. That field is optional, so a record written
+before this rule existed still parses.
+
+A rule the record does not carry the evidence for SHALL be reported as unknown and skipped, never
+resolved as ended. A record with no recorded time, or one whose recorded time cannot be read as a
+date, SHALL NOT be expired. A record with no recorded directory SHALL NOT be a removed worktree. A
+base commit that is not a commit id SHALL leave the merged rule unknown instead of being passed to
+git. A git command that could not be answered SHALL NOT be read as evidence: when the clone's
+branches cannot be listed at all, the branch rules SHALL be unknown rather than `branch-deleted`. A
+branch absent from the clone SHALL be `branch-deleted` only when the record carries evidence that
+the name was a local branch when it was written, captured at write time; without it the branch rules
+SHALL be unknown, since the same field may name a task that never was a branch. Judging many records
+SHALL cost the same git work as judging one record per distinct branch.
+
+`fleet_status` SHALL stay read-only, reporting ended records as a count with their reasons and never
+as a live verdict, and SHALL name the rules it could not evaluate; the next write SHALL remove ended
+records from the records file. The surface SHALL disclose that nothing re-proves a record, so a
+verdict decays 30 minutes after it was recorded, and that no tool records a verdict yet, so an empty
+record list means nothing was recorded rather than that nothing holds.
+
+#### Scenario: A verdict whose branch landed is no longer live
+
+- **GIVEN** a verification record proved on a branch that is then merged into the default branch
+- **WHEN** fleet status is read
+- **THEN** the record is reported as ended with the reason `branch-merged`, not as a live verdict
+
+#### Scenario: A record with no recorded time is not expired
+
+- **GIVEN** a verification record carrying no recorded time
+- **WHEN** fleet status is read long after the session expiry
+- **THEN** the record is still live, and the expiry predicate is disclosed as unknown for it
+
+#### Scenario: Git that cannot be asked is not evidence of a deletion
+
+- **GIVEN** a verification record in a directory that is not a git work tree
+- **WHEN** fleet status is read
+- **THEN** the record is still live, the branch predicates are disclosed as unknown, and the next write does not remove it
+
+#### Scenario: A name that was never a branch is not a deleted branch
+
+- **GIVEN** a verification record whose branch names a task that is not a branch of this clone
+- **WHEN** fleet status is read
+- **THEN** the record is still live and the branch predicates are disclosed as unknown
+
+#### Scenario: A base commit that is not a commit id is never passed to git
+
+- **GIVEN** a verification record whose base commit is not a hexadecimal commit id
+- **WHEN** its lifecycle is judged
+- **THEN** the merged predicate is unknown, no revision is passed to git, and the record stays live
+
+#### Scenario: An ended record is removed on the next write
+
+- **GIVEN** a verification record that has ended
+- **WHEN** the next verification verdict is recorded
+- **THEN** the ended record is no longer in the records file
 
 #### Scenario: A fleet verdict is shared
 
