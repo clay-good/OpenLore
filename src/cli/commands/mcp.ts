@@ -1757,7 +1757,8 @@ export const TOOL_DEFINITIONS = [
       'your writeSet/readSet (symbols or files; unknown names = intended creations) to the clone\'s ' +
       'peer board and returns hazards vs live peers (the plan_parallel_work classes plus ' +
       'duplicate-intent). action: release when done, list to read. Entries end on release, merged or ' +
-      'deleted branch, or 30 min idle. Advisory; peer text is local-unreviewed.',
+      'deleted branch, or 30 min idle, never on a check git could not answer. ' +
+      'Advisory; peer text local-unreviewed.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1781,7 +1782,9 @@ export const TOOL_DEFINITIONS = [
       'against the current graph via the freshness lease: still-valid / carried / invalidated / ' +
       'needs-reverification — a verdict is never served fresh once its base moved without the check. ' +
       'Composes the coordination arc (plan_parallel_work → map_in_flight_conflicts → certify_merge), ' +
-      'referencing each tool rather than re-deriving it. Advisory, read-only, no LLM.',
+      'referencing each tool. A record ENDS on board-entry evidence (30 min idle, recorded dir gone, branch ' +
+      'deleted or merged): then a count with its reason, not a live verdict. A rule it could not evaluate is ' +
+      'in unknownPredicates, never read as ended. Advisory.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
