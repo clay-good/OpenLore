@@ -1643,6 +1643,92 @@ demote its own surprise tier.
 - **WHEN** churn is mined
 - **THEN** the result is identical to the pre-change behavior
 
+### Requirement: SurpriseIsWithheldPerFileWhenAFileHasNoBefore
+
+The `surprising-change` tier asserts "a hub whose file rarely changed before". The system SHALL
+withhold that label from any symbol whose file is reported ADDED (or renamed into its path) in the
+briefed range and carries no pre-base churn at that path: such a file did not exist before, so the
+premise is vacuous rather than true, and its zero prior churn SHALL NOT be read as stability. The
+symbol SHALL still be briefed, one tier lower, on its structural labels alone, and the withholding
+SHALL be stated on the entry and counted in a `withholding` receipt.
+
+#### Scenario: A high-fan-in symbol in a brand-new file is not surprising
+
+- **GIVEN** a changed file git reports as added since the base ref, with no pre-base churn
+- **AND** a high-fan-in symbol in it
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the symbol is not tiered `surprising-change`
+- **AND** it is still briefed at its structural tier with the withheld label and its reason
+
+#### Scenario: A long-lived, rarely-changed file keeps the label
+
+- **GIVEN** a hub in a file present at the base ref with low pre-base churn
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the symbol is tiered `surprising-change` with no withheld label
+
+#### Scenario: Absent from the churn window is not absent from history
+
+- **GIVEN** a modified file with no entry in the scanned churn window
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the label is kept, because the file existed and was simply never touched
+
+#### Scenario: A re-added path with real pre-base history keeps the label
+
+- **GIVEN** a file added in the briefed range whose path carries pre-base churn
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the label is kept, because its "before" is real
+
+### Requirement: HubTiersAreWithheldFromFunctionLocalHelpers
+
+The `surprising-change`, `hub-change` and `chokepoint-change` tiers all assert the symbol is a
+repository hub. The system SHALL withhold them from a changed symbol that is lexically nested
+inside another indexed function in the same file and every one of whose callers lies inside that
+enclosing function: its fan-in is internal to one body, so the significance belongs to the
+enclosing symbol. The symbol SHALL rank `ordinary-change`, SHALL retain its graph labels and
+fan-in as disclosed evidence, and the withholding SHALL name the enclosing symbol. A nested
+function with any caller outside its enclosing function, or with no caller, SHALL be unaffected.
+
+#### Scenario: A one-line nested helper is not the headline
+
+- **GIVEN** a nested arrow function with high fan-in, called only from its enclosing parser
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** it is tiered `ordinary-change` with its hub label and fan-in reported as evidence
+- **AND** the withheld tier names the enclosing function
+
+#### Scenario: A nested function called from outside keeps its tier
+
+- **GIVEN** a nested function with a caller outside its enclosing function
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** its hub-derived tier is assigned unchanged
+
+### Requirement: BriefingSinceDoesNotComputeTheCoOccurrenceMap
+
+`briefing_since` reads only the change-coupling miner's per-file churn and scan stats. It SHALL
+request the miner's churn-only mode so the O(files²)-per-commit co-occurrence pass is not computed
+and discarded. The miner SHALL keep the co-occurrence map as its default so the analyze-time
+snapshot that `get_change_coupling` serves is unchanged, SHALL return byte-identical churn and scan
+stats in either mode, and SHALL report which mode ran rather than letting an opted-out empty map
+read as an absence of co-change.
+
+#### Scenario: The cheap path performs no pair operations
+
+- **GIVEN** a history whose commits each touch many files
+- **WHEN** the miner is called in churn-only mode
+- **THEN** its co-occurrence pair operation count is zero and the coupling map is empty
+- **AND** the mode is reported so the emptiness is not read as evidence
+
+#### Scenario: The default still computes the map
+
+- **GIVEN** the same history
+- **WHEN** the miner is called with no mode option
+- **THEN** the co-occurrence map is computed as before
+
+#### Scenario: The opt-out changes no answer
+
+- **GIVEN** the same history mined in both modes
+- **WHEN** the churn maps and scan stats are compared
+- **THEN** they are identical
+
 ### Requirement: BriefingCapabilityClaimsAreCurrent
 
 The system SHALL NOT embed in any tool response a claim that a shipped capability does not exist.
