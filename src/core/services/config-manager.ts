@@ -5,6 +5,7 @@
  */
 
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { YAML_QUIET } from '../analyzer/yaml-diagnostics.js';
 import { dirname, join, resolve } from 'node:path';
 import YAML from 'yaml';
 import type { ProjectType, OpenLoreConfig } from '../../types/index.js';
@@ -339,7 +340,7 @@ export async function readOpenSpecConfig(openspecPath: string): Promise<OpenSpec
     return null; // File doesn't exist — normal case before generate
   }
   try {
-    return YAML.parse(content) as OpenSpecConfig;
+    return YAML.parse(content, { ...YAML_QUIET }) as OpenSpecConfig;
   } catch (err) {
     logger.warning(`Failed to parse ${configPath}: ${(err as Error).message}`);
     return null;

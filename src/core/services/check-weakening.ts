@@ -19,6 +19,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { YAML_QUIET } from '../analyzer/yaml-diagnostics.js';
 import { readFile } from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import type Parser from 'tree-sitter';
@@ -796,7 +797,7 @@ function commandKey(command: string): string {
 
 function ciFacts(text: string): CiFacts | null {
   let doc: unknown;
-  try { doc = parseYaml(text, { maxAliasCount: 100 }); } catch { return null; }
+  try { doc = parseYaml(text, { ...YAML_QUIET, maxAliasCount: 100 }); } catch { return null; }
   const facts: CiFacts = { testSteps: new Map(), allSteps: new Set(), allowFailure: new Set(), disabled: new Set() };
   if (!doc || typeof doc !== 'object') return facts;
   const record = (where: string, run: unknown) => {

@@ -1,4 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
+import { __setGrammarImporterForTests } from './grammar-entry.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CallGraphBuilder, serializeCallGraph, __resetGrammarCacheForTests, type SerializedCallGraph } from './call-graph.js';
@@ -46,7 +47,12 @@ describe('spec-08 polyglot integration (tools unchanged)', () => {
 describe('spec-08 graceful degradation', () => {
   it('an unavailable grammar degrades without aborting analyze or other languages', async () => {
     __resetGrammarCacheForTests();
-    vi.doMock('tree-sitter-c-sharp', () => { throw new Error('simulated missing grammar'); });
+    // Grammars are imported by resolved entry FILE now (DEP0151), so a
+    // specifier-keyed module mock no longer intercepts them — use the importer seam.
+    __setGrammarImporterForTests((specifier, loadReal) => {
+      if (specifier === 'tree-sitter-c-sharp') throw new Error('simulated missing grammar');
+      return loadReal(specifier);
+    });
     const files = [
       load('polyglot/svc.cs', 'C#'),  // grammar simulated-unavailable → no nodes
       load('polyglot/util.c', 'C'),    // unaffected
@@ -55,7 +61,7 @@ describe('spec-08 graceful degradation', () => {
     expect(g.nodes.some(n => n.language === 'C#' && !n.isExternal)).toBe(false);
     expect(g.nodes.some(n => n.language === 'C' && !n.isExternal)).toBe(true);
     expect(edge(g, 'driver', 'helper')).toBe(true);
-    vi.doUnmock('tree-sitter-c-sharp');
+    __setGrammarImporterForTests(null);
     __resetGrammarCacheForTests();
   });
 });

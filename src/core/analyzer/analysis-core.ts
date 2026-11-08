@@ -1,5 +1,6 @@
 import { join, relative, resolve } from 'node:path';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
+import { joinCapped, INVENTORY_ITEMS_SHOWN } from '../../utils/capped-list.js';
 
 /** One retained repo-wide artifact, read under the untrusted-artifact rules. Throws on refusal. */
 async function readRetainedArtifact(path: string): Promise<string> {
@@ -205,7 +206,10 @@ export async function runAnalysisCore(
   emit({
     stage: 'mapping',
     status: 'info',
-    detail: `Workspace shards (${workspaceShards.source}): ${workspaceShards.shards.map(shard => `${shard.name} ${shard.files.length}`).join(', ')}`,
+    // Rendering cap only: a monorepo can declare hundreds of shards, and this
+    // detail is a one-line console message. The full shard set stays in the
+    // analysis artifacts.
+    detail: `Workspace shards (${workspaceShards.source}): ${joinCapped(workspaceShards.shards.map(shard => `${shard.name} ${shard.files.length}`), INVENTORY_ITEMS_SHOWN, ', ', 'shard')}`,
   });
   for (const ignored of workspaceShards.ignoredMembers) {
     emit({ stage: 'mapping', status: 'warning', detail: `Ignored workspace member '${ignored.member}' from ${ignored.manifest}: ${ignored.reason}.` });

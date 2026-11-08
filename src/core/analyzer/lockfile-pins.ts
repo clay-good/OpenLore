@@ -13,6 +13,7 @@
  */
 
 import { parse as parseYaml } from 'yaml';
+import { YAML_QUIET } from './yaml-diagnostics.js';
 import type { PackageEcosystem } from './external-packages.js';
 
 /** The lockfiles each ecosystem's manifests are paired with, in the order they are looked for. */
@@ -89,7 +90,7 @@ function pinsFromPackageLock(text: string): Set<string> | null {
 
 function pinsFromPnpmLock(text: string): Set<string> | null {
   let doc: unknown;
-  try { doc = parseYaml(text); } catch { return null; }
+  try { doc = parseYaml(text, { ...YAML_QUIET }); } catch { return null; }
   if (!doc || typeof doc !== 'object') return null;
   const out = new Set<string>();
   let sawSection = false;

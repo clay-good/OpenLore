@@ -8,6 +8,7 @@
 import { readFile, writeFile, mkdir, access, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml, parseDocument } from 'yaml';
+import { YAML_QUIET } from '../analyzer/yaml-diagnostics.js';
 import logger from '../../utils/logger.js';
 import { OPENSPEC_DIR, OPENSPEC_CONFIG_FILENAME } from '../../constants.js';
 import type { ProjectSurveyResult } from './spec-pipeline.js';
@@ -576,7 +577,7 @@ export class OpenSpecConfigManager {
   async readConfig(): Promise<OpenSpecConfig | null> {
     try {
       const content = await readFile(this.configPath, 'utf-8');
-      return parseYaml(content) as OpenSpecConfig;
+      return parseYaml(content, { ...YAML_QUIET }) as OpenSpecConfig;
     } catch {
       return null;
     }
@@ -621,7 +622,7 @@ export class OpenSpecConfigManager {
     }
 
     if (raw !== null) {
-      const doc = parseDocument(raw);
+      const doc = parseDocument(raw, { ...YAML_QUIET });
       if (doc.errors.length > 0) {
         // Never clobber a host file we cannot parse — fail loudly instead of
         // re-serializing (or truncating) malformed YAML.
@@ -643,7 +644,7 @@ export class OpenSpecConfigManager {
 
         // Safety net: never let a splice that produced invalid YAML reach disk.
         // The on-disk file stays the (valid) original if anything is off.
-        const verified = parseDocument(next);
+        const verified = parseDocument(next, { ...YAML_QUIET });
         if (verified.errors.length > 0) {
           throw new Error(
             `Internal error updating ${this.configPath} (${verified.errors[0].message}); ` +

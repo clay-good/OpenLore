@@ -18,6 +18,7 @@
  */
 
 import { LineCounter, parseDocument } from 'yaml';
+import { YAML_QUIET } from '../yaml-diagnostics.js';
 import type { IacGraph, IacResource } from './types.js';
 import { emptyIacGraph } from './types.js';
 
@@ -59,7 +60,7 @@ export function extractServerless(files: readonly InFile[]): IacGraph {
     try {
       // `merge: true`: a shared-config anchor (`<<: *defaults`) is common in a real manifest, and
       // without it the handler it supplies reads as absent — a confident wrong reason.
-      doc = parseDocument(file.content, { lineCounter: lc, uniqueKeys: false, merge: true });
+      doc = parseDocument(file.content, { ...YAML_QUIET, lineCounter: lc, uniqueKeys: false, merge: true });
       if (doc.errors.length) continue;
       // INSIDE the try: `toJS` is what throws on an excessive alias count, and an escape here
       // would abort `buildIacGraph` for the WHOLE repository — every other ecosystem's resources
