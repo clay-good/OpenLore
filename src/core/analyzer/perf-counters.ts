@@ -4,6 +4,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export interface PerfWorkCounters {
   /** Calls into a tree-sitter parser through the shared parse-budget boundary. */
   sourceParses: number;
+  /**
+   * Child nodes materialized by the shared `readNamedChildren` boundary during a tree walk.
+   * One per node per walk when children are read once; quadratic in a node's width when a walk
+   * re-evaluates the `namedChildren` getter per child (change: bound-large-literal-extraction).
+   */
+  astChildNodesMaterialized: number;
   fullNodeTableLoads: number;
   adjacencyBuilds: number;
   edgeStoreStatementPrepares: number;
@@ -34,6 +40,7 @@ export async function measurePerfWorkForTests<T>(
 ): Promise<{ result: T; counters: Readonly<PerfWorkCounters> }> {
   const counters: PerfWorkCounters = {
     sourceParses: 0,
+    astChildNodesMaterialized: 0,
     fullNodeTableLoads: 0,
     adjacencyBuilds: 0,
     edgeStoreStatementPrepares: 0,

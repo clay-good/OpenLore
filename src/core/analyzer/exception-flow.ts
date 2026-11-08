@@ -28,7 +28,8 @@
 
 import type Parser from 'tree-sitter';
 import { usesTsxGrammar } from './language-detection.js';
-import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
+import { readNamedChildren } from './ast-children.js';
+import { parseWithBudget, type BudgetableParser } from './extraction-budget.js';
 import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
@@ -424,7 +425,10 @@ function rootAstIndex(root: Node): RootAstIndex | null {
       const type = node.childForFieldName('type') ?? node.namedChildren.at(-1);
       if (name && (type?.text === 'error' || /\bError\s*\(\s*\)/.test(type?.text ?? ''))) customGoErrorTypes.add(name);
     }
-    for (let i = node.namedChildren.length - 1; i >= 0; i--) stack.push({ node: node.namedChildren[i], depth: depth + 1 });
+    // ONE read of the children getter per node — see `readNamedChildren`. Re-reading it per
+    // child made this walk O(k²) on a wide node (a generated literal of a few thousand elements).
+    const kids = readNamedChildren(node);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push({ node: kids[i], depth: depth + 1 });
   }
   const index = { nodesByType, customGoErrorTypes };
   rootAstIndexes.set(root as object, index);
@@ -455,8 +459,10 @@ function astTraversalWithinBudget(root: Node): boolean {
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
     if (depth > MAX_TRAVERSAL_DEPTH || ++visited > MAX_TRAVERSAL_NODES) return false;
-    for (let i = node.namedChildren.length - 1; i >= 0; i--) {
-      stack.push({ node: node.namedChildren[i], depth: depth + 1 });
+    // ONE read of the children getter per node — see `readNamedChildren`.
+    const kids = readNamedChildren(node);
+    for (let i = kids.length - 1; i >= 0; i--) {
+      stack.push({ node: kids[i], depth: depth + 1 });
     }
   }
   return true;

@@ -58,7 +58,7 @@ import {
 } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { sanitizeForTerminal } from '../../utils/misc.js';
-import { parseBudgetOverrunMs } from './parse-budget.js';
+import { extractionBudgetOverrunMs } from './extraction-budget.js';
 
 /** One Pass-1 input record — the same shape `CallGraphBuilder.build` receives. */
 export interface ExtractionFile {
@@ -649,7 +649,7 @@ async function runPooled<T>(
         // fix-analyze-native-abort-and-file-cost-budget). It is still recorded and disclosed by
         // the builder, exactly as a serial-lane overrun is.
         const budgetOverrun = outcome.status === 'error'
-          && parseBudgetOverrunMs((outcome.error as Error | undefined)?.message) !== undefined;
+          && extractionBudgetOverrunMs((outcome.error as Error | undefined)?.message) !== undefined;
         // A worker that cannot handle a language reports it two ways, and BOTH are
         // indistinguishable from a real answer: an empty result (the core binding failed to
         // load) or a throw (the per-language grammar `import` failed — those loads are not

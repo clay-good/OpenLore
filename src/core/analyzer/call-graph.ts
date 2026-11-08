@@ -108,7 +108,7 @@ import {
 } from './literal-reflection.js';
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
 // synchronous native call nothing else can interrupt.
-import { parseWithBudget as rawParseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
+import { parseWithBudget as rawParseWithBudget, extractionBudgetOverrunMs, checkExtractionBudget, runWithExtractionBudget, type BudgetableParser } from './extraction-budget.js';
 import { usesTsxGrammar } from './language-detection.js';
 import { extractScriptContainer, SCRIPT_CONTAINER_FORMATS } from './sfc-script-extractor.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
@@ -244,6 +244,9 @@ export function __resetAnalyzerWorkCountersForTests(clearQueries = false): void 
  * A normal analyze leaves this `undefined`, so its facts and its cost are unchanged.
  */
 function contentHashesFor(root: unknown, nodes: FunctionNode[], content: string, language: string): FileContentHashes | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   if (!contentHashesRequested()) return undefined;
   return computeFileContentHashes(root as HashTreeNode, nodes, content, language);
 }
@@ -255,6 +258,9 @@ function contentHashesFor(root: unknown, nodes: FunctionNode[], content: string,
  * add-codebase-style-fingerprint).
  */
 function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], filePath: string): FileStyleRaw | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   try {
     const raw = tallyFileStyle({
       language,
@@ -292,6 +298,9 @@ function tallyDynamicBoundary(
   nodes: FunctionNode[],
   content: string,
 ): AttributedCandidate[] | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   if (!root) return undefined;
   try {
     const candidates = matchDynamicBoundaries(
@@ -918,6 +927,9 @@ function materializeCfgByNodeId(
   nodes: FunctionNode[],
   cfgByStart: Map<number, FunctionCfg>,
 ): Map<string, FunctionCfg> {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   const cfg = new Map<string, FunctionCfg>();
   if (cfgByStart.size === 0) return cfg;
   for (const n of nodes) {
@@ -2560,6 +2572,9 @@ function collectClassRelationshipFacts(
   language: string,
   runQuery: (source: string) => TsMatch[],
 ): ClassRelationshipFact[] {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   try {
   const byClass = new Map<string, ClassRelationshipFact>();
   const merge = (className: string, parents: string[] = [], interfaces: string[] = []): void => {
@@ -3733,7 +3748,7 @@ export async function _extractClassRelationshipsLegacyForTesting(
       // Best-effort; skip unparseable files — but a file abandoned at the BUDGET is reported, not
       // swallowed. "We ran out of time on this file" and "the grammar rejected it" call for
       // different actions, and only one of them used to leave any trace.
-      if (parseBudgetOverrunMs((err as Error | undefined)?.message) !== undefined) {
+      if (extractionBudgetOverrunMs((err as Error | undefined)?.message) !== undefined) {
         budgetExceeded?.add(file.path);
       }
     }
@@ -5294,6 +5309,9 @@ function collectPass1DynamicDispatch(
   nodes: FunctionNode[],
   filePath: string,
 ): DynamicDispatchFacts | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   const events: DynamicDispatchFacts['events'] = [];
   const callbacks: DynamicDispatchFacts['callbacks'] = [];
   const tree = { rootNode } as unknown as Parser.Tree;
@@ -5944,7 +5962,7 @@ export class CallGraphBuilder {
         // never guessed at. A worker fault never reaches here: the pool routes that file to the
         // main thread instead, so this message is always the main thread's own verdict.
         const message = (error as Error | undefined)?.message;
-        const overrunBudgetMs = parseBudgetOverrunMs(message);
+        const overrunBudgetMs = extractionBudgetOverrunMs(message);
         const exclusion: FileExclusionReason = overrunBudgetMs !== undefined
           ? 'budget-exceeded'
           : 'parse-failure';
@@ -7297,6 +7315,15 @@ function assignClassStableIds(classes: ClassNode[]): void {
  * lane cannot drift from the serial one. Returns `undefined` for a language with no extractor.
  */
 export async function dispatchFileExtract(
+  file: { path: string; content: string; language: string },
+): Promise<FileExtractResult | undefined> {
+  // The per-file budget starts HERE, not at the parse: it bounds the file's whole extraction
+  // (change: bound-large-literal-extraction). Both lanes — serial and pooled — reach extraction
+  // through this one function, so neither can escape the bound.
+  return runWithExtractionBudget(() => dispatchFileExtractUnbudgeted(file));
+}
+
+async function dispatchFileExtractUnbudgeted(
   file: { path: string; content: string; language: string },
 ): Promise<FileExtractResult | undefined> {
   const container = (SCRIPT_CONTAINER_FORMATS as readonly string[]).includes(file.language)

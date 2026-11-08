@@ -29,7 +29,7 @@ import { gitPathArgs } from '../../utils/git-args.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import { isTestFile } from '../analyzer/test-file.js';
 import { getExceptionParser } from '../analyzer/exception-flow.js';
-import { parseWithBudget, type BudgetableParser } from '../analyzer/parse-budget.js';
+import { parseWithBudget, type BudgetableParser } from '../analyzer/extraction-budget.js';
 import type { SerializedCallGraph } from '../analyzer/call-graph.js';
 import type { ChangedFile } from '../../types/index.js';
 import { emittedText } from './generated-file-guard.js';

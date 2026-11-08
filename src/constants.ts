@@ -872,8 +872,9 @@ export const EXTRACTION_POOL_REQUEST_TIMEOUT_MS = 120_000;
 export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;
 
 /**
- * Wall-clock ceiling on the tree-sitter PARSE of ONE file (change:
- * fix-analyze-native-abort-and-file-cost-budget).
+ * Wall-clock ceiling on the whole EXTRACTION of ONE file — the tree-sitter parse AND every
+ * post-parse phase the language extractor runs over the tree (changes:
+ * fix-analyze-native-abort-and-file-cost-budget, bound-large-literal-extraction).
  *
  * `MAX_READ_SIZE` bounds how much of a file is read; nothing bounded how long one file may
  * be *worked on*. A 300 KB file of a repeated unterminated block-comment opener parses for
@@ -884,16 +885,27 @@ export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;
  * parse (a `setTimeout` cannot preempt one, and terminating a worker mid-parse is what turns
  * the failure into a process-level abort).
  *
+ * It bounds the parse ALONE no longer, and the rename says so. A generated `demo.pb.go`
+ * parsed in milliseconds and then spent 82 s in a post-parse tree walk, so this constant
+ * read as a 20 s per-file bound while an 82 s file sailed through undisclosed. The clock now
+ * starts when the file enters `dispatchFileExtract` and is checked at cooperative checkpoints
+ * through every phase — see `extraction-budget.ts` for which, and for what a cooperative
+ * bound can and cannot promise.
+ *
  * Generous on purpose: it is a runaway bound, not a performance weight. The slowest file in
- * this repository parses in well under a second, and the largest ordinary generated files
+ * this repository extracts in well under a second, and the largest ordinary generated files
  * measured (1.5 MB) stay far below it — so no real source file is affected, and any file that
  * IS abandoned is disclosed with its elapsed time rather than silently dropped. Override with
  * `OPENLORE_PARSE_BUDGET_MS`; `0` disables the bound entirely.
+ *
+ * The OVERRIDE keeps its original name: it is an operator-facing contract that appears in
+ * documented runbooks, and renaming an environment variable to match an internal rename would
+ * silently ignore the setting of everyone who already uses it.
  */
-export const PER_FILE_PARSE_BUDGET_MS = 20_000;
+export const PER_FILE_EXTRACTION_BUDGET_MS = 20_000;
 
 /**
- * Operator override for {@link PER_FILE_PARSE_BUDGET_MS}, in milliseconds. `0` disables the
+ * Operator override for {@link PER_FILE_EXTRACTION_BUDGET_MS}, in milliseconds. `0` disables the
  * bound (restoring the pre-change unbounded behavior byte-for-byte).
  */
 export const PARSE_BUDGET_ENV = 'OPENLORE_PARSE_BUDGET_MS';
@@ -902,7 +914,7 @@ export const PARSE_BUDGET_ENV = 'OPENLORE_PARSE_BUDGET_MS';
  * How long ONE file's extraction may run before the CLI names it in progress output. Purely a
  * disclosure threshold — nothing is abandoned at this point — so a user waiting on a slow run
  * can identify the responsible file without attaching a debugger. Well below
- * {@link PER_FILE_PARSE_BUDGET_MS} so a file that will eventually be abandoned is named long
+ * {@link PER_FILE_EXTRACTION_BUDGET_MS} so a file that will eventually be abandoned is named long
  * before it is.
  */
 export const SLOW_FILE_DISCLOSURE_MS = 5_000;

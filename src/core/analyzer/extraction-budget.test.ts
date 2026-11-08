@@ -19,15 +19,15 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   parseWithBudget,
-  parseBudgetMs,
-  parseBudgetOverrunMs,
+  extractionBudgetMs,
+  extractionBudgetOverrunMs,
   parseBudgetSupported,
-  ParseBudgetExceededError,
-  PARSE_BUDGET_MESSAGE_PREFIX,
-} from './parse-budget.js';
+  ExtractionBudgetExceededError,
+  EXTRACTION_BUDGET_MESSAGE_PREFIX,
+} from './extraction-budget.js';
 import { tallyParseHealth, type ParseHealthNode } from './parse-health.js';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
-import { PER_FILE_PARSE_BUDGET_MS, PARSE_BUDGET_ENV } from '../../constants.js';
+import { PER_FILE_EXTRACTION_BUDGET_MS, PARSE_BUDGET_ENV } from '../../constants.js';
 
 /** The exact payload that reproduced the failure: 100,000 unterminated block-comment openers. */
 const HOSTILE_TS = '/*x'.repeat(100_000);
@@ -48,7 +48,7 @@ describe('parseWithBudget', () => {
     expect(parseWithBudget(parser, 'x')).toEqual({ ok: true });
     // Armed to the budget, then cleared — a deadline left armed would charge the NEXT file the
     // remainder of this one's budget on the same singleton parser.
-    expect(calls).toEqual([PER_FILE_PARSE_BUDGET_MS * 1000, 0]);
+    expect(calls).toEqual([PER_FILE_EXTRACTION_BUDGET_MS * 1000, 0]);
   });
 
   it('disarms the deadline even when the parse throws', () => {
@@ -58,16 +58,16 @@ describe('parseWithBudget', () => {
       parse: () => { throw new Error('boom'); },
     };
     expect(() => parseWithBudget(parser, 'x')).toThrow('boom');
-    expect(calls).toEqual([PER_FILE_PARSE_BUDGET_MS * 1000, 0]);
+    expect(calls).toEqual([PER_FILE_EXTRACTION_BUDGET_MS * 1000, 0]);
   });
 
   it('turns a null tree from a BOUNDED parser into a budget-exceeded error carrying the bound', () => {
     const parser = { setTimeoutMicros: () => {}, parse: () => null };
     let thrown: unknown;
     try { parseWithBudget(parser, 'x'); } catch (e) { thrown = e; }
-    expect(thrown).toBeInstanceOf(ParseBudgetExceededError);
-    expect((thrown as Error).message).toContain(PARSE_BUDGET_MESSAGE_PREFIX);
-    expect(parseBudgetOverrunMs((thrown as Error).message)).toBe(PER_FILE_PARSE_BUDGET_MS);
+    expect(thrown).toBeInstanceOf(ExtractionBudgetExceededError);
+    expect((thrown as Error).message).toContain(EXTRACTION_BUDGET_MESSAGE_PREFIX);
+    expect(extractionBudgetOverrunMs((thrown as Error).message)).toBe(PER_FILE_EXTRACTION_BUDGET_MS);
   });
 
   it('RESETS the parser when the deadline fires, so the next file does not resume the abandoned parse', () => {
@@ -75,7 +75,7 @@ describe('parseWithBudget', () => {
     // it. Without the reset, the file AFTER a budget-exceeded one silently produced zero symbols.
     let resets = 0;
     const parser = { setTimeoutMicros: () => {}, reset: () => { resets++; }, parse: () => null };
-    expect(() => parseWithBudget(parser, 'x')).toThrow(ParseBudgetExceededError);
+    expect(() => parseWithBudget(parser, 'x')).toThrow(ExtractionBudgetExceededError);
     expect(resets).toBe(1);
   });
 
@@ -156,28 +156,28 @@ describe('parseWithBudget', () => {
     process.env[PARSE_BUDGET_ENV] = '0';
     const calls: number[] = [];
     const parser = { setTimeoutMicros: (n: number) => calls.push(n), parse: () => ({ ok: true }) };
-    expect(parseBudgetMs()).toBe(0);
+    expect(extractionBudgetMs()).toBe(0);
     parseWithBudget(parser, 'x');
     expect(calls).toEqual([]); // no deadline armed at all
   });
 });
 
-describe('parseBudgetMs', () => {
+describe('extractionBudgetMs', () => {
   it('honours a valid override', () => {
     process.env[PARSE_BUDGET_ENV] = '1500';
-    expect(parseBudgetMs()).toBe(1500);
+    expect(extractionBudgetMs()).toBe(1500);
   });
 
   it.each(['', '   ', 'abc', '-5', 'NaN', 'Infinity'])(
     'ignores %o and keeps the default — a typo must not silently disable the bound',
     (raw) => {
       process.env[PARSE_BUDGET_ENV] = raw;
-      expect(parseBudgetMs()).toBe(PER_FILE_PARSE_BUDGET_MS);
+      expect(extractionBudgetMs()).toBe(PER_FILE_EXTRACTION_BUDGET_MS);
     },
   );
 });
 
-describe('parseBudgetOverrunMs', () => {
+describe('extractionBudgetOverrunMs', () => {
   it('reads the BUDGET off a message that crossed a worker boundary', () => {
     // The class does not survive structured cloning, so classification is message-keyed. This is
     // the exact shape the parent receives from a worker.
@@ -185,18 +185,18 @@ describe('parseBudgetOverrunMs', () => {
     // The budget, not the measured elapsed time: the caller writes this into `parse-health.json`,
     // which must be byte-identical across re-analyses of a fixed repository state. A wall-clock
     // number there would make every run differ.
-    expect(parseBudgetOverrunMs(new ParseBudgetExceededError(19_977, 20_000).message)).toBe(20_000);
+    expect(extractionBudgetOverrunMs(new ExtractionBudgetExceededError(19_977, 20_000).message)).toBe(20_000);
   });
 
   it('still classifies a marked message whose budget it cannot read', () => {
     // Degrading to "ordinary parse failure" would mis-attribute the cause; falling back to the
     // active budget keeps the reason right.
-    expect(parseBudgetOverrunMs(`${PARSE_BUDGET_MESSAGE_PREFIX}: mangled`)).toBe(PER_FILE_PARSE_BUDGET_MS);
+    expect(extractionBudgetOverrunMs(`${EXTRACTION_BUDGET_MESSAGE_PREFIX}: mangled`)).toBe(PER_FILE_EXTRACTION_BUDGET_MS);
   });
 
   it.each([undefined, '', 'Maximum call stack size exceeded', 'Unexpected token'])(
     'returns undefined for %o so an ordinary failure is never re-labelled',
-    (msg) => expect(parseBudgetOverrunMs(msg)).toBeUndefined(),
+    (msg) => expect(extractionBudgetOverrunMs(msg)).toBeUndefined(),
   );
 });
 

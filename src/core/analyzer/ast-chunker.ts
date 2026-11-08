@@ -11,7 +11,7 @@
 
 import type Parser from 'tree-sitter';
 import { detectLanguage, usesTsxGrammar } from './language-detection.js';
-import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
+import { parseWithBudget, type BudgetableParser } from './extraction-budget.js';
 
 // ── Lazy parser singletons (one per language, created on first use) ─────────
 

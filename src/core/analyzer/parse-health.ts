@@ -44,7 +44,7 @@ export const PARSE_HEALTH_LINE_CAP = 25;
  *
  * Each member is a path that actually exists in the code; the set is deliberately not aspirational:
  *  - `parse-failure`   the extractor threw, or produced no usable tree
- *  - `budget-exceeded` the parse hit {@link PER_FILE_PARSE_BUDGET_MS} and was abandoned
+ *  - `budget-exceeded` the parse hit {@link PER_FILE_EXTRACTION_BUDGET_MS} and was abandoned
  *  - `size-cap`        the file exceeded a size bound before extraction was attempted
  *
  * A **worker fault is deliberately absent**. The proposal listed one, but a worker fault no longer

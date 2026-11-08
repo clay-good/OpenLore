@@ -4426,14 +4426,52 @@ process.
 - **THEN** the artifacts describe exactly the files that extracted successfully, and the failed file
   is absent from the graph and present in the parse-health record — never half-written into both
 
+### Requirement: TreeWalksAreLinearInNodeWidth
+
+Every whole-tree walk in extraction SHALL read each node's children EXACTLY ONCE, so its cost is
+linear in the number of nodes and never quadratic in one node's width. A tree-sitter node's
+`children` / `namedChildren` are getters that re-marshal the node and allocate a fresh object per
+child, and its `child(i)` / `namedChild(i)` accessors scan from the first child — so re-reading
+either inside a per-child loop costs O(k²) on a node with k children. Both hazards SHALL be avoided
+by every walk, not only the ones a past incident happened to reach.
+
+A node of a few thousand children is ORDINARY generated code, not hostile input: a generated
+protobuf descriptor emits its wire format as one `[]byte{…}` composite literal. A walk that is
+quadratic in width therefore degrades real repositories, and the degradation is invisible in file
+size — an 89 KB generated file cost 82 s while a larger generated file whose descriptor was emitted
+as a string literal cost nothing.
+
+#### Scenario: A wide composite literal extracts in linear time
+
+- **GIVEN** a source file containing one composite literal of N elements
+- **WHEN** the file is extracted
+- **THEN** the number of child nodes the walks materialize grows proportionally to N, not to N²
+
+#### Scenario: The facts are unchanged
+
+- **GIVEN** a real generated-protobuf source file that extracts within the budget
+- **WHEN** it is extracted after the walks were made linear
+- **THEN** it contributes exactly the same functions, spans and edges it contributed before
+
 ### Requirement: PerFileExtractionCostIsBounded
 
 Extraction of a single file SHALL be bounded by a wall-clock budget expressed as a named constant.
-The bound SHALL be enforced IN-BAND, inside the parse itself, rather than by an external timer or by
-terminating the thread holding the parse: a tree-sitter parse is one synchronous native call, so a
-timer cannot preempt it and terminating mid-parse is what converts a slow file into a process-level
-abort. A binding that cannot accept the deadline SHALL parse unbounded, as before, and SHALL NOT
-fail the file.
+The budget SHALL cover the file's WHOLE extraction — the parse and every post-parse phase the
+language extractor runs over the tree — not the parse alone. A bound whose name and documentation
+claim the file is bounded, while in fact only its parse is, is an honesty defect as much as a
+performance one: a generated protobuf file parsed in milliseconds and then spent 82 s in a
+post-parse tree walk, exceeding a documented 20 s per-file bound with no disclosure at all.
+
+The bound SHALL be enforced IN-BAND, at cooperative checkpoints the extraction already passes
+through, rather than by an external timer or by terminating the thread holding the work: extraction
+is synchronous, so a timer cannot preempt it and terminating mid-parse is what converts a slow file
+into a process-level abort. The checkpoints SHALL include the parse (through the parser's own
+deadline, armed with the time REMAINING on the file's budget), each shared post-parse phase
+boundary, the shared tree-walk children boundary, and the return of the file's extraction. The final
+checkpoint SHALL be conclusive: a file whose extraction exceeded the budget SHALL NOT be admitted to
+the graph even when no earlier checkpoint interrupted it. A binding that cannot accept the parse
+deadline SHALL parse unbounded, as before, and SHALL NOT fail the file; the remaining checkpoints
+still apply to it.
 
 A file exceeding the budget SHALL be abandoned, recorded with reason `budget-exceeded` and the
 budget it exceeded, and SHALL NOT block completion of the run. Abandoning a file SHALL cost that
@@ -4453,6 +4491,15 @@ which is a worse failure than the unbounded parse this bound replaces.
 - **WHEN** `openlore analyze` runs
 - **THEN** the run completes, that file is recorded as `budget-exceeded` with the budget it
   exceeded, and the remaining files are analyzed normally
+
+#### Scenario: A file that overruns AFTER its parse is abandoned too
+
+- **GIVEN** a file whose parse completes well inside the budget and whose post-parse extraction
+  exceeds it
+- **WHEN** `openlore analyze` runs
+- **THEN** that file is recorded as `budget-exceeded` with the budget it exceeded — never
+  `parse-failure` — its symbols are absent from the graph, and the remaining files are analyzed
+  normally
 
 #### Scenario: The file after an abandoned one is unaffected
 
