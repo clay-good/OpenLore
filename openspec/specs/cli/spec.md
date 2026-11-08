@@ -1353,7 +1353,9 @@ count, or a dropped tail) is never acceptable. Guard tests SHALL assert both the
 length and the exact omitted count.
 
 Third-party libraries SHALL NOT write diagnostics to OpenLore's terminal. Where a dependency offers
-a diagnostic-routing option it SHALL be passed (`yaml`'s `logLevel`), and where a dependency's
+a diagnostic-routing option it SHALL be passed at the level that silences WARNINGS ONLY (`yaml`'s
+`logLevel: 'error'`, never `'silent'`, which would also stop it throwing on a malformed document),
+and where a dependency's
 warning is provoked by OpenLore's own import or call shape the call SHALL be changed so the warning
 does not arise (native tree-sitter grammars are imported by their resolved entry FILE, never by an
 extension-less package `main`, so Node emits no `DEP0151`). Information a suppressed warning

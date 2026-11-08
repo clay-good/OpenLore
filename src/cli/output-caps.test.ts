@@ -225,6 +225,18 @@ describe('yaml library diagnostics do not reach stderr', () => {
     expect(line).toContain('.Name');
   });
 
+  it('silences the library\'s WARNINGS without silencing its ERRORS', async () => {
+    const { parse, parseDocument } = await import('yaml');
+    // `logLevel: 'silent'` would ALSO stop `parse()` throwing on a malformed
+    // document (it returns partial data instead) and stop `parseDocument`
+    // reporting a multi-document source. Suppressing noise must never suppress
+    // a real failure, so YAML_QUIET is `'error'`.
+    expect(YAML_QUIET.logLevel).toBe('error');
+    expect(() => parse('key: [unclosed bracket', { ...YAML_QUIET })).toThrow();
+    const multi = parseDocument('a: 1\n---\nb: 2\n', { ...YAML_QUIET });
+    expect(multi.errors.length).toBeGreaterThan(0);
+  });
+
   it('says nothing when no key was stringified', async () => {
     const { parseAllDocuments } = await import('yaml');
     configureLogger({ verbose: true });

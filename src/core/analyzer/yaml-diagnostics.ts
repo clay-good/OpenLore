@@ -36,8 +36,15 @@ import { sanitizeForTerminal } from '../../utils/misc.js';
  *
  * Spread into every `parse` / `parseDocument` / `parseAllDocuments` call:
  * `parseDocument(src, { ...YAML_QUIET, lineCounter })`.
+ *
+ * `'error'`, deliberately NOT `'silent'`. The library's `log.warn` fires only at
+ * `'debug'` and `'warn'`, so `'error'` already silences every warning — while
+ * `'silent'` additionally changes ERROR semantics: `yaml.parse()` stops throwing
+ * on a malformed document and returns partial data instead, and `parseDocument`
+ * stops reporting a multi-document source. Silencing a warning must never
+ * silence an error.
  */
-export const YAML_QUIET = { logLevel: 'silent' } as const;
+export const YAML_QUIET = { logLevel: 'error' } as const;
 
 /** How many distinct stringified keys one file reports before the rest are counted. */
 const KEYS_REPORTED = 5;

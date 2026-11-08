@@ -28,7 +28,8 @@ Found while in there, same class: the `Domains detected` inventory line (764 cha
    and imports that, at all 34 grammar import sites in `call-graph.ts`, `ast-chunker.ts` and
    `exception-flow.ts`. No Node warning is suppressed, no dependency added, no version changed.
 3. **`yaml` diagnostics go through our logger.** Every OpenLore `yaml` parse passes
-   `logLevel: 'silent'`, so the library never writes to the terminal. The information is not
+   `logLevel: 'error'` (warnings only — `'silent'` would also stop it throwing on a malformed
+   document), so the library never writes to the terminal. The information is not
    discarded: `reportStringifiedCollectionKeys` re-derives the same fact from the parsed document
    and reports it on `logger.debug` — visible under `--verbose`, and now naming the file the
    library's warning never carried.
