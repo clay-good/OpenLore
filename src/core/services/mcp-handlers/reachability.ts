@@ -513,7 +513,9 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       tests: roots.filter(r => r.isTest).length,
       imported: importedNames !== null ? roots.filter(r => !r.isTest && importedNames.has(r.name)).length : 0,
       // The three contract counts are disjoint by precedence (gRPC → GraphQL → HTTP), the way
-      // `deployed` already takes precedence over all of them; `httpHandlers` is HTTP-only.
+      // `deployed` already takes precedence over all of them. `httpHandlers` is the HTTP lane AND
+      // the fallback lane: a binding whose contract node carries no readable format tag stays here
+      // rather than dropping out of every count.
       grpcHandlers: roots.filter(r => grpcHandlerIds.has(r.id) && !deployedIds.has(r.id)).length,
       graphqlResolvers: roots.filter(r => graphqlResolverIds.has(r.id) && !deployedIds.has(r.id) && !grpcHandlerIds.has(r.id)).length,
       httpHandlers: roots.filter(r => httpHandlerIds.has(r.id) && !deployedIds.has(r.id) && !grpcHandlerIds.has(r.id) && !graphqlResolverIds.has(r.id)).length,
