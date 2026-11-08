@@ -4278,6 +4278,23 @@ defect. A worker SHALL additionally prove it can parse — in a language the bui
 deduplicated reporting. An extraction lane that can produce nothing SHALL never be mistaken for
 files that contain nothing.
 
+A worker's FAILURE SHALL NOT be recorded as the file's verdict either. Every known worker-local
+defect reaches the parent as that one message — a per-language grammar that resolved on the main
+thread but not in that isolate, a successfully extracted result that will not serialize back across
+the channel, a binding that misbehaves in one thread — and having already extracted that language
+proves none of them absent. So a worker-reported failure SHALL be re-extracted on the serial path,
+and the file SHALL be recorded as failed (`parse-failure`) only when the SERIAL path fails too; a
+case where the serial path extracts it SHALL be disclosed as a lane defect, worded apart from the
+empty-result defect so a reader can tell "the worker asserted a parse failure" from "the worker
+reported nothing". A file abandoned at the per-file PARSE BUDGET is the one exception: that bound is
+a property of the file, so it SHALL be trusted and SHALL NOT be re-extracted — one bound, not two.
+
+Re-checking SHALL be bounded by a named constant counting the worker failures re-extracted in one
+build. The bound SHALL limit DUPLICATED work, never completeness: past it the pool SHALL stop
+claiming files and the remainder of the build SHALL be extracted on the serial path exactly once,
+and the retirement SHALL be disclosed. No bound SHALL ever cause a file to be recorded as failed on
+a worker's word.
+
 The lane SHALL bound its own cost and liveness: worker startup and each per-file request SHALL have
 deadlines after which the worker is retired and its file re-extracted on the serial path; worker
 count SHALL be bounded per PROCESS, not per build, so concurrent builds cannot multiply the resident
@@ -4298,6 +4315,30 @@ the build result for the CLI to render.
 - **WHEN** the analyze run completes
 - **THEN** the affected file was re-extracted on the serial path, its facts are identical to a
   fully serial run, and the fallback is disclosed
+
+#### Scenario: A file only the worker could not parse keeps its place in the graph
+
+- **GIVEN** a worker that answers "failed" for one file — for a reason about the worker rather than
+  the source, after it has already extracted many files of that same language
+- **WHEN** the analyze run completes
+- **THEN** that file was re-extracted on the serial path, its facts are in the graph, no
+  `parse-failure` record names it, and the contradiction is disclosed as a lane defect worded as a
+  parse failure the worker asserted and the serial path refuted
+
+#### Scenario: A failure the serial path reproduces is still the file's own
+
+- **GIVEN** a file a worker reports as failed and the serial path also cannot parse
+- **WHEN** the analyze run completes
+- **THEN** the file is recorded as `parse-failure`, carrying the serial path's own error, and
+  nothing is disclosed as a lane defect
+
+#### Scenario: A lane that fails everything costs one extra pass, not two
+
+- **GIVEN** a build in which every worker answer is a failure
+- **WHEN** the re-check bound is reached
+- **THEN** the pool stops claiming files, the remaining files are extracted once on the serial path,
+  the retirement and its failure count are disclosed, and the resulting graph is identical to a
+  fully serial run with no file recorded as failed
 
 #### Scenario: A worker that cannot parse is dropped, not trusted
 
@@ -6417,6 +6458,13 @@ declared DI package, a declared decorator or annotation, or a resolution API nam
 source-declared framework table. A call to a method merely *named* `get`, `resolve`, or `make`
 SHALL NOT be recorded.
 
+A matcher's rule tables are keyed by text read out of the ANALYZED SOURCE, so a lookup SHALL match
+only keys the rule table DECLARES — never a key it inherits from the language's own base object. A
+repository is free to name a function `toString`, `valueOf`, `constructor` or `hasOwnProperty`, and
+such a name SHALL fire no rule and SHALL yield no site. Every recorded `kind` SHALL be a member of
+the closed vocabulary and therefore serializable, so no matched construct can make a file's facts
+unable to cross a process or thread boundary.
+
 The vocabulary SHALL carry a measured **density budget**: on the substrate's own repository and
 on each language fixture, recorded sites SHALL NOT exceed a declared per-thousand-lines ceiling,
 and a matcher that exceeds it SHALL fail the test suite rather than ship.
@@ -6448,6 +6496,13 @@ at most once.
 - **GIVEN** `this.cache.get(key)` and `Promise.resolve(x)` in a file with no DI framework import
 - **WHEN** the repository is analyzed
 - **THEN** no `container-resolution` site is recorded for either
+
+#### Scenario: A function named after a base-object member fires no rule
+
+- **GIVEN** a Go file declaring a local `toString := func(x int) int { ... }` and calling it
+- **WHEN** the repository is analyzed
+- **THEN** no site is recorded for that call, and every site in the file carries a kind from the
+  closed vocabulary that survives being sent across a thread boundary
 
 #### Scenario: A literal that resolves to nothing is still a boundary
 
