@@ -47,6 +47,17 @@ interface SearchResponseView {
   budget?: string;
   tokenBudget?: number;
   matchEvidence?: MatchEvidenceView;
+  parseHealth?: string;
+  coverage?: { verdict?: string; reason?: string };
+  composition?: {
+    returned?: number;
+    matched?: number;
+    omitted?: number;
+    requestedLimit?: number;
+    servedLimit?: number;
+    limitClamped?: string;
+    moreMayExist?: boolean;
+  };
 }
 
 export interface SearchCliOptions {
@@ -76,6 +87,18 @@ export function renderSearchHuman(result: SearchResponseView, specs: boolean): s
   const mode = result.retrievalMode ?? result.searchMode;
   if (mode) lines.push(`   retrieval mode: ${mode}`);
   lines.push(`   ${result.count ?? result.results?.length ?? 0} result(s)`);
+  // The bound and the readability of what was searched, not just the rows that came back
+  // (change: fix-retrieval-coverage-over-unread-content). A silent clamp and an unread file
+  // both make an empty answer look like a finished one.
+  const composition = result.composition;
+  if (composition?.limitClamped) lines.push(`   ${composition.limitClamped}`);
+  if (composition?.moreMayExist) lines.push(`   more matches may exist beyond the served limit of ${composition.servedLimit}`);
+  if (composition?.omitted) lines.push(`   ${composition.omitted} result(s) omitted by the token budget`);
+  if (result.coverage && result.coverage.verdict !== 'covered') {
+    lines.push(`   coverage: ${result.coverage.verdict}`);
+    if (result.coverage.reason) lines.push(`     ${result.coverage.reason}`);
+  }
+  if (result.parseHealth) lines.push(`   ${result.parseHealth}`);
 
   for (const hit of result.results ?? []) {
     const label = hit.name ?? hit.title ?? '(unnamed result)';

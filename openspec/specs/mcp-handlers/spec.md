@@ -3096,6 +3096,58 @@ output, subject to the same dispatch-time shape enforcement as the rest of the c
 - **WHEN** the conclusion shape is enforced at dispatch
 - **THEN** the omission is reported as a contract violation
 
+### Requirement: RetrievalCannotClaimCoverageOverUnreadContent
+
+`orient` and `search_code` are the first tools an agent calls, so a confident empty answer there is
+the most expensive possible failure: the agent stops looking. Both SHALL account for material in
+scope that the index could not read, and SHALL NOT render "I found nothing" and "I could not read
+it" identically.
+
+A verdict of `covered` SHALL be unsayable when material in scope was unparseable, contributed no
+usable tree, exceeded a size cap, was abandoned at the parse budget, decoded lossily, lost its
+grammar, had analysis breadth shed under memory pressure, or whose readability record is itself
+present and unreadable. In each of those cases the verdict SHALL be `partial`, the cause SHALL be
+named in the coverage conclusion's `unreadable` field and in the `parseHealth` boundary, and the
+verdict the evidence alone would have produced SHALL travel as `evidenceVerdict`. `uncovered` is
+equally unsayable there: a repository with one bad file is not uncovered, and a repository where two
+of three files never parsed has not established that nothing matched.
+
+The readability signal SHALL be repository-wide, not scoped to the files the result set surfaced: a
+file that produced zero symbols never surfaces, and its silence is exactly what a confident empty
+answer rests on. It SHALL be read from the persisted parse-health artifact, never recomputed, so the
+disclosure adds no measurable cost to the hot path, and an absent artifact SHALL continue to mean a
+clean repository.
+
+An index that exists and cannot be vouched for SHALL be refused with the same `notReady` conclusion
+the graph-dependent tools already return, rather than served as ranked results. An absent index, or
+an index whose graph is unavailable, SHALL continue to be answered as before.
+
+#### Scenario: A file that produced zero symbols is still disclosed
+
+- **GIVEN** a repository holding a source file the grammar could not parse into any symbol
+- **WHEN** `orient` or `search_code` answers a query that surfaces only the readable files
+- **THEN** the verdict is `partial` and the boundary names the unparsed file, even though no result
+  set could ever surface it
+
+#### Scenario: Nothing matched over unread material is not an abstention
+
+- **GIVEN** a repository with unparseable files and a query that matches no indexed symbol
+- **WHEN** `search_code` answers
+- **THEN** the verdict is `partial` with `evidenceVerdict: "uncovered"`, not a bare `uncovered`
+
+#### Scenario: An unattested index is refused, not served
+
+- **GIVEN** an analysis whose artifacts no longer hash to their published generation
+- **WHEN** `orient` or `search_code` is called
+- **THEN** it returns the shared `notReady` refusal with its reason and remedy, and no ranked results
+
+#### Scenario: A clean repository is unchanged
+
+- **GIVEN** a repository with no parse-health artifact and an attested index
+- **WHEN** `orient` or `search_code` answers
+- **THEN** the verdict and the response are exactly as before this requirement, with no boundary and
+  no readability field
+
 ### Requirement: InsertionPointsWithholdRecommendationWithoutStrongEvidence
 
 `suggest_insertion_points` SHALL NOT recommend a location when the retrieval that produced its

@@ -20,7 +20,7 @@ import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
+import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine, refuseUnattestedIndex } from './utils.js';
 import { readJsonArtifactCached, readDependencyGraphOrPartial } from './artifact-cache.js';
 import { expandHandle, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
@@ -40,8 +40,8 @@ import {
 } from '../../analyzer/style-fingerprint.js';
 import { scanViolations } from '../../architecture/check.js';
 import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
-import { coverageDisclosure, coverageVerdict, requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
-import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
+import { coverageVerdict, resolveCoverage, requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
+import { loadParseHealth, parseHealthBoundary, readabilityShortfall } from './parse-health-boundary.js';
 import {
   classifyRole,
   deriveStrategy,
@@ -293,7 +293,7 @@ export async function handleOrient(
   const entryPool = tokenBudget ? Math.max(clampedLimit, ORIENT_BUDGET_CANDIDATE_POOL) : clampedLimit;
 
   // ── Parallel data loading ──────────────────────────────────────────────────
-  const [rawResults, mappingIdx, llmCtx] = await Promise.all([
+  const [rawResults, mappingIdx, llmCtx, parseHealth] = await Promise.all([
     VectorIndex.search(outputDir, task, embedSvc, {
       limit: tokenBudget ? Math.max(clampedLimit * 3, entryPool) : clampedLimit * 3,
       vocabularyExpansion,
@@ -303,8 +303,25 @@ export async function handleOrient(
     }),
     loadMappingIndex(absDir),
     readCachedContext(absDir),
+    // Read here, not at response time: the coverage verdict below needs it, and one artifact
+    // read inside the existing parallel block costs nothing on the hot path (change:
+    // fix-retrieval-coverage-over-unread-content).
+    loadParseHealth(absDir),
   ]);
   const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
+
+  // An index that exists and cannot be vouched for is refused here with the SAME conclusion
+  // `get_subgraph` and `blast_radius` already return, instead of being served as a confident
+  // briefing stamped `source-derived`. An absent index or an unavailable graph still falls
+  // through to the ordinary (and honestly disclosed) answer below.
+  if (!llmCtx) {
+    const refusal = await refuseUnattestedIndex(absDir);
+    if (refusal) return refusal;
+  }
+
+  // What the retrieval could not read, repository-wide. The verdict reads this; so does the
+  // boundary text below.
+  const unreadable = readabilityShortfall(parseHealth.report, parseHealth.artifactUnreadable);
 
 
   // ── Relevant functions (top-N) ────────────────────────────────────────────
@@ -353,10 +370,11 @@ export async function handleOrient(
   // An uncovered selection returns no symbols at all; the rest of the briefing (specs,
   // decisions, staleness) has its own evidence and is unaffected (spec `mcp-handlers`
   // RetrievalHandlersCarryTheCoverageVerdict).
+  // A `covered` verdict is unsayable when material in scope went unread: the briefing is then
+  // `partial`, carrying the evidence verdict and the named cause (change:
+  // fix-retrieval-coverage-over-unread-content).
   const symbolCoverage = coverageVerdict(relevantFunctionsAll.map(f => f.matchEvidence));
-  const coverage = symbolCoverage === 'covered'
-    ? { verdict: symbolCoverage, questionKind: 'where-is' as const }
-    : coverageDisclosure(symbolCoverage, 'where-is');
+  const coverage = resolveCoverage(symbolCoverage, 'where-is', unreadable);
 
   // ── Relevant files (deduplicated) ─────────────────────────────────────────
   const relevantFiles = [...new Set(relevantFunctions.map(f => f.filePath))];
@@ -1151,7 +1169,12 @@ export async function handleOrient(
   // Parse-health boundary (change: add-parse-health-boundary-disclosure): if any file this orient
   // surfaced parsed with errors, disclose that its symbols/edges are a lower bound rather than
   // letting the agent read the missing symbols as genuinely absent. Absent on a clean repo.
-  const parseHealthNote = parseHealthBoundary(await loadParseHealthReport(absDir), relevantFiles);
+  // `repoWide`: the per-file half of this boundary is scoped to the files orient SURFACED, so it
+  // can never fire for the worst case — a file that produced zero symbols never surfaces.
+  const parseHealthNote = parseHealthBoundary(parseHealth.report, relevantFiles, {
+    repoWide: true,
+    artifactUnreadable: parseHealth.artifactUnreadable,
+  });
 
   // Generated-file guard (change: add-generated-file-guard): mark the files in scope that are
   // generated or vendored, with the literal source and regenerate command, so an agent edits the

@@ -269,6 +269,32 @@ describe('AnalysisArtifactGenerator', () => {
       expect(artifacts.parseHealth!.excludedByReason).toEqual({ 'size-cap': 1 });
     });
 
+    it('records an oversized GraphQL schema as size-cap so retrieval cannot claim it was read', async () => {
+      // A schema past the contract reader's byte cap is honestly declared unread by
+      // `certify_service_contract` and `find_dead_code` — and said nothing to `orient` or
+      // `search_code`, which went on recommending unrelated TypeScript functions as insertion
+      // points for a GraphQL type change (change: fix-retrieval-coverage-over-unread-content).
+      const { MAX_SPEC_BYTES } = await import('./contract/openapi.js');
+      await mkdir(join(tempDir, 'schema'), { recursive: true });
+      const rel = 'schema/huge.graphql';
+      await writeFile(
+        join(tempDir, rel),
+        `type Query { ok: String }\n# ${'x'.repeat(MAX_SPEC_BYTES)}\n`,
+      );
+
+      const repoMap = createMockRepoMap({
+        allFiles: [createScoredFile({ name: 'huge.graphql', path: rel, absolutePath: join(tempDir, rel) })],
+        highValueFiles: [],
+      });
+      const artifacts = await generateArtifacts(repoMap, createMockDepGraph({}), {
+        rootDir: tempDir, outputDir, maxDeepAnalysisFiles: 0, maxValidationFiles: 0,
+      });
+
+      const rec = artifacts.parseHealth?.files.find(f => f.filePath === rel);
+      expect(rec, 'the unread schema is recorded, not silent').toBeDefined();
+      expect(rec!.exclusion).toBe('size-cap');
+    });
+
     it('leaves an ordinary HTML file alone — the cap must not catch real pages', async () => {
       await mkdir(join(tempDir, 'src'), { recursive: true });
       const rel = 'src/page.html';

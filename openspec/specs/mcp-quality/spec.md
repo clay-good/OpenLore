@@ -1324,7 +1324,7 @@ agent what to do, not only what is wrong.
 
 A retrieval-backed conclusion SHALL NOT be shaped like an answered question when its results rest on
 evidence too weak to answer it. Every such conclusion SHALL carry a coverage verdict derived from the
-match evidence already attached to its results: `covered`, `weak`, or `uncovered`. A conclusion whose
+match evidence already attached to its results: `covered`, `weak`, `uncovered`, or `partial`. A conclusion whose
 verdict is `uncovered` SHALL NOT return a ranked list of results; it SHALL return the reason and the
 remedy. A conclusion whose verdict is `weak` MAY return results, and SHALL state that every result
 rests on low-tier evidence.
@@ -1351,6 +1351,29 @@ tell "this is what you asked for" from "this is the closest thing I hold."
 - **GIVEN** a query with at least one result matching on a strong field
 - **WHEN** the conclusion is produced
 - **THEN** the verdict is `covered` and the result set is the same as before this requirement
+
+#### Scenario: A partial verdict names material the retrieval could not read
+
+- **GIVEN** a repository where some material in scope was unparseable, excluded by a size cap,
+  served from an index that cannot be vouched for, or whose readability record is itself unreadable
+- **WHEN** a retrieval-backed conclusion is produced
+- **THEN** the verdict is `partial`, never `covered` and never `uncovered`, and the conclusion names
+  the cause and carries the verdict the evidence alone would have produced as `evidenceVerdict`
+
+#### Scenario: A receipt never names evidence its field does not contain
+
+- **GIVEN** a result whose match evidence names a field and the terms that matched
+- **WHEN** the receipt is read
+- **THEN** every named term occurs in the named field's own text, so a hit on the corpus's language
+  marker is attributed to `language` and not to a path that contains no such token
+
+#### Scenario: A bounded page discloses its bound
+
+- **GIVEN** a retrieval request whose `limit` exceeds the per-call maximum, or whose matches reach
+  the served limit
+- **WHEN** the conclusion is produced
+- **THEN** it carries the returned count, the matched count, the requested and served limits, a
+  receipt for any clamp, and whether matches may exist beyond the page — never a silent cut
 
 #### Scenario: The verdict is derived, not tuned
 

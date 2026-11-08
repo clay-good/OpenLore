@@ -465,6 +465,19 @@ export class AnalysisArtifactGenerator {
   }
 
   /**
+   * Files an enrichment scan refused for their size, reported by the scan that enforced the cap.
+   * Recorded here so they reach `parse-health.json` — the one artifact every health surface reads
+   * — instead of only a transient progress warning (change:
+   * fix-retrieval-coverage-over-unread-content).
+   */
+  private _enrichmentSizeCapped = new Map<string, string>();
+
+  /** Called by the analysis pipeline before {@link generate}, once the enrichment scans are done. */
+  recordEnrichmentSizeCaps(paths: Iterable<[string, string]>): void {
+    this._enrichmentSizeCapped = new Map(paths);
+  }
+
+  /**
    * Generate all artifacts
    */
   async generate(
@@ -1618,6 +1631,11 @@ export class AnalysisArtifactGenerator {
           // specification OpenLore could not read.
           const oversized = content.length > MAX_SPEC_BYTES;
           const retainable = !oversized || /(?:^|\n)[ \t]{0,2}["']?(?:openapi|swagger)["']?[ \t]*:/.test(content.slice(0, 1 << 16));
+          // A specification past the reader's byte cap is carried truncated and REPORTED unread
+          // by the contract tools — and said nothing to the retrieval surfaces, which went on
+          // claiming full coverage over a document they had not read (change:
+          // fix-retrieval-coverage-over-unread-content).
+          if (oversized && retainable) sizeCapped.push({ path: file.path, language: 'OpenAPI' });
           // Two bounds, not one: a count (50) and a total (64 MB). One specification can be 4 MB,
           // so a count alone let a specification-heavy monorepo hold ~200 MB of strings from the
           // walk until the build returned.
@@ -1645,6 +1663,7 @@ export class AnalysisArtifactGenerator {
         if (isProtobufPath(file.path)) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (oversized) sizeCapped.push({ path: file.path, language: 'Protobuf' });
           if (protoFiles < MAX_PROTO_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
             protoFiles++;
             contractBytes += retained;
@@ -1656,6 +1675,7 @@ export class AnalysisArtifactGenerator {
         if (isGraphqlPath(file.path) && !fixtureSchema) {
           const oversized = content.length > MAX_SPEC_BYTES;
           const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (oversized) sizeCapped.push({ path: file.path, language: 'GraphQL' });
           if (graphqlFiles < MAX_GRAPHQL_CANDIDATES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
             graphqlFiles++;
             contractBytes += retained;
@@ -1802,6 +1822,13 @@ export class AnalysisArtifactGenerator {
       const existing = parseHealthRecords.get(path);
       if (existing) existing.encodingFallback = true;
       else parseHealthRecords.set(path, { filePath: path, language, errorCount: 0, missingCount: 0, errorLines: [], encodingFallback: true });
+    }
+    // Files an enrichment scan refused for their size (SOURCE_SCAN_MAX_FILE_BYTES, whose contract
+    // comment says "a file excluded here is disclosed by analyze, never silently dropped"). It was
+    // disclosed only as a live progress warning, so nothing persisted it and `doctor`, `orient`
+    // and `search_code` all read the repository as fully read.
+    for (const [path, language] of this._enrichmentSizeCapped) {
+      sizeCapped.push({ path, language });
     }
     for (const { path, language } of sizeCapped) {
       parseHealthRecords.set(path, {

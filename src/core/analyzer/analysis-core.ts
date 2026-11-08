@@ -35,6 +35,7 @@ import { computeProjectFingerprint, fingerprintHashOfConfiguration } from '../se
 import { writeAnalysisContentProvenance } from '../services/served-content.js';
 import { AnalysisArtifactGenerator, type AnalysisArtifacts, type EnrichmentData } from './artifact-generator.js';
 import { isScannedByEnrichment, type OversizedFileObserver } from './bounded-file-scan.js';
+import { detectLanguage } from './language-detection.js';
 import { DependencyGraphBuilder, type DependencyGraphResult } from './dependency-graph.js';
 import { extractEnvVars } from './env-extractor.js';
 import { buildRouteInventory } from './http-route-parser.js';
@@ -379,6 +380,18 @@ export async function runAnalysisCore(
       detail: `${oversizedByPath.size} file(s) exceeded the ${Math.round(SOURCE_SCAN_MAX_FILE_BYTES / 1024 / 1024)} MB enrichment scan cap; inventory counts are a lower bound.`,
     });
   }
+  // PERSIST the exclusion, don't just emit it. `SOURCE_SCAN_MAX_FILE_BYTES`'s contract comment
+  // says a file excluded here "is disclosed by analyze, never silently dropped" — and the only
+  // disclosure was this transient progress line, so `doctor`, `orient` and `search_code` all
+  // reported the repository as fully read (change: fix-retrieval-coverage-over-unread-content).
+  generator.recordEnrichmentSizeCaps(
+    [...oversizedByPath.keys()]
+      .sort()
+      .map(absolutePath => [
+        relative(rootPath, absolutePath) || absolutePath,
+        detectLanguage(absolutePath),
+      ] as [string, string]),
+  );
   emit({ stage: 'extractors', status: 'complete' });
 
   const inventories = { uiComponents, schemas, routeInventory, middleware, envVars };
