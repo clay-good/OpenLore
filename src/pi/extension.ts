@@ -1368,7 +1368,7 @@ export const NAV_TOOLS: NavToolSpec[] = [
     parameters: Type.Object({
       baseRef: Type.Optional(Type.String({ description: 'Git ref to diff against (default HEAD).' })),
       change: Type.Optional(Type.String({ description: 'Change id recorded on the certificate (default "working-tree").' })),
-      format: Type.Optional(Type.String({ description: 'Output shape: "in-toto" predicate or "json" (default json).' })),
+      format: Type.Optional(Type.String({ description: 'Output shape: "in-toto" for an unsigned Statement v1 envelope (shape structurally checked locally), or "json" (default json).' })),
     }),
   },
   {

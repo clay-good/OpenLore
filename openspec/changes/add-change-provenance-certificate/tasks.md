@@ -35,7 +35,12 @@
 - [x] OpenLore emits but does not sign (no crypto introduced beyond sha256 content-addressing)
 - [x] tool-registration guards green (contract, annotations incl. read-only write-audit, presets,
       payload budget, doc-claim-sync, tool-count, epistemic-lease, Pi parity, TLS coverage)
-- [ ] in-toto predicate schema validation against an external validator (with the CLI surface)
+- [~] in-toto Statement v1 envelope validation. DONE: a local, dependency-free STRUCTURAL check of
+      the envelope (`validateInTotoStatement`), run on every `format: "in-toto"` emission and
+      disclosed as the `statementValidation` receipt. NOT DONE: validation against an external
+      validator or a published schema, and the CLI surface — both still open. The check also
+      cannot say the subject digest identifies an artifact (it addresses the predicate body), and
+      that deviation is disclosed in the note and the docs.
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD SemanticChangeProvenanceIsReproducibleAndPortable (MCP tool;

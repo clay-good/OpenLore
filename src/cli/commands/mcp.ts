@@ -1722,7 +1722,7 @@ export const TOOL_DEFINITIONS = [
         baseRef: { type: 'string', description: 'Git ref to diff the working tree against (default HEAD).' },
         change: { type: 'string', description: 'Change id recorded on the certificate (spec-store context; default "working-tree").' },
         allowBaseFallback: { type: 'boolean', description: 'Accept the disclosed main → master → HEAD~1 base fallback instead of failing on an unresolvable base.' },
-        format: { type: 'string', enum: ['in-toto', 'json'], description: 'Output shape: an in-toto predicate statement, or standalone JSON (default json).' },
+        format: { type: 'string', enum: ['in-toto', 'json'], description: 'Output shape: an unsigned in-toto Statement v1 envelope (its shape structurally checked locally), or standalone JSON (default json).'  },
       },
     },
   },
