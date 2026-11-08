@@ -192,6 +192,45 @@ describe('capOutput', () => {
   });
 });
 
+describe('capStructuredResult — the MCP response is screened', () => {
+  const ESC = String.fromCharCode(27);
+
+  it('removes bidi overrides and zero-width characters a repository put in a path', () => {
+    // These leaked raw into orient / search_code / get_subgraph / find_path / find_dead_code /
+    // get_map responses. Only the STRING branch of this function screened anything, and ESC
+    // looked handled because JSON.stringify escapes it by itself — so nobody noticed that the
+    // rest of the class passes through verbatim.
+    const result = { relevantFunctions: [{ name: 'evil\u200bFn', filePath: 'src/\u202eesc.ts' }] };
+    const text = capStructuredResult(result, 64 * 1024).text;
+
+    expect(text).not.toContain('\u202e');
+    expect(text).not.toContain('\u200b');
+    const parsed = JSON.parse(text) as { relevantFunctions: { name: string; filePath: string }[] };
+    expect(parsed.relevantFunctions[0]).toEqual({ name: 'evilFn', filePath: 'src/esc.ts' });
+  });
+
+  it('screens the values, so a consumer that parses the response does not get ESC back', () => {
+    // JSON.stringify turns a real ESC into the six characters \\u001b: a text-only pass has
+    // nothing left to remove, and the control character reappears the moment the document is
+    // parsed. Screening runs at the values for exactly this reason.
+    const text = capStructuredResult({ filePath: `src/zz${ESC}[2K${ESC}[1GFAKE.ts` }, 64 * 1024).text;
+    expect(text).not.toContain('u001b');
+    const parsed = JSON.parse(text) as { filePath: string };
+    expect(parsed.filePath).toBe('src/zzFAKE.ts');
+    expect(parsed.filePath).not.toContain(ESC);
+  });
+
+  it('keeps legitimate non-ASCII in a path', () => {
+    const file = 'src/spåce dir ünicode/日本語/🙈.ts';
+    const parsed = JSON.parse(capStructuredResult({ file }, 64 * 1024).text) as { file: string };
+    expect(parsed.file).toBe(file);
+  });
+
+  it('still screens a plain string result', () => {
+    expect(capStructuredResult(`a${ESC}[31mb`, 1024).text).toBe('ab');
+  });
+});
+
 describe('capStructuredResult', () => {
   it('leaves a within-budget object as pretty JSON, untruncated', () => {
     const r = capStructuredResult({ a: 1, b: 'hi' }, 1024);
@@ -440,7 +479,9 @@ describe('capStructuredResult', () => {
       ['quote',            '"'],
       ['backslash',        '\\'],
       ['short control',    '\n'],
-      ['long control',     '\u0001'],
+      // A \uXXXX-escaped control character (the 'long control' class) is no longer reachable
+      // here: values are screened before they are capped, so a C0 control never survives to be
+      // measured. The class above covers the escape arithmetic that is still live.
       ['two-byte utf-8',   'é'],
       ['three-byte utf-8', '☃'],
       ['astral pair',      '😀'],

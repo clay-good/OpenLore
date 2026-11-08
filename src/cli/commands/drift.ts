@@ -37,6 +37,7 @@ import { createLLMService } from '../../core/services/llm-service.js';
 import { isLlmLoggingEnabled } from '../../core/services/llm-logging-policy.js';
 import type { LLMService } from '../../core/services/llm-service.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import { jsonOutput } from '../output.js';
 import {
   displayHookPath,
   hookManagerWarning,
@@ -732,7 +733,7 @@ Exit codes:
             mode: 'static',
           };
           // Straight to stdout so it bypasses the console→stderr redirect.
-          process.stdout.write(JSON.stringify(emptyResult, null, 2) + '\n');
+          process.stdout.write(jsonOutput(emptyResult) + '\n');
         } else {
           logger.success('No changes detected. Specs are up to date.');
         }
@@ -816,7 +817,7 @@ Exit codes:
       // ========================================================================
       if (opts.json) {
         // Straight to stdout so it bypasses the console→stderr redirect.
-        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+        process.stdout.write(jsonOutput(result) + '\n');
       } else if (opts.quiet) {
         // Quiet mode: only show the final pass/fail line
         if (result.hasDrift) {

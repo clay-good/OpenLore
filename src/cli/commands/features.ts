@@ -16,6 +16,7 @@ import { Command } from 'commander';
 import type { ChalkInstance } from 'chalk';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
+import { jsonOutput } from '../output.js';
 import {
   collectFeatureInventory,
   type FeatureStatus,
@@ -63,7 +64,7 @@ the whole structural graph work with no keys set. The features below are all opt
     const inventory = await collectFeatureInventory(rootPath);
 
     if (options.json) {
-      console.log(JSON.stringify(inventory, null, 2));
+      console.log(jsonOutput(inventory));
       return;
     }
 

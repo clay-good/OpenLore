@@ -40,6 +40,7 @@ import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { execFileGit } from '../../utils/git-exec.js';
 import { assessWiring, type WiringScope } from '../install/wiring-scope.js';
 import { collectGovernanceStatus, type GovernanceStatus } from '../../core/decisions/autopilot.js';
+import { jsonOutput } from '../output.js';
 
 
 /** Bound on the working-tree comparison: a status command must stay instant. */
@@ -335,7 +336,7 @@ Read-only: this never builds, rebuilds, or locks the index.
     };
 
     if (options.json) {
-      console.log(JSON.stringify(status, null, 2));
+      console.log(jsonOutput(status));
       return;
     }
 
