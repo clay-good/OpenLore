@@ -565,7 +565,7 @@ describe('round-4 review', () => {
       resolveImplementation: () => [],
     });
     expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found',
-      detail: "`getOrder` is imported by srv/server.js from './handlers', which is not indexed here (a package or a path alias)" })]);
+      detail: "`getOrder` is imported by srv/server.js from './handlers', which is not indexed here (a package, or a specifier no declared path alias resolves to one module)" })]);
   });
 
   it('an imported handler binds only in the module it was imported from', () => {
@@ -588,6 +588,120 @@ server.addService(proto.shop.orders.v1.OrderService.service, { getOrder });
     });
     expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
     expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ rpc: 'GetOrder', reason: 'implementation-not-found', detail: expect.stringContaining("from 'pkg', which is not indexed here") })]);
+  });
+});
+
+describe('gRPC Node: a class instance written at the registration', () => {
+  const nodeReg = (partial: Partial<GrpcRegistration> = {}): GrpcRegistration => ({
+    file: 'srv/server.ts', line: 2, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', implType: 'MyHandlers', ...partial,
+  });
+  const ts = (id: string) => fn(id, { language: 'TypeScript' });
+
+  it('binds each RPC to the method of that name on the class, in the registration\'s own file', () => {
+    const p = direct({
+      registrations: [nodeReg()],
+      resolveImplementation: resolverOver([ts('srv/server.ts::MyHandlers.getOrder'), ts('srv/server.ts::MyHandlers.listOrders')]),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual([
+      'srv/server.ts::MyHandlers.getOrder -> proto/orders.proto::/shop.orders.v1.OrderService/GetOrder',
+      'srv/server.ts::MyHandlers.listOrders -> proto/orders.proto::/shop.orders.v1.OrderService/ListOrders',
+    ]);
+    expect(p.unresolvedRegistrations).toEqual([]);
+  });
+
+  it('an imported class binds only in the module it was imported from', () => {
+    const code = [
+      ts('srv/handlers/index.ts::MyHandlers.getOrder'), ts('srv/handlers/index.ts::MyHandlers.listOrders'),
+      // A same-named class in a module the registration never names, and a same-named method on
+      // another class: neither is the registered implementation.
+      ts('lib/other.ts::MyHandlers.getOrder'), ts('srv/server.ts::OtherHandlers.getOrder'),
+    ];
+    const p = direct({ registrations: [nodeReg({ implFrom: './handlers' })], resolveImplementation: resolverOver(code) });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual([
+      'srv/handlers/index.ts::MyHandlers.getOrder -> proto/orders.proto::/shop.orders.v1.OrderService/GetOrder',
+      'srv/handlers/index.ts::MyHandlers.listOrders -> proto/orders.proto::/shop.orders.v1.OrderService/ListOrders',
+    ]);
+  });
+
+  it('a class the registration\'s module does not name binds nothing, and says so', () => {
+    const p = direct({
+      // The class is declared somewhere else entirely; the registration names no module for it.
+      registrations: [nodeReg()],
+      resolveImplementation: resolverOver([ts('lib/other.ts::MyHandlers.getOrder')]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found',
+      detail: 'no method of `MyHandlers` named after an RPC was found in srv/server.ts' })]);
+  });
+
+  it('a class of that name in two places binds no RPC of the registration', () => {
+    // `./handlers` resolves to both `srv/handlers.ts` and `srv/handlers/index.ts`.
+    const p = direct({
+      registrations: [nodeReg({ implFrom: './handlers' })],
+      resolveImplementation: resolverOver([ts('srv/handlers.ts::MyHandlers.getOrder'), ts('srv/handlers/index.ts::MyHandlers.listOrders')]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'ambiguous-implementation',
+      detail: expect.stringContaining('defined in more than one place') })]);
+  });
+
+  it('an imported class whose module is not indexed is named as imported, never bound locally', () => {
+    const p = direct({
+      registrations: [nodeReg({ implFrom: 'pkg/handlers' })],
+      resolveImplementation: resolverOver([ts('srv/server.ts::MyHandlers.getOrder')]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'implementation-not-found',
+      detail: "no method of `MyHandlers` named after an RPC was found in the module 'pkg/handlers' it is imported from" })]);
+  });
+
+  it('two methods of the class answering one RPC key bind nothing', () => {
+    const p = direct({
+      registrations: [nodeReg()],
+      resolveImplementation: resolverOver([
+        ts('srv/server.ts::MyHandlers.getOrder'), { ...ts('srv/server.ts::MyHandlers.getOrder'), id: 'srv/server.ts::MyHandlers.getOrder#2' },
+      ]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'ambiguous-implementation', rpc: 'GetOrder' })]);
+  });
+
+  it('end to end: the scanner\'s own output for a local class and a named object both bind', () => {
+    const classSrc = `class MyHandlers {
+  getOrder(call, cb) {}
+  listOrders(call, cb) {}
+}
+server.addService(proto.shop.orders.v1.OrderService.service, new MyHandlers());
+`;
+    const classP = direct({
+      registrations: scanGrpcRegistrations('srv/server.ts', classSrc),
+      resolveImplementation: resolverOver([ts('srv/server.ts::MyHandlers.getOrder'), ts('srv/server.ts::MyHandlers.listOrders')]),
+    });
+    expect(edgesOf(classP, 'implements_endpoint')).toHaveLength(2);
+    // The grpc-node example shape: a local bound once to an object literal.
+    const objectSrc = `function getOrder(call, cb) {}
+function listOrders(call, cb) {}
+const serviceImplementation = { getOrder, listOrders };
+server.addService(proto.shop.orders.v1.OrderService.service, serviceImplementation);
+`;
+    const objectP = direct({
+      registrations: scanGrpcRegistrations('srv/server.ts', objectSrc),
+      resolveImplementation: resolverOver([ts('srv/server.ts::getOrder'), ts('srv/server.ts::listOrders')]),
+    });
+    expect(edgesOf(objectP, 'implements_endpoint')).toEqual([
+      'srv/server.ts::getOrder -> proto/orders.proto::/shop.orders.v1.OrderService/GetOrder',
+      'srv/server.ts::listOrders -> proto/orders.proto::/shop.orders.v1.OrderService/ListOrders',
+    ]);
+  });
+
+  it('a factory call still discloses, and binds nothing', () => {
+    const src = 'server.addService(proto.shop.orders.v1.OrderService.service, makeHandlers());\n';
+    const p = direct({
+      registrations: scanGrpcRegistrations('srv/server.ts', src),
+      resolveImplementation: resolverOver([ts('srv/server.ts::getOrder')]),
+    });
+    expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'not-literal' })]);
   });
 });
 

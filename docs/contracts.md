@@ -155,12 +155,22 @@ code the generator emits for every language. That call is the evidence the edge 
 | Go | `pb.RegisterOrderServiceServer(s, &orderServer{})` | the method `GetOrder` of `orderServer` |
 | Python | `orders_pb2_grpc.add_OrderServiceServicer_to_server(OrderServicer(), server)` | the method `GetOrder` of `OrderServicer` |
 | Node (grpc-js) | `server.addService(proto.orders.v1.OrderService.service, { getOrder })` | the function the map names under `GetOrder` or `getOrder` |
+| Node (grpc-js) | `server.addService(…, new MyHandlers())` | the method `getOrder` of `MyHandlers` |
+| Node (grpc-js) | `const impl = { getOrder }; server.addService(…, impl)` | the function the literal names, as if written at the call |
 
 The rules refuse rather than guess:
 
 - The implementation must be written **at the registration**: `&orderServer{}`, `OrderServicer()`,
-  an object literal. A variable or a factory call (`NewServer()`) names no type, so the
-  registration is disclosed as `not-literal`.
+  an object literal, `new MyHandlers()`. A variable or a factory call (`NewServer()`,
+  `makeHandlers()`) names no type, so the registration is disclosed as `not-literal`.
+- One Node exception, because the file settles it: a **bare local name** passed to `addService` is
+  read as the object literal it was bound to, when this file binds it exactly once — one unindented
+  top-level `const`/`let`/`var` whose initializer is an object literal, with no later assignment to
+  the name or one of its members, no `Object.assign` onto it, no computed access, no `delete`, and
+  no import of that name. This is the shape every official grpc-node example uses. Anything else —
+  bound twice, bound inside a function, reassigned, imported, or bound to a call's result — keeps
+  the `not-literal` disclosure. `new Impl().wrap()`, `new Impl(c).handlers`, `this.handlers` and
+  `impl.handlers` name a value, not a type, and stay disclosed too.
 - A service named by two packages, or declared in two files, binds nothing (`ambiguous-service`).
   A service no file read declares — its `.proto` lives in another repository, or in a file that
   could not be read, which the detail then says — is `unknown-service`. A Node service path of
@@ -184,7 +194,19 @@ The rules refuse rather than guess:
   whose handler is neither defined nor imported in the registration's file, are
   `implementation-not-found`.
 - A Node handler imported into the registration's file binds only in the module it was imported
-  from; a package or path-alias import binds nothing.
+  from. A **declared** path alias is followed: a tsconfig/jsconfig `compilerOptions.paths` entry or
+  a `package.json` `imports` subpath, and only when exactly one mapping matches the specifier, it
+  names exactly one target, and that target is exactly one indexed module. Two mappings matching, a
+  fallback list, a value that is not an array of strings, a target climbing above the repository
+  root, or a conditional `imports` object leave the specifier unresolved and disclosed. A webpack,
+  jest or vite alias is arbitrary JavaScript and is never read; a tsconfig's `extends` chain is not
+  followed, so a config that inherits its `paths` declares none here. A real package binds nothing.
+- A Node class instantiated at the registration is looked for in the registration's own file, or —
+  when the class name is imported — only in the module it was imported from (one barrel re-export
+  followed). A default or whole-module import does not name the class it holds, so it binds
+  nothing; `new ns.MyHandlers()` binds only when `ns` is an imported namespace. As for Go and
+  Python the class's location is settled once per registration: a class of that name in two places
+  makes the whole registration `ambiguous-implementation`.
 - Node keys match the RPC name, its lower-camel form, or grpc-js's lodash `camelCase`
   (`GetHTTPStatus` → `getHttpStatus`).
 - Node's static-codegen form, `addService(services.GreeterService, { … })`, is read too, and binds
