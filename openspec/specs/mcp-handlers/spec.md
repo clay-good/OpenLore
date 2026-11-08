@@ -4555,27 +4555,39 @@ only one pass over the edge list.
 A handler bound to a declared operation is a liveness root, so a binding the contract projection
 REFUSED to make roots nothing: a gRPC server registration or a GraphQL resolver map can name a
 function literally while that function still reaches no root. `find_dead_code` SHALL NOT report
-such a symbol in its highest-confidence dead tier, and SHALL disclose the reason.
+such a symbol in its highest-confidence dead tier, and SHALL disclose the reason. This governs
+bindings the projection REFUSED; a handler whose registration style was never read at all — its RPC
+stays in `unboundRpcs` — is outside it and may still be rated `high`.
 
 A candidate SHALL be capped at `low` when its name matches a symbol a refused registration or
-resolver entry named, or when its class matches the implementation class a refused registration
-named. A refusal that names NEITHER — the registration handed over a variable, so the handler names
-are not in it — SHALL cap every candidate in the file that declares the registration, which is the
-most precise granularity available and a disclosed lower bound: an argument assembled in another
-module is not covered. An `inline-implementation` refusal SHALL cap nothing, because an inline
-function expression has no graph node that could look dead. Each cap SHALL carry a reason naming the
-refused contract wiring and pointing at `contractRootsNotAssessed`.
+resolver entry WROTE, or when its class matches the implementation class a refused registration
+named — narrowed to the one directory where the projection's own scope rule proves the class can
+live nowhere else, and matched by name alone where no such proof exists. A refusal that names NO
+function, and whose implementation argument could not be read, SHALL cap every candidate in the file
+that declares the registration: the handler names are not in the registration, and such an object is
+written where it is registered. A refusal that names no function and whose implementation WAS
+readable — an inline handler, or an unknown field or service with an all-inline map — SHALL cap
+nothing, because it left no named symbol unrooted and a cap would state a reason that is false. Each
+cap SHALL carry a reason naming the refused contract wiring and pointing at
+`contractRootsNotAssessed`, and SHALL NOT assert identity where the match is by name alone.
 
-Because every contract disclosure is bounded with its exact total beside it, a repository whose
-refusals exceed that bound holds unbound symbols the artifact does not name. Their names are not
-recoverable, so NO candidate in that repository SHALL be rated high-confidence dead; the ceiling
-SHALL state how many refusals are past the cap. The cap only ever LOWERS a verdict — it never
-promotes a candidate, and it never removes one from the candidate set, which stays the reachability
-partition `deadCodeIds` and `find_dead_code` share.
+The cap SHALL read the COMPLETE refusal list. Because each disclosure's `items` are bounded for a
+reader, the producer SHALL carry the deduplicated symbol, class and file names over every refusal;
+a reader's cap SHALL NOT decide whether a handler can be called confidently dead. An index that
+cannot name every refusal — one written before those names were carried, or one past the name
+list's own disclosed cap — SHALL have NO candidate rated high-confidence dead, and SHALL state how
+many refusals it cannot name at report level and in its soundness caveats, not only on a candidate
+that reached the highest tier.
 
-OpenAPI `unresolvedBindings` are NOT read for this cap: that disclosure names no symbol, and the
-one name a route carries substitutes a placeholder when extraction fails, so it cannot ground a
-symbol match. Those bindings stay disclosed in `contractRootsNotAssessed`.
+The cap only ever LOWERS a verdict — it never promotes a candidate, and it never removes one from
+the candidate set, which stays the reachability partition `deadCodeIds` and `find_dead_code` share.
+
+The cap is a LOWER BOUND and the response SHALL say so. NOT covered: an implementation object
+assembled in a module other than the registration's; a registration style the scan does not read at
+all, whose RPC is listed in `unboundRpcs`; GraphQL resolver-plumbing keys, which produce no refusal;
+and OpenAPI `unresolvedBindings`, which name no symbol (the one name a route carries substitutes a
+placeholder when extraction fails, so it cannot ground a symbol match). Where a refusal names only a
+file, unrelated candidates in that file are capped as well: precision is lost, soundness is not.
 
 #### Scenario: A method whose class a refused gRPC registration named
 
@@ -4593,10 +4605,11 @@ symbol match. Those bindings stay disclosed in `contractRootsNotAssessed`.
 - **WHEN** `find_dead_code` runs
 - **THEN** the candidate is rated `low` and its reason names the unreadable implementation argument
 
-#### Scenario: An inline implementation caps nothing
+#### Scenario: A readable refusal that names no function caps nothing
 
-- **GIVEN** an `inline-implementation` refusal in a file holding an unrelated candidate, and no
-  other refusal naming that file
+- **GIVEN** a refusal in a file holding an unrelated candidate whose reason is
+  `inline-implementation`, `unknown-field` or `unknown-service` with an all-inline map, and no other
+  refusal naming that file
 - **WHEN** `find_dead_code` runs
 - **THEN** the candidate keeps its `high` rating
 
@@ -4607,12 +4620,27 @@ symbol match. Those bindings stay disclosed in `contractRootsNotAssessed`.
 - **WHEN** `find_dead_code` runs
 - **THEN** the candidate is rated `low` and its reason names the refused resolver map
 
-#### Scenario: More refusals than the disclosure names
+#### Scenario: More refusals than the reader slice lists, all named by the index
 
-- **GIVEN** 25 unresolved registrations of which the disclosure lists 20, none naming the candidate
+- **GIVEN** 43 unresolved registrations of which the disclosure lists 20, and complete name lists
+  naming all 43
 - **WHEN** `find_dead_code` runs
-- **THEN** no candidate is rated `high`, and the reason states how many refusals are past the
-  disclosure cap
+- **THEN** a candidate no refusal names keeps its `high` rating — the reader slice decides nothing
+
+#### Scenario: An index that cannot name every refusal
+
+- **GIVEN** an index whose refusal names are incomplete (written before they were carried, or past
+  the name cap)
+- **WHEN** `find_dead_code` runs
+- **THEN** no candidate is rated `high`, and the count of unnamed refusals appears in
+  `contractRootsNotAssessed` and in `soundness.caveats`, whatever each candidate's tier
+
+#### Scenario: A class cap is scoped where the projection proves it
+
+- **GIVEN** a Go registration naming the unqualified type `server` in `greeter/`, and an unrelated
+  struct of the same name in `metrics/`
+- **WHEN** `find_dead_code` runs
+- **THEN** the method in `greeter/` is capped and the one in `metrics/` is not
 
 #### Scenario: A candidate no contract wiring names is unaffected
 
