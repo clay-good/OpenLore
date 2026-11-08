@@ -249,20 +249,31 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
 
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
-  const caveats: string[] = [
+  // Two of the caveats below are STANDING methodology, true of every briefing. The rest
+  // are live disclosures about THIS answer's coverage, and only those drive
+  // `confidenceBoundary.complete` (change: never-claim-complete-beside-a-refusal) — a
+  // standing note would pin `complete` to false on every answer and so say nothing.
+  const liveDisclosures: string[] = [
     ...(granularityNote ? [granularityNote] : []),
     ...(importsNote ? [importsNote] : []),
     ...(carriedCaveat(carried) ? [carriedCaveat(carried)!] : []),
+  ];
+  const caveats: string[] = [
+    ...liveDisclosures,
     'Significance is a tier label from existing classifiers (hub/orchestrator/chokepoint) plus raw evidence — not a weighted score. The caller makes the final judgment.',
     'Scope is hand-authored source code: infrastructure (IaC) resources and generated/vendored files are excluded (their change-impact has its own lens — blast_radius / analyze_impact). Non-code changed files still count toward changedFiles.',
   ];
   // The unresolved-ref disclosure leads the caveats — it changes which base every
   // number below was computed against, so it must not be buried.
   if (requestedRefUnresolved) {
-    caveats.unshift(`Requested base ref "${baseRefInput}" could not be resolved; briefed against "${resolvedBase}" instead (git's silent fallback). Pass a ref that exists to target the base you meant.`);
+    const unresolved = `Requested base ref "${baseRefInput}" could not be resolved; briefed against "${resolvedBase}" instead (git's silent fallback). Pass a ref that exists to target the base you meant.`;
+    caveats.unshift(unresolved);
+    liveDisclosures.push(unresolved);
   }
   if (!historyAvailable) {
-    caveats.push(`Git history is too shallow (${coupling.stats.commitsScanned} commit(s) scanned) to establish "rarely changed before" — the surprising-change label is withheld and those hubs rank as hub-change.`);
+    const shallow = `Git history is too shallow (${coupling.stats.commitsScanned} commit(s) scanned) to establish "rarely changed before" — the surprising-change label is withheld and those hubs rank as hub-change.`;
+    caveats.push(shallow);
+    liveDisclosures.push(shallow);
   }
   // Surprise rests on per-file churn matched by exact path. git history does not
   // follow renames, so a just-renamed (or non-ASCII-path) hub can read low churn and
@@ -272,7 +283,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   }
 
   const staleness = await computeStaleness(absDir);
-  const confidenceBoundary = assembleBoundary({ staleness, integrity: ctx?.integrity });
+  const confidenceBoundary = assembleBoundary({ staleness, integrity: ctx?.integrity, disclosures: liveDisclosures });
 
   return {
     baseRef: resolvedBase,

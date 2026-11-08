@@ -464,6 +464,17 @@ edge `confidence`/`synthesizedBy` provenance already present (decision `08e71184
 - **THEN** the `confidenceBoundary` names the synthesized crossing as known-unknowable, breaks down the
   synthesized edges by rule, and reports `complete: false`
 
+#### Scenario: `complete` is derived, and names its causes
+
+- **GIVEN** any response carrying a `confidenceBoundary`
+- **WHEN** it is dispatched
+- **THEN** `complete` is derived at the dispatch boundary from the boundary's own parts AND from the
+  registered disclosure channels on the response (`verdict: "unverifiable"`, `notAssessed`,
+  `truncated`, `baseRefFallback`, `changeGranularity.reasons`, `filePatternMatch`, `noPath`,
+  `ambiguousCallSites`, `partialIndex.partial`, …), never asserted by the handler
+- **AND** when it is `false`, `incompleteBecause` carries one reason per cause, each naming the field
+  that holds the detail (requirement `NoCompleteBesideADisclosure`, mcp-quality)
+
 ### Requirement: StalenessBoundary
 
 When graph-relevant source files have changed since the index's build commit, every conclusion SHALL

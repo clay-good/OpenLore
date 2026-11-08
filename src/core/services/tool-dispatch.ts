@@ -18,6 +18,7 @@
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import type { DecisionScope } from '../../types/index.js';
 import { resolveCanonicalToolName, enforceConclusionContract } from './mcp-handlers/tool-contract.js';
+import { reconcileCompleteness } from './mcp-handlers/confidence-boundary.js';
 import { withFollowupHints } from './mcp-handlers/followup-hints.js';
 import { withPartialReceiptScope, partialReceiptForThisRequest } from './mcp-handlers/partial-request.js';
 import {
@@ -165,7 +166,16 @@ export async function dispatchTool(
     // Data-dependent next-call receipts (change: add-conclusion-followup-hints).
     const hinted = withFollowupHints(canonical, checked);
     const leased = await withLeaseToken(canonical, hinted, args, directory);
-    return withPartialIndexReceipt(await redactSourceToolResult(canonical, leased, directory), directory);
+    const received = await withPartialIndexReceipt(
+      await redactSourceToolResult(canonical, leased, directory),
+      directory,
+    );
+    // LAST, after every receipt above has been attached: `complete: true` must be
+    // unsayable in the same response as a disclosed refusal, cap, fallback, degradation
+    // or discarded input (NoCompleteBesideADisclosure). Here, in the one place both
+    // transports and every CLI wrapper funnel through, so a tool — including one that
+    // does not exist yet — cannot opt out of the invariant.
+    return reconcileCompleteness(received);
   });
 }
 

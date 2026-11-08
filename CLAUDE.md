@@ -76,6 +76,17 @@ For all other cases (reading a file, grepping, listing files) use native tools d
 > `src/core/services/mcp-handlers/tool-contract.ts` — `tool-contract.test.ts` fails until you do.
 > Conclusion tools must return the computed answer, not a graph for the agent to traverse.
 
+> **Adding a field that says your answer is incomplete?** (a refusal verdict, a cap, a fallback, a
+> degradation, a discarded input.) Classify it in `confidence-boundary.ts`: register it in
+> `DISCLOSURE_CHANNELS` with its own firing predicate, or record it in
+> `NON_DISCLOSURE_RESPONSE_FIELDS` with the reason it is not a completeness signal.
+> `completeness-invariant.test.ts` fails until you do. `confidenceBoundary.complete` is DERIVED from
+> that registry at the dispatch boundary and must never be asserted by a handler — `complete: true`
+> beside a disclosed gap tells the agent not to look further, turning a disclosed gap into a silent
+> one. A live disclosure that exists only in prose (`note`, `caveats`) is invisible to the sweep:
+> declare it with `assembleBoundary({ disclosures })`, and never pass a standing methodology caveat,
+> which would pin `complete` to false forever (change: never-claim-complete-beside-a-refusal).
+
 > **Authoring a new governance finding?** Register its stable `code` (with a source-declared default
 > class + description) in `FINDING_CODE_REGISTRY` in `src/core/services/mcp-handlers/enforcement-policy.ts`,
 > and emit it in the unified `GovernanceFinding` shape (`{ code, severity, source, subject, message }`).

@@ -358,7 +358,30 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
 
   // ── Candidate dead-code report ──────────────────────────────────────────────
   let candidates = codeNodes.filter(n => !n.isTest && !live.has(n.id));
-  if (input.filePattern) candidates = candidates.filter(n => n.filePath.includes(input.filePattern!));
+  // A pattern that matches nothing scopes the report to an EMPTY set, and an empty report
+  // over an empty scope said "no dead code here" without ever saying it looked nowhere
+  // (change: never-claim-complete-beside-a-refusal). Counted over every indexed file, not
+  // only the candidates, so "your pattern is wrong" is distinguishable from "that region
+  // has no dead code".
+  let filePatternMatch: { pattern: string; matchedFiles: number; detail?: string } | undefined;
+  if (input.filePattern) {
+    const pattern = input.filePattern;
+    const matched = new Set<string>();
+    for (const n of codeNodes) if (n.filePath.includes(pattern)) matched.add(n.filePath);
+    candidates = candidates.filter(n => n.filePath.includes(pattern));
+    filePatternMatch = {
+      pattern,
+      matchedFiles: matched.size,
+      ...(matched.size === 0
+        ? {
+            detail:
+              `filePattern "${pattern}" matched 0 of the indexed files, so this report covers an empty scope. ` +
+              'An empty candidateDead here means "nothing was examined", NOT "nothing is dead" — the pattern is a '
+              + 'plain substring of the repo-relative path, not a glob.',
+          }
+        : {}),
+    };
+  }
   const parseHealthReport = await loadParseHealthReport(absDir);
   const scriptContainerFiles = new Set(
     (parseHealthReport?.scriptContainers ?? [])
@@ -556,6 +579,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     externalWiring: externalWiringBlock(wiring.report, roots.filter(isWired)),
     byConfidence,
     candidateDead: finalRanked.slice(0, limit),
+    ...(filePatternMatch ? { filePatternMatch } : {}),
     truncated: finalRanked.length > limit ? finalRanked.length - limit : 0,
     coverage: { languages, exportSignal },
     ...(federationBlock ? { federation: federationBlock } : {}),
