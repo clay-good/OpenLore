@@ -8345,8 +8345,14 @@ The analyzer SHALL deterministically discover interface-schema files — OpenAPI
 documents by their top-level key, every `.proto` file, and every GraphQL SDL file (`.graphql`,
 `.graphqls`, `.gql`) — and read each into a normalized element model for rule-table diffing. A
 GraphQL file holding only operations and fragments is a client document and SHALL be listed as a
-skipped candidate, not read as an empty schema; GraphQL files SHALL be merged into one schema, with
-`extend` folded into its definition and a type two files define treated as ambiguous. For protobuf that model SHALL hold RPCs, messages under their full
+skipped candidate, not read as an empty schema; GraphQL files SHALL be merged into one schema PER
+PROJECT — the schema's nearest enclosing directory holding a `package.json` or a GraphQL/Relay
+config, the repository root when there is none — with `extend` folded into its definition and a type
+two files OF THE SAME PROJECT define treated as ambiguous. The partition SHALL be disclosed, SHALL
+be derived from file presence alone (never from a manifest's contents), and SHALL be bounded in the
+number of project roots honored and the directory depth walked, with both bounds disclosed; dropping
+a bounded root SHALL only ever widen a universe. A duplicate field, enum value or argument SHALL
+withhold THAT type with its reason, never the document around it. For protobuf that model SHALL hold RPCs, messages under their full
 names with numbered fields, enums with their values, and `reserved` numbers and names, with type
 names resolved by protobuf's own scoping rule over the file and the files it imports (and what
 those re-export with `import public`) — never over a file it does not import. Discovery scope SHALL be visible, and a
@@ -8365,6 +8371,29 @@ file that cannot be read SHALL be unread with the reason, never omitted.
 - **GIVEN** `web/queries.graphql` holding `query GetOrder { order(id: 1) { id } }` only
 - **WHEN** the repository is analyzed
 - **THEN** it is listed under `skippedCandidates` as a client document, and declares no type
+
+#### Scenario: Two projects in one repository do not void each other
+
+- **GIVEN** `packages/a/package.json` beside `packages/a/schema.graphql`, and
+  `packages/b/package.json` beside `packages/b/schema.graphql`, each schema declaring `type Query`
+- **WHEN** the repository is analyzed
+- **THEN** each project's operations are projected from its own schema, neither `Query` is
+  ambiguous, and the partition is named
+
+#### Scenario: A collision inside one project stays ambiguous
+
+- **GIVEN** `packages/a/schema.graphql` and `packages/a/nested/copy.graphql` both declaring
+  `type Query`, with one `package.json` at `packages/a`
+- **WHEN** the repository is analyzed
+- **THEN** `Query` is ambiguous, no operation of that kind is projected, and the reason names the
+  project it collided in
+
+#### Scenario: A duplicate field withholds its type, not the file
+
+- **GIVEN** a schema file in which one type declares the same field twice and other types do not
+- **WHEN** the repository is analyzed
+- **THEN** that type is listed as not assessed with the duplicate named, and every other type in
+  the same file is projected
 
 #### Scenario: Parse failure is unread, not empty
 

@@ -241,9 +241,9 @@ A gRPC finding names no consumer — client call sites are not read — and says
 
 Every `.graphql`, `.graphqls` and `.gql` file is read with a hand-written SDL reader. A file that
 holds only operations and fragments is a **client document**, not a schema: it is listed under
-`skippedCandidates` with that reason. All schema files read are merged into **one schema**, as one
-server sees them — `extend type Query { … }` in another file adds to `Query`; a type two files
-define is ambiguous and binds nothing. A type only ever extended — a Federation 1 subgraph's
+`skippedCandidates` with that reason. Schema files are merged into **one schema per project**, as
+one server sees them — `extend type Query { … }` in another file of the same project adds to
+`Query`; a type two files of the same project define is ambiguous and binds nothing. A type only ever extended — a Federation 1 subgraph's
 `extend type Query` and `extend type User @key(…)` — is this repository's contract and is compared
 as one. When any file defines `schema { … }`, the roots are exactly the ones it names.
 
@@ -282,7 +282,7 @@ client (`@apollo/client`, `urql`, Relay…) and no server, and objects inside cl
 mocks, and a `const Query = {…}` in a file that is not about resolvers. Maps in comments, strings,
 test files and `*.generated.*` files are not read, and neither are schemas under test or fixture
 paths — a fixture's `type Query` would make the real root ambiguous. A root type defined in two
-files is reported as not assessed, which `find_dead_code` repeats.
+files of the same project is reported as not assessed, which `find_dead_code` repeats.
 
 An import is followed one level through a barrel (`export * from './feature'`, `export { a as b }
 from …`, a Python package's `__init__.py`); when the module is indexed but does not define or
@@ -293,8 +293,37 @@ to the repository's SDL; neither are files importing a mocking library (`msw`,
 is the compiler's copy of a server's schema, and a file whose types sit beside `@client`
 operations is Apollo local state: `analyze` reads neither as this repository's contract, and lists
 both under `skippedCandidates`. `certify_service_contract` never drops a schema on a config's say-so —
-it grades the file and names the Relay link in its boundaries. One schema per repository means
-a monorepo with several servers' SDL makes their shared roots ambiguous — disclosed, not guessed.
+it grades the file and names the Relay link in its boundaries.
+
+### Which project a schema belongs to
+
+GraphQL's namespace is global to a **server**, not to a repository. A schema's universe is its
+nearest enclosing **project root**: the closest ancestor directory holding a `package.json`, a
+`relay.config.json`, a `graphql.config.{json,yml,yaml}`, a `.graphqlrc.{json,yml,yaml}` or a
+`.graphqlconfig` — the repository root when there is none. Type and field identity resolves inside
+one universe, so two unrelated projects that each declare `type Query` do not void each other.
+Nothing is parsed to decide this: a `package.json` that is not valid JSON still marks its directory.
+
+| Situation | Answer |
+|---|---|
+| `packages/a/schema.graphql` and `packages/b/schema.graphql` each declare `type Query` | two universes, both graded |
+| `packages/a/schema.graphql` and `packages/a/nested/copy.graphql` both declare `type Query` | one universe, still **not assessed** |
+| A schema with no `package.json` above it | the repository root's universe |
+| Several versioned definition files in ONE directory that redefine the same types | one universe, still **not assessed** |
+
+The partition is stated in `boundaries`, so the answer is checkable. A project root that exists at
+only one of the two revisions is **ignored on both**, and said so: honoring it would move a type
+between universes and read as one type removed and another added. A `relay.config.js`-only project
+(no manifest) falls back to the enclosing universe — the pre-partition answer, never a narrower one.
+Past 2,000 project roots, the deepest are dropped, which only ever widens a universe; a schema more
+than 40 directories deep falls back to the repository root. Both are disclosed.
+
+### What a duplicate declaration withholds
+
+A duplicate field, enum value or argument makes **that type** unassessable — which definition wins
+is not knowable — and nothing else. The type is withheld from the merged namespace and named with
+its reason; every other type in the same document is read and graded. (A duplicate argument on a
+`directive` definition, whose namespace is the whole document, still refuses the file.)
 
 Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
 bound: a type field is not a node.

@@ -5672,6 +5672,11 @@ export interface CallGraphBuilderOptions {
   /** Schema files deliberately not read (fixtures, a Relay compiler's copy), each with why. */
   contractFilesSkipped?: ReadonlyArray<{ file: string; reason: string }>;
   /**
+   * Project-root directories the walk saw (change: scope-graphql-schema-universes), so GraphQL
+   * schema identity is scoped to a project instead of the whole repository.
+   */
+  projectRoots?: readonly string[];
+  /**
    * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
    * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
    * no mapping: a built path then binds only if it is itself indexed.
@@ -5691,6 +5696,7 @@ export class CallGraphBuilder {
   private readonly protoFilesOmitted: number;
   private readonly graphqlFilesOmitted: number;
   private readonly contractFilesSkipped: ReadonlyArray<{ file: string; reason: string }>;
+  private readonly projectRoots: readonly string[];
   private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
@@ -5703,6 +5709,7 @@ export class CallGraphBuilder {
     this.protoFilesOmitted = options.protoFilesOmitted ?? 0;
     this.graphqlFilesOmitted = options.graphqlFilesOmitted ?? 0;
     this.contractFilesSkipped = options.contractFilesSkipped ?? [];
+    this.projectRoots = options.projectRoots ?? [];
     this.buildOutput = options.buildOutput;
     this.resolution = {
       typeInference: options.resolution?.typeInference !== false,
@@ -6766,6 +6773,7 @@ export class CallGraphBuilder {
           protoFilesOmitted: this.protoFilesOmitted,
           graphqlFilesOmitted: this.graphqlFilesOmitted,
           ...(this.contractFilesSkipped.length ? { skippedFiles: this.contractFilesSkipped } : {}),
+          ...(this.projectRoots.length ? { projectRoots: this.projectRoots } : {}),
           importTargets: (() => {
             // Built lazily, once: a repository with no imported handler never indexes its files.
             let resolve: ReturnType<typeof createImportResolver> | undefined;

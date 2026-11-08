@@ -664,6 +664,109 @@ enum Status { OPEN CLOSED }
     expect(r.notAssessed).toEqual([{ file: 'graphql/schema.graphql', reason: 'outside the model: @key' }]);
   });
 
+  // ── Schema universes (change: scope-graphql-schema-universes) ──
+  //
+  // Reproduced on pinned clones of graphql-yoga, relay-examples and the public GitHub SDL before
+  // these were written: merging a whole monorepo into one namespace made every project's root type
+  // ambiguous, so no root-type change was ever graded.
+
+  const PKG = '{"name":"p","version":"1.0.0"}\n';
+
+  it('two projects each defining `type Query` are graded separately, not voided (the release blocker)', async () => {
+    const root = repo({
+      'packages/a/package.json': PKG, 'packages/a/schema.graphql': SDL,
+      'packages/b/package.json': PKG, 'packages/b/schema.graphql': 'type Query { ping: Boolean! }\n',
+    });
+    // Two genuine breaking changes in ONE project: an output loosened, a required argument added.
+    write(root, 'packages/a/schema.graphql', SDL.replace('orders(first: Int = 10): [Order!]!', 'orders(first: Int = 10, tenant: ID!): [Order!]').replace('order(id: ID!): Order', 'order(id: ID!): Order!'));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; class: string; address: string; file: string }>; suggestedBump: string | null };
+    expect(changes.items.map(c => `${c.rule} ${c.class} ${c.address}`).sort()).toEqual([
+      'field-type-changed breaking Query.orders',
+      'output-field-made-non-null non-breaking Query.order',
+      'required-param-added breaking Query.orders',
+    ]);
+    // Never swallowed by one `schema-unassessed` over the root type.
+    expect(changes.items.some(c => c.rule === 'schema-unassessed')).toBe(false);
+    expect(changes.suggestedBump).toBe('major');
+    expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('scoped to 2 project(s)')]));
+    // The other project's identical root name is not a collision.
+    expect(JSON.stringify(r.notAssessed ?? [])).not.toContain('more than one file');
+  });
+
+  it('two sibling projects each extending `type User` bind within their own project', async () => {
+    const SUB = 'type User @key(fields: "email") { email: String! name: String }\nextend type User { totalProductsCreated: Int }\ntype Query { me: User }\n';
+    const root = repo({
+      'examples/a/package.json': PKG, 'examples/a/schema.graphql': SUB,
+      'examples/b/package.json': PKG, 'examples/b/schema.graphql': SUB,
+    });
+    const r = await handleCertifyServiceContract({ directory: root });
+    expect(JSON.stringify(r.notAssessed ?? [])).not.toContain('declared twice');
+    expect(JSON.stringify(r.notAssessed ?? [])).not.toContain('more than one file');
+    // Each project's `Query.me` is on the surface, from its own file.
+    expect((r.surface as Array<{ file: string; address: string }>).map(x => `${x.address} ${x.file}`).sort())
+      .toEqual(['Query.me examples/a/schema.graphql', 'Query.me examples/b/schema.graphql']);
+  });
+
+  it('two schemas in the SAME project still collide and stay unassessed', async () => {
+    const root = repo({
+      'packages/a/package.json': PKG, 'packages/a/schema.graphql': SDL, 'packages/a/nested/copy.graphql': SDL,
+      'packages/b/package.json': PKG, 'packages/b/schema.graphql': 'type Query { ping: Boolean! }\n',
+    });
+    write(root, 'packages/a/schema.graphql', SDL.replace('total: Float', 'total: Float!'));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string }>; suggestedBump: string | null };
+    expect(changes.items.some(c => c.rule === 'operation-removed' || c.rule === 'type-removed')).toBe(false);
+    expect(changes.items.map(c => c.rule)).toContain('schema-unassessed');
+    expect(changes.suggestedBump).toBeNull();
+    expect(r.notAssessed).toEqual(expect.arrayContaining([
+      { file: expect.any(String), reason: expect.stringContaining('is defined in more than one file within packages/a') },
+    ]));
+  });
+
+  it('a duplicated field withholds THAT type; the rest of the document is still graded', async () => {
+    const DUP = `${SDL}type Owner { a: Int\n a: String\n b: Int }\n`;
+    const root = repo({ 'graphql/schema.graphql': DUP });
+    write(root, 'graphql/schema.graphql', DUP.replace('total: Float', 'total: Float!').replace('OPEN CLOSED', 'OPEN'));
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; address: string }>; suggestedBump: string | null };
+    // The file is READ: the rest of it is graded, which a file-wide refusal made impossible.
+    expect(changes.items.map(c => `${c.rule} ${c.address}`).sort()).toEqual([
+      'enum-value-removed Status',
+      'output-field-made-non-null Order',
+    ]);
+    // And the one ambiguous type is named, with why, and never graded.
+    expect(r.notAssessed).toEqual(expect.arrayContaining([
+      { file: 'graphql/schema.graphql', reason: expect.stringContaining('GraphQL type Owner: field `a` is declared twice') },
+    ]));
+    expect(changes.items.some(c => c.address === 'Owner')).toBe(false);
+  });
+
+  it('notAssessed carries an omitted count when it hits the cap', async () => {
+    const root = repo({
+      'graphql/a.graphql': SDL.replace('type Order {', 'type Order @key(fields: "id") {'),
+      'graphql/b.graphql': 'type Mutation @tag(name: "x") { go: Boolean }\n',
+    });
+    const full = await handleCertifyServiceContract({ directory: root });
+    expect((full.notAssessed as unknown[]).length).toBe(2);
+    expect(full.notAssessedOmitted).toBeUndefined();
+    const capped = await handleCertifyServiceContract({ directory: root, maxResults: 1 });
+    expect((capped.notAssessed as unknown[]).length).toBe(1);
+    expect(capped.notAssessedOmitted).toBe(1);
+  });
+
+  it('a project root at one revision only partitions both sides without it, and says so', async () => {
+    const root = repo({ 'packages/a/schema.graphql': SDL, 'packages/b/schema.graphql': 'type Query { ping: Boolean! }\n' });
+    // The manifest appears only at head: honoring it would move `Query` between universes.
+    write(root, 'packages/a/package.json', PKG);
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    expect(r.boundaries).toEqual(expect.arrayContaining([expect.stringContaining('project root(s) exist at one revision only')]));
+    // Both sides stay in one universe, so the two `type Query` definitions stay unassessed —
+    // never graded clean because a manifest appeared.
+    const changes = r.changes as { items: Array<{ rule: string }> };
+    expect(changes.items.some(c => c.rule === 'operation-added' || c.rule === 'operation-removed')).toBe(false);
+  });
+
   it('moving an extension to another file is no change', async () => {
     const root = repo({ 'graphql/schema.graphql': SDL, 'graphql/ops.graphqls': EXT });
     rmSync(join(root, 'graphql/ops.graphqls'));

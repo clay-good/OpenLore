@@ -187,3 +187,49 @@ describe('GraphQL projection through the builder', () => {
     expect(edges).toEqual(['apps/a/resolvers.ts::me -> apps/a/schema.graphql::RootQuery.me', 'cmd/main.go::echoServer.Say -> e2e/echo.proto::/echo.Echo/Say']);
   });
 });
+
+describe('GraphQL projection through the builder: schema universes (change: scope-graphql-schema-universes)', () => {
+  // Two packages, each with its own `type Query` and its own resolver map — the shape every
+  // monorepo has, and the one that used to void both schemas.
+  const A_SDL = 'type Query { order(id: ID!): Order }\ntype Order { id: ID! }\n';
+  const B_SDL = 'type Query { ping: Boolean! }\ntype Order { sku: String! }\n';
+  const A_TS = "export function getOrder(id: string) { return { id }; }\nexport const resolvers = { Query: { order: getOrder } };\n";
+  const B_TS = 'export function ping() { return true; }\nexport const resolvers = { Query: { ping } };\n';
+
+  const monorepo = (projectRoots?: string[]) => new CallGraphBuilder({
+    contractFiles: [
+      { path: 'packages/a/schema.graphql', content: A_SDL },
+      { path: 'packages/b/schema.graphql', content: B_SDL },
+    ],
+    ...(projectRoots ? { projectRoots } : {}),
+  }).build([
+    { path: 'packages/a/src/resolvers.ts', content: A_TS, language: 'TypeScript' },
+    { path: 'packages/b/src/resolvers.ts', content: B_TS, language: 'TypeScript' },
+  ]);
+
+  it('projects and binds both packages when each is its own project', async () => {
+    const result = await monorepo(['packages/a', 'packages/b']);
+    const ops = [...result.nodes.values()].filter(n => n.language === 'GraphQL' && n.name.includes('.'));
+    expect(ops.map(n => `${n.name} ${n.filePath}`).sort()).toEqual([
+      'Query.order packages/a/schema.graphql', 'Query.ping packages/b/schema.graphql',
+    ]);
+    const bound = result.edges.filter(e => e.kind === 'implements_endpoint')
+      .map(e => `${result.nodes.get(e.callerId)!.name} -> ${result.nodes.get(e.calleeId)!.filePath}::${result.nodes.get(e.calleeId)!.name}`).sort();
+    expect(bound).toEqual([
+      'getOrder -> packages/a/schema.graphql::Query.order',
+      'ping -> packages/b/schema.graphql::Query.ping',
+    ]);
+    // Each `type Order` is its own node; neither voids the other.
+    expect([...result.nodes.values()].filter(n => n.language === 'GraphQL' && n.name === 'Order').map(n => n.filePath).sort())
+      .toEqual(['packages/a/schema.graphql', 'packages/b/schema.graphql']);
+    expect(result.contracts?.notAssessed ?? []).toEqual([]);
+  });
+
+  it('with no project roots both are voided — the behavior this change fixes', async () => {
+    const result = await monorepo();
+    expect([...result.nodes.values()].some(n => n.language === 'GraphQL')).toBe(false);
+    expect(result.contracts?.notAssessed ?? []).toEqual(expect.arrayContaining([
+      expect.stringContaining('root type Query is defined in more than one file'),
+    ]));
+  });
+});

@@ -5,7 +5,8 @@
  * interface, input, enum, union and scalar types with their fields, arguments, enum values, union
  * members and implemented interfaces, plus the `schema { query: … }` roots. `extend` definitions are
  * kept apart and merged across files by {@link mergeGraphqlSchema}, because a modular schema splits
- * one type over many files. Deterministic and offline: a small hand-written tokenizer, no
+ * one type over many files; {@link mergeGraphqlUniverses} does that once per PROJECT, since
+ * GraphQL's namespace is global to a server and not to a repository. Deterministic and offline: a small hand-written tokenizer, no
  * `graphql-js`, no network.
  *
  * A file holding only operations and fragments is a CLIENT document, not a schema, and is reported
@@ -75,6 +76,14 @@ export interface GqlType {
   interfaces: string[];
   /** A hash of the type's own directives (`@deprecated` is not valid on a type, so all of them). */
   directivesHash: string;
+  /**
+   * Why THIS type's shape cannot be read (change: scope-graphql-schema-universes).
+   *
+   * A duplicate field, enum value or argument makes the type genuinely ambiguous — which
+   * definition wins is not knowable — but it says nothing about the rest of the document. The type
+   * is kept with the reason and withheld from the merged namespace; every other type is still read.
+   */
+  unassessable?: string;
 }
 
 /** A directive definition: `directive @auth(role: Role!) repeatable on FIELD_DEFINITION | OBJECT`. */
@@ -224,6 +233,9 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
   const skipDescription = () => { if (peek()?.t === 'str') next(); };
 
   const unassessed = new Set<string>();
+
+  /** Withhold one TYPE (never the document) and say why; the first reason read is the one kept. */
+  const withhold = (t: GqlType, reason: string) => { t.unassessable ??= reason; };
 
   /** A balanced `{…}`, `[…]` or `(…)` group, or one token: a value or a selection set, as text. */
   const skipGroup = (): string => {
@@ -411,13 +423,16 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
         skipDescription();
         if (kind === 'input') {
           const v = inputValue();
-          if (seen.has(v.name)) fail(`field ${shown({ t: 'name', v: v.name, line: v.line })} declared twice in ${t.name}`);
+          // A duplicate makes THIS type ambiguous, not the document: the rest is still read, and
+          // the type is withheld from the merged namespace rather than guessed between.
+          if (seen.has(v.name)) { withhold(t, `field \`${v.name}\` is declared twice (line ${v.line})`); continue; }
           seen.add(v.name);
           t.fields.push({ name: v.name, type: v.type, args: [], ...(v.defaultValue !== undefined ? { defaultValue: v.defaultValue } : {}), deprecated: v.deprecated, directivesHash: v.directivesHash, line: v.line });
           continue;
         }
         const f = name('a field name');
-        if (seen.has(f.v)) fail(`field ${shown(f)} declared twice in ${t.name}`, f);
+        const duplicate = seen.has(f.v);
+        if (duplicate) withhold(t, `field \`${f.v}\` is declared twice (line ${f.line})`);
         seen.add(f.v);
         const args: GqlArg[] = [];
         if (is('(')) {
@@ -426,7 +441,7 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
           while (!is(')')) {
             const a = inputValue();
             // A repeated argument name would let the last one silently win every comparison.
-            if (seenArgs.has(a.name)) fail(`argument \`${a.name}\` declared twice on ${t.name}.${f.v}`);
+            if (seenArgs.has(a.name)) { withhold(t, `argument \`${a.name}\` is declared twice on \`${f.v}\` (line ${a.line})`); continue; }
             seenArgs.add(a.name);
             args.push(a);
           }
@@ -435,7 +450,8 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
         expect(':');
         const type = typeRef();
         const d = directives();
-        t.fields.push({ name: f.v, type, args, deprecated: d.deprecated, directivesHash: d.hash, line: f.line });
+        // The first definition is kept, so what IS read of a withheld type stays deterministic.
+        if (!duplicate) t.fields.push({ name: f.v, type, args, deprecated: d.deprecated, directivesHash: d.hash, line: f.line });
       }
       expect('}');
     } else if (kind === 'enum' && is('{')) {
@@ -444,10 +460,11 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
       while (!is('}')) {
         skipDescription();
         const v = name('an enum value');
-        if (seen.has(v.v)) fail(`enum value ${shown(v)} declared twice in ${t.name}`, v);
+        const duplicate = seen.has(v.v);
+        if (duplicate) withhold(t, `enum value \`${v.v}\` is declared twice (line ${v.line})`);
         seen.add(v.v);
         const d = directives();
-        t.values.push({ name: v.v, deprecated: d.deprecated, directivesHash: d.hash, line: v.line });
+        if (!duplicate) t.values.push({ name: v.v, deprecated: d.deprecated, directivesHash: d.hash, line: v.line });
       }
       expect('}');
     }
@@ -499,6 +516,13 @@ export interface GqlSchema {
   rootConflicts: GqlRootKind[];
   /** Names defined in more than one file, with a fingerprint of all their definitions. */
   ambiguous: Array<{ name: string; files: string[]; fingerprint: string }>;
+  /**
+   * Types withheld for THEIR OWN shape — a duplicate field, enum value or argument — each with
+   * why and a fingerprint of its definitions (change: scope-graphql-schema-universes). Absent from
+   * `types`, exactly like an ambiguous name: which definition wins is not knowable. Every other
+   * type in the same document is read and compared normally.
+   */
+  unassessableTypes: Array<{ name: string; files: string[]; reason: string; fingerprint: string }>;
   /** `extend`s of a type no file read defines (projected as extension-only types). */
   orphanExtensions: Array<{ name: string; file: string }>;
   /** Directive definitions by name; one defined in two files is absent (see `ambiguousDirectives`). */
@@ -510,11 +534,16 @@ export interface GqlSchema {
   conflicts: string[];
 }
 
-/** A definition's content for comparison: everything but its line numbers. */
-const fingerprintOf = (x: unknown): string => sha(JSON.stringify(x, (k, v) => (k === 'line' ? undefined : v)));
+/**
+ * A definition's content for comparison: everything but its line numbers. `unassessable` is
+ * skipped with them — its text NAMES a line, so keeping it would make a pure reformat read as a
+ * change to a withheld type.
+ */
+const fingerprintOf = (x: unknown): string => sha(JSON.stringify(x, (k, v) => (k === 'line' || k === 'unassessable' ? undefined : v)));
 
 /**
- * Merge every read document into ONE schema, as a GraphQL server does: one global namespace,
+ * Merge the documents of ONE project into one schema, as a GraphQL server does: one global namespace
+ * (see {@link mergeGraphqlUniverses} for the partition into projects),
  * definitions and their `extend`s folded together. A name defined in two files — two services'
  * schemas in one repository, or a copy beside its source — is ambiguous and dropped from the
  * merged map, never guessed between; its fingerprint is kept so a change to it is still seen.
@@ -552,19 +581,38 @@ export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
   for (const k of rootConflicts) delete roots[k];
   const types = new Map<string, GqlMergedType>();
   const ambiguous: GqlSchema['ambiguous'] = [];
+  const unassessableTypes: GqlSchema['unassessableTypes'] = [];
+  /** Every definition and extension of one name, hashed: what a withheld type is compared by. */
+  const contentOf = (name: string) => fingerprintOf([...(defs.get(name) ?? []).map(x => x.t), ...(exts.get(name) ?? []).map(x => x.t)].map(fingerprintOf).sort());
   for (const [name, at] of defs) {
     if (at.length > 1) {
-      ambiguous.push({ name, files: at.map(x => x.file).sort(), fingerprint: fingerprintOf([...at.map(x => x.t), ...(exts.get(name) ?? []).map(x => x.t)].map(fingerprintOf).sort()) });
+      ambiguous.push({ name, files: at.map(x => x.file).sort(), fingerprint: contentOf(name) });
+      continue;
+    }
+    // Withheld for its own shape: the document around it is still read (case: one duplicated field
+    // in a 1.2 MB schema used to refuse the whole file, grading nothing).
+    if (at[0].t.unassessable) {
+      unassessableTypes.push({ name, files: [at[0].file], reason: at[0].t.unassessable, fingerprint: contentOf(name) });
       continue;
     }
     const { file, t } = at[0];
     types.set(name, { ...t, file, extendedIn: [], fields: [...t.fields], values: [...t.values], members: [...t.members], interfaces: [...t.interfaces] });
   }
   const orphanExtensions: GqlSchema['orphanExtensions'] = [];
-  for (const [name, at] of exts) {
+  for (const [name, every] of exts) {
+    // An `extend` whose OWN shape cannot be read is not folded in — and does not withhold the type
+    // it extends, which another file may define cleanly. Before this type-scoped refusal existed,
+    // a duplicate made the whole FILE unreadable and the clean definition was compared normally;
+    // withholding the merged type instead would downgrade a real `field-removed` in the clean file
+    // to `schema-unassessed`, which is the one direction that must never happen.
+    const at = every.filter(x => !x.t.unassessable);
+    for (const x of every) {
+      if (x.t.unassessable) conflicts.push(`\`extend ${x.t.kind} ${name}\` in ${x.file} is not read: ${x.t.unassessable}`);
+    }
+    if (!at.length) continue;
     let base = types.get(name);
     if (!base) {
-      if (defs.has(name)) continue; // ambiguous: in its fingerprint
+      if (defs.has(name)) continue; // ambiguous or withheld: in its fingerprint
       for (const x of at) orphanExtensions.push({ name, file: x.file });
       // Extension-only: the first extension stands for the definition the gateway holds.
       const first = at[0];
@@ -605,9 +653,60 @@ export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
   }
   return {
     types, roots, rootConflicts: [...rootConflicts].sort(), ambiguous: ambiguous.sort((a, b) => (a.name < b.name ? -1 : 1)),
+    unassessableTypes: unassessableTypes.sort((a, b) => (a.name < b.name ? -1 : 1)),
     orphanExtensions, directives, ambiguousDirectives: ambiguousDirectives.sort((a, b) => (a.name < b.name ? -1 : 1)), schemaDirectivesHash: schemaDirectives.length ? sha(schemaDirectives.sort().join('|')) : NO_DIRECTIVES,
     conflicts: conflicts.sort(),
   };
+}
+
+/**
+ * A schema read from NO file: every map empty and NO root names.
+ *
+ * Deliberately not `mergeGraphqlSchema([])`, which supplies GraphQL's default root names. Used as
+ * the absent side of a comparison, those defaults would make a real `type Mutation` in a schema
+ * whose `schema { query: … }` names no mutation root read as a ROOT at the empty side — and a root
+ * is skipped, so its removal would go ungraded.
+ */
+export const emptyGqlSchema = (): GqlSchema => ({
+  types: new Map(), roots: {}, rootConflicts: [], ambiguous: [], unassessableTypes: [],
+  orphanExtensions: [], directives: new Map(), ambiguousDirectives: [],
+  schemaDirectivesHash: NO_DIRECTIVES, conflicts: [],
+});
+
+/** One project's merged schema, with the universe it belongs to and the files it was merged from. */
+export interface GqlUniverseSchema {
+  /** The project-root directory the schemas share; `''` is the repository root. */
+  universe: string;
+  files: string[];
+  schema: GqlSchema;
+}
+
+/**
+ * Merge the documents into ONE schema PER UNIVERSE (change: scope-graphql-schema-universes).
+ *
+ * GraphQL's namespace is global to a server, not to a repository. Merging every file of a monorepo
+ * into one namespace made each project's `type Query` "defined in more than one file", which
+ * withheld every operation of every project — so a genuine breaking change inside one of them was
+ * never graded. Two schemas in DIFFERENT universes never collide; two in the SAME universe still
+ * do, and stay unassessed, because there the ambiguity is real.
+ */
+export function mergeGraphqlUniverses(
+  docs: readonly GqlDocument[],
+  universeOf: (file: string) => string,
+): GqlUniverseSchema[] {
+  const byUniverse = new Map<string, GqlDocument[]>();
+  for (const d of docs) {
+    const key = universeOf(d.file);
+    const at = byUniverse.get(key);
+    if (at) at.push(d); else byUniverse.set(key, [d]);
+  }
+  return [...byUniverse.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([universe, group]) => ({
+      universe,
+      files: group.map(d => d.file).sort(),
+      schema: mergeGraphqlSchema(group),
+    }));
 }
 
 /**

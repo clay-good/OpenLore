@@ -1490,7 +1490,7 @@ export class AnalysisArtifactGenerator {
     const { MAX_PROTO_FILES } = await import('./contract/project-protobuf.js');
     const { isProtobufPath } = await import('./contract/protobuf.js');
     const { isGraphqlPath } = await import('./contract/graphql.js');
-    const { isFixtureSchemaPath } = await import('./contract/types.js');
+    const { isFixtureSchemaPath, isProjectRootMarkerPath, projectRootDirs } = await import('./contract/types.js');
     const { MAX_GRAPHQL_CANDIDATES } = await import('./contract/project-graphql.js');
     const { relaySchemaPaths } = await import('./contract/graphql.js');
     const { readBuildOutputMap } = await import('./iac/build-output.js');
@@ -1558,6 +1558,12 @@ export class AnalysisArtifactGenerator {
     let graphqlFilesOmitted = 0;
     /** `package.json` / `relay.config.*` texts: they name the schema a Relay COMPILER reads. */
     const relayConfigs: Array<{ path: string; content: string }> = [];
+    /**
+     * Paths that mark a project root, so GraphQL schema identity is scoped to a project rather
+     * than to the whole repository (change: scope-graphql-schema-universes). Paths only — never
+     * parsed, so an invalid `package.json` still marks its directory.
+     */
+    const projectRootMarkers: string[] = [];
     /**
      * Drop the schema a Relay config names: it is the compiler's copy of a server's schema (often
      * GitHub's), and read as this repository's contract it would grade the vendor's API.
@@ -1667,6 +1673,7 @@ export class AnalysisArtifactGenerator {
         // source (change: add-iac-deploy-binding-commands).
         if (file.path === 'tsconfig.json' || file.path === 'package.json') buildOutputConfigs.set(file.path, content);
         if (/(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts))$/.test(file.path)) relayConfigs.push({ path: file.path, content });
+        if (isProjectRootMarkerPath(file.path)) projectRootMarkers.push(file.path);
 
         // Signatures: exclude test files
         if (!isTest) {
@@ -1747,6 +1754,7 @@ export class AnalysisArtifactGenerator {
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
         ...(contractFiles.length ? { contractFiles: withoutClientSchemas(contractFiles) } : {}),
         ...(skippedContractFiles.length ? { contractFilesSkipped: skippedContractFiles } : {}),
+        ...(projectRootMarkers.length ? { projectRoots: projectRootDirs(projectRootMarkers) } : {}),
         ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
         ...(protoFilesOmitted ? { protoFilesOmitted } : {}),
         ...(graphqlFilesOmitted ? { graphqlFilesOmitted } : {}),

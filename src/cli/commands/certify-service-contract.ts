@@ -66,6 +66,8 @@ export function renderServiceContract(result: Record<string, unknown>): string {
     for (const f of findings) lines.push(`  [${f.enforcementClass ?? 'advisory'}] ${f.code}: ${f.message}`);
   }
   for (const n of (r.notAssessed as Array<{ file: string; reason: string }>) ?? []) lines.push(`Not assessed: ${n.file} (${n.reason})`);
+  // The cap is printed too: a bounded list of what was NOT assessed must never read as all of it.
+  if (r.notAssessedOmitted) lines.push(`Not assessed: ${String(r.notAssessedOmitted)} more, not listed`);
   for (const b of (r.boundaries as string[]) ?? []) lines.push(`Boundary: ${b}`);
   return lines.join('\n');
 }

@@ -8,9 +8,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  readGraphql, mergeGraphqlSchema, namedType, isGraphqlPath, isBuiltInScalar,
+  readGraphql, mergeGraphqlSchema, mergeGraphqlUniverses, namedType, isGraphqlPath, isBuiltInScalar,
   type GqlDocument, type GqlType,
 } from './graphql.js';
+import { partitionSchemaUniverses, projectRootDirs, isProjectRootMarkerPath, MAX_SCHEMA_UNIVERSE_DEPTH } from './types.js';
 import { MAX_SPEC_BYTES } from './openapi.js';
 
 const read = (text: string, file = 'schema.graphql'): GqlDocument => {
@@ -278,10 +279,51 @@ describe('readGraphql: refusals', () => {
     expect(fails('input A { a: [Int] = [1, 2')).toMatch(/end of file/);
   });
 
-  it('a duplicate field or enum value is unreadable', () => {
-    expect(fails('type A { a: Int\n a: String }')).toMatch(/line 2: field `a` declared twice in A/);
-    expect(fails('input I { a: Int, a: Int }')).toMatch(/declared twice/);
-    expect(fails('enum E { X Y X }')).toMatch(/enum value `X` declared twice/);
+  it('a duplicate field or enum value withholds THAT type, not the document (change: scope-graphql-schema-universes)', () => {
+    const d = read('type A { a: Int\n a: String }\ntype B { b: Int }\ninput I { c: Int, c: Int }\nenum E { X Y X }');
+    expect(type(d, 'A').unassessable).toMatch(/field `a` is declared twice \(line 2\)/);
+    expect(type(d, 'I').unassessable).toMatch(/field `c` is declared twice/);
+    expect(type(d, 'E').unassessable).toMatch(/enum value `X` is declared twice/);
+    // The rest of the document is read as before.
+    expect(type(d, 'B').unassessable).toBeUndefined();
+    expect(type(d, 'B').fields.map(f => f.name)).toEqual(['b']);
+    // The first definition is kept, so what IS read of a withheld type is deterministic.
+    expect(type(d, 'A').fields.map(f => f.type)).toEqual(['Int']);
+    expect(type(d, 'E').values.map(v => v.name)).toEqual(['X', 'Y']);
+  });
+
+  it('a withheld type is absent from the merged namespace, with why, and its neighbours are not', () => {
+    const merged = mergeGraphqlSchema([read('type A { a: Int\n a: String }\ntype B { b: Int }')]);
+    expect(merged.types.has('A')).toBe(false);
+    expect(merged.types.has('B')).toBe(true);
+    expect(merged.unassessableTypes).toEqual([
+      { name: 'A', files: ['schema.graphql'], reason: expect.stringContaining('field `a` is declared twice'), fingerprint: expect.any(String) },
+    ]);
+    // A reformat that does not change the shape does not change the fingerprint.
+    const again = mergeGraphqlSchema([read('\n\ntype A { a: Int\n a: String }\ntype B { b: Int }')]);
+    expect(again.unassessableTypes[0].fingerprint).toBe(merged.unassessableTypes[0].fingerprint);
+    const altered = mergeGraphqlSchema([read('type A { a: ID\n a: String }\ntype B { b: Int }')]);
+    expect(altered.unassessableTypes[0].fingerprint).not.toBe(merged.unassessableTypes[0].fingerprint);
+  });
+
+  it('an `extend` holding a duplicate field is not folded in, and does NOT withhold the type it extends', () => {
+    const merged = mergeGraphqlSchema([
+      read('type A { a: Int }', 'a.graphql'),
+      read('extend type A { b: Int\n b: String }', 'b.graphql'),
+    ]);
+    // The clean definition is still compared — before the type-scoped refusal existed, the whole
+    // bad FILE was dropped and `A` was compared normally; withholding `A` here would downgrade a
+    // real `field-removed` in a.graphql to `schema-unassessed`.
+    expect(merged.types.get('A')!.fields.map(f => f.name)).toEqual(['a']);
+    expect(merged.unassessableTypes).toEqual([]);
+    expect(merged.conflicts).toEqual([expect.stringMatching(/^`extend object A` in b\.graphql is not read: field `b` is declared twice/)]);
+  });
+
+  it('an `extend`-only type whose only extension is unreadable is not invented', () => {
+    const merged = mergeGraphqlSchema([read('extend type Ghost { b: Int\n b: String }', 'b.graphql')]);
+    expect(merged.types.has('Ghost')).toBe(false);
+    expect(merged.orphanExtensions).toEqual([]);
+    expect(merged.conflicts).toEqual([expect.stringContaining('`extend object Ghost` in b.graphql is not read')]);
   });
 
   it('schema blocks with unknown operations, bad keywords, and stray tokens are unreadable', () => {
@@ -493,7 +535,9 @@ describe('readGraphql: directive definitions, schema directives and default valu
   });
 
   it('a duplicate argument name, a root named twice, or a second `schema` definition is unreadable', () => {
-    expect(fails('type Q { a(x: Int, x: String): Int }')).toMatch(/argument `x` declared twice on Q\.a/);
+    // A duplicate argument withholds its own type; a duplicate on a `directive` definition, whose
+    // namespace is the document's, still refuses the file.
+    expect(type(read('type Q { a(x: Int, x: String): Int }'), 'Q').unassessable).toMatch(/argument `x` is declared twice on `a`/);
     expect(fails('directive @d(x: Int, x: Int) on FIELD')).toMatch(/argument `x` declared twice on @d/);
     expect(fails('schema { query: A query: B }')).toMatch(/the query root is named twice/);
     expect(fails('schema { query: A }\nschema { mutation: B }')).toMatch(/a second `schema` definition/);
@@ -548,5 +592,100 @@ describe('mergeGraphqlSchema: roots, extension-only types, ambiguity fingerprint
     const h = (...texts: string[]) => mergeGraphqlSchema(texts.map((t, i) => doc(`${i}.graphql`, t))).schemaDirectivesHash;
     expect(h('extend schema @link(url: "a")', 'extend schema @link(url: "b")')).toBe(h('extend schema @link(url: "b")', 'extend schema @link(url: "a")'));
     expect(h('extend schema @link(url: "a")')).not.toBe(h('extend schema @link(url: "b")'));
+  });
+});
+
+describe('schema universes (change: scope-graphql-schema-universes)', () => {
+  it('keys a universe by the nearest enclosing project root, and the repository root otherwise', () => {
+    const roots = projectRootDirs(['package.json', 'packages/a/package.json', 'packages/b/relay.config.json', 'packages/b/src/notes.md']);
+    expect(roots).toEqual(['', 'packages/a', 'packages/b']);
+    const p = partitionSchemaUniverses(
+      ['packages/a/schema.graphql', 'packages/a/deep/other.graphql', 'packages/b/src/schema.graphql', 'docs/schema.graphql'],
+      roots,
+    );
+    expect(p.universeOf('packages/a/schema.graphql')).toBe('packages/a');
+    expect(p.universeOf('packages/a/deep/other.graphql')).toBe('packages/a');
+    expect(p.universeOf('packages/b/src/schema.graphql')).toBe('packages/b');
+    expect(p.universeOf('docs/schema.graphql')).toBe('');
+    expect(p.universes).toEqual(['', 'packages/a', 'packages/b']);
+    expect(p.rootsOmitted).toBe(0);
+    expect(p.tooDeep).toEqual([]);
+  });
+
+  it('recognizes the marker forms, and nothing else', () => {
+    for (const f of ['package.json', 'a/b/package.json', 'relay.config.json', 'graphql.config.yml', 'graphql.config.yaml', '.graphqlrc.json', '.graphqlconfig', '.graphqlconfig.yml']) {
+      expect(isProjectRootMarkerPath(f), f).toBe(true);
+    }
+    for (const f of ['package-lock.json', 'my-package.json', 'relay.config.js', 'tsconfig.json', 'schema.graphql']) {
+      expect(isProjectRootMarkerPath(f), f).toBe(false);
+    }
+  });
+
+  it('refuses a root or a schema reached through `..`, an absolute path or a drive letter', () => {
+    const p = partitionSchemaUniverses(['../outside/schema.graphql', '/abs/schema.graphql'], ['../outside', '/abs', 'C:/x', 'ok']);
+    // Neither schema keys a universe of its own, and no refused root became one.
+    expect(p.universeOf('../outside/schema.graphql')).toBe('');
+    expect(p.universeOf('/abs/schema.graphql')).toBe('');
+    expect(p.universeOf('ok/schema.graphql')).toBe('ok');
+    expect(projectRootDirs(['../a/package.json', '/b/package.json'])).toEqual([]);
+  });
+
+  it('bounds the walk: a schema deeper than the bound falls back to the repository root, disclosed', () => {
+    const deep = `${Array.from({ length: MAX_SCHEMA_UNIVERSE_DEPTH + 5 }, (_, i) => `d${i}`).join('/')}/schema.graphql`;
+    const p = partitionSchemaUniverses([deep], ['d0']);
+    expect(p.universeOf(deep)).toBe('');
+    expect(p.tooDeep).toEqual([deep]);
+  });
+
+  it('drops the DEEPEST roots past the cap, so a universe only ever gets wider', () => {
+    const roots = ['', ...Array.from({ length: 2_500 }, (_, i) => `packages/p${i}/nested`)];
+    const p = partitionSchemaUniverses(['packages/p0/nested/schema.graphql'], roots);
+    expect(p.rootsOmitted).toBeGreaterThan(0);
+    // The repository root is shallowest, so it is always honored.
+    expect(p.universeOf('top.graphql')).toBe('');
+  });
+
+  it('merges one schema per universe, so two projects do not void each other', () => {
+    const docs = [
+      read('type Query { a: Int }\ntype Shared { x: Int }', 'packages/a/schema.graphql'),
+      read('type Query { b: Int }\ntype Shared { y: Int }', 'packages/b/schema.graphql'),
+    ];
+    const roots = ['packages/a', 'packages/b'];
+    const p = partitionSchemaUniverses(docs.map(d => d.file), roots);
+    const universes = mergeGraphqlUniverses(docs, p.universeOf);
+    expect(universes.map(u => u.universe)).toEqual(['packages/a', 'packages/b']);
+    for (const u of universes) {
+      expect(u.schema.ambiguous).toEqual([]);
+      expect(u.schema.types.get('Query')!.fields).toHaveLength(1);
+      expect(u.schema.types.has('Shared')).toBe(true);
+    }
+  });
+
+  it('two schemas in the SAME project still collide and stay unassessed', () => {
+    const docs = [
+      read('type Query { a: Int }', 'packages/a/schema.graphql'),
+      read('type Query { b: Int }', 'packages/a/other/schema.graphql'),
+    ];
+    const p = partitionSchemaUniverses(docs.map(d => d.file), ['packages/a']);
+    const universes = mergeGraphqlUniverses(docs, p.universeOf);
+    expect(universes).toHaveLength(1);
+    expect(universes[0].schema.ambiguous.map(a => a.name)).toEqual(['Query']);
+    expect(universes[0].schema.types.has('Query')).toBe(false);
+  });
+
+  it('stays linear on a hostile shape: 2,000 roots, 2,000 schemas 40 deep, looked up per type', () => {
+    const roots = Array.from({ length: 2_000 }, (_, i) => `packages/p${i}`);
+    const deep = Array.from({ length: MAX_SCHEMA_UNIVERSE_DEPTH }, (_, i) => `d${i}`).join('/');
+    const paths = Array.from({ length: 2_000 }, (_, i) => `packages/p${i}/${deep}/schema.graphql`);
+    const started = Date.now();
+    const p = partitionSchemaUniverses(paths, roots);
+    // 40,000 lookups — what a loop over schemas × types would do — cost no extra walk: memoized.
+    let wrong = 0;
+    for (const f of paths) for (let i = 0; i < 20; i++) if (p.universeOf(f) !== f.slice(0, f.indexOf('/', f.indexOf('/') + 1))) wrong++;
+    expect(wrong).toBe(0);
+    // Quadratic in either dimension would be millions of segment walks, not thousands.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(p.universes).toHaveLength(2_000);
+    expect(p.tooDeep).toEqual([]);
   });
 });

@@ -3945,6 +3945,38 @@ argument or input field SHALL be allowed to become looser (optional) and never s
 other than `@deprecated` that changed SHALL be `potentially-breaking`, and because client operations
 are not read, a GraphQL finding SHALL say its consumers are not assessed.
 
+Schema identity SHALL be scoped to the schema's own project (its nearest enclosing project root),
+so two unrelated projects in one repository do not void each other's types; a collision INSIDE one
+project SHALL stay unassessed. Both revisions SHALL be partitioned with the SAME project roots — a
+root present at only one revision SHALL be honored at neither, and disclosed — and the partition
+used SHALL be stated in `boundaries`. A duplicate field, enum value or argument SHALL withhold THAT
+type under `notAssessed` with its reason while the rest of the document is graded. Every bounded
+list of what was not assessed SHALL carry the count it omitted.
+
+#### Scenario: A root type each project declares is graded per project
+
+- **GIVEN** two packages, each with a `package.json` and a schema declaring `type Query`, and a
+  required argument added plus an output loosened in ONE of them
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** both changes are graded `breaking`, neither root type is `schema-unassessed`, and the
+  partition is named in `boundaries`
+
+#### Scenario: A project root that appeared is honored at neither revision
+
+- **GIVEN** a `package.json` added at head beside a schema, with another schema elsewhere declaring
+  the same root type
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** both revisions are partitioned without that root, the one-sided root is disclosed, and
+  nothing is reported added or removed because of it
+
+#### Scenario: A duplicate field withholds its type, and the omitted count is given
+
+- **GIVEN** a schema in which one type declares a field twice and other types changed
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** the other types' changes are graded, the duplicated type is listed under `notAssessed`
+  with the duplicate named, and a `notAssessed` list cut by the result cap reports
+  `notAssessedOmitted`
+
 #### Scenario: Nullability follows variance
 
 - **GIVEN** `Order.total: Float` made `Float!`, and `Query.orders` given a new argument `status: Status!`

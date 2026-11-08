@@ -250,6 +250,12 @@ export interface ContractProjectionInput {
   resolveGraphqlImplementation?: (map: ResolverMap, name: string) => readonly FunctionNode[];
   /** The code functions a registration could mean by a name (see `ProtobufProjectionInput`). */
   resolveGrpcImplementation?: (reg: GrpcRegistration, name: string) => readonly FunctionNode[];
+  /**
+   * Project-root directories in this repository (change: scope-graphql-schema-universes). GraphQL
+   * schema identity is scoped to the nearest enclosing one, so two unrelated projects in a monorepo
+   * do not void each other's types. Absent, the whole repository is one project.
+   */
+  projectRoots?: readonly string[];
 }
 
 /** A path template with no literal segment (`/`, `/{id}`): too generic to match without its base path. */
@@ -328,6 +334,7 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
   const gql = gqlRead.length
     ? projectGraphql({
       files: gqlRead,
+      ...(input.projectRoots ? { projectRoots: input.projectRoots } : {}),
       resolverMaps: input.graphqlResolverMaps ?? (() => []),
       resolveImplementation: input.resolveGraphqlImplementation ?? (() => []),
       ...(input.importTargets ? { importTargets: input.importTargets } : {}),

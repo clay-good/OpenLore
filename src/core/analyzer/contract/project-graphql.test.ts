@@ -154,6 +154,76 @@ describe('projectGraphql: references_schema', () => {
   });
 });
 
+describe('projectGraphql: schema universes (change: scope-graphql-schema-universes)', () => {
+  const A = 'type Query { order: Order }\ntype Order { id: ID }\n';
+  const B = 'type Query { ping: Boolean }\ntype Order { sku: String }\n';
+  const two = (projectRoots?: string[]) => projectGraphql({
+    files: [{ path: 'packages/a/schema.graphql', content: A }, { path: 'packages/b/schema.graphql', content: B }],
+    ...(projectRoots ? { projectRoots } : {}),
+    resolverMaps: () => [],
+    resolveImplementation: () => [],
+  });
+
+  it('two projects each get their own namespace: both roots and both `Order`s are projected', () => {
+    const p = two(['packages/a', 'packages/b']);
+    expect(p.nodes.map(n => `${n.name} ${n.filePath}`).sort()).toEqual([
+      'Order packages/a/schema.graphql', 'Order packages/b/schema.graphql',
+      'Query.order packages/a/schema.graphql', 'Query.ping packages/b/schema.graphql',
+    ]);
+    // Each operation references its OWN project's type, never the other's.
+    expect(edgesOf(p, 'references_schema')).toEqual(['packages/a/schema.graphql::Query.order -> packages/a/schema.graphql::Order']);
+    expect(p.notAssessed).toEqual([]);
+    expect(p.notes).toEqual(expect.arrayContaining([expect.stringContaining('scoped to 2 project(s): packages/a, packages/b')]));
+  });
+
+  it('without project roots the whole repository is one namespace, exactly as before', () => {
+    const p = two();
+    expect(p.nodes.map(n => n.name)).toEqual([]);
+    expect(p.notAssessed).toEqual([expect.stringContaining('root type Query is defined in more than one file')]);
+    expect(p.notes.some(n => n.includes('scoped to'))).toBe(false);
+  });
+
+  it('a resolver map binds to its OWN project first, and is never guessed between two', () => {
+    const code = [fn('packages/a/src/r.ts::getOrder'), fn('outside/r.ts::getOrder')];
+    const p = projectGraphql({
+      files: [{ path: 'packages/a/schema.graphql', content: A }, { path: 'packages/b/schema.graphql', content: 'type Query { order: Thing }\ntype Thing { id: ID }\n' }],
+      projectRoots: ['packages/a', 'packages/b'],
+      resolverMaps: () => [
+        { file: 'packages/a/src/r.ts', line: 1, runtime: 'node', root: 'Query', entries: [{ field: 'order', fn: 'getOrder', line: 2 }] },
+        { file: 'outside/r.ts', line: 1, runtime: 'node', root: 'Query', entries: [{ field: 'order', fn: 'getOrder', line: 2 }] },
+      ],
+      resolveImplementation: byName(code),
+    });
+    // The map inside packages/a binds to packages/a's operation.
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['packages/a/src/r.ts::getOrder -> packages/a/schema.graphql::Query.order']);
+    // The map in no project sees `Query.order` declared by two projects: disclosed, never guessed.
+    expect(p.unresolvedResolvers).toEqual([
+      { file: 'outside/r.ts', line: 2, root: 'Query', field: 'order', reason: 'ambiguous-implementation', detail: expect.stringContaining('declared by 2 projects') },
+    ]);
+  });
+
+  it('a map outside every project still binds when exactly one project declares the operation', () => {
+    const code = [fn('outside/r.ts::getOrder')];
+    const p = projectGraphql({
+      files: [{ path: 'packages/a/schema.graphql', content: A }],
+      projectRoots: ['packages/a'],
+      resolverMaps: () => [{ file: 'outside/r.ts', line: 1, runtime: 'node', root: 'Query', entries: [{ field: 'order', fn: 'getOrder', line: 2 }] }],
+      resolveImplementation: byName(code),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual(['outside/r.ts::getOrder -> packages/a/schema.graphql::Query.order']);
+  });
+
+  it('a type withheld for a duplicate field is named, and its neighbours are still projected', () => {
+    const p = projectGraphql({
+      files: [{ path: 's.graphql', content: 'type Query { a: Int }\ntype Dup { x: Int\n x: String }\ntype Fine { y: Int }\n' }],
+      resolverMaps: () => [],
+      resolveImplementation: () => [],
+    });
+    expect(p.nodes.map(n => n.name).sort()).toEqual(['Fine', 'Query.a']);
+    expect(p.notAssessed).toEqual([expect.stringMatching(/^GraphQL type Dup in s\.graphql: field `x` is declared twice/)]);
+  });
+});
+
 describe('projectGraphql: implements_endpoint from resolver maps', () => {
   it('binds the functions a literal map names, marked as a resolver binding', () => {
     const p = direct();
