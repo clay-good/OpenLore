@@ -1494,8 +1494,12 @@ export class AnalysisArtifactGenerator {
     const { MAX_GRAPHQL_CANDIDATES } = await import('./contract/project-graphql.js');
     const { relaySchemaPaths } = await import('./contract/graphql.js');
     const { readBuildOutputMap } = await import('./iac/build-output.js');
+    const { readPathAliases } = await import('./contract/grpc-registration.js');
     /** Total specification bytes retained across the walk. */
     const MAX_CONTRACT_BYTES = 64 * 1024 * 1024;
+    /** tsconfig/jsconfig/package.json texts kept for the alias reader, and the bytes of each. */
+    const MAX_ALIAS_CONFIG_FILES = 200;
+    const MAX_ALIAS_CONFIG_FILE_BYTES = 256 * 1024;
 
     const CALL_GRAPH_LANGS = new Set([
       'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
@@ -1545,6 +1549,13 @@ export class AnalysisArtifactGenerator {
     const contractFiles: Array<{ path: string; content: string }> = [];
     /** The configs that declare where built output comes from (add-iac-deploy-binding-commands). */
     const buildOutputConfigs = new Map<string, string>();
+    /**
+     * The configs that DECLARE path aliases — a tsconfig/jsconfig `compilerOptions.paths`, a
+     * `package.json` `imports` subpath — so an aliased handler import resolves to the module it
+     * names (change: fix-bind-aliased-grpc-node-handlers). Bounded: a monorepo has many, and only
+     * the text is kept, never a traversal.
+     */
+    const aliasConfigs = new Map<string, string>();
     /** Candidates past a retention bound: counted so the projection can disclose the cap. */
     let contractFilesOmitted = 0;
     /** Retained specification bytes, bounded alongside the file count. */
@@ -1666,6 +1677,8 @@ export class AnalysisArtifactGenerator {
         // The project's own build-output mapping, for binding a deployed `dist/…` handler to its
         // source (change: add-iac-deploy-binding-commands).
         if (file.path === 'tsconfig.json' || file.path === 'package.json') buildOutputConfigs.set(file.path, content);
+        if (aliasConfigs.size < MAX_ALIAS_CONFIG_FILES && /(?:^|\/)(?:[jt]sconfig(?:\.[\w.-]+)?\.json|package\.json)$/.test(file.path)
+          && content.length <= MAX_ALIAS_CONFIG_FILE_BYTES) aliasConfigs.set(file.path, content);
         if (/(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts))$/.test(file.path)) relayConfigs.push({ path: file.path, content });
 
         // Signatures: exclude test files
@@ -1751,6 +1764,7 @@ export class AnalysisArtifactGenerator {
         ...(protoFilesOmitted ? { protoFilesOmitted } : {}),
         ...(graphqlFilesOmitted ? { graphqlFilesOmitted } : {}),
         ...(buildOutputConfigs.size ? { buildOutput: readBuildOutputMap(buildOutputConfigs) } : {}),
+        ...(aliasConfigs.size ? { pathAliases: readPathAliases(aliasConfigs) } : {}),
       });
       // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the
       // WHOLE build via a build-scoped async-context store, and forwarded to each extraction worker

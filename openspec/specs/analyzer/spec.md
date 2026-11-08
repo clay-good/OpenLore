@@ -8593,6 +8593,47 @@ unbound is listed as not bound, never as not implemented.
 - **THEN** every code function's fan-in and fan-out, the entry points and the hubs are identical,
   and no protobuf node appears among them
 
+#### Scenario: A Node registration's implementation is read in each shape that is written down
+
+A grpc-js `addService` call states its implementation in one of three shapes a reader can settle
+from the file's own text. Each is read, and the scope rule says WHERE the implementation may be:
+
+| Written at the registration | Bound | Where it is looked for |
+|---|---|---|
+| an object literal (`{ getOrder }`) | the function each key names | this file, or — for an imported name — the module it was imported from |
+| a local name bound ONCE to an object literal | the same, through that literal | as above |
+| `new MyHandlers()` | the method of the class named after each RPC | this file, or the module `MyHandlers` was imported from |
+
+- **GIVEN** `server.addService(proto.shop.v1.OrderService.service, new MyHandlers())` with
+  `class MyHandlers { getOrder() … }` in the same file, and a second server whose implementation is
+  `const serviceImplementation = { getOrder }` passed by name
+- **WHEN** the repository is analyzed
+- **THEN** `MyHandlers.getOrder` and `getOrder` each carry an `implements_endpoint` edge to
+  `/shop.v1.OrderService/GetOrder`, and neither is a dead-code candidate
+
+#### Scenario: A Node implementation whose value the file does not settle stays disclosed
+
+- **GIVEN** `addService(…, makeHandlers())`, `addService(…, this.handlers)`,
+  `addService(…, new Impl().wrap())`, a name bound more than once or reassigned after its literal,
+  and a name imported from another module
+- **WHEN** the repository is analyzed
+- **THEN** none of them binds anything and each is disclosed as `not-literal` with what was written
+
+#### Scenario: A handler imported through a DECLARED path alias is followed
+
+An alias is followed only from a mapping the repository wrote down — a tsconfig/jsconfig
+`compilerOptions.paths` entry or a `package.json` `imports` subpath — and only when exactly ONE
+mapping matches the specifier, names exactly one target, and that target is exactly one indexed
+module. A webpack/jest/vite alias is arbitrary code and is never read; an `extends` chain is not
+followed. Anything ambiguous leaves the specifier unresolved and disclosed.
+
+- **GIVEN** `tsconfig.json` declaring `"@app/*": ["src/*"]`, and
+  `import { addItem } from '@app/handlers'` registered as `addService(…, { addItem })`
+- **WHEN** the repository is analyzed
+- **THEN** `addItem` in `src/handlers.ts` carries the `implements_endpoint` edge; with no such
+  mapping declared, or with two mappings matching, no edge is drawn and the registration is
+  disclosed as `implementation-not-found` naming the module it was imported from
+
 ### Requirement: GraphqlOperationsAreBoundToTheirResolverMaps
 
 Each root field of a GraphQL schema SHALL be a graph node named `<RootType>.<field>`, and each other
