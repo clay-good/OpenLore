@@ -265,8 +265,8 @@ describe('declare_footprint', () => {
     const far = await fleet(a, Date.now() + PANIC_SESSION_EXPIRY_MS * 1000);
     expect(far.live).toEqual(['legacy']);
     expect(far.ended.count).toBe(0);
-    expect(far.unknown.join(' ')).toMatch(/no recordedAt/);
-    expect(far.unknown.join(' ')).toMatch(/baseCommit is not a commit id/);
+    expect(far.unknown.join(' ')).toMatch(/no usable recordedAt/);
+    expect(far.unknown.join(' ')).toMatch(/baseCommit is absent or not a 40-64 character hex commit id/);
   });
 
   it('an ended fleet record is pruned on the next write, and a new record is stamped', async () => {
