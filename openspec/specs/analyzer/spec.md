@@ -4278,6 +4278,23 @@ defect. A worker SHALL additionally prove it can parse — in a language the bui
 deduplicated reporting. An extraction lane that can produce nothing SHALL never be mistaken for
 files that contain nothing.
 
+A worker's FAILURE SHALL NOT be recorded as the file's verdict either. Every known worker-local
+defect reaches the parent as that one message — a per-language grammar that resolved on the main
+thread but not in that isolate, a successfully extracted result that will not serialize back across
+the channel, a binding that misbehaves in one thread — and having already extracted that language
+proves none of them absent. So a worker-reported failure SHALL be re-extracted on the serial path,
+and the file SHALL be recorded as failed (`parse-failure`) only when the SERIAL path fails too; a
+case where the serial path extracts it SHALL be disclosed as a lane defect, worded apart from the
+empty-result defect so a reader can tell "the worker asserted a parse failure" from "the worker
+reported nothing". A file abandoned at the per-file PARSE BUDGET is the one exception: that bound is
+a property of the file, so it SHALL be trusted and SHALL NOT be re-extracted — one bound, not two.
+
+Re-checking SHALL be bounded by a named constant counting the worker failures re-extracted in one
+build. The bound SHALL limit DUPLICATED work, never completeness: past it the pool SHALL stop
+claiming files and the remainder of the build SHALL be extracted on the serial path exactly once,
+and the retirement SHALL be disclosed. No bound SHALL ever cause a file to be recorded as failed on
+a worker's word.
+
 The lane SHALL bound its own cost and liveness: worker startup and each per-file request SHALL have
 deadlines after which the worker is retired and its file re-extracted on the serial path; worker
 count SHALL be bounded per PROCESS, not per build, so concurrent builds cannot multiply the resident
@@ -4298,6 +4315,30 @@ the build result for the CLI to render.
 - **WHEN** the analyze run completes
 - **THEN** the affected file was re-extracted on the serial path, its facts are identical to a
   fully serial run, and the fallback is disclosed
+
+#### Scenario: A file only the worker could not parse keeps its place in the graph
+
+- **GIVEN** a worker that answers "failed" for one file — for a reason about the worker rather than
+  the source, after it has already extracted many files of that same language
+- **WHEN** the analyze run completes
+- **THEN** that file was re-extracted on the serial path, its facts are in the graph, no
+  `parse-failure` record names it, and the contradiction is disclosed as a lane defect worded as a
+  parse failure the worker asserted and the serial path refuted
+
+#### Scenario: A failure the serial path reproduces is still the file's own
+
+- **GIVEN** a file a worker reports as failed and the serial path also cannot parse
+- **WHEN** the analyze run completes
+- **THEN** the file is recorded as `parse-failure`, carrying the serial path's own error, and
+  nothing is disclosed as a lane defect
+
+#### Scenario: A lane that fails everything costs one extra pass, not two
+
+- **GIVEN** a build in which every worker answer is a failure
+- **WHEN** the re-check bound is reached
+- **THEN** the pool stops claiming files, the remaining files are extracted once on the serial path,
+  the retirement and its failure count are disclosed, and the resulting graph is identical to a
+  fully serial run with no file recorded as failed
 
 #### Scenario: A worker that cannot parse is dropped, not trusted
 
@@ -6417,6 +6458,13 @@ declared DI package, a declared decorator or annotation, or a resolution API nam
 source-declared framework table. A call to a method merely *named* `get`, `resolve`, or `make`
 SHALL NOT be recorded.
 
+A matcher's rule tables are keyed by text read out of the ANALYZED SOURCE, so a lookup SHALL match
+only keys the rule table DECLARES — never a key it inherits from the language's own base object. A
+repository is free to name a function `toString`, `valueOf`, `constructor` or `hasOwnProperty`, and
+such a name SHALL fire no rule and SHALL yield no site. Every recorded `kind` SHALL be a member of
+the closed vocabulary and therefore serializable, so no matched construct can make a file's facts
+unable to cross a process or thread boundary.
+
 The vocabulary SHALL carry a measured **density budget**: on the substrate's own repository and
 on each language fixture, recorded sites SHALL NOT exceed a declared per-thousand-lines ceiling,
 and a matcher that exceeds it SHALL fail the test suite rather than ship.
@@ -6448,6 +6496,13 @@ at most once.
 - **GIVEN** `this.cache.get(key)` and `Promise.resolve(x)` in a file with no DI framework import
 - **WHEN** the repository is analyzed
 - **THEN** no `container-resolution` site is recorded for either
+
+#### Scenario: A function named after a base-object member fires no rule
+
+- **GIVEN** a Go file declaring a local `toString := func(x int) int { ... }` and calling it
+- **WHEN** the repository is analyzed
+- **THEN** no site is recorded for that call, and every site in the file carries a kind from the
+  closed vocabulary that survives being sent across a thread boundary
 
 #### Scenario: A literal that resolves to nothing is still a boundary
 
@@ -6690,11 +6745,55 @@ conclusions SHALL say so. An adapter SHALL only ever add evidence of use and SHA
 deadness. A reference built from a variable, expression, or glob, an unsupported command form, a
 missing or unmapped target, a path outside the repository, and a config that cannot be read or parsed
 SHALL surface as disclosed boundaries with a reason, never as guesses; reading SHALL not follow links
-or block on non-regular files. Config formats outside the supported set — workspace-member manifests,
-framework route conventions, and others — SHALL be named as unread in the caveats. Downstream
+or block on non-regular files. Config formats outside the supported set — framework route conventions
+and others — SHALL be named as unread in the caveats. Downstream
 conclusions SHALL consume the evidence: a config-wired untested gap carries its receipt and is not
 flagged also-dead, and the entry-points digest separates entry points in files a config invokes from
 those no read config invokes.
+
+In a workspace monorepo the package.json adapter SHALL also read the manifests a root config DECLARES
+as workspace members — the root `workspaces` field (array form or `{ packages: [...] }`) and
+`pnpm-workspace.yaml`'s `packages:`, including `!` exclusions — and SHALL NOT search the tree for
+manifests, so a root is only ever a file a config names. Each member manifest's references SHALL
+resolve against THAT manifest's own directory and SHALL be receipted with that manifest's own path.
+Reading SHALL be bounded — the glob expansion over real directories, its `**` depth, the number of
+patterns, and the number of member manifests read (with an exact count of those left unread) — and
+SHALL never follow a symlinked directory or a pattern that leaves the repository (confined with the
+repository's own path-confinement helper). A pattern form the reader does not expand (a brace list,
+character class, or extglob) and a member manifest that cannot be read or parsed SHALL be disclosed
+boundaries naming the member's own path. Whenever a repository declares workspaces, the standing limit
+— that only declared member manifests are read, so a manifest outside the declared set contributes
+nothing — SHALL be disclosed in the boundaries channel even when nothing was capped, and SHALL be
+listed ahead of the resolved-reference boundaries so truncation cannot hide it.
+
+#### Scenario: A declared workspace member's script wires its own file
+
+- **GIVEN** a root package.json declaring `workspaces: ["benchmark"]` and `benchmark/package.json`
+  whose `scripts.start` runs `node start-server.ts`
+- **WHEN** `find_dead_code` runs
+- **THEN** the functions in `benchmark/start-server.ts` are `externally-wired` roots, and the receipt
+  names `benchmark/package.json` and the `scripts.start` key
+
+#### Scenario: A member's relative reference resolves against the member's directory
+
+- **GIVEN** `benchmark/envelop/package.json` whose script runs `node ./app.js`, and an unrelated
+  `app.js` at the repository root
+- **WHEN** the adapters run
+- **THEN** `benchmark/envelop/app.js` is wired and the root's `app.js` gains no evidence
+
+#### Scenario: A manifest outside the declared set contributes nothing, and the limit is disclosed
+
+- **GIVEN** a root declaring `workspaces: ["packages/*"]` and a `tools/package.json` whose `bin` names
+  `tools/helper.js`
+- **WHEN** the adapters run
+- **THEN** `tools/helper.js` gains no evidence, and the boundaries disclose that only the manifests of
+  declared workspace members are read
+
+#### Scenario: A workspace pattern that leaves the repository is refused
+
+- **GIVEN** a root declaring `workspaces: ["../*"]` with a manifest outside the repository
+- **WHEN** the adapters run
+- **THEN** nothing outside the repository is read and the pattern is an `outside-repository` boundary
 
 #### Scenario: A bin-wired CLI entry is not a dead-code candidate
 
@@ -8344,6 +8443,9 @@ same-basename source file.
 The analyzer SHALL deterministically discover interface-schema files — OpenAPI and Swagger
 documents by their top-level key, every `.proto` file, and every GraphQL SDL file (`.graphql`,
 `.graphqls`, `.gql`) — and read each into a normalized element model for rule-table diffing. A
+schema that looks GENERATED or VENDORED — by a generator header in its bounded head, or by a path
+pattern — SHALL be disclosed with that provenance and its certainty, and SHALL still be read and
+graded: provenance annotates and never excludes. A
 GraphQL file holding only operations and fragments is a client document and SHALL be listed as a
 skipped candidate, not read as an empty schema; GraphQL files SHALL be merged into one schema, with
 `extend` folded into its definition and a type two files define treated as ambiguous. For protobuf that model SHALL hold RPCs, messages under their full
@@ -8379,6 +8481,18 @@ file that cannot be read SHALL be unread with the reason, never omitted.
 - **WHEN** the repository is analyzed
 - **THEN** `extend` is named as outside the model (under the projection's `notes`, which withhold
   no conclusion), and the rest of the file is read
+
+#### Scenario: A generated or vendored schema copy is disclosed, not dropped
+
+- **GIVEN** `src/__generated__/schema.graphql`, a `# @generated`-headed SDL, and a copy under
+  `vendor/`
+- **WHEN** the repository is analyzed
+- **THEN** each is listed under the projection's `schemaProvenance` with its `kind`
+  (`generated` / `vendored`), the rule that `matched`, and a `certainty` of `declared` for a
+  header the file itself carries or `path-pattern` for a path guess
+- **AND** every one of them is projected and graded exactly as before: provenance annotates, and
+  never drops, downgrades or excludes a schema
+- **AND** a header marker is looked for in a bounded head of the file only, never the whole text
 
 #### Scenario: Protobuf types resolve by scope, across files
 
@@ -10534,6 +10648,61 @@ class pairs, and was applied inconsistently across reachability paths.
 - **THEN** override edges are still emitted for every name-and-arity-matched override pair, and none
   are silently dropped
 
+### Sub-component: CHAReceiverOutsideRepositoryRefusal
+
+#### Requirement: CHAReceiverOutsideRepositoryRefusal
+
+The system SHALL NOT synthesize a `cha-name-only` virtual-dispatch edge for a `recv.m()` call site
+whose receiver is statically known NOT to be a value of a type defined in this repository. A
+receiver is known to be outside the repository when, and only when, the import facts already
+extracted for the caller's file say so:
+
+- `recv` is a source-level QUALIFIER the file binds to a package or module that does not resolve to
+  an in-project file (`json` from Go's `import "encoding/json"`, `os` from Python's `import os`,
+  `fs` from `import * as fs from 'node:fs'`), or
+- `recv`'s explicitly DECLARED type is qualified by such a package (`t *testing.T`,
+  `ctx context.Context`, `zf: zipfile.ZipFile`).
+
+The determination SHALL be made from import/qualifier facts only, and SHALL NOT consult any
+hard-coded list of standard-library or third-party names. A Go import specifier whose last segment
+is the name of the repository's own root package SHALL NOT be treated as outside the repository
+(the module's own path names the repository root, which has no path segment to match).
+
+A refused call site SHALL be DISCLOSED as an unresolved-ambiguous call site with
+`strategy: 'cha_receiver_outside_repo'`, naming the in-repo methods the pass declined to wire as its
+candidates, so that removing the former edges cannot promote any of those methods to
+high-confidence dead code. CHA SHALL continue to over-approximate by method name for a genuinely
+unresolved receiver whose type could be an in-repo class.
+
+#### Scenario: A standard-library call is not fanned onto same-named in-repo methods
+
+- **GIVEN** a Go file that imports `encoding/json` and calls `json.Unmarshal(...)`, and a method
+  named `Unmarshal` declared on an in-repo type
+- **WHEN** the call graph is built
+- **THEN** the call site carries only its `external::json.Unmarshal` edge and no
+  `cha-name-only` edge to the in-repo `Unmarshal`
+
+#### Scenario: A receiver whose declared type is outside the repository is refused
+
+- **GIVEN** a Go function with a parameter `t *testing.T` that calls `t.Fatalf(...)`, and an in-repo
+  method named `Fatalf`
+- **WHEN** the call graph is built
+- **THEN** no `cha-name-only` edge is synthesized to the in-repo `Fatalf`
+
+#### Scenario: A genuinely unresolved in-repo receiver still fans out
+
+- **GIVEN** a call `x.area()` whose receiver type was not recovered and is not an imported
+  non-repo qualifier, and two in-repo classes declaring `area`
+- **WHEN** the call graph is built
+- **THEN** a `cha-name-only` edge is synthesized to each of them
+
+#### Scenario: A refusal is disclosed, never silent
+
+- **GIVEN** a call site whose name-only fan-out was refused
+- **WHEN** the built graph's ambiguous call sites are inspected
+- **THEN** the site appears with `strategy: 'cha_receiver_outside_repo'` and lists the in-repo
+  methods declined as its candidates
+
 ### Sub-component: CHAProvenanceLabeling
 
 #### Requirement: CHAProvenanceLabeling
@@ -10543,7 +10712,8 @@ edges by setting its `confidence` to `synthesized` and recording the producing r
 `synthesizedBy` property, using `cha-declared-type` for a virtual-dispatch edge whose target set was
 narrowed by a statically-recovered receiver type, `cha-name-only` for a virtual-dispatch edge
 resolved by method name over the whole hierarchy (the receiver type was not statically recovered and
-the call site's argument count is not captured, so no arity narrowing is applied), and `override` for
+the call site's argument count is not captured, so no arity narrowing is applied, and the receiver is
+not known to be outside the repository — see CHAReceiverOutsideRepositoryRefusal), and `override` for
 a method-level override edge.
 Directly-resolved edges SHALL retain their existing `confidence` value and SHALL NOT carry
 `synthesizedBy`. A virtual-dispatch edge SHALL NOT introduce a new `EdgeConfidence` member or a new

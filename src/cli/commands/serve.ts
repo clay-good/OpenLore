@@ -43,6 +43,7 @@ import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
+import { sanitizeForTerminal, stringifyScreened } from '../../utils/misc.js';
 import { resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-contract.js';
 import { releaseContextCache, validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-handlers/utils.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -285,8 +286,16 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   });
 }
 
+/**
+ * The daemon's single response serializer — and therefore where the HTTP transport screens
+ * repository-derived bytes, as `capStructuredResult` does for the stdio transport.
+ * `JSON.stringify` escapes C0 controls on its own but passes bidi overrides and zero-width
+ * characters through verbatim, so a tool result reached an agent carrying them. The class only
+ * removes characters inside string literals, so the body stays valid JSON (content-length is
+ * measured after).
+ */
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body);
+  const text = sanitizeForTerminal(stringifyScreened(body), { keepNewlines: true });
   res.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(text),

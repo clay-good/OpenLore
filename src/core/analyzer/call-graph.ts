@@ -7184,7 +7184,7 @@ export class CallGraphBuilder {
       // Calibration: CHA is the over-approximating mechanism — with it off, no `overrides`
       // edges are synthesized and every other edge is left exactly as it was.
       if (this.resolution.cha) {
-        edges.push(...synthesizeTypeHierarchyEdges({
+        const cha = synthesizeTypeHierarchyEdges({
           nodes: hierarchyNodes,
           classes,
           inheritanceEdges,
@@ -7192,7 +7192,26 @@ export class CallGraphBuilder {
           fileContents,
           directCalleeIdsByCaller,
           importMap: callImportMap,
-        }));
+        });
+        // A loop, not a spread: a large repository's synthesized set can exceed the engine's
+        // argument limit, and the throw would be swallowed below, silently dropping the pass.
+        for (const edge of cha.edges) edges.push(edge);
+        // Sites whose name-only fan-out CHA refused because the receiver is statically outside
+        // this repository (change: suppress-false-cha-name-only). Disclosed through the SAME
+        // channel as a refused resolution-ladder binding, so the graph records an unresolved
+        // call there instead of silently losing the (false) edges — and the `find_dead_code`
+        // ambiguity cap keeps naming the in-repo methods the pass declined to wire.
+        for (const site of cha.refusedSites) {
+          ambiguousSites.push({
+            callerId: site.callerId,
+            calleeName: site.method,
+            calleeObject: site.recv,
+            line: site.line,
+            strategy: 'cha_receiver_outside_repo',
+            candidateIds: site.refusedCandidateIds.slice(0, AMBIGUOUS_CANDIDATE_CAP),
+            candidateCount: site.refusedCandidateIds.length,
+          });
+        }
       }
     } catch {
       // CHA is best-effort; a failure must never abort the build.

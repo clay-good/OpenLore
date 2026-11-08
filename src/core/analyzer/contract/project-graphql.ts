@@ -33,10 +33,13 @@ export interface UnresolvedResolver {
   root: string;
   field?: string;
   /**
-   * The function name the resolver entry NAMED and this projection refused to bind, when the
-   * literal named one. Carried so a consumer can say WHICH symbol was left unrooted —
-   * `find_dead_code` reads it to keep an unbound resolver out of its high-confidence verdicts.
-   * Absent when the entry names no function (an inline implementation, a map that is not literal).
+   * The name the resolver entry WROTE at this position and this projection refused to bind.
+   * Carried so a consumer can say WHICH symbol was left unrooted — `find_dead_code` reads it to
+   * keep an unbound resolver out of its high-confidence verdicts. Absent when the entry writes no
+   * name at all (an inline implementation, a map that is not literal). It is the head of what was
+   * written, so on an entry the projection could not FOLLOW it may name something that is not a
+   * function (`RESOLVERS` in `RESOLVERS["list"]`); a consumer matching it by name therefore
+   * over-matches at worst, and never claims the name is a resolver.
    */
   symbol?: string;
   reason: 'not-literal' | 'unknown-field' | 'inline-implementation' | 'ambiguous-implementation' | 'implementation-not-found';

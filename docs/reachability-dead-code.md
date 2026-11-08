@@ -74,6 +74,7 @@ Code that only configuration invokes has no importer, so without evidence it rea
 | Config | What counts as wiring |
 |---|---|
 | root `package.json` | `bin`, `main`, `module`, `exports` targets; files run by `scripts`; `jest` setup files |
+| declared workspace manifests | the same keys, in the `package.json` of every member the root `workspaces` field (array or `{ packages: [...] }`) or `pnpm-workspace.yaml` `packages:` declares; each reference resolves against that manifest's own directory and is receipted with its own path |
 | `tsconfig.json` | `files`; `outDir` → `rootDir` maps a build output (`dist/cli/index.js`) back to its source |
 | `vitest`/`vite`/`jest` config | literal `setupFiles` / `globalSetup` values |
 | `.github/workflows/*.yml` | files run by `run:` steps, relative to the step's `working-directory` |
@@ -93,9 +94,13 @@ counted in a caveat, never guessed: `dynamic-reference` (a variable, `${{ }}` ex
 `unsupported-form` (a module run by name, a path after a `cd`, or a config with too many references),
 `target-not-found`, `build-output-unmapped` (a build output tsconfig does not map to a source),
 `outside-repository`, `unreadable-config` (a link, a non-regular file, or one over 1 MB), and
-`unparsed-config`. Workspace-member manifests,
-framework routing conventions, and other config formats are not read, and only POSIX shell
-workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
+`unparsed-config`. Only the DECLARED workspace set is read — the tree is never searched for
+manifests — so a `package.json` outside it contributes nothing; a repository that declares workspaces
+carries that limit as a standing `externalWiring.boundaries` entry, together with any pattern that
+leaves the repository (`outside-repository`), a brace list / character class / extglob pattern, and an
+exact count of members left unread past the cap of 256. A member manifest's own `workspaces` field is
+not followed. Framework routing conventions and other config formats are not read, and only POSIX
+shell workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
 repository, 36 of 1,018 entry points are in config-wired files.
 
 Confidence is deliberately conservative — the bias is toward **false-live over false-dead**:
@@ -120,20 +125,37 @@ disclosed as precisely as it can be, and a candidate it names is capped at `low`
 
 | The refusal names | Capped |
 |---|---|
-| a function (a grpc-js map entry, a resolver entry) | the candidate of that name |
-| an implementation class (a Go/Python servicer type) | the candidates of that class |
-| neither — `server.addService(Echo.service, serviceImplementation)` hands over a variable | every candidate in the file that declares the registration |
+| a function (a grpc-js map entry, a resolver entry) | every candidate of that name |
+| an implementation class (a Go/Python servicer type) | the candidates of that class — in one directory where the projection's scope rule proves it (Go, unqualified type), by name alone otherwise |
+| no function at all — `server.addService(Echo.service, serviceImplementation)` hands over a variable | every candidate in the file that declares the registration |
 
 File scope is the honest granularity for the third row: the registration does not contain the
-handler names at all, and a handler object is written where it is registered. It is a lower bound —
-an argument assembled in another module is not covered. An `inline-implementation` refusal caps
-nothing, because an inline function expression has no graph node to look dead.
+handler names at all, and such an object is written where it is registered. A refusal that names no
+function and whose implementation *was* readable — an inline handler, or an unknown field or service
+with an all-inline map — caps **nothing**: it left no named symbol unrooted, so capping would print
+a reason that is false about the repository.
 
-The disclosure lists are bounded (20 items, with the exact total beside them). When more bindings
-were refused than the lists name, the unnamed one could be any candidate, so the whole repository
-gives up `high` and the reason says how many refusals are past the cap. OpenAPI `unresolvedBindings`
-are not read for this: they name no symbol, and a route's `handlerName` falls back to a placeholder
-when extraction fails, so it cannot ground a match.
+**The cap reads the complete refusal list, not the 20-item reader slice.** `cg.contracts` carries
+`unboundHandlerNames` — deduplicated symbol, class and file names over every refusal — because a
+display cap must not decide a correctness question (grpc-go discloses 43 refusals, so an items-only
+rule would give up that repository's entire `high` tier). An index written before that field
+existed, or one past the field's own 2,000-name cap, cannot name every refusal; then and only then
+the whole repository gives up `high`, stated once in `contractRootsNotAssessed.refusalsNotNamed` and
+in `soundness.caveats`, not only on a row that happened to reach the `high` branch.
+
+### What this cap does NOT cover
+
+It is a lower bound, and `soundness.caveats` says so in the response:
+
+- an implementation object assembled in **another module** than the registration;
+- a registration style the scan does not read at all — its RPC is listed in `unboundRpcs`, and its
+  handler can still be rated `high`;
+- a GraphQL resolver-plumbing key (`__resolveType`), which produces no refusal row;
+- OpenAPI `unresolvedBindings`, which name no symbol (a route's `handlerName` falls back to the
+  placeholders `handler` / `unknown` when extraction fails, so it cannot ground a match).
+
+Where the refusal names only a file, unrelated candidates in that file are capped too — precision
+lost, never soundness.
 
 ### Re-export / barrel resolution raises recall (fewer false-dead)
 

@@ -5,6 +5,10 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Removed
+
+- The OpenSpec plugin manifest (`plugin-manifest` command and schema); the OpenSpec host side was never built.
+
 ### GraphQL schemas are read
 
 - **Every `.graphql` / `.graphqls` / `.gql` schema is read** and merged into one schema, `extend`

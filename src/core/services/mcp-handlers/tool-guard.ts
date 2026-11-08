@@ -21,7 +21,7 @@
 import { validateAgainstSchema } from '../../../cli/manifest/schema-validator.js';
 import { MCP_TOOL_TIMEOUT_MS, MCP_TOOL_TIMEOUT_OVERRIDES } from '../../../constants.js';
 import { suggestKey } from '../config-schema.js';
-import { sanitizeForTerminal } from '../../../utils/misc.js';
+import { sanitizeForTerminal, screenJsonValue } from '../../../utils/misc.js';
 import { redactSecretString } from '../secret-redaction.js';
 
 /** Stable MCP tool error-code taxonomy. */
@@ -406,7 +406,30 @@ function fitByTrimmingArrays(result: unknown, maxBytes: number): { text: string;
   return { text, truncated: Object.keys(omitted()).length > 0 };
 }
 
+/**
+ * The MCP response body for a tool result: capped to the byte budget, then SCREENED.
+ *
+ * This is the choke point where a structured tool result becomes the text an agent reads on
+ * the stdio MCP transport, so it is where repository-derived bytes are neutralized. (The
+ * serve daemon serializes its own HTTP body and screens it in its own `sendJson`.) It used to screen
+ * only the string branch, which looked sufficient because `JSON.stringify` escapes C0
+ * controls to `\uXXXX` by itself: ESC therefore appeared handled, while U+202E bidi
+ * overrides and U+200B zero-width characters passed through verbatim into orient,
+ * search_code, get_subgraph, find_path, find_dead_code and get_map responses.
+ *
+ * Screening runs AFTER capping, on the serialized document: the class only ever REMOVES
+ * characters inside string literals, so the JSON stays valid and parseable and the byte
+ * budget still holds (the text can only get smaller).
+ */
 export function capStructuredResult(result: unknown, maxBytes: number): { text: string; truncated: boolean } {
+  // Twice, deliberately: at the VALUES first, because `JSON.stringify` escapes a real ESC to
+  // `\\u001b` and a consumer that parses the document would get the control character back; then
+  // over the serialized text, which is what catches an object KEY carrying a bidi override.
+  const capped = capStructuredResultUnscreened(screenJsonValue(result), maxBytes);
+  return { ...capped, text: sanitizeForTerminal(capped.text, { keepNewlines: true }) };
+}
+
+function capStructuredResultUnscreened(result: unknown, maxBytes: number): { text: string; truncated: boolean } {
   if (typeof result === 'string') {
     return capOutput(sanitizeForTerminal(result, { keepNewlines: true }), maxBytes);
   }

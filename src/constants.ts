@@ -872,6 +872,26 @@ export const EXTRACTION_POOL_REQUEST_TIMEOUT_MS = 120_000;
 export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;
 
 /**
+ * How many worker-reported FAILURES may be re-checked on the main thread before the pool is
+ * retired for the rest of the build (change: fix-recheck-failed-worker-extractions).
+ *
+ * A worker's failure is never a verdict about the FILE — only the main thread's own attempt is —
+ * so every worker failure costs a second extraction of that file. This is the bound on that
+ * DUPLICATED work, not a bound on completeness: past the cap the pool stops claiming files and
+ * the remainder runs on the main thread ONCE, so the worst case is roughly one serial pass plus
+ * this many double-extracted files, and never a file missing from the graph.
+ *
+ * Sized so no healthy build can reach it (a worker failure is a rare event) while a
+ * systematically broken lane is abandoned early rather than shadowing the whole repository.
+ *
+ * Approximate by one round of concurrency, deliberately: a worker already holding a file when the
+ * cap fires still answers for it, so the realized count can exceed this by up to one per worker.
+ * Serializing the decision would buy an exact number at the cost of the lane's parallelism, and
+ * the disclosure reports the count actually re-checked rather than this constant.
+ */
+export const EXTRACTION_POOL_FAILURE_RECHECK_CAP = 128;
+
+/**
  * Wall-clock ceiling on the tree-sitter PARSE of ONE file (change:
  * fix-analyze-native-abort-and-file-cost-budget).
  *

@@ -279,7 +279,11 @@ function sanitizeReviewValue(value: string): string {
     // eslint-disable-next-line no-control-regex -- repository text must not carry layout/bidi controls into a PR comment
     .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]+/gu, ' ')
     .replaceAll('&', '&amp;')
-    .replaceAll('@', '@\u200b')
+    // A mention is defused with an HTML entity, NOT a zero-width space: an invisible character
+    // is itself in the screened class (it makes two different strings render identically), so the
+    // output screen stripped it back out and the mention came alive again. An entity renders as a
+    // plain '@' and cannot notify anyone.
+    .replaceAll('@', '&#64;')
     .replaceAll('://', ':&#47;&#47;')
     .replace(/\bwww\./giu, 'www&#46;')
     .replaceAll('<', '&lt;')

@@ -5,6 +5,11 @@
  * conclusion (not a diff), truncation carries a receipt that never drops a higher
  * tier for a lower one, the surprise label is withheld on shallow history, tests-to-
  * run are wired, and the briefing core is deterministic.
+ *
+ * Plus (change: fix-briefing-since-ranking-and-cost): the surprise label is withheld PER FILE
+ * for a file added/renamed into its path since the base (its premise "rarely changed before"
+ * is vacuous), the hub-derived tiers are withheld from a function-local helper, and the churn
+ * miner is asked to skip the co-occurrence map this briefing never reads.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -90,7 +95,12 @@ interface BriefingResult {
   changedFiles: number;
   changedSymbols: number;
   tierCounts: Record<string, number>;
-  briefing: Array<{ name: string; tier: string; labels: string[]; community?: string; evidence: { fanIn: number; priorChurn: number } }>;
+  briefing: Array<{ id: string; name: string; tier: string; labels: string[]; community?: string; evidence: { fanIn: number; priorChurn: number }; withheld?: Array<{ label: string; reason: string }> }>;
+  withholding: {
+    surpriseWithheldForNewFiles: number;
+    hubTierWithheldForFunctionLocalHelpers: number;
+    newFilesWithoutPriorHistory: string[];
+  };
   truncation: { bounded: boolean; returned: number; omitted: number; lowestTierReached: string | null; omittedByTier?: Record<string, number> };
   regions: Array<{ community: string; count: number }>;
   testsToRun: { count: number; files: string[]; truncatedAtDepth?: number; soundness?: unknown };
@@ -104,10 +114,10 @@ const mockedDiff = vi.mocked(getChangedFiles);
 const mockedCoupling = vi.mocked(analyzeChangeCoupling);
 const mockedResolve = vi.mocked(resolveBaseRefDisclosed);
 
-function diffFiles(paths: string[], resolvedBase = 'mainsha') {
+function diffFiles(paths: string[], resolvedBase = 'mainsha', status: Record<string, 'added' | 'renamed' | 'modified'> = {}) {
   return {
     resolvedBase,
-    files: paths.map(p => ({ path: p, status: 'modified' as const, additions: 1, deletions: 0, isTest: /\.test\./.test(p), isConfig: false, isGenerated: false, extension: '.ts' })),
+    files: paths.map(p => ({ path: p, status: status[p] ?? ('modified' as const), additions: 1, deletions: 0, isTest: /\.test\./.test(p), isConfig: false, isGenerated: false, extension: '.ts' })),
     hasUnstagedChanges: false,
     currentBranch: 'feature',
   };
@@ -116,7 +126,12 @@ function coupling(churn: Record<string, number>, commitsScanned: number) {
   return {
     churn: new Map(Object.entries(churn)),
     coupling: new Map(),
-    stats: { commitsScanned, bulkCommitsFiltered: 0, filesTracked: Object.keys(churn).length },
+    stats: {
+      commitsScanned, bulkCommitsFiltered: 0, filesTracked: Object.keys(churn).length,
+      // briefing_since reads churn only, so the miner is asked to skip the co-occurrence
+      // pass: an honest stub reports the cheap path it was asked for.
+      couplingComputed: false, coPairsCounted: 0,
+    },
   };
 }
 
@@ -181,7 +196,11 @@ describe('handleBriefingSince', () => {
     await handleBriefingSince({ directory: '/repo', baseRef: 'v1.0' });
     // The churn miner must be scoped to the resolved base so commits INSIDE base..HEAD
     // (the briefed change itself) never inflate priorChurn and demote the surprise tier.
-    expect(mockedCoupling).toHaveBeenCalledWith('/repo', { startRef: 'v1.0' });
+    // …and (change: fix-briefing-since-ranking-and-cost) to skip the co-occurrence map:
+    // this briefing reads coupling.churn + coupling.stats only, so the quadratic pass is
+    // pure waste. Asserting the OPTION is the injected-spy half; change-coupling.test.ts
+    // asserts the cheap path itself with an operation count.
+    expect(mockedCoupling).toHaveBeenCalledWith('/repo', { startRef: 'v1.0', includeCoupling: false });
   });
 
   it('withholds surprising-change on shallow history (single commit) and discloses it', async () => {
@@ -298,13 +317,157 @@ describe('handleBriefingSince', () => {
     mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
     const live = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
     expect(live.tierCounts['surprising-change']).toBeGreaterThan(0);
-    expect(live.caveats.some(c => /does not follow renames/i.test(c))).toBe(true);
+    expect(live.caveats.some(c => /rename that happened BEFORE the base ref/i.test(c))).toBe(true);
 
     // No surprise (only a volatile hub) → the rename caveat is suppressed as noise
     mockedDiff.mockResolvedValue(diffFiles(['src/orch.ts']));
     mockedCoupling.mockResolvedValue(coupling({ 'src/orch.ts': 50 }, 40));
     const quiet = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
     expect(quiet.tierCounts['surprising-change']).toBe(0);
-    expect(quiet.caveats.some(c => /does not follow renames/i.test(c))).toBe(false);
+    expect(quiet.caveats.some(c => /rename that happened BEFORE the base ref/i.test(c))).toBe(false);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Withholding a label whose premise does not hold
+// (change: fix-briefing-since-ranking-and-cost)
+// ───────────────────────────────────────────────────────────────────────────────
+describe('handleBriefingSince — surprise withheld per file, not just per repo', () => {
+  it('withholds surprising-change for a high-fan-in symbol in an ADDED file, and states why', async () => {
+    // The defect: a brand-new file has zero pre-base churn, which read as "decades of
+    // stability" and put every one-line helper in a new parser at the top of the briefing.
+    // For an ADDED file the premise "rarely changed before" is VACUOUS — it did not exist.
+    const newHub = node({ id: 'src/brand-new.ts::newHub', fanIn: 34, fanOut: 2 });
+    const oldHub = node({ id: 'src/old.ts::oldHub', fanIn: 9, fanOut: 2 });
+    mockedReadCtx.mockResolvedValue({
+      callGraph: graph([newHub, oldHub], { hubFunctions: [newHub, oldHub] }),
+    } as unknown as Awaited<ReturnType<typeof readCachedContext>>);
+    mockedDiff.mockResolvedValue(diffFiles(['src/brand-new.ts', 'src/old.ts'], 'mainsha', {
+      'src/brand-new.ts': 'added',
+    }));
+    // Pre-base churn exists for the long-lived file only; the added file has no entry.
+    mockedCoupling.mockResolvedValue(coupling({ 'src/old.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+
+    const brandNew = r.briefing.find(b => b.name === 'newHub')!;
+    expect(brandNew.tier).not.toBe('surprising-change');
+    // It is still briefed (a new file's symbols are a real change) — one tier lower,
+    // on its structural labels alone.
+    expect(brandNew.tier).toBe('chokepoint-change');
+    // …and the withholding is STATED, not silent.
+    expect(brandNew.withheld?.some(w => w.label === 'surprising-change' && /added \(or renamed/.test(w.reason))).toBe(true);
+    expect(r.withholding.surpriseWithheldForNewFiles).toBe(1);
+    expect(r.withholding.newFilesWithoutPriorHistory).toContain('src/brand-new.ts');
+    expect(r.caveats.some(c => /surprising-change label is WITHHELD/.test(c))).toBe(true);
+    // The genuinely stable, long-lived hub keeps the label and now leads the briefing,
+    // despite a far lower fan-in.
+    expect(r.briefing[0].name).toBe('oldHub');
+    expect(r.briefing[0].tier).toBe('surprising-change');
+  });
+
+  it('a symbol in a long-lived, rarely-changed file IS still surprising-change (the tier is not deleted)', async () => {
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    const core = r.briefing.find(b => b.name === 'coreHub')!;
+    expect(core.tier).toBe('surprising-change');
+    expect(core.withheld).toBeUndefined();
+    expect(r.withholding.surpriseWithheldForNewFiles).toBe(0);
+  });
+
+  it('a MODIFIED file absent from the churn window keeps the label (it existed and was untouched)', async () => {
+    // The two cases the old `?? 0` conflated: "absent because added" (vacuous premise,
+    // withhold) vs "absent because never touched" (a true premise, keep).
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/other.ts': 7 }, 40)); // core.ts has no churn entry
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    const core = r.briefing.find(b => b.name === 'coreHub')!;
+    expect(core.tier).toBe('surprising-change');
+    expect(core.evidence.priorChurn).toBe(0);
+    expect(core.withheld).toBeUndefined();
+  });
+
+  it('withholds the label for a file RENAMED into its path (git history does not follow renames)', async () => {
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts'], 'mainsha', { 'src/core.ts': 'renamed' }));
+    mockedCoupling.mockResolvedValue(coupling({}, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    const core = r.briefing.find(b => b.name === 'coreHub')!;
+    expect(core.tier).not.toBe('surprising-change');
+    expect(core.withheld?.[0].label).toBe('surprising-change');
+    expect(r.withholding.surpriseWithheldForNewFiles).toBe(1);
+  });
+
+  it('keeps the label for a re-added path that DOES carry pre-base history', async () => {
+    // Added in this range, but the path has churn before the base (deleted and recreated):
+    // its "before" is real, so nothing is withheld.
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts'], 'mainsha', { 'src/core.ts': 'added' }));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 2 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    const core = r.briefing.find(b => b.name === 'coreHub')!;
+    expect(core.tier).toBe('surprising-change');
+    expect(core.withheld).toBeUndefined();
+  });
+});
+
+describe('handleBriefingSince — function-local helpers are not repository hubs', () => {
+  // A one-line arrow nested inside a parser, called 34 times from that parser's own body.
+  const reader = node({ id: 'src/parse.ts::readThing', fanIn: 2, fanOut: 40, startIndex: 0, endIndex: 5000 });
+  const helper = node({ id: 'src/parse.ts::expect', fanIn: 34, fanOut: 1, startIndex: 2000, endIndex: 2080 });
+  const sibling = node({ id: 'src/parse.ts::peek', fanIn: 1, fanOut: 1, startIndex: 2100, endIndex: 2150 });
+  const outsider = node({ id: 'src/other.ts::caller', fanIn: 0, fanOut: 1, startIndex: 0, endIndex: 50 });
+  const edge = (callerId: string, calleeId: string) =>
+    ({ callerId, calleeId, calleeName: calleeId.split('::')[1], confidence: 'import' } as CallEdge);
+
+  it('withholds the hub tier from a nested helper whose every caller is inside the enclosing function', async () => {
+    mockedReadCtx.mockResolvedValue({
+      callGraph: graph([reader, helper, sibling, outsider], {
+        hubFunctions: [helper, reader],
+        edges: [edge('src/parse.ts::readThing', 'src/parse.ts::expect'), edge('src/parse.ts::peek', 'src/parse.ts::expect')],
+      }),
+    } as unknown as Awaited<ReturnType<typeof readCachedContext>>);
+    mockedDiff.mockResolvedValue(diffFiles(['src/parse.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/parse.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    const h = r.briefing.find(b => b.name === 'expect')!;
+    expect(h.tier).toBe('ordinary-change');
+    // Honest, not erased: the hub label and the fan-in stay as evidence, with the reason.
+    expect(h.labels).toContain('hub');
+    expect(h.evidence.fanIn).toBe(34);
+    expect(h.withheld?.some(w => /lexically nested inside src\/parse\.ts::readThing/.test(w.reason))).toBe(true);
+    expect(r.withholding.hubTierWithheldForFunctionLocalHelpers).toBe(1);
+    expect(r.caveats.some(c => /function-local helpers, not repository hubs/.test(c))).toBe(true);
+    // The helper no longer outranks the file's real entry point.
+    expect(r.briefing[0].name).not.toBe('expect');
+  });
+
+  it('keeps the hub tier for a nested function called from OUTSIDE its enclosing function', async () => {
+    mockedReadCtx.mockResolvedValue({
+      callGraph: graph([reader, helper, outsider], {
+        hubFunctions: [helper, reader],
+        edges: [edge('src/parse.ts::readThing', 'src/parse.ts::expect'), edge('src/other.ts::caller', 'src/parse.ts::expect')],
+      }),
+    } as unknown as Awaited<ReturnType<typeof readCachedContext>>);
+    mockedDiff.mockResolvedValue(diffFiles(['src/parse.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/parse.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    const h = r.briefing.find(b => b.name === 'expect')!;
+    expect(h.tier).toBe('surprising-change');
+    expect(h.withheld).toBeUndefined();
+    expect(r.withholding.hubTierWithheldForFunctionLocalHelpers).toBe(0);
+  });
+
+  it('leaves a TOP-LEVEL hub alone (no enclosing function to attribute it to)', async () => {
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    expect(r.briefing.find(b => b.name === 'coreHub')!.tier).toBe('surprising-change');
+    expect(r.withholding.hubTierWithheldForFunctionLocalHelpers).toBe(0);
   });
 });

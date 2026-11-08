@@ -23,8 +23,10 @@
  * bridges and cross-language polymorphism, DI/plugin registries with no
  * statically-visible binding, contract wiring the projection refused to bind (a
  * gRPC registration or GraphQL resolver map whose implementation could not be
- * pinned — such a symbol is capped below `high`, never claimed confidently
- * dead), RTA/VTA-level pruning of the CHA name+arity over-approximation, and externally-consumed public exports — these can still
+ * pinned — capped below `high` where the refusal names the symbol, its class or
+ * its file; a refusal naming none of those, and a registration style the scan
+ * does not read at all, remain uncovered), RTA/VTA-level pruning of the CHA
+ * name+arity over-approximation, and externally-consumed public exports — these can still
  * produce false "dead" positives. Roots include tests, imported symbols, files a config invokes, and
  * detected framework entries; every candidate carries a confidence level and a
  * reason; nothing is ever auto-deleted. Pass `directResolvedOnly` to ignore
@@ -46,7 +48,6 @@ import {
   qualificationReason,
 } from './dynamic-boundary-disclosure.js';
 import { isProjectedLanguage } from '../../analyzer/projected-language.js';
-import { MAX_DISCLOSED } from '../../analyzer/contract/project.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -101,7 +102,7 @@ export async function loadExternalWiring(absDir: string): Promise<{ report: Exte
 /** Caveats every conclusion resting on config-wired roots carries. */
 export function externalWiringCaveats(report: ExternalWiringReport): string[] {
   const caveats = [
-    'Config wiring is read from the root package.json (bin, main, module, exports, scripts, jest), tsconfig.json files, vitest/vite/jest setup files, and POSIX-shell .github/workflows run steps. Workspace-member manifests, framework routing conventions, and other config formats are not read, so code wired only there can appear dead.',
+    'Config wiring is read from the package.json of the repository root and of each DECLARED workspace member (bin, main, module, exports, scripts, jest), tsconfig.json files, vitest/vite/jest setup files, and POSIX-shell .github/workflows run steps. A manifest outside the declared workspace set, framework routing conventions, and other config formats are not read, so code wired only there can appear dead.',
   ];
   if (report.wired.length > 0) {
     caveats.push('Every function in a file a config invokes is treated as live, because module-scope code has no call-graph node; unused helpers in such a file are not flagged.');
@@ -111,6 +112,11 @@ export function externalWiringCaveats(report: ExternalWiringReport): string[] {
     caveats.push(`${unresolved} config reference(s) could not be resolved to a repository file (dynamic, unsupported, missing, outside the repository, or an unreadable config; see externalWiring.boundaries) — code they would wire can appear dead.`);
   }
   return caveats;
+}
+
+/** A path's directory, trailing slash kept, for the one proven class scope. */
+function dirOf(filePath: string): string {
+  return filePath.slice(0, filePath.lastIndexOf('/') + 1);
 }
 
 /** A graph file path in the adapters' repo-relative spelling. */
@@ -206,7 +212,7 @@ function fileImported(filePath: string, importedFiles: Set<string>): boolean {
 }
 
 /**
- * Symbols a contract registration or resolver map NAMED and the projection REFUSED to bind
+ * What a contract registration or resolver map NAMED and the projection REFUSED to bind
  * (change: cap-unbound-contract-handler-confidence).
  *
  * A handler bound to a declared operation is a liveness root; a refused binding roots nothing. So a
@@ -215,51 +221,64 @@ function fileImported(filePath: string, importedFiles: Set<string>): boolean {
  * `find_dead_code` reads this to keep such a symbol out of its HIGH-confidence verdicts, exactly as
  * it does for a node named by an unresolved-ambiguous call site.
  *
- * Three granularities, each as precise as the refusal allows:
- *   `symbols`     the refusal named a function (`{ getOrder }` in a grpc-js map, a resolver entry).
- *   `classNames`  it named an implementation class (Go/Python register a servicer type).
- *   `files`       it named NEITHER, so what it would have bound is unknown. This is the real
- *                 `not-literal` shape — `server.addService(Echo.service, serviceImplementation)`
- *                 hands over a variable, so the handler names are not in the registration at all.
- *                 The file that declares the registration is then the honest granularity: it is
- *                 where such an object is written. A `not-literal` argument assembled in ANOTHER
- *                 module is NOT covered, which is why this is a lower bound, not a guarantee.
- *                 `inline-implementation` is excluded: its handler is an inline function
- *                 expression with no graph node, so it can make no candidate look dead.
- *
- * `truncated` is the honest half. Every contract disclosure is bounded at {@link MAX_DISCLOSED} with
- * its exact total beside it, so a repository with more refusals than that has unbound symbols these
- * lists do not name. Their names cannot be recovered from the artifact, so the only sound answer is
- * a repository-wide ceiling: with any truncation, NO candidate is rated high-confidence dead.
+ * The buckets, and the bucket RULE, belong to the producer ({@link unboundHandlerNames}): they are
+ * computed over the COMPLETE refusal list, because `unresolvedRegistrations.items` is bounded for a
+ * READER and a reader's cap must not decide a correctness question. An artifact written before that
+ * field existed is read back from the bounded items instead, and then — and only then — the missing
+ * remainder forces a repository-wide ceiling: `legacyTruncated` counts the refusals whose names the
+ * artifact cannot carry, and no candidate in such a repository is rated high-confidence dead.
  *
  * OpenAPI `unresolvedBindings` are NOT read here: that disclosure names no symbol (the one name on
  * a route, `handlerName`, substitutes the placeholders `handler`/`unknown` when extraction fails,
  * so it cannot ground a symbol match). They stay disclosed in `contractRootsNotAssessed`.
  */
-export function unboundContractSymbols(cg: SerializedCallGraph): {
-  symbols: Set<string>; classNames: Set<string>; files: Set<string>; truncated: number;
-} {
+export interface UnboundContractScope {
+  symbols: Set<string>;
+  /** Class name → the ONE directory it may live in, or `undefined` where no scope is proven. */
+  classes: Map<string, string | undefined>;
+  files: Set<string>;
+  /** Distinct names a FRESH artifact dropped at its own cap; disclosed, not a ceiling trigger. */
+  namesOmitted: number;
+  /** Refusals a LEGACY (or truncated-items) artifact cannot name. Forces the ceiling. */
+  legacyTruncated: number;
+}
+
+export function unboundContractSymbols(cg: SerializedCallGraph): UnboundContractScope {
   const symbols = new Set<string>();
-  const classNames = new Set<string>();
+  const classes = new Map<string, string | undefined>();
   const files = new Set<string>();
-  let truncated = 0;
-  type Item = { symbol?: string; className?: string; file?: string; reason?: string };
-  const lists: Array<{ items: Item[]; total: number } | undefined> = [
-    cg.contracts?.unresolvedRegistrations,
-    cg.contracts?.unresolvedResolvers,
-  ];
+  const complete = cg.contracts?.unboundHandlerNames;
+  if (complete) {
+    for (const name of complete.symbols ?? []) if (typeof name === 'string') symbols.add(name);
+    for (const c of complete.classes ?? []) if (c && typeof c.name === 'string') classes.set(c.name, c.dir);
+    for (const f of complete.files ?? []) if (typeof f === 'string') files.add(wiringKey(f));
+    const omitted = Number(complete.truncated);
+    return { symbols, classes, files, namesOmitted: Number.isFinite(omitted) && omitted > 0 ? omitted : 0, legacyTruncated: 0 };
+  }
+  // Legacy artifact: the bounded items are all there is. Apply the SAME bucket rule by hand — a
+  // refusal that names no function and is not a `not-literal` implementation argument buckets
+  // nothing — and count what the bound hid, which the ceiling then answers for.
+  let legacyTruncated = 0;
+  const lists = [cg.contracts?.unresolvedRegistrations, cg.contracts?.unresolvedResolvers];
   for (const list of lists) {
-    if (!list) continue;
-    truncated += Math.max(0, (list.total ?? 0) - (list.items?.length ?? 0));
-    for (const item of list.items ?? []) {
-      if (item.symbol) symbols.add(item.symbol);
-      if (item.className) classNames.add(item.className);
-      if (!item.symbol && !item.className && item.file && item.reason !== 'inline-implementation') {
-        files.add(wiringKey(item.file));
+    if (!list || typeof list !== 'object') continue;
+    const items = Array.isArray(list.items) ? list.items : [];
+    const total = Number(list.total);
+    legacyTruncated += Number.isFinite(total) ? Math.max(0, total - items.length) : 0;
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const row = item as { symbol?: unknown; symbols?: unknown; className?: unknown; classDir?: unknown; file?: unknown; reason?: unknown };
+      let named = false;
+      const syms = [...(typeof row.symbol === 'string' ? [row.symbol] : []), ...(Array.isArray(row.symbols) ? row.symbols : [])];
+      for (const sym of syms) if (typeof sym === 'string') { symbols.add(sym); named = true; }
+      if (typeof row.className === 'string') {
+        named = true;
+        classes.set(row.className, typeof row.classDir === 'string' ? row.classDir : undefined);
       }
+      if (!named && row.reason === 'not-literal' && typeof row.file === 'string') files.add(wiringKey(row.file));
     }
   }
-  return { symbols, classNames, files, truncated };
+  return { symbols, classes, files, namesOmitted: 0, legacyTruncated };
 }
 
 /**
@@ -410,7 +429,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         ? 'Nothing else becomes unreachable — every other node has an independent path to a root (or is itself a root).'
         : 'These nodes are reachable only through the target. Deleting it orphans them — verify before removing (dynamic callers are invisible here).',
       ...(federationRequested ? { federationNote: 'Federation scope is not applied in delete-impact (ifDeleted) mode — it is a within-repo reachability query. To see cross-repo consumers that keep a symbol live, call find_dead_code with federation and without ifDeleted, or analyze_impact with federation.' } : {}),
-      soundness: deadCodeSoundness(exportSignal, languages, wiring.report),
+      soundness: deadCodeSoundness(exportSignal, languages, wiring.report, unboundContract),
       confidenceBoundary: assembleBoundary({
         ...boundaryParts,
         extraCrossings: crossingsOf(dynamicBoundaryCrossing(
@@ -423,7 +442,30 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
 
   // ── Candidate dead-code report ──────────────────────────────────────────────
   let candidates = codeNodes.filter(n => !n.isTest && !live.has(n.id));
-  if (input.filePattern) candidates = candidates.filter(n => n.filePath.includes(input.filePattern!));
+  // A pattern that matches nothing scopes the report to an EMPTY set, and an empty report
+  // over an empty scope said "no dead code here" without ever saying it looked nowhere
+  // (change: never-claim-complete-beside-a-refusal). Counted over every indexed file, not
+  // only the candidates, so "your pattern is wrong" is distinguishable from "that region
+  // has no dead code".
+  let filePatternMatch: { pattern: string; matchedFiles: number; detail?: string } | undefined;
+  if (input.filePattern) {
+    const pattern = input.filePattern;
+    const matched = new Set<string>();
+    for (const n of codeNodes) if (n.filePath.includes(pattern)) matched.add(n.filePath);
+    candidates = candidates.filter(n => n.filePath.includes(pattern));
+    filePatternMatch = {
+      pattern,
+      matchedFiles: matched.size,
+      ...(matched.size === 0
+        ? {
+            detail:
+              `filePattern "${pattern}" matched 0 of the indexed files, so this report covers an empty scope. ` +
+              'An empty candidateDead here means "nothing was examined", NOT "nothing is dead" — the pattern is a '
+              + 'plain substring of the repo-relative path, not a glob.',
+          }
+        : {}),
+    };
+  }
   const parseHealthReport = await loadParseHealthReport(absDir);
   const scriptContainerFiles = new Set(
     (parseHealthReport?.scriptContainers ?? [])
@@ -476,19 +518,26 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       // `file` and `className`, and `contractRootsNotAssessed` names the registration site.
       if (unboundContract.symbols.has(n.name)) {
         confidence = 'low';
-        reasons.push('named by a contract registration or resolver map whose binding was refused (see contractRootsNotAssessed) — the wiring that would root it was not bound, so it may be live');
+        reasons.push('a contract registration or resolver map writes this name and the binding was refused (see contractRootsNotAssessed) — the wiring that would root it was not bound, so it may be live');
       }
-      if (n.className && unboundContract.classNames.has(n.className)) {
-        confidence = 'low';
-        reasons.push('its class is the implementation a contract registration named, and that registration could not be bound (see contractRootsNotAssessed) — the registration may serve this method');
+      // Matched by class NAME, narrowed to the one directory the projection's scope rule proves
+      // (a Go registration naming an unqualified type means its own package). Where no such proof
+      // exists the match is by name alone, which the reason says rather than asserting identity.
+      if (n.className && unboundContract.classes.has(n.className)) {
+        const dir = unboundContract.classes.get(n.className);
+        if (dir === undefined || dirOf(wiringKey(n.filePath)) === dirOf(wiringKey(dir))) {
+          confidence = 'low';
+          reasons.push(`its class name matches the implementation a contract registration named${dir === undefined ? ', by name alone' : ' in this directory'}, and that registration could not be bound (see contractRootsNotAssessed) — the registration may serve this method`);
+        }
       }
-      // The refusal named neither a function nor a class — the registration handed over a
-      // variable, so what it binds is not in the registration at all. The file that declares it is
-      // the honest granularity (a handler object is written where it is registered), so every
-      // candidate in that file is capped rather than one guessed name.
+      // The refusal named no function at all — the registration or resolver map handed over a
+      // variable, so what it binds is not written there. The file that declares it is the honest
+      // granularity (such an object is written where it is registered), so every candidate in that
+      // file is capped rather than one guessed name. This over-caps unrelated candidates in the
+      // same file; `soundness.caveats` says so.
       if (unboundContract.files.has(wiringKey(n.filePath))) {
         confidence = 'low';
-        reasons.push('declared in a file holding a contract registration whose implementation argument could not be read (see contractRootsNotAssessed) — the registration may name this symbol');
+        reasons.push('declared in a file holding a contract registration or resolver map whose implementation argument could not be read (see contractRootsNotAssessed) — it may name this symbol, and which symbol cannot be said');
       }
 
       if (scriptContainerFiles.has(n.filePath)) {
@@ -513,12 +562,14 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         reasons.push(qualificationReason(dynamicHit));
       }
 
-      // Repository-wide ceiling for the truncated half of the disclosure: more contract bindings
-      // were refused than the lists name, so an unnamed one may be this very candidate. Nothing
-      // here can tell; the sound answer is to withhold `high` for the whole repository.
-      if (unboundContract.truncated > 0 && confidence === 'high') {
+      // Repository-wide ceiling, for an index whose artifact cannot name every refusal (one written
+      // before `unboundHandlerNames` existed, or whose own name cap was reached). An unnamed
+      // refusal may be this very candidate and nothing here can tell, so `high` is withheld for the
+      // whole repository. A current artifact names them all and reaches this never.
+      const unnamedRefusals = unboundContract.legacyTruncated + unboundContract.namesOmitted;
+      if (unnamedRefusals > 0 && confidence === 'high') {
         confidence = 'medium';
-        reasons.push(`${unboundContract.truncated} further contract registration(s)/resolver(s) whose binding was refused are past the disclosure cap of ${MAX_DISCLOSED} and do not name their symbol, so no candidate in this repository is rated high-confidence dead`);
+        reasons.push(`${unnamedRefusals} refused contract binding(s) are not named by this index (see contractRootsNotAssessed.refusalsNotNamed), so no candidate in this repository is rated high-confidence dead — re-run \`openlore analyze\` to name them`);
       }
 
       return {
@@ -623,8 +674,9 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
           unresolvedRegistrationItems: cg.contracts.unresolvedRegistrations.items.slice(0, 10).map(u => ({
             file: emittedText(u.file), line: u.line, service: emittedText(u.service), reason: u.reason,
             ...(u.rpc ? { rpc: emittedText(u.rpc) } : {}),
-            // The symbol left unrooted, so a reader sees which candidate-dead row this explains.
+            // What was left unrooted, so a reader sees which candidate-dead rows this explains.
             ...(u.symbol ? { symbol: emittedText(u.symbol) } : {}),
+            ...(u.symbols?.length ? { symbols: u.symbols.slice(0, 10).map(emittedText) } : {}),
             ...(u.className ? { className: emittedText(u.className) } : {}),
           })),
         } : {}),
@@ -646,9 +698,14 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         // code-first server, a style not read) is not rooted by them, so it may be listed here.
         ...(cg.contracts.unboundGraphqlOperations?.total ? { unboundGraphqlOperations: cg.contracts.unboundGraphqlOperations.total } : {}),
         ...(cg.contracts.unboundRpcs?.total ? { unboundRpcs: cg.contracts.unboundRpcs.total } : {}),
+        // The ceiling, stated once whether or not a candidate reached the `high` branch.
+        ...(unboundContract.legacyTruncated + unboundContract.namesOmitted > 0 ? {
+          refusalsNotNamed: unboundContract.legacyTruncated + unboundContract.namesOmitted,
+          refusalsNotNamedNote: 'This index cannot name these refused bindings (an artifact written before the names were carried, or past the name cap), so no candidate in this repository is rated high-confidence dead. Re-run `openlore analyze`.',
+        } : {}),
         ...(cg.contracts.notAssessed?.length ? { notAssessed: cg.contracts.notAssessed.map(emittedText) } : {}),
         ...(cg.contracts.notes?.length ? { notes: cg.contracts.notes.map(emittedText) } : {}),
-        note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here — a candidate a registration or resolver names by symbol or class, or that is declared in the file of a registration whose implementation argument could not be read, is never rated high-confidence dead, and when more refusals exist than these lists name, no candidate in the repository is. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',
+        note: 'A handler bound to a declared operation is a liveness root. These bindings were NOT made, so a handler that serves a declared endpoint may be listed as a candidate here — a candidate a refused registration or resolver names by symbol or class, or that is declared in the file of one whose implementation argument could not be read, is never rated high-confidence dead. Run `openlore analyze` after a specification changes; `certify_service_contract` grades the parity.',
       },
     } : {}),
     // Receipts for every config-wired file that kept code live, and every config reference that
@@ -656,10 +713,11 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
     externalWiring: externalWiringBlock(wiring.report, roots.filter(isWired)),
     byConfidence,
     candidateDead: finalRanked.slice(0, limit),
+    ...(filePatternMatch ? { filePatternMatch } : {}),
     truncated: finalRanked.length > limit ? finalRanked.length - limit : 0,
     coverage: { languages, exportSignal },
     ...(federationBlock ? { federation: federationBlock } : {}),
-    soundness: deadCodeSoundness(exportSignal, languages, wiring.report),
+    soundness: deadCodeSoundness(exportSignal, languages, wiring.report, unboundContract),
     ...(parseHealthNote ? { parseHealthBoundary: parseHealthNote } : {}),
     confidenceBoundary: assembleBoundary({
       ...boundaryParts,
@@ -693,9 +751,12 @@ function externalWiringBlock(report: ExternalWiringReport, wiredRoots: FunctionN
   };
 }
 
-function deadCodeSoundness(exportSignal: 'dependency-graph' | 'none', languages: string[], wiring?: ExternalWiringReport): {
-  posture: string; caveats: string[];
-} {
+function deadCodeSoundness(
+  exportSignal: 'dependency-graph' | 'none',
+  languages: string[],
+  wiring?: ExternalWiringReport,
+  contract?: UnboundContractScope,
+): { posture: string; caveats: string[] } {
   const caveats = [
     'These are CANDIDATES, not deletion authority — never auto-delete based on this.',
     'Dynamic dispatch, reflection, DI, plugin registries, and framework routing invoke code invisibly to static analysis; such symbols can be flagged dead falsely.',
@@ -705,6 +766,14 @@ function deadCodeSoundness(exportSignal: 'dependency-graph' | 'none', languages:
     caveats.push('No dependency graph found — the "imported elsewhere" liveness signal is unavailable, so confidence is reduced. Run analyze_codebase to generate it.');
   }
   if (wiring) caveats.push(...externalWiringCaveats(wiring));
+  // The contract cap's own boundary, for the READER of the response and not only the source: it
+  // fires where a refusal names the symbol, its class or its file, and nowhere else.
+  if (contract && (contract.symbols.size || contract.classes.size || contract.files.size)) {
+    caveats.push('A refused contract binding (a gRPC registration or GraphQL resolver map the projection could not bind) caps a candidate only where the refusal names its symbol, its class, or the file that declares the registration — so this cap is a LOWER BOUND: an implementation object assembled in another module, and a registration style the scan does not read at all (see contractRootsNotAssessed.unboundRpcs), are not covered. Where the refusal names only a file, unrelated candidates in it are capped too.');
+  }
+  if (contract && contract.legacyTruncated + contract.namesOmitted > 0) {
+    caveats.push(`${contract.legacyTruncated + contract.namesOmitted} refused contract binding(s) are not named by this index, so NO candidate here is rated high-confidence dead. Re-run \`openlore analyze\`.`);
+  }
   const dynamic = languages.filter(l => DYNAMIC_LANGS.has(l));
   if (dynamic.length > 0) {
     caveats.push(`Dynamic languages present (${dynamic.join(', ')}): implicit exports and runtime dispatch make deadness unreliable — those candidates are capped at low confidence.`);

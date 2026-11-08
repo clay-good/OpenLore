@@ -464,6 +464,17 @@ edge `confidence`/`synthesizedBy` provenance already present (decision `08e71184
 - **THEN** the `confidenceBoundary` names the synthesized crossing as known-unknowable, breaks down the
   synthesized edges by rule, and reports `complete: false`
 
+#### Scenario: `complete` is derived, and names its causes
+
+- **GIVEN** any response carrying a `confidenceBoundary`
+- **WHEN** it is dispatched
+- **THEN** `complete` is derived at the dispatch boundary from the boundary's own parts AND from the
+  registered disclosure channels on the response (`verdict: "unverifiable"`, `notAssessed`,
+  `truncated`, `baseRefFallback`, `changeGranularity.reasons`, `filePatternMatch`, `noPath`,
+  `ambiguousCallSites`, `partialIndex.partial`, …), never asserted by the handler
+- **AND** when it is `false`, `incompleteBecause` carries one reason per cause, each naming the field
+  that holds the detail (requirement `NoCompleteBesideADisclosure`, mcp-quality)
+
 ### Requirement: StalenessBoundary
 
 When graph-relevant source files have changed since the index's build commit, every conclusion SHALL
@@ -1642,6 +1653,92 @@ demote its own surprise tier.
 - **GIVEN** a caller of the change-coupling miner that supplies no start ref
 - **WHEN** churn is mined
 - **THEN** the result is identical to the pre-change behavior
+
+### Requirement: SurpriseIsWithheldPerFileWhenAFileHasNoBefore
+
+The `surprising-change` tier asserts "a hub whose file rarely changed before". The system SHALL
+withhold that label from any symbol whose file is reported ADDED (or renamed into its path) in the
+briefed range and carries no pre-base churn at that path: such a file did not exist before, so the
+premise is vacuous rather than true, and its zero prior churn SHALL NOT be read as stability. The
+symbol SHALL still be briefed, one tier lower, on its structural labels alone, and the withholding
+SHALL be stated on the entry and counted in a `withholding` receipt.
+
+#### Scenario: A high-fan-in symbol in a brand-new file is not surprising
+
+- **GIVEN** a changed file git reports as added since the base ref, with no pre-base churn
+- **AND** a high-fan-in symbol in it
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the symbol is not tiered `surprising-change`
+- **AND** it is still briefed at its structural tier with the withheld label and its reason
+
+#### Scenario: A long-lived, rarely-changed file keeps the label
+
+- **GIVEN** a hub in a file present at the base ref with low pre-base churn
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the symbol is tiered `surprising-change` with no withheld label
+
+#### Scenario: Absent from the churn window is not absent from history
+
+- **GIVEN** a modified file with no entry in the scanned churn window
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the label is kept, because the file existed and was simply never touched
+
+#### Scenario: A re-added path with real pre-base history keeps the label
+
+- **GIVEN** a file added in the briefed range whose path carries pre-base churn
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the label is kept, because its "before" is real
+
+### Requirement: HubTiersAreWithheldFromFunctionLocalHelpers
+
+The `surprising-change`, `hub-change` and `chokepoint-change` tiers all assert the symbol is a
+repository hub. The system SHALL withhold them from a changed symbol that is lexically nested
+inside another indexed function in the same file and every one of whose callers lies inside that
+enclosing function: its fan-in is internal to one body, so the significance belongs to the
+enclosing symbol. The symbol SHALL rank `ordinary-change`, SHALL retain its graph labels and
+fan-in as disclosed evidence, and the withholding SHALL name the enclosing symbol. A nested
+function with any caller outside its enclosing function, or with no caller, SHALL be unaffected.
+
+#### Scenario: A one-line nested helper is not the headline
+
+- **GIVEN** a nested arrow function with high fan-in, called only from its enclosing parser
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** it is tiered `ordinary-change` with its hub label and fan-in reported as evidence
+- **AND** the withheld tier names the enclosing function
+
+#### Scenario: A nested function called from outside keeps its tier
+
+- **GIVEN** a nested function with a caller outside its enclosing function
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** its hub-derived tier is assigned unchanged
+
+### Requirement: BriefingSinceDoesNotComputeTheCoOccurrenceMap
+
+`briefing_since` reads only the change-coupling miner's per-file churn and scan stats. It SHALL
+request the miner's churn-only mode so the O(files²)-per-commit co-occurrence pass is not computed
+and discarded. The miner SHALL keep the co-occurrence map as its default so the analyze-time
+snapshot that `get_change_coupling` serves is unchanged, SHALL return byte-identical churn and scan
+stats in either mode, and SHALL report which mode ran rather than letting an opted-out empty map
+read as an absence of co-change.
+
+#### Scenario: The cheap path performs no pair operations
+
+- **GIVEN** a history whose commits each touch many files
+- **WHEN** the miner is called in churn-only mode
+- **THEN** its co-occurrence pair operation count is zero and the coupling map is empty
+- **AND** the mode is reported so the emptiness is not read as evidence
+
+#### Scenario: The default still computes the map
+
+- **GIVEN** the same history
+- **WHEN** the miner is called with no mode option
+- **THEN** the co-occurrence map is computed as before
+
+#### Scenario: The opt-out changes no answer
+
+- **GIVEN** the same history mined in both modes
+- **WHEN** the churn maps and scan stats are compared
+- **THEN** they are identical
 
 ### Requirement: BriefingCapabilityClaimsAreCurrent
 
@@ -3936,6 +4033,55 @@ parsed SHALL be listed as not assessed with the reason, never treated as empty o
 - **THEN** the file is listed under `notAssessed` with the reason, and none of its operations is
   reported as removed
 
+### Requirement: SchemaDiscoveryExclusionsAndProvenanceAreDisclosed
+
+No discovered schema SHALL become silently absent from `certify_service_contract`, and nothing
+SHALL be dropped on a guess.
+
+A directory-name rule (`node_modules/`, `vendor/`, `dist/`, `build/`, `.git/`) SHALL apply to
+UNTRACKED files only, because a tracked file is part of the repository by definition;
+`node_modules/` SHALL be the one named exception applied to tracked files too, since a committed
+dependency tree is another project's contract. Every file the rule excludes SHALL be named in one
+`boundaries` line with the count and the first few paths, and the same rule SHALL be applied to
+the working tree and to the base revision, so an exclusion never reads as an addition or a removal.
+
+Each graded schema SHALL carry its provenance when it looks generated or vendored — `kind`, the
+rule that `matched`, and a `certainty` of `declared` (a generator header the file itself carries,
+read from a bounded head) or `path-pattern` (a path guess, never reported as `declared`). A
+client-toolchain config (Relay, Apollo, graphql-config, `.graphqlrc*`, GraphQL Code Generator)
+naming a schema SHALL produce one `boundaries` line naming that config, and SHALL NEVER cause a
+schema to be dropped, downgraded or excluded from grading. A config SHALL NOT be read as naming a
+schema outside the config's own directory. Every list cut at a cap SHALL carry its omitted count.
+
+#### Scenario: A tracked schema under build/ is graded; an untracked one under dist/ is named
+
+- **GIVEN** a tracked `google/devtools/build/v1/build_events.proto` and an untracked `dist/y.proto`
+- **WHEN** `certify_service_contract` runs
+- **THEN** the tracked file is read and graded, and the untracked one is named in a `boundaries`
+  line with the count, rather than vanishing from the result
+
+#### Scenario: A generated copy is graded with its provenance
+
+- **GIVEN** `src/__generated__/schema.graphql` with a root field removed since the base revision
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** its `specs` entry carries `provenance` of `kind: generated`, `matched: __generated__/`,
+  `certainty: path-pattern`, and the removal is still graded `operation-removed` with a major bump
+
+#### Scenario: A config names a schema but never drops one
+
+- **GIVEN** an `apollo.config.js` naming `./schema.graphql`, and a `web/graphql.config.yml` naming
+  `../schema.graphql`
+- **WHEN** `certify_service_contract` runs with a base ref
+- **THEN** one `boundaries` line names the Apollo config and the schema it named, the second
+  config is not read as naming that schema at all, and the schema is graded either way
+
+#### Scenario: A cap carries its omitted count
+
+- **GIVEN** a schema whose surface holds more operations than `maxResults`
+- **WHEN** `certify_service_contract` runs
+- **THEN** `surfaceOmitted` carries the number past the cap, and a repository holding GraphQL
+  client documents and no schema still discloses them under `notAssessed`
+
 ### Requirement: GraphqlChangesAreGradedByVariance
 
 `certify_service_contract` SHALL grade GraphQL schema changes against the base revision with
@@ -4145,7 +4291,10 @@ live peer entry, using the existing footprint and hazard classifier plus a `dupl
 for two write-sets that create the same symbol name or file. `map_in_flight_conflicts` SHALL treat
 live entries as agent task descriptors, and `fleet_status` SHALL list them. An entry SHALL end when
 released, when its branch is merged or deleted, or when it is not refreshed within the session
-expiry rule. Entry titles SHALL be redacted and withheld when instruction-shaped, and every peer field
+expiry rule. A check git could not answer SHALL NOT end an entry: when the clone's branches cannot
+be listed, neither a deleted nor a merged branch is detected, and the entry ends on release or on the
+expiry rule. A branch whose short name git disambiguates (`heads/<name>`, when a tag shares the name)
+SHALL be matched to its branch, not read as deleted. Entry titles SHALL be redacted and withheld when instruction-shaped, and every peer field
 SHALL be served as `local-unreviewed` data. Hazards SHALL be advisory unless `enforcement.policy`
 names them blocking.
 
@@ -4319,6 +4468,65 @@ are read, their text is screened before it is served, a file that cannot be read
 over, and a record from another worktree is listed as `other-worktree`, not checked against this
 worktree's code. `plan_parallel_work` SHALL offer an option that adds live board entries from other
 worktrees to the planned tasks, named `board:<actorId>`; this directory's own entries are not added.
+
+A verification record SHALL end on the same evidence as a peer-board entry, decided by the board's
+own predicates rather than a copy of them: not re-proven within 30 minutes (the session expiry
+rule), its recorded directory removed, its branch deleted, or its branch merged into the default
+branch. A record SHOULD carry the time it was recorded. That field is optional, so a record written
+before this rule existed still parses.
+
+A rule the record does not carry the evidence for SHALL be reported as unknown and skipped, never
+resolved as ended. A record with no recorded time, or one whose recorded time cannot be read as a
+date, SHALL NOT be expired. A record with no recorded directory SHALL NOT be a removed worktree. A
+base commit that is not a commit id SHALL leave the merged rule unknown instead of being passed to
+git. A git command that could not be answered SHALL NOT be read as evidence: when the clone's
+branches cannot be listed at all, the branch rules SHALL be unknown rather than `branch-deleted`. A
+branch absent from the clone SHALL be `branch-deleted` only when the record carries evidence that
+the name was a local branch when it was written, captured at write time; without it the branch rules
+SHALL be unknown, since the same field may name a task that never was a branch. Judging many records
+SHALL cost the same git work as judging one record per distinct branch.
+
+`fleet_status` SHALL stay read-only, reporting ended records as a count with their reasons and never
+as a live verdict, and SHALL name the rules it could not evaluate; the next write SHALL remove ended
+records from the records file. The surface SHALL disclose that nothing re-proves a record, so a
+verdict decays 30 minutes after it was recorded, and that no tool records a verdict yet, so an empty
+record list means nothing was recorded rather than that nothing holds.
+
+#### Scenario: A verdict whose branch landed is no longer live
+
+- **GIVEN** a verification record proved on a branch that is then merged into the default branch
+- **WHEN** fleet status is read
+- **THEN** the record is reported as ended with the reason `branch-merged`, not as a live verdict
+
+#### Scenario: A record with no recorded time is not expired
+
+- **GIVEN** a verification record carrying no recorded time
+- **WHEN** fleet status is read long after the session expiry
+- **THEN** the record is still live, and the expiry predicate is disclosed as unknown for it
+
+#### Scenario: Git that cannot be asked is not evidence of a deletion
+
+- **GIVEN** a verification record in a directory that is not a git work tree
+- **WHEN** fleet status is read
+- **THEN** the record is still live, the branch predicates are disclosed as unknown, and the next write does not remove it
+
+#### Scenario: A name that was never a branch is not a deleted branch
+
+- **GIVEN** a verification record whose branch names a task that is not a branch of this clone
+- **WHEN** fleet status is read
+- **THEN** the record is still live and the branch predicates are disclosed as unknown
+
+#### Scenario: A base commit that is not a commit id is never passed to git
+
+- **GIVEN** a verification record whose base commit is not a hexadecimal commit id
+- **WHEN** its lifecycle is judged
+- **THEN** the merged predicate is unknown, no revision is passed to git, and the record stays live
+
+#### Scenario: An ended record is removed on the next write
+
+- **GIVEN** a verification record that has ended
+- **WHEN** the next verification verdict is recorded
+- **THEN** the ended record is no longer in the records file
 
 #### Scenario: A fleet verdict is shared
 
@@ -4555,27 +4763,39 @@ only one pass over the edge list.
 A handler bound to a declared operation is a liveness root, so a binding the contract projection
 REFUSED to make roots nothing: a gRPC server registration or a GraphQL resolver map can name a
 function literally while that function still reaches no root. `find_dead_code` SHALL NOT report
-such a symbol in its highest-confidence dead tier, and SHALL disclose the reason.
+such a symbol in its highest-confidence dead tier, and SHALL disclose the reason. This governs
+bindings the projection REFUSED; a handler whose registration style was never read at all — its RPC
+stays in `unboundRpcs` — is outside it and may still be rated `high`.
 
 A candidate SHALL be capped at `low` when its name matches a symbol a refused registration or
-resolver entry named, or when its class matches the implementation class a refused registration
-named. A refusal that names NEITHER — the registration handed over a variable, so the handler names
-are not in it — SHALL cap every candidate in the file that declares the registration, which is the
-most precise granularity available and a disclosed lower bound: an argument assembled in another
-module is not covered. An `inline-implementation` refusal SHALL cap nothing, because an inline
-function expression has no graph node that could look dead. Each cap SHALL carry a reason naming the
-refused contract wiring and pointing at `contractRootsNotAssessed`.
+resolver entry WROTE, or when its class matches the implementation class a refused registration
+named — narrowed to the one directory where the projection's own scope rule proves the class can
+live nowhere else, and matched by name alone where no such proof exists. A refusal that names NO
+function, and whose implementation argument could not be read, SHALL cap every candidate in the file
+that declares the registration: the handler names are not in the registration, and such an object is
+written where it is registered. A refusal that names no function and whose implementation WAS
+readable — an inline handler, or an unknown field or service with an all-inline map — SHALL cap
+nothing, because it left no named symbol unrooted and a cap would state a reason that is false. Each
+cap SHALL carry a reason naming the refused contract wiring and pointing at
+`contractRootsNotAssessed`, and SHALL NOT assert identity where the match is by name alone.
 
-Because every contract disclosure is bounded with its exact total beside it, a repository whose
-refusals exceed that bound holds unbound symbols the artifact does not name. Their names are not
-recoverable, so NO candidate in that repository SHALL be rated high-confidence dead; the ceiling
-SHALL state how many refusals are past the cap. The cap only ever LOWERS a verdict — it never
-promotes a candidate, and it never removes one from the candidate set, which stays the reachability
-partition `deadCodeIds` and `find_dead_code` share.
+The cap SHALL read the COMPLETE refusal list. Because each disclosure's `items` are bounded for a
+reader, the producer SHALL carry the deduplicated symbol, class and file names over every refusal;
+a reader's cap SHALL NOT decide whether a handler can be called confidently dead. An index that
+cannot name every refusal — one written before those names were carried, or one past the name
+list's own disclosed cap — SHALL have NO candidate rated high-confidence dead, and SHALL state how
+many refusals it cannot name at report level and in its soundness caveats, not only on a candidate
+that reached the highest tier.
 
-OpenAPI `unresolvedBindings` are NOT read for this cap: that disclosure names no symbol, and the
-one name a route carries substitutes a placeholder when extraction fails, so it cannot ground a
-symbol match. Those bindings stay disclosed in `contractRootsNotAssessed`.
+The cap only ever LOWERS a verdict — it never promotes a candidate, and it never removes one from
+the candidate set, which stays the reachability partition `deadCodeIds` and `find_dead_code` share.
+
+The cap is a LOWER BOUND and the response SHALL say so. NOT covered: an implementation object
+assembled in a module other than the registration's; a registration style the scan does not read at
+all, whose RPC is listed in `unboundRpcs`; GraphQL resolver-plumbing keys, which produce no refusal;
+and OpenAPI `unresolvedBindings`, which name no symbol (the one name a route carries substitutes a
+placeholder when extraction fails, so it cannot ground a symbol match). Where a refusal names only a
+file, unrelated candidates in that file are capped as well: precision is lost, soundness is not.
 
 #### Scenario: A method whose class a refused gRPC registration named
 
@@ -4593,10 +4813,11 @@ symbol match. Those bindings stay disclosed in `contractRootsNotAssessed`.
 - **WHEN** `find_dead_code` runs
 - **THEN** the candidate is rated `low` and its reason names the unreadable implementation argument
 
-#### Scenario: An inline implementation caps nothing
+#### Scenario: A readable refusal that names no function caps nothing
 
-- **GIVEN** an `inline-implementation` refusal in a file holding an unrelated candidate, and no
-  other refusal naming that file
+- **GIVEN** a refusal in a file holding an unrelated candidate whose reason is
+  `inline-implementation`, `unknown-field` or `unknown-service` with an all-inline map, and no other
+  refusal naming that file
 - **WHEN** `find_dead_code` runs
 - **THEN** the candidate keeps its `high` rating
 
@@ -4607,12 +4828,27 @@ symbol match. Those bindings stay disclosed in `contractRootsNotAssessed`.
 - **WHEN** `find_dead_code` runs
 - **THEN** the candidate is rated `low` and its reason names the refused resolver map
 
-#### Scenario: More refusals than the disclosure names
+#### Scenario: More refusals than the reader slice lists, all named by the index
 
-- **GIVEN** 25 unresolved registrations of which the disclosure lists 20, none naming the candidate
+- **GIVEN** 43 unresolved registrations of which the disclosure lists 20, and complete name lists
+  naming all 43
 - **WHEN** `find_dead_code` runs
-- **THEN** no candidate is rated `high`, and the reason states how many refusals are past the
-  disclosure cap
+- **THEN** a candidate no refusal names keeps its `high` rating — the reader slice decides nothing
+
+#### Scenario: An index that cannot name every refusal
+
+- **GIVEN** an index whose refusal names are incomplete (written before they were carried, or past
+  the name cap)
+- **WHEN** `find_dead_code` runs
+- **THEN** no candidate is rated `high`, and the count of unnamed refusals appears in
+  `contractRootsNotAssessed` and in `soundness.caveats`, whatever each candidate's tier
+
+#### Scenario: A class cap is scoped where the projection proves it
+
+- **GIVEN** a Go registration naming the unqualified type `server` in `greeter/`, and an unrelated
+  struct of the same name in `metrics/`
+- **WHEN** `find_dead_code` runs
+- **THEN** the method in `greeter/` is capped and the one in `metrics/` is not
 
 #### Scenario: A candidate no contract wiring names is unaffected
 

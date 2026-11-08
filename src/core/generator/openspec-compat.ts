@@ -13,10 +13,9 @@ import { OPENSPEC_DIR, OPENSPEC_CONFIG_FILENAME } from '../../constants.js';
 import type { ProjectSurveyResult } from './spec-pipeline.js';
 
 /**
- * Top-level `config.yaml` keys OpenSpec (the host) owns when OpenLore runs as an
- * OpenSpec plugin. Their presence marks the config as host-managed, in which case
- * OpenLore writes ONLY its `openlore` key (the one it declares via
- * `ownsConfigKeys`) and leaves every other key byte-for-byte unchanged — it never
+ * Top-level `config.yaml` keys OpenSpec (the host) owns. Their presence marks the
+ * config as host-managed, in which case OpenLore writes ONLY its `openlore` key
+ * and leaves every other key byte-for-byte unchanged — it never
  * introduces or overwrites a host-owned key. When none of these are present the
  * config is treated as standalone OpenLore's own, and OpenLore may create
  * `schema`/`context` as before (it is then the legitimate creator).

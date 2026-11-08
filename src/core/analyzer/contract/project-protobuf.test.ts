@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { projectProtobuf, GRPC_REGISTRATION_BINDING, MAX_PROTO_FILES, type ProtobufProjectionInput } from './project-protobuf.js';
-import { projectContracts, contractDisclosure, type ContractProjectionInput } from './project.js';
+import { projectContracts, contractDisclosure, unboundHandlerNames, MAX_UNBOUND_HANDLER_NAMES, type ContractProjectionInput } from './project.js';
 import { scanGrpcRegistrations, type GrpcRegistration } from './grpc-registration.js';
 import type { FunctionNode } from '../call-graph-types.js';
 
@@ -166,7 +166,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
 
   it('discloses an unknown service', () => {
     const p = direct({ registrations: [goReg({ service: 'BillingService' })] });
-    expect(p.unresolvedRegistrations).toEqual([{ file: 'cmd/server/main.go', line: 12, service: 'BillingService', className: 'orderServer', reason: 'unknown-service' }]);
+    expect(p.unresolvedRegistrations).toEqual([{ file: 'cmd/server/main.go', line: 12, service: 'BillingService', className: 'orderServer', classDir: 'cmd/server/', reason: 'unknown-service' }]);
     expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
   });
 
@@ -177,7 +177,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
       { path: 'proto/common.proto', content: COMMON },
     ] });
     expect(p.unresolvedRegistrations).toEqual([{
-      file: 'cmd/server/main.go', line: 12, service: 'OrderService', className: 'orderServer', reason: 'ambiguous-service',
+      file: 'cmd/server/main.go', line: 12, service: 'OrderService', className: 'orderServer', classDir: 'cmd/server/', reason: 'ambiguous-service',
       detail: 'shop.orders.v1.OrderService, shop.orders.v2.OrderService',
     }]);
     expect(p.edges.some(e => e.kind === 'implements_endpoint')).toBe(false);
@@ -189,7 +189,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
       { path: 'proto/common.proto', content: COMMON },
     ] });
     expect(p.unresolvedRegistrations).toEqual([{
-      file: 'cmd/server/main.go', line: 12, service: 'shop.orders.v1.OrderService', className: 'orderServer', reason: 'ambiguous-service',
+      file: 'cmd/server/main.go', line: 12, service: 'shop.orders.v1.OrderService', className: 'orderServer', classDir: 'cmd/server/', reason: 'ambiguous-service',
       detail: 'copy/orders.proto, proto/orders.proto',
     }]);
   });
@@ -208,7 +208,7 @@ describe('projectProtobuf: implements_endpoint from registrations', () => {
     ]) });
     expect(p.unresolvedRegistrations).toEqual([{
       file: 'cmd/server/main.go', line: 12, service: 'shop.orders.v1.OrderService', rpc: 'GetOrder',
-      symbol: 'GetOrder', className: 'orderServer', reason: 'ambiguous-implementation', detail: 'more than one `GetOrder` on orderServer',
+      className: 'orderServer', classDir: 'cmd/server/', reason: 'ambiguous-implementation', detail: 'more than one `GetOrder` on orderServer',
     }]);
     expect(edgesOf(p, 'implements_endpoint')).toEqual([
       'cmd/server/main.go::orderServer.ListOrders -> proto/orders.proto::/shop.orders.v1.OrderService/ListOrders',
@@ -407,7 +407,7 @@ describe('projectContracts with protobuf', () => {
   it('discloses unbound RPCs and unresolved registrations, bounded with totals', () => {
     const p = viaContracts({ grpcRegistrations: [goReg({ service: 'Nope' })] });
     expect(p.unboundRpcs.total).toBe(2);
-    expect(p.unresolvedRegistrations).toEqual({ items: [{ file: 'cmd/server/main.go', line: 12, service: 'Nope', className: 'orderServer', reason: 'unknown-service' }], total: 1 });
+    expect(p.unresolvedRegistrations).toEqual({ items: [{ file: 'cmd/server/main.go', line: 12, service: 'Nope', className: 'orderServer', classDir: 'cmd/server/', reason: 'unknown-service' }], total: 1 });
     expect(contractDisclosure(p)).toBeDefined();
   });
 
@@ -767,14 +767,93 @@ describe('an unbound registration names the symbol or class it left unrooted', (
     expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ className: 'orderServer', reason: 'implementation-not-found' })]);
   });
 
-  it('a service expression that is not literal still names the class it registered', () => {
-    const p = direct({ registrations: [goReg({ notLiteral: 'the implementation is `srv`' })], resolveImplementation: resolverOver(SERVER) });
-    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ className: 'orderServer', reason: 'not-literal' })]);
+  it('an implementation argument that is not literal names nothing: that is what could not be read', () => {
+    const p = direct({ registrations: [goReg({ implType: undefined, notLiteral: 'the implementation is `srv`' })], resolveImplementation: resolverOver(SERVER) });
+    expect(p.unresolvedRegistrations).toEqual([{ file: 'cmd/server/main.go', line: 12, service: 'shop.orders.v1.OrderService', reason: 'not-literal', detail: 'the implementation is `srv`' }]);
+  });
+
+  it('Go: a class cap is scoped to the package the registration proves, and only when unqualified', () => {
+    const bare = direct({ registrations: [goReg()], resolveImplementation: () => [] });
+    expect(bare.unresolvedRegistrations[0]).toMatchObject({ className: 'orderServer', classDir: 'cmd/server/' });
+    // A qualified `impl.orderServer` may live in any directory named `impl`, so nothing is proven.
+    const qualified = direct({ registrations: [goReg({ implQualifier: 'impl' })], resolveImplementation: () => [] });
+    expect(qualified.unresolvedRegistrations[0].classDir).toBeUndefined();
+  });
+
+  it('Node: a refusal decided before the map was read names the map\'s own function names', () => {
+    const p = direct({
+      registrations: [{ file: 'srv/server.js', line: 2, runtime: 'node', service: 'proto.other.v9.Greeter', methods: [{ key: 'sayHello', fn: 'sayHello' }, { key: 'wave' }] }],
+      resolveImplementation: () => [],
+    });
+    // `wave` is inline, so it contributes no name; `sayHello` is what the binding would have rooted.
+    expect(p.unresolvedRegistrations).toEqual([expect.objectContaining({ reason: 'unknown-service', symbols: ['sayHello'] })]);
+  });
+
+  it('Go and Python per-RPC refusals name no symbol: the method name comes from the schema', () => {
+    const p = direct({ resolveImplementation: resolverOver([
+      ...SERVER, fn('cmd/server/main.go::orderServer.GetOrder', { id: 'cmd/server/main.go::orderServer.GetOrder#2', startLine: 40 }),
+    ]) });
+    expect(p.unresolvedRegistrations[0].symbol).toBeUndefined();
+    expect(p.unresolvedRegistrations[0].className).toBe('orderServer');
   });
 
   it('an inline implementation names no symbol, because the literal names no function', () => {
     const p = direct({ registrations: [{ file: 'src/server.js', line: 4, runtime: 'node', service: 'proto.shop.orders.v1.OrderService', methods: [{ key: 'getOrder' }] }], resolveImplementation: () => [] });
     expect(p.unresolvedRegistrations[0].symbol).toBeUndefined();
     expect(p.unresolvedRegistrations[0].className).toBeUndefined();
+  });
+});
+
+/**
+ * The complete name lists a consumer must read instead of the bounded display slice
+ * (change: cap-unbound-contract-handler-confidence). `MAX_DISCLOSED` is a reader's cap; resting a
+ * correctness ceiling on it gave up the whole high-confidence dead tier on grpc-go (43 refusals).
+ */
+describe('unboundHandlerNames: the complete refusal names', () => {
+  it('buckets by symbol, class and file, over every refusal and not the first 20', () => {
+    const many = Array.from({ length: 43 }, (_, i) => ({ file: `srv/s${i}.go`, line: 1, reason: 'implementation-not-found', className: `impl${i}` }));
+    const out = unboundHandlerNames(many, [
+      { file: 'src/resolvers.ts', line: 1, reason: 'not-literal' },
+      { file: 'src/other.ts', line: 2, reason: 'implementation-not-found', symbol: 'order' },
+    ]);
+    expect(out.classes).toHaveLength(43);
+    expect(out.symbols).toEqual(['order']);
+    expect(out.files).toEqual(['src/resolvers.ts']);
+    expect(out.truncated).toBe(0);
+  });
+
+  it('buckets nothing for a refusal that names no function and could be read', () => {
+    // An inline handler has no graph node; an unknown field or service with an all-inline map left
+    // no named symbol unrooted. Capping on these would print a reason that is false.
+    const out = unboundHandlerNames([
+      { file: 'src/server.js', line: 1, reason: 'inline-implementation' },
+      { file: 'src/resolvers.ts', line: 2, reason: 'unknown-field' },
+      { file: 'src/server.js', line: 3, reason: 'unknown-service' },
+    ]);
+    expect(out).toEqual({ symbols: [], classes: [], files: [], truncated: 0 });
+  });
+
+  it('carries a class scope only when one was proven, and dedupes name+scope', () => {
+    const out = unboundHandlerNames([
+      { file: 'greeter/main.go', line: 1, reason: 'implementation-not-found', className: 'server', classDir: 'greeter/' },
+      { file: 'greeter/main.go', line: 2, reason: 'implementation-not-found', className: 'server', classDir: 'greeter/' },
+      { file: 'py/app.py', line: 3, reason: 'implementation-not-found', className: 'server' },
+    ]);
+    expect(out.classes).toEqual([{ name: 'server' }, { name: 'server', dir: 'greeter/' }]);
+  });
+
+  it('discloses its own name cap instead of applying it silently', () => {
+    const over = Array.from({ length: MAX_UNBOUND_HANDLER_NAMES + 5 }, (_, i) => ({ file: 'a.go', line: 1, reason: 'implementation-not-found', symbol: `fn${i}` }));
+    const out = unboundHandlerNames(over);
+    expect(out.symbols).toHaveLength(MAX_UNBOUND_HANDLER_NAMES);
+    expect(out.truncated).toBe(5);
+  });
+
+  it('is carried on the projection only when something was refused', () => {
+    expect(direct({ registrations: [], resolveImplementation: () => [] }).unresolvedRegistrations).toHaveLength(0);
+    const quiet = viaContracts({ grpcRegistrations: [] });
+    expect(quiet.unboundHandlerNames).toBeUndefined();
+    const noisy = viaContracts({ grpcRegistrations: [goReg({ service: 'Nope' })] });
+    expect(noisy.unboundHandlerNames?.classes).toEqual([{ name: 'orderServer', dir: 'cmd/server/' }]);
   });
 });

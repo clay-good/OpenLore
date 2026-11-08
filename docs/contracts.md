@@ -315,19 +315,56 @@ to the repository's SDL; neither are files importing a mocking library (`msw`,
 is the compiler's copy of a server's schema, and a file whose types sit beside `@client`
 operations is Apollo local state: `analyze` reads neither as this repository's contract, and lists
 both under `skippedCandidates`. `certify_service_contract` never drops a schema on a config's say-so —
-it grades the file and names the Relay link in its boundaries. One schema per repository means
+it grades the file and names the config that named it in its boundaries. One schema per repository means
 a monorepo with several servers' SDL makes their shared roots ambiguous — disclosed, not guessed.
 
 Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
 bound: a type field is not a node.
 
 Known boundaries, disclosed where they bite: a schema a frontend vendors for graphql-codegen or
-`apollo.config.js` (not Relay) is graded as this repository's contract; an Ariadne bindable created
+`apollo.config.js` is graded as this repository's contract — now with a boundary line naming that
+config (see *Schema provenance and discovery exclusions* below); an Ariadne bindable created
 in one module and decorated in another is not followed (its operations stay unbound); a map in a
 directory holding an inline schema is not bound to the repository's SDL; and an operation two maps
 bind keeps both edges, with a note naming it. Code-first servers (Strawberry, Graphene, Nexus,
 gqlgen) have no resolver map, so their operations are listed in `unboundGraphqlOperations` — "not
 bound", never "not served".
+
+### Schema provenance and discovery exclusions
+
+A codegen output or a vendored copy of someone else's contract used to be graded as this
+repository's own, silently. It is now **disclosed, never dropped** — a verdict that drops a schema
+is a gate bypass, and a provenance signal is a guess, so it only annotates.
+
+Each graded schema's `specs` entry carries `provenance` when a rule matched:
+
+| Rule | `matched` | `certainty` |
+|---|---|---|
+| A generator header in the file's bounded head (`# @generated`, `Code generated … DO NOT EDIT.`, `AUTO-GENERATED FILE`, …) | the marker id, e.g. `at-generated` | `declared` |
+| A path pattern: `__generated__/`, `generated/`, `*.generated.*` | that pattern | `path-pattern` |
+| A vendored path: `node_modules/`, `vendor/`, `vendored/`, `third_party/` | that pattern | `path-pattern` |
+
+The marker ids and pattern names are the [generated-file guard](generated-files.md)'s own
+vocabulary; a `path-pattern` guess is never reported as `declared`, and a header is looked for in
+a bounded head of the file, never in a 10 MB schema whole.
+
+A client-toolchain config that names a schema — Relay (`package.json` `"relay"`, `relay.config.*`),
+Apollo (`apollo.config.*`), graphql-config (`graphql.config.*`, `.graphqlrc*`) or GraphQL Code
+Generator (`codegen.*`) — produces one boundary line naming that config and the schema. A config is
+read for **one literal schema path inside its own directory**: a value that climbs out
+(`../schema.graphql`), a URL, an interpolation or a glob is never claimed, because a config in this
+repository must not let OpenLore speak for someone else's schema — or stop speaking about this
+repository's own. On the `analyze` side a Relay copy is still dropped (and listed under
+`skippedCandidates`); `certify_service_contract` drops nothing on any config's say-so.
+
+Discovery excludes `node_modules/`, `vendor/`, `dist/`, `build/` and `.git/` — for **untracked
+files only**. A tracked file is part of the repository by definition, and the blanket rule deleted
+four hand-written Google API protos (`google/devtools/build/v1/build_events.proto` and friends)
+from certify because `build/` appears in their path. `node_modules/` is the one named exception
+applied to tracked files too: a committed dependency tree is genuinely another project's contract.
+Either way the exclusion is named in a `boundaries` line with the count and the first few paths,
+and the same rule runs on the base revision, so an exclusion never reads as an addition or a
+removal.
 
 ### Breaking changes
 

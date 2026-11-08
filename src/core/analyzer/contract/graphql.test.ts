@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   readGraphql, mergeGraphqlSchema, namedType, isGraphqlPath, isBuiltInScalar,
+  clientSchemaReferences, relaySchemaPaths, CLIENT_SCHEMA_CONFIG_FILE,
   type GqlDocument, type GqlType,
 } from './graphql.js';
 import { MAX_SPEC_BYTES } from './openapi.js';
@@ -548,5 +549,77 @@ describe('mergeGraphqlSchema: roots, extension-only types, ambiguity fingerprint
     const h = (...texts: string[]) => mergeGraphqlSchema(texts.map((t, i) => doc(`${i}.graphql`, t))).schemaDirectivesHash;
     expect(h('extend schema @link(url: "a")', 'extend schema @link(url: "b")')).toBe(h('extend schema @link(url: "b")', 'extend schema @link(url: "a")'));
     expect(h('extend schema @link(url: "a")')).not.toBe(h('extend schema @link(url: "b")'));
+  });
+});
+
+describe('client-toolchain schema configs', () => {
+  const ref = (path: string, content: string) => clientSchemaReferences([{ path, content }]);
+
+  it('reads the single literal schema path out of each config kind it knows', () => {
+    expect(ref('package.json', '{"relay":{"schema":"./schema/schema.graphql"}}')).toEqual([
+      { schema: 'schema/schema.graphql', config: 'package.json', tool: 'a Relay compiler config' },
+    ]);
+    expect(ref('relay.config.js', "module.exports = { schema: './s.graphql' };")).toEqual([
+      { schema: 's.graphql', config: 'relay.config.js', tool: 'a Relay compiler config' },
+    ]);
+    expect(ref('apollo.config.js', "module.exports = { client: { service: { localSchemaFile: './s.graphql' } } };")).toEqual([
+      { schema: 's.graphql', config: 'apollo.config.js', tool: 'an Apollo client config' },
+    ]);
+    expect(ref('graphql.config.yml', 'schema: schema/s.graphql\ndocuments: src/**/*.graphql\n')).toEqual([
+      { schema: 'schema/s.graphql', config: 'graphql.config.yml', tool: 'a graphql-config file' },
+    ]);
+    expect(ref('.graphqlrc', 'schema: s.graphql\n')).toEqual([
+      { schema: 's.graphql', config: '.graphqlrc', tool: 'a graphql-config file' },
+    ]);
+    expect(ref('codegen.yml', 'schema: ./api/s.graphql\ngenerates:\n  out.ts: {}\n')).toEqual([
+      { schema: 'api/s.graphql', config: 'codegen.yml', tool: 'a GraphQL Code Generator config' },
+    ]);
+    // Resolved from the config's OWN directory, not the repository root.
+    expect(ref('web/app/.graphqlrc.yml', 'schema: gql/s.graphql\n')[0].schema).toBe('web/app/gql/s.graphql');
+    expect(CLIENT_SCHEMA_CONFIG_FILE.test('web/app/codegen.ts')).toBe(true);
+    expect(CLIENT_SCHEMA_CONFIG_FILE.test('web/app/vite.config.ts')).toBe(false);
+  });
+
+  it('never claims a schema outside the config\'s own directory, or one that is not a literal path', () => {
+    // A path that climbs out names someone else's schema — often this repository's own server.
+    for (const lit of ['../schema.graphql', '../../a/schema.graphql', './', '.']) {
+      expect(ref('web/graphql.config.yml', `schema: ${lit}\n`), lit).toEqual([]);
+    }
+    for (const lit of ['https://api.example.com/graphql', '${SCHEMA_PATH}', 'src/**/*.graphql']) {
+      expect(ref('graphql.config.yml', `schema: ${lit}\n`), lit).toEqual([]);
+    }
+    expect(ref('graphql.config.yml', 'documents: src/q.graphql\n')).toEqual([]);
+    // A 1 MB value is not a path: the read is bounded, not attempted.
+    expect(ref('graphql.config.yml', `schema: ${'a'.repeat(1024 * 1024)}\n`)).toEqual([]);
+  });
+
+  it('reads the config\'s own value, not a commented-out line, another key, or the next line', () => {
+    // A `#`-commented value is not the config's value.
+    expect(ref('graphql.config.yml', '# schema: ./old.graphql\nschema: ./real.graphql\n')[0].schema).toBe('real.graphql');
+    // A key that merely ENDS in `schema` is a different key.
+    expect(ref('graphql.config.yml', 'my_schema: ./other.graphql\nschema: ./real.graphql\n')[0].schema).toBe('real.graphql');
+    // `$schema` (a JSON Schema reference) is not the schema path.
+    expect(ref('.graphqlrc.json', '{"$schema":"https://json.schemastore.org/graphqlrc","schema":"./real.graphql"}')[0].schema).toBe('real.graphql');
+    // An empty value never borrows the NEXT line's; a list form is not a single literal path.
+    expect(ref('graphql.config.yml', 'schema:\ndocuments: ./src/x.ts\n')).toEqual([]);
+    expect(ref('graphql.config.yml', 'schema:\n  - ./a.graphql\n  - ./b.graphql\n')).toEqual([]);
+    // A one-line JS object literal still reads.
+    expect(ref('apollo.config.js', "module.exports = { client: { service: { localSchemaFile: './s.graphql' } } };")[0].schema).toBe('s.graphql');
+    // A bare value with a trailing comment keeps the path, not the comment.
+    expect(ref('codegen.yml', 'schema: ./api/s.graphql # the server\n')[0].schema).toBe('api/s.graphql');
+    // Bounded: a value past the line budget is not read, rather than scanned forever.
+    expect(ref('graphql.config.yml', '\n'.repeat(5_000) + 'schema: ./late.graphql\n')).toEqual([]);
+    expect(CLIENT_SCHEMA_CONFIG_FILE.test('.graphqlrc.ts')).toBe(true);
+    expect(CLIENT_SCHEMA_CONFIG_FILE.test('codegen.json')).toBe(true);
+  });
+
+  it('keeps `relaySchemaPaths` to Relay configs alone: only Relay may make a schema drop', () => {
+    const configs = [
+      { path: 'package.json', content: '{"relay":{"schema":"./relay.graphql"}}' },
+      { path: 'apollo.config.js', content: "module.exports = { client: { service: { localSchemaFile: './apollo.graphql' } } };" },
+      { path: 'codegen.yml', content: 'schema: codegen.graphql\n' },
+    ];
+    expect([...relaySchemaPaths(configs)]).toEqual(['relay.graphql']);
+    expect(clientSchemaReferences(configs).map(r => r.schema).sort()).toEqual(['apollo.graphql', 'codegen.graphql', 'relay.graphql']);
   });
 });
