@@ -855,7 +855,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
             console.log('');
             const cycles = rp.cycles as CycleReport[];
             for (const c of cycles.slice(0, CYCLE_LINES_SHOWN)) {
-              console.log(`    ${renderCycleLine(c)}`);
+              console.log(`    ${safe(renderCycleLine(c))}`);
             }
             const moreCycles = omittedDisclosure(cycles.length, CYCLE_LINES_SHOWN, 'cycle');
             if (moreCycles) console.log(`      ${safe(moreCycles)}`);
@@ -903,7 +903,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
               .slice(0, 5);
 
             for (const group of topGroups) {
-              console.log(`    ${renderCloneGroupLine(group)}`);
+              console.log(`    ${safe(renderCloneGroupLine(group))}`);
             }
           }
 
