@@ -17,6 +17,9 @@ All notable changes to OpenLore are documented here. This project adheres to
   not match. The note, the tool description and the docs now state this plainly.
 - **Fixed a false claim**: the JSON note advertised a `--format in-toto` CLI flag; there is no
   `openlore certify-provenance` command. It now names the tool's `format` option.
+### Removed
+
+- The OpenSpec plugin manifest (`plugin-manifest` command and schema); the OpenSpec host side was never built.
 
 ### GraphQL schemas are read
 

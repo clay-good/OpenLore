@@ -11,8 +11,8 @@
 // Guard the Node version BEFORE anything heavy loads. This bootstrap import runs
 // the guard as a side effect; because ESM evaluates dependencies in source order
 // (each fully before the next), keeping it the FIRST import makes it run ahead of
-// commander and the command modules. A host on an unsupported Node (e.g.
-// `openspec lore generate` under Node 20) gets one legible stderr line and a
+// commander and the command modules. A caller on an unsupported Node (e.g. a
+// tool spawning `openlore` under Node 20) gets one legible stderr line and a
 // stable exit code, never a stack trace. Keep this the first import.
 import './node-version-bootstrap.js';
 // Size the V8 heap to the machine BEFORE commander and the command modules load, so a large
@@ -75,7 +75,6 @@ import { enforceCommand } from './commands/enforce.js';
 import { exportCommand } from './export/index.js';
 import { importCommand } from './commands/import.js';
 import { manifestCommand } from './manifest/index.js';
-import { pluginManifestCommand } from './plugin-manifest/index.js';
 import { serveCommand } from './commands/serve.js';
 import { panicCheckCommand } from './commands/panic-check.js';
 import { panicLevelCommand } from './commands/panic-level.js';
@@ -273,7 +272,6 @@ program.addCommand(enforceCommand);
 program.addCommand(exportCommand);
 program.addCommand(importCommand);
 program.addCommand(manifestCommand);
-program.addCommand(pluginManifestCommand);
 program.addCommand(serveCommand);
 program.addCommand(panicCheckCommand);
 program.addCommand(panicLevelCommand);

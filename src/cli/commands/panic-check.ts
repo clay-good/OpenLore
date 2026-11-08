@@ -24,6 +24,7 @@ import { emit } from '../../core/services/telemetry.js';
 import { readStdin } from '../../utils/stdin.js';
 import { resolve } from 'node:path';
 import { readLiveLedger } from '../../core/services/session-ledger.js';
+import { jsonOutput } from '../output.js';
 
 type HookFormat = 'claude' | 'kilo' | 'codex';
 
@@ -107,7 +108,7 @@ export const panicCheckCommand = new Command('panic-check')
           const pendingTool = parsePendingToolName(await readStdin());
           if (!isRecoveryTool(pendingTool)) {
             const blockOutput = { decision: 'block' as const, advisory: true, panicLevel: effective.panicLevel, message: output.message };
-            process.stdout.write(JSON.stringify(blockOutput) + '\n');
+            process.stdout.write(jsonOutput(blockOutput) + '\n');
             process.exit(0);
           }
         }

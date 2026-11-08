@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
-import { writeStdout, writeStderr } from './output.js';
+import { writeStdout, writeStderr, jsonOutput } from './output.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -110,5 +110,36 @@ describe('writeStderr — the same sanitized sink for the stderr twins', () => {
     expect(out).not.toContain(ESC);
     expect(out).toContain('risk: high');
     expect(out.split('\n').length).toBe(3); // structure preserved, no line erased
+  });
+});
+
+describe('jsonOutput — the machine-readable face', () => {
+  const ESC = String.fromCharCode(27);
+
+  it('removes a bidi override that JSON.stringify passes through verbatim', () => {
+    // `openlore decisions --json` emitted the raw U+202E bytes of a decision title while the
+    // human render stripped them: JSON escapes C0 controls on its own, so ESC looked handled
+    // and nobody noticed the rest of the class.
+    const written = jsonOutput({ title: 'title \u202eoverride', path: `a${ESC}[31mb.ts` });
+
+    expect(written).not.toContain('\u202e');
+    expect(written).not.toContain(ESC);
+    // Still valid, still parseable, and a consumer that parses it gets no control back.
+    const parsed = JSON.parse(written) as { title: string; path: string };
+    expect(parsed.title).toBe('title override');
+    expect(parsed.path).toBe('ab.ts');
+  });
+
+  it('removes zero-width characters', () => {
+    expect(JSON.parse(jsonOutput({ symbol: 'handle\u200bOrient\u200d' }))).toEqual({ symbol: 'handleOrient' });
+  });
+
+  it('leaves legitimate non-ASCII in a path alone', () => {
+    const file = 'src/spåce dir ünicode/日本語/🙈.ts';
+    expect((JSON.parse(jsonOutput({ file })) as { file: string }).file).toBe(file);
+  });
+
+  it('emits two-space-indented JSON and no trailing newline', () => {
+    expect(jsonOutput({ a: 1 })).toBe('{\n  "a": 1\n}');
   });
 });

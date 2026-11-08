@@ -144,6 +144,36 @@ export function findCheapestPath(
   return { found: true, best: hits[0], alternates: hits.slice(1, 1 + MAX_ALTERNATES), reached: reach.size };
 }
 
+/**
+ * The hint on a no-path answer (change: never-claim-complete-beside-a-refusal).
+ *
+ * A bounded search that found nothing has three causes it cannot tell apart: the endpoints
+ * are genuinely unconnected, the only path is longer than the bound, or a name matched
+ * several functions and the resolver bound an intermediate hop to a different same-named
+ * callee. The hint names them instead of asserting the first one.
+ */
+export function noPathHint(
+  from: string,
+  to: string,
+  fromMatches: number,
+  toMatches: number,
+  useCallDistance: boolean,
+): string {
+  const bound = useCallDistance ? `call-distance ${PATH_MAX_DISTANCE}` : `depth ${SUBGRAPH_MAX_DEPTH_LIMIT}`;
+  const ambiguous = [
+    ...(fromMatches > 1 ? [`"${from}" matched ${fromMatches} functions`] : []),
+    ...(toMatches > 1 ? [`"${to}" matched ${toMatches} functions`] : []),
+  ];
+  const tail = `This search was bounded at ${bound}, so "no path" means "none within the bound" — `
+    + 'the endpoints may be unconnected, or linked only by a longer chain. '
+    + 'Not a proof that no path exists.';
+  return ambiguous.length > 0
+    ? `${ambiguous.join(' and ')} (see resolvedFrom / resolvedTo), so a same-name collision may have bound an `
+      + `intermediate hop to a different function of that name. Disambiguate with name::path before concluding `
+      + `the endpoints are unconnected. ${tail}`
+    : tail;
+}
+
 export async function handleFindPath(
   directory: string,
   from: string,
@@ -290,7 +320,15 @@ export async function handleFindPath(
       noPath: {
         reason: `No call path from "${from}" to "${to}" within ${useCallDistance ? `call-distance ${PATH_MAX_DISTANCE}` : `depth ${SUBGRAPH_MAX_DEPTH_LIMIT}`}.`,
         reachedNodes: result.reached,
-        hint: 'The endpoints may be in different connected components, or only linked by a longer path — try the other endpoint kinds.',
+        // The old hint ASSERTED "different connected components" — a cause this search
+        // cannot tell apart from a path beyond its own bound, or from an endpoint name
+        // that matched several functions (change: never-claim-complete-beside-a-refusal).
+        // It now names the causes it actually cannot distinguish, ambiguity first when
+        // ambiguity is live, and never claims the endpoints are unconnected.
+        hint: noPathHint(from, to, fromRes.nodes.length, toRes.nodes.length, useCallDistance),
+        ...(fromRes.nodes.length > 1 || toRes.nodes.length > 1
+          ? { ambiguousEndpoints: { from: fromRes.nodes.length, to: toRes.nodes.length } }
+          : {}),
       },
       confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains([], pairIndex), staleness, integrity: ctx?.integrity }),
     });

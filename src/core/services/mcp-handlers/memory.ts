@@ -698,7 +698,19 @@ export async function handleRecall(
         // Recall does no graph traversal — its boundary is the freshness of the
         // index the anchors were checked against (per-memory verdicts cover the
         // rest). (spec: add-confidence-boundary-disclosure)
-        confidenceBoundary: assembleBoundary({ staleness: await computeStaleness(rootPath) }),
+        //
+        // `note` is prose, so the dispatch-boundary sweep cannot read it (change:
+        // never-claim-complete-beside-a-refusal). Its live disclosures are declared here
+        // instead: a discarded `asOf`/`changedSince`/`type` filter, a budget trim, lost
+        // anchors, a stale decision reference, skipped claims. `evidenceNote` and
+        // `unreconciledNote` are left out only because `evidenceRefuted`,
+        // `evidenceUnverifiable` and `unreconciled` are registered channels that name the
+        // same gap already.
+        confidenceBoundary: assembleBoundary({
+          staleness: await computeStaleness(rootPath),
+          disclosures: [budgetNote, reanchorNote, staleRefNote, claimsSkippedNote, ...warnings]
+            .filter((d): d is string => typeof d === 'string' && d.length > 0),
+        }),
       };
     } finally {
       ctx?.close();

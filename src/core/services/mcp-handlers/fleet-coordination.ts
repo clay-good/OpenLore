@@ -12,13 +12,22 @@
  *
  * Deterministic, local, read-only against the graph. `fleet_status` composes the recorded verdicts
  * with the arc's conclusions, attributing each line to the tool that produced it; it references
- * those tools, it does not re-derive them. Live PR/branch harvesting, the expire-on-land lifecycle,
- * and the CLI are follow-ups.
+ * those tools, it does not re-derive them. Live PR/branch harvesting and the CLI are follow-ups.
+ *
+ * Records end on the SAME evidence as peer-board entries, through the board's own batched decider
+ * (`judgeLifecycle`): idle expiry, worktree removed, branch deleted, branch merged. A record does
+ * not carry everything those predicates need, and a missing field never means "ended" — a record
+ * with no `recordedAt` (every record written before this lifecycle existed) is NOT expired, an
+ * unrecorded directory is not a removed worktree, and a `baseCommit` that is not a commit id leaves
+ * the merged predicate unknown instead of handing peer text to git. `fleet_status` mirrors
+ * `readBoard`: read-only, with ended records reported as a count and reasons, never as a live
+ * verdict; the next `recordVerification` prunes them, as `pruneEnded` does for the board.
  */
 
 import { memoryFreshness } from '../../decisions/anchor.js';
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import type { StructuralAnchor } from '../../../types/index.js';
+import type { EndReason, LifecycleSubject, LifecycleUnknown } from '../footprint-board.js';
 import { validateDirectory, safeJoin } from './utils.js';
 import { OPENLORE_DIR } from '../../../constants.js';
 import { mkdir, rm, realpath, lstat } from 'node:fs/promises';
@@ -42,6 +51,17 @@ export interface VerificationRecord {
   anchors: StructuralAnchor[];
   /** The analysis directory (canonical) that recorded it; set when records are shared by the clone. */
   worktree?: string;
+  /**
+   * When the verdict was recorded (ISO). Optional: records written before the lifecycle existed
+   * carry none, and are never expired by the idle rule — only reported as unknown for it.
+   */
+  recordedAt?: string;
+  /**
+   * Whether `branch` really was a local branch of the clone when the verdict was recorded. Stamped
+   * at write time; without it, a `branch` absent from the clone today proves nothing (the field is
+   * also used for a task id), so the branch predicates report unknown rather than "deleted".
+   */
+  branchWasLocalRef?: boolean;
 }
 
 export type RecordState = 'still-valid' | 'carried' | 'invalidated' | 'needs-reverification' | 'other-worktree';
@@ -122,7 +142,71 @@ const isRecord = (v: unknown): v is VerificationRecord => {
   const r = v as Partial<VerificationRecord> | null;
   return !!r && typeof r === 'object' && typeof r.id === 'string' && r.id.length <= 256 && VERDICTS.has(r.verdict as string)
     && typeof r.branch === 'string' && typeof r.baseCommit === 'string' && typeof r.producedBy === 'string'
-    && optStr(r.worktree) && Array.isArray(r.anchors) && r.anchors.every(isAnchor);
+    && optStr(r.worktree) && optStr(r.recordedAt) && (r.branchWasLocalRef === undefined || typeof r.branchWasLocalRef === 'boolean')
+    && Array.isArray(r.anchors) && r.anchors.every(isAnchor);
+};
+
+/** A commit id, never an option or a revision expression: `baseCommit` is peer-written. */
+const COMMIT_ID_RE = /^[0-9a-f]{40,64}$/;
+
+/**
+ * What the board's lifecycle predicates can read off a record. Pure, and deliberately partial: a
+ * field the record does not carry is left out so its predicate reports `unknown`, never "ended".
+ *
+ * `worktree` on a record is the ANALYSIS directory, which may be a package inside the worktree, so
+ * it is offered as the subject's `root` (must still exist) and not matched against the clone's
+ * worktree list — that would read a monorepo package as a removed worktree.
+ */
+export function lifecycleSubjectFor(r: VerificationRecord): LifecycleSubject {
+  // A timestamp that cannot be parsed is absent evidence, not proof of staleness: nothing ever
+  // re-proves a record, so a malformed one must leave the idle rule unknown, not expire it.
+  const usableTime = r.recordedAt !== undefined && Number.isFinite(Date.parse(r.recordedAt));
+  return {
+    ...(usableTime ? { lastSeenAt: r.recordedAt } : {}),
+    ...(r.worktree !== undefined ? { root: r.worktree } : {}),
+    branch: r.branch,
+    ...(r.branchWasLocalRef === true ? { branchKnownRef: true } : {}),
+    ...(COMMIT_ID_RE.test(r.baseCommit) ? { baseAtDeclare: r.baseCommit } : {}),
+  };
+}
+
+/** Records still live, and those that ended with the board's reason, plus unknown predicates. */
+export interface RecordLifecycle {
+  live: Array<{ record: VerificationRecord; unknown: LifecycleUnknown[] }>;
+  ended: Array<{ id: string; branch: string; reason: EndReason; unknown: LifecycleUnknown[] }>;
+  /** How many live records left each predicate unevaluated, and why. */
+  unknown: Partial<Record<LifecycleUnknown, number>>;
+}
+
+/** Judge every record against the board's end predicates (one batch: one `main` + worktree lookup). */
+async function judgeRecords(absDir: string, records: readonly VerificationRecord[], now?: number): Promise<RecordLifecycle> {
+  const { judgeLifecycle } = await import('../footprint-board.js');
+  const out: RecordLifecycle = { live: [], ended: [], unknown: {} };
+  let judged: Array<{ item: VerificationRecord; reason: EndReason | null; unknown: LifecycleUnknown[] }>;
+  try {
+    judged = await judgeLifecycle(absDir, records, lifecycleSubjectFor, now !== undefined ? { now } : {});
+  } catch {
+    // A belt-and-braces guard: the decider already resolves an unanswerable git call to `unknown`,
+    // so nothing should throw here — and if anything does, nothing is dropped on a failed check.
+    return { live: records.map(record => ({ record, unknown: [] })), ended: [], unknown: {} };
+  }
+  for (const { item, reason, unknown } of judged) {
+    if (reason) { out.ended.push({ id: item.id, branch: item.branch, reason, unknown }); continue; }
+    out.live.push({ record: item, unknown });
+    for (const u of unknown) out.unknown[u] = (out.unknown[u] ?? 0) + 1;
+  }
+  return out;
+}
+
+const UNKNOWN_REASON: Record<LifecycleUnknown, string> = {
+  'expiry-unknown-no-timestamp': 'no usable recordedAt (absent, or not a date that can be parsed): the 30-minute idle rule was not applied, so the record was kept',
+  'worktree-unknown-not-recorded': 'no directory recorded: the removed-worktree rule was not applied',
+  'branch-unknown-detached-or-unrecorded': 'the record\'s branch field is empty: the branch rules were not applied',
+  'branch-unknown-unusable-name': 'the recorded branch name is not one git can be asked about: the branch rules were not applied',
+  'branch-unknown-git-could-not-be-asked': 'git could not list this clone\'s branches (for example not a git work tree, no git on PATH, or git refused the directory): the branch rules were not applied, and nothing was read as a deleted branch',
+  'branch-unknown-never-a-known-branch': 'the recorded branch is not a branch of this clone and there is no evidence it ever was one: the branch rules were not applied',
+  'branch-merged-unknown-no-default-branch': 'no main or master branch: the merged rule was not applied',
+  'branch-merged-unknown-no-base-commit': 'baseCommit is absent or not a 40-64 character hex commit id: the merged rule was not applied (it was never passed to git)',
 };
 
 /**
@@ -178,17 +262,29 @@ function fitRecords(records: VerificationRecord[]): string {
  * Record a verification verdict (coordination-scoped), shared by the clone's worktrees. Advisory.
  * Serialized by a lock next to the file; refuses to write over a records file it could not read.
  */
-export async function recordVerification(absDir: string, record: VerificationRecord): Promise<void> {
+export async function recordVerification(absDir: string, record: VerificationRecord, opts: { now?: number } = {}): Promise<void> {
   const dir = await sharedRecordsDir(absDir);
   const path = dir ? join(dir, RECORDS_FILE) : safeJoin(absDir, LEGACY_RECORDS_REL);
   await mkdir(dirname(path), { recursive: true });
   const worktree = dir ? await realpath(absDir).catch(() => absDir) : undefined;
+  const { isLocalBranch } = await import('../footprint-board.js');
+  const branchWasLocalRef = (await isLocalBranch(absDir, record.branch)) === true;
   await withCommitLock(`${path}.lock`, async () => {
     const { records, shared, legacy } = await loadRecords(absDir);
     const own = dir ? shared! : legacy;
     if (own.state === 'unreadable') throw new Error(`The verification records at ${path} could not be read; nothing was written over them.`);
-    const next = records.filter(r => r.id !== record.id);
-    next.push({ ...record, ...(worktree ? { worktree } : {}) });
+    // The write is where ended records are pruned, mirroring the board's pruneEnded: the read path
+    // stays read-only. Judged inside the lock, over what the file holds right now.
+    const kept = (await judgeRecords(absDir, records, opts.now)).live.map(l => l.record);
+    const next = kept.filter(r => r.id !== record.id);
+    next.push({
+      ...record,
+      recordedAt: record.recordedAt ?? new Date(opts.now ?? Date.now()).toISOString(),
+      // Positive evidence for the branch predicates, captured while it is still checkable. Absent
+      // when the name is not a branch (a task id) or git could not be asked.
+      ...(branchWasLocalRef ? { branchWasLocalRef } : {}),
+      ...(worktree ? { worktree } : {}),
+    });
     await atomicWriteFile(path, fitRecords(next));
     // Folded into the shared file: the legacy copy (this tool's own artifact) is retired only when
     // every record in it was read and carried over, and it is a regular file inside this directory.
@@ -213,9 +309,14 @@ export interface FleetStatusInput {
  * the current graph, plus the arc's tool references per in-flight branch. Each line is attributed
  * to its producing tool; the arc tools are referenced, not re-derived.
  */
-export async function handleFleetStatus(input: FleetStatusInput): Promise<Record<string, unknown>> {
+export async function handleFleetStatus(input: FleetStatusInput, opts: { now?: number } = {}): Promise<Record<string, unknown>> {
   const absDir = await validateDirectory(input.directory);
-  const { records } = await loadRecords(absDir);
+  const { records: all } = await loadRecords(absDir);
+  // Ended records are not live verdicts: reported as a count with reasons, pruned on the next write.
+  const lifecycle = await judgeRecords(absDir, all, opts.now);
+  const records = lifecycle.live.map(l => l.record);
+  // Which rule was skipped, per record: an aggregate alone cannot say WHICH verdict is undecayed.
+  const unknownById = new Map(lifecycle.live.map(l => [l.record.id, l.unknown]));
   const here = await realpath(absDir).catch(() => absDir);
 
   let view: Parameters<typeof memoryFreshness>[1] | null = null;
@@ -226,10 +327,19 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
 
   // Any worktree of the clone may have written a record: its text is screened before it is served.
   const { emittedText } = await import('../generated-file-guard.js');
-  const classified = classifyRecords(records, view, here).map(c => ({ ...c, id: emittedText(c.id), branch: emittedText(c.branch), producedBy: emittedText(c.producedBy), baseCommit: emittedText(c.baseCommit) }));
+  const classified = classifyRecords(records, view, here).map(c => ({
+    ...c, id: emittedText(c.id), branch: emittedText(c.branch), producedBy: emittedText(c.producedBy), baseCommit: emittedText(c.baseCommit),
+    ...((unknownById.get(c.id) ?? []).length ? { unknownPredicates: unknownById.get(c.id) } : {}),
+  }));
   const counts = classified.reduce<Record<RecordState, number>>((acc, c) => {
     acc[c.state] = (acc[c.state] ?? 0) + 1; return acc;
   }, { 'still-valid': 0, 'carried': 0, 'invalidated': 0, 'needs-reverification': 0, 'other-worktree': 0 });
+
+  const endedCounts = lifecycle.ended.reduce<Partial<Record<EndReason, number>>>((acc, e) => {
+    acc[e.reason] = (acc[e.reason] ?? 0) + 1; return acc;
+  }, {});
+  // Always emitted, empty included: an absent lane would make "everything was checked" silent.
+  const unknownNotes = Object.entries(lifecycle.unknown).map(([k, n]) => `${n} record${n === 1 ? '' : 's'}: ${UNKNOWN_REASON[k as LifecycleUnknown]}`);
 
   return {
     tool: 'fleet_status',
@@ -237,8 +347,20 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
     verificationMemory: {
       records: classified,
       summary: counts,
+      // Records that ended on the board's own evidence. Counted with the reason, never served as a
+      // live verdict; the next recordVerification removes them from the file.
+      ended: {
+        count: lifecycle.ended.length,
+        byReason: endedCounts,
+        ...(lifecycle.ended.length
+          ? { records: lifecycle.ended.map(e => ({ id: emittedText(e.id), branch: emittedText(e.branch), reason: e.reason, ...(e.unknown.length ? { unknownPredicates: e.unknown } : {}) })) }
+          : {}),
+        note: 'A record ends on the same evidence as a peer-board entry: 30 minutes without being re-proven, a removed recorded directory, a deleted branch, or a branch merged into the default branch. The reason names which.',
+      },
+      // What could NOT be checked. A record missing a field is kept, never expired by its absence.
+      unknownPredicates: unknownNotes,
       note: view
-        ? 'Verdicts re-checked against the current graph via the freshness lease; a verdict is never served fresh once its base moved without this check.'
+        ? 'Verdicts re-checked against the current graph via the freshness lease; a verdict is never served fresh once its base moved without this check. No tool records a verdict yet, so this store is empty unless a caller used the API directly.'
         : 'No graph available to re-check against — every recorded verdict is conservatively needs-reverification, not silently fresh. Run analyze_codebase.',
     },
     // The arc the fleet consults per in-flight branch — referenced, not re-run here.
@@ -252,7 +374,12 @@ export async function handleFleetStatus(input: FleetStatusInput): Promise<Record
     board: await boardSummary(absDir),
     boundaries: [
       'Verification records are shared by every worktree of this clone (next to the peer board in the git common directory); outside a git work tree they stay in this directory.',
-      'Advisory and read-only. Live PR/branch harvesting, expire-on-land record lifecycle, and the CLI are follow-ups; today the arc tools are referenced per branch, not executed here.',
+      'Advisory and read-only. Live PR/branch harvesting and the CLI are follow-ups; today the arc tools are referenced per branch, not executed here.',
+      'No tool records a verdict yet: recordVerification is API-only, so this store is empty unless a caller writes to it directly. An empty record list means nothing has been recorded, not that nothing holds.',
+      'Nothing re-proves a record the way declare_footprint refreshes a board entry, so a verdict decays 30 minutes after it was recorded; re-run the producing tool to prove it again.',
+      'A record whose recorded directory no longer exists ends as worktree-removed even when only that directory moved (a renamed package in a monorepo) and the worktree itself is intact.',
+      'A squash-merged or rebase-merged branch, and a branch whose tip sits further back than main\'s last 5000 first-parent commits, are not detected as merged; such a record ends when its branch is deleted or after 30 minutes, if it carries the evidence those rules need.',
+      'A rule named in unknownPredicates could not be evaluated: the records it applies to were kept, not proven live.',
     ],
   };
 }

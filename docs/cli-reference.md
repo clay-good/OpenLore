@@ -45,7 +45,6 @@
 | `openlore working-set context` | Assemble the working-set briefing for an active change across its targets (read-only, advisory) | Targets indexed |
 | `openlore impact-certificate` | Certify what the current diff opens into declared covering surfaces, before it lands (advisory; opt-in blocking) | Yes |
 | `openlore enforce` | Unified finding-enforcement gate: blocks on `blocking`, new debt under `frozen`, or an unverifiable frozen baseline (advisory by default); `--sarif <path>` also writes every classified finding as SARIF 2.1.0 | Decisions/specs present |
-| `openlore plugin-manifest emit\|validate` | Inspect/validate the OpenSpec plugin manifest (distinct from the federation `manifest`) | No |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
 | `openlore statusline` | Print the current search-index state for Claude Code's status line | No |
@@ -666,7 +665,7 @@ openlore briefing-since --max 25                     # bound the briefing (defau
 openlore briefing-since --base main --json           # machine-readable (stable shape) for CI / an orchestrator
 ```
 
-`briefing-since` answers the reviewer / catch-up / onboarding question the other change tools don't — not "what does *my* pending diff do?" but **"a lot changed since I last looked; which of it structurally matters?"** Each changed production symbol is labeled with exactly one **tier**, ordered highest-first: `surprising-change` (a high-fan-in **hub** whose file **rarely changed before** — a normally-stable, widely-depended-on symbol that suddenly moved) > `hub-change` (a broad high-fan-in/high-fan-out hub) > `chokepoint-change` (a high-fan-in funnel) > `ordinary-change`. The tiers come **entirely from existing classifiers** (`landmark-signals` hub/orchestrator/chokepoint + the `volatilityLevel` churn classifier) plus raw evidence (fan-in, fan-out, prior churn) — there is **no weighted significance score and no new tuning constant**; the caller makes the final judgment from the evidence. **Honest by construction**: changed symbols are **exact** where both revisions hash cleanly (normalized per-symbol content hashes: a formatting- or comment-only edit is not a change, and a rename is listed under `carried`), and a changed file kept whole — a module-level change, parse errors, a language with no native parse tree — is named with its reason in `changeGranularity`; the `surprising-change` label is **withheld** when git history is too shallow (`< 2` non-bulk commits) to say "rarely changed before"; a bounded briefing always carries a **truncation receipt** (omitted count + per-tier breakdown + lowest tier reached) and **never drops a higher tier for a lower one**; a **silent base-ref fallback is disclosed** — a `--base` that git cannot resolve (a typo) is reported (`baseRefFallback`) and you are told which base was actually used, rather than briefing against `main` unannounced; because per-file churn is matched by exact path (git history does not follow renames), a just-renamed file that reads as low-churn carries a caveat so its `surprising-change` label isn't trusted blindly; and the scope is **hand-authored source code** — infrastructure (IaC) resources and generated/vendored files are excluded (the same candidate set `coverage-gaps` ranks), so the briefing stays about the code whose call-graph significance the tiers actually measure. The cursor is the **base ref**, never wall-clock time. It also includes the tests to run for the whole change set (via `select_tests`), grouped by region/community. Deterministic and offline. The matching MCP tool `briefing_since` is exposed under `openlore mcp --preset full`.
+`briefing-since` answers the reviewer / catch-up / onboarding question the other change tools don't — not "what does *my* pending diff do?" but **"a lot changed since I last looked; which of it structurally matters?"** Each changed production symbol is labeled with exactly one **tier**, ordered highest-first: `surprising-change` (a high-fan-in **hub** whose file **rarely changed before** — a normally-stable, widely-depended-on symbol that suddenly moved) > `hub-change` (a broad high-fan-in/high-fan-out hub) > `chokepoint-change` (a high-fan-in funnel) > `ordinary-change`. The tiers come **entirely from existing classifiers** (`landmark-signals` hub/orchestrator/chokepoint + the `volatilityLevel` churn classifier) plus raw evidence (fan-in, fan-out, prior churn) — there is **no weighted significance score and no new tuning constant**; the caller makes the final judgment from the evidence. **Honest by construction**: changed symbols are **exact** where both revisions hash cleanly (normalized per-symbol content hashes: a formatting- or comment-only edit is not a change, and a rename is listed under `carried`), and a changed file kept whole — a module-level change, parse errors, a language with no native parse tree — is named with its reason in `changeGranularity`; the `surprising-change` label is **withheld** when git history is too shallow (`< 2` non-bulk commits) to say "rarely changed before", and **withheld per file** for a file added (or renamed into its path) in the briefed range with no pre-base churn there (a brand-new file's zero churn is not stability — its symbols are still briefed one tier lower, with the withholding stated per entry and counted in `withholding`); the hub-derived tiers are likewise withheld from a **function-local helper** — a function nested inside another with every caller inside it, whose fan-in is internal to one body, so the significance belongs to the enclosing symbol; a bounded briefing always carries a **truncation receipt** (omitted count + per-tier breakdown + lowest tier reached) and **never drops a higher tier for a lower one**; a **silent base-ref fallback is disclosed** — a `--base` that git cannot resolve (a typo) is reported (`baseRefFallback`) and you are told which base was actually used, rather than briefing against `main` unannounced; because per-file churn is matched by exact path (git history does not follow renames), a just-renamed file that reads as low-churn carries a caveat so its `surprising-change` label isn't trusted blindly; and the scope is **hand-authored source code** — infrastructure (IaC) resources and generated/vendored files are excluded (the same candidate set `coverage-gaps` ranks), so the briefing stays about the code whose call-graph significance the tiers actually measure. The cursor is the **base ref**, never wall-clock time. It also includes the tests to run for the whole change set (via `select_tests`), grouped by region/community. Deterministic and offline. The matching MCP tool `briefing_since` is exposed under `openlore mcp --preset full`.
 
 #### Enforcement gate
 
@@ -689,35 +688,13 @@ The version 3 JSON envelope adds disjoint `new[]` and `frozen[]` ratchet partiti
 
 ---
 
-## OpenSpec plugin manifest
+## Node-version guard
 
-`openlore plugin-manifest` inspects and validates the OpenSpec **plugin** manifest
-OpenLore publishes — the `"openspec"` key in its `package.json` — so the OpenSpec
-marketplace can discover, surface, gate, and invoke OpenLore as a subprocess
-without importing its code. It is **distinct** from `openlore manifest` (the
-federation `.well-known/openlore.json`); the names never collide.
-
-```bash
-openlore plugin-manifest emit            # human-readable summary
-openlore plugin-manifest emit --json     # the manifest as JSON, stdout only
-openlore plugin-manifest validate        # schema + semantic check of OpenLore's own manifest
-openlore plugin-manifest validate <dir>  # validate another package's manifest
-```
-
-`validate` exits `0` when the manifest is valid, `1` on a schema/semantic failure
-(missing required field, no `bin`/`binArgs`, non-token `namespace`, a traversing
-skill `dir`/`source`), and `2` when no manifest is found. The manifest declares the
-namespace (`lore`), the executable (`bin: openlore`), `openspecCompat` (kept
-coherent with the `@fission-ai/openspec` peer-dep range), the help-only surfaced
-commands, the contributed skill, and `ownsConfigKeys: ["openlore"]`. See
-[OPENSPEC-INTEGRATION.md](OPENSPEC-INTEGRATION.md) for the full marketplace contract.
-
-> **Node-version guard.** OpenLore requires Node ≥22.22 (the supported dependency floor where the
-> built-in `node:sqlite` is available without runtime flags). The CLI checks this before
-> any command runs; under an older Node it prints one stderr line naming the
-> required and actual versions and exits with the stable code **78** — never a
-> stack trace — so a host delegating to OpenLore (e.g. `openspec lore generate` on
-> Node 20) surfaces a clean, legible failure.
+OpenLore requires Node ≥22.22 (the supported dependency floor where the
+built-in `node:sqlite` is available without runtime flags). The CLI checks this before
+any command runs; under an older Node it prints one stderr line naming the
+required and actual versions and exits with the stable code **78** — never a
+stack trace — so a tool that spawns OpenLore surfaces a clean, legible failure.
 
 ---
 

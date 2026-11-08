@@ -10,6 +10,11 @@
  * Entries end on evidence, never by guesswork: released, not refreshed within the panic-state
  * session expiry, worktree removed, branch deleted, or branch merged into the default branch.
  * Reads are fail-open (an unreadable entry is counted, not fatal); writes are atomic and bounded.
+ *
+ * The end predicates are the clone's single lifecycle decider ({@link judgeLifecycle}), so anything
+ * else recorded per branch and worktree — the fleet verification records next door — ends on the
+ * same evidence rather than on a copy of these rules. A subject that does not carry what a
+ * predicate needs reports that predicate `unknown`; a missing field never means "ended".
  */
 
 import { createHash } from 'node:crypto';
@@ -71,6 +76,60 @@ export interface BoardEntry {
 }
 
 export type EndReason = 'expired' | 'worktree-removed' | 'branch-deleted' | 'branch-merged';
+
+/**
+ * Why a predicate could not be evaluated. A predicate the subject does not carry the evidence for
+ * is reported here and skipped — never resolved as "ended" by the absence of a field.
+ */
+export type LifecycleUnknown =
+  | 'expiry-unknown-no-timestamp'
+  | 'worktree-unknown-not-recorded'
+  | 'branch-unknown-detached-or-unrecorded'
+  | 'branch-unknown-unusable-name'
+  | 'branch-unknown-git-could-not-be-asked'
+  | 'branch-unknown-never-a-known-branch'
+  | 'branch-merged-unknown-no-default-branch'
+  | 'branch-merged-unknown-no-base-commit';
+
+/** What the lifecycle predicates read. Every field is optional: an absent one is `unknown`. */
+export interface LifecycleSubject {
+  /** When the subject was last refreshed (ISO). Absent → the idle-expiry predicate is unknown. */
+  lastSeenAt?: string;
+  /** The worktree top this subject belongs to. Absent → it is not matched against the clone's worktrees. */
+  worktree?: string;
+  /** The directory the subject's paths are relative to; must exist, and sit inside `worktree`. */
+  root?: string;
+  /** The branch. Empty or absent → a detached HEAD, or not recorded. */
+  branch?: string;
+  /**
+   * Evidence that `branch` really named a local branch when the subject was recorded. Without it a
+   * name absent from the clone's branches proves nothing — it may be a task id that never was a
+   * branch — so the branch predicates report unknown instead of "deleted".
+   */
+  branchKnownRef?: boolean;
+  /** The merge-base with the default branch when the subject was recorded. A commit id only. */
+  baseAtDeclare?: string;
+}
+
+/** A lifecycle verdict for one subject: why it ended (or null), and the predicates left unknown. */
+export interface LifecycleVerdict {
+  reason: EndReason | null;
+  unknown: LifecycleUnknown[];
+}
+
+/** A commit id, never an option or a revision expression: it is passed to git. */
+const COMMIT_ID_RE = /^[0-9a-f]{40,64}$/;
+/**
+ * A branch name this decider will hand to git. Bounded and free of control characters, so a
+ * peer-written 128 KB or newline-bearing name is reported unknown instead of spawned. No real
+ * branch name is rejected (git itself forbids control characters and spaces in a refname).
+ */
+const MAX_BRANCH_CHARS = 512;
+const usableBranch = (b: string): boolean => {
+  if (!b.length || b.length > MAX_BRANCH_CHARS) return false;
+  for (let i = 0; i < b.length; i++) { const c = b.charCodeAt(i); if (c < 0x20 || c === 0x7f) return false; }
+  return !/[\s~^:?*[\\]/.test(b);
+};
 
 export interface BoardRead {
   live: Array<{ entry: BoardEntry; moved: string[] }>;
@@ -140,35 +199,141 @@ async function defaultBranch(root: string): Promise<string | null> {
   return null;
 }
 
-/** Why an entry is no longer live, or null when it is. */
-async function endReason(root: string, e: BoardEntry, now: number, main: string | null, worktrees: Set<string> | null): Promise<EndReason | null> {
-  const seen = Date.parse(e.lastSeenAt);
-  if (!Number.isFinite(seen) || now - seen > PANIC_SESSION_EXPIRY_MS) return 'expired';
-  // Only a worktree of this clone counts (a crafted path elsewhere is not one).
-  if (!existsSync(e.worktree)) return 'worktree-removed';
-  const wt = await realpath(e.worktree).catch(() => e.worktree);
-  if (worktrees && !worktrees.has(e.worktree) && !worktrees.has(wt)) return 'worktree-removed';
-  if (e.root) {
-    const rel = relative(wt, await realpath(e.root).catch(() => e.root!));
-    if (rel.startsWith('..') || isAbsolute(rel)) return 'worktree-removed';
+/**
+ * Why a subject is no longer live, or null when it is — the clone's single lifecycle decider.
+ * Predicates in order: idle expiry, worktree removed, branch deleted, branch merged. A predicate
+ * whose evidence the subject does not carry is reported in `unknown` and skipped.
+ */
+async function endReason(root: string, s: LifecycleSubject, now: number, ctx: GitContext): Promise<LifecycleVerdict> {
+  const unknown: LifecycleUnknown[] = [];
+  const ended = (reason: EndReason): LifecycleVerdict => ({ reason, unknown });
+
+  // Idle expiry. A recorded-but-unparseable timestamp is expired (it cannot be shown to be
+  // recent); NO timestamp at all is unknown, so a subject that never carried one survives.
+  if (s.lastSeenAt === undefined) unknown.push('expiry-unknown-no-timestamp');
+  else {
+    const seen = Date.parse(s.lastSeenAt);
+    if (!Number.isFinite(seen) || now - seen > PANIC_SESSION_EXPIRY_MS) return ended('expired');
   }
-  if (!e.branch) return null; // a detached HEAD: only expiry and release end it
-  let tip: string;
-  try {
-    tip = await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${e.branch}^{commit}`]);
-  } catch {
-    return 'branch-deleted';
+
+  // The directory the subject lives in must still exist. `existsSync(undefined)` is false, so an
+  // unrecorded directory is reported unknown rather than read as a removed worktree.
+  const dir = s.worktree ?? s.root;
+  if (dir === undefined) unknown.push('worktree-unknown-not-recorded');
+  else if (!existsSync(dir)) return ended('worktree-removed');
+  if (s.worktree !== undefined) {
+    // Only a worktree of this clone counts (a crafted path elsewhere is not one).
+    const wt = await realpath(s.worktree).catch(() => s.worktree!);
+    if (ctx.worktrees && !ctx.worktrees.has(s.worktree) && !ctx.worktrees.has(wt)) return ended('worktree-removed');
+    if (s.root) {
+      const rel = relative(wt, await realpath(s.root).catch(() => s.root!));
+      if (rel.startsWith('..') || isAbsolute(rel)) return ended('worktree-removed');
+    }
+  }
+
+  // A detached HEAD, or a name git cannot be asked about: only expiry and release end it.
+  if (!s.branch) { unknown.push('branch-unknown-detached-or-unrecorded'); return { reason: null, unknown }; }
+  if (!usableBranch(s.branch)) { unknown.push('branch-unknown-unusable-name'); return { reason: null, unknown }; }
+  // Git could not list the clone's branches at all (not a work tree, no git binary, a dubious
+  // ownership refusal): that is no evidence a branch is gone. Unknown, never 'branch-deleted'.
+  if (!ctx.branchTips) { unknown.push('branch-unknown-git-could-not-be-asked'); return { reason: null, unknown }; }
+  const tip = ctx.branchTips.get(s.branch);
+  if (tip === undefined) {
+    // Absent now. Only positive evidence that it WAS a branch makes that a deletion; a name that
+    // was never one (a task id) proves nothing.
+    if (!s.branchKnownRef) { unknown.push('branch-unknown-never-a-known-branch'); return { reason: null, unknown }; }
+    return ended('branch-deleted');
   }
   // Merged: the branch has commits of its own, and they are now in the default branch.
   // A fast-forward or pull onto main moves the tip along main's own history: that is not a merge.
-  if (main && e.branch !== main && e.baseAtDeclare && tip !== e.baseAtDeclare) {
-    try {
-      await git(root, ['merge-base', '--is-ancestor', tip, `refs/heads/${main}`]);
-      const firstParent = await git(root, ['rev-list', '--first-parent', '--max-count=5000', `refs/heads/${main}`]);
-      if (!firstParent.split('\n').includes(tip)) return 'branch-merged';
-    } catch { /* not an ancestor */ }
+  if (!ctx.main) unknown.push('branch-merged-unknown-no-default-branch');
+  else if (s.branch !== ctx.main) {
+    // Peer-written: hex-validated before it can stand in for a revision git is asked about.
+    if (!s.baseAtDeclare || !COMMIT_ID_RE.test(s.baseAtDeclare)) unknown.push('branch-merged-unknown-no-base-commit');
+    else if (tip !== s.baseAtDeclare && await mergedIntoMain(root, ctx, tip)) return ended('branch-merged');
   }
-  return null;
+  return { reason: null, unknown };
+}
+
+/** What the predicates resolve once per batch, so a big batch is not a git-spawn storm. */
+interface GitContext {
+  main: string | null;
+  worktrees: Set<string> | null;
+  /** The clone's local branches and their tips, or null when git could not be asked. */
+  branchTips: Map<string, string> | null;
+  /** main's first-parent history, read at most once. */
+  mainFirstParent?: Set<string>;
+  /** Memo per tip: is it merged into main (ancestor, but not on main's own first-parent line)? */
+  merged: Map<string, boolean>;
+}
+
+/** Is `tip` merged into main? Memoized per tip; main's first-parent list is read at most once. */
+async function mergedIntoMain(root: string, ctx: GitContext, tip: string): Promise<boolean> {
+  const memo = ctx.merged.get(tip);
+  if (memo !== undefined) return memo;
+  let verdict = false;
+  try {
+    await git(root, ['merge-base', '--is-ancestor', tip, `refs/heads/${ctx.main}`]);
+    ctx.mainFirstParent ??= new Set((await git(root, ['rev-list', '--first-parent', '--max-count=5000', `refs/heads/${ctx.main}`])).split('\n'));
+    verdict = !ctx.mainFirstParent.has(tip);
+  } catch { /* not an ancestor */ }
+  ctx.merged.set(tip, verdict);
+  return verdict;
+}
+
+/** The clone's local branches and their tips in ONE call, or null when git could not be asked. */
+async function localBranchTips(root: string): Promise<Map<string, string> | null> {
+  try {
+    // lstrip=2, not `:short`: git's short form DISAMBIGUATES, so a branch sharing its name with a
+    // tag comes back as `heads/feat-x`. Keyed by the canonical name, then by the `heads/` form as
+    // an alias — `symbolic-ref --short` disambiguates too, so that IS the name a subject recorded.
+    const { stdout } = await execFileGit('git', ['for-each-ref', '--format=%(objectname) %(refname:lstrip=2)', 'refs/heads/'], { cwd: root });
+    const tips = new Map<string, string>();
+    const canonical: Array<[string, string]> = [];
+    for (const line of String(stdout).split('\n')) {
+      const sp = line.indexOf(' ');
+      if (sp > 0) canonical.push([line.slice(sp + 1), line.slice(0, sp)]);
+    }
+    for (const [name, tip] of canonical) tips.set(name, tip);
+    // Aliases never shadow a branch actually named `heads/…`.
+    for (const [name, tip] of canonical) if (!tips.has(`heads/${name}`)) tips.set(`heads/${name}`, tip);
+    return tips;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `name` is a local branch of this clone right now; null when git could not be asked. */
+export async function isLocalBranch(root: string, name: string): Promise<boolean | null> {
+  if (!usableBranch(name)) return false;
+  const tips = await localBranchTips(root);
+  return tips ? tips.has(name) : null;
+}
+
+/**
+ * Judge many lifecycle subjects at once, resolving the default branch, the clone's worktree set and
+ * its branch tips ONCE for the batch. The batched wrapper every other record store reaches the
+ * board's end predicates through — there is no second copy of the rules. Git work per batch is
+ * bounded by the number of distinct branches, not by the number of subjects.
+ */
+export async function judgeLifecycle<T>(
+  root: string,
+  items: readonly T[],
+  subjectOf: (item: T) => LifecycleSubject,
+  opts: { now?: number } = {},
+): Promise<Array<{ item: T } & LifecycleVerdict>> {
+  if (!items.length) return []; // no subjects: no git calls (the hooks reach this on every tool call)
+  const now = opts.now ?? Date.now();
+  const branchTips = await localBranchTips(root);
+  const ctx: GitContext = {
+    branchTips,
+    main: branchTips ? (['main', 'master'].find(b => branchTips.has(b)) ?? null) : await defaultBranch(root),
+    worktrees: await worktreePaths(root),
+    merged: new Map(),
+  };
+  const out: Array<{ item: T } & LifecycleVerdict> = [];
+  for (const item of items) out.push({ item, ...(await endReason(root, subjectOf(item), now, ctx)) });
+  return out;
 }
 
 /** The worktrees of this clone (absolute, real paths), or null when git cannot list them. */
@@ -225,9 +390,7 @@ export async function readBoard(root: string, opts: { now?: number } = {}): Prom
     names = names.slice(0, MAX_FILES_READ);
   }
   if (!names.length) return out; // an unused board: no git calls (the hooks read it on every tool call)
-  const now = opts.now ?? Date.now();
-  const main = await defaultBranch(root);
-  const worktrees = await worktreePaths(root);
+  const read: Array<{ entry: BoardEntry; file: string }> = [];
   for (const n of names) {
     let entry: unknown;
     try {
@@ -235,13 +398,24 @@ export async function readBoard(root: string, opts: { now?: number } = {}): Prom
       entry = JSON.parse(await readFileConfined(dir, n, MAX_ENTRY_BYTES, true));
     } catch { out.unreadable++; continue; }
     if (!isEntry(entry)) { out.unreadable++; continue; }
-    const reason = await endReason(root, entry, now, main, worktrees);
-    if (reason) { out.ended.push({ actorId: entry.actorId, reason, file: join(dir, n), lastSeenAt: entry.lastSeenAt }); continue; }
+    read.push({ entry, file: join(dir, n) });
+  }
+  // One batch through the shared decider: an entry's branch came from `symbolic-ref`, so it is
+  // known to have been a real branch and an absent one is a deletion.
+  const judged = await judgeLifecycle(root, read, r => ({ ...r.entry, branchKnownRef: true }), opts);
+  const unknown = new Set<LifecycleUnknown>();
+  for (const { item: { entry, file }, reason, unknown: u } of judged) {
+    for (const code of u) unknown.add(code);
+    if (reason) { out.ended.push({ actorId: entry.actorId, reason, file, lastSeenAt: entry.lastSeenAt }); continue; }
     out.live.push({ entry, moved: await movedSymbols(entry) });
   }
   if (out.unreadable) out.boundaries.push(`${out.unreadable} board entr${out.unreadable === 1 ? 'y' : 'ies'} could not be read and ${out.unreadable === 1 ? 'was' : 'were'} skipped.`);
-  if (!main) out.boundaries.push('No main or master branch: a merged branch is not detected; its entry ends when released, deleted, or expired.');
+  // Which end rules actually ran. A rule git could not answer is NOT reported as a deletion, so say
+  // plainly that it was skipped rather than leaving "no main or master branch" to stand in for it.
+  if (unknown.has('branch-unknown-git-could-not-be-asked')) out.boundaries.push('Git could not list this clone\'s branches: neither a deleted nor a merged branch was detected, and nothing was read as deleted; an entry then ends on release or after 30 minutes without a refresh.');
+  else if (unknown.has('branch-merged-unknown-no-default-branch')) out.boundaries.push('No main or master branch: a merged branch is not detected; its entry ends when released, deleted, or expired.');
   else out.boundaries.push('A squash-merged or fast-forwarded branch is not detected as merged; its entry ends when released, when the branch is deleted, or after 30 minutes without a refresh.');
+  if (unknown.has('branch-unknown-unusable-name')) out.boundaries.push('An entry recorded a branch name git cannot be asked about: its branch rules were skipped, and it ends on release or after 30 minutes without a refresh.');
   out.boundaries.push('The board covers the worktrees of this clone only; agents in other clones or on other machines are not visible.');
   out.live.sort((a, b) => (a.entry.actorId < b.entry.actorId ? -1 : a.entry.actorId > b.entry.actorId ? 1 : 0));
   return out;

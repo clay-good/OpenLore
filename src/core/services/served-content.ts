@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ARTIFACT_ANALYSIS_ORIGIN, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import type { PendingDecision } from '../../types/index.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 
 /** Factual origin labels for content OpenLore serves to an agent or reviewer. */
 export const SERVED_CONTENT_PROVENANCES = [
@@ -108,15 +109,28 @@ export async function indexedSpecContentProvenance(
 }
 
 /**
- * Frame bytes for an agent without rewriting them. The selected delimiter is
- * checked against the content, so the enclosed content cannot contain (and
- * therefore cannot forge) either boundary line.
+ * Frame content for an agent. The selected delimiter is checked against the content,
+ * so the enclosed content cannot contain (and therefore cannot forge) either boundary
+ * line.
+ *
+ * The frame's own header states the content is neutralized data, so this is where the
+ * neutralizing happens: terminal control sequences, bidi overrides and zero-width
+ * characters are removed from the framed content ({@link sanitizeForTerminal},
+ * newlines kept because the framed block is line-structured). A fence that ONLY
+ * claims the bytes are safe is worse than no fence, because the surrounding text
+ * tells the model to trust the claim. Doing it here rather than at each renderer makes
+ * the claim true for every caller — including the always-on `orient --inject`
+ * UserPromptSubmit path, which assembled its lines with no screening at all.
+ *
+ * Byte length and delimiter are computed from the SCREENED content, so the receipt
+ * describes exactly what is enclosed.
  */
 export function frameServedContent(
-  content: string,
+  rawContent: string,
   provenance: ServedContentProvenance | readonly ServedContentProvenance[],
   label: string,
 ): string {
+  const content = sanitizeForTerminal(rawContent, { keepNewlines: true });
   let counter = 0;
   let delimiter: string;
   do {
@@ -154,12 +168,25 @@ export const INJECTION_SHAPE_LIMITS =
   'Lexical and incomplete: it may miss unrecognized phrasing and may flag benign content. ' +
   'It aids human review and is not a guarantee that content is safe.';
 
-/** Deterministic, offline lexical indicators. They diagnose text and never mutate it. */
+/**
+ * Deterministic, offline lexical indicators. They diagnose text and never mutate it.
+ *
+ * CALL {@link screenServedText}, not this, on any path that SERVES the text: these
+ * rules must see the text a model will see, and that is only true after sanitizing.
+ * (A leading `\x1b[31m` once left `m` against the `I` of `IGNORE`, so the `\b` that
+ * opened the imperative rule never matched and the note was served verbatim.)
+ *
+ * The opening `\b` is gone from the two keyword rules for the same reason, as defence
+ * in depth: whatever junk a future evasion leaves glued to the keyword, the rule still
+ * fires. The trailing `\b` stays, so prose like "ignores all previous rulesets" is not
+ * caught by accident, and the keyword alone is never enough — each rule still needs
+ * its object ("instructions", "a recorded decision").
+ */
 export function detectInjectionShapes(content: string): InjectionShapeMatch[] {
   const rules: Array<{ shape: InjectionShape; pattern: RegExp }> = [
     {
       shape: 'imperative-override',
-      pattern: /\b(?:ignore|disregard|override|forget)\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|system|developer)?\s*(?:instructions?|rules?|guidance)\b/i,
+      pattern: /(?:ignore|disregard|override|forget)\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|system|developer)?\s*(?:instructions?|rules?|guidance)\b/i,
     },
     {
       shape: 'message-impersonation',
@@ -171,7 +198,7 @@ export function detectInjectionShapes(content: string): InjectionShapeMatch[] {
     },
     {
       shape: 'decision-steering',
-      pattern: /\b(?:ignore|disregard|reject|override|bypass|do\s+not\s+follow)\b[^\n]{0,80}\b(?:recorded\s+)?(?:decision|adr|requirement|specification)\b/i,
+      pattern: /(?:ignore|disregard|reject|override|bypass|do\s+not\s+follow)\b[^\n]{0,80}\b(?:recorded\s+)?(?:decision|adr|requirement|specification)\b/i,
     },
   ];
 
@@ -182,4 +209,42 @@ export function detectInjectionShapes(content: string): InjectionShapeMatch[] {
     matches.push({ shape: rule.shape, excerpt: match[0].replace(/\s+/g, ' ').trim().slice(0, 160) });
   }
   return matches;
+}
+
+/** The placeholder served in place of text that reads like an instruction to the agent. */
+export const WITHHELD_SERVED_TEXT = '[withheld: reads like an instruction]';
+
+export interface ServedTextScreen {
+  /** The text as a model would see it: screened of control, bidi and zero-width characters. */
+  sanitized: string;
+  /** The injection shapes found IN `sanitized`, sorted and deduplicated. */
+  shapes: InjectionShape[];
+  /** True when `sanitized` must not be served as content. */
+  withheld: boolean;
+}
+
+/**
+ * Sanitize first, then screen — the one order in which the instruction-shape screen is
+ * sound, and the only screening entry point a serving path may use.
+ *
+ * Running the screen on RAW text and sanitizing only at render time let a five-byte
+ * `\x1b[31m` prefix walk an "IGNORE ALL PREVIOUS INSTRUCTIONS" memory straight into the
+ * always-on `orient --inject` block, while the identical note without the prefix was
+ * correctly withheld. The screen was never reached on the representation that reached
+ * the model. Callers must serve `sanitized` (or the withheld placeholder) and nothing
+ * else: text screened as one representation and emitted as another is the same defect
+ * wearing a different hat.
+ *
+ * Newlines are kept, because the `message-impersonation` rule anchors on them —
+ * stripping them first would hide a forged `\n[system]:` line from the screen. A caller
+ * that needs a single line collapses whitespace AFTER this, where it can no longer
+ * change the verdict.
+ *
+ * The screen's limits are unchanged and still stated in {@link INJECTION_SHAPE_LIMITS}:
+ * it is lexical, incomplete, and not a guarantee.
+ */
+export function screenServedText(text: string): ServedTextScreen {
+  const sanitized = sanitizeForTerminal(text, { keepNewlines: true });
+  const shapes = [...new Set(detectInjectionShapes(sanitized).map(m => m.shape))].sort();
+  return { sanitized, shapes, withheld: shapes.length > 0 };
 }

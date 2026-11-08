@@ -611,30 +611,98 @@ export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
 }
 
 /**
- * The schema paths Relay configs name (`"relay": { "schema": "./schema/schema.graphql" }` in a
- * `package.json`, `schema: '…'` in `relay.config.*`), resolved from the config's directory.
+ * A client-toolchain config file that can name the schema its tool reads, with the human name of
+ * that tool. Relay is read for DROPPING on the analyze side (a Relay copy is the compiler's copy
+ * of a server's schema); the rest are read for DISCLOSURE only — certify never drops a schema on
+ * a config's say-so (change: disclose-schema-provenance).
  */
-export function relaySchemaPaths(configs: ReadonlyArray<{ path: string; content: string }>): Set<string> {
-  const out = new Set<string>();
+const CLIENT_SCHEMA_CONFIGS: ReadonlyArray<{ test: RegExp; tool: string; bare: boolean }> = [
+  { test: /(?:^|\/)package\.json$/, tool: 'a Relay compiler config', bare: false },
+  { test: /(?:^|\/)relay\.config\.(?:[cm]?js|json|ts)$/, tool: 'a Relay compiler config', bare: false },
+  { test: /(?:^|\/)apollo\.config\.(?:[cm]?js|ts|json)$/, tool: 'an Apollo client config', bare: true },
+  { test: /(?:^|\/)graphql\.config\.(?:[cm]?js|ts|json|ya?ml)$/, tool: 'a graphql-config file', bare: true },
+  { test: /(?:^|\/)\.graphqlrc(?:\.(?:json|ya?ml|[cm]?js|ts))?$/, tool: 'a graphql-config file', bare: true },
+  { test: /(?:^|\/)codegen\.(?:ya?ml|json|ts|[cm]?js)$/, tool: 'a GraphQL Code Generator config', bare: true },
+];
+
+/** Every config file name {@link clientSchemaReferences} reads: what a caller collects. */
+export const CLIENT_SCHEMA_CONFIG_FILE = /(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts)|apollo\.config\.(?:[cm]?js|ts|json)|graphql\.config\.(?:[cm]?js|ts|json|ya?ml)|\.graphqlrc(?:\.(?:json|ya?ml|[cm]?js|ts))?|codegen\.(?:ya?ml|json|ts|[cm]?js))$/;
+
+/**
+ * A `schema:` value, read ONE LINE AT A TIME.
+ *
+ * Per line, and never across one: a `\s*` that crossed newlines read `documents:` as the value of
+ * an empty `schema:`, and an unanchored key matched `my_schema:` and a `#`-commented-out line.
+ * `(?:^|[^\w$])` is the left boundary — `$schema` (a JSON Schema key, usually a URL) is not it.
+ */
+const SCHEMA_KEY_QUOTED = /(?:^|[^\w$])["']?schema["']?[ \t]*:[ \t]*["']([^"'\n]{1,500})["']/;
+/** A quoted or bare value (YAML configs, Apollo). A bare value must END on its own line. */
+const SCHEMA_KEY_ANY = /(?:^|[^\w$])["']?(?:schema|localSchemaFile)["']?[ \t]*:[ \t]*(?:["']([^"'\n]{1,500})["']|([^\s"'\n#,}\]]{1,500})(?=[ \t]*(?:#|$)))/;
+/** Lines read from one config: a schema path a tool reads sits near the top, never at line 10,000. */
+const MAX_CONFIG_LINES = 2_000;
+
+/** The first `schema:` value in `body`, skipping comment lines. */
+function firstSchemaValue(body: string, bare: boolean): string | undefined {
+  let n = 0;
+  for (const raw of body.split('\n')) {
+    if (++n > MAX_CONFIG_LINES) return undefined;
+    const line = raw.trimStart();
+    // A commented-out `schema:` is not the config's value.
+    if (line.startsWith('#') || line.startsWith('//') || line.startsWith('*')) continue;
+    const m = (bare ? SCHEMA_KEY_ANY : SCHEMA_KEY_QUOTED).exec(raw);
+    const lit = m?.[1] ?? m?.[2];
+    if (lit !== undefined) return lit;
+  }
+  return undefined;
+}
+
+/** A value that is not a literal local path: a URL, an interpolation, a glob. */
+const notALiteralPath = (lit: string) => lit.includes('://') || /[$*{}]|^\.+$/.test(lit);
+
+/** The schema one config names, resolved inside the config's own directory. */
+export interface ClientSchemaReference {
+  /** The schema path, relative to the repository root. */
+  schema: string;
+  /** The config file that named it. */
+  config: string;
+  /** The human name of the toolchain, for a disclosure line. */
+  tool: string;
+}
+
+/**
+ * The single literal schema path each client-toolchain config names, resolved from the config's
+ * own directory: `"relay": { "schema": "./schema/schema.graphql" }` in a `package.json`,
+ * `schema: '…'` in `relay.config.*`, `localSchemaFile` in `apollo.config.*`, `schema:` in
+ * `graphql.config.*` / `.graphqlrc*` / `codegen.*`.
+ */
+export function clientSchemaReferences(configs: ReadonlyArray<{ path: string; content: string }>): ClientSchemaReference[] {
+  const out: ClientSchemaReference[] = [];
   for (const c of configs) {
+    const kind = CLIENT_SCHEMA_CONFIGS.find(k => k.test.test(c.path));
+    if (!kind) continue;
     const dir = c.path.includes('/') ? c.path.slice(0, c.path.lastIndexOf('/')) : '';
     const body = /package\.json$/.test(c.path) ? /"relay"\s*:\s*\{([^}]{0,4000})\}/.exec(c.content)?.[1] : c.content;
     if (!body) continue;
-    const m = /["']?schema["']?\s*:\s*["']([^"'\n]{1,500})["']/.exec(body);
-    if (!m) continue;
-    // Only a schema INSIDE the config's own directory is the Relay project's copy. A path that climbs
+    const lit = firstSchemaValue(body, kind.bare);
+    if (!lit || notALiteralPath(lit)) continue;
+    // Only a schema INSIDE the config's own directory is the client project's copy. A path that climbs
     // out of it — `../api/schema.graphql`, or past the repository root — names someone else's
     // schema (often this repository's own server), which must never be dropped on its say-so.
     const parts: string[] = [];
     let escaped = false;
-    for (const seg of m[1].split('/')) {
+    for (const seg of lit.split('/')) {
       if (!seg || seg === '.') continue;
       if (seg === '..') { if (!parts.length) { escaped = true; break; } parts.pop(); } else parts.push(seg);
     }
     if (escaped || !parts.length) continue;
-    out.add([...(dir ? [dir] : []), ...parts].join('/'));
+    out.push({ schema: [...(dir ? [dir] : []), ...parts].join('/'), config: c.path, tool: kind.tool });
   }
   return out;
+}
+
+/** The subset of {@link clientSchemaReferences} a Relay compiler config names. */
+export function relaySchemaPaths(configs: ReadonlyArray<{ path: string; content: string }>): Set<string> {
+  return new Set(clientSchemaReferences(configs).filter(r => /(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts))$/.test(r.config)).map(r => r.schema));
 }
 
 /** The named type inside a type reference: `[Order!]!` → `Order`. */

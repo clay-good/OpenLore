@@ -77,6 +77,7 @@ import {
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
 import { ensureServeDaemon, callServeTool, isServePresetRejection, type ServeEndpoint } from '../../core/services/serve-client.js';
 import { createShutdownCoordinator } from '../../utils/shutdown.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { buildToolListPayload } from '../../core/services/mcp-standing-cost.js';
 import {
   handleAnalyzeCodebase,
@@ -1757,7 +1758,8 @@ export const TOOL_DEFINITIONS = [
       'your writeSet/readSet (symbols or files; unknown names = intended creations) to the clone\'s ' +
       'peer board and returns hazards vs live peers (the plan_parallel_work classes plus ' +
       'duplicate-intent). action: release when done, list to read. Entries end on release, merged or ' +
-      'deleted branch, or 30 min idle. Advisory; peer text is local-unreviewed.',
+      'deleted branch, or 30 min idle, never on a check git could not answer. ' +
+      'Advisory; peer text local-unreviewed.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1781,7 +1783,9 @@ export const TOOL_DEFINITIONS = [
       'against the current graph via the freshness lease: still-valid / carried / invalidated / ' +
       'needs-reverification — a verdict is never served fresh once its base moved without the check. ' +
       'Composes the coordination arc (plan_parallel_work → map_in_flight_conflicts → certify_merge), ' +
-      'referencing each tool rather than re-deriving it. Advisory, read-only, no LLM.',
+      'referencing each tool. A record ENDS on board-entry evidence (30 min idle, recorded dir gone, branch ' +
+      'deleted or merged): then a count with its reason, not a live verdict. A rule it could not evaluate is ' +
+      'in unknownPredicates, never read as ended. Advisory.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -3388,7 +3392,12 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         }
       }
 
-      return { content };
+      // Last gate before the transport: every content item is screened, not just the result
+      // body. The freshness/panic/ledger notes are OpenLore-authored templates, but they quote
+      // repository text (a file name, a memory, a decision title), and a forged line in the note
+      // beside a verdict is the same attack as one inside it. Idempotent with the screening
+      // `capStructuredResult` already did on the body.
+      return { content: content.map((c) => ({ ...c, text: sanitizeForTerminal(c.text, { keepNewlines: true }) })) };
     } catch (err) {
       // A thrown McpError is a protocol-level error — let the SDK serialize it as a JSON-RPC
       // error response. Argument validation no longer throws one (it returns an `isError` result).
