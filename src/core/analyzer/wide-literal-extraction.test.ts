@@ -106,7 +106,9 @@ const DEMO_PB_GO_GOLDEN = JSON.parse(
 
 describe('extraction of a real generated-protobuf file is unchanged', () => {
   it('yields exactly the functions and edges the pre-fix build yielded', async () => {
-    const content = readFileSync(DEMO_PB_GO, 'utf-8');
+    // The golden pins byte offsets captured from LF content; normalize line
+    // endings so a CRLF checkout (Windows, autocrlf) compares the same bytes.
+    const content = readFileSync(DEMO_PB_GO, 'utf-8').replace(/\r\n/g, '\n');
     const result = await dispatchFileExtract({
       path: 'src/frontend/genproto/demo.pb.go',
       content,

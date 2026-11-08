@@ -1,2 +1,7 @@
 # Hand-written type declarations, not generated output (docs/generated-files.md).
 src/types/*.d.ts -linguist-generated
+
+# Extraction goldens pin byte offsets (startIndex/endIndex) captured from LF
+# content; a CRLF checkout on Windows would shift every offset and break the
+# unchanged-facts guard. Keep the fixture and its golden LF on every platform.
+src/core/analyzer/fixtures/genproto/** text eol=lf
