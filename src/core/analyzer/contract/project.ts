@@ -29,6 +29,7 @@ import { readOpenApi, looksLikeOpenApi, HTTP_METHODS, type ContractDocument } fr
 import { isProtobufPath } from './protobuf.js';
 import { projectProtobuf, MAX_PROTO_FILES, type UnresolvedRegistration } from './project-protobuf.js';
 import { isGraphqlPath } from './graphql.js';
+import { schemaProvenance, SCHEMA_PROVENANCE_HEAD_BYTES, type SchemaProvenance } from './types.js';
 import { projectGraphql, MAX_GRAPHQL_CANDIDATES, type UnresolvedResolver } from './project-graphql.js';
 import type { ResolverMap } from './graphql-resolvers.js';
 import type { GrpcRegistration, ImportTarget } from './grpc-registration.js';
@@ -54,6 +55,89 @@ export function isContractEdgeKind(kind: string | undefined): boolean {
 
 /** A bounded list with its exact total, so a cap never reads as the whole truth. */
 export interface Disclosed<T> { items: T[]; total: number }
+
+/** Distinct names carried in {@link UnboundHandlerNames}, per list. */
+export const MAX_UNBOUND_HANDLER_NAMES = 2_000;
+
+/**
+ * What every REFUSED binding names, over the COMPLETE refusal list rather than the
+ * {@link MAX_DISCLOSED} display slice (change: cap-unbound-contract-handler-confidence).
+ *
+ * `find_dead_code` reads this to keep a handler whose wiring was refused out of its
+ * high-confidence dead verdicts. It cannot read `unresolvedRegistrations.items` for that: those
+ * are bounded for a READER, and a reader's cap must never decide a correctness question — the
+ * canonical gRPC repository discloses 43 refusals, so an items-only rule would have to give up
+ * the whole high-confidence tier there.
+ *
+ * DEDUPLICATED NAMES ONLY: no file, line or reason, so this grows with the number of DISTINCT
+ * names, not with the number of refusals, and its own cap is disclosed in `truncated` (never
+ * silently applied).
+ */
+export interface UnboundHandlerNames {
+  /** Function names a refusal named literally. */
+  symbols: string[];
+  /**
+   * Implementation classes a refusal named. `dir` is set only where the projection's own scope
+   * rule PROVES the class can live nowhere else (a Go registration naming an unqualified type can
+   * only mean its own package), so a consumer narrows exactly as far as is sound and no further.
+   */
+  classes: Array<{ name: string; dir?: string }>;
+  /**
+   * Files holding a refusal that names NO function at all — the registration or resolver map
+   * handed over a variable, so the handler names are not in it. The file that declares it is then
+   * the most precise honest granularity.
+   */
+  files: string[];
+  /** Distinct names dropped at {@link MAX_UNBOUND_HANDLER_NAMES}; `0` when nothing was dropped. */
+  truncated: number;
+}
+
+/** A refusal row, as much of one as the name buckets need; a real row carries more. */
+export interface NamedRefusal {
+  file?: string;
+  reason?: string;
+  line?: number;
+  symbol?: string;
+  symbols?: string[];
+  className?: string;
+  classDir?: string;
+}
+
+/**
+ * Sort every refusal into the three buckets {@link UnboundHandlerNames} describes. The ONE place
+ * the bucket rule lives, so the producer and `find_dead_code` cannot drift apart.
+ *
+ * A refusal that names no function AND is not a `not-literal` implementation argument buckets
+ * NOTHING: an inline handler has no graph node to look dead, and an unknown field or service with
+ * an all-inline map left no named symbol unrooted. Capping on those would print a reason that is
+ * false about the repository.
+ */
+export function unboundHandlerNames(...lists: ReadonlyArray<readonly NamedRefusal[]>): UnboundHandlerNames {
+  const symbols = new Set<string>();
+  const classes = new Map<string, { name: string; dir?: string }>();
+  const files = new Set<string>();
+  for (const list of lists) {
+    for (const r of list) {
+      let named = false;
+      for (const sym of [...(r.symbol ? [r.symbol] : []), ...(r.symbols ?? [])]) {
+        symbols.add(sym);
+        named = true;
+      }
+      if (r.className) {
+        named = true;
+        const key = `${r.className}\u0000${r.classDir ?? ''}`;
+        if (!classes.has(key)) classes.set(key, { name: r.className, ...(r.classDir ? { dir: r.classDir } : {}) });
+      }
+      if (!named && r.reason === 'not-literal' && r.file) files.add(r.file);
+    }
+  }
+  const cap = <T>(all: T[]): { kept: T[]; dropped: number } =>
+    ({ kept: all.slice(0, MAX_UNBOUND_HANDLER_NAMES), dropped: Math.max(0, all.length - MAX_UNBOUND_HANDLER_NAMES) });
+  const s = cap([...symbols].sort());
+  const c = cap([...classes.values()].sort((a, b) => a.name.localeCompare(b.name) || (a.dir ?? '').localeCompare(b.dir ?? '')));
+  const f = cap([...files].sort());
+  return { symbols: s.kept, classes: c.kept, files: f.kept, truncated: s.dropped + c.dropped + f.dropped };
+}
 
 /** A specification file that declared itself one and could not be read. */
 export interface UnreadSpecification { file: string; reason: string }
@@ -97,6 +181,12 @@ export interface GeneratedClientBinding {
  * What the projection could not bind, carried on the build result so a consumer can say
  * "unmatched" rather than imply absence. No node, no edge — disclosure only.
  */
+/** One candidate schema's provenance, as disclosed by the projection. */
+export interface SchemaProvenanceFact extends SchemaProvenance {
+  /** Path relative to the analyzed root. */
+  file: string;
+}
+
 export interface ContractDisclosure {
   /** Operations no indexed route serves and no indexed client call consumes. */
   unmatchedOperations: Disclosed<string>;
@@ -115,11 +205,27 @@ export interface ContractDisclosure {
   /** gRPC server registrations that name a service but could not be bound to its RPCs. */
   unresolvedRegistrations: Disclosed<UnresolvedRegistration>;
   /**
+   * What the COMPLETE refusal list names, for a consumer that must not rest a conclusion on the
+   * reader-facing `items` slice. Absent when nothing was refused, and absent from an artifact
+   * written before this field existed — a consumer must then fall back to the bounded items and
+   * say so.
+   */
+  unboundHandlerNames?: UnboundHandlerNames;
+  /**
    * Files that looked like a specification but are not one — a YAML or JSON file with an
    * `openapi` or `swagger` key that is not at the top level — each with why. Listed so the
    * discovery scope is visible: a file the reader passed over is never silently absent.
    */
   skippedCandidates: Disclosed<UnreadSpecification>;
+  /**
+   * Candidate schemas that look GENERATED or VENDORED — a codegen output under `__generated__/`,
+   * a `# @generated`-headed SDL, a copy under `vendor/` — each with the rule that said so
+   * (change: disclose-schema-provenance).
+   *
+   * An ANNOTATION, never a drop: the schema is projected and graded exactly as before. A
+   * `path-pattern` verdict is a guess at the weaker certainty and is never reported as `declared`.
+   */
+  schemaProvenance?: Disclosed<SchemaProvenanceFact>;
   /**
    * RPCs no scanned registration binds. Registrations are read in Go, Python, and Node (grpc-js)
    * only, so an RPC served from another language is listed here too: this is "not bound", never
@@ -185,10 +291,12 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     ambiguousAddresses: p.ambiguousAddresses,
     unresolvedGeneratedBindings: p.unresolvedGeneratedBindings,
     unresolvedRegistrations: p.unresolvedRegistrations,
+    ...(p.unboundHandlerNames ? { unboundHandlerNames: p.unboundHandlerNames } : {}),
     unboundRpcs: p.unboundRpcs,
     unresolvedResolvers: p.unresolvedResolvers,
     unboundGraphqlOperations: p.unboundGraphqlOperations,
     skippedCandidates: p.skippedCandidates,
+    ...(p.schemaProvenance ? { schemaProvenance: p.schemaProvenance } : {}),
     ...(p.notAssessed ? { notAssessed: p.notAssessed } : {}),
     ...(p.notes ? { notes: p.notes } : {}),
     ...(p.truncations ? { truncations: p.truncations } : {}),
@@ -198,6 +306,7 @@ export function contractDisclosure(p: ProjectedContracts): ContractDisclosure | 
     rest.unreadSpecifications, rest.unboundClientCalls, rest.ambiguousAddresses,
     rest.unresolvedGeneratedBindings, rest.unresolvedRegistrations, rest.unboundRpcs, rest.skippedCandidates,
     rest.unresolvedResolvers, rest.unboundGraphqlOperations,
+    ...(rest.schemaProvenance ? [rest.schemaProvenance] : []),
   ];
   const silent = lists.every(l => l.total === 0) && !rest.notAssessed && !rest.notes && !rest.truncations;
   return silent ? undefined : rest;
@@ -366,6 +475,22 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
       ...(gql?.clientDocuments ?? []).map(file => ({ file, reason: 'a GraphQL client document (operations and fragments), not a schema' })),
       ...(input.skippedFiles ?? []),
     ];
+    // Every candidate that is a SCHEMA by its own format test — not every file the caller passed:
+    // `input.files` also holds YAML/JSON that only mentions an `openapi` key somewhere, and naming
+    // a lockfile "a generated schema" would be a claim about a file no reader read. A generated or
+    // vendored copy is named here and projected all the same. The head is BOUNDED — a 10 MB SDL is
+    // never scanned whole.
+    const provenance: SchemaProvenanceFact[] = [];
+    for (const f of input.files) {
+      // Provenance first: it is cheap (a path test and a bounded head) and rare, so the format
+      // test that follows — a YAML/JSON parse for the OpenAPI case — runs only for the few files
+      // that have provenance at all, never for every candidate.
+      const v = schemaProvenance(f.path, f.content.slice(0, SCHEMA_PROVENANCE_HEAD_BYTES));
+      if (!v) continue;
+      const isSchema = isProtobufPath(f.path) || isGraphqlPath(f.path)
+        || (looksLikeOpenApi(f.content) && !!readOpenApi(f.path, f.content));
+      if (isSchema) provenance.push({ file: f.path, ...v });
+    }
     return {
       ...p,
       nodes: [...p.nodes, ...(proto?.nodes ?? []), ...(gql?.nodes ?? [])],
@@ -375,9 +500,15 @@ export function projectContracts(input: ContractProjectionInput): ProjectedContr
         ? bound([...p.skippedCandidates.items, ...clientDocs], p.skippedCandidates.total + clientDocs.length)
         : p.skippedCandidates,
       unresolvedRegistrations: bound(proto?.unresolvedRegistrations ?? []),
+      // Over the COMPLETE lists, not the bounded slices above: a display cap must not decide
+      // whether a handler can be called confidently dead.
+      ...((proto?.unresolvedRegistrations.length || gql?.unresolvedResolvers.length)
+        ? { unboundHandlerNames: unboundHandlerNames(proto?.unresolvedRegistrations ?? [], gql?.unresolvedResolvers ?? []) }
+        : {}),
       unboundRpcs: proto && !protoWithheld ? bound(proto.unboundRpcs) : none(),
       unresolvedResolvers: bound(gql?.unresolvedResolvers ?? []),
       unboundGraphqlOperations: gql && !gqlWithheld ? bound(gql.unboundOperations) : none(),
+      ...(provenance.length ? { schemaProvenance: bound(provenance) } : {}),
       ...(notAssessed.size ? { notAssessed: [...notAssessed].sort() } : {}),
       ...(notes.size ? { notes: [...notes].sort() } : {}),
       ...(truncations.length ? { truncations } : {}),

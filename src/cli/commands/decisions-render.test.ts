@@ -68,7 +68,7 @@ describe('decisions rendering', () => {
       ...decision('verified'),
       verificationEvidence: 'git-diff\x1b[3A' as unknown as 'git-diff',
     }, true));
-    expect(out).toContain('Verification evidence: git-diff[3A');
+    expect(out).toContain('Verification evidence: git-diff');
     // eslint-disable-next-line no-control-regex
     expect(out).not.toMatch(/\x1b/);
   });

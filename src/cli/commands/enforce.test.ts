@@ -840,7 +840,7 @@ describe('enforce gate decision', () => {
     expect(result.code).toBe(1);
     expect(result.stderr).not.toContain('\u001b');
     expect(result.stderr).not.toContain('\r');
-    expect(result.stderr).toContain('hostile-[2J-name');
+    expect(result.stderr).toContain('hostile--name');
   });
 
   it('advisory by default — a stale-decision-reference does not block (exit 0)', async () => {

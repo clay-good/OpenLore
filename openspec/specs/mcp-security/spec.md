@@ -521,10 +521,15 @@ or computed judgment of whether that content should be believed.
 Content that has not passed human review SHALL NOT be presented as carrying the reviewed corpus's
 authority.
 
-The serving path SHALL preserve recorded bytes exactly. It SHALL NOT sanitize, strip, escape,
-neutralize, or otherwise rewrite instruction-shaped content. A composed agent-context block SHALL
-state that its content is data rather than instructions and SHALL use a delimiter absent from the
-enclosed bytes.
+The serving path SHALL preserve recorded bytes exactly, with one narrow exception named below:
+it SHALL NOT sanitize, strip, escape, neutralize, reword, or otherwise rewrite instruction-shaped
+content, and SHALL NOT paraphrase recorded text. The exception is characters that are not content
+but rendering control — C0/C1 controls, terminal escape sequences, bidi overrides, isolates and
+marks, line/paragraph separators, and zero-width characters — which SHALL be screened from every
+agent-facing and machine-readable render (see
+ScreeningIsAppliedOnEveryAgentFacingOutputPathBeforeTheInstructionScreen). The stored record keeps
+its bytes; the render is screened. A composed agent-context block SHALL state that its content is
+data rather than instructions and SHALL use a delimiter absent from the enclosed bytes.
 
 #### Scenario: An unreviewed memory retains its status and bytes
 
@@ -534,6 +539,7 @@ enclosed bytes.
 - **AND** it is not presented as carrying the reviewed corpus's authority
 - **AND** its text is byte-identical to the recorded text
 - **AND** it carries no trustworthiness, safety, or confidence verdict
+- **AND** rendering-control characters are the only bytes a render may remove
 
 #### Scenario: Another actor's title is marked as foreign
 
@@ -563,6 +569,56 @@ review rather than guaranteeing safety.
 - **THEN** the finding names the artifact and matched shape
 - **AND** the artifact remains byte-identical
 - **AND** the default exit posture remains non-blocking
+
+### Requirement: ScreeningIsAppliedOnEveryAgentFacingOutputPathBeforeTheInstructionScreen
+
+Every output path that reaches an agent or a machine consumer SHALL screen repository-derived
+text through the single shared screen before emitting it: the composed agent-context block
+(`orient --inject` and the loop hooks), MCP and daemon tool responses, and `--json` command
+output. The screened class SHALL cover C0 controls, DEL and C1, complete terminal escape
+sequences (introducer and payload, not the introducer alone), bidi overrides, isolates and marks,
+the line and paragraph separators, and zero-width characters. Screening SHALL be linear in the
+length of its input.
+
+Screening SHALL run BEFORE the lexical instruction-shape screen, and the screened text SHALL be
+the text that is served: a note screened as one representation and emitted as another is not
+screened. Screening SHALL remove only rendering-control characters: a path, symbol or title SHALL
+remain identifiable, and legitimate non-ASCII text (accents, non-Latin scripts, emoji, combining
+marks) SHALL be emitted unchanged.
+
+On a machine-readable (JSON) face, screening SHALL be applied to the string values rather than
+only to the serialized document, because serialization escapes a control character into a form a
+consumer decodes back into the control character. Any residue that cannot be screened at the
+values — an object key — SHALL be named in the implementation rather than passed through silently.
+
+#### Scenario: The composed block encloses no control byte
+
+- **GIVEN** a repository with a file name containing a terminal escape sequence and a bidi
+  override
+- **WHEN** the pre-turn hook emits the task-scoped orientation block
+- **THEN** the block states that its content is untrusted data
+- **AND** it encloses no escape sequence, bidi or zero-width character
+- **AND** the file is still named, in a form a reader can identify
+
+#### Scenario: An escape prefix does not walk an imperative past the instruction screen
+
+- **GIVEN** two pinned memories with the same imperative text, one prefixed with a terminal
+  escape sequence
+- **WHEN** both are pushed into the agent-context block
+- **THEN** both are withheld as instruction-shaped, with the same recorded shapes
+
+#### Scenario: A tool response carries no bidi or zero-width character
+
+- **GIVEN** a symbol name containing a zero-width character and a path containing a bidi override
+- **WHEN** a tool response is returned over either transport
+- **THEN** the response is valid, parseable, and contains neither character
+- **AND** a consumer that parses it does not recover a control character
+
+#### Scenario: A legitimate unicode path survives --json output
+
+- **GIVEN** a file whose name contains accented, non-Latin and emoji characters
+- **WHEN** a command emits its `--json` result
+- **THEN** the name is emitted unchanged
 
 ### Requirement: LlmDerivedTextIsUntrustedUntilHumanApproval
 

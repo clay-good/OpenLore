@@ -75,6 +75,24 @@ describe('before-edit', () => {
     expect(readFileSync(join(root, 'gen/order.pb.go'), 'utf-8')).toBe(GENERATED);
   });
 
+  it('screens the repository-derived text it pushes into model context', async () => {
+    // A hook's additionalContext goes straight into the model's context, and only
+    // 'subagent-start' screened its own text. The file name carries the payload here: a bidi
+    // override reverses how the name renders, and a zero-width character makes two different
+    // names look identical. (ESC in a file name is covered where it is portable to write one;
+    // Windows rejects the byte in a path, so the ESC case is pinned on the screening helpers
+    // and on the orient --inject block instead.)
+    const name = 'gen/or\u202eder\u200b.pb.go';
+    const root = repo({ [name]: GENERATED });
+    const r = await runHook('before-edit', payload(root, name));
+    const c = context(r.stdout)!;
+
+    expect(r.stdout).not.toContain('\u202e');
+    expect(r.stdout).not.toContain('\u200b');
+    // Screened, not hidden: the target is still named.
+    expect(c.additionalContext).toContain('order.pb.go is generated');
+  });
+
   it('prints nothing for an ordinary file, outside an OpenLore repository, or when turned off', async () => {
     const root = repo({ 'src/a.ts': 'export const a = 1;\n', 'gen/order.pb.go': GENERATED });
     expect((await runHook('before-edit', payload(root, 'src/a.ts'))).stdout).toBe('');

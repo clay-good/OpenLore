@@ -358,9 +358,21 @@ describe('computeBlastRadius', () => {
     expect(b.confidenceBoundary?.staleness).toEqual(marker);
   });
 
-  it('omits the confidence boundary when the index is current (no false staleness noise)', async () => {
+  // Changed with `never-claim-complete-beside-a-refusal`. This used to assert the whole
+  // boundary is ABSENT on a current index. The boundary is still dropped when the briefing
+  // has nothing to disclose, but this fixture is not that briefing: it degrades one file to
+  // file granularity (`unreadable`), cannot read `.gitattributes`, and has no merge-base
+  // with HEAD — three real gaps it already prints in `caveats`. Keeping the old assertion
+  // would mean a briefing that names three gaps in prose claims a complete answer. What
+  // the test is actually guarding — no FALSE staleness noise — is asserted directly.
+  it('reports no staleness when the index is current (no false staleness noise)', async () => {
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
-    expect(b.confidenceBoundary).toBeUndefined();
+    expect(b.confidenceBoundary?.staleness).toBeUndefined();
+    expect(b.confidenceBoundary?.integrity).toBeUndefined();
+    expect(b.confidenceBoundary?.knownUnknowable).toBeUndefined();
+    // The boundary is present only because the briefing disclosed gaps, and it names them.
+    expect(b.confidenceBoundary?.complete).toBe(false);
+    expect(b.confidenceBoundary?.incompleteBecause?.length).toBeGreaterThan(0);
   });
 
   it('errors clearly when no analysis exists', async () => {

@@ -36,6 +36,7 @@ import {
 import type { DependencyGraphResult } from '../../core/analyzer/dependency-graph.js';
 import type { GenerationReport } from '../../core/generator/openspec-writer.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import { jsonOutput } from '../output.js';
 
 // ============================================================================
 // TYPES
@@ -501,7 +502,7 @@ A score >= threshold indicates specs are production-ready.
       if (opts.json) {
         // JSON-only output, written straight to stdout (bypasses the redirected
         // console.log) so it is the sole thing on the stream.
-        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+        process.stdout.write(jsonOutput(report) + '\n');
       } else {
         // Display individual results
         for (let i = 0; i < report.results.length; i++) {

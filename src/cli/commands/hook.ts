@@ -26,7 +26,7 @@
 
 import { Command } from 'commander';
 import { createHash } from 'node:crypto';
-import { sanitizeForTerminal } from '../../utils/misc.js';
+import { sanitizeForTerminal, screenJsonText } from '../../utils/misc.js';
 import { homedir } from 'node:os';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -594,10 +594,22 @@ function momentDisabled(root: string, moment: HookMoment): boolean {
 export interface HookRunResult { stdout: string; exitCode: 0 }
 
 /**
- * Run one moment over a payload. Never throws and always exits 0: a timeout or an error prints
- * nothing. Exported for tests; the CLI prints `stdout`.
+ * Run one moment over a payload, then SCREEN the result.
+ *
+ * Never throws and always exits 0: a timeout or an error prints nothing. Exported for tests; the
+ * CLI prints `stdout`.
+ *
+ * Screening happens here rather than in each moment, because every moment's payload is
+ * repository-derived text going straight into model context and only `subagent-start` screened its
+ * own. The class only removes characters inside the JSON's string literals, so the harness still
+ * parses exactly one object.
  */
 export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<HookRunResult> {
+  const r = await runHookUnscreened(moment, raw, opts);
+  return r.stdout ? { ...r, stdout: screenJsonText(r.stdout) } : r;
+}
+
+async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<HookRunResult> {
   const silent: HookRunResult = { stdout: '', exitCode: 0 };
   const payload = parseHookPayload(raw);
   // The OpenLore root: the nearest directory at or above the session's working directory (the agent
@@ -695,7 +707,11 @@ additionalContext. Prints nothing when there is nothing new; always exits 0. Tur
     process.stdout.write = (() => true) as typeof process.stdout.write;
     let r: HookRunResult;
     try { r = await runHook(moment as HookMoment, raw); } finally { process.stdout.write = write; }
-    if (r.stdout) write(r.stdout + '\n');
+    // The hook's one stdout write is also its screening choke point: every moment's
+    // additionalContext is repository-derived text headed straight into model context, and only
+    // 'subagent-start' sanitized its own. The class only removes characters inside the JSON's
+    // string literals, so the harness still parses one object.
+    if (r.stdout) write(sanitizeForTerminal(r.stdout, { keepNewlines: true }) + '\n');
     // Codex expects JSON from a Stop hook that exits 0; an empty object says nothing.
     else if (options.harness === 'codex' && moment === 'before-stop') write('{}\n');
     process.exit(0);
