@@ -5,6 +5,17 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-11-09
+
+**The graph learns your service contracts, and the agent loop leaves receipts.**
+
+OpenLore now reads your service contracts — OpenAPI, protobuf, and GraphQL — into the same call
+graph as your code, binds handlers and generated clients to the operations they serve and call, and
+grades a contract change against its real consumers, including those in sibling repositories. The
+agent loop gained receipts that arrive when you can act on them, a session ledger, cross-worktree
+coordination, and new verifiable claim kinds. Infrastructure definitions are bound to the code they
+run, and onboarding keeps the index current in the background.
+
 ### The in-toto statement we emit is checked
 
 - **`certify_provenance` with `format: "in-toto"` now validates the envelope it emits** against the
@@ -356,6 +367,11 @@ the graph.**
 - **A Pi daemon left by an older version recovers** instead of failing to start. (#621)
 - **The vocabulary cache is keyed on its meta file's content**, so a stale cache is not served.
   (#653)
+
+The new contract-graph, verification, and coordination capabilities ship behind opt-in presets
+(`full`, `verify`, `coordination`, `federation`); the default tool surface is unchanged. The index
+schema version is now 17, so the first run after upgrading rebuilds the graph in the background. No
+breaking changes.
 
 ## [3.5.0] - 2026-10-25
 

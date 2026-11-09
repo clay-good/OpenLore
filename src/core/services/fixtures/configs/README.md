@@ -26,6 +26,9 @@ They intentionally do not move with the current schema.
   off an embedding inherited from the user-wide `~/.openlore/config.json` defaults.
 - `3.5.0-default.json` captures the unchanged default configuration factory shape for v3.5.0 and
   schema 1.2.0 (the release added MCP tools and index self-healing, not config behavior).
+- `3.6.0-default.json` captures the unchanged default configuration factory shape for v3.6.0 and
+  schema 1.2.0 (the release added the contract graph, agent-loop receipts, and IaC binding, not
+  config behavior).
 
 For each release, add at least one `<package-version>-*.json` fixture before changing the package
 version. Include both a factory-default shape and a realistic customized shape when the release
