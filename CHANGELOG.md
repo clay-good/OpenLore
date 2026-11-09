@@ -14,364 +14,106 @@ graph as your code, binds handlers and generated clients to the operations they 
 grades a contract change against its real consumers, including those in sibling repositories. The
 agent loop gained receipts that arrive when you can act on them, a session ledger, cross-worktree
 coordination, and new verifiable claim kinds. Infrastructure definitions are bound to the code they
-run, and onboarding keeps the index current in the background.
+run, and onboarding keeps the index current in the background. Everything is additive and behind
+existing or opt-in presets; the default tool surface and your configuration are unchanged.
 
-### The in-toto statement we emit is checked
+### The service-contract graph
 
-- **`certify_provenance` with `format: "in-toto"` now validates the envelope it emits** against the
-  in-toto Statement v1 shape, locally and with no new dependency (`validateInTotoStatement`), and
-  discloses the outcome as a named `statementValidation` receipt — conformant, or the reasons a
-  consumer's verifier would reject it.
-- **The check is structural only, and says so.** It verifies no signature, none of the predicate's
-  own fields, and not that the `subject` digest identifies an artifact — that digest is the content
-  address of the predicate body, so an in-toto verifier resolving it against a built artifact will
-  not match. The note, the tool description and the docs now state this plainly.
-- **Fixed a false claim**: the JSON note advertised a `--format in-toto` CLI flag; there is no
-  `openlore certify-provenance` command. It now names the tool's `format` option.
-### Removed
+- **`certify_service_contract`** grades an OpenAPI 3.x / Swagger 2.0, protobuf (proto3), or GraphQL
+  change against the code: two-way parity with the indexed handlers, a closed-table
+  breaking/dangerous verdict per changed element, each joined to the in-repo clients it breaks and
+  the tests that reach them, and a suggested version bump withheld when compatibility cannot be
+  proven. (#639, #659, #687, #688)
+- **Declared operations, messages, and named schemas are graph nodes**, bound to the handler that
+  serves each (`implements_endpoint`) and the function that calls it (`consumes_endpoint`), so
+  `orient`, `analyze_impact`, and `get_subgraph` cross the API boundary. Matching is literal — an
+  ambiguous address binds nothing and says so. (#660, #682, #687, #688)
+- **A generated client is bound to the operations it calls** by `operationId`, read from a header
+  that names its source spec — never a name match alone. (#680)
+- **Consumers in sibling repositories are censused** with `--federation`, so a breaking verdict is
+  not read as safe just because this repository has no caller. (#681)
+- **`orient` names the contract of a handler in scope** — operation, spec `file:line`, required
+  parameters and body — unasked, and **`blast_radius` briefs a spec-only diff** on the elements it
+  declares and who serves and consumes them. (#655, #679)
+- **A literal request body missing a required property is reported** and carried in `verify_change`.
+  (#656, #658)
 
-- The OpenSpec plugin manifest (`plugin-manifest` command and schema); the OpenSpec host side was never built.
+### The agent loop leaves receipts
 
-### GraphQL schemas are read
+- **Loop hooks push OpenLore's receipts at the moments a harness offers** — after an edit, after a
+  compaction, before stopping, at sub-agent start, and before a write — in Claude Code, Codex, and
+  Pi. (#637, #649, #650, #651, #652, #654)
+- **A session ledger** names the symbol that changed under you, tells a background change from your
+  own edit, tracks declared operations and resources like code symbols, and counts how the session's
+  symbols changed. (#636, #657, #661)
+- **Weakened checks, invented references, and hand-edited generated files are reported** on a diff —
+  deleted or skipped tests and relaxed gates, an import or package that does not exist, an edit a
+  regenerate will overwrite. (#629, #632, #634)
+- **`get_handoff_briefing`** states the in-flight change so a compaction or a new session does not
+  lose it, and **lease tokens** let any process ask `verify_claim` whether what it was served still
+  holds. (#638, #644)
+- **`verify_claim` gains `endpoint-implemented`, `endpoint-consumed`, `decision-governed`, and
+  `lease-current`**, and answers `unverifiable` (naming the disagreement) rather than a confident
+  "no". (#642)
 
-- **Every `.graphql` / `.graphqls` / `.gql` schema is read** and merged into one schema, `extend`
-  folded in: each root field becomes an operation node (`Query.order`), each named type a node, with
-  `references_schema` edges between them. A file of operations and fragments is a client document,
-  listed under `skippedCandidates`.
-- **The function a literal resolver map names is bound to its operation** — JS/TS
-  `{ Query: { order: getOrder } }` and Python Ariadne `@query.field("order")` — with an
-  `implements_endpoint` edge, so it is a reachability root. Inline resolvers, spreads, unknown
-  fields and functions neither local nor imported are disclosed in `unresolvedResolvers`.
-- **`certify_service_contract` grades GraphQL changes** with variance-aware rows: an output may only
-  become non-null, an input only optional; removals, a required argument and an output made nullable are
-  `breaking`; an added enum value or union member is `dangerous`. GraphQL consumers are a disclosed
-  boundary. The index schema version is now 17.
-- **An imported handler binds only in the module it was imported from**, one barrel re-export
-  followed — for gRPC Node registrations too, which previously took any same-named function in the
-  repository. A package or path-alias import binds nothing and says so.
-- **GraphQL schemas under fixture paths are not read** (`fixtures/`, `__tests__/`, `testdata/`,
-  `*.test.graphql`), and are listed under `skippedCandidates`: a fixture's `type Query` made the real
-  root ambiguous. `.proto` files are read wherever they are, as before.
-- `find_dead_code` names unbound GraphQL operations and gRPC RPCs, so a code-first resolver or a
-  handler registered in an unread style is not reported dead without a word.
+### Infrastructure bound to the code it runs
 
-### Protobuf schemas are read
+- **Function resources are bound to their handlers** (`deploys_symbol`) across Terraform,
+  CloudFormation/SAM, and Serverless, and **`orient` names the infrastructure a deployed handler
+  depends on** — the resource that runs it and the sites that set each variable it reads. Serverless
+  Framework joins the supported ecosystems (13 in all). (#640, #645, #662)
 
-- **Every `.proto` file is read as a proto3 schema** and projected onto the graph: each RPC is a
-  node named by its gRPC method path (`/orders.v1.OrderService/GetOrder`), each message and enum a
-  node named by its full name, with `references_schema` edges from an RPC to its request and
-  response types and from a message to its fields' types. Types are resolved with protobuf's own
-  scoping rule over each file's imports, as protoc resolves them. proto2 and editions files are
-  listed as unread with that reason.
-- **The method that serves an RPC is bound to it** through the server registration — Go
-  `RegisterXServer(s, &impl{})`, Python `add_XServicer_to_server(Impl(), server)`, Node
-  `server.addService(pkg.X.service, { … })` — with an `implements_endpoint` edge, so it is a
-  reachability root rather than dead code. A registration whose implementation is not written at
-  the call, an ambiguous service or method, and every RPC left unbound are disclosed.
-- **`certify_service_contract` grades `.proto` changes** with protobuf rows in the closed rule
-  table: fields matched by number, removal without `reserved` and reuse of a reserved number
-  `breaking`, a rename `dangerous`, removed or retyped RPCs `breaking`. gRPC consumers are a
-  disclosed boundary: a protobuf change carries `consumersNotAssessed`, not an empty `consumers`.
-- **A file that looks like a specification but is not one** — an `openapi` key below the top
-  level — is now listed under `skippedCandidates` instead of passing silently.
-- **`unmatchedOperations` no longer lists named schemas.** A schema is neither served nor called,
-  so listing one read as "declared but nothing serves it".
-- **`certify_service_contract` withholds the suggested bump when a changed specification could not
-  be compared** (a parse error, proto2, a cap) — OpenAPI included. An unchanged unreadable file
-  withholds nothing.
-- **What withholds nothing moved to `notes`.** An unresolved OpenAPI `$ref`, a protobuf type
-  imported from outside the repository and an `extend` block are listed under the projection's new
-  `notes`, not `notAssessed`, so `find_dead_code` no longer says "these bindings were NOT made"
-  when every binding was made. `find_dead_code` now also names gRPC registrations that bound
-  nothing.
-- **`get_leaf_functions` and `get_low_risk_refactor_candidates` list code only**: projected
-  declarations are excluded, and a handler bound to an operation is still a leaf.
-- `blast_radius` names changed `.proto` files; Node's static-codegen registration
-  `addService(services.XService, …)` is read.
-- The index schema version is now 16: a new projected node language, which an older OpenLore would
-  otherwise rank as code. An existing index is rebuilt on the next `openlore analyze`.
+### Coordination across worktrees
 
-### Named schemas are in the graph
-
-- **Each named schema a specification declares is a graph node**, with `references_schema` edges
-  from the operations that reference it and from the schemas whose definitions reference it. A
-  schema shared by twenty operations is one node with twenty inbound edges, so "what does
-  changing `Order` touch?" becomes a graph question, and a handler reaches its contract's schemas
-  through the operation it serves. Per-field nodes are deliberately not projected — a large
-  document has thousands of fields, and the property-level verdict already belongs to
-  `certify_service_contract`. Edges are direct only, cycles terminate, and a `$ref` naming
-  something the document does not declare draws no edge and is disclosed. Like every projected
-  declaration, a schema node is excluded from the code rankings and its edges change no
-  function's degree.
-- **A reference is followed through a reusable component and ignored in documentation.** An
-  operation keeping its parameters in `components/parameters` — the style the specification
-  recommends — is bound to the schemas those components name, where previously it appeared to
-  reference nothing and the missing edges were disclosed as external references. A `$ref` written
-  inside a `description` or an `example` is prose about a type, so it draws no edge. An
-  operation's references are attributed by its address, so a document repeating an `operationId`
-  can no longer give one operation's schemas to another.
-- **The exclusion that keeps declarations out of the code rankings now covers every surface that
-  ranks or counts code.** `search_code`, `suggest_insertion_points` and `orient` share one
-  candidate filter in the index, so a document declaring a few hundred schemas could fill the
-  whole result set and evict every function; the structural health map could report a schema as
-  the repository's top betweenness bridge, rescaling the real chokepoint's score; the refactoring
-  report could call two mutually-recursive schemas a dependency cycle to break; and `CODEBASE.md`
-  counted declarations under "functions / methods analyzed". A caller that names a projected
-  language explicitly is still served it.
-- **A schema cap now reports what the document declared**, not the capped list the reader
-  returned — which reported every document past the cap as having dropped nothing.
-
-### Your consumers are usually in another repository
-
-- **`certify_service_contract` censuses indexed sibling repositories for consumers** with
-  `federation: true` / `--federation`, reporting each hit against the sibling's registry name
-  rather than a path on this machine. A breaking verdict computed from one repository said "no
-  caller in this repository" for exactly the change most worth stopping. A finding now
-  distinguishes called-here, called-only-in-a-sibling, and called-in-neither — and the last names
-  how many siblings were censused, so it is not read as proof of safety. A sibling that is
-  missing, unindexed, stale or unbaselined is named as not censused rather than counted
-  consumer-free, and the repository under certification is never censused as its own sibling.
-
-### A generated client is no longer invisible to the contract graph
-
-- **A generated API client is bound to the operations it calls, by `operationId`.** Such a client
-  builds its URL from a base variable, so no literal path is extracted and nothing bound by path:
-  the operation read as consumed by no one. Where a module's header names a specification as its
-  source, a function whose name is exactly an `operationId` of that specification is now linked
-  with a `consumes_endpoint` edge. The header claim is required — a name match alone never binds,
-  so a hand-written function sharing a name with an `operationId` is not falsely linked — and the
-  reference is read only from a header comment, so a specification path used in ordinary code is
-  not mistaken for a generation claim. An ambiguous name, or a document declaring one
-  `operationId` twice, binds nothing and is disclosed.
-
-### A specification edit is no longer an empty briefing
-
-- **`blast_radius` names the contract elements a changed specification declares**, and for each
-  one the indexed handler that serves it and the in-repo call sites that consume it. A
-  specification is not a call-graph node and declares no handler of its own, so a diff that edits
-  only `openapi.yaml` previously briefed an agent on nothing at all — no impacted symbols, no
-  tests, no contracts. Consumers are read from the whole repository, not from the diff, because a
-  specification change affects callers the diff never touched. It is a blast radius, not a
-  verdict: `certify_service_contract` with a base ref still owns the breaking/dangerous grade,
-  and the field's note says so.
-
-**Everything the agent needs to see, pushed at the moment it can act — and the API contract in
-the graph.**
-
-### Your API contract is part of the graph
-
-- **`certify_service_contract`** grades an OpenAPI 3.x / Swagger 2.0 change against the code:
-  two-way parity with the indexed route handlers, a closed-table breaking/dangerous verdict per
-  changed element, each one joined to the in-repo clients it breaks and to the tests that reach
-  them, and a suggested version bump that is withheld when compatibility cannot be proven. (#639,
-  #659)
-- **Declared operations are now graph nodes**, bound to the handler that serves each
-  (`implements_endpoint`) and to the function that calls it (`consumes_endpoint`), so `orient`,
-  `analyze_impact` and `get_subgraph` cross the API boundary. Matching is literal: an address that
-  names two operations binds nothing, and a call to another host never binds to your own
-  specification. (#660)
-- **`orient` names the contract of a handler in scope** — the operation it serves, its spec
-  file:line, its required parameters and body properties — unasked. (#655)
-- **A literal request body that omits a required property is reported** by
-  `certify_service_contract` and carried in `verify_change`. (#656, #658)
-
-### The diff shapes agents get wrong
-
-- **Weakened checks are reported:** tests deleted, skipped or emptied, assertions removed,
-  suppressions added, a relaxed CI gate — each joined to the code it used to guard. (#634)
-- **Invented references are reported:** an import, export or package that does not exist or is not
-  declared. (#632)
-- **A hand-edited generated file is named with its source and regenerate command**, so the edit
-  that will be overwritten is caught before it is made. (#629)
-
-### Receipts arrive when you can act on them
-
-- **The agent-loop hooks** push OpenLore's receipts at the moments a harness offers: after an edit,
-  after a compaction, before stopping, at sub-agent start, and before a write. (#637, #649, #650)
-- **A sub-agent is briefed on its own task** when it starts, instead of inheriting nothing. (#649)
-- **Edits made after the last test run are named** in the before-stop receipt. (#643)
-- **Codex and Pi** get the same moments: a managed Codex hook set, Pi after-edit receipts, and a
-  Pi session that resumes from the handoff briefing after a compaction. (#651, #652, #654)
-- **`get_handoff_briefing`** states the in-flight change — touched symbols, open changes, drifted
-  specs, the tests to run — so a compaction or a new session does not lose it. (#638)
-
-### The session ledger
-
-- **It names the symbol that changed under you**, tells a background change from your own edit, and
-  sees a modify/revert loop. (#636)
-- **Session change counts** (body-only, signature, unclassified, first-seen-after-edit, changed
-  exports) — counts only, never a percentage or a threshold. (#657)
-- **Declared OpenAPI operations and infrastructure resources are tracked like code symbols**, so a
-  note names `POST /v1/checkout`, not the file it lives in; a reformat is not a change, and a file
-  is still named whenever an element model cannot see what moved. (#661)
-- **Lease tokens** (`orient` and `recall`) let any process ask `verify_claim` whether everything it
-  was served still hashes the same. (#644)
-
-### Infrastructure, bound to the code it runs
-
-- **Which manifests set each environment variable** — Kubernetes, compose, Dockerfile,
-  Terraform/OpenTofu, CloudFormation/SAM, GitHub Actions and Serverless — with the key and location,
-  never the value. (#640, #662)
-- **A function resource is bound to the code it runs** (`deploys_symbol`): Terraform and
-  CloudFormation/SAM Lambda handlers, Serverless `functions.*.handler`, and a handler that names
-  built output resolved through the project's own `outDir`/`rootDir` or `main`/`source` mapping.
-  An unmappable handler is disclosed, never guessed. (#645, #662)
-- **`orient` names the infrastructure a deployed handler depends on**: the resource that runs it and
-  the sites that set each variable it reads, read only when a resource actually runs something in
-  scope. (#662)
-- **Serverless Framework** is a supported ecosystem (13 in all). (#662)
-
-### Parallel agents see each other
-
-- **A shared footprint board** across every worktree of a clone: who is about to write which
-  symbols, with hazard-typed conflicts and duplicate-intent detection. (#641)
-- **A peer change notice** when another agent changes a symbol you declared as a read, or one you
-  were served. (#646, #647)
-- **Fleet records** are shared on the board, and `plan_parallel_work` can plan against the live
-  agents on it. (#648)
-
-### Claims you can check before you assert them
-
-- **`verify_claim` gains `endpoint-implemented`, `endpoint-consumed`, `decision-governed` and
-  `lease-current`.** It now answers `unverifiable`, naming the disagreement, when its own scan
-  contradicts an edge the graph published, instead of a confident "no". (#642, #644, #661)
+- **A shared footprint board** across every worktree of a clone shows who is about to write which
+  symbols, with hazard-typed conflicts and duplicate-intent detection; **peer-change notices** fire
+  when another agent touches what you read; and `plan_parallel_work` can plan against the live agents
+  on the board. (#641, #646, #647, #648)
 
 ### Onboarding and the background
 
-- **OpenLore sets itself up and stays current** in the background: a cold start builds the index,
-  a stale one repairs itself, and the first touch is disclosed once rather than read as a broken
-  install. (#631)
-- **Index staleness is judged by content**, not the clock or file mtimes, so a checkout or a pull
-  that rewrote unchanged files no longer reads as behind. (#630)
+- **OpenLore sets itself up and stays current** in the background: a cold start builds the index, a
+  stale one repairs itself (judged by content, not file mtimes), and the first touch is disclosed
+  once rather than read as a broken install. (#630, #631)
+- **An OpenSpec `propose` prompt is grounded in repository structure** before drafting, and Claude
+  Code gets a **color-coded OpenLore status line**. (#622, #623)
 - **Local semantic vectors build 8–10x faster.** (#633)
-- **An OpenSpec `propose` prompt is grounded in repository structure** before drafting, in Claude
-  Code, Codex and Pi. (#623)
-- **A color-coded OpenLore status line** for Claude Code. (#622)
-- **Behavior change (Pi): the repository digest is now on-demand.** The Pi extension no longer
-  appends the architecture digest and spec-domain index to every turn; the agent calls
-  `openlore_orient` when it has a task. To restore the previous every-turn injection, set
-  `"pi": { "contextMode": "full" }` in `.openlore/config.json`. (#623)
-- **The minimum supported Node.js version is now 22.22** (`^22.22.0 || >=23.5.0`), matching the
-  file watcher's new floor (chokidar 6). On Node 22.19–22.21 the CLI exits with code 78 and asks
-  you to upgrade. (#620)
+
+### Breaking and behavior changes
+
+- **Minimum Node.js is now 22.22** (`^22.22.0 || >=23.5.0`), matching the file watcher's floor
+  (chokidar 6); 22.19–22.21 exits with code 78 and asks you to upgrade. (#620)
+- **The Pi repository digest is on-demand.** The Pi extension no longer appends the architecture
+  digest to every turn; call `openlore_orient` when you have a task, or set
+  `"pi": { "contextMode": "full" }` to restore the previous every-turn injection. (#623)
+- **Removed** the OpenSpec plugin manifest (`plugin-manifest`); the host side was never built. (#692)
 
 ### Fixed
 
-- **A failed command prints one legible line, not a V8 stack trace.** Any throw from a command
-  action used to surface as Node's raw trace — absolute `dist/` paths, internal frames, the
-  version banner. The most common way a real user met it was `install` in a repository whose
-  `CLAUDE.md` is a symlink into a dotfiles checkout: the trace named `path-confinement.js` and
-  nothing actionable. Failures now render as `error: openlore <command> stopped: <message>`, with
-  an explanation for the shapes a first run actually hits (a symlink out of the repository, an
-  unwritable path, a full disk, exhausted file descriptors) and the stack behind `--verbose`.
-- **`install` preserves an `mcpServers.openlore` entry it did not write.** A hand-wired wrapper or
-  a pinned preset in `.mcp.json` was replaced silently; it is now kept, with a warning naming it,
-  and `--force` takes it over. This matches what the Codex adapter already did for
-  `mcp_servers.openlore`.
-- **OpenLore no longer edits your pre-commit hook.** Five installers (the decisions gate,
-  `enforce`, `blast-radius`, `impact-certificate`, `refresh-stories`) appended their block to the
-  end of an existing hook and deleted a trailing `exit 0` so the block could be reached —
-  silently changing what that script does for anyone whose `exit 0` was deliberately swallowing a
-  linter's status. Every block is now inserted directly after the shebang through one shared
-  `insertHookBlock`, and every other byte of the hook survives.
-- **A refusal during `install` is described by its cause.** The summary claimed "hand-edited
-  OpenLore block(s) detected" for every repo-scope refusal, including unparseable files, symlinks
-  and foreign configuration entries, and advertised `--force` where it does not help. Each refusal
-  already names its own cause; the summary now points at those messages.
-- **A lock age is never negative.** `openlore status` and the analysis-in-progress error could
-  report a negative heartbeat age, because a filesystem mtime carries sub-millisecond precision
-  while `Date.now()` is truncated to whole milliseconds.
-- **Rust tests are detected.** `isTestFile` is a path-only predicate, and Rust's dominant
-  convention is not a path: a test lives in an inline `#[cfg(test)] mod tests` beside the code.
-  On a real Cargo workspace that left **2,496 of 3,363 "entry points" as test functions**,
-  `report_coverage_gaps` reporting a 96% gap rate while 2,759 `#[test]` attributes sat in the
-  source, and `orient` offering a `#[test]` function as the place to add a feature. A Rust test
-  is now recognized from the attribute on the function (`#[test]`, `#[tokio::test]`,
-  `#[rstest]`, `#[test_case]`, `#[bench]`), and the two missing path conventions
-  (`src/<module>/tests.rs`, `foo_test.rs`) were added.
-- **`orient` never offers a test function as an insertion point**, in any language.
-- **`report_coverage_gaps` names what test detection cannot see for a language.** Rust reported
-  `testDetection: "full"` as soon as one path rule matched. It now also discloses that an
-  unattributed helper inside a test module counts as production code, and that a call inside a
-  macro body — `assert_eq!(sha256_hex(x), y)`, the usual shape of a Rust assertion — is not a
-  call-graph edge, so code exercised only through an assertion macro still reports no reaching
-  test.
-- **`orient` no longer prescribes tools the wired preset does not expose.** Its `nextSteps` named
-  `record_decision`, `check_spec_drift` and `get_spec` unconditionally; none is in the default
-  `substrate` preset, so an agent that followed them got a preset-membership error — in the same
-  session where `install` had printed "the generated guidance prescribes only tools this preset
-  exposes". Guidance now falls back to the CLI equivalent (`openlore decisions record`,
-  `openlore drift`, the spec file path), and `suggestedTools` lists only wired tools.
-- **`env-impact` explains an empty inventory honestly.** It advised "run analyze first" for a
-  repository whose language the env scan does not cover (Rust, Java, …), where re-running can
-  never help. It now names the scope boundary instead.
-- **A trimmed response gives every list a fair share of the budget.** The list-shortening added
-  for over-budget answers grew the lists back largest-first with every other list still at zero,
-  so the biggest list took the whole budget and every other list was served EMPTY — on a
-  `get_mapping` answer, 1,549 `linked` rows filled 256 KB and the `ambiguous`, `stale` and
-  `unmapped` lanes the tool exists to surface were all zeroed. Each list now gets an equal share
-  of what is left, an unused share rolls to the next list, and the remainder is spent on the
-  largest. (#663)
-- **A trim receipt no longer overwrites a tool's own disclosure.** It was written as top-level
-  `truncated` / `omitted` / `truncationNote`, which clobbered payloads that already define them:
-  `get_architecture_overview`'s partial answer carries an `omitted` **array** of field names
-  beside an `omittedBecause` explaining it, and `certify_public_surface`, `blast_radius` and
-  `plan_parallel_work` each declare a `truncated` or `truncationNote` of their own shape. The
-  receipt now lives under its own `responseBudget` key and nothing else is rewritten. (#663)
-- **`map_in_flight_conflicts` budgets the whole call, not each repository.** The harvest budget
-  was a per-repository default, so a federation of N repositories harvested for N budgets, and
-  pull-request enumeration — a `gh pr diff` per PR, up to 50 — had no budget at all. One deadline
-  is now computed per call and honored by both halves. A branch the caller explicitly excluded is
-  also no longer reported as one the budget could not reach. (#663)
-- **Two response-reading claims in the docs were wrong.** A panic block begins `[PANIC:`, not
-  `[openlore …]`, so a host filtering on the documented prefix read it as the answer; and "pick
-  the block that parses" loses the whole answer for the tools that return plain text
-  (`get_signatures`). Both are named now.
-- **A watcher save no longer destroys the projected edges in the graph store.** Contract bindings
-  and deploy bindings are produced only by a full `analyze`, so a subset rebuild must preserve
-  them. The guard was on `deleteEdgesForFile` but not on `deleteOutgoingEdgesForFile` — the path
-  taken for every *recomputed caller* file, which is most of them — and it listed contract kinds
-  only, so `deploys_symbol` was unguarded everywhere. Saving one shared utility left orphaned
-  OpenAPI operation nodes with no edges, saving a deployed handler dropped its own deploy
-  binding, and the index reported itself current either way; an `.olbundle` exported afterwards
-  shipped a graph with no contract or deploy edges under a valid attestation. Both deletions are
-  now keyed on the node *language*, so the next projected language is covered by construction.
-- **One unreadable manifest no longer erases the whole infrastructure graph.** A throw anywhere
-  in the IaC pass was swallowed silently: a single YAML file with heavy anchor reuse trips the
-  parser's own alias-count guard, and every resource, reference and deploy binding of all eleven
-  ecosystems disappeared with nothing said — `orient` then reported no infrastructure, which
-  reads as "no resource runs a function in scope". Each ecosystem's extractor now runs in
-  isolation, and a failure is named in `iacNotAssessed` rather than served as an empty result.
-- **An infrastructure declaration is no longer served as code.** The "a declaration is never a
-  hub, an entry point, or a term in the average fan-in/fan-out" invariant was implemented with a
-  contract-only predicate, so infrastructure never had it. Adding a `serverless.yml` to a
-  repository gave the deployed handler a fan-in of 1 *from its own manifest*, which removed it
-  from the entry points and left the YAML stanza as the only entry point — and `CODEBASE.md`
-  prints that table under "the natural starting point for any task". On this repository 48 of
-  1,121 entry points were GitHub Actions jobs, Helm templates, Bicep modules and Serverless
-  stanzas, all of them terms in the published averages. A declaration binding is now excluded
-  from degrees, entry-point status, hub status, the file-level dependency rankings, the
-  layer-violation check, the landmark set and `find_path`'s `role:` endpoints — in both the
-  in-memory build and the persisted store, which are checked against each other.
-- **`orient`'s infrastructure briefing matches a deployed function by name *and* file.** A bare
-  name match attributed one file's environment reads to a same-named function in another.
-
-- **A whole-repository answer no longer discards itself when it exceeds the response budget.**
-  `get_architecture_overview`, `get_refactor_report` and `get_mapping` returned a JSON string cut
-  mid-structure, with advice to narrow the query using parameters they do not accept. They now keep
-  the summary and the top of every ranked list and say in `omitted` exactly how many items each
-  list lost. (#663)
-- **`map_in_flight_conflicts` no longer dies on a clone with many branches.** It reads branches
-  most-recently-committed first rather than alphabetically, and a harvest time budget discloses any
-  branch it did not reach instead of letting the whole call time out. (#663)
-- **A Pi daemon left by an older version recovers** instead of failing to start. (#621)
-- **The vocabulary cache is keyed on its meta file's content**, so a stale cache is not served.
-  (#653)
+- A failed command prints one legible line, not a V8 stack trace; `install` preserves an
+  `mcpServers.openlore` entry it did not write, no longer edits your pre-commit hook, and describes a
+  refusal by its cause. (#671, #695)
+- Rust tests are detected from their attributes (`#[test]`, `#[tokio::test]`, …), and `orient` never
+  offers a test function as an insertion point or prescribes a tool the wired preset does not expose.
+  (#674)
+- A watcher save no longer drops the projected contract and deploy edges, one unreadable manifest no
+  longer erases the whole infrastructure graph, and an infrastructure declaration is never served as
+  code (a hub, an entry point, or a term in the fan-in/fan-out averages).
+- Over-budget answers keep a fair share of every list and no longer overwrite a tool's own
+  disclosure. (#663)
+- Large composite literals extract in linear time, so a generated `.pb.go` no longer stalls
+  `analyze`. (#708)
+- `analyze`'s console output is bounded and no longer leaks library warnings. (#700)
+- `certify_provenance`'s in-toto envelope is validated against the Statement v1 shape, with its
+  structural-only scope stated plainly. (#707)
+- A Pi daemon left by an older version recovers, and the vocabulary cache is keyed on its content.
+  (#621, #653)
 
 The new contract-graph, verification, and coordination capabilities ship behind opt-in presets
 (`full`, `verify`, `coordination`, `federation`); the default tool surface is unchanged. The index
-schema version is now 17, so the first run after upgrading rebuilds the graph in the background. No
-breaking changes.
+schema version is now 17, so the first run after upgrading rebuilds the graph in the background. The
+only compatibility change is the raised Node.js floor noted above.
+
 
 ## [3.5.0] - 2026-10-25
 
