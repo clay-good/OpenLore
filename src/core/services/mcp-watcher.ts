@@ -25,7 +25,7 @@
  */
 
 import { readFile, readdir, realpath, unlink } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { realpathSync, type Stats } from 'node:fs';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireAnalysisLock } from '../runtime/advisory-lock.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
@@ -39,6 +39,7 @@ import { createHash } from 'node:crypto';
 import { join, relative, resolve, isAbsolute, posix } from 'node:path';
 import { spawn } from 'node:child_process';
 import chokidar, { type FSWatcher } from 'chokidar';
+import ignoreModule from 'ignore';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth, extractFileDynamicBoundary } from '../analyzer/call-graph.js';
@@ -69,6 +70,73 @@ import {
 } from '../analyzer/sfc-script-extractor.js';
 import { isTestFile } from '../analyzer/test-file.js';
 import { toRepositoryPath } from '../analyzer/file-walker.js';
+
+const ignore = (ignoreModule as typeof ignoreModule & { default?: typeof ignoreModule }).default ?? ignoreModule;
+type GitignoreScope = { baseDir: string; matcher: ReturnType<typeof ignore> };
+
+/** Load gitignore files without descending into paths already excluded by a shallower scope. */
+export async function loadGitignoreScopes(rootPath: string): Promise<GitignoreScope[]> {
+  const scopes: GitignoreScope[] = [];
+  const rootMatcher = ignore();
+  try {
+    const content = await readFile(join(rootPath, '.gitignore'), 'utf-8');
+    rootMatcher.add(content);
+    scopes.push({ baseDir: '', matcher: rootMatcher });
+  } catch { /* A repository may not have a root .gitignore. */ }
+
+  const walk = async (dir: string, baseDir: string, inherited: GitignoreScope[]): Promise<void> => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    let activeScopes = inherited;
+    if (baseDir) {
+      const gitignore = entries.find((entry) => entry.isFile() && entry.name === '.gitignore');
+      if (gitignore) {
+        try {
+          const matcher = ignore().add(await readFile(join(dir, '.gitignore'), 'utf-8'));
+          const scope = { baseDir, matcher };
+          scopes.push(scope);
+          activeScopes = [...inherited, scope];
+        } catch { /* Ignore unreadable nested rules. */ }
+      }
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const rel = baseDir ? `${baseDir}/${entry.name}` : entry.name;
+      if (isIgnoredRelPath(rel) || isGitignoredPath(rel, activeScopes, true)) continue;
+      await walk(join(dir, entry.name), rel, activeScopes);
+    }
+  };
+  await walk(rootPath, '', scopes.filter((scope) => scope.baseDir === ''));
+  return scopes;
+}
+
+/** Match a root-relative candidate; later (deeper) scopes can re-include files. */
+export function isGitignoredPath(
+  relPath: string,
+  scopes: GitignoreScope[],
+  isDirectory = false,
+): boolean {
+  const rel = toRepositoryPath(relPath);
+  // Chokidar probes the watch root itself before its children. The ignore
+  // package rejects empty, dot, absolute, and parent-relative paths.
+  if (!rel || rel === '.' || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return false;
+  let ignored = false;
+  for (const { baseDir, matcher } of scopes) {
+    let scopedPath = rel;
+    if (baseDir) {
+      if (rel === baseDir) continue;
+      if (!rel.startsWith(`${baseDir}/`)) continue;
+      scopedPath = rel.slice(baseDir.length + 1);
+    }
+    // A trailing slash means DIRECTORY to gitignore. Do not try both forms:
+    // that would also hide a regular file matched only by a directory rule.
+    if (isDirectory && !scopedPath.endsWith('/')) scopedPath += '/';
+    const result = matcher.test(scopedPath);
+    if (result.ignored) ignored = true;
+    else if (result.unignored) ignored = false;
+  }
+  return ignored;
+}
 import {
   combineStaleFileCompositions,
   composeStaleFiles,
@@ -497,10 +565,11 @@ export class McpWatcher {
 
   async start(): Promise<void> {
     this.stopping = false;
+    const gitignoreScopes = await loadGitignoreScopes(this.rootPath);
     // Auto-degrade live embedding on very large trees (Step 4). Counting is
     // bounded — it stops as soon as the ceiling is exceeded.
     if (this.embed) {
-      const count = await this.countSourceFiles(this.embedFileCeiling + 1);
+      const count = await this.countSourceFiles(this.embedFileCeiling + 1, gitignoreScopes);
       if (count > this.embedFileCeiling) {
         this.embedDegraded = true;
         process.stderr.write(
@@ -520,9 +589,9 @@ export class McpWatcher {
         // directory name. This prunes the ignored directory itself (chokidar
         // never opens FDs inside it — the EMFILE fix) without false-matching on
         // parent path components above the watch root.
-        ignored: (filePath: string) => {
+        ignored: (filePath: string, stats?: Stats) => {
           const rel = relative(rootPath, filePath);
-          return isIgnoredRelPath(rel) || extraIgnore.some((p) => rel.includes(p));
+          return isIgnoredRelPath(rel) || isGitignoredPath(rel, gitignoreScopes, stats?.isDirectory()) || extraIgnore.some((p) => rel.includes(p));
         },
         persistent: true,
         ignoreInitial: true,
@@ -2911,7 +2980,7 @@ export class McpWatcher {
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
   /** Bounded count of watched source files; stops early once `cap` is exceeded. */
-  private async countSourceFiles(cap: number): Promise<number> {
+  private async countSourceFiles(cap: number, gitignoreScopes: GitignoreScope[]): Promise<number> {
     let count = 0;
     const walk = async (dir: string): Promise<void> => {
       if (count > cap) return;
@@ -2926,8 +2995,8 @@ export class McpWatcher {
         const abs = join(dir, entry.name);
         const rel = relative(this.rootPath, abs);
         if (entry.isDirectory()) {
-          if (!isIgnoredRelPath(rel)) await walk(abs);
-        } else if (entry.isFile() && SOURCE_EXTENSIONS.test(entry.name) && !isIgnoredRelPath(rel)) {
+          if (!isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes, true)) await walk(abs);
+        } else if (entry.isFile() && SOURCE_EXTENSIONS.test(entry.name) && !isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes)) {
           count++;
         }
       }

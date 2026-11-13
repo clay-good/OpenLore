@@ -118,6 +118,44 @@ describe('McpWatcher — real fs watcher', () => {
     watchers.length = 0;
   });
 
+  it('starts with gitignore rules, prunes build directories, and watches a nested re-inclusion', async () => {
+    const { rootPath, outputPath, contextPath } = await setupProject();
+    await mkdir(join(rootPath, 'cargo-cache', 'debug'), { recursive: true });
+    await mkdir(join(rootPath, 'src'));
+    await writeFile(join(rootPath, '.gitignore'), 'cargo-cache/\n*.cache.ts\n');
+    await writeFile(join(rootPath, 'src', '.gitignore'), '!kept.cache.ts\n');
+
+    const kept = join(rootPath, 'src', 'kept.cache.ts');
+    const ignored = join(rootPath, 'cargo-cache', 'debug', 'generated.ts');
+    const ignoredFile = join(rootPath, 'src', 'ignored.cache.ts');
+    await writeFile(kept, 'export function before() {}\n');
+    await writeFile(ignored, 'export function generatedBefore() {}\n');
+    await writeFile(ignoredFile, 'export function ignoredBefore() {}\n');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await expect(watcher.start()).resolves.not.toThrow();
+
+    // Inspect real chokidar subscriptions, not merely the absence of events:
+    // ignored build directories must be pruned before they consume watch FDs.
+    const source = (watcher as unknown as {
+      fsWatcher?: { getWatched(): Record<string, string[]> };
+    }).fsWatcher;
+    expect(source).toBeDefined();
+    const directories = Object.keys(source!.getWatched());
+    expect(directories.some((p) => /(^|[/\\])cargo-cache([/\\]|$)/.test(p))).toBe(false);
+
+    await writeFile(ignored, 'export function generatedAfter() {}\n');
+    await writeFile(ignoredFile, 'export function ignoredAfter() {}\n');
+    await writeFile(kept, 'export function after() {}\n');
+    await settle(contextPath);
+
+    const updated = JSON.parse(await readFile(contextPath, 'utf8')) as LLMContext;
+    expect(updated.signatures?.find((s) => s.path === 'src/kept.cache.ts')?.entries.some((e) => e.name === 'after')).toBe(true);
+    expect(updated.signatures?.some((s) => s.path === 'cargo-cache/debug/generated.ts')).toBe(false);
+    expect(updated.signatures?.some((s) => s.path === 'src/ignored.cache.ts')).toBe(false);
+  }, 20_000);
+
   it('picks up a changed TypeScript file and updates llm-context.json', async () => {
     const { rootPath, outputPath, contextPath } = await setupProject();
 
