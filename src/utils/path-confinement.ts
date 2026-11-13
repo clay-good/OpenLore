@@ -15,7 +15,7 @@
 
 import { constants, realpathSync, lstatSync, readlinkSync, type Stats } from 'node:fs';
 import { link, lstat, mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises';
-import { basename, dirname, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /** Upper bound on a symlink chain, so a cycle cannot spin the resolver. */
@@ -135,6 +135,18 @@ function sameFile(
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+/** Detect actual symlink components without treating Windows short names as links. */
+function hasSymlinkComponent(filePath: string): boolean {
+  const absolute = resolve(filePath);
+  const { root } = parse(absolute);
+  let current = root;
+  for (const component of absolute.slice(root.length).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    if (lstatSync(current).isSymbolicLink()) return true;
+  }
+  return false;
+}
+
 /**
  * Read a repository file through one descriptor and disclose its contents only while
  * that descriptor still names the canonically confined file. The repeated identity
@@ -173,7 +185,7 @@ export async function readFileConfinedWithStat(
   const canonicalRoot = await realpath(absDir);
   const canonicalPath = await realpath(lexicalPath);
   safeJoin(canonicalRoot, canonicalPath);
-  if (rejectSymlinkPath && canonicalPath !== lexicalPath) {
+  if (rejectSymlinkPath && hasSymlinkComponent(lexicalPath)) {
     throw new Error(`Path escape blocked: symbolic-link path component in "${filePath}"`);
   }
 
@@ -192,7 +204,10 @@ export async function readFileConfinedWithStat(
     const verifyIdentity = async (descriptorStat: Stats): Promise<void> => {
       const currentCanonicalPath = await realpath(canonicalPath);
       safeJoin(canonicalRoot, currentCanonicalPath);
-      if (rejectSymlinkPath && currentCanonicalPath !== canonicalPath) {
+      if (
+        rejectSymlinkPath &&
+        (currentCanonicalPath !== canonicalPath || hasSymlinkComponent(lexicalPath))
+      ) {
         throw new Error(`Confined read target changed during access: "${filePath}"`);
       }
       const current = await stat(currentCanonicalPath);

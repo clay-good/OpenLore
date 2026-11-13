@@ -136,6 +136,21 @@ describe('safeOpenspecDir', () => {
 });
 
 describe('readFileConfined', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'accepts Windows short-name paths when symlink paths are rejected',
+    async ({ skip }) => {
+      const aliasRoot = await mkdtemp(join(tmpdir(), 'openlore-confine-alias-'));
+      try {
+        await writeFile(join(aliasRoot, 'state.json'), '{"ok":true}');
+        if ((await realpath(aliasRoot)) === aliasRoot) skip();
+        await expect(readFileConfinedWithStat(aliasRoot, 'state.json', undefined, true))
+          .resolves.toMatchObject({ content: '{"ok":true}' });
+      } finally {
+        await rm(aliasRoot, { recursive: true, force: true });
+      }
+    }
+  );
+
   it('reads a stable in-root regular file through its confined descriptor', async () => {
     await expect(readFileConfined(root, 'openspec/specs/core/spec.md')).resolves.toBe('# real spec\n');
   });
@@ -181,6 +196,13 @@ describe('readFileConfined', () => {
   it('refuses an escaping symlink before returning any bytes', async () => {
     await expect(readFileConfined(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
     await expect(readFileConfinedWithStat(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
+  });
+
+  it('rejects an in-root symlink when the caller disallows symlink paths', async () => {
+    const alias = join(root, 'openspec', 'specs', 'core', 'aliased.md');
+    await symlink(join(root, 'openspec', 'specs', 'core', 'spec.md'), alias);
+    await expect(readFileConfinedWithStat(root, 'openspec/specs/core/aliased.md', undefined, true))
+      .rejects.toThrow(/symbolic-link path component/);
   });
 });
 
