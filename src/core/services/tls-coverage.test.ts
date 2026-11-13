@@ -40,7 +40,7 @@ const SRC = join(REPO_ROOT, 'src');
  * opt in, which is a behaviour change in its own right.
  */
 const EXEMPT: { file: string; line: number; why: string }[] = [
-  { file: 'src/core/configuration/inspect.ts', line: 514, why: 'validated loopback http:// daemon descriptor; observational health only' },
+  { file: 'src/core/configuration/inspect.ts', line: 510, why: 'validated loopback http:// daemon descriptor; observational health only' },
   { file: 'src/core/configuration/observe.ts', line: 40, why: 'validated loopback http:// daemon descriptor; observational policy health only' },
   { file: 'src/core/services/serve-client.ts', line: 97, why: 'loopback http:// health probe' },
   { file: 'src/core/services/serve-client.ts', line: 194, why: 'loopback http:// daemon call' },

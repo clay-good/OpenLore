@@ -42,6 +42,7 @@ import type {
 
 const ignore =
   (ignoreModule as typeof ignoreModule & { default?: typeof ignoreModule }).default ?? ignoreModule;
+const TRACKED_FILES_TIMEOUT_MS = 250;
 const DECLARATIVE = new Set([
   'package.json',
   'tsconfig.json',
@@ -140,7 +141,6 @@ export async function readConfiguration(options: ConfigurationOptions) {
 async function trackedFiles(
   root: string,
   cap: number,
-  milliseconds: number,
   signal?: AbortSignal
 ): Promise<{ paths: Set<string>; partial: boolean }> {
   return new Promise((resolveResult) => {
@@ -157,10 +157,7 @@ async function trackedFiles(
       partial = true;
       child.kill();
     };
-    const timer = setTimeout(
-      end,
-      Math.max(1, Math.min(milliseconds, CONFIGURATION_HARD_BUDGET.milliseconds))
-    );
+    const timer = setTimeout(end, TRACKED_FILES_TIMEOUT_MS);
     const abort = () => end();
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout?.setEncoding('utf8');
@@ -274,7 +271,6 @@ export async function inspectConfiguration(
   const tracked = await trackedFiles(
     config.root,
     budget.entries,
-    Math.min(250, budget.milliseconds),
     options.signal
   );
   if (tracked.partial)
