@@ -112,3 +112,13 @@ notifications. These two qualification gates remain open in `tasks.md`.
 
 Task 8.5 remains open for a fully green qualification run on the supported CI runner; the
 pre-existing two-core diagnostic assertion is explicitly not counted as a pass.
+
+## Live agent usability evidence
+
+See `docs/configuration-assistant-agent-trial.md` and
+`bench/results/configuration-agent-2026-11-13/`. Two independent participants used real MCP stdio,
+selected their own candidates and calls, stopped for exact-plan test-host approval, and completed
+apply/verify with preserved choices and honest pending runtime observations. The first needed five
+rejected preview attempts; a shared detailed candidate schema and skill example removed those
+retries for a fresh participant. Native Codex was blocked by authentication before any tool call;
+this is not a native Pi/Codex UI pass or a notification precision/platform qualification.

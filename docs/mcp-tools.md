@@ -126,7 +126,7 @@ live registry.
 <!-- standing-context-cost:start -->
 | Preset | Tools | Measured tokens | Budget |
 |---|---:|---:|---:|
-| `configuration` | 1 | 186 | 200 |
+| `configuration` | 1 | 545 | 585 |
 | `minimal` | 6 | 2,854 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
 | `memory` | 3 | 1,510 | 1,610 |

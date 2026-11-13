@@ -1,3 +1,4 @@
+import { configurationCandidateSchema } from '../core/configuration/tool-schema.js';
 import { configureOpenLore, configurationRoot, reviewConfigurationOnIdle, type ConfigurationRequest } from '../api/configuration.js';
 /**
  * openlore Pi extension — src/pi/extension.ts
@@ -2708,7 +2709,7 @@ function registerOpenlore(
     promptGuidelines: ['Use openlore_configure to change the LLM provider, model, or embedding settings.'],
     parameters: Type.Object({
       action: Type.Optional(Type.Union(['inspect','preview','apply','verify','revert'].map(value => Type.Literal(value)))),
-      candidate: Type.Optional(Type.Unknown()),
+      candidate: Type.Optional(Type.Unsafe(configurationCandidateSchema)),
       activate: Type.Optional(Type.Boolean({description:'Request authenticated daemon restart after applying; requires host confirmation.'})),
       plan: Type.Optional(Type.Unknown()),
       global: Type.Optional(Type.Boolean({ description: 'Edit user-wide defaults instead of project configuration.' })),

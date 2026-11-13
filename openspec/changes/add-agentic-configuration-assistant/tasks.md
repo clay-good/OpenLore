@@ -75,6 +75,7 @@
 - [x] 8.4 Check config schema/version fixtures, API consumer/import graph, tool annotations/counts/payload budgets, completeness disclosures and Pi/MCP parity.
 - [ ] 8.5 Run strict OpenSpec validation, lint, typecheck, relevant unit and deterministic integration suites.
 - [x] 8.6 Document the host workflow, exception precedence, partial verification, rollback, provider/network opt-ins and notification controls.
+- [x] 8.7 Run a blind live agent usability journey through real MCP, preserve failed attempts, correct observed interface friction, and repeat on a fresh fixture.
 
 Notification rollout remains manual by default with a second host opt-in. User-rated precision/burden
 calibration and the supported Windows/Node CI matrix remain qualification gates; local validation

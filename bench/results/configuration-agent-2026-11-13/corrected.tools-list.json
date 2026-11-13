@@ -1,0 +1,145 @@
+{
+  "tools": [
+    {
+      "name": "configure_openlore",
+      "description": "Inspect repository configuration without an index or daemon; preview, apply, verify or revert a revision-bound plan. Writes require a scoped host startup grant. Does not reason with an internal model.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "directory": {
+            "type": "string",
+            "description": "Absolute path; default cwd"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "preview",
+              "apply",
+              "verify",
+              "revert"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          },
+          "candidate": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Preview only. Start with existing selection.rules plus reviewed recommendation.rule values. Omit analysis to preserve existing include/exclude patterns. Not the inspection selection or a config document.",
+            "properties": {
+              "rules": {
+                "type": "array",
+                "maxItems": 100,
+                "description": "Complete desired rule list; preserve existing rules unless the user approves replacing them.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+                    },
+                    "pattern": {
+                      "type": "string",
+                      "description": "Repository-relative gitignore pattern, e.g. build-cache/."
+                    },
+                    "lanes": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "index": {
+                          "type": "string",
+                          "enum": [
+                            "include",
+                            "exclude"
+                          ]
+                        },
+                        "watch": {
+                          "type": "string",
+                          "enum": [
+                            "include",
+                            "exclude"
+                          ]
+                        },
+                        "embed": {
+                          "type": "string",
+                          "enum": [
+                            "include",
+                            "exclude"
+                          ]
+                        }
+                      }
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "evidenceRefs": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "pattern",
+                    "lanes",
+                    "reason"
+                  ]
+                }
+              },
+              "reviewMode": {
+                "type": "string",
+                "enum": [
+                  "manual",
+                  "notify"
+                ]
+              },
+              "analysis": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "includePatterns": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "excludePatterns": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "rules"
+            ]
+          },
+          "plan": {
+            "type": "object",
+            "description": "Exact complete preview result, unchanged, required for apply/verify/revert."
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Configure Openlore",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    }
+  ]
+}

@@ -29,3 +29,17 @@ Do not interrupt the user on that basis. Notify only after an opted-in host prov
 actionable discrepancy, applies persistence/hysteresis, and acquires a shared delivery claim.
 Keep dismissals across harmless evidence changes; deliver one grouped passive notice while idle.
 No automatic policy application or internal LLM loop is part of this workflow.
+
+For `preview`, `candidate` is **not** the inspection's `selection` or a full config document.
+Use `{ "rules": [...existingRules, ...reviewedRules], "reviewMode": "manual" }`.
+Existing rules come from `selection.rules`; each reviewed rule is `recommendations[i].rule`.
+Omit `analysis` to retain existing include/exclude patterns. To change those deliberately,
+use `candidate.analysis.includePatterns` / `candidate.analysis.excludePatterns`.
+For example (only after reviewing this output directory):
+
+```json
+{"action":"preview","candidate":{"rules":[{"id":"build-output","pattern":"build-cache/","lanes":{"watch":"exclude","embed":"exclude"},"reason":"Declared compiler output; representative files reviewed"}],"reviewMode":"manual"}}
+```
+
+Pass the **complete, unchanged preview response** as `plan` for `apply`, `verify` or `revert`.
+Do not reconstruct it from the diff, drop identity fields, or add authorization fields.

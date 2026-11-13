@@ -119,7 +119,7 @@ are subscription counts and one local timing sample, not OS handle counts or a g
 The real-watcher fixture also grows the excluded tree to 1,000 directories and asserts unchanged
 subscriptions and bounded discovery entry counts. It is included in deterministic integration checks.
 
-The opt-in MCP management schema measures 186 tokens under `utf8-bytes-div-4-v1`, with a 200-token
+The opt-in MCP management schema measures 545 tokens under `utf8-bytes-div-4-v1`, with a 585-token
 budget. The default surface remains 15 tools / 5,248 tokens. Notification tests include 200 quiet
 metadata revisions plus positive, transient, dismissal, snooze and host-delivery controls. This is
 controlled precision evidence; it does not establish user-rated false-alarm rates in production.
@@ -128,3 +128,6 @@ Cancellation propagates the caller's `AbortSignal.reason` (normally `AbortError`
 A cancellation after publication leaves a retained pending receipt; it does not erase the user's config.
 The inspection's daemon compatibility label covers the validated descriptor/protocol; required tools
 and realized policy are separate verification observations.
+
+A [live agent usability trial](configuration-assistant-agent-trial.md) exercises discovery, proposal,
+host approval, publication and honest partial verification through the real MCP transport.

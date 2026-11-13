@@ -1,3 +1,4 @@
+import { configurationCandidateSchema } from '../../core/configuration/tool-schema.js';
 import { redactSecretString } from '../../core/services/secret-redaction.js';
 import { configureOpenLoreMcp } from '../../core/configuration/mcp.js';
 /**
@@ -185,7 +186,7 @@ export const TOOL_DEFINITIONS = [
   {
     name:'configure_openlore',
     description:'Inspect repository configuration without an index or daemon; preview, apply, verify or revert a revision-bound plan. Writes require a scoped host startup grant. Does not reason with an internal model.',
-    inputSchema:{type:'object',additionalProperties:false,properties:{directory:{type:'string',description:'Absolute path; default cwd'},action:{type:'string',enum:['inspect','preview','apply','verify','revert']},scope:{type:'string'},candidate:{type:'object'},plan:{type:'object'}},required:['action']},
+    inputSchema:{type:'object',additionalProperties:false,properties:{directory:{type:'string',description:'Absolute path; default cwd'},action:{type:'string',enum:['inspect','preview','apply','verify','revert']},scope:{type:'string'},candidate:configurationCandidateSchema,plan:{type:'object',description:'Exact complete preview result, unchanged, required for apply/verify/revert.'}},required:['action']},
   },
   {
     name: 'orient',
@@ -2706,7 +2707,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   maxTokens: number;
   rationale: string;
 }> = {
-  configuration: {baselineTokens:186,maxTokens:200,rationale:'One opt-in management schema plus 7.5% headroom; default surface unchanged.'},
+  configuration: {baselineTokens:545,maxTokens:585,rationale:'Expanded candidate schema after live agent trial exposed five rejected preview guesses; 7.3% headroom, default surface unchanged.'},
   minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
   memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },

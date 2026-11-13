@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "passed": false,
+  "status": "blocked-authentication",
+  "openloreToolCalls": 0,
+  "reason": "401: Could not parse your authentication token. Please try signing in again.",
+  "note": "Standalone Codex stopped before any OpenLore tool call; no usability conclusion."
+}

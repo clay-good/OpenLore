@@ -1,3 +1,5 @@
+import { Compile } from 'typebox/compile';
+import type { TSchema } from 'typebox';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -76,12 +78,12 @@ describe('configuration host adapters', () => {
   it('supports Pi structured reads without UI or a global executable and refuses unconfirmed writes', async () => {
     const tools = new Map<
       string,
-      { name: string; execute: (...args: unknown[]) => Promise<unknown> }
+      { name: string; parameters: TSchema; execute: (...args: unknown[]) => Promise<unknown> }
     >();
     const resolveDaemon = vi.fn();
     const restartDaemon = vi.fn();
     const pi = {
-      registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) =>
+      registerTool: (tool: { name: string; parameters: TSchema; execute: (...args: unknown[]) => Promise<unknown> }) =>
         tools.set(tool.name, tool),
       registerCommand: vi.fn(),
       on: vi.fn(),
@@ -93,6 +95,15 @@ describe('configuration host adapters', () => {
       ui: { confirm: vi.fn(), notify: vi.fn() },
     } as unknown as ExtensionContext;
     const tool = tools.get('openlore_configure')!;
+    const validateArguments = Compile(tool.parameters);
+    expect(validateArguments.Check({ action: 'preview', candidate })).toBe(true);
+    // The live participant guessed both inspection and whole-config wrappers.
+    for (const wrong of [
+      { ...candidate, excludePatterns: ['vendor/**'] },
+      { selection: candidate },
+      { filePolicies: candidate },
+    ]) expect(validateArguments.Check({ action: 'preview', candidate: wrong })).toBe(false);
+
     const inspected = await tool.execute(
       'inspect',
       { action: 'inspect' },

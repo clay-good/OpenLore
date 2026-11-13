@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "kind": "live-agent-usability",
+  "approval": "scripted host approval of independently checked exact plan",
+  "runner": "independent collaboration agent through real MCP stdio bridge",
+  "sourceCommit": "350aab4d93ff29a355f53ac785ae84f8d7f4a3b3",
+  "assessmentCliSha256": "336ff413815cff6034fd51576fbd7c29973a9e604f0181c891346e53ba15fa24",
+  "scenario": "extension-only configuration, ignored build output, versioned generated client, inherited operator choices",
+  "passed": true,
+  "failedProposalCalls": 0,
+  "proposalCalls": [
+    "inspect",
+    "preview"
+  ],
+  "applicationCalls": [
+    "apply",
+    "verify"
+  ],
+  "selection": {
+    "outputWatched": false,
+    "clientIndexed": true,
+    "sourceIndexed": true,
+    "sourceWatched": true
+  },
+  "answerFiles": [],
+  "sourceTreeDirty": true,
+  "limitations": [
+    "One live agent journey; not a multi-model success-rate estimate.",
+    "Approval is supplied by the test host; no human UI approval is claimed.",
+    "No index/daemon exists in this fixture; honest pending verification is required."
+  ]
+}
