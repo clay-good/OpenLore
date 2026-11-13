@@ -1,4 +1,4 @@
-import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
+import { constants, closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import ignoreModule from 'ignore';
 import { safeJoin } from '../../utils/path-confinement.js';
@@ -27,14 +27,14 @@ export class ConfigurationWatchPolicy {
       let fd: number | undefined;
       try {
         const path = safeJoin(this.root, join(dir, name));
-        if (lstatSync(path).isSymbolicLink()) continue;
         fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
         const info = fstatSync(fd);
         if (!info.isFile() || info.size > 64 * 1024)
           throw new Error('Ignore evidence exceeds watch-policy budget');
         matcher.add(readFileSync(fd, 'utf8'));
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'ELOOP') throw error;
       } finally {
         if (fd !== undefined) closeSync(fd);
       }

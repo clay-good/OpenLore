@@ -157,7 +157,10 @@ async function trackedFiles(
       partial = true;
       child.kill();
     };
-    const timer = setTimeout(end, milliseconds);
+    const timer = setTimeout(
+      end,
+      Math.max(1, Math.min(milliseconds, CONFIGURATION_HARD_BUDGET.milliseconds))
+    );
     const abort = () => end();
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout?.setEncoding('utf8');

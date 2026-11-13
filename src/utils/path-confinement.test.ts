@@ -211,6 +211,16 @@ describe('confinedAtomicWriteFile expected identity', () => {
     await expect(readFile(path, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('does not treat a missing target parent as a missing recovery journal', async () => {
+    const path = join(root, 'removed-parent', 'recover.md');
+    const journal = join(root, 'recover-missing-parent.journal');
+    const guardName = '.recover.md.openlore-cas-backup.36b8f84d-0a96-4eeb-8694-73f7a330e775';
+    await writeFile(journal, JSON.stringify({ guard: guardName }));
+
+    await expect(recoverConfinedAtomicWriteFile(root, path, journal)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(journal, 'utf-8')).resolves.toBe(JSON.stringify({ guard: guardName }));
+  });
+
   it('keeps the journal when a post-rename read fails, then recovers', async () => {
     const path = join(root, 'openspec', 'specs', 'core', 'recover-after-read-error.md');
     const journal = join(root, 'recover-after-read-error.journal');

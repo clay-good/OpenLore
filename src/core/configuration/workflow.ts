@@ -108,16 +108,50 @@ function publishPatch(
   inverse = false
 ): void {
   const value = inverse ? patch.before : patch.after;
-  if (patch.field === 'analysis' || patch.field === 'configurationAssistant') {
-    const next = { ...object(raw[patch.field]) };
-    for (const key of Object.keys(object(patch.after))) {
-      if (Object.hasOwn(object(value), key)) next[key] = object(value)[key];
-      else delete next[key];
+  if (patch.field === 'analysis') {
+    const next = { ...object(raw.analysis) };
+    const proposed = object(patch.after);
+    const previous = object(value);
+    if (Object.hasOwn(proposed, 'maxFiles')) {
+      if (Object.hasOwn(previous, 'maxFiles')) next.maxFiles = previous.maxFiles;
+      else delete next.maxFiles;
     }
-    if (Object.keys(next).length) raw[patch.field] = next;
-    else delete raw[patch.field];
-  } else if (value === undefined) delete raw[patch.field];
-  else raw[patch.field] = value;
+    if (Object.hasOwn(proposed, 'includePatterns')) {
+      if (Object.hasOwn(previous, 'includePatterns')) next.includePatterns = previous.includePatterns;
+      else delete next.includePatterns;
+    }
+    if (Object.hasOwn(proposed, 'excludePatterns')) {
+      if (Object.hasOwn(previous, 'excludePatterns')) next.excludePatterns = previous.excludePatterns;
+      else delete next.excludePatterns;
+    }
+    if (Object.keys(next).length) raw.analysis = next;
+    else delete raw.analysis;
+    return;
+  }
+  if (patch.field === 'configurationAssistant') {
+    const next = { ...object(raw.configurationAssistant) };
+    if (Object.hasOwn(object(patch.after), 'reviewMode')) {
+      if (Object.hasOwn(object(value), 'reviewMode'))
+        next.reviewMode = object(value).reviewMode;
+      else delete next.reviewMode;
+    }
+    if (Object.keys(next).length) raw.configurationAssistant = next;
+    else delete raw.configurationAssistant;
+    return;
+  }
+  const set = (key: string) => {
+    if (value === undefined) delete raw[key];
+    else raw[key] = value;
+  };
+  switch (patch.field) {
+    case 'filePolicies': set('filePolicies'); break;
+    case 'version': set('version'); break;
+    case 'projectType': set('projectType'); break;
+    case 'openspecPath': set('openspecPath'); break;
+    case 'generation': set('generation'); break;
+    case 'createdAt': set('createdAt'); break;
+    case 'lastRun': set('lastRun'); break;
+  }
 }
 function hasAuthority(
   options: ConfigurationOptions,

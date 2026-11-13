@@ -263,33 +263,36 @@ export async function recoverConfinedAtomicWriteFile(
     ? canonicalRoot
     : lexicalRoot;
   const target = safeJoin(base, relative(base, requested));
-  // A first publication has no journal and its parent may not exist yet.
-  try { await lstat(recoveryJournalPath); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  // A first publication has no journal and its parent may not exist yet. Open
+  // with O_NOFOLLOW and inspect the opened handle so a path swap cannot replace
+  // the journal between a separate lstat and open.
   const parent = dirname(target);
   const expectedParent = resolve(canonicalRoot, relative(base, parent));
-  const canonicalParent = await realpath(parent);
-  if (canonicalParent !== expectedParent) {
-    throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
-  }
 
   let journal: { guard?: unknown };
+  let canonicalParent: string;
+  let handle: Awaited<ReturnType<typeof open>>;
   try {
-    const handle = await open(recoveryJournalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const info = await handle.stat();
-      if (!info.isFile()) throw new Error(`Confined write recovery journal is not a regular file: "${recoveryJournalPath}"`);
-      const buffer = Buffer.alloc(MAX_RECOVERY_JOURNAL_BYTES + 1);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      if (bytesRead > MAX_RECOVERY_JOURNAL_BYTES) {
-        throw new Error(`Confined write recovery journal is too large: "${recoveryJournalPath}"`);
-      }
-      journal = JSON.parse(buffer.subarray(0, bytesRead).toString('utf-8')) as { guard?: unknown };
-    }
-    finally { await handle.close(); }
+    handle = await open(recoveryJournalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
+  }
+  try {
+    canonicalParent = await realpath(parent);
+    if (canonicalParent !== expectedParent) {
+      throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
+    }
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error(`Confined write recovery journal is not a regular file: "${recoveryJournalPath}"`);
+    const buffer = Buffer.alloc(MAX_RECOVERY_JOURNAL_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_RECOVERY_JOURNAL_BYTES) {
+      throw new Error(`Confined write recovery journal is too large: "${recoveryJournalPath}"`);
+    }
+    journal = JSON.parse(buffer.subarray(0, bytesRead).toString('utf-8')) as { guard?: unknown };
+  } finally {
+    await handle.close();
   }
 
   const prefix = `.${basename(target)}.openlore-cas-backup.`;
