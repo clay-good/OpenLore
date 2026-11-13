@@ -21,6 +21,8 @@
  *    completeness test names any residual drift.
  */
 
+import { validateFilePolicies } from '../configuration/validation.js';
+
 import type {
   AnalysisConfig,
   BlastRadiusConfig,
@@ -44,7 +46,7 @@ import type {
 } from '../../types/index.js';
 
 /** The current config-schema version stamped into `.openlore/config.json`. */
-export const CONFIG_SCHEMA_VERSION = '1.2.0';
+export const CONFIG_SCHEMA_VERSION = '1.3.0';
 
 /**
  * Top-level value shapes retained as the public compatibility map for callers and tests.
@@ -303,6 +305,8 @@ const hooksRule: ConfigRule = {
 const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
+    filePolicies: {kind:'object', strict:true, fields:{rules:{kind:'array',element:{kind:'object',strict:true,fields:{id:stringRule,pattern:stringRule,reason:stringRule,evidenceRefs:{kind:'array',element:stringRule},lanes:{kind:'object',strict:true,fields:{index:{kind:'enum',values:['include','exclude']},watch:{kind:'enum',values:['include','exclude']},embed:{kind:'enum',values:['include','exclude']}},required:[]}},required:['id','pattern','reason','lanes']}}},required:['rules']},
+    configurationAssistant: {kind:'object',strict:true,fields:{reviewMode:{kind:'enum',values:['manual','notify']}},required:[]},
     version: stringRule,
     projectType: { kind: 'enum', values: ['nodejs', 'python', 'rust', 'go', 'java', 'ruby', 'php', 'unknown'] },
     openspecPath: stringRule,
@@ -344,6 +348,8 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
  * here fails `tsc` (and CI); {@link config-schema.test.ts} binds it at runtime too.
  */
 export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> = {
+  filePolicies: 'object',
+  configurationAssistant: 'object',
   version: 'string',
   projectType: 'string',
   openspecPath: 'string',
@@ -808,6 +814,7 @@ export function validateOpenLoreConfig(
   };
   validateRule(parsed, CONFIG_RULE, '', findings, true);
   if (isConfigObject(parsed)) {
+    if (parsed.filePolicies !== undefined) for (const message of validateFilePolicies(parsed.filePolicies)) findings.mismatches.push({kind:'type-mismatch',key:'filePolicies',fatal:true,message});
     const workspace = parsed.workspace;
     const shards = isConfigObject(workspace) && Array.isArray(workspace.shards)
       ? workspace.shards

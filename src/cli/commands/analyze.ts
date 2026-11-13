@@ -566,6 +566,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         opts.exclude,
         opts.maxFiles,
         analysisGeneratedExcludes(rootPath, outputPath, openloreConfig.openspecPath),
+        openloreConfig.filePolicies,
       );
 
       // Skip re-analysis only when the SOURCE is unchanged since the last run — a

@@ -1,3 +1,5 @@
+import { redactSecretString } from '../../core/services/secret-redaction.js';
+import { configureOpenLoreMcp } from '../../core/configuration/mcp.js';
 /**
  * openlore MCP Server
  *
@@ -180,6 +182,11 @@ const FEDERATION_PROPS = {
 } as const;
 
 export const TOOL_DEFINITIONS = [
+  {
+    name:'configure_openlore',
+    description:'Inspect repository configuration without an index or daemon; preview, apply, verify or revert a revision-bound plan. Writes require a scoped host startup grant. Does not reason with an internal model.',
+    inputSchema:{type:'object',additionalProperties:false,properties:{directory:{type:'string',description:'Absolute path; default cwd'},action:{type:'string',enum:['inspect','preview','apply','verify','revert']},scope:{type:'string'},candidate:{type:'object'},plan:{type:'object'}},required:['action']},
+  },
   {
     name: 'orient',
     description:
@@ -2504,6 +2511,7 @@ const _RWD  = { readOnlyHint: false, destructiveHint: true, idempotentHint: fals
 const _RWDI = { readOnlyHint: false, destructiveHint: true, idempotentHint: true  } as const;
 
 const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW | typeof _RWD | typeof _RWDI> = {
+  configure_openlore: _RWD,
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
   prepare_spec_generation: _RO, prepare_spec_repair: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
@@ -2618,6 +2626,7 @@ const MINIMAL_TOOLS = new Set([
 // (orient + search + governance) omits. CodeGraph wins its benchmark with a
 // surface like this; openlore's was either too lean (no traversal) or all ~60.
 export const TOOL_PRESETS: Record<string, Set<string>> = {
+  configuration: new Set(['configure_openlore']),
   minimal: MINIMAL_TOOLS,
   // Graph-navigation core: orient to enter, then traverse/trace/impact + compact
   // symbol bodies — no governance tools, no inventories.
@@ -2697,6 +2706,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   maxTokens: number;
   rationale: string;
 }> = {
+  configuration: {baselineTokens:186,maxTokens:200,rationale:'One opt-in management schema plus 7.5% headroom; default surface unchanged.'},
   minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
   memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },
@@ -3065,6 +3075,16 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       if (!checked.ok) return checked.result;
       directory = checked.directory;
       (args as Record<string, unknown>).directory = directory;
+    }
+
+    if (name === 'configure_openlore') {
+      try {
+        const result = await configureOpenLoreMcp(args as Record<string,unknown>,directory,extra.signal);
+        const outcome = (result as {outcome?:string}).outcome;
+        return {content:[{type:'text' as const,text:JSON.stringify(result)}],isError:outcome !== undefined && ['blocked','stale-plan','needs-input','failed'].includes(outcome)};
+      } catch (error) {
+        return {content:[{type:'text' as const,text:JSON.stringify({version:1,outcome:'failed',reason:sanitizeForTerminal(redactSecretString(error instanceof Error ? error.message : String(error)),{keepNewlines:true}),recovery:'Inspect current configuration and retry the original plan to recover its retained operation receipt.'})}],isError:true};
+      }
     }
 
     if (options.watchAuto && !autoWatcher) {
@@ -3481,7 +3501,7 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + certify_merge + fleet_status + declare_footprint + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
+  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "configuration" = provider-free configure_openlore management; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + certify_merge + fleet_status + declare_footprint + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
   .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the "${LEAN_DEFAULT_PRESET}" default is recommended.`)
   .option('--list-tools', 'Print the active tool surface grouped by capability family (navigate/change/remember/verify/coordinate/federate) and exit — does not start the server. Respects --preset / --all-tools.')
   .action((options: McpServerOptions) => startMcpServer(options));

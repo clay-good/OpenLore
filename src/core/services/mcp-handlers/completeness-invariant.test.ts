@@ -223,6 +223,11 @@ describe('`complete: true` is still reachable (the fix is not "always false")', 
     expect(boundaryOf(twice).incompleteBecause).toEqual(boundaryOf(once).incompleteBecause);
   });
 
+  it('does not coerce a malformed outcome from untrusted data', () => {
+    const answer = {...JSON.parse('{"outcome":{"toString":"not-callable"}}'),confidenceBoundary:cleanBoundary()};
+    expect(() => reconcileCompleteness(answer)).not.toThrow();
+  });
+
   it('passes a non-object result through untouched', () => {
     expect(reconcileCompleteness('a bare string')).toBe('a bare string');
     expect(reconcileCompleteness(null)).toBe(null);
@@ -237,6 +242,8 @@ describe('`complete: true` is still reachable (the fix is not "always false")', 
 describe('every incomplete answer names WHICH part is incomplete', () => {
   it('each registered channel, when it fires, produces a reason naming that channel', () => {
     const firingValue: Record<string, unknown> = {
+      disclosures: [{code:'verification-pending',detail:'Watcher observation is missing.'}],
+      outcome:'applied-pending-verification',
       verdict: 'unverifiable',
       withheld: 'shallow-history',
       unsupported: true,

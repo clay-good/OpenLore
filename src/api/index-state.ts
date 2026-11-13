@@ -1,3 +1,6 @@
+import type { FilePolicies } from '../core/configuration/types.js';
+import { FilePolicyResolver, validateFilePolicies } from '../core/configuration/policy.js';
+import { readOpenLoreConfig } from '../core/services/config-manager.js';
 /**
  * `openloreIndexState` — does the persisted index still represent this working tree?
  * (change: extend-api-for-supervising-hosts)
@@ -26,6 +29,8 @@ import type { BaseOptions } from './types.js';
 
 /** The persisted configuration a fingerprint was computed under. */
 export interface IndexFingerprintConfig {
+  indexPolicyRevision?:string;
+  indexPolicies?:FilePolicies;
   includePatterns: string[];
   excludePatterns: string[];
   maxFiles: number;
@@ -58,7 +63,10 @@ function readConfig(value: unknown): IndexFingerprintConfig | null {
   const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string');
   if (!strings(c.includePatterns) || !strings(c.excludePatterns) || !strings(c.protectedExcludePatterns)) return null;
   if (typeof c.maxFiles !== 'number' || !Number.isFinite(c.maxFiles)) return null;
+  if (c.indexPolicies !== undefined && validateFilePolicies(c.indexPolicies).length) return null;
   return {
+    ...(typeof c.indexPolicyRevision === 'string' ? {indexPolicyRevision:c.indexPolicyRevision} : {}),
+    ...(c.indexPolicies ? {indexPolicies:c.indexPolicies as FilePolicies} : {}),
     includePatterns: c.includePatterns,
     excludePatterns: c.excludePatterns,
     protectedExcludePatterns: c.protectedExcludePatterns,
@@ -89,6 +97,9 @@ async function openloreIndexStateImpl(options: BaseOptions): Promise<IndexStateR
     // mismatch gets manufactured, so say what is true: this cannot be assessed.
     return { matchesWorkingTree: false, fingerprint: recorded, reason: 'config-unrecorded' };
   }
+
+  const current = await readOpenLoreConfig(root,options.configPath);
+  if ((configuration.indexPolicyRevision ?? new FilePolicyResolver().revisionFor('index')) !== new FilePolicyResolver(current?.filePolicies).revisionFor('index')) return {matchesWorkingTree:false,fingerprint:recorded,reason:'fingerprint-mismatch'};
 
   // The only expensive step in any of these reads — re-hashing the corpus. A caller that gave up
   // (a checkout superseded by the next one) should not pay for the rest of it.

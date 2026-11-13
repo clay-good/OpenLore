@@ -263,6 +263,9 @@ export async function recoverConfinedAtomicWriteFile(
     ? canonicalRoot
     : lexicalRoot;
   const target = safeJoin(base, relative(base, requested));
+  // A first publication has no journal and its parent may not exist yet.
+  try { await lstat(recoveryJournalPath); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   const parent = dirname(target);
   const expectedParent = resolve(canonicalRoot, relative(base, parent));
   const canonicalParent = await realpath(parent);
@@ -324,6 +327,8 @@ export async function confinedAtomicWriteFile(
   data: string,
   options: {
     mode?: number;
+    /** Remove the captured existing file instead of publishing data. Requires the target lock and recovery journal. */
+    removeIfUnchanged?: boolean;
     preserveMode?: boolean;
     /** Publish only if the target still has this identity; null means it must remain absent. */
     expectedIdentity?: Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs' | 'mode'> | null;
@@ -333,6 +338,7 @@ export async function confinedAtomicWriteFile(
     recoveryJournalPath?: string;
   } = {},
 ): Promise<void> {
+  if (options.removeIfUnchanged && (!options.expectedIdentity || options.expectedContent === undefined || !options.recoveryJournalPath)) throw new Error('Checked removal requires an existing snapshot and lock-bound recovery journal');
   const lexicalRoot = resolve(absRoot);
   const canonicalRoot = await realpath(lexicalRoot);
   const requested = resolve(absPath);
@@ -490,7 +496,7 @@ export async function confinedAtomicWriteFile(
         throw new Error(`Confined write conflict: target changed after it was read: "${target}"`);
       }
       try {
-        await link(temp, target); // atomic no-replace; preserves any external writer
+        if (!options.removeIfUnchanged) await link(temp, target); // atomic no-replace; preserves any external writer
       } catch (error) {
         await restoreGuard();
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') {

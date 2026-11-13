@@ -111,7 +111,7 @@ The win scales with codebase size (round-trips without → with):
 
 ## What your agent reaches for (you rarely type these)
 
-Once wired, your agent calls these over MCP on its own. The default surface is the **`substrate`** preset — **15 tools**: the navigation core, the highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and the spec composites. The lean **`navigation`** preset (10 tools) and the full **83 tools** (`--preset full`) are one flag away.
+Once wired, your agent calls these over MCP on its own. The default surface is the **`substrate`** preset — **15 tools**: the navigation core, the highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and the spec composites. The lean **`navigation`** preset (10 tools) and the full **84 tools** (`--preset full`) are one flag away.
 
 | When the agent needs to… | Tool |
 |-----------|------|
@@ -127,7 +127,7 @@ Once wired, your agent calls these over MCP on its own. The default surface is t
 | Verify a fact before asserting it | `verify_claim` — deterministic verdict + citation |
 | Record an architectural choice | `record_decision` **before** writing the code |
 
-Full reference — all 83 tools: [docs/mcp-tools.md](docs/mcp-tools.md). Ships as a Claude Code [Skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/openlore-orient/`](skills/openlore-orient/).
+Full reference — all 84 tools: [docs/mcp-tools.md](docs/mcp-tools.md). Ships as a Claude Code [Skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/openlore-orient/`](skills/openlore-orient/).
 
 ---
 
@@ -199,7 +199,7 @@ We'd rather you know these up front.
 |------------|-----|
 | **Install & wire my agent** (one command) | [install.md](docs/install.md) |
 | Understand *why* wiring an agent helps | [agent-setup.md](docs/agent-setup.md) |
-| See all **83 MCP tools** + parameters | [mcp-tools.md](docs/mcp-tools.md) |
+| See all **84 MCP tools** + parameters | [mcp-tools.md](docs/mcp-tools.md) |
 | Run the full **CLI reference** | [cli-reference.md](docs/cli-reference.md) |
 | Configure `.openlore/config.json` (incl. `enforcement.policy`) | [configuration.md](docs/configuration.md) |
 | Choose / configure an LLM provider (optional) | [providers.md](docs/providers.md) |
@@ -248,3 +248,10 @@ If OpenLore saves your agents from re-reading the same files — or catches one 
 - [OpenSpec](https://github.com/Fission-AI/OpenSpec) — spec-driven development framework
 - [AGENTS.md](AGENTS.md) — system prompt for direct LLM prompting
 - [Examples](examples/) — BMAD, Vibe, GSD, drift-demo, spec-kit integrations
+
+### Repository-aware configuration
+
+Use `/openlore configure assist` in Pi, or the opt-in MCP `configuration` preset, to inspect
+repository evidence and review independent index/watch/embed policies before applying a plan.
+The shared API is `openlore/configuration`; no global CLI or compatible daemon is required for
+inspection. [Workflow, authorization, rollback and notification controls](docs/configuration-assistant.md).

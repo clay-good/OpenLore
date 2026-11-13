@@ -1100,9 +1100,10 @@ export async function walkFingerprintCorpus(
   canonicalRoot: string,
   limits: FingerprintLimits = {},
 ): Promise<Awaited<ReturnType<FileWalker['walk']>>> {
-  const configured = limits.configuration as { includePatterns?: string[]; excludePatterns?: string[]; protectedExcludePatterns?: string[]; maxFiles?: number } | undefined;
+  const configured = limits.configuration as { includePatterns?: string[]; excludePatterns?: string[]; protectedExcludePatterns?: string[]; maxFiles?: number; indexPolicies?:import('../../configuration/types.js').FilePolicies } | undefined;
   const maxFiles = limits.maxFiles ?? configured?.maxFiles ?? DEFAULT_FINGERPRINT_MAX_FILES;
   return new FileWalker(canonicalRoot, {
+    filePolicies: configured?.indexPolicies,
     maxFiles,
     includePatterns: limits.includePatterns ?? configured?.includePatterns ?? [],
     excludePatterns: limits.excludePatterns ?? configured?.excludePatterns ?? [],
@@ -1213,6 +1214,7 @@ export async function isCacheFresh(directory: string): Promise<boolean> {
     [],
     DEFAULT_MAX_FILES,
     analysisGeneratedExcludes(directory, analysisDir, config?.openspecPath),
+    config?.filePolicies,
   );
   return isAnalysisCacheFresh(directory, analysisDir, configuration);
 }

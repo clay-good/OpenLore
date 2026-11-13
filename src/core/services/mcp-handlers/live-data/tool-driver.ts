@@ -74,6 +74,7 @@ const needEnvVar =
     f.envVar ? build(f, f.envVar) : null;
 
 export const TOOL_REGISTRY: Record<string, ToolPlan> = {
+  configure_openlore:{kind:'read',buildArgs:f => ({directory:f.directory,action:'inspect'})},
   // ── directory-only read tools ────────────────────────────────────────────
   analyze_codebase: { kind: 'read', buildArgs: (f) => ({ directory: f.directory, force: false }) },
   get_architecture_overview: { kind: 'read', buildArgs: dirOnly },
