@@ -1137,7 +1137,7 @@ SHALL be disclosed rather than silently swallowed.
 ### Requirement: TraversalToolsShareOnePrecomputedRepresentation
 
 All reachability-answering handlers (`select_tests`, `report_coverage_gaps`, `find_dead_code`,
-`blast_radius`/`change_footprint`, `find_path`, `trace_execution_path`, `analyze_env_impact`, and
+`blast_radius` (and its change-footprint projection), `find_path`, `trace_execution_path`, `analyze_env_impact`, and
 `verify_claim`'s reach kinds) SHALL traverse a single condensation/adjacency structure built or
 loaded once per artifact generation, rather than rebuilding per-call adjacency. An unfiltered
 whole-graph reach SHALL run as a topological sweep of the condensation DAG; a reach restricted to
