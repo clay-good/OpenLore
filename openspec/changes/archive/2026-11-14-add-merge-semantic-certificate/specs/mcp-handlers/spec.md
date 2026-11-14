@@ -7,11 +7,12 @@
 The system SHALL provide an opt-in `certify_merge` conclusion tool that, given two refs and their
 merge-base, deterministically certifies their structural compatibility: each symbol one side
 removed or changed in signature is joined — in both directions — against the direct call edges the
-other side added into it. Each finding SHALL be classified `incompatible` or
-`potentially-incompatible` using the same closed classification rules as public-surface
-certification — a change that cannot be proven compatible is `potentially-incompatible`, never
-silently compatible — and SHALL name the edge and the rule; the certificate SHALL name the two refs
-and the base. The verdict SHALL be presented as a sound lower bound (`no-detected-conflict`, never
+other side added into it; only direct call edges are joined. Each finding SHALL be classified
+`incompatible` (severity `error`) or `potentially-incompatible` (severity `warning`) using the same
+closed classification rules as public-surface certification — a change that cannot be proven
+compatible is `potentially-incompatible`, never silently compatible — and SHALL name the edge and
+the rule; the certificate's overall `verdict` and `summary` carry the labels, and the certificate
+SHALL name the two refs and the base. The verdict SHALL be presented as a sound lower bound (`no-detected-conflict`, never
 "safe"), and the certificate SHALL disclose that calls the other side already had, import edges,
 unindexed languages, and dynamic dispatch are not assessed. A ref that cannot be resolved SHALL be
 an error, not a certificate. Findings SHALL be emitted under the registered governance finding code
@@ -36,9 +37,11 @@ tool (what breaks when git does not).
 
 #### Scenario: The unprovable is never silently compatible
 
-- **GIVEN** one branch narrows a parameter type used by the other branch's added call
+- **GIVEN** one branch changes a parameter type in a way that cannot be proven wider or narrower
+  (an incomparable or untyped change, or a language with no signature classification), and the
+  other branch adds a call to that function
 - **WHEN** the certificate is computed
-- **THEN** the finding is `potentially-incompatible` with the rule named
+- **THEN** the finding is `potentially-incompatible`, with rule `signature-unprovable`
 
 #### Scenario: An unresolvable ref is an error
 

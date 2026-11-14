@@ -17,7 +17,6 @@
       (enforcement-policy.ts) with defaultClass 'advisory' and a description; emit violations in
       the unified `GovernanceFinding` shape
 
-## Part 2 — execution-witnessed recall calibration (deferred to a follow-up PR)
 
 ## Verification
 - [x] Checker self-test: an injected monotone-refinement violation is detected with the correct

@@ -38,7 +38,7 @@
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD SemanticChangeProvenanceIsReproducibleAndPortable (MCP tool;
-      `certify_public_surface` fold-in + the CLI remain, so the change stays open until they land)
+      `certify_public_surface` fold-in + the CLI remain)
 - [x] Archived `add-attested-governance-artifacts` as superseded (done in #603)
 
 

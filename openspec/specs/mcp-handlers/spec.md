@@ -5114,11 +5114,12 @@ this emits a portable, recomputable record a third party can verify.
 The system SHALL provide an opt-in `certify_merge` conclusion tool that, given two refs and their
 merge-base, deterministically certifies their structural compatibility: each symbol one side
 removed or changed in signature is joined — in both directions — against the direct call edges the
-other side added into it. Each finding SHALL be classified `incompatible` or
-`potentially-incompatible` using the same closed classification rules as public-surface
-certification — a change that cannot be proven compatible is `potentially-incompatible`, never
-silently compatible — and SHALL name the edge and the rule; the certificate SHALL name the two refs
-and the base. The verdict SHALL be presented as a sound lower bound (`no-detected-conflict`, never
+other side added into it; only direct call edges are joined. Each finding SHALL be classified
+`incompatible` (severity `error`) or `potentially-incompatible` (severity `warning`) using the same
+closed classification rules as public-surface certification — a change that cannot be proven
+compatible is `potentially-incompatible`, never silently compatible — and SHALL name the edge and
+the rule; the certificate's overall `verdict` and `summary` carry the labels, and the certificate
+SHALL name the two refs and the base. The verdict SHALL be presented as a sound lower bound (`no-detected-conflict`, never
 "safe"), and the certificate SHALL disclose that calls the other side already had, import edges,
 unindexed languages, and dynamic dispatch are not assessed. A ref that cannot be resolved SHALL be
 an error, not a certificate. Findings SHALL be emitted under the registered governance finding code
@@ -5143,9 +5144,11 @@ tool (what breaks when git does not).
 
 #### Scenario: The unprovable is never silently compatible
 
-- **GIVEN** one branch narrows a parameter type used by the other branch's added call
+- **GIVEN** one branch changes a parameter type in a way that cannot be proven wider or narrower
+  (an incomparable or untyped change, or a language with no signature classification), and the
+  other branch adds a call to that function
 - **WHEN** the certificate is computed
-- **THEN** the finding is `potentially-incompatible` with the rule named
+- **THEN** the finding is `potentially-incompatible`, with rule `signature-unprovable`
 
 #### Scenario: An unresolvable ref is an error
 
@@ -5157,10 +5160,12 @@ tool (what breaks when git does not).
 
 The system SHALL hold, under the opt-in coordination preset, a verification memory of typed anchored
 records, each carrying the base commit it was proven against and the symbols it was proven over.
-When a record is read, the system SHALL decide its state deterministically with the freshness
-lease — `still-valid`, `invalidated` (an anchored symbol changed), or `needs-reverification`
-(an anchor can no longer be located) — and SHALL NOT serve a record as fresh without a graph to
-check it against. The `fleet_status` conclusion SHALL report the classified records and the peer
+When a live record is read in the worktree that recorded it, the system SHALL decide its state
+deterministically with the freshness lease — `still-valid`, `invalidated` (an anchored symbol
+changed), or `needs-reverification` (an anchor cannot be located, carries no content hash, or
+cannot be checked) — and SHALL NOT serve a record as fresh without a graph to check it against. A
+record from another worktree and an ended record are not classified here; see
+`FleetRecordsAndPlansUseTheBoard`. The `fleet_status` conclusion SHALL report the classified records and the peer
 board summary, and SHALL point to the dispatch, in-flight, and landing tools by name without running
 them. Where records live, when they end, and the disclosure that no tool records a verdict yet are
 stated in `FleetRecordsAndPlansUseTheBoard`.
@@ -5174,12 +5179,14 @@ stated in `FleetRecordsAndPlansUseTheBoard`.
 
 #### Scenario: Drift invalidates the record
 
-- **GIVEN** a record whose proven symbols a later commit changed
+- **GIVEN** a live record, read in the worktree that recorded it, whose proven symbols a later
+  commit changed
 - **WHEN** `fleet_status` is read
 - **THEN** the record is `invalidated`, not fresh
 
 #### Scenario: A lost anchor is never silently trusted or dropped
 
-- **GIVEN** a record whose anchored symbol can no longer be located
+- **GIVEN** a live record, read in the worktree that recorded it, whose anchored symbol can no
+  longer be located
 - **WHEN** `fleet_status` is read
 - **THEN** the record is `needs-reverification`, surfaced as such, neither served fresh nor dropped

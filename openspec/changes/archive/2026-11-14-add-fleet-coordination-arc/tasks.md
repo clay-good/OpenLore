@@ -7,15 +7,15 @@
 
 ## Implementation
 - [x] Typed coordination verification record `{ id, verdict, branch, baseCommit, producedBy,
-      anchors }`, recorded for a clean `blast_radius` / stable `certify_public_surface` / passed
-      `certify_merge`, in a coordination-scoped JSON store (`recordVerification`)
+      anchors }` in a coordination-scoped JSON store, written through the `recordVerification` API;
+      no tool calls it yet
 - [x] Base-drift resolution: `classifyRecords` maps the freshness-lease verdict to `still-valid` /
       `invalidated` / `needs-reverification` (carry is handled upstream by the anchor system, so a
       moved-but-unchanged symbol reads fresh → still-valid); a verdict is NEVER served fresh without
       the check (no graph → every record is needs-reverification, not silently fresh)
 - [x] `fleet_status` composing conclusion: the classified records + the arc references
-      (plan_parallel_work → map_in_flight_conflicts → certify_merge) per in-flight branch, each line
-      attributed to its producing tool; references components, re-derives nothing
+      (plan_parallel_work → map_in_flight_conflicts → certify_merge) named, and the `branches` input
+      echoed; references components, re-derives nothing
 - [x] Boundary disclosure: no-graph and unanchored records → needs-reverification; advisory
 - [x] `fleet_status` MCP handler + dispatch; `coordination` preset (budget 3,100 → 3,400); family
       `coordinate`; class `conclusion`; `_RO` annotation; epistemic-lease weight; Pi NAV/review
@@ -36,7 +36,7 @@
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD FleetVerificationMemorySurvivesBaseDrift (lifecycle, the distinct
-      `carried` state + invalidating commit, live arc execution, and the CLI remain — change stays open)
+      `carried` state + invalidating commit, live arc execution, and the CLI remain —)
 
 ## Dependencies
 - [x] Requires `add-merge-semantic-certificate` (`certify_merge`) — merged (#610)
