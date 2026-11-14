@@ -1364,10 +1364,15 @@ export function searchableFieldsForFunctionRow(row: Record<string, unknown>): Se
     .filter(Boolean)
     .join('\n');
   const body = text.startsWith(`${prefix}\n`) ? text.slice(prefix.length + 1) : '';
-  // Include the language marker with the path because both occupy the same
-  // prefix segment in the flattened text scored by BM25. Every attributed
-  // token must come from that scored text; fields are not extra query inputs.
-  return { symbol, path: `[${language}] ${filePath}`, signature, doc: docstring, body };
+  // Every attributed token must come from the scored text, and from the part of it that
+  // actually contains the token. The language marker and the path occupy the same prefix
+  // SEGMENT, but they are not the same TEXT: folded together, a query for `type` matched
+  // `[TypeScript]` and the receipt named `field: "path"` for a file whose path contains no
+  // `type` at all — a receipt naming evidence the file does not contain, which is worse than
+  // no receipt (change: fix-retrieval-coverage-over-unread-content). Splitting them keeps the
+  // partition of the scored text exact (the brackets and spaces are not tokens) while letting
+  // each field answer for its own tokens.
+  return { symbol, path: filePath, language: `[${language}]`, signature, doc: docstring, body };
 }
 
 /**

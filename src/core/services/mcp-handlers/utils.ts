@@ -635,6 +635,42 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
   ));
 }
 
+/**
+ * The not-ready reasons that mean an index EXISTS and its bytes cannot be vouched for.
+ *
+ * `index-absent` and `graph-unavailable` are deliberately absent: a repository with no analysis
+ * yet, or one whose graph index a version upgrade reset, is a legitimate state that the
+ * first-run partial-serving lane answers. So is `index-unreadable`: that context MATCHES its
+ * published generation — its bytes are attested — and merely could not be read into a graph
+ * context. Retrieval does not need that context (it ranks from the vector index), and refusing on
+ * it pre-empted the staleness disclosure and the background repair that answer exactly that
+ * state. These three name bytes that are unverified or mid-rewrite.
+ */
+const UNATTESTED_INDEX_REASONS: ReadonlySet<NotReadyReason> = new Set<NotReadyReason>([
+  'index-publish-in-progress',
+  'index-generation-unavailable',
+  'index-generation-mismatch',
+]);
+
+/**
+ * Refuse to serve from an index that cannot be vouched for — the SAME refusal `get_subgraph`,
+ * `blast_radius`, `select_tests` and `find_dead_code` already emit, shared rather than
+ * reinvented (change: fix-retrieval-coverage-over-unread-content).
+ *
+ * `search_code` and `orient` read the vector index, which survives a corrupt or unattested
+ * `llm-context.json`, so they went on answering `verdict: "covered"` with
+ * `provenance: "source-derived"` over artifacts four other tools were refusing one module away.
+ * Two tools' worth of honesty existed already; this is that honesty, not a second mechanism.
+ *
+ * Returns `null` — carry on — for an absent index or an unavailable graph, so first-run partial
+ * serving is untouched. Called ONLY when the context read already returned null, so the ordinary
+ * path pays nothing for it.
+ */
+export async function refuseUnattestedIndex(directory: string): Promise<NotReadyResult | null> {
+  const verdict = await diagnoseIndexUnservable(directory);
+  return UNATTESTED_INDEX_REASONS.has(verdict.reason) ? verdict : null;
+}
+
 /** Name the entry kind a refused artifact actually is, without guessing beyond what stat saw. */
 function describeEntryKind(entry: { isSymbolicLink(): boolean; isDirectory(): boolean; isFIFO(): boolean }): string {
   if (entry.isSymbolicLink()) return 'symbolic link';
