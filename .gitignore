@@ -18,6 +18,8 @@ Thumbs.db
 !.claude/commands
 .openlore/
 .mcp.json
+# The Claude Code plugin's MCP config ships with the plugin.
+!plugin/.mcp.json
 .cursor/
 
 # --------------------

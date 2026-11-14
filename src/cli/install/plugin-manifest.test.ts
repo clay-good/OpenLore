@@ -4,6 +4,7 @@
  * wires, and with the plugin directory's review rules that a test can see without the network.
  */
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { MANAGED_HOOKS } from './adapters/claude-code.js';
@@ -78,12 +79,22 @@ describe('Claude Code plugin manifest', () => {
     expect(readJson(join(PLUGIN, '.claude-plugin', 'plugin.json')).name).toBe(entry.name);
   });
 
-  it('meets the plugin directory file rules: README, license, and no file a reviewer must hold', () => {
+  it('meets the plugin directory file rules: README, license, icon, and no file a reviewer must hold', () => {
     const words = readFileSync(join(PLUGIN, 'README.md'), 'utf8').split(/\s+/).filter(Boolean);
     expect(words.length).toBeGreaterThanOrEqual(40);
     expect(statSync(join(PLUGIN, 'LICENSE')).isFile()).toBe(true);
+    // The directory takes a square PNG of 512 to 2048 px, under 2 MB. Images are exempt from the 256 KiB hold.
+    expect(statSync(join(PLUGIN, '.claude-plugin', 'icon.png')).size).toBeLessThan(2 * 1024 * 1024);
     for (const file of filesUnder(PLUGIN)) {
+      if (file.endsWith('.png')) continue;
       expect(statSync(file).size, relative(PLUGIN, file)).toBeLessThan(256 * 1024);
     }
+  });
+
+  it('is committed in full: no plugin file is ignored by git', () => {
+    // The root .gitignore ignores `.mcp.json` everywhere; a git-hosted install would ship without the MCP server.
+    const files = filesUnder(PLUGIN).map((file) => relative(ROOT, file));
+    const ignored = spawnSync('git', ['check-ignore', '--no-index', ...files], { cwd: ROOT, encoding: 'utf8' });
+    expect(ignored.stdout.trim()).toBe('');
   });
 });
