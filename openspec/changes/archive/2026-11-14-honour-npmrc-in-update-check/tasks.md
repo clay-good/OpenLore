@@ -14,5 +14,5 @@
 - [x] 2.2 Check the real lookup against the live npm: it prints the resolved argv, `cwd`, and the version. Result: `latest: 3.2.0` in about 1.1 s. Before the array fix it returned `null`.
 
 
-> Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the
-> "Not doing" table of `ROADMAP.md` with the commit to restore them from (`0dd75dbef`).
+> Archived 2026-11-14. Manual task 2.3 (check against a private Nexus registry) was removed before
+> archiving; it is listed under "Notes for the owner" in `ROADMAP.md` (restore from `0dd75dbef`).

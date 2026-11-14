@@ -2,56 +2,46 @@
 
 ## ADDED Requirements
 
-### Requirement: CodexProposalPreparationIsInstalledWithOpenLoreOrientation
+### Requirement: PlanAuthoringPromptsReceivePreparation
 
-The OpenLore installer SHALL register a Codex prompt-submission hook for proposal preparation and
-the OpenLore MCP server needed to call `openlore_orient`. Installation SHALL preserve unrelated
-Codex configuration and SHALL use Codex's normal hook trust and activation behavior.
+At the prompt-submitted moment, the OpenLore prompt hooks (Claude Code `orient --inject`, Pi
+`before_agent_start`, Codex `orient --proposal-only`) SHALL print the proposal preparation block
+when the submitted prompt is a recognized request to write a plan, spec, or proposal. Recognition
+SHALL use a closed, documented list of commands and phrases, and SHALL NOT require OpenSpec or any
+other spec framework to be installed. A prompt that is not recognized SHALL be handled exactly as
+before.
 
-#### Scenario: Codex receives proposal preparation and orientation capability
+#### Scenario: A Spec Kit prompt gets the block
 
-- **GIVEN** Codex is selected for OpenLore installation
-- **WHEN** OpenLore writes the Codex configuration
-- **THEN** it registers the OpenLore MCP server and a managed proposal hook
-- **AND** the hook emits proposal guidance only for recognized OpenSpec proposal invocations
+- **WHEN** the user submits `/speckit.specify add rate limits` in a repository with no `openspec/` directory
+- **THEN** the hook output contains the `[OpenLore proposal preparation]` block
+- **AND** the normal task orientation for the prompt is still printed
 
-#### Scenario: Existing Codex configuration is preserved
+#### Scenario: A plain-language plan request gets the block
 
-- **GIVEN** Codex configuration contains unrelated MCP servers or prompt hooks
-- **WHEN** OpenLore installs or uninstalls its managed integration
-- **THEN** it preserves those unrelated entries
+- **WHEN** the user submits "write an implementation plan for the retry queue"
+- **THEN** the hook output contains the preparation block
 
-#### Scenario: Codex hook trust has not been granted
+#### Scenario: An ordinary prompt is unchanged
 
-- **GIVEN** the managed Codex hook is installed but not trusted or activated by Codex
-- **WHEN** the user starts a Codex session
-- **THEN** OpenLore does not bypass Codex's trust requirements
+- **WHEN** the user submits "fix the failing spec test"
+- **THEN** the hook output contains no preparation block
 
-### Requirement: PiDefaultsToOnDemandStructuralContext
+### Requirement: PlanPreparationKeepsUserIntentAndOrientsFirst
 
-The Pi extension SHALL omit the repository-wide architecture digest and spec-domain index from
-standing context by default and SHALL keep task-specific structural evidence available through
-`openlore_orient`. The `.openlore/config.json` setting `pi.contextMode: "full"` MAY restore the
-existing digest-and-index injection on every turn. For a recognized OpenSpec `propose` invocation,
-the extension SHALL inject only the concise proposal-preparation instruction in the default mode.
+The preparation block SHALL tell the agent to recover the requested outcome, the decisions the user
+explicitly accepted, the constraints, and the open questions from the conversation; to ask one
+focused question and write no plan or spec files when there is no actionable request; and otherwise
+to call `orient` with that brief before it writes. The block SHALL tell the agent to keep unchosen
+options as open questions and to disclose when orientation is unavailable. The text SHALL name no
+spec framework.
 
-#### Scenario: Default Pi turns omit standing repository summaries
+#### Scenario: The block is framework-neutral
 
-- **GIVEN** Pi is using its default context mode
-- **WHEN** the extension prepares an ordinary turn
-- **THEN** it does not append the repository architecture digest or spec-domain index
-- **AND** the `openlore_orient` tool remains available for task-specific orientation
+- **WHEN** the block is printed for any recognized prompt
+- **THEN** it contains no framework name and refers to "plan or spec files"
 
-#### Scenario: Full Pi context is explicitly enabled
+#### Scenario: Injection is turned off
 
-- **GIVEN** `.openlore/config.json` sets `pi.contextMode` to `full`
-- **WHEN** the extension prepares a turn
-- **THEN** it appends the architecture digest and spec-domain index as it does today
-
-#### Scenario: A proposal turn receives only a concise instruction
-
-- **GIVEN** Pi is in its default context mode and a supported OpenSpec `propose` invocation is
-  recognized
-- **WHEN** the extension prepares the turn
-- **THEN** it injects the concise proposal-preparation instruction
-- **AND** leaves intent synthesis and task-specific `openlore_orient` invocation to the agent
+- **WHEN** `.openlore/config.json` sets `contextInjection.mode` to `off`
+- **THEN** no preparation block is printed

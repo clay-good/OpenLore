@@ -32,13 +32,13 @@
 - [x] in-toto Statement v1 envelope validation. DONE: a local, dependency-free STRUCTURAL check of
       the envelope (`validateInTotoStatement`), run on every `format: "in-toto"` emission and
       disclosed as the `statementValidation` receipt. NOT DONE: validation against an external
-      validator or a published schema, and the CLI surface — both still open. The check also
+      validator or a published schema, and the CLI surface — both cut (see ROADMAP.md). The check also
       cannot say the subject digest identifies an artifact (it addresses the predicate body), and
       that deviation is disclosed in the note and the docs.
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD SemanticChangeProvenanceIsReproducibleAndPortable (MCP tool;
-      `certify_public_surface` fold-in + the CLI remain)
+      `certify_public_surface` fold-in + the CLI are cut)
 - [x] Archived `add-attested-governance-artifacts` as superseded (done in #603)
 
 

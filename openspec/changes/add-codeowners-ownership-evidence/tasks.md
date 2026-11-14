@@ -1,39 +1,37 @@
 # Tasks — add-codeowners-ownership-evidence
 
-## Implementation
-- [ ] Resolver (`src/core/analyzer/codeowners.ts`): locate `CODEOWNERS` (root / `.github/` /
-      `docs/`), parse the GitHub dialect (gitignore-style patterns + owner handles), resolve
-      owner-per-file by last-match-wins; GitLab sections / Bitbucket dialect → explicit
-      `unsupported dialect` disclosure; unrecognized rule syntax → per-rule disclosed skip
-- [ ] `blast_radius` join (`blast-radius.ts`): resolve owners for changed files + affected-caller
-      files; report distinct ownership domains spanned (count + owner names) as raw evidence, no
-      score; absent CODEOWNERS → disclosed absence, fields omitted
-- [ ] `map_in_flight_conflicts` join (`interference-map.ts`): owning team per conflict witness
-      symbol (via its file); "not assessed" nodes stay not assessed
-- [ ] `briefing_since` join (`briefing-since.ts`): owner grouping alongside region grouping
-- [ ] `unowned-critical-path` finding: `hub`/`chokepoint`-labeled symbols
-      (`landmark-signals.ts` — existing classifiers, no new constants) in files no rule covers;
-      register in `FINDING_CODE_REGISTRY` (`enforcement-policy.ts`, defaultClass `advisory`,
-      source `blast-radius`), emit in the unified `GovernanceFinding` shape
+## 1. Resolver
 
-## Verification
-- [ ] Resolver fixtures: last-match-wins precedence, negation-less gitignore semantics, per-file
-      purity (same path → same owners, no git state consulted); GitLab-section fixture →
-      `unsupported dialect`, never a wrong owner map
-- [ ] Join fixtures: a diff spanning two owned regions reports 2 domains with names; a repo with
-      no CODEOWNERS reports disclosed absence on all three tools (never inferred owners)
-- [ ] Finding fixture: an uncovered hub yields `unowned-critical-path`; a covered hub does not;
-      `resolveEnforcementClass` resolves it advisory by default and blocking when the policy says so
-- [ ] Declared-vs-mined separation: no authorship/git data flows into ownership fields (the
-      disagreement signal stays with add-knowledge-map-and-coupling-upgrades)
-- [ ] tools/list payload budgets re-asserted (`mcp-presets.test.ts` — full AND substrate;
-      `blast_radius` is on the default surface)
-- [ ] Full suite green
+- [ ] 1.1 New `src/core/analyzer/codeowners.ts`: locate the file, parse GitHub-format rules, and
+      resolve owners by last-match-wins. Test: new `codeowners.test.ts`. Done when
+      `* @org/core` then `src/api/ @org/api-team` resolves `src/api/routes.ts` to `@org/api-team`
+      with no git call.
+- [ ] 1.2 Honest gaps in the same module: no file → "not assessed"; GitLab sections or Bitbucket
+      syntax → unsupported format, no map; one bad rule → skipped and counted. Read the file with
+      the confined, size-bounded reader in `src/utils/path-confinement.ts`. Test:
+      `codeowners.test.ts`. Done when no fixture yields a partial or wrong owner map.
 
-## Spec
-- [ ] `analyzer` delta: ADD CodeownersResolutionIsDeclarativeAndDialectHonest
-- [ ] `mcp-handlers` delta: ADD OwnershipEvidenceJoinsExistingConclusions
+## 2. Surfaces
 
-## Coordination
-- [ ] Leave `add-knowledge-map-and-coupling-upgrades` unmodified; note the declared-vs-mined
-      disagreement signal there as its follow-up when this ships
+- [ ] 2.1 Add `ownership` to the briefing in `src/core/services/mcp-handlers/blast-radius.ts`,
+      for changed files and affected-caller files. Test: `blast-radius.test.ts`. Done when a diff
+      across two owned areas names both owners and a repository with no file says "not assessed".
+- [ ] 2.2 Add the "raise to" receipt line in `src/core/services/mcp-handlers/verify-change.ts`.
+      Test: `verify-change.test.ts`. Done when the line appears only if owners resolved, and the
+      before-stop receipt (`src/cli/commands/hook.test.ts`) stays within its budget.
+- [ ] 2.3 Register `unowned-critical-path` (advisory, source `blast-radius`) in
+      `src/core/services/mcp-handlers/enforcement-policy.ts` and emit it from `blast-radius.ts`
+      for changed hub or chokepoint symbols in uncovered files. Tests: `enforcement-policy.test.ts`,
+      `blast-radius.test.ts`. Done when a changed uncovered hub yields the finding, a covered one
+      does not, and an unchanged one does not.
+- [ ] 2.4 Classify the "not assessed" and skipped-rule fields in `confidence-boundary.ts`. Test:
+      `completeness-invariant.test.ts`. Done when the test passes.
+
+## 3. Guards and docs
+
+- [ ] 3.1 Screen owner handles on output like other repository text. Test: `blast-radius.test.ts`
+      with an instruction-shaped handle. Done when the text is withheld or neutralized.
+- [ ] 3.2 MCP↔Pi parity and payload budget (`blast_radius` is on the default surface). Tests:
+      `src/pi/extension.test.ts`, `src/cli/commands/mcp-presets.test.ts`. Done when both pass.
+- [ ] 3.3 Document `ownership` and the finding in `docs/mcp-tools.md` and `docs/configuration.md`.
+      Done when the docs state "GitHub format only" and "never inferred from authorship".
