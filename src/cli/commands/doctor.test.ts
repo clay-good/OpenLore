@@ -982,12 +982,17 @@ describe('doctor command', () => {
       vi.mocked(loggerModule.logger.success).mockClear();
       const { VectorIndex } = await import('../../core/analyzer/vector-index.js');
       const indexExists = vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
+      // The graph-store check opens the checkout's REAL `.openlore/analysis/call-graph.db`; a
+      // developer's stale local index (from an older OpenLore) turned this test red off CI.
+      const { EdgeStore } = await import('../../core/services/edge-store.js');
+      const storeExists = vi.spyOn(EdgeStore, 'exists').mockReturnValue(false);
 
       try {
         await doctorCommand.parseAsync([], { from: 'user' });
         expect(vi.mocked(loggerModule.logger.success)).toHaveBeenCalledWith('All checks passed!');
       } finally {
         indexExists.mockRestore();
+        storeExists.mockRestore();
         if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
         else process.env.ANTHROPIC_API_KEY = saved;
       }
