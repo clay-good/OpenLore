@@ -110,7 +110,12 @@ export async function loadGitignoreScopes(rootPath: string): Promise<GitignoreSc
   return scopes;
 }
 
-/** Match a root-relative candidate; later (deeper) scopes can re-include files. */
+/**
+ * Match a root-relative candidate. Each scope governs only its own subtree, and the path is
+ * ignored when ANY applicable scope ignores it. This is the analyzer's FileWalker rule: a deeper
+ * `!kept.rs` does not re-include what a shallower `*.rs` excluded (same-file negation still
+ * works). Git would re-include it, but the watcher must never index a file `analyze` leaves out.
+ */
 export function isGitignoredPath(
   relPath: string,
   scopes: GitignoreScope[],
@@ -120,7 +125,6 @@ export function isGitignoredPath(
   // Chokidar probes the watch root itself before its children. The ignore
   // package rejects empty, dot, absolute, and parent-relative paths.
   if (!rel || rel === '.' || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return false;
-  let ignored = false;
   for (const { baseDir, matcher } of scopes) {
     let scopedPath = rel;
     if (baseDir) {
@@ -131,11 +135,9 @@ export function isGitignoredPath(
     // A trailing slash means DIRECTORY to gitignore. Do not try both forms:
     // that would also hide a regular file matched only by a directory rule.
     if (isDirectory && !scopedPath.endsWith('/')) scopedPath += '/';
-    const result = matcher.test(scopedPath);
-    if (result.ignored) ignored = true;
-    else if (result.unignored) ignored = false;
+    if (matcher.ignores(scopedPath)) return true;
   }
-  return ignored;
+  return false;
 }
 import {
   combineStaleFileCompositions,

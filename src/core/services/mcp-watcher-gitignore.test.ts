@@ -74,14 +74,17 @@ describe('watcher Git ignore pruning', () => {
     expect(isGitignoredPath(join('cargo-cache', 'generated.rs'), scopes)).toBe(true);
   });
 
-  it('lets a nested negation re-include a file ignored by an ancestor scope', async () => {
-    await writeFile(join(root, '.gitignore'), '*.rs\n');
+  it('matches analyze: a nested negation does not re-include what an ancestor scope ignores', async () => {
+    await writeFile(join(root, '.gitignore'), '*.rs\n!same-file.rs\n');
     await mkdir(join(root, 'src'));
     await writeFile(join(root, 'src', '.gitignore'), '!kept.rs\n');
     const scopes = await loadGitignoreScopes(root);
-    expect(isGitignoredPath(join('src', 'kept.rs'), scopes)).toBe(false);
+    // FileWalker evaluates scopes independently (ignored if any says so); the watcher must agree,
+    // or it would index a file the next `openlore analyze` drops.
+    expect(isGitignoredPath(join('src', 'kept.rs'), scopes)).toBe(true);
     expect(isGitignoredPath(join('src', 'other.rs'), scopes)).toBe(true);
-    expect(isGitignoredPath(join('sibling', 'kept.rs'), scopes)).toBe(true);
+    // Negation inside the same file still applies.
+    expect(isGitignoredPath('same-file.rs', scopes)).toBe(false);
   });
 
   it('never loads rules below a pruned directory to reopen an excluded parent', async () => {
