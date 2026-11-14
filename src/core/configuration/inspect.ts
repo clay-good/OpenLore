@@ -96,8 +96,9 @@ export async function readConfiguration(options: ConfigurationOptions) {
   let globalUnreadable = false;
   const userPath = globalOpenLoreConfigPath();
   try {
+    // The user's own directory may sit behind a symbolic link (a linked home directory).
     const content = await readFileConfined(
-      dirname(userPath),
+      await realpath(dirname(userPath)),
       basename(userPath),
       CONFIGURATION_HARD_BUDGET.fileBytes,
       true
@@ -199,7 +200,8 @@ function factsFor(path: string, content: string): Record<string, string | string
       patterns: content
         .split(/\r?\n/)
         .filter((x) => x.trim() && !x.trim().startsWith('#'))
-        .slice(0, 100),
+        .slice(0, 100)
+        .map((x) => x.slice(0, 256)),
     };
   if (name.endsWith('.json')) {
     const errors: import('jsonc-parser').ParseError[] = [];
@@ -482,10 +484,12 @@ export async function inspectConfiguration(
   const evidenceRevision = configurationDigest({
     root: config.root,
     config: config.revision,
-    evidence: evidence.map((e) => [e.path, e.revision]),
+    evidence: evidence.filter((e) => e.kind !== 'tracked').map((e) => [e.path, e.revision]),
     topology: topology.sort(),
     scope,
-    partial: disclosures.map((d) => d.code),
+    // Git tracking evidence is time-bounded; a timeout on one of two reads must not make an
+    // unchanged plan stale.
+    partial: disclosures.map((d) => d.code).filter((code) => code !== 'tracked-files-partial'),
   });
   const runtime: ConfigurationInspection['runtime'] = {
     daemon: 'absent',

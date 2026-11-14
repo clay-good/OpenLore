@@ -1,15 +1,14 @@
 import { redactSecrets } from '../services/secret-redaction.js';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import {
   confinedAtomicWriteFile,
   readFileConfinedWithStat,
   recoverConfinedAtomicWriteFile,
 } from '../../utils/path-confinement.js';
-import { isGuardedWriteFailure, withGuardedConfigWrite } from '../runtime/guarded-config-write.js';
+import { isGuardedWriteFailure, verifiedSettingsCoordinationDir, withGuardedConfigWrite } from '../runtime/guarded-config-write.js';
 import {
-  CONFIG_SCHEMA_VERSION,
+  CONFIG_DEFAULT_STAMP_VERSION,
   isFatalConfigFinding,
   validateOpenLoreConfig,
 } from '../services/config-schema.js';
@@ -46,6 +45,8 @@ function validateCandidate(value: ConfigurationCandidate): void {
   if (value.reviewMode !== undefined && !['manual', 'notify'].includes(value.reviewMode))
     errors.push('Invalid review mode');
   if (value.analysis !== undefined) {
+    if (!value.analysis || typeof value.analysis !== 'object' || Array.isArray(value.analysis))
+      errors.push('Unsupported analysis change');
     if (
       Object.keys(object(value.analysis)).some(
         (k) => !['includePatterns', 'excludePatterns'].includes(k)
@@ -182,7 +183,7 @@ async function preview(
   // Bootstrap only canonical local fields; inherited credentials and providers are never copied.
   if (!config.identity)
     for (const [field, after] of Object.entries({
-      version: CONFIG_SCHEMA_VERSION,
+      version: CONFIG_DEFAULT_STAMP_VERSION,
       projectType: 'unknown',
       openspecPath: 'openspec',
       analysis: { maxFiles: DEFAULT_MAX_FILES, includePatterns: [], excludePatterns: [] },
@@ -297,10 +298,12 @@ interface Operation {
     | 'reverted';
   result: ConfigurationReceipt;
 }
-function statePath(plan: ConfigurationPlan): { dir: string; file: string } {
-  const dir = process.env.OPENLORE_SETTINGS_RUNTIME_DIR
-    ? resolve(process.env.OPENLORE_SETTINGS_RUNTIME_DIR)
-    : join(homedir(), '.openlore', 'runtime', 'settings-writes');
+/**
+ * The journal lives in the verified private runtime directory. Its canonical path is used so a
+ * home or temporary directory behind a symbolic link (macOS `/var`) does not fail the strict read.
+ */
+async function statePath(plan: ConfigurationPlan): Promise<{ dir: string; file: string }> {
+  const dir = await verifiedSettingsCoordinationDir();
   return {
     dir,
     file: join(
@@ -316,7 +319,7 @@ async function readOperation(plan: ConfigurationPlan): Promise<{
   operations: Operation[];
   identity: Awaited<ReturnType<typeof readFileConfinedWithStat>> | null;
 }> {
-  const { dir, file } = statePath(plan);
+  const { dir, file } = await statePath(plan);
   try {
     const identity = await readFileConfinedWithStat(dir, file, 1024 * 1024, true);
     const stored = JSON.parse(identity.content) as {
@@ -354,11 +357,11 @@ async function readOperation(plan: ConfigurationPlan): Promise<{
   }
 }
 async function recoverOperation(plan: ConfigurationPlan): Promise<void> {
-  const { dir, file } = statePath(plan);
+  const { dir, file } = await statePath(plan);
   await recoverConfinedAtomicWriteFile(dir, file, file + '.publication');
 }
 async function saveOperation(operation: Operation): Promise<void> {
-  const { dir, file } = statePath(operation.plan);
+  const { dir, file } = await statePath(operation.plan);
   const read = await readOperation(operation.plan);
   const operations = [
     ...read.operations.filter((previous) => previous.plan.id !== operation.plan.id),

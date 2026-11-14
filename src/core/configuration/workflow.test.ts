@@ -197,4 +197,10 @@ describe('provider-free configuration workflow', () => {
     expect((await applyConfiguration(plan, authorized(plan))).outcome).toBe('blocked');
     expect(await readFile(join(root, '.openlore/config.json'), 'utf8')).toBe('{broken');
   });
+  it('rejects an analysis change that is not an object', async () => {
+    for (const analysis of [['x'], 'abc', null])
+      await expect(
+        previewConfiguration({ ...candidate, analysis } as never, { rootPath: root })
+      ).rejects.toThrow('Unsupported analysis change');
+  });
 });

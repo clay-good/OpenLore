@@ -120,4 +120,50 @@ describe('non-watched input freshness', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it('leaves the corpus of a repository with no rules unchanged, including case-different names', async () => {
+    // Protected patterns match case-sensitively in the walker. Without rules, no other matcher
+    // may re-interpret them: `Specs/` is not the protected `specs/`.
+    const root = await mkdtemp(join(tmpdir(), 'ol-policy-compat-'));
+    try {
+      await mkdir(join(root, 'Specs/sub'), { recursive: true });
+      await mkdir(join(root, 'src'));
+      await writeFile(join(root, 'Specs/a.ts'), 'export const a = 1;');
+      await writeFile(join(root, 'Specs/sub/c.ts'), 'export const c = 1;');
+      await writeFile(join(root, 'src/b.ts'), 'export const b = 1;');
+      const walk = async (filePolicies?: { rules: [] }): Promise<string[]> =>
+        (
+          await new FileWalker(root, {
+            protectedExcludePatterns: ['specs/**'],
+            ...(filePolicies ? { filePolicies } : {}),
+          }).walk()
+        ).files
+          .map((f) => f.path)
+          .sort();
+      const expected = ['Specs/a.ts', 'Specs/sub/c.ts', 'src/b.ts'];
+      expect(await walk()).toEqual(expected);
+      expect(await walk({ rules: [] })).toEqual(expected);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('never throws from the watch predicate on an unusable ignore file', async () => {
+    // The predicate runs inside the watcher's `ignored` callback; a throw there stops live indexing.
+    const root = await mkdtemp(join(tmpdir(), 'ol-policy-watch-'));
+    const stderr = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try {
+      await mkdir(join(root, 'big'));
+      await writeFile(join(root, 'big/.gitignore'), ('x'.repeat(63) + '\n').repeat(2048));
+      await mkdir(join(root, 'odd/.gitignore'), { recursive: true });
+      await writeFile(join(root, '.gitignore'), 'ignored/\n');
+      const policy = new ConfigurationWatchPolicy(root, new FilePolicyResolver({ rules }));
+      expect(policy.admitted('big/main.ts')).toBe(true);
+      expect(policy.admitted('odd/main.ts')).toBe(true);
+      expect(policy.admitted('ignored', true)).toBe(false);
+      expect(policy.admitted('generated', true)).toBe(false);
+    } finally {
+      process.stderr.write = stderr;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

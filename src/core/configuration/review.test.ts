@@ -99,4 +99,11 @@ describe('configuration notification precision', () => {
     });
     expect(Object.keys(recovered.state.conditions)).toHaveLength(0);
   });
+  it('ignores a dismissal for an inherited property name', () => {
+    const state = { version: 1, conditions: {} } as unknown as Parameters<
+      typeof dismissConfigurationReview
+    >[0];
+    dismissConfigurationReview(state, '__proto__');
+    expect(({} as { dismissed?: boolean }).dismissed).toBeUndefined();
+  });
 });

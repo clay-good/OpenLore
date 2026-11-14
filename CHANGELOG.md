@@ -5,6 +5,18 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Optional per-lane file rules and an agent-driven configuration workflow** (#719). A new optional
+  `filePolicies` block in `.openlore/config.json` holds rules that include or exclude a path
+  separately for indexing, live watching and embedding, so a tracked generated tree can stay out of
+  the watcher while still being analyzed. The workflow inspects repository evidence, previews an
+  exact config diff, applies it only with host authorization, verifies, and can revert. It is
+  reachable from Pi (`openlore_configure` actions, `/openlore configure assist`), the
+  `openlore configure` CLI, the `openlore/configuration` API, and an opt-in MCP preset
+  (`--preset configuration`). Nothing changes for a repository without `filePolicies`: the corpus,
+  fingerprints, default MCP surface and default config stamp are the same as before.
+
 ### Fixed
 
 - **`orient` and `search_code` stop claiming coverage over content they could not read.** With

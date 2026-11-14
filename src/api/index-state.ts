@@ -98,7 +98,9 @@ async function openloreIndexStateImpl(options: BaseOptions): Promise<IndexStateR
     return { matchesWorkingTree: false, fingerprint: recorded, reason: 'config-unrecorded' };
   }
 
-  const current = await readOpenLoreConfig(root,options.configPath);
+  // A config that cannot be read has no usable policies; this read did not exist before file
+  // policies, so it must not turn an index-state answer into a rejection.
+  const current = await readOpenLoreConfig(root,options.configPath).catch(() => null);
   if ((configuration.indexPolicyRevision ?? new FilePolicyResolver().revisionFor('index')) !== new FilePolicyResolver(current?.filePolicies).revisionFor('index')) return {matchesWorkingTree:false,fingerprint:recorded,reason:'fingerprint-mismatch'};
 
   // The only expensive step in any of these reads — re-hashing the corpus. A caller that gave up

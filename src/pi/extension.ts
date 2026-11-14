@@ -1,4 +1,3 @@
-import { configurationCandidateSchema } from '../core/configuration/tool-schema.js';
 import { configureOpenLore, configurationRoot, reviewConfigurationOnIdle, type ConfigurationRequest } from '../api/configuration.js';
 /**
  * openlore Pi extension — src/pi/extension.ts
@@ -1953,7 +1952,7 @@ export function piActivatorDescription(): string {
  * raising a budget changes both a number and its rationale (the STANDING_CONTEXT_BUDGETS pattern).
  */
 export const PI_STANDING_CONTEXT_BUDGETS: Record<PiSessionToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
-  lean: { baselineTokens: 3_241, maxTokens: 3_470, rationale: 'Includes the native configuration workflow; measured baseline plus 7% headroom.' },
+  lean: { baselineTokens: 2_977, maxTokens: 3_180, rationale: 'Includes the configuration workflow actions on openlore_configure (188 tokens, loosely typed arguments); measured baseline plus 6.8% headroom.' },
   search: { baselineTokens: 240, maxTokens: 300, rationale: 'Measured budget for orient and search_code; Pi tool_search loads specialized tools only when requested.' },
   all: { baselineTokens: 8_825, maxTokens: 9_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, and fleet_status (the moat/interop features); measured baseline plus 6.5% headroom.' },
 };
@@ -2766,9 +2765,11 @@ function registerOpenlore(
     promptGuidelines: ['Use openlore_configure to change the LLM provider, model, or embedding settings.'],
     parameters: Type.Object({
       action: Type.Optional(Type.Union(['inspect','preview','apply','verify','revert'].map(value => Type.Literal(value)))),
-      candidate: Type.Optional(Type.Unsafe(configurationCandidateSchema)),
+      // Kept loose and typed: this tool is in every Pi session's standing context, and strict
+      // providers reject untyped or `pattern` properties. The workflow validates the candidate.
+      candidate: Type.Optional(Type.Object({}, {additionalProperties:true, description:'Preview only: {rules:[{id,pattern,lanes:{index|watch|embed:"include"|"exclude"},reason}]}. Keep existing rules.'})),
       activate: Type.Optional(Type.Boolean({description:'Request authenticated daemon restart after applying; requires host confirmation.'})),
-      plan: Type.Optional(Type.Unknown()),
+      plan: Type.Optional(Type.Object({}, {additionalProperties:true, description:'Exact preview result, unchanged.'})),
       global: Type.Optional(Type.Boolean({ description: 'Edit user-wide defaults instead of project configuration.' })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {

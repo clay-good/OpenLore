@@ -589,7 +589,7 @@ export class FileWalker {
   }
 
   /** Real paths of directories already walked — stops a symlink cycle from walking forever. */
-  private policy = new FilePolicyResolver();
+  private policy: FilePolicyResolver | undefined;
   private readonly explicitPolicies: FilePolicies | undefined;
   private readonly visitedRealDirs = new Set<string>();
 
@@ -929,7 +929,7 @@ export class FileWalker {
           }
         }
 
-        if (!this.policy.admitted(posixSubPath,'index',true,true) && !this.policy.mayIncludeDescendant(posixSubPath)) {
+        if (this.policy && !this.policy.admitted(posixSubPath,'index',true,true) && !this.policy.mayIncludeDescendant(posixSubPath)) {
           this.recordSkip('file-policy');
           continue;
         }
@@ -990,7 +990,7 @@ export class FileWalker {
           continue;
         }
 
-        if (this.shouldSkipFile(posixPath) || !this.policy.admitted(posixPath,'index',true)) {
+        if (this.shouldSkipFile(posixPath) || (this.policy && !this.policy.admitted(posixPath,'index',true))) {
           this.recordSkip('pattern');
           continue;
         }
@@ -1118,7 +1118,9 @@ export class FileWalker {
     this.restrictedIncludePrefixes = [];
     this.restrictedIncludeMatchesAnyDir = false;
 
-    this.policy = new FilePolicyResolver(this.explicitPolicies, this.options.protectedExcludePatterns);
+    // Only when rules exist. Protected patterns are enforced by the checks above, which match
+    // case-sensitively; the rule matcher is veto-only and must not re-interpret them.
+    this.policy = this.explicitPolicies?.rules.length ? new FilePolicyResolver(this.explicitPolicies) : undefined;
     // Load ignore patterns
     this.ig = await loadIgnorePatterns(this.rootPath);
     this.igRepositoryIgnore = await loadRepositoryIgnorePatterns(this.rootPath);

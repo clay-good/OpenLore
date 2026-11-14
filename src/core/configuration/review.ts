@@ -152,6 +152,7 @@ export function dismissConfigurationReview(
   snoozedUntil?: number
 ): ConfigurationReviewState {
   const next = JSON.parse(JSON.stringify(state)) as ConfigurationReviewState;
+  if (!Object.hasOwn(next.conditions, id)) return next;
   const condition = next.conditions[id];
   if (!condition) return next;
   if (snoozedUntil !== undefined && Number.isFinite(snoozedUntil)) {

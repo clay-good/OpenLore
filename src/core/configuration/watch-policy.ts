@@ -2,6 +2,7 @@ import { constants, closeSync, fstatSync, openSync, readFileSync } from 'node:fs
 import { dirname, join } from 'node:path';
 import ignoreModule from 'ignore';
 import { safeJoin } from '../../utils/path-confinement.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { FilePolicyResolver, repositoryPath } from './policy.js';
 const ignore =
   (ignoreModule as typeof ignoreModule & { default?: typeof ignoreModule }).default ?? ignoreModule;
@@ -27,21 +28,39 @@ export class ConfigurationWatchPolicy {
       let fd: number | undefined;
       try {
         const path = safeJoin(this.root, join(dir, name));
-        fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        // O_NONBLOCK: a FIFO with this name must not block the event loop.
+        fd = openSync(
+          path,
+          constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
+        );
         const info = fstatSync(fd);
-        if (!info.isFile() || info.size > 64 * 1024)
-          throw new Error('Ignore evidence exceeds watch-policy budget');
-        matcher.add(readFileSync(fd, 'utf8'));
+        if (info.isFile() && info.size <= 64 * 1024) matcher.add(readFileSync(fd, 'utf8'));
+        else this.skipped(join(dir, name), 'not a regular file of at most 64 KiB');
       } catch (error) {
+        // This runs inside the watcher's `ignored` callback, where a throw stops live
+        // indexing. An unreadable ignore file contributes no rules instead.
         const code = (error as NodeJS.ErrnoException).code;
-        if (code !== 'ENOENT' && code !== 'ELOOP') throw error;
+        if (code !== 'ENOENT' && code !== 'ELOOP')
+          this.skipped(join(dir, name), code ?? 'unreadable');
       } finally {
         if (fd !== undefined) closeSync(fd);
       }
     }
-    if (this.cache.size >= 50_000) throw new Error('Watch-policy directory budget exceeded');
-    this.cache.set(dir, matcher);
+    // At the budget the matcher is still returned, only not kept.
+    if (this.cache.size < 50_000) this.cache.set(dir, matcher);
     return matcher;
+  }
+  private warned = false;
+  private skipped(path: string, why: string): void {
+    if (this.warned) return;
+    this.warned = true;
+    process.stderr.write(
+      '[mcp-watcher] ignore file not applied to watch policy (' +
+        why +
+        '): ' +
+        sanitizeForTerminal(path) +
+        '\n'
+    );
   }
   admitted(path: string, directory = false): boolean {
     const rel = repositoryPath(path);

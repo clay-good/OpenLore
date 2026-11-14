@@ -23,7 +23,6 @@ describe('real configuration watch subscriptions', () => {
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, 'output.ts'), 'export const output = 1;');
     }
-    await writeFile(join(root, '.gitignore'), 'generated/\n');
     const config = getDefaultConfig('nodejs', 'openspec');
     const configPath = join(root, '.openlore/config.json');
     await writeFile(configPath, JSON.stringify(config));
@@ -60,6 +59,9 @@ describe('real configuration watch subscriptions', () => {
       const filtered = watcher.configurationWatchedDirectories;
       expect(filtered.some((p) => p === 'generated' || p.startsWith('generated/'))).toBe(false);
       expect(filtered).toContain('src');
+      // The tree is not ignored until here: the watcher on main already prunes ignored
+      // directories, so the assertions above prove the watch rule alone prunes a tracked tree.
+      await writeFile(join(root, '.gitignore'), 'generated/\n');
       const discoveryBefore = await inspectConfiguration({ rootPath: root });
       for (let i = 100; i < 1000; i++) await mkdir(join(root, 'generated', 'chunk-' + i));
       const discoveryAfter = await inspectConfiguration({ rootPath: root });

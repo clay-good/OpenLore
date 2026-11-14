@@ -102,7 +102,11 @@ describe('configuration host adapters', () => {
       { ...candidate, excludePatterns: ['vendor/**'] },
       { selection: candidate },
       { filePolicies: candidate },
-    ]) expect(validateArguments.Check({ action: 'preview', candidate: wrong })).toBe(false);
+    ])
+      // The standing Pi schema stays loose; the workflow itself refuses each wrong shape.
+      await expect(
+        tool.execute('preview', { action: 'preview', candidate: wrong }, undefined, undefined, ctx)
+      ).rejects.toThrow(/configuration candidate|file polic|rule/i);
 
     const inspected = await tool.execute(
       'inspect',

@@ -49,6 +49,13 @@ import type {
 export const CONFIG_SCHEMA_VERSION = '1.3.0';
 
 /**
+ * The version stamped into a new default config. It stays at the last version whose fields a
+ * default config uses, so an older OpenLore on the same repository does not warn about a newer
+ * schema until a 1.3.0 field (`filePolicies`, `configurationAssistant`) is in fact in use.
+ */
+export const CONFIG_DEFAULT_STAMP_VERSION = '1.2.0';
+
+/**
  * Top-level value shapes retained as the public compatibility map for callers and tests.
  * The recursive schema below refines object fields without changing this exported shape.
  */

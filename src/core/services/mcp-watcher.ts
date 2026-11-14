@@ -576,9 +576,19 @@ export class McpWatcher {
 
   async start(): Promise<void> {
     this.stopping = false;
-    const configuration = await readOpenLoreConfig(this.rootPath);
-    this.filePolicy = new FilePolicyResolver(configuration?.filePolicies);
-    this.watchPolicy = configuration?.filePolicies ? new ConfigurationWatchPolicy(this.rootPath,this.filePolicy,configuration.analysis.excludePatterns) : undefined;
+    // File policies are optional. A config that cannot be read must not stop live indexing:
+    // the watcher started without reading it before this option existed.
+    this.filePolicy = new FilePolicyResolver();
+    this.watchPolicy = undefined;
+    try {
+      const configuration = await readOpenLoreConfig(this.rootPath);
+      if (configuration?.filePolicies) {
+        this.filePolicy = new FilePolicyResolver(configuration.filePolicies);
+        this.watchPolicy = new ConfigurationWatchPolicy(this.rootPath,this.filePolicy,configuration.analysis?.excludePatterns ?? []);
+      }
+    } catch (error) {
+      process.stderr.write(`[mcp-watcher] file policies not applied (configuration unreadable): ${sanitizeForTerminal(error instanceof Error ? error.message : String(error))}\n`);
+    }
 
     const gitignoreScopes = await loadGitignoreScopes(this.rootPath);
     // Auto-degrade live embedding on very large trees (Step 4). Counting is
@@ -615,7 +625,7 @@ export class McpWatcher {
       });
 
       const watched = (p: string): boolean =>
-        ((SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p)) && this.filePolicy.admitted(repositoryPath(relative(this.rootPath,p)),'index',true)) || isIndexedOpenSpecFile(this.openspecRoot, p);
+        ((SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p)) && (!this.watchPolicy || this.filePolicy.admitted(repositoryPath(relative(this.rootPath,p)),'index',true))) || isIndexedOpenSpecFile(this.openspecRoot, p);
       this.fsWatcher.on('change', (absPath: string) => {
         const p = this.fromWatchRoot(absPath);
         if (watched(p)) this.enqueue(p);
@@ -3004,8 +3014,8 @@ export class McpWatcher {
         const abs = join(dir, entry.name);
         const rel = relative(this.rootPath, abs);
         if (entry.isDirectory()) {
-          if (!isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes, true) && !this.extraIgnore.some(p => rel.includes(p)) && (this.watchPolicy?.admitted(repositoryPath(rel),true) ?? true)) await walk(abs);
-        } else if (entry.isFile() && SOURCE_EXTENSIONS.test(entry.name) && !isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes) && !this.extraIgnore.some(p => rel.includes(p)) && (this.watchPolicy?.admitted(repositoryPath(rel)) ?? true) && this.filePolicy.admitted(repositoryPath(rel),'index',true)) {
+          if (!isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes, true) && (this.watchPolicy?.admitted(repositoryPath(rel),true) ?? true)) await walk(abs);
+        } else if (entry.isFile() && SOURCE_EXTENSIONS.test(entry.name) && !isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes) && (this.watchPolicy ? this.watchPolicy.admitted(repositoryPath(rel)) && this.filePolicy.admitted(repositoryPath(rel),'index',true) : true)) {
           count++;
         }
       }
