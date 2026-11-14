@@ -668,6 +668,13 @@ export async function runConfigWizard(
 interface Daemon {
   baseUrl: string;
   token?: string;
+  /**
+   * Process id `.openlore/serve.json` announced when this daemon was resolved. A cached daemon is
+   * reused only while the descriptor still names this pid at this address: another session or the
+   * CLI can replace the daemon while an older one keeps answering on its old port, and serving the
+   * status (or tool calls) from that one shows a stale state. Absent for an injected test daemon.
+   */
+  pid?: number;
   incompatibility?: string;
   /** A repository-bound health response found a version mismatch or missing Pi tools. */
   autoRecoverable?: boolean;
@@ -792,10 +799,22 @@ export function piDaemonSpawnCommand(cwd: string): { command: string; args: stri
   };
 }
 
+/**
+ * Is a cached daemon still the one `.openlore/serve.json` announces for this working tree? A
+ * draining or missing announcement, another pid, or another address means it was replaced or is
+ * going away. A daemon without a recorded pid has no identity to compare and is kept. @internal
+ */
+export async function piDaemonStillAnnounced(cwd: string, daemon: { baseUrl: string; pid?: number }): Promise<boolean> {
+  if (daemon.pid === undefined) return true;
+  const desc = await readDescriptor(cwd);
+  return desc !== null && desc.pid === daemon.pid && serveHttpBaseUrl(desc.host, desc.port) === daemon.baseUrl;
+}
+
 function incompatibleDaemon(desc: ServeDescriptor): Daemon {
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
+    pid: desc.pid,
     incompatibility:
       'The running openlore daemon does not report an authenticated, enforced tool surface for ' +
       'this repository. Stop the legacy or incompatible process manually, upgrade OpenLore, ' +
@@ -845,6 +864,7 @@ function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
+    pid: desc.pid,
     ...(autoRecoverable
       ? {
           autoRecoverable: true,
@@ -2449,7 +2469,17 @@ function registerOpenlore(
     const pending = pendingDaemons.get(cwd);
     if (pending) return pending;
     const cached = daemons.get(cwd);
-    if (cached) return cached;
+    if (cached) {
+      // Reuse the cache only while serve.json still announces this daemon. A replaced daemon can
+      // keep answering on its old port, so liveness alone would keep serving the old one.
+      if (await piDaemonStillAnnounced(cwd, cached)) return cached;
+      if (daemons.get(cwd) === cached) dropDaemon(cwd);
+      // Another caller may have started resolving while the descriptor was read.
+      const racing = pendingDaemons.get(cwd);
+      if (racing) return racing;
+      const replaced = daemons.get(cwd);
+      if (replaced) return replaced;
+    }
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
     const resolving = resolveAndRecordDaemon(cwd).finally(() => pendingDaemons.delete(cwd));
     pendingDaemons.set(cwd, resolving);
@@ -2524,9 +2554,17 @@ function registerOpenlore(
     keepalive = setInterval(() => {
       for (const [cwd, daemon] of daemons) {
         const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
+        // Drop only the daemon this ping was for: a newer one may have replaced it meanwhile.
+        const drop = () => { if (daemons.get(cwd) === daemon) dropDaemon(cwd); };
         void fetch(`${daemon.baseUrl}/health`, { headers, signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' })
-          .then((res) => { if (!res.ok) dropDaemon(cwd); })
-          .catch(() => dropDaemon(cwd));
+          .then(async (res) => {
+            if (!res.ok) return drop();
+            // An answer is not enough: the port may now belong to another daemon or root, or the
+            // daemon may be draining. Keep the cache only for the same, repository-bound process.
+            const health = validateServeHealth(await res.json().catch(() => null), cwd);
+            if (!health || health.draining || (daemon.pid !== undefined && health.pid !== daemon.pid)) drop();
+          })
+          .catch(drop);
       }
     }, KEEPALIVE_MS);
     keepalive.unref?.(); // never keep the host process alive for the keepalive alone
@@ -2541,10 +2579,11 @@ function registerOpenlore(
     try {
       if (!ctx.hasUI) return;
       const cwd = ctx.cwd;
-      // No usable daemon cached (the cwd moved, or a daemon was dropped): resolve the same way a
-      // tool call would, so the status reports this resolution, not a stale one. `getDaemon`
+      // Resolve the same way a tool call would, so the status reports this resolution, not a
+      // stale one: no daemon cached (the cwd moved, one was dropped), or a cached daemon that
+      // serve.json no longer announces (replaced by another session or the CLI). `getDaemon`
       // keeps its failure cooldown, so a failing daemon is not re-probed on every run.
-      if (!daemons.has(cwd)) await getDaemon(cwd);
+      await getDaemon(cwd);
       const daemon = daemons.has(cwd) ? 'usable' : (daemonViews.get(cwd) ?? 'unavailable');
       let health: HealthResult | undefined;
       try {

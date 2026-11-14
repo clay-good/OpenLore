@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon, piToolSurface, PI_TOOL_SNIPPETS, PI_LEAN_TOOLS, PI_SEARCH_TOOLS, PI_ON_DEMAND_SUBSTRATE_TOOLS, PI_TOOL_GROUPS, PI_ACTIVATOR_TOOL, PI_STANDING_CONTEXT_BUDGETS, piRegisteredToolNames, estimatePiStandingTokens, formatPiStatus, piDaemonView, piHealthCacheKey, PI_STATUS_KEY, type PiDaemonView, type PiExtensionRuntime } from './extension.js';
+import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon, piToolSurface, PI_TOOL_SNIPPETS, PI_LEAN_TOOLS, PI_SEARCH_TOOLS, PI_ON_DEMAND_SUBSTRATE_TOOLS, PI_TOOL_GROUPS, PI_ACTIVATOR_TOOL, PI_STANDING_CONTEXT_BUDGETS, piRegisteredToolNames, estimatePiStandingTokens, formatPiStatus, piDaemonView, piDaemonStillAnnounced, piHealthCacheKey, PI_STATUS_KEY, type PiDaemonView, type PiExtensionRuntime } from './extension.js';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { HealthResult } from '../api/health.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS } from '../cli/commands/mcp.js';
@@ -1985,6 +1985,48 @@ describe('Pi footer status', () => {
     release();
     await vi.waitFor(() => expect(h.last()).toBe('openlore: ready'));
     await h.shutdown();
+  });
+
+  describe('cached daemon identity', () => {
+    const announce = (pid: number, port: number, state?: 'draining') =>
+      writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
+        port, pid, host: '127.0.0.1', token: 't', protocolVersion: 1,
+        startedAt: '', version: '0.0.0', ...(state ? { state } : {}),
+      }));
+    beforeEach(async () => { await mkdir(join(dir, '.openlore'), { recursive: true }); });
+
+    it('keeps a cached daemon only while serve.json announces it', async () => {
+      const cached = { baseUrl: 'http://127.0.0.1:9001', pid: 111 };
+      expect(await piDaemonStillAnnounced(dir, cached)).toBe(false); // nothing announced
+      await announce(111, 9001);
+      expect(await piDaemonStillAnnounced(dir, cached)).toBe(true);
+      await announce(222, 9001);
+      expect(await piDaemonStillAnnounced(dir, cached)).toBe(false); // replaced
+      await announce(111, 9002);
+      expect(await piDaemonStillAnnounced(dir, cached)).toBe(false); // moved
+      await announce(111, 9001, 'draining');
+      expect(await piDaemonStillAnnounced(dir, cached)).toBe(false); // going away
+      expect(await piDaemonStillAnnounced(dir, { baseUrl: 'http://127.0.0.1:9001' })).toBe(true); // no identity
+    });
+
+    it('re-resolves the status when another daemon replaced the cached one', async () => {
+      await announce(111, 9001);
+      const resolveDaemon = vi.fn<NonNullable<PiExtensionRuntime['resolveDaemon']>>()
+        .mockResolvedValueOnce({ daemon: { baseUrl: 'http://127.0.0.1:9001', token: 't', pid: 111 } } as Awaited<ReturnType<Resolve>>)
+        .mockResolvedValueOnce({ daemon: { baseUrl: 'http://127.0.0.1:9002', token: 't', pid: 222, incompatibility: 'old' } } as Awaited<ReturnType<Resolve>>);
+      const h = statusHarness({ readHealth: async () => health('ready'), resolveDaemon });
+      await h.start();
+      expect(h.last()).toBe('openlore: ready');
+
+      await h.agentEnd(); // same daemon still announced: the cache is reused
+      expect(resolveDaemon).toHaveBeenCalledTimes(1);
+
+      await announce(222, 9002);
+      await h.agentEnd();
+      expect(resolveDaemon).toHaveBeenCalledTimes(2);
+      expect(h.last()).toBe('openlore: daemon incompatible');
+      await h.shutdown();
+    });
   });
 
   it('shares the session-start daemon resolution with a tool call', async () => {
