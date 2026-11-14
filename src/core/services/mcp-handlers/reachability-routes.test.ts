@@ -22,7 +22,7 @@ vi.mock('./parse-health-boundary.js', async (importOriginal) => {
 });
 vi.mock('../../drift/git-diff.js', () => ({ getChangedFiles: vi.fn(async () => ({ files: [] })) }));
 vi.mock('../../analyzer/entry-point-adapters.js', () => ({
-  collectExternalWiring: vi.fn(async () => ({ wired: [], boundaries: [], boundariesOmitted: 0 })),
+  collectExternalWiring: vi.fn(async () => ({ wired: [], boundaries: [], boundariesOmitted: 0, manifestsRead: [] })),
 }));
 
 import { handleFindDeadCode, deadCodeIds } from './reachability.js';

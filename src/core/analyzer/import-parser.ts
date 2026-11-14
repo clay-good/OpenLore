@@ -1389,6 +1389,15 @@ export function extractsExports(filePath: string): boolean {
   return type === 'ts' || type === 'js' || type === 'python' || type === 'java' || type === 'kotlin';
 }
 
+/**
+ * Whether `parseContent` extracts NAMED IMPORTS for this file, so the dependency graph can say which
+ * other files import a symbol of it. For any other language "no file imports it by name" is not
+ * evidence: nothing was looked for. Same set as {@link extractsExports}; HTML imports name assets.
+ */
+export function extractsImports(filePath: string): boolean {
+  return extractsExports(filePath);
+}
+
 /** The parser's extension dispatch — the one definition `parseContent` and `extractsExports` share. */
 function importParserFileType(filePath: string): 'js' | 'ts' | 'python' | 'java' | 'kotlin' | 'html' | 'unknown' {
   const ext = extname(filePath).toLowerCase();

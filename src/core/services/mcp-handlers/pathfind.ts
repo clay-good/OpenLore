@@ -11,6 +11,7 @@
  * weighted traversal (weightedBfs) from add-call-distance-scoping.
  */
 
+import { resolveQualifiedSymbol } from './symbol-query.js';
 import { relative, isAbsolute } from 'node:path';
 import { isProjectedLanguage } from '../../analyzer/projected-language.js';
 import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
@@ -70,6 +71,8 @@ export function resolveEndpoint(
     const p = spec.slice(5).replace(/^\/+/, '').toLowerCase();
     return { kind: 'file', nodes: real(cg.nodes).filter(n => n.filePath.toLowerCase().includes(p)) };
   }
+  const qualified = resolveQualifiedSymbol(spec.replace(/^name:/, ''), name => real(cg.nodes).filter(n => n.name === name), id => real(cg.nodes).find(n => n.id === id));
+  if (qualified) return { kind: 'name', nodes: qualified };
   // exact / fuzzy name (case-insensitive substring, like trace_execution_path)
   const low = spec.toLowerCase();
   return { kind: 'name', nodes: real(cg.nodes).filter(n => n.name.toLowerCase().includes(low)) };

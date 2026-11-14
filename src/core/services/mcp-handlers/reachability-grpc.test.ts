@@ -159,12 +159,16 @@ describe('find_dead_code rootKinds by contract protocol', () => {
 describe('find_dead_code never rates an unbound contract handler high-confidence dead', () => {
   const impl = node('srv/main.go::orderServer.GetOrder', 'GetOrder', { className: 'orderServer' });
 
-  it('reaches high confidence when no contract registration names the handler (the baseline)', async () => {
+  it('stops at medium for a Go handler no registration names (the baseline)', async () => {
+    // The dependency graph extracts no Go imports, so "not imported by name" is not evidence for a
+    // Go file and cannot carry it to high. It was rated high here before.
     await write([impl, RPC], [], disclosure({}));
     await writeDepGraph();
     const [c] = (await run()).candidateDead;
     expect(c.name).toBe('GetOrder');
-    expect(c.confidence).toBe('high');
+    expect(c.confidence).toBe('medium');
+    expect(c.reason).toContain('imports are not extracted for Go');
+    expect(c.reason).not.toContain('not imported by name');
   });
 
   it('caps a method whose class a refused gRPC registration named', async () => {
@@ -241,7 +245,7 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
   });
 
   it('does not cap a candidate no registration names', async () => {
-    const other = node('srv/util.go::unusedHelper', 'unusedHelper');
+    const other = node('srv/util.ts::unusedHelper', 'unusedHelper', { language: 'TypeScript' });
     await write([other, RPC], [], disclosure({
       unresolvedRegistrations: { items: [{ file: 'srv/main.go', line: 12, service: 'orders.v1.OrderService', className: 'orderServer', reason: 'implementation-not-found' }], total: 1 },
     }));
@@ -256,7 +260,7 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
   // items, so a repository with more refusals than those name holds unbound symbols it cannot
   // recover. The whole repository then gives up `high` rather than guess.
   it('withholds high across the repository when a legacy artifact cannot name every refusal', async () => {
-    const other = node('srv/util.go::unusedHelper', 'unusedHelper');
+    const other = node('srv/util.ts::unusedHelper', 'unusedHelper', { language: 'TypeScript' });
     await write([other, RPC], [], disclosure({
       unresolvedRegistrations: {
         items: Array.from({ length: 20 }, (_, i) => ({ file: 'srv/main.go', line: i + 1, service: `svc.S${i}`, className: `serverImpl${i}`, reason: 'implementation-not-found' })),
@@ -291,7 +295,7 @@ describe('find_dead_code never rates an unbound contract handler high-confidence
  * up that repository's entire high-confidence tier.
  */
 describe('find_dead_code reads the complete refusal names, not the reader slice', () => {
-  const unrelated = node('srv/util.go::unusedHelper', 'unusedHelper');
+  const unrelated = node('srv/util.ts::unusedHelper', 'unusedHelper', { language: 'TypeScript' });
 
   it('keeps high when a current artifact names every refusal, however many there are', async () => {
     await write([unrelated, RPC], [], disclosure({
@@ -327,7 +331,7 @@ describe('find_dead_code reads the complete refusal names, not the reader slice'
     // Go, unqualified `&server{}`: `inScope` proves it can only mean the registration's own
     // package, so a same-named struct in another package is NOT capped.
     const here = node('greeter/main.go::server.SayHello', 'SayHello', { className: 'server' });
-    const elsewhere = node('metrics/collector.go::server.deadScrape', 'deadScrape', { className: 'server' });
+    const elsewhere = node('metrics/collector.ts::server.deadScrape', 'deadScrape', { className: 'server', language: 'TypeScript' });
     await write([here, elsewhere, RPC], [], disclosure({
       unresolvedRegistrations: { items: [{ file: 'greeter/main.go', line: 9, service: 'helloworld.Greeter', className: 'server', classDir: 'greeter/', reason: 'implementation-not-found' }], total: 1 },
       unboundHandlerNames: { symbols: [], files: [], classes: [{ name: 'server', dir: 'greeter/' }], truncated: 0 },

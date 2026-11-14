@@ -6,6 +6,8 @@
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable, notReadyResult, safeJoin } from './utils.js';
+import { resolveQualifiedSymbol } from './symbol-query.js';
+export { resolveQualifiedSymbol } from './symbol-query.js';
 import { readDependencyGraphOrPartial } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
@@ -609,6 +611,7 @@ function ambiguousCallSitesBlock(
   };
 }
 
+
 /**
  * Extract a depth-limited subgraph centred on a named function.
  * Falls back to semantic search if no exact name match is found.
@@ -628,8 +631,10 @@ export async function handleGetSubgraph(
   if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.edgeStore) return notReadyResult('Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).', 'graph-unavailable');
 
+  const store = ctx.edgeStore;
+  const qualified = resolveQualifiedSymbol(functionName, n => store.getInternalNodesByName(n), id => store.getNode(id));
   const lower = functionName.toLowerCase();
-  let seeds = ctx.edgeStore.searchNodes(lower);
+  let seeds = qualified ?? store.searchNodes(lower);
 
   // searchNodes is a fuzzy FTS match, so a unique symbol can come back alongside
   // incidental hits. Prefer exact name matches so a known symbol resolves to a
@@ -799,8 +804,10 @@ export async function handleAnalyzeImpact(
   // error instead of crashing on `undefined.toLowerCase()`.
   if (typeof symbol !== 'string' || symbol.trim() === '') return { error: 'symbol is required.' };
 
+  const store = ctx.edgeStore;
+  const qualified = resolveQualifiedSymbol(symbol, n => store.getInternalNodesByName(n), id => store.getNode(id));
   const lower = symbol.toLowerCase();
-  let seeds = ctx.edgeStore.searchNodes(lower);
+  let seeds = qualified ?? store.searchNodes(lower);
 
   // searchNodes is a fuzzy FTS match, so a unique symbol can come back alongside
   // incidental hits. Prefer exact name matches so a known symbol resolves to a
@@ -1543,8 +1550,12 @@ export async function handleTraceExecutionPath(
 
   const entryLower  = entryFunction.toLowerCase();
   const targetLower = targetFunction.toLowerCase();
-  const entryMatches  = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
-  const targetMatches = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
+  const byName = (name: string) => cg.nodes.filter(n => !n.isTest && n.name === name);
+  const byId = (id: string) => nodeMap.get(id);
+  const entryMatches  = resolveQualifiedSymbol(entryFunction, byName, byId)
+    ?? cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
+  const targetMatches = resolveQualifiedSymbol(targetFunction, byName, byId)
+    ?? cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
 
   if (entryMatches.length === 0)  return { error: `No function matching "${entryFunction}" found in call graph.` };
   if (targetMatches.length === 0) return { error: `No function matching "${targetFunction}" found in call graph.` };

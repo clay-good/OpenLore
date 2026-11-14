@@ -158,6 +158,7 @@ interface TextSearchPayload {
   query: string;
   searchMode: 'text' | 'text_fallback';
   retrievalMode: 'keyword' | 'keyword+vocabulary';
+  coverage: ReturnType<typeof coverageDisclosure> | { verdict: 'covered'; questionKind: QuestionKind };
   count: number;
   results: Array<{
     filePath: string;
@@ -180,13 +181,14 @@ async function searchTextLines(
   searchMode: 'text' | 'text_fallback',
   provenance: AnalysisContentProvenance,
   vocabularyExpansion = true,
+  questionKind: QuestionKind = 'where-is',
 ): Promise<TextSearchPayload | null> {
   const { TextLineIndex } = await import('../../analyzer/text-line-index.js');
   const { servedRetrievalMode } = await import('../../analyzer/embedder.js');
   const retrievalMode = servedRetrievalMode(null, outputDir, 'code', vocabularyExpansion) as 'keyword' | 'keyword+vocabulary';
   if (!TextLineIndex.exists(outputDir)) {
     return searchMode === 'text'
-      ? { query, searchMode, retrievalMode, count: 0, results: [], note: 'No text line index found. Run "openlore analyze".' }
+      ? { query, searchMode, retrievalMode, coverage: coverageDisclosure('uncovered', questionKind), count: 0, results: [], note: 'No text line index found. Run "openlore analyze".' }
       : null;
   }
   const hits = await TextLineIndex.searchText(outputDir, query, {
@@ -194,12 +196,18 @@ async function searchTextLines(
     vocabularyExpansion,
   });
   if (hits.length === 0 && searchMode === 'text_fallback') return null;
+  // A literal-text answer is a retrieval conclusion like any other: it states what its evidence is
+  // worth (spec `mcp-quality` NoFalseCoverage). It used to omit the verdict entirely.
+  const verdict = coverageVerdict(hits.map(h => h.matchEvidence));
   return {
     query,
     searchMode,
     retrievalMode,
+    coverage: verdict === 'covered' ? { verdict, questionKind } : coverageDisclosure(verdict, questionKind),
     ...(searchMode === 'text_fallback'
-      ? { note: 'No code symbols matched; these are literal-text matches from markup/text files.' }
+      // Not "from markup/text files": a source line the symbol index has not caught up with (a
+      // file the watcher is still re-indexing) is served from here too.
+      ? { note: 'No indexed code symbol matched; these are literal-text line matches, which can include source lines the symbol index has not seen yet.' }
       : {}),
     count: hits.length,
     results: hits.map((h) => ({
@@ -241,7 +249,7 @@ export async function handleSearchCode(
   // symbol search. Use when hunting a literal string (UI copy, error text).
   if (mode === 'text') {
     const [result, freshnessCtx] = await Promise.all([
-      searchTextLines(outputDir, query, limit, 'text', analysisProvenance, vocabularyExpansion),
+      searchTextLines(outputDir, query, limit, 'text', analysisProvenance, vocabularyExpansion, questionKind),
       readCachedContext(absDir),
     ]);
     return result
@@ -363,7 +371,7 @@ export async function handleSearchCode(
   if (results.length === 0 && overlaid.additions.length === 0) {
     try {
       const textFallback = await searchTextLines(
-        outputDir, query, limit, 'text_fallback', analysisProvenance, vocabularyExpansion,
+        outputDir, query, limit, 'text_fallback', analysisProvenance, vocabularyExpansion, questionKind,
       );
       if (textFallback) {
         return withIndexStaleness(absDir, {
@@ -728,6 +736,15 @@ export async function handleSearchSpecs(
   const { resolveEmbedder, embedderMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
 
   if (!SpecVectorIndex.exists(outputDir)) {
+    // `analyze` builds no spec index when there are no specs to index, so "run analyze" was a loop
+    // on a repository that has none: say what is actually missing.
+    const listed = await handleListSpecDomains(directory) as { count?: number };
+    if (!listed.count) {
+      return {
+        error: 'No specs to search: this repository has no OpenSpec domain specs (openspec/specs/<domain>/spec.md).',
+        hint: 'Run "openlore generate" to author them (needs an LLM provider), then "openlore analyze" to index them. search_code searches the code itself.',
+      };
+    }
     return {
       error: 'No spec index found. Run "openlore analyze" first.',
       hint: 'Plain "openlore analyze" builds a keyword (BM25) spec index; configure EMBED_* for semantic spec search.',

@@ -54,6 +54,12 @@ export interface RawMethodCall {
 }
 
 const SELF_RECEIVERS = new Set(['self', 'this', 'cls']);
+/**
+ * `super.m()` is not virtual dispatch: it binds statically to the nearest base's `m`, which the
+ * direct resolver already walks the ancestors for. When the base is external (`extends Map`) there
+ * is no in-repo target at all, and the name-only fan-out wired it to every unrelated in-repo `m`.
+ */
+const SUPER_RECEIVERS = new Set(['super', 'super()']);
 
 /**
  * A `recv.m()` site where CHA REFUSED the name-only fan-out because the receiver is statically
@@ -457,6 +463,7 @@ function synthesizeVirtualDispatchEdges(
     const caller = nodes.get(call.callerId);
     if (!caller || caller.isExternal) continue;
     if (!h.declaresMethod(call.method)) continue; // bias: only user-defined methods resolve
+    if (SUPER_RECEIVERS.has(call.recv)) continue;
     const fileImports = importMap?.get(caller.filePath);
 
     // ── Recover the receiver's declared type ────────────────────────────────

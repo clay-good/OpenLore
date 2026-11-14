@@ -473,7 +473,7 @@ describe('collectExternalWiring — GitHub Actions', () => {
 
   it('contributes nothing for a repository with no supported config', async () => {
     await put('src/orphan.ts');
-    expect(await collectExternalWiring(root)).toEqual({ wired: [], boundaries: [], boundariesOmitted: 0 });
+    expect(await collectExternalWiring(root)).toEqual({ wired: [], boundaries: [], boundariesOmitted: 0, manifestsRead: [] });
   });
 });
 

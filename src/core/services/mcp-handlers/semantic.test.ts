@@ -245,10 +245,23 @@ describe('handleSearchSpecs', () => {
       },
     }));
 
+    await mkdir(join(tmpDir, 'openspec', 'specs', 'auth'), { recursive: true });
+    await writeFile(join(tmpDir, 'openspec', 'specs', 'auth', 'spec.md'), '# Auth\n');
     const { handleSearchSpecs } = await import('./semantic.js');
     const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string; hint: string };
     expect(result.error).toContain('No spec index found');
     expect(result.hint).toContain('keyword');
+  });
+
+  it('says there are no specs, not "run analyze", when the repository has none', async () => {
+    // `analyze` indexes no specs when none exist, so "run analyze first" never resolved.
+    vi.doMock('../../analyzer/spec-vector-index.js', () => ({
+      SpecVectorIndex: { exists: vi.fn().mockReturnValue(false), build: vi.fn(), search: vi.fn() },
+    }));
+    const { handleSearchSpecs } = await import('./semantic.js');
+    const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string; hint: string };
+    expect(result.error).toMatch(/^No specs to search/);
+    expect(result.hint).toContain('openlore generate');
   });
 });
 
@@ -366,6 +379,22 @@ describe('handleSearchCode', () => {
     expect(result.count).toBe(1);
     expect(Array.isArray(result.results)).toBe(true);
     expect((result.indexStaleness as { staleFiles: string[] }).staleFiles).toEqual(['src/a.ts']);
+  });
+
+  it('a literal-text answer carries the coverage verdict the dispatch contract requires', async () => {
+    // Served whenever no indexed symbol matched — including the seconds while the watcher re-indexes
+    // a just-written function — and it had no `coverage`, which the runtime contract flags.
+    const analysisDir = join(tmpDir, '.openlore', 'analysis');
+    await mkdir(analysisDir, { recursive: true });
+    await TextLineIndex.build(analysisDir, [{ filePath: 'src/a.ts', content: 'export function zebraQuokka() {}\n' }]);
+    await writeAnalysisFile(tmpDir, 'llm-context.json', {});
+    const { handleSearchCode } = await import('./semantic.js');
+    const { assertConclusionShape } = await import('./tool-contract.js');
+    const result = await handleSearchCode(tmpDir, 'zebraQuokka', 10, undefined, undefined, undefined, 'text') as {
+      coverage?: { verdict: string };
+    };
+    expect(result.coverage?.verdict).toBe('covered');
+    expect(() => assertConclusionShape('search_code', result)).not.toThrow();
   });
 
   it('checks stale text-index citations outside the programming-language allowlist', async () => {

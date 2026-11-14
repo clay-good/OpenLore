@@ -334,6 +334,18 @@ describe('change evidence audit', () => {
     expect(payload.changes[0].evidenceDisclaimer).toBe(EVIDENCE_DISCLAIMER);
   });
 
+  it('reports no open changes, not a crash, when openspec/changes does not exist', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-change-status-'));
+    roots.push(root);
+    let stdout = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      stdout += String(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+    expect(await runChangeStatusCli({ rootPath: root, json: true, validateChange: validate })).toBe(0);
+    expect((JSON.parse(stdout) as { changes: unknown[] }).changes).toEqual([]);
+  });
+
   it('rejects traversal-like or unknown names before reading outside the open-change set', async () => {
     const root = await fixture();
     await expect(auditChangeStatuses({ rootPath: root, name: '../../outside', validateChange: validate }))

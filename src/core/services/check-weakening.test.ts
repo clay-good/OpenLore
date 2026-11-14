@@ -220,6 +220,19 @@ describe('check weakening — suppressions and swallowed errors', () => {
   });
 });
 
+describe('check weakening — renamed functions', () => {
+  it('a function renamed with its existing swallow is not reported; a second copy still is', async () => {
+    // Renaming `validateApiKey` → `validateApiKeyX` made its long-standing try/catch read as new.
+    const body = '{ try { return check(a); } catch { return false; } }';
+    const r = await detect([
+      { path: 'src/a.ts', base: `class A { validate(a) ${body} }\n`, current: `class A { validateX(a) ${body} }\n` },
+      { path: 'src/b.ts', base: `class B { one(a) ${body} }\n`, current: `class B { one(a) ${body}\n  two(a) ${body} }\n` },
+    ]);
+    expect(r.findings.map(f => f.location?.path)).toEqual(['src/b.ts']);
+    expect(r.findings[0].message).toContain('in `two`');
+  });
+});
+
 describe('check weakening — check configs', () => {
   const cfg = (path: string, base: string, current: string) => detect([{ path, base, current }]);
 

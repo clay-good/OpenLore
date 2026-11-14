@@ -1,4 +1,5 @@
 import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
+import { OPENLORE_DIR } from '../../constants.js';
 
 
 export type SourceTreeState = 'clean' | 'dirty' | 'unknown';
@@ -17,7 +18,10 @@ export async function captureSourceState(
     const { stdout: commitOut } = await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: rootPath });
     const { stdout: statusOut } = await execFileAsync(
       'git',
-      ['status', '--porcelain=v1', '--untracked-files=all'],
+      // OpenLore's own output is not source. In a repository that does not ignore `.openlore/`,
+      // counting it made every import and first analysis flip its own state to dirty mid-run.
+      // `:/` keeps the whole-repository scope a bare `git status` has.
+      ['status', '--porcelain=v1', '--untracked-files=all', '--', ':/', `:(exclude)${OPENLORE_DIR}`],
       { cwd: rootPath },
     );
     const { stdout: commitAfterOut } = await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: rootPath });

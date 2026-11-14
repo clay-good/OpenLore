@@ -493,7 +493,7 @@ describe('computeBlastRadius', () => {
     } finally {
       const { getRepoPrefix } = await import('../../drift/git-diff.js');
       vi.mocked(getRepoPrefix).mockResolvedValue('');
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

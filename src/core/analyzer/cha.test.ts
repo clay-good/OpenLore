@@ -154,6 +154,18 @@ describe('CHA — virtual-dispatch edges', () => {
     expect(b.edges.some(e => e.synthesizedBy?.startsWith('cha-') && e.calleeId === methodId(b, 'Widget', 'render'))).toBe(false);
   });
 
+  it('A super call is never fanned out by name (it binds statically to the base)', async () => {
+    // A `class HeaderMap extends Map` calling `super.get(...)`: the base is the external
+    // `Map`, yet name-only CHA wired it to every in-repo `get`, closing false `get ↔ get` cycles.
+    const b = await build(`
+      class HeaderMap extends Map<string, string> {
+        get(key: string) { return super.get(key.toLowerCase()); }
+      }
+      class Cache { get(key: string) { return key; } }
+    `);
+    expect(b.edges.some(e => e.synthesizedBy?.startsWith('cha-') && e.calleeId === methodId(b, 'Cache', 'get'))).toBe(false);
+  });
+
   it('Precise and over-approximating dispatch are distinguishable', async () => {
     const b = await build(`
       class Shape { area() { return 0; } }
