@@ -1,72 +1,64 @@
-# Add the datastore access graph: which code reads and writes each table
+# Show which code reads and writes each table, and what a migration breaks
 
-> Status: PROPOSED (2026-07-27, substrate-whitespace sweep). OpenLore knows what the tables *are*
-> and nothing about who touches them. Prior art for static query→table analysis: dbt's static
-> analysis phase over rendered queries (https://docs.getdbt.com/docs/fusion/new-concepts),
-> sqlglot-backed column lineage for dbt (https://github.com/Fszta/dbt-column-lineage), SQLMesh's
-> integrated lineage.
+> Priority: P3 · Not built
+> Reaches the agent through: `blast_radius`, `verify_change` (and so the before-stop moment)
+> Why it helps the agent: before it drops or narrows a column, it sees the functions and tests that still use that column.
 
-## The gap
+Folds in `add-migration-impact-certificate` (removed; restore from commit 0dd75dbef).
 
-`schema-extractor.ts` parses ORM *model definitions* — Prisma, TypeORM, Drizzle, SQLAlchemy, JPA
-(`src/core/analyzer/schema-extractor.ts:4`, `:27`) — and `get_schema_inventory` serves them. That
-is a catalog of shapes. The question every schema change actually asks is the other one: **which
-functions read this table, which write it, and what breaks if the column goes away?** Nothing
-computes it. An agent asked to drop `users.legacy_id` has an inventory entry, a call graph, and no
-edge between them.
+## Problem
 
-This is the fourth instance of a shape OpenLore has already built three times — env vars
-(`analyze_env_impact`), logs, errors — inventory → line-precise sites → upstream blast radius →
-reaching tests. Data is the missing member. It is also the dependency the open
-`add-migration-impact-certificate` names but does not own: that proposal joins a migration verdict
-to "surviving readers", and nothing today can name a reader.
+OpenLore knows the shape of each table. `schema-extractor.ts` parses the model definitions of
+Prisma, TypeORM, Drizzle, SQLAlchemy and JPA. It does not know which code touches a table. An agent
+that drops `users.legacy_id` in a migration gets no warning about the three functions that still
+read that column. To OpenLore, a migration file is plain text. The agent must search by hand or
+guess.
 
 ## What changes
 
-**`analyze_datastore_impact`** (`--preset full`; CLI `openlore datastore-impact --table <name>`),
-plus the extraction that feeds it:
+- **Access sites (analyzer fact).** `schema-extractor.ts` gains a closed, bounded pattern table for
+  ORM query calls of the five ORMs it already parses, and for static SQL string literals. Each site
+  records `{ table, columns?, access: read | write | ddl, file, line, enclosingFunction, confidence }`.
+  Confidence is `resolved`, `partial` (table known, columns not), or `unresolvable` (the query text
+  is built at run time). The sites are facts on existing functions. No new graph node type.
+- **`blast_radius` field `datastoreAccess`.** For each changed function: the tables and columns it
+  reads or writes, with file and line. For a changed model definition: the access sites of that
+  table and the tests that reach them (existing `select_tests` reachability).
+- **Migration targets.** When the diff changes a raw SQL migration file or removes or narrows a
+  field in a supported ORM model, OpenLore lists the dropped or narrowed tables and columns. It
+  joins each target to its access sites, the functions that contain them, and the reaching tests.
+- **`verify_change` advisory finding `migration-target-still-used`.** One finding per target that
+  still has an access site. The message names the function, file, line and the tests to run.
+  Example: "DROP COLUMN `invoices.subtotal`: still read by `getInvoiceTotals`
+  (`src/billing/totals.ts:88`) and 2 more; 4 reaching tests." The agent fixes the readers, or
+  records why the drop is safe, or raises it in its final message.
+- **Field `datastoreNotAssessed`** on both answers: counts and locations of unresolvable sites,
+  migration statements the scanner could not read, and files that use an ORM outside the pattern
+  table.
 
-- **Access sites, not just definitions.** During the existing AST walk, ORM query calls
-  (`prisma.user.findMany`, `session.query(User)`, `db.select().from(users)`, repository/entity
-  manager calls) and SQL string literals are matched against a closed pattern table — the same
-  bounded-regex discipline `schema-extractor.ts` already uses, for the same reason (no new grammar,
-  no dialect engine, measured bounds). Each site yields `{ table, columns?, access: read | write |
-  ddl, file, line, enclosingFunction, confidence }`.
-- **`datastore::<table>` nodes** joined to the call graph, so backward reachability answers
-  "which functions transitively touch this table" and `select_tests` answers "which tests reach a
-  writer" with no new traversal machinery.
-- **Confidence tiers, disclosed per site.** `resolved` (a literal table name in an ORM call or a
-  static SQL literal); `partial` (a static SQL literal whose columns could not be attributed —
-  the table is claimed, the columns are not); `unresolvable` (a dynamically-built query string,
-  an ORM call on a receiver the resolver refused to guess). Unresolvable sites are **counted and
-  listed in `boundaries`**, so the answer is a stated lower bound, never a confident empty set.
-- **Column granularity only where it is honest**: a column is attributed when it appears
-  literally in the site. `SELECT *`, dynamic projections, and ORM calls without an explicit
-  selection report table-level access with the column set explicitly `unknown` — not empty.
+## What does not change
 
-Deliberately NOT borrowed from the prior art: a SQL dialect engine or parser dependency (no
-grammar is added; unparseable SQL is disclosed, not approximated), warehouse/catalog connections
-of any kind, transformation-model DAG semantics, and column-level lineage *through* SQL
-expressions — the join tree inside a query is out of scope and says so.
+- No new MCP tool, preset or CLI command. `analyze_datastore_impact` and `certify_migration` are
+  not built. `get_schema_inventory` keeps its name and output.
+- The finding is advisory. It is registered in `FINDING_CODE_REGISTRY`, so an operator can opt in to
+  blocking.
+- Local and static only. No database connection, no query execution, no LLM, no SQL parser
+  dependency.
+- Works without OpenSpec. The facts come from code, tests and the diff.
 
-## Why this is in scope
+## Limits we disclose
 
-It is the same deterministic inventory→sites→radius→tests conclusion the substrate already serves
-three times, applied to the layer where a wrong answer is most expensive, with no LLM and no
-runtime. It unblocks `add-migration-impact-certificate` (cross-referenced, not modified: that
-change owns the migration *verdict*, this one owns *who reads the table*) and gives
-`analyze_impact` a bridge into the data layer that a call graph alone cannot cross.
+- The join is by name and is a lower bound. An empty join reads "no reference found in the index",
+  never "unreferenced".
+- A column is attributed only when it appears literally at the site. `SELECT *` and dynamic
+  projections report table-level access with columns `unknown`.
+- A migration statement the scanner cannot classify is counted as not assessed, never as safe.
+- Only drop and narrow are assessed. Lock hazards (for example a non-concurrent index build) are
+  out of scope.
+- ORMs covered: Prisma, TypeORM, Drizzle, SQLAlchemy, JPA. Files that use another library are
+  listed as not scanned.
 
-## Impact
+## Depends on
 
-- Touches: `src/core/analyzer/schema-extractor.ts` (access-site extraction alongside definition
-  parsing), the walk that already visits these files, a new handler under
-  `src/core/services/mcp-handlers/`, and a CLI command.
-- Tool surface: +1 tool in `--preset full` only; family `navigate`; registered `conclusion` in
-  `TOOL_CAPABILITY_FAMILY` and cross-referencing its siblings (`get_schema_inventory` for shapes,
-  `analyze_env_impact` for the same shape on config).
-- Specs: `mcp-handlers` — 1 ADDED (DatastoreAccessSitesAreConclusionsWithDisclosedConfidence).
-- Risk: pattern-table coverage rots as ORMs evolve (mitigated: an ORM the table does not cover
-  produces *no* sites for its files and that file set is disclosed as unscanned — the failure mode
-  is a stated gap, not a silent one); regex cost on hostile files (mitigated: the bounded-pattern
-  discipline and measurement precedent already established in `schema-extractor.ts:69-73`).
+Nothing. It uses shipped code: `schema-extractor.ts`, `select_tests` reachability, and the
+merge-base blob reader in `src/utils/git-blobs.ts`.
