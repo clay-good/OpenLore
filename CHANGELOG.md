@@ -5,6 +5,15 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **OpenLore is a Claude Code plugin.** `claude plugin marketplace add clay-good/OpenLore`, then
+  `claude plugin install openlore@openlore`, wires the MCP server (the default `substrate` tools) and
+  the session-start, prompt, before-edit, after-edit, and before-stop hooks, with no global npm
+  install and no config. The plugin pins an exact `openlore` release; Claude Code installs it in
+  about 11 s. Its README lists everything it runs, writes, and sends. The npm CLI, the Pi extension,
+  and the MCP registry listing are unchanged.
+
 ### Fixed
 
 - **`orient` and `search_code` stop claiming coverage over content they could not read.** With

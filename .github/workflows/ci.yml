@@ -154,6 +154,14 @@ jobs:
         # diff, and this checks the real `npm pack` manifest rather than the intent.
         run: npm run audit:packlist
 
+      # The Claude Code plugin (plugin/) and its self-hosted marketplace are static JSON that
+      # only Claude Code's own validator understands fully. --strict fails on warnings, the
+      # same bar the plugin directory applies. Pinned so a validator release cannot move CI.
+      - name: Validate the Claude Code plugin and marketplace
+        run: |
+          npx --yes @anthropic-ai/claude-code@2.1.322 plugin validate plugin --strict
+          npx --yes @anthropic-ai/claude-code@2.1.322 plugin validate . --strict
+
       # The Pass-1 extraction worker is loaded by runtime path resolution, and under vitest
       # the .ts entry is always the one resolved — so the COMPILED entry that the npm package
       # actually ships is exercised by no other job. A compile or packaging regression there

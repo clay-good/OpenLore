@@ -39,7 +39,15 @@ OpenLore fixes both halves, and then gets out of your way. A **one-time static a
 npm install -g openlore && openlore install
 ```
 
-That is the only command most people ever run. It **auto-detects your agent** (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md), wires it, registers the MCP server, and builds the index — no API key, no config, no prompts. After that, **it's on in the background and you don't think about it:**
+**Claude Code only?** Install it as a plugin instead, with no global npm install and no config
+([what the plugin runs and writes](plugin/README.md)):
+
+```bash
+claude plugin marketplace add clay-good/OpenLore
+claude plugin install openlore@openlore
+```
+
+`npm install -g openlore && openlore install` is the only command most people ever run. It **auto-detects your agent** (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md), wires it, registers the MCP server, and builds the index — no API key, no config, no prompts. After that, **it's on in the background and you don't think about it:**
 
 - 🔄 **Every task starts oriented, automatically** — a compact architecture digest is injected into your agent's context at the start of each session, and your agent calls `orient()` and the other tools itself over MCP. You don't type anything.
 - 🌱 **Every repo, not just this one** — `install` wires your user account too, so each new git repo you open indexes itself in the background on first touch. "Install once" is literal.
