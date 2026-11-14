@@ -51,6 +51,7 @@ import {
 import { isProjectedLanguage } from '../../analyzer/projected-language.js';
 import { isContractLanguage } from '../../analyzer/contract/types.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
+import { extractsImports } from '../../analyzer/import-parser.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
@@ -601,10 +602,16 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       const noCaller = (n.fanIn ?? 0) === 0;
       const dynamic = DYNAMIC_LANGS.has(n.language) || !STATIC_LANGS.has(n.language);
       const moduleUsed = importedFiles !== null && fileImported(n.filePath, importedFiles);
+      // The dependency graph records imports only for the languages the import parser reads. For a
+      // Rust or Go file, "no file imports it by name" means nothing was looked for — not evidence.
+      const importSignal = importedNames !== null && extractsImports(n.filePath);
       const reasons: string[] = [];
       if (noCaller) reasons.push('no internal caller');
       else reasons.push('reachable only from other candidate-dead code');
-      if (importedNames !== null && !importedNames.has(n.name)) reasons.push('not imported by name from any other file');
+      if (importSignal && !importedNames.has(n.name)) reasons.push('not imported by name from any other file');
+      else if (importedNames !== null && !importSignal) {
+        reasons.push(`imports are not extracted for ${n.language}, so whether another file uses it by name is unknown`);
+      }
       if (moduleUsed) reasons.push('but its module IS imported elsewhere (symbol-level usage unresolved — e.g. namespace/default import or external API)');
       // The inventory's own word overrides the generic clause: a symbol it calls a route
       // handler must never be told it is "not a route handler" (change: root-framework-routes).
@@ -616,7 +623,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       let confidence: Confidence;
       if (dynamic) confidence = 'low';
       else if (moduleUsed) confidence = 'low';
-      else if (exportSignal === 'none') confidence = 'medium';
+      else if (!importSignal) confidence = 'medium';
       else confidence = noCaller ? 'high' : 'medium';
 
       // A candidate reached into by a synthesized dynamic-dispatch edge (its

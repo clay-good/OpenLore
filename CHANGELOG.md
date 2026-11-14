@@ -16,6 +16,11 @@ All notable changes to OpenLore are documented here. This project adheres to
   member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped
   at low with the manifest named, and `verify_claim` `dead` answers `unverifiable` instead of
   `confirmed`.
+- **`find_dead_code` no longer rates Go, Rust, C# and other code high-confidence dead on a signal it
+  never collected.** "Not imported by name from any other file" comes from the dependency graph,
+  which extracts imports only for TypeScript, JavaScript, Python, Java and Kotlin. In a Rust
+  workspace 617 public functions were rated `high`, including a serde `default = "…"` callback.
+  Candidates in other languages now stop at `medium` and say why.
 - **A fresh `openlore install` no longer leaves its own index stale.** The decision-trail step
   appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
   of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now
