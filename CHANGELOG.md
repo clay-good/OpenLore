@@ -16,6 +16,15 @@ All notable changes to OpenLore are documented here. This project adheres to
   nothing runs twice. A real install is tested on Linux, Windows, and macOS in CI. Its README lists
   everything it runs, writes, and fetches. The npm CLI, the Pi extension, and the MCP registry
   listing are unchanged.
+- **Optional per-lane file rules and an agent-driven configuration workflow** (#719). A new optional
+  `filePolicies` block in `.openlore/config.json` holds rules that include or exclude a path
+  separately for indexing, live watching and embedding, so a tracked generated tree can stay out of
+  the watcher while still being analyzed. The workflow inspects repository evidence, previews an
+  exact config diff, applies it only with host authorization, verifies, and can revert. It is
+  reachable from Pi (`openlore_configure` actions, `/openlore configure assist`), the
+  `openlore configure` CLI, the `openlore/configuration` API, and an opt-in MCP preset
+  (`--preset configuration`). Nothing changes for a repository without `filePolicies`: the corpus,
+  fingerprints, default MCP surface and default config stamp are the same as before.
 
 ### Fixed
 
@@ -106,6 +115,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   `detect_changes` said "Re-run analyze_codebase" when the diff touched only non-code files, and
   `search_specs` said "Run openlore analyze first" on a repository with no specs, which `analyze`
   cannot fix. Both now say what is actually the case.
+
+### Docs
+
+- **The roadmap names one direction and one next step.** `ROADMAP.md` now plans OpenLore as
+  evidence delivered to the agent through hooks (ADR-0036, superseding ADR-0035), names the Claude
+  Code plugin as the next build, and lists cut work with the commit to restore it from. Shipped
+  changes are archived, and the main specs state only what the code does today.
 
 ## [3.6.0] - 2026-11-09
 

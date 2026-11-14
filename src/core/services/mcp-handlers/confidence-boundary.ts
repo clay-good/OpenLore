@@ -557,6 +557,8 @@ const countOf = (v: unknown): number => (Array.isArray(v) ? v.length : typeof v 
  * that is always false carries no information at all.
  */
 export const DISCLOSURE_CHANNELS: readonly DisclosureChannel[] = [
+  {path:'disclosures',fires:nonEmptyArray,detail:() => 'Configuration coverage or effects are partial; read the structured disclosures.'},
+  {path:'outcome',fires:v => typeof v === 'string' && ['blocked','stale-plan','needs-input','failed','partially-verified','applied-pending-verification'].includes(v),detail:() => 'An operation is incomplete or unverified; read its phase receipt.'},
   {
     path: 'verdict',
     fires: (v) => v === 'unverifiable',

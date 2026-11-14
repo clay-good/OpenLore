@@ -1009,3 +1009,50 @@ export const SOURCE_SCAN_MAX_CONCURRENCY = 32;
  * already resident. `bounded-computation.test.ts` fails the build if that wiring is undone.
  */
 export const SOURCE_SCAN_MAX_FILE_BYTES = 4 * 1024 * 1024;
+
+/** Configuration reviews are opt-in and coalesced at host idle points. */
+export const CONFIGURATION_REVIEW_INTERVAL_MS = 5 * 60 * 1000;
+/** Minimum observed declared-output directory subscriptions for a passive review. */
+export const CONFIGURATION_MATERIAL_WATCH_DIRECTORIES = 50;
+
+/** Bounded, provider-free repository configuration discovery. */
+export const CONFIGURATION_SURVEY_BUDGET = {
+  entries: 10_000,
+  depth: 8,
+  bytes: 1024 * 1024,
+  fileBytes: 64 * 1024,
+  milliseconds: 2000,
+};
+export const CONFIGURATION_HARD_BUDGET = {
+  entries: 50_000,
+  depth: 16,
+  bytes: 4 * 1024 * 1024,
+  fileBytes: 1024 * 1024,
+  milliseconds: 10_000,
+};
+export const CONFIGURATION_SOURCE =
+  /\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|php|cs|c|cpp|h|swift|vue|svelte|astro|graphql|proto)$/;
+export const CONFIGURATION_PRUNED = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  '.openlore',
+  'node_modules',
+  'target',
+  'dist',
+  'build',
+  'vendor',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '.cache',
+  '.next',
+  'coverage',
+]);
+
+export const CONFIGURATION_POLICY_VERSION = 1;
+export const CONFIGURATION_MAX_RULES = 100;
+export const CONFIGURATION_MAX_STRING = 1024;
+
+/** A host-owned verification probe must stop waiting and disclose unknown cleanup after this deadline. */
+export const CONFIGURATION_CANARY_TIMEOUT_MS = 5000;

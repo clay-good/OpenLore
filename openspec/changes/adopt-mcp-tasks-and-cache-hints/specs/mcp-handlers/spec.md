@@ -4,49 +4,39 @@
 
 ### Requirement: CacheHintsNeverOutrunTheLease
 
-When protocol-native result cache hints (`ttlMs`/`cacheScope`) are emitted, they SHALL be derived
-from the epistemic lease's existing thresholds — no new tuning constant — and SHALL only ever be
-MORE conservative than the lease's own verdict for the same response: a hint never advertises
-validity the lease would not disclose. The lease's factual prose note SHALL be retained unchanged
-alongside the hint (the hint is an additive machine-readable carrier, not a replacement). A result
-whose validity is bound to repository events rather than wall-clock time (recall freshness
-verdicts, impact certificates) SHALL declare the most conservative available scope rather than a
-TTL that could outlive a repo change.
+When cache hints (`ttlMs` / `cacheScope`) are emitted, they SHALL be derived from the freshness
+lease's existing thresholds and SHALL never state a longer validity than the lease gives the same
+response. The lease's prose note SHALL stay unchanged beside the hint. A result whose validity ends
+on a repository change (a `recall` freshness verdict, an impact certificate) SHALL declare the
+most conservative scope and no time-based validity.
 
 #### Scenario: A hint is bounded by the lease
 
-- **GIVEN** a session whose lease state is degraded
-- **WHEN** a tool result is emitted with cache hints
-- **THEN** the hinted validity does not exceed what the degraded lease note discloses, and the
-  prose note itself is byte-identical to the pre-hint behavior
+- **WHEN** a tool result is emitted with cache hints while the lease is degraded
+- **THEN** the hinted validity does not exceed what the lease discloses, and the prose note is
+  byte-identical to the behavior before hints
 
-#### Scenario: Event-bound results decline wall-clock caching
+#### Scenario: Event-bound results decline time-based caching
 
-- **GIVEN** a `recall` result carrying a freshness verdict anchored to code content
-- **WHEN** cache hints are attached
-- **THEN** the result declares the no-store-equivalent scope instead of a fixed TTL, so no client
-  cache can serve it past a repository change
+- **WHEN** cache hints are attached to a `recall` result
+- **THEN** the result declares the most conservative scope, so no client cache serves it past a
+  repository change
 
 ### Requirement: LongOperationsAreTasksWhenNegotiated
 
-When the client negotiates the MCP tasks capability, the two genuinely long operations — the full
-`analyze_codebase` build and the cold-start self-bootstrap — SHALL return task handles observable
-via `tasks/get` and cancelable via `tasks/cancel`, with cancellation leaving the persisted index
-store uncorrupted. Absent the capability, behavior SHALL be byte-identical to today (blocking
-analyze; fire-and-forget background bootstrap). No ordinary conclusion tool becomes a task —
-deterministic answers that compute quickly stay synchronous by design.
+When the client negotiates the MCP tasks capability, the full `analyze_codebase` build and the
+first-run index build SHALL return task handles with progress and cancel, and a cancel SHALL leave
+the index store uncorrupted. Without the capability, behavior SHALL be byte-identical to today. No
+other tool SHALL become a task.
 
-#### Scenario: A cold start becomes observable
+#### Scenario: A first-run build becomes observable
 
-- **GIVEN** a client with the tasks capability wiring the server against a never-analyzed repo
-- **WHEN** the first tool call triggers the cold-start index build
-- **THEN** the build is exposed as a task whose progress is pollable via `tasks/get`, instead of
-  an invisible background promise
+- **WHEN** a client with the tasks capability makes its first call against a repository that was
+  never analyzed
+- **THEN** the build is a task whose progress the client can read
 
-#### Scenario: Cancellation is safe and honest
+#### Scenario: Cancel is safe
 
-- **GIVEN** an in-flight `analyze_codebase` task
-- **WHEN** the client issues `tasks/cancel`
-- **THEN** the build stops, the store is left either at its pre-build state or a consistent
-  partial state that is honestly flagged (never a silently torn graph), and the task reports
-  canceled
+- **WHEN** the client cancels a running `analyze_codebase` task
+- **THEN** the build stops, the store is at its earlier state or a flagged partial state, and the
+  task reports canceled

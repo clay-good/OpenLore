@@ -15,7 +15,8 @@
  * Supported keywords: type (string or array incl. "null"), const, enum,
  * required, dependentRequired, properties, additionalProperties (false, or a
  * subschema applied to the remaining properties), items, oneOf, minLength,
- * maxLength, minimum, maximum, minItems, maxItems, maxProperties. The
+ * maxLength, pattern, minimum, maximum, minItems, maxItems, minProperties,
+ * maxProperties. The
  * `integer` type is distinguished from `number`.
  */
 
@@ -35,7 +36,7 @@ type JsonSchema = Record<string, unknown>;
 export const SUPPORTED_SCHEMA_KEYWORDS: readonly string[] = [
   'type', 'const', 'enum', 'required', 'dependentRequired', 'properties',
   'additionalProperties', 'items', 'oneOf',
-  'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems', 'maxProperties',
+  'minLength', 'maxLength', 'pattern', 'minimum', 'maximum', 'minItems', 'maxItems', 'minProperties', 'maxProperties',
 ];
 
 /** Keywords that carry no constraint: ignoring them enforces nothing away. */
@@ -110,6 +111,9 @@ function validateNode(value: unknown, schema: JsonSchema, path: string, errors: 
     if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) {
       errors.push({ path, message: `longer than maxLength ${schema.maxLength} (got ${value.length})` });
     }
+    if (typeof schema.pattern === 'string' && !new RegExp(schema.pattern).test(value)) {
+      errors.push({ path, message: `does not match pattern ${JSON.stringify(schema.pattern)}` });
+    }
   }
 
   // numeric bounds (inclusive, per JSON Schema)
@@ -126,6 +130,9 @@ function validateNode(value: unknown, schema: JsonSchema, path: string, errors: 
   if (typeOf(value) === 'object') {
     const obj = value as Record<string, unknown>;
     const props = (schema.properties as Record<string, JsonSchema> | undefined) ?? {};
+    if (typeof schema.minProperties === 'number' && Object.keys(obj).length < schema.minProperties) {
+      errors.push({ path, message: `fewer than minProperties ${schema.minProperties} properties (got ${Object.keys(obj).length})` });
+    }
 
     // maxProperties bounds an open-ended map (e.g. a `layers` object whose keys are
     // caller-chosen), which `properties` cannot.

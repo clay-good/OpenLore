@@ -8,6 +8,7 @@ import { COMMAND_GROUPS } from '../help-groups.js';
 
 type Pair = {
   tool: string;
+  sharedApi?:string;
   command: string;
   commandExport: string;
   cliFile: string;
@@ -17,6 +18,7 @@ type Pair = {
 };
 
 const PAIRS: readonly Pair[] = [
+  {tool:'configure_openlore',command:'configure',commandExport:'configureCommand',cliFile:'configure.ts',sharedApi:'configureOpenLore',commonInputs:['directory','action'],mcpOnlyInputs:['scope','candidate','plan'],cliOnlyInputs:['candidateFile','planFile','apply','replaceChoices']},
   { tool: 'orient', command: 'orient', commandExport: 'orientCommand', cliFile: 'orient.ts', commonInputs: ['directory', 'task', 'limit', 'tokenBudget', 'lean'], mcpOnlyInputs: ['rankBy'] },
   { tool: 'search_code', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'limit', 'language', 'minFanIn', 'tokenBudget'], mcpOnlyInputs: ['mode', 'questionKind'] },
   { tool: 'search_specs', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'limit', 'domain', 'section'] },
@@ -89,11 +91,11 @@ const read = (relative: string): string => readFileSync(join(import.meta.dirname
 
 function paritySourceErrors(pair: Pair, cliSource: string): string[] {
   const errors: string[] = [];
-  if (!cliSource.includes(`dispatchTool('${pair.tool}'`) && !cliSource.includes(`dispatchTool("${pair.tool}"`)) {
+  if (!(pair.sharedApi ? cliSource.includes(`await ${pair.sharedApi}(`) : cliSource.includes(`dispatchTool('${pair.tool}'`) || cliSource.includes(`dispatchTool("${pair.tool}"`))) {
     errors.push('CLI does not dispatch the paired MCP tool');
   }
   if (!cliSource.includes(".option('--json")) errors.push('CLI has no JSON conclusion path');
-  if (!/JSON\.stringify\((?:result|report)/.test(cliSource)) {
+  if (!/(?:JSON\.stringify|jsonOutput)\((?:result|report)/.test(cliSource)) {
     errors.push('CLI JSON path does not serialize the dispatched conclusion directly');
   }
   return errors;
@@ -131,7 +133,7 @@ describe('CLI/MCP conclusion delivery parity', () => {
   });
 
   it('rejects wrong dispatch and rewritten output', () => {
-    const pair = PAIRS[0];
+    const pair = PAIRS.find(p => p.tool === 'orient')!;
     expect(paritySourceErrors(pair, "command.option('--json'); const result = await dispatchTool('search_code', {}); console.log(JSON.stringify(result))"))
       .toContain('CLI does not dispatch the paired MCP tool');
     expect(paritySourceErrors(pair, "command.option('--json'); const result = await dispatchTool('orient', {}); console.log(JSON.stringify({ data: result }))"))

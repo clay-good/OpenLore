@@ -1,76 +1,60 @@
-# Adopt the agent-context interop standards: AGENTS.md first-class, the orient skill portable, the injected digest evidence-slim
+# Five short skills and a slim digest for the Claude Code plugin
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 4). OpenLore already emits per-tool context
-> files and ships an orient skill — but it targets the 2024-era per-tool matrix
-> (.cursorrules, .clinerules, .windsurf/rules.md) while the ecosystem consolidated on two
-> open standards: AGENTS.md (Linux Foundation-stewarded, read by 28+ harnesses) and Agent
-> Skills / SKILL.md (32 tools by 2026-03). Meanwhile, published evidence (arXiv 2602.11988,
-> 138-task benchmark) shows LLM-generated always-injected context files *reduce* agent task
-> success ~3% and raise cost >20% — a direct warning about the auto-generated CODEBASE.md
-> digest OpenLore tells users to inject at session start. Promote the standards, demote the
-> per-tool matrix, and slim the static injected surface to what the evidence supports.
+> Priority: P2 · Not built
+> Reaches the agent through: the prompt-submitted moment (slim digest), and plugin skills that call `orient`, `blast_radius`, `verify_change`, `verify_claim`, and `recall`
+> Why it helps the agent: the agent gets a few lines of repository shape once per session and five short recipes, not a long file on every turn.
 
-## The gap
+## Problem
 
-- **(a) AGENTS.md is one selectable target among seven, labeled as Codex-only.**
-  `AI_TOOL_TARGETS` (`src/core/analyzer/ai-config-generator.ts:55-62`) lists `AGENTS.md`
-  as `'OpenAI Codex (AGENTS.md)'` — but AGENTS.md is now the cross-tool standard (Codex,
-  Copilot, Cursor, Windsurf, Amp, Devin, Aider, Zed, Jules, VS Code, JetBrains; Claude
-  Code since spring 2026). A user who picks only their current editor's bespoke file gets
-  a context file one harness reads; picking AGENTS.md would reach nearly all of them. The
-  interactive prompt neither says so nor defaults to it.
-- **(b) The orient skill installs to Claude Code only.** `setup.ts` writes the 8 skills to
-  `.claude/skills/` (`src/cli/commands/setup.ts:10`, `:501`) even though
-  `skills/openlore-orient/SKILL.md` already satisfies the open Agent Skills format
-  (frontmatter checked by `src/cli/install/skill-wrapper.test.ts:41`) and the standard's
-  discovery paths are read by Gemini CLI, Codex, Goose, Kiro, and others. The portability
-  is already paid for; the install step just doesn't deliver it.
-- **(c) The always-injected digest is the measured anti-pattern.** CLAUDE.md wiring
-  `@`-imports the full generated `CODEBASE.md` (hub tables, god functions, entry-point
-  lists) into every session. Gloaguen et al. (arXiv 2602.11988) measured exactly this
-  shape — auto-generated, always-injected context — and found it *hurts* (−3% success,
-  +20% cost); minimal human-curated files barely help. OpenLore's own thesis agrees:
-  structure should be fetched on demand via `orient`, not front-loaded. The generated
-  digest predates that thesis and was never re-audited against it.
+An npm install tells the user to `@`-import `.openlore/analysis/CODEBASE.md` into `CLAUDE.md`. That
+file is the full digest from `generateCodebaseDigest` (`src/core/analyzer/codebase-digest.ts`): hub
+tables, entry points, god functions, ownership domains. It is loaded on every turn, whether or not
+the task needs it. A plugin install cannot edit `CLAUDE.md`, so a plugin user gets no digest at all.
+
+The plugin ships one skill, `openlore-orient`. The other canonical skills in `skills/` are long
+(132 to 352 lines) and some name tools that the default `substrate` surface does not expose. The
+agent has no short recipe for "debug this," "review my change," or "which tests do I write."
 
 ## What changes
 
-1. **AGENTS.md becomes the recommended default target.** Relabel it in `AI_TOOL_TARGETS`
-   ("Most agent CLIs/editors (AGENTS.md standard)"), preselect it in the interactive
-   prompt and in `--yes`/zero-interaction flows, and keep the per-tool files as explicit
-   opt-ins for the holdouts (GEMINI.md noted in the label). Existing per-tool wiring is
-   untouched on update — this changes the default for new wiring only.
-2. **Skill emission via the open standard's discovery paths.** `setup.ts` gains non-Claude
-   skill destinations for the harnesses the Agent Skills standard defines, installing the
-   same `skills/openlore-orient/` content (frontmatter already conformant). Cross-shell
-   wrapper scripts already exist (`orient.sh` / `orient.ps1` / `orient-via-mcp.mjs`).
-3. **Split the digest into a minimal injected core + on-demand remainder.** The generated
-   `CODEBASE.md` splits into (i) a short always-injected section — commands, the MCP
-   workflow table pointer, top invariants — sized in lines and guarded by a test, and
-   (ii) the full structural digest, kept on disk and referenced ("run `orient` /
-   `get_map`; full digest at .openlore/analysis/CODEBASE.md") instead of inlined. The
-   proposal cites the negative evidence in the generated file's header so downstream
-   users understand why the digest is not auto-injected.
+- **A slim digest.** `generateCodebaseDigest` also writes `.openlore/analysis/CODEBASE.slim.md`
+  (new file): at most 12 lines. It holds the function and edge counts, the three highest fan-in
+  hubs, the languages with a call graph, where specs and decisions live (when the repository has
+  any), and one pointer line to `orient`. Repository-derived lines go through
+  `frameServedContent`, like the full digest.
+- **Printed once per session at the prompt-submitted moment.** `buildInjection`
+  (`src/cli/commands/orient-inject.ts`) puts the slim digest before the task block on the first
+  prompt of a session. It records the delivery under the payload's `session_id` in the per-session
+  record that `src/core/services/hook-session.ts` keeps (hook-reliability task 3.1), so later prompts do not repeat it. A rebuilt
+  index with a different digest is printed once more. No `session_id`: the digest is not printed.
+- **Five plugin skills.** The plugin ships `openlore-orient`, `openlore-debug`,
+  `openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`. Each `SKILL.md`
+  in `skills/` is cut to 80 lines or fewer, names only tools in the `plugin` preset, and ends
+  with one of three actions: fix it, record a decision with the proof, or raise it to the human.
+  The copies under `plugin/skills/` are byte-identical to `skills/`.
+- **A guard test** pins the skill list, the line budgets, the tool names, and the digest size.
 
-## Why this is in scope
+## What does not change
 
-Distribution is part of the substrate's job: a context file only one harness reads is a
-smaller product than the same file in the standard location. And (c) is a claims-honesty
-issue — OpenLore currently *recommends* an injection pattern the best available evidence
-says harms the agents it exists to serve, while its own on-demand `orient` design is the
-pattern the same evidence favors.
+- No new tool, preset, command, or config key. `contextInjection.mode: "off"` also turns the slim
+  digest off.
+- `CODEBASE.md` keeps its name, content, and the `@`-import that `openlore install` writes. Current
+  npm, MCP, and Pi users see no difference. Pi keeps `pi.contextMode`.
+- `openlore setup` still installs the full skill set for the harnesses it supports.
+- Local only, no LLM. Works with no spec framework: the spec and decision line is left out when the
+  repository has none.
 
-## Impact
+## Limits we disclose
 
-- Files: `src/core/analyzer/ai-config-generator.ts` (labels, default, digest split),
-  `src/cli/commands/setup.ts` (skill destinations, preselection),
-  `src/cli/install/detect.ts` (AGENTS.md-first detection already partially present,
-  `:119-126`), templates + their tests (`ai-config-generator.test.ts`,
-  `codebase-digest.test.ts`).
-- Specs: `generator` — 2 ADDED requirements (StandardContextFilesAreTheDefaultTargets,
-  InjectedDigestStaysMinimal); `cli` — 1 ADDED (SkillEmissionFollowsTheOpenStandard).
-- No new MCP tool; no default-preset change (ADR-0023 process not triggered).
-- Risk: low. Existing wired repos are untouched (update flows never clobber); the digest
-  split changes generated-file layout, so the e2e fixtures and any docs quoting the
-  digest need refresh. Prior art: agents.md (Linux Foundation), Agent Skills standard,
-  arXiv 2602.11988 for the slimming evidence.
+- The slim digest is a fixed-size summary. It names three hubs, not all of them; the pointer line
+  says to call `orient` for the task.
+- "Once per session" depends on the harness sending `session_id`. Without it, nothing is printed.
+- Until the first index build finishes there is no digest. The existing pointer line says so.
+- `AGENTS.md` as the default context file, and skills for other harnesses, are not in this change.
+  They are later work.
+
+## Depends on
+
+- `ship-claude-code-plugin` (separate change, folder `plugin/`): it builds the plugin, its hooks,
+  and the copy of `openlore-orient`. This change only sets the skill content and the digest.
+- Shipped: `generateCodebaseDigest`, `orient --inject`, the per-session hook record.

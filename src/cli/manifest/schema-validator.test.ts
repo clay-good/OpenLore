@@ -7,6 +7,19 @@ import {
 import { TOOL_DEFINITIONS } from '../commands/mcp.js';
 
 describe('size and shape keywords', () => {
+  it('enforces patterns and minimum object property counts', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        id: { type: 'string', pattern: '^[a-z0-9_-]{1,8}$' },
+        lanes: { type: 'object', minProperties: 1 },
+      },
+    };
+    expect(validateAgainstSchema({ id: 'rule-1', lanes: { watch: 'exclude' } }, schema)).toEqual([]);
+    expect(validateAgainstSchema({ id: 'Bad ID', lanes: { watch: 'exclude' } }, schema)).toHaveLength(1);
+    expect(validateAgainstSchema({ id: 'ok', lanes: {} }, schema)[0].message).toMatch(/minProperties/);
+  });
+
   it('enforces string length bounds', () => {
     const schema = { type: 'object', properties: { s: { type: 'string', minLength: 2, maxLength: 4 } } };
     expect(validateAgainstSchema({ s: 'abc' }, schema)).toEqual([]);

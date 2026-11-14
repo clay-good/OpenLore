@@ -1,38 +1,47 @@
 # Tasks
 
-## 1. Proposal intent preparation
+## 1. Recognition
 
-- [ ] 1.1 Define the injected instruction for deriving requested outcome, accepted decisions,
-      constraints, and unresolved questions from the conversation
-- [ ] 1.2 Define the actionable-request check; exploration, questions, and assistant suggestions
-      without user assent must lead to clarification before proposal files are created
-- [ ] 1.3 Ensure the brief is passed to `orient()` before proposal artifacts are authored and that
-      missing orientation evidence is disclosed without blocking an otherwise actionable request
+- [ ] 1.1 Add `isPlanAuthoringInvocation` to `src/cli/commands/proposal-context.ts`: the existing
+      OpenSpec forms, the Spec Kit commands, and the verb-plus-plan-noun phrase rule. Keep
+      `isOpenSpecProposalInvocation` exported and unchanged. Test:
+      `src/cli/commands/proposal-context.test.ts`. Done when each listed form matches and every
+      prompt the current tests reject is still rejected.
+- [ ] 1.2 Add negative cases to `src/cli/commands/proposal-context.test.ts`: "fix the spec test,"
+      "read the design doc," "explain this ADR," and a code-only task. Done when none of them
+      matches.
+- [ ] 1.3 Point `proposalContextForPrompt` at the new check in
+      `src/cli/commands/proposal-context.ts`. Test: `src/cli/commands/orient-inject.test.ts`. Done
+      when a Spec Kit prompt gets the block after its task orientation and an ordinary prompt gets
+      the same output as before.
 
-## 2. Agent integrations
+## 2. Instruction text
 
-- [ ] 2.1 Extend Claude Code's managed `UserPromptSubmit` / `orient --inject` path to detect
-      proposal invocations and supply the proposal-specific preparation instruction
-- [ ] 2.2 Add proposal-trigger detection and preparation to the Pi extension hook
-- [ ] 2.3 Make Pi on-demand context the default: omit the repeated architecture digest and spec
-      index, retain them under an explicit full-context setting, and inject only the short
-      proposal instruction for recognized proposal invocations
-- [ ] 2.4 Add Codex prompt-submission hook and MCP-server adapter; register both in OpenLore
-      install/detection flows, preserving Codex trust and activation requirements
-- [ ] 2.5 Verify supported OpenSpec proposal invocation forms are recognized and unrelated prompts
-      remain unchanged
-- [ ] 2.6 Preserve ownership-safe install/uninstall behavior for managed hook configuration
+- [ ] 2.1 Reword `openSpecProposalContext` in `src/cli/commands/proposal-context.ts` to say "plan
+      or spec files"; keep the header line and the function name. Tests:
+      `src/cli/commands/proposal-context.test.ts`, `src/pi/extension.test.ts`. Done when both pass
+      and the text contains no framework name.
+- [ ] 2.2 When the spec-layout detector from `spec-framework-neutrality` is present, add one line
+      with the detected path and format in `src/cli/commands/orient-inject.ts`
+      (`buildProposalOnlyInjection`). Test: `src/cli/commands/orient-inject.test.ts`. Done when the
+      line appears for a detected layout and is absent otherwise. Skip this task until that change
+      lands.
 
-## 3. Specification and verification
+## 3. Harness delivery
 
-- [ ] 3.1 Add the `openspec` requirements and scenarios from this change to the canonical spec
-- [ ] 3.2 Verify a concise `propose` follow-up uses the earlier user request and calls `orient()`
-      before creating proposal artifacts
-- [ ] 3.3 Verify an explore-then-propose conversation with no concrete ask requests clarification
-      and creates no proposal artifacts
-- [ ] 3.4 Verify unselected alternatives remain unresolved and are not attributed to the user
-- [ ] 3.5 Verify missing analysis artifacts disclose the limitation and do not block a clear request
-- [ ] 3.6 Verify non-proposal prompts do not invoke proposal-specific preparation
-- [ ] 3.7 Verify default Pi turns omit the standing digest and spec index, full mode restores them,
-      and proposal turns receive only the concise preparation instruction
-- [ ] 3.8 Run `openspec validate --strict` and the relevant Pi, Codex-install, and hook tests
+- [ ] 3.1 Confirm Pi uses the same function: `src/pi/extension.ts` (`before_agent_start`). Test:
+      `src/pi/extension.test.ts`. Done when a Spec Kit prompt adds the block in the default
+      on-demand mode and an ordinary prompt adds nothing.
+- [ ] 3.2 Update the `--proposal-only` help text in `src/cli/commands/orient.ts` to say "plan or
+      spec," and confirm `src/cli/install/adapters/codex.ts` needs no change. Test:
+      `src/cli/install/adapters/codex.test.ts`. Done when the Codex hook prints the block for a
+      plain "write an implementation plan" prompt and the installed hook entry is byte-identical.
+
+## 4. Docs and checks
+
+- [ ] 4.1 Update `docs/install.md` and the `orient --proposal-only` row in `docs/cli-reference.md`
+      to describe plan and spec prompts in any workflow. Done when neither says the hook is
+      OpenSpec-only.
+- [ ] 4.2 Run `openspec validate add-openspec-proposal-orientation` and
+      `npx vitest run src/cli/commands/proposal-context.test.ts src/cli/commands/orient-inject.test.ts src/pi/extension.test.ts src/cli/install/adapters/codex.test.ts`.
+      Done when all pass.

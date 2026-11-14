@@ -1,3 +1,4 @@
+import type { FilePolicies, ConfigurationAssistantConfig } from '../core/configuration/types.js';
 /**
  * Core type definitions for openlore
  */
@@ -17,6 +18,8 @@ export type PanicResponseMode = 'off' | 'observe' | 'advisory' | 'experimental_b
 
 // Configuration types
 export interface OpenLoreConfig {
+  filePolicies?: FilePolicies;
+  configurationAssistant?: ConfigurationAssistantConfig;
   version: string;
   projectType: ProjectType;
   openspecPath: string;

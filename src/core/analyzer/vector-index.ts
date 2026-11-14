@@ -1,3 +1,4 @@
+import type { FilePolicyResolver } from '../configuration/policy.js';
 /**
  * VectorIndex
  *
@@ -68,7 +69,7 @@ export interface FunctionRecord {
   /** Concatenated text used for embedding */
   text: string;
   /** Embedding vector */
-  vector: number[];
+  vector: number[] | null;
 }
 
 export interface SearchResult {
@@ -108,6 +109,7 @@ const META_FILE = 'vector-index-meta.json';
 const META_SCHEMA_VERSION = 1;
 
 export interface VectorIndexMeta {
+  embeddingPolicyRevision?: string;
   hasEmbeddings: boolean;
   dim: number;
   model: string | null;
@@ -1457,6 +1459,7 @@ export class VectorIndex {
     callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
     /** How to behave when another process is already mutating this index. */
     lock?: VectorIndexLockOptions,
+    embeddingPolicy?: FilePolicyResolver,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1468,7 +1471,7 @@ export class VectorIndex {
   }> {
     return withVectorIndexMutation(outputDir, () => VectorIndex.buildUnlocked(
       outputDir, nodes, signatures, hubIds, entryPointIds, embedSvc, fileContents, incremental,
-      vocabularyExpansion, callEdges,
+      vocabularyExpansion, callEdges, embeddingPolicy,
     ), lock);
   }
 
@@ -1483,6 +1486,7 @@ export class VectorIndex {
     incremental = false,
     vocabularyExpansion = true,
     callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
+    embeddingPolicy?: FilePolicyResolver,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1577,6 +1581,8 @@ export class VectorIndex {
     const testFunctions = repoNodes.length - productionFunctions;
     const signatureOnlySymbols = candidates.length - repoNodes.length;
 
+    if (embeddingPolicy && !candidates.some(r => embeddingPolicy.admitted(r.filePath,'embed',true))) embedSvc = null;
+
     // ── BM25-only build (no embedding service) ───────────────────────────────
     // Write the corpus without a `vector` column so the table can never be
     // searched with ANN, and record `hasEmbeddings: false` in the sidecar.
@@ -1607,6 +1613,7 @@ export class VectorIndex {
         fullBuildAt: builtAt,
         schemaVersion: META_SCHEMA_VERSION,
         tokenizerVersion: TOKENIZER_VERSION,
+        ...(embeddingPolicy?.hasRulesFor('embed') ? {embeddingPolicyRevision:embeddingPolicy.revisionFor('embed')} : {}),
         ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
       });
       _degradedFallback.delete(dbPath);
@@ -1651,6 +1658,7 @@ export class VectorIndex {
           const text = row.text as string;
           // Convert Arrow typed arrays (Float32Array etc.) to plain number[]
           // so LanceDB can re-infer the schema when writing back
+          if (!row.vector) continue;
           const vector = Array.from(row.vector as ArrayLike<number>);
           // Cache the vector keyed by "id::text" so a text change invalidates it
           cachedVectors.set(`${id}::${text}`, vector);
@@ -1665,9 +1673,11 @@ export class VectorIndex {
     const toEmbed: typeof candidates = [];
     const toEmbedIdx: number[] = []; // index into `candidates`
     const cachedIdx: number[] = [];
+    const excludedIdx: number[] = [];
 
     for (let i = 0; i < candidates.length; i++) {
       const r = candidates[i];
+      if (embeddingPolicy && !embeddingPolicy.admitted(r.filePath,'embed',true)) {excludedIdx.push(i);continue;}
       const cacheKey = `${r.id}::${r.text}`;
       if (cachedVectors.has(cacheKey)) {
         cachedIdx.push(i);
@@ -1690,6 +1700,7 @@ export class VectorIndex {
 
     // ── Assemble final records ───────────────────────────────────────────────
     const fullRecords: FunctionRecord[] = new Array(candidates.length);
+    for (const idx of excludedIdx) fullRecords[idx] = {...candidates[idx],vector:null};
     for (let i = 0; i < cachedIdx.length; i++) {
       const idx = cachedIdx[i];
       const r = candidates[idx];
@@ -1717,7 +1728,7 @@ export class VectorIndex {
     );
     await writeMeta(outputDir, {
       hasEmbeddings: true,
-      dim: fullRecords[0]?.vector.length ?? 0,
+      dim: fullRecords.find(r => r.vector)?.vector?.length ?? 0,
       // Runtime test doubles and third-party embedders predating `modelName`
       // can omit it despite the current type contract. Persist a valid,
       // conservative identity rather than publishing malformed metadata.
@@ -1726,6 +1737,7 @@ export class VectorIndex {
       fullBuildAt: builtAt,
       schemaVersion: META_SCHEMA_VERSION,
       tokenizerVersion: TOKENIZER_VERSION,
+      ...(embeddingPolicy?.hasRulesFor('embed') ? {embeddingPolicyRevision:embeddingPolicy.revisionFor('embed')} : {}),
       ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
     });
 
@@ -1772,9 +1784,10 @@ export class VectorIndex {
      * section is short, and a caller that loses the race should converge, not fail.
      */
     lock: VectorIndexLockOptions = { contention: 'wait' },
-  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' }> {
+    embeddingPolicy?: FilePolicyResolver,
+  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' | 'policy-changed' }> {
     return withVectorIndexMutation(outputDir, () => VectorIndex.updateFilesUnlocked(
-      outputDir, nodes, changedFilePaths, signatures, hubIds, entryPointIds, embedSvc, fileContents,
+      outputDir, nodes, changedFilePaths, signatures, hubIds, entryPointIds, embedSvc, fileContents, embeddingPolicy,
     ), lock);
   }
 
@@ -1787,13 +1800,15 @@ export class VectorIndex {
     entryPointIds: Set<string>,
     embedSvc: Embedder | null | undefined,
     fileContents?: Map<string, string>,
-  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' }> {
+    embeddingPolicy?: FilePolicyResolver,
+  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' | 'policy-changed' }> {
     if (!VectorIndex.exists(outputDir)) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: false };
     }
     const dbPath = dbPathFor(outputDir);
     const existingMeta = readMeta(outputDir);
     const indexHasEmbeddings = metaHasEmbeddings(existingMeta);
+    if (existingMeta && existingMeta !== INVALID_META && existingMeta.embeddingPolicyRevision !== (embeddingPolicy?.hasRulesFor('embed') ? embeddingPolicy.revisionFor('embed') : undefined)) return {embedded:0,reused:0,total:0,hasEmbeddings:indexHasEmbeddings,deferred:'policy-changed'};
     if (changedFilePaths.size === 0) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: indexHasEmbeddings };
     }
@@ -2008,14 +2023,16 @@ export class VectorIndex {
       for (const row of previousRows) {
         const id = row.id as string;
         const text = row.text as string;
-        cachedVectors.set(`${id}::${text}`, Array.from(row.vector as ArrayLike<number>));
+        if (row.vector) cachedVectors.set(`${id}::${text}`, Array.from(row.vector as ArrayLike<number>));
       }
     }
 
     const toEmbed: typeof candidates = [];
     const toEmbedIdx: number[] = [];
     const cachedIdx: number[] = [];
+    const excludedIdx: number[] = [];
     for (let i = 0; i < candidates.length; i++) {
+      if (embeddingPolicy && !embeddingPolicy.admitted(candidates[i].filePath,'embed',true)) {excludedIdx.push(i);continue;}
       const key = `${candidates[i].id}::${candidates[i].text}`;
       if (cachedVectors.has(key)) cachedIdx.push(i);
       else { toEmbed.push(candidates[i]); toEmbedIdx.push(i); }
@@ -2030,6 +2047,7 @@ export class VectorIndex {
     }
 
     const fullRecords: FunctionRecord[] = new Array(candidates.length);
+    for (const idx of excludedIdx) fullRecords[idx] = {...candidates[idx],vector:null};
     for (const idx of cachedIdx) {
       const r = candidates[idx];
       fullRecords[idx] = { ...r, vector: cachedVectors.get(`${r.id}::${r.text}`)! };
