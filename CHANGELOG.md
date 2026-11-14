@@ -16,6 +16,10 @@ All notable changes to OpenLore are documented here. This project adheres to
   member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped
   at low with the manifest named, and `verify_claim` `dead` answers `unverifiable` instead of
   `confirmed`.
+- **A fresh `openlore install` no longer leaves its own index stale.** The decision-trail step
+  appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
+  of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now
+  wired between `init` and `analyze`.
 
 ## [3.6.0] - 2026-11-09
 

@@ -109,7 +109,10 @@ export interface InstallOptions {
  * Failures are non-fatal: the surfaces are already wired, so we warn and tell
  * the user to run analyze themselves rather than failing the whole install.
  */
-export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): Promise<boolean> {
+export async function buildIndex(
+  cwd: string,
+  opts: { repair?: boolean; afterInit?: () => Promise<void> } = {},
+): Promise<boolean> {
   const prevCwd = process.cwd();
   // analyze prints its own multi-line CLI output ("Next step: run generate",
   // etc.) via console.log — noise inside install. Capture it to stderr so
@@ -130,6 +133,10 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
         }
       },
     });
+
+    // Anything that writes into the analyzed corpus (the decisions guidance in CLAUDE.md and
+    // AGENTS.md) must land BEFORE analyze fingerprints it, or the index is stale on arrival.
+    await opts.afterInit?.();
 
     process.chdir(cwd);
     const { analyzeCommand } = await import('../commands/analyze.js');
@@ -639,13 +646,19 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   if (opts.userOnly) return wiringUserScope && userScopeClean ? 0 : 1;
   const shouldAnalyze = opts.analyze !== false && !opts.dryRun && !opts.uninstall;
   if (shouldAnalyze) {
-    const indexBuilt = await buildIndex(cwd);
-    // AFTER the index build, which is what creates `.openlore/config.json` on a
-    // repository seeing OpenLore for the first time. Wiring the gate before it
-    // meant the headline flow — a bare `openlore install` on a fresh repo — always
-    // reported "no config yet" and silently skipped the decision trail
-    // (change: unify-onboarding-entrypoint).
-    reportGovernanceGate(await wireGovernanceGate(cwd));
+    // AFTER init, which is what creates `.openlore/config.json` on a repository seeing
+    // OpenLore for the first time — wiring the gate before it meant the headline flow always
+    // reported "no config yet" and silently skipped the decision trail (change:
+    // unify-onboarding-entrypoint). And BEFORE analyze: the gate appends decisions guidance to
+    // CLAUDE.md / AGENTS.md, which the analysis fingerprints, so wiring it after the build left
+    // a brand-new index stale and the next run re-analyzed an unchanged repository.
+    let gateWired = false;
+    const wireGate = async (): Promise<void> => {
+      gateWired = true;
+      reportGovernanceGate(await wireGovernanceGate(cwd));
+    };
+    const indexBuilt = await buildIndex(cwd, { afterInit: wireGate });
+    if (!gateWired) await wireGate();
     if (indexBuilt) await printProveGuidance(cwd);
   } else if (!opts.dryRun && !opts.uninstall) {
     // `--no-analyze` skipped init, so there is no config to wire governance into.
