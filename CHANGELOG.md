@@ -7,6 +7,13 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **`orient` and `search_code` stop claiming coverage over content they could not read.** With
+  unparseable files, an oversized contract schema, or an unreadable parse-health record in the
+  repository, both answered `covered` (or a confident empty `uncovered`). The verdict is now
+  `partial`, naming the cause, with the unobstructed verdict kept as `evidenceVerdict`. An index
+  whose artifacts no longer match their published generation is refused, as the graph tools already
+  refuse it. A hit matched only on a file's language marker is weak evidence and says so, and
+  `search --json` reports how many results were returned, matched and clamped.
 - **The refactor report's cycles are real call cycles again.** It read three kinds of edge as
   calls: the derived `tested_by` edge (production function → test), so each function closed a false
   cycle with every test that calls it — 474 "cycles" on a 1,500-function Python repository; the
