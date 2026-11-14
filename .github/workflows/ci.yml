@@ -612,10 +612,38 @@ jobs:
             throw "serve --stop reported success but the daemon OS process (pid $stopPid) is still running 15s later"
           }
 
+  # A real `claude plugin install` of plugin/ on each OS, then every hook and the MCP server run
+  # exactly as the plugin declares them (scripts/plugin-smoke.mjs). It installs the openlore
+  # version the plugin pins from npm, so it tests what plugin users get. No Claude login needed.
+  plugin-smoke:
+    name: Claude Code Plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.22.0'
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.322
+
+      - name: Install the plugin and run its hooks and MCP server
+        run: node scripts/plugin-smoke.mjs
+
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, test, build, integration, node-floor, windows-smoke, windows-unit]
+    needs: [lint, test, build, integration, node-floor, windows-smoke, windows-unit, plugin-smoke]
     if: always()
     permissions:
       contents: read
@@ -628,7 +656,8 @@ jobs:
              [[ "${{ needs.integration.result }}" != "success" ]] || \
              [[ "${{ needs.node-floor.result }}" != "success" ]] || \
              [[ "${{ needs.windows-smoke.result }}" != "success" ]] || \
-             [[ "${{ needs.windows-unit.result }}" != "success" ]]; then
+             [[ "${{ needs.windows-unit.result }}" != "success" ]] || \
+             [[ "${{ needs.plugin-smoke.result }}" != "success" ]]; then
             echo "One or more required jobs failed"
             exit 1
           fi
