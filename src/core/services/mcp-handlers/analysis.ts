@@ -6,6 +6,7 @@
  * get_middleware_inventory, get_schema_inventory, get_ui_components.
  */
 
+import { resolveQualifiedSymbol } from './symbol-query.js';
 import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
@@ -1412,13 +1413,16 @@ export async function handleGetMinimalContext(
   );
 
   // Find target node(s)
-  const candidates = cg.nodes.filter(n =>
-    n.name === functionName &&
+  const eligible = (n: (typeof cg.nodes)[number]) =>
     !n.isExternal && !n.isTest &&
     confinedPath(n) !== null &&
     // Anchor on a path separator so "config.ts" doesn't also match "app-config.ts".
-    (!filePath || n.filePath === filePath || n.filePath.endsWith('/' + filePath.replace(/^\//, ''))),
-  );
+    (!filePath || n.filePath === filePath || n.filePath.endsWith('/' + filePath.replace(/^\//, '')));
+  let candidates = cg.nodes.filter(n => n.name === functionName && eligible(n));
+  if (candidates.length === 0) {
+    candidates = (resolveQualifiedSymbol(functionName, name => cg.nodes.filter(n => n.name === name), id => cg.nodes.find(n => n.id === id)) ?? [])
+      .filter(eligible);
+  }
   if (candidates.length === 0) return { error: `Function "${functionName}" not found. Run analyze_codebase first.` };
   const target = candidates[0];
   const targetPath = confinedPath(target)!;
@@ -1592,7 +1596,8 @@ export async function handleGetCluster(
   const cg = ctx.callGraph as SerializedCallGraph;
 
   // Find the target node
-  const target = cg.nodes.find(n => n.name === functionName && !n.isExternal && !n.isTest);
+  const target = cg.nodes.find(n => n.name === functionName && !n.isExternal && !n.isTest)
+    ?? resolveQualifiedSymbol(functionName, name => cg.nodes.filter(n => n.name === name && !n.isTest), id => cg.nodes.find(n => n.id === id))?.[0];
   if (!target) return { error: `Function "${functionName}" not found.` };
   if (!target.communityId) return { error: `No community data. Re-run analyze_codebase.` };
 

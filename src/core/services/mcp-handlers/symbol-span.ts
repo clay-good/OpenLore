@@ -32,6 +32,7 @@
  * or deletes any file.
  */
 
+import { resolveQualifiedSymbol } from './symbol-query.js';
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import { stat } from 'node:fs/promises';
@@ -115,6 +116,9 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
   let candidates = pool.filter(n => n.name === namePart);
   if (pathPart) {
     candidates = candidates.filter(n => n.filePath === pathPart || n.filePath.endsWith(pathPart));
+  }
+  if (candidates.length === 0) {
+    candidates = resolveQualifiedSymbol(sym, name => pool.filter(n => n.name === name), () => undefined) ?? [];
   }
 
   if (candidates.length === 0) {

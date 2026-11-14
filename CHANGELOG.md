@@ -53,9 +53,12 @@ All notable changes to OpenLore are documented here. This project adheres to
   dead.** A function defined inside a live function is a value it hands out (a callback, a returned
   visitor's `enter`/`leave`) whose caller is outside the graph; a constructor of a class with live
   members has run, though `new X()` is not a call edge. Both are capped at `low` with the reason.
-- **`get_subgraph`, `analyze_impact` and `trace_execution_path` accept a qualified symbol.**
-  `EdgeStore.open` — the form the generated `CODEBASE.md` prints for a hub — was answered "No
-  function matching", and a bare `open` matched every `open` in the repository. `Class.method`,
+- **Every symbol-taking tool accepts a qualified symbol.** `EdgeStore.open` — the form the
+  generated `CODEBASE.md` prints for a hub — was answered "not found" by `get_subgraph`,
+  `analyze_impact`, `trace_execution_path`, `find_path`, `get_minimal_context`, `get_cluster` and
+  `locate_symbol_span`; `find_clones` and `analyze_error_propagation` resolved an external leaf
+  carrying the dotted call text and called the method uncomparable / unsupported; and a bare `open`
+  matched every `open` in the repository. `Class.method`,
   `name::path`, `Class.method::path` and node ids now resolve; a plain or dotted name that is not a
   `Class.method` keeps the existing lookup.
 - **`verify_claim` can verify a symbol whose name is shared.** An ambiguous subject was answered
