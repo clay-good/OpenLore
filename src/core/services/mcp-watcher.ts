@@ -1,3 +1,6 @@
+import { ConfigurationWatchPolicy } from '../configuration/watch-policy.js';
+import { FilePolicyResolver, repositoryPath } from '../configuration/policy.js';
+import { readOpenLoreConfig } from './config-manager.js';
 /**
  * McpWatcher — incremental re-indexer for the MCP server's --watch mode.
  *
@@ -565,8 +568,28 @@ export class McpWatcher {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
+  private filePolicy = new FilePolicyResolver();
+  private watchPolicy: ConfigurationWatchPolicy | undefined;
+  get configurationWatchedDirectories(): string[] { return Object.keys(this.fsWatcher?.getWatched() ?? {}).map(p => repositoryPath(relative(this.watchRoot,p))).slice(0,1000); }
+  /** Revision of the policy actually installed on this watcher. */
+  get configurationPolicyRevision(): string { return this.filePolicy.revisionFor('watch'); }
+
   async start(): Promise<void> {
     this.stopping = false;
+    // File policies are optional. A config that cannot be read must not stop live indexing:
+    // the watcher started without reading it before this option existed.
+    this.filePolicy = new FilePolicyResolver();
+    this.watchPolicy = undefined;
+    try {
+      const configuration = await readOpenLoreConfig(this.rootPath);
+      if (configuration?.filePolicies) {
+        this.filePolicy = new FilePolicyResolver(configuration.filePolicies);
+        this.watchPolicy = new ConfigurationWatchPolicy(this.rootPath,this.filePolicy,configuration.analysis?.excludePatterns ?? []);
+      }
+    } catch (error) {
+      process.stderr.write(`[mcp-watcher] file policies not applied (configuration unreadable): ${sanitizeForTerminal(error instanceof Error ? error.message : String(error))}\n`);
+    }
+
     const gitignoreScopes = await loadGitignoreScopes(this.rootPath);
     // Auto-degrade live embedding on very large trees (Step 4). Counting is
     // bounded — it stops as soon as the ceiling is exceeded.
@@ -593,7 +616,7 @@ export class McpWatcher {
         // parent path components above the watch root.
         ignored: (filePath: string, stats?: Stats) => {
           const rel = relative(rootPath, filePath);
-          return isIgnoredRelPath(rel) || isGitignoredPath(rel, gitignoreScopes, stats?.isDirectory()) || extraIgnore.some((p) => rel.includes(p));
+          return isIgnoredRelPath(rel) || isGitignoredPath(rel, gitignoreScopes, stats?.isDirectory()) || extraIgnore.some((p) => rel.includes(p)) || (this.watchPolicy ? !this.watchPolicy.admitted(repositoryPath(rel),stats?.isDirectory()) : false);
         },
         persistent: true,
         ignoreInitial: true,
@@ -602,7 +625,7 @@ export class McpWatcher {
       });
 
       const watched = (p: string): boolean =>
-        SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p) || isIndexedOpenSpecFile(this.openspecRoot, p);
+        ((SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p)) && (!this.watchPolicy || this.filePolicy.admitted(repositoryPath(relative(this.rootPath,p)),'index',true))) || isIndexedOpenSpecFile(this.openspecRoot, p);
       this.fsWatcher.on('change', (absPath: string) => {
         const p = this.fromWatchRoot(absPath);
         if (watched(p)) this.enqueue(p);
@@ -2175,16 +2198,10 @@ export class McpWatcher {
         ? changedNodes
         : (cg.nodes ?? []).filter((n) => changedFilePaths.has(n.filePath));
 
-      const { embedded, reused, total, hasEmbeddings, deferred } = await VectorIndex.updateFiles(
-        this.outputPath,
-        nodes,
-        changedFilePaths,
-        context.signatures ?? [],
-        hubIds,
-        entryIds,
-        embedSvc,
-        fileContents,
-      );
+      const updateArgs = [this.outputPath,nodes,changedFilePaths,context.signatures ?? [],hubIds,entryIds,embedSvc,fileContents] as const;
+      const {embedded,reused,total,hasEmbeddings,deferred} = cfg?.filePolicies
+        ? await VectorIndex.updateFiles(...updateArgs,undefined,new FilePolicyResolver(cfg.filePolicies))
+        : await VectorIndex.updateFiles(...updateArgs);
 
       if (deferred === 'model-changed') {
         // Honest signal, not a silent no-op: the embedding model changed, so the
@@ -2194,7 +2211,7 @@ export class McpWatcher {
         process.stderr.write(
           `[mcp-watcher] embedding model changed — vector update deferred for ${changedFilePaths.size} file(s); run "openlore analyze --force" (or "openlore embed --local") to rebuild the semantic index\n`
         );
-      } else if (deferred === 'tokenizer-changed') {
+      } else if (deferred === 'tokenizer-changed' || deferred === 'policy-changed') {
         // Honest signal: the keyword tokenizer changed, so the incremental patch
         // was refused to avoid mixing token sets. Search still serves correct
         // results (the corpus is re-tokenized from raw text each process), but the
@@ -2997,8 +3014,8 @@ export class McpWatcher {
         const abs = join(dir, entry.name);
         const rel = relative(this.rootPath, abs);
         if (entry.isDirectory()) {
-          if (!isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes, true)) await walk(abs);
-        } else if (entry.isFile() && SOURCE_EXTENSIONS.test(entry.name) && !isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes)) {
+          if (!isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes, true) && (this.watchPolicy?.admitted(repositoryPath(rel),true) ?? true)) await walk(abs);
+        } else if (entry.isFile() && SOURCE_EXTENSIONS.test(entry.name) && !isIgnoredRelPath(rel) && !isGitignoredPath(rel, gitignoreScopes) && (this.watchPolicy ? this.watchPolicy.admitted(repositoryPath(rel)) && this.filePolicy.admitted(repositoryPath(rel),'index',true) : true)) {
           count++;
         }
       }

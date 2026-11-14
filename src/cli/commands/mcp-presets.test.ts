@@ -696,7 +696,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // certify_provenance's in-toto validation wording lengthens an existing tool's
     // description, not a new tool: 109,300 → 110,500 B (measured 109,350 B;
     // change: add-change-provenance-certificate).
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(110_500);
+    // Detailed configuration candidate schema adds 1,436 B after the live usability trial;
+    // measured 111,518 B. The default surface does not include this opt-in tool.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(112_000);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

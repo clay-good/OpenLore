@@ -15,7 +15,7 @@
 
 import { constants, realpathSync, lstatSync, readlinkSync, type Stats } from 'node:fs';
 import { link, lstat, mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises';
-import { basename, dirname, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /** Upper bound on a symlink chain, so a cycle cannot spin the resolver. */
@@ -135,6 +135,18 @@ function sameFile(
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+/** Detect actual symlink components without treating Windows short names as links. */
+function hasSymlinkComponent(filePath: string): boolean {
+  const absolute = resolve(filePath);
+  const { root } = parse(absolute);
+  let current = root;
+  for (const component of absolute.slice(root.length).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    if (lstatSync(current).isSymbolicLink()) return true;
+  }
+  return false;
+}
+
 /**
  * Read a repository file through one descriptor and disclose its contents only while
  * that descriptor still names the canonically confined file. The repeated identity
@@ -173,7 +185,7 @@ export async function readFileConfinedWithStat(
   const canonicalRoot = await realpath(absDir);
   const canonicalPath = await realpath(lexicalPath);
   safeJoin(canonicalRoot, canonicalPath);
-  if (rejectSymlinkPath && canonicalPath !== lexicalPath) {
+  if (rejectSymlinkPath && hasSymlinkComponent(lexicalPath)) {
     throw new Error(`Path escape blocked: symbolic-link path component in "${filePath}"`);
   }
 
@@ -192,7 +204,10 @@ export async function readFileConfinedWithStat(
     const verifyIdentity = async (descriptorStat: Stats): Promise<void> => {
       const currentCanonicalPath = await realpath(canonicalPath);
       safeJoin(canonicalRoot, currentCanonicalPath);
-      if (rejectSymlinkPath && currentCanonicalPath !== canonicalPath) {
+      if (
+        rejectSymlinkPath &&
+        (currentCanonicalPath !== canonicalPath || hasSymlinkComponent(lexicalPath))
+      ) {
         throw new Error(`Confined read target changed during access: "${filePath}"`);
       }
       const current = await stat(currentCanonicalPath);
@@ -263,30 +278,36 @@ export async function recoverConfinedAtomicWriteFile(
     ? canonicalRoot
     : lexicalRoot;
   const target = safeJoin(base, relative(base, requested));
+  // A first publication has no journal and its parent may not exist yet. Open
+  // with O_NOFOLLOW and inspect the opened handle so a path swap cannot replace
+  // the journal between a separate lstat and open.
   const parent = dirname(target);
   const expectedParent = resolve(canonicalRoot, relative(base, parent));
-  const canonicalParent = await realpath(parent);
-  if (canonicalParent !== expectedParent) {
-    throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
-  }
 
   let journal: { guard?: unknown };
+  let canonicalParent: string;
+  let handle: Awaited<ReturnType<typeof open>>;
   try {
-    const handle = await open(recoveryJournalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const info = await handle.stat();
-      if (!info.isFile()) throw new Error(`Confined write recovery journal is not a regular file: "${recoveryJournalPath}"`);
-      const buffer = Buffer.alloc(MAX_RECOVERY_JOURNAL_BYTES + 1);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      if (bytesRead > MAX_RECOVERY_JOURNAL_BYTES) {
-        throw new Error(`Confined write recovery journal is too large: "${recoveryJournalPath}"`);
-      }
-      journal = JSON.parse(buffer.subarray(0, bytesRead).toString('utf-8')) as { guard?: unknown };
-    }
-    finally { await handle.close(); }
+    handle = await open(recoveryJournalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
+  }
+  try {
+    canonicalParent = await realpath(parent);
+    if (canonicalParent !== expectedParent) {
+      throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
+    }
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error(`Confined write recovery journal is not a regular file: "${recoveryJournalPath}"`);
+    const buffer = Buffer.alloc(MAX_RECOVERY_JOURNAL_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_RECOVERY_JOURNAL_BYTES) {
+      throw new Error(`Confined write recovery journal is too large: "${recoveryJournalPath}"`);
+    }
+    journal = JSON.parse(buffer.subarray(0, bytesRead).toString('utf-8')) as { guard?: unknown };
+  } finally {
+    await handle.close();
   }
 
   const prefix = `.${basename(target)}.openlore-cas-backup.`;
@@ -324,6 +345,8 @@ export async function confinedAtomicWriteFile(
   data: string,
   options: {
     mode?: number;
+    /** Remove the captured existing file instead of publishing data. Requires the target lock and recovery journal. */
+    removeIfUnchanged?: boolean;
     preserveMode?: boolean;
     /** Publish only if the target still has this identity; null means it must remain absent. */
     expectedIdentity?: Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs' | 'mode'> | null;
@@ -333,6 +356,7 @@ export async function confinedAtomicWriteFile(
     recoveryJournalPath?: string;
   } = {},
 ): Promise<void> {
+  if (options.removeIfUnchanged && (!options.expectedIdentity || options.expectedContent === undefined || !options.recoveryJournalPath)) throw new Error('Checked removal requires an existing snapshot and lock-bound recovery journal');
   const lexicalRoot = resolve(absRoot);
   const canonicalRoot = await realpath(lexicalRoot);
   const requested = resolve(absPath);
@@ -490,7 +514,7 @@ export async function confinedAtomicWriteFile(
         throw new Error(`Confined write conflict: target changed after it was read: "${target}"`);
       }
       try {
-        await link(temp, target); // atomic no-replace; preserves any external writer
+        if (!options.removeIfUnchanged) await link(temp, target); // atomic no-replace; preserves any external writer
       } catch (error) {
         await restoreGuard();
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') {

@@ -27,7 +27,7 @@ import {
   validateOpenLoreConfig,
   backfillRequiredConfigDefaults,
   isFatalConfigFinding,
-  CONFIG_SCHEMA_VERSION,
+  CONFIG_DEFAULT_STAMP_VERSION,
   type ConfigValidationFinding,
 } from './config-schema.js';
 
@@ -114,7 +114,7 @@ async function ensureDir(dirPath: string): Promise<void> {
  */
 export function getDefaultConfig(projectType: ProjectType, openspecPath: string): OpenLoreConfig {
   return {
-    version: CONFIG_SCHEMA_VERSION,
+    version: CONFIG_DEFAULT_STAMP_VERSION,
     projectType,
     openspecPath,
     analysis: {

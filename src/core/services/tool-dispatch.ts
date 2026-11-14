@@ -1,3 +1,4 @@
+import { configureOpenLoreMcp } from '../configuration/mcp.js';
 /**
  * Shared tool dispatch — single source of truth mapping a tool name + args to its
  * handler. Consumed by BOTH transports:
@@ -160,6 +161,7 @@ export async function dispatchTool(
   signal?: AbortSignal,
 ): Promise<unknown> {
   const canonical = resolveCanonicalToolName(name);
+  if (canonical === 'configure_openlore') return configureOpenLoreMcp(args,directory,signal);
   return withPartialReceiptScope(async () => {
     const result = await dispatchToolImpl(canonical, args, directory, signal);
     const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
@@ -297,6 +299,7 @@ async function dispatchToolImpl(
   // Resolve a deprecated tool-name alias (e.g. get_ui_components) to its canonical
   // name so both transports dispatch identically and old callers keep working.
   name = resolveCanonicalToolName(name);
+  if (name === 'configure_openlore') return configureOpenLoreMcp(args,directory,signal);
   if (name === 'orient') {
     const { task, limit = 5, tokenBudget, lean, rankBy } = args as { task: string; limit?: number; tokenBudget?: number; lean?: boolean; rankBy?: 'distance' | 'pagerank' };
     return rankBy === undefined

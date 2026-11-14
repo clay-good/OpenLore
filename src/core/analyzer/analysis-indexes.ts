@@ -1,3 +1,4 @@
+import { FilePolicyResolver } from '../configuration/policy.js';
 import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
@@ -228,6 +229,7 @@ function indexConfigurationHash(options: BuildAnalysisIndexesOptions): string {
     generation: options.config?.generation ?? null,
     openspecPath: options.config?.openspecPath ?? null,
     analysis: options.config?.analysis ?? null,
+    ...(options.config?.filePolicies?.rules.some(r => r.lanes.embed || r.lanes.index) ? {embeddingPolicyRevision:new FilePolicyResolver(options.config.filePolicies).revisionFor('embed')} : {}),
     include: options.include ?? [],
     exclude: options.exclude ?? [],
   })).digest('hex');
@@ -410,6 +412,7 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
               detail: `Reclaimed an index lock left by a process that is no longer running: ${lockPath}`,
             }),
           },
+          options.config?.filePolicies ? new FilePolicyResolver(options.config.filePolicies) : undefined,
         );
         result.functionIndex = 'built';
         const vocabulary = loadRepositoryVocabulary(options.outputPath);
@@ -641,9 +644,11 @@ async function buildClaimedLocalVectors(
       ? Promise.resolve(texts.map(text => recorded.get(text)!))
       : local.embed(texts),
   };
+  const policyConfig = await import('../services/config-manager.js').then(m => m.readOpenLoreConfig(rootPath));
+  const embeddingPolicy = policyConfig?.filePolicies ? new FilePolicyResolver(policyConfig.filePolicies) : undefined;
   const scratch = await mkdtemp(join(tmpdir(), 'openlore-vectors-'));
   try {
-    await VectorIndex.build(scratch, nodes, signatures, hubs, entries, recorder, fileContents, false, vocabularyExpansion, graph?.edges);
+    await VectorIndex.build(scratch, nodes, signatures, hubs, entries, recorder, fileContents, false, vocabularyExpansion, graph?.edges, undefined, embeddingPolicy);
     // The write, and the generation check it depends on, happen while this process owns the
     // repository's analysis: a full analyze cannot publish a new graph in between, so the
     // vectors always describe the graph that is published. A running analysis wins; the next
@@ -653,7 +658,7 @@ async function buildClaimedLocalVectors(
     try {
       const after = await readCurrentGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
       if (after?.generationId !== before.generationId) return 'skipped';
-      await VectorIndex.build(outputPath, nodes, signatures, hubs, entries, replay, fileContents, false, vocabularyExpansion, graph?.edges);
+      await VectorIndex.build(outputPath, nodes, signatures, hubs, entries, replay, fileContents, false, vocabularyExpansion, graph?.edges, undefined, embeddingPolicy);
       return 'built';
     } finally {
       await ownership.release();

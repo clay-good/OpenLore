@@ -25,6 +25,8 @@ import { getDefaultConfig } from './config-manager.js';
  * residual divergence between the two. This is the type-completeness bind.
  */
 const FULLY_POPULATED: Required<OpenLoreConfig> = {
+  filePolicies: {rules:[]},
+  configurationAssistant: {reviewMode:'manual'},
   version: CONFIG_SCHEMA_VERSION,
   projectType: 'nodejs',
   openspecPath: 'openspec',
@@ -51,8 +53,8 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
 };
 
 describe('config-schema — type-completeness bind', () => {
-  it('signals the workspace schema addition with schema version 1.2.0', () => {
-    expect(CONFIG_SCHEMA_VERSION).toBe('1.2.0');
+  it('signals the workspace schema addition with schema version 1.3.0', () => {
+    expect(CONFIG_SCHEMA_VERSION).toBe('1.3.0');
     expect(checkConfigVersion('1.0.0')).toEqual([]);
   });
 

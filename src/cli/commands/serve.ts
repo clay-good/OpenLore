@@ -820,6 +820,7 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
         // source. Optional and allowlist-projected: an older daemon omits it and readers report
         // 'unknown' rather than guessing, so no protocol bump is warranted.
         watcher: watcher ? 'healthy' : 'stopped',
+        ...(url.searchParams.get('configuration') === 'true' && watcher ? {configuration:{watchPolicyRevision:watcher.configurationPolicyRevision,watchedDirectories:watcher.configurationWatchedDirectories}} : {}),
       });
       return;
     }
