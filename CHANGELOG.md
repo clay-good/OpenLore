@@ -15,6 +15,10 @@ All notable changes to OpenLore are documented here. This project adheres to
 - **A `super.m()` call is no longer fanned out to every same-named method.** In
   `class HeaderMap extends Map`, `super.get(…)` was wired to each unrelated in-repo `get` (one in a
   test file). A super call binds to the base class, which the direct resolver already follows.
+- **Renaming a function no longer reports its existing `try/catch` as a newly swallowed error.**
+  The `error-swallowed` check keyed each handler by its enclosing function's name, so the
+  after-edit hook flagged a plain method rename as a weakened check. A handler around code the
+  baseline already discarded, in any function of the file, is now matched first.
 - **`find_dead_code` no longer rates a package's entry point high-confidence dead** when that
   package's `package.json` was never read (it is neither the root's nor a declared workspace
   member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped
