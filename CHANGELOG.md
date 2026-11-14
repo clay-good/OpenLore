@@ -7,10 +7,14 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
-- **The refactor report no longer finds a cycle between every function and its tests.** The derived
-  `tested_by` edge (production function → test) was read as a call, so each function a test calls
-  closed a false two-node cycle with that test; on a 1,500-function Python repository 474 "cycles"
-  were reported, almost all of them this.
+- **The refactor report's cycles are real call cycles again.** It read three kinds of edge as
+  calls: the derived `tested_by` edge (production function → test), so each function closed a false
+  cycle with every test that calls it — 474 "cycles" on a 1,500-function Python repository; the
+  `overrides` edge, so every override that calls `super.m()` cycled with its base; and the
+  deliberately over-approximate `cha-name-only` guess, so unrelated same-named methods cycled.
+- **A `super.m()` call is no longer fanned out to every same-named method.** In
+  `class HeaderMap extends Map`, `super.get(…)` was wired to each unrelated in-repo `get` (one in a
+  test file). A super call binds to the base class, which the direct resolver already follows.
 - **`find_dead_code` no longer rates a package's entry point high-confidence dead** when that
   package's `package.json` was never read (it is neither the root's nor a declared workspace
   member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped

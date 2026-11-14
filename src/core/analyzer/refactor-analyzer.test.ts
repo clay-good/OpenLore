@@ -300,6 +300,24 @@ describe('analyzeForRefactoring — in_cycle', () => {
     expect(issuesOf(report, 'is_open')).not.toContain('in_cycle');
   });
 
+  it('does NOT close a cycle through an override edge or a name-only CHA guess', () => {
+    // D.m overrides B.m and calls super.m(); X.run and Y.run are unrelated same-named delegates
+    // that the name-only pass wired to each other.
+    const bm = makeNode({ id: 'b.ts::B.m', name: 'm', filePath: 'b.ts', fanIn: 1 });
+    const dm = makeNode({ id: 'd.ts::D.m', name: 'm', filePath: 'd.ts', fanOut: 1 });
+    const xr = makeNode({ id: 'x.ts::X.run', name: 'run', filePath: 'x.ts', fanIn: 1, fanOut: 1 });
+    const yr = makeNode({ id: 'y.ts::Y.run', name: 'run', filePath: 'y.ts', fanIn: 1, fanOut: 1 });
+    const graph = makeGraph([bm, dm, xr, yr], [
+      { callerId: bm.id, calleeId: dm.id, calleeName: 'm', confidence: 'synthesized' as const, kind: 'overrides' as const, synthesizedBy: 'override' },
+      { callerId: dm.id, calleeId: bm.id, calleeName: 'm', confidence: 'self_cls' as const },
+      { callerId: xr.id, calleeId: yr.id, calleeName: 'run', confidence: 'synthesized' as const, synthesizedBy: 'cha-name-only' },
+      { callerId: yr.id, calleeId: xr.id, calleeName: 'run', confidence: 'synthesized' as const, synthesizedBy: 'cha-name-only' },
+    ]);
+
+    const report = analyzeForRefactoring(graph);
+    expect(report.stats.cyclesDetected).toBe(0);
+  });
+
   it('does NOT flag a linear chain as a cycle', () => {
     // a → b → c (no cycle)
     const a = makeNode({ id: 'l.ts::a', name: 'a', filePath: 'l.ts', fanIn: 0, fanOut: 1 });
