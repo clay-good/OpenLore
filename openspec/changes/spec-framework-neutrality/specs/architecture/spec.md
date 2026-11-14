@@ -59,7 +59,7 @@ source SHALL be read. An adapter SHALL NOT write, create or edit any file of the
 #### Scenario: The fixed order
 
 - **WHEN** spec sources are detected
-- **THEN** they are checked in this order: OpenSpec, Spec Kit, Kiro, ADR folders, markdown
+- **THEN** they are checked in this order: OpenSpec, Spec Kit, BMAD, ADR folders, markdown
   requirements, tests as intent
 
 #### Scenario: Two sources are present
@@ -78,7 +78,7 @@ source SHALL be read. An adapter SHALL NOT write, create or edit any file of the
 
 #### Scenario: A source without code anchors is not assessed for drift
 
-- **GIVEN** a repository whose only source is Kiro specs
+- **GIVEN** a repository whose only source is BMAD planning files
 - **WHEN** a drift, mapping or spec-coverage answer is requested
 - **THEN** the answer says it was not assessed because the source has no code anchors
 - **AND** it does not report zero drift or zero coverage

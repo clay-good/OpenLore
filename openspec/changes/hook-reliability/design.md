@@ -25,7 +25,7 @@ What the moment prints:
 | State | Today | After |
 |---|---|---|
 | Thrown error, time limit passed, corrupt `.openlore/` | `error` pointer line on every prompt | nothing; counted as error or overrun |
-| No index, build started or running | build note on every prompt | the same line, once per session |
+| No index, build started or running | build note on every prompt, to the agent | nothing to the agent; progress goes to the user (section 7) |
 | No index, no build possible | `no-graph` pointer on every prompt | the same line, once per session |
 | Gate withheld (management intent, weak relevance, empty prompt) | pointer line | unchanged here |
 | Strong match | orientation block | unchanged (a block is not a finding; never deduplicated) |
@@ -135,6 +135,33 @@ with their paths, and prints the command to remove each. It does not delete them
 names `.openlore/` (`install/index.ts:817-821`); copied skills are not named today.
 
 **Rejected.** An interactive "remove data too?" prompt: uninstall also runs without a terminal.
+
+## 7. Progress for the user, silence for the agent
+
+**Decision.** The index builder (first build and background repair) writes
+`.openlore/build-progress.json` — `{ phase, filesDone, filesTotal, startedAt, pid }` — atomically, at
+most once per second, and removes it when it ends. A record whose `pid` is gone, or that is older
+than 2 minutes without an update, means "not building". Readers:
+
+| Reader | While building | When not building |
+|---|---|---|
+| `openlore statusline` | `OpenLore: indexing 45% (1,310/2,900 files)`, then the phase name for the write phases | today's labels (`index ready`, `index stale (n)`, …) |
+| `openlore status` | the same, plus elapsed time | unchanged |
+| prompt-submitted moment, agent context | nothing | nothing new |
+| prompt-submitted moment, user-only line | one line at build start and one at ready, only when OpenLore's status line is not wired | nothing |
+
+The user-only line uses the harness channel that shows text to the user and not to the model
+(Claude Code: hook output `systemMessage`; Pi: its footer status, already shipped). A harness
+without such a channel gets no line.
+
+**Why.** The owner asked for a visible sign of progress when work runs, and silence when it does
+not. The status line is the one place the user looks without being interrupted. The agent needs
+no progress text: tool answers served during a build already disclose that they are partial
+(`first-run partial serving`).
+
+**Rejected.** A progress line in the agent's context on every prompt (today's behavior; it is noise
+the agent cannot act on). MCP progress notifications: the client renders them for a running tool
+call only, and the build runs in the background, not inside a call.
 
 ## Spec placement
 

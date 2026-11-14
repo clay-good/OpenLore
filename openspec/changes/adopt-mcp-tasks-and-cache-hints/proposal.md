@@ -36,7 +36,8 @@ Until then the only work is to record the state of these three gates in this fol
   on a repository change (a `recall` verdict, a certificate) declares the most conservative scope
   instead of a time. The prose note stays, byte for byte.
 - **Long builds are tasks.** When the client negotiates tasks, `analyze_codebase` and the
-  first-run index build return a task handle with progress and cancel. No other tool becomes a
+  first-run index build return a task handle with progress and cancel. Progress reads the record
+  that `hook-reliability` group 9 writes (`.openlore/build-progress.json`). No other tool becomes a
   task.
 - **Schemas state exclusivity.** `find_clones` declares `symbol` XOR `snippet` with `oneOf`. Other
   prose-only "exactly one of" rules get the same treatment. `validateToolArgs`

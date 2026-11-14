@@ -20,6 +20,9 @@ one slow or broken hook hurts every turn. Today:
 - A hook whose runtime is gone (moved or removed install) exits non-zero with `Cannot find module`
   on every event. `openlore doctor` checks the MCP launcher path but not the hook commands.
 - Nothing records if a hook ran, how long it took, or what the agent did with a finding.
+- While the first index builds, the user sees no progress. `openlore statusline` knows only "no
+  index" or "ready", and the prompt hook puts a build or failure line into the agent's context on
+  every prompt instead.
 
 ## What changes
 
@@ -39,6 +42,12 @@ one slow or broken hook hurts every turn. Today:
   checks that its runtime exists and exits 0 when it does not.
 - **One health line in `openlore status`.** Per moment: last run, p95, errors, overruns, findings
   shown.
+- **Progress for the user, silence for the agent (owner, 2026-11-14).** While an index build or
+  repair runs, the user sees its progress: `OpenLore: indexing 45% (1,310/2,900 files)` in the
+  status line and in `openlore status`. When nothing runs, nothing extra is shown. The agent's
+  context gets no progress text; answers served during a build already say they are partial.
+  Where OpenLore's status line is not wired (the plugin cannot set one), the user gets one line
+  through the harness's user-only channel when the build starts and one when it is ready.
 - **Acted-on counts.** The session record counts what happened to each shown finding: fixed,
   decided, open at stop, or not assessed. This is the project's proof-from-daily-use signal: it
   shows, from real sessions, that findings lead to action. It is local data and is never sent.
@@ -51,8 +60,9 @@ one slow or broken hook hurts every turn. Today:
   working without a reinstall.
 - Findings stay advisory. Blocking stays opt-in through `enforcement.policy`.
 - The harness timeouts in `MANAGED_HOOKS` (15 s, 30 s, 90 s) stay as they are.
-- A missing index at the prompt-submitted moment still starts the background build and says so in
-  one line, now once per session (`OneShotOrientSelfBootstraps` is unchanged).
+- A missing index at the prompt-submitted moment still starts the background build
+  (`OneShotOrientSelfBootstraps` is unchanged). The line that says so goes to the user, not the
+  agent (group 9).
 - The rule "quiet unless new and real" belongs to `reframe-governance-as-agent-evidence`. This
   change supplies only the once-per-session mechanism.
 - Works the same with or without OpenSpec.
@@ -71,6 +81,11 @@ one slow or broken hook hurts every turn. Today:
 - The runtime guard needs a POSIX shell (Claude Code uses one, also on Windows through Git Bash).
   Where the host does not run hook commands through a shell, the command stays unguarded.
 - Plugin hooks (`plugin/hooks/hooks.json`) and plugin removal belong to `ship-claude-code-plugin`.
+- Claude Code plugins cannot set the user's status line (the plugin components list has none).
+  Plugin users who want the progress bar wire `openlore statusline` themselves; the two
+  user-only lines cover the rest. That those lines stay out of the model's context is read from
+  the hooks docs and is confirmed in task 9.1 before code is written.
+- The percentage counts files parsed, not time. The last phases (index writes) are shown by name.
 
 ## Depends on / order
 
@@ -79,7 +94,8 @@ one slow or broken hook hurts every turn. Today:
   that group first, or keep the stop-block check from reading source defaults.
 
 - Nothing blocks the start. Build order is in `tasks.md`: measure, fail-open tests, prompt-submitted
-  moment, once per session, latency test, health line, acted-on counts, upgrade and uninstall.
+  moment, once per session, latency test, health line, acted-on counts, upgrade and uninstall,
+  progress.
 - `ship-claude-code-plugin` must keep its `hooks.json` equal to `MANAGED_HOOKS`. If group 8 changes
   the wired command form, tell that change.
 - `reframe-governance-as-agent-evidence` can use the finding id (design decision 3) for its

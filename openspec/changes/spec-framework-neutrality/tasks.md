@@ -30,7 +30,7 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
   plus `specSources.found: []`, and a repo with `openspec/` returns the same bytes as before.
 - [ ] 2.2 "run `openlore generate`" → `reason: "no-spec-source"` + `lookedFor` in `semantic.ts`,
   `analysis.ts`, `spec-link-service.ts`. Tests: beside. Done when: no response there names `openlore generate`; each names the reason.
-- [ ] 2.3 `get_test_coverage` with no spec source: `coveragePercent: null` + reason, never 0 (`coverage-analyzer.ts`,
+- [ ] 2.3 `get_test_coverage` with no spec source: `coveragePercent: null` + reason + `note: "no spec source found (looked for: …)"`, never 0 (`coverage-analyzer.ts`,
   `types/test-generator.ts`, `tool-dispatch.ts`). Test: beside. Done when: no source → `null`; 0 of 4 covered → 0.
 - [ ] 2.4 CLI text: `src/cli/commands/drift.ts:680-683` (exit code stays 2), `src/api/drift.ts:76`,
   `doctor.ts:699-716, 1261` (text "Spec source", status `ok` when none), `analyze.ts`,
@@ -79,46 +79,50 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
   Tests: beside. Done when: `grep -rn "'openspec/\|\"openspec/\|\`openspec/" src --include="*.ts"`
   outside tests, the OpenSpec adapter, the generator and `src/constants.ts` returns 0 lines.
 
-## 6. Adapter: ADR folders
+## 6. Adapter: Spec Kit
 
-- [ ] 6.1 New `spec-sources/adr.ts`: read `docs/adr`, `docs/decisions` and `adrPaths`; MADR and
+- [ ] 6.1 Confirm the layout against `templates/spec-template.md` in the github/spec-kit repository at
+  its latest release tag (record the tag); write it at the top of `spec-sources/spec-kit.ts` (new).
+  Assumed: `.specify/`; `specs/<NNN-feature>/{spec,plan,tasks}.md`; `FR-NNN`; Given/When/Then.
+  Test: `src/core/spec-sources/spec-kit.test.ts`. Done when: the comment names the tag.
+- [ ] 6.2 `FR-NNN` lines as `requirement`, scenarios as `scenario`, `tasks.md` checkboxes as `task`.
+  Test: `spec-kit.test.ts`. Done when: `.specify/` plus `specs/001-x/spec.md` is detected as
+  `spec-kit`, not `openspec`, and a repo with both `openspec/` and `.specify/` reports both.
+
+## 7. Adapter: BMAD
+
+- [ ] 7.1 Confirm the layout against the BMAD-METHOD repository (bmad-code-org/BMAD-METHOD) at its
+  latest release tag (record the tag): the install marker, where the PRD, architecture and story
+  files are written, and how requirements (`FR1`-style lines) and acceptance criteria look. Write
+  it at the top of `spec-sources/bmad.ts` (new). Assumed: `.bmad-core/` or `_bmad/`; `docs/prd.md`
+  or sharded `docs/prd/`; `docs/architecture.md`; `docs/stories/*.md`. Test:
+  `src/core/spec-sources/bmad.test.ts` fixture mirrors the confirmed layout. Done when: the comment
+  names the tag.
+- [ ] 7.2 PRD requirement lines as `requirement`, architecture decisions as `decision`, story
+  acceptance criteria and checkboxes as `task`. Test: `bmad.test.ts`. Done when: every item is
+  listed with its line, a repo with `openspec/` and BMAD files reports both, and nothing is written.
+
+## 8. Adapter: ADR folders
+
+- [ ] 8.1 New `spec-sources/adr.ts`: read `docs/adr`, `docs/decisions` and `adrPaths`; MADR and
   Nygard shapes give title, status and decision text with `file` and `line`; other shapes the title
   only. Register it. Test: `adr.test.ts` (new). Done when: one fixture per shape lists `decision`
   items and the fixture tree hash is unchanged.
-- [ ] 6.2 `orient` and `search_specs` return ADR items; `verify_claim` `decision-governed` lists a
+- [ ] 8.2 `orient` and `search_specs` return ADR items; `verify_claim` `decision-governed` lists a
   matching ADR as "found in ADR folder, not anchored", never as governing (`orient.ts`,
   `semantic.ts`, `claim-verification.ts`). Tests: beside, Pi parity guard. Done when: a repo with
   only `docs/adr` gets ADR items in both tools and `specSources.found` is `["adr"]`.
 
-## 7. Adapters: markdown requirements, then tests as intent
+## 9. Adapters: markdown requirements, then tests as intent
 
-- [ ] 7.1 New `spec-sources/markdown-requirements.ts`: tracked `*.md` outside other sources; sentences
+- [ ] 9.1 New `spec-sources/markdown-requirements.ts`: tracked `*.md` outside other sources; sentences
   with upper-case SHALL / MUST / SHOULD or the EARS shape "WHEN … THE … SHALL"; a file counts with 3
   or more matches. Test: `markdown-requirements.test.ts` (new). Done when: EARS and RFC 2119 fixtures
   list every sentence with its line, and a README with lower-case "you must" lists 0.
-- [ ] 7.2 New `spec-sources/tests.ts`: where `isTestFile` (`test-file.ts:97`) is true, list
+- [ ] 9.2 New `spec-sources/tests.ts`: where `isTestFile` (`test-file.ts:97`) is true, list
   `describe` / `it` / `test` titles (TS, JS), `def test_*` (Python), `func Test*` (Go) as
   `test-intent`; others not assessed, named in `lookedFor`. Test: `tests.test.ts` (new). Done when:
   each language's fixture lists titles with lines; `tests` alone never fills `specSources.found` (design 3).
-
-## 8. Adapter: Kiro
-
-- [ ] 8.1 Confirm the layout against the Kiro specs documentation at kiro.dev (record the page URL and
-  date); write it at the top of `spec-sources/kiro.ts` (new). Assumed: `.kiro/specs/<feature>/`
-  `requirements.md`, `design.md`, `tasks.md`. Test: `src/core/spec-sources/kiro.test.ts` fixture
-  mirrors the confirmed layout. Done when: the comment names the page URL and the date.
-- [ ] 8.2 Numbered requirements and EARS acceptance criteria as `requirement`, checkboxes as `task`.
-  Test: `kiro.test.ts`. Done when: every criterion is listed with its line and nothing is written.
-
-## 9. Adapter: Spec Kit
-
-- [ ] 9.1 Confirm the layout against `templates/spec-template.md` in the github/spec-kit repository at
-  its latest release tag (record the tag); write it at the top of `spec-sources/spec-kit.ts` (new).
-  Assumed: `.specify/`; `specs/<NNN-feature>/{spec,plan,tasks}.md`; `FR-NNN`; Given/When/Then.
-  Test: `src/core/spec-sources/spec-kit.test.ts`. Done when: the comment names the tag.
-- [ ] 9.2 `FR-NNN` lines as `requirement`, scenarios as `scenario`, `tasks.md` checkboxes as `task`.
-  Test: `spec-kit.test.ts`. Done when: `.specify/` plus `specs/001-x/spec.md` is detected as
-  `spec-kit`, not `openspec`, and a repo with both `openspec/` and `.specify/` reports both.
 
 ## 10. Text: tool descriptions
 

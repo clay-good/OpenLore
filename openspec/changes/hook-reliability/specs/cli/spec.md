@@ -129,8 +129,16 @@ one.
 #### Scenario: An enabled install never emits silence
 
 - **GIVEN** injection is enabled in any mode other than `off`
-- **WHEN** the hook runs on any turn where a gate withheld the briefing or no index is available
+- **WHEN** the hook runs on the first turn of a session where a gate withheld the briefing for a
+  given reason, or no index is available and no build can start
 - **THEN** the output is non-empty and carries a stated reason
+- **AND** a later turn in the same session withheld for the same reason emits nothing
+
+#### Scenario: A running build says nothing to the agent
+
+- **GIVEN** an index build or repair is running
+- **WHEN** the hook runs
+- **THEN** the agent's context gets no build or progress line
 
 #### Scenario: A disabled install stays silent
 
@@ -281,3 +289,32 @@ SHALL report a wired hook command whose runtime file does not exist.
 - **GIVEN** a wired hook command whose entry file was deleted
 - **WHEN** `openlore doctor` runs
 - **THEN** it reports the missing path and names `openlore install` as the fix
+
+### Requirement: IndexProgressIsShownToTheUserNotTheAgent
+
+While an index build or a background repair runs, OpenLore SHALL record its progress (phase, files
+done, files total, start time) in a local file under `.openlore/`, and `openlore statusline` and
+`openlore status` SHALL show it as a percentage with the file counts. When no build or repair
+runs, they SHALL show their usual state and nothing more. Progress text SHALL NOT be added to the
+agent's context. Where OpenLore's status line is not wired, the prompt-submitted moment MAY show
+the user one line when a build starts and one when it is ready, through a channel the harness
+shows to the user and not to the model; it SHALL show no other progress text.
+
+#### Scenario: The status line shows a running build
+
+- **GIVEN** a first index build that has parsed 1,310 of 2,900 files
+- **WHEN** `openlore statusline` runs
+- **THEN** it prints `OpenLore: indexing 45% (1,310/2,900 files)`
+
+#### Scenario: A stale progress record is not a running build
+
+- **GIVEN** a progress record whose process has exited
+- **WHEN** `openlore statusline` runs
+- **THEN** it prints the usual index state, not a percentage
+
+#### Scenario: A user without OpenLore's status line hears twice
+
+- **GIVEN** a Claude Code session where OpenLore's status line is not wired and no index exists
+- **WHEN** the first prompt starts a build, and a later prompt arrives after it is ready
+- **THEN** the user sees one start line and one ready line
+- **AND** neither line is in the model's context, and no other prompt shows a progress line

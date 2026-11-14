@@ -140,3 +140,28 @@ nothing outside its own folder; every file below is edited when the group is bui
 - [ ] 8.5 Docs: `docs/install.md` (upgrade, uninstall, what is kept, the guard and its shell
   limit). Tell `ship-claude-code-plugin` the final command form. Test: `src/doc-claim-sync.test.ts`. Done when: the page
   states what uninstall removes and keeps.
+
+## 9. Progress for the user, silence for the agent
+
+- [ ] 9.1 Confirm in the Claude Code hooks docs (code.claude.com/docs/en/hooks) that hook output
+  `systemMessage` is shown to the user and not added to the model's context, and that
+  `UserPromptSubmit` accepts it; record the URL and date in `src/cli/commands/orient-inject.ts`.
+  Done when: the comment exists. If the docs do not confirm it, drop the user line (9.4) and keep
+  the status line only.
+- [ ] 9.2 Progress record: the builder writes `.openlore/build-progress.json` (design section 7)
+  through the atomic writer, at most once per second, and removes it at the end, in
+  `src/core/services/cold-start-bootstrap.ts` and the analyze pipeline it calls;
+  `collectIndexStatus` (`src/cli/commands/status.ts`) reads it, treating a dead `pid` or a 2-minute-old
+  record as not building. Tests: beside. Done when: a fixture build leaves no record, and a record
+  with a dead pid reads as not building.
+- [ ] 9.3 `openlore statusline` (`src/cli/commands/statusline.ts` `indexLabel`) and `openlore status`
+  show `indexing N% (done/total files)` and then the phase name. Tests: `statusline.test.ts`,
+  `status.test.ts`. Done when: the scenario numbers print exactly, with thousands separators.
+- [ ] 9.4 Prompt-submitted moment (`orient-inject.ts`): no build or progress line in the agent's
+  context; when OpenLore's status line is not wired, one user-only line at build start and one at
+  ready, per session record. Replace today's "orientation failed for this turn (the index may be
+  mid-rebuild)" output with nothing (counted as in group 2). Tests: `orient-inject.test.ts`. Done
+  when: a 5-prompt session during a build has 0 agent-visible progress lines and at most 2 user lines.
+- [ ] 9.5 Docs: `docs/install.md` (how plugin users wire `openlore statusline` in their own
+  settings; what they see during a build). Tell `ship-claude-code-plugin`. Test:
+  `src/doc-claim-sync.test.ts`. Done when: the page shows the status-line setting and the sample output.

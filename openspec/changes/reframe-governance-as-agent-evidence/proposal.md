@@ -31,10 +31,12 @@
 3. **Quiet by default (`mcp-quality`).** A moment emits no finding when nothing is new and real. A
    finding is stated once per session. Each emitted finding names its proof and one action:
    `fix`, `decide` or `raise`.
-4. **One plugin tool set (`mcp-quality`, `src/cli/commands/mcp.ts`).** A new preset entry `plugin`
-   with 11 tools: `orient`, `search_code`, `get_subgraph`, `analyze_impact`, `find_path`,
+4. **`verify_change` in the default, and one plugin tool set (`mcp-quality`,
+   `src/cli/commands/mcp.ts`).** `verify_change` joins `substrate` (16 tools), gated by the
+   benchmark protocol. A new preset entry `plugin`, a subset of `substrate`, has 11 tools:
+   `orient`, `search_code`, `get_subgraph`, `analyze_impact`, `find_path`,
    `get_function_skeleton`, `suggest_insertion_points`, `recall`, `verify_claim`, `blast_radius`,
-   `verify_change`.
+   `verify_change`. No spec-generation tool is in the plugin set.
 5. **Certificates become evidence sources.** The before-stop moment may call
    `certify_public_surface`, `certify_service_contract` and `change_impact_certificate` in process,
    each only on its trigger and inside a time slice. See the table in `design.md`.
@@ -45,8 +47,8 @@
 
 - No tool is renamed, aliased or removed. All 83 tools stay in `TOOL_DEFINITIONS` under their
   current names.
-- The npm default stays `substrate` with the same 15 tools. `openlore install` and a bare
-  `openlore mcp` show no difference.
+- The npm default stays the `substrate` preset. Its 15 tools stay; `verify_change` is added
+  (16), only if the benchmark shows no regression.
 - Every tool outside the plugin set stays available through `openlore mcp --preset <name>`,
   `--preset full`, `openlore install --preset <name>`, the CLI commands, and Pi.
 - Pi keeps its surface: `NAV_TOOLS` (46) and `PI_EXCLUDED_CONCLUSION_TOOLS` (36) are not edited.
@@ -77,11 +79,10 @@
 - The prompt-submitted moment carries orientation context, not findings. The quiet rule governs
   findings. This change does not move `orient --inject` into `HOOK_MOMENTS`.
 
-## Open question for the owner
+## Owner decision (2026-11-14, ADR-0037)
 
-The plugin set is a new preset entry, `plugin` (11 tools). The alternative is to add
-`verify_change` to `substrate`, which changes the npm default and needs the benchmark protocol
-(ADR-0023).
+Add `verify_change` to `substrate`; keep a separate `plugin` set that is a subset of it, with no
+spec-generation tool. See `design.md` section 1 for the benchmark gate and its fallback.
 
 ## Depends on / order
 

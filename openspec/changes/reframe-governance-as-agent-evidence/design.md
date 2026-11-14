@@ -1,20 +1,27 @@
 # Design decisions
 
-## 1. The plugin set is a new preset entry named `plugin`
+## 1. `verify_change` joins `substrate`; the plugin set is a subset of it
 
-**Decision.** Add `plugin` to `TOOL_PRESETS` (`src/cli/commands/mcp.ts:2620`). The plugin starts
-`openlore mcp --preset plugin`. `LEAN_DEFAULT_PRESET` (`src/constants.ts:295`) stays `substrate`.
+**Decision (owner, 2026-11-14).** Add `verify_change` to `substrate` (15 → 16 tools), so every MCP
+user gets the closing check of an edit. Add a `plugin` entry to `TOOL_PRESETS`
+(`src/cli/commands/mcp.ts:2620`) with the 11 tools below; every one of them is in `substrate`. The
+plugin starts `openlore mcp --preset plugin`. `LEAN_DEFAULT_PRESET` (`src/constants.ts:295`) stays
+`substrate`.
 
-**Why.** `verify_change` is in the `verify` preset only, not in `substrate`. The CLI takes one
-`--preset` value (`resolvePresetName`, `mcp.ts:2738`), so two presets cannot be joined. A named
-entry gets every guard for free: dispatch enforcement, the standing-context budget, the docs table,
-`install --preset` validation (`src/cli/install/index.ts:430`).
+**Why.** `verify_change` is the pull form of the before-stop moment; leaving it out of the default
+hides the one tool that closes the loop. The plugin set stays separate because it leaves out the 2
+spec-generation tools (owner: no spec-generating feature in the plugin) and 3 orientation views. A
+CI test keeps `plugin ⊂ substrate`, so the plugin can never offer a tool the npm default lacks.
+
+**Gate.** `DefaultSurfaceDecisionsRideTheBenchmarkProtocol` applies to the `substrate` edit. Run the
+benchmark with and without `verify_change` (task 2.1). If it shows a task-completion or selection
+regression, `verify_change` stays out of `substrate`, the `plugin` preset ships unchanged, and the
+subset test is relaxed to "every plugin tool except `verify_change`".
 
 | Rejected | Reason |
 |---|---|
-| Reuse `substrate` | No `verify_change`; 15 tools; 2 OpenSpec-only tools |
-| Add `verify_change` to `substrate` | Changes the npm default; needs the benchmark protocol (`DefaultSurfaceDecisionsRideTheBenchmarkProtocol`) |
-| Shrink `substrate` to this set | Removes 5 tools from current users |
+| Plugin uses `substrate` as is | Carries 2 spec-generation tools and 3 orientation views |
+| Shrink `substrate` to the plugin set | Removes 5 tools from current users |
 | A tool list inside `plugin/.mcp.json` | No such flag exists; the set would live outside `src/` and outside the guards |
 
 ## 2. The 11 tools
@@ -33,15 +40,15 @@ entry gets every guard for free: dispatch enforcement, the standing-context budg
 | `recall` | remember | yes | 0 | What is known about the code in hand |
 | `verify_claim` | verify | yes | 0 | Settle a claim before it reaches a human |
 | `blast_radius` | change | yes | 0 | Weigh the pending diff |
-| `verify_change` | change | no (`verify`) | 0 | One receipt after a change; the pull form of before-stop |
+| `verify_change` | change | yes (added here) | 0 | One receipt after a change; the pull form of before-stop |
 
-Left out of the plugin set, still in `substrate` and `full`:
+Left out of the plugin set, still in `substrate`, `full` and Pi:
 
 | Tool | Reason |
 |---|---|
 | `trace_execution_path` | Near-sibling of `find_path`; 1 skill names it |
 | `get_landmarks`, `get_map` | Orientation views; `orient` and `find_path` selectors cover the common case; 0 skills |
-| `prepare_spec_generation`, `prepare_spec_repair` | OpenSpec-only; no feature in the fixed set may need a spec framework |
+| `prepare_spec_generation`, `prepare_spec_repair` | Spec generation; the plugin gives deterministic evidence only (owner, 2026-11-14) |
 
 ## 3. Certificates run inside the before-stop moment, in process
 
