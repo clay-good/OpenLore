@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IndexStatus } from './status.js';
@@ -7,7 +7,7 @@ import type { IndexStatus } from './status.js';
 const collect = vi.hoisted(() => vi.fn());
 vi.mock('./status.js', () => ({ collectIndexStatus: collect }));
 
-const { renderStatusLine, statusLabel, workingDirectoryFromInput } = await import('./statusline.js');
+const { openloreProjectRoot, renderStatusLine, statusLabel, workingDirectoryFromInput } = await import('./statusline.js');
 
 const ESC = '\x1b';
 const base: IndexStatus = {
@@ -53,6 +53,52 @@ describe('workingDirectoryFromInput', () => {
       expect(workingDirectoryFromInput(input, '/fallback')).toBe('/fallback');
     },
   );
+
+  describe('against real directories', () => {
+    let root: string;
+    let project: string;
+    let savedGlobal: string | undefined;
+    beforeEach(async () => {
+      root = await realpath(await mkdtemp(join(tmpdir(), 'openlore-statusline-root-')));
+      project = join(root, 'project');
+      await mkdir(join(project, '.openlore'), { recursive: true });
+      await writeFile(join(project, '.openlore', 'config.json'), '{}');
+      // A subdirectory where a tool left a bare `.openlore/` (telemetry only, no config).
+      await mkdir(join(project, 'ui', '.openlore', 'telemetry'), { recursive: true });
+      savedGlobal = process.env.OPENLORE_GLOBAL_CONFIG;
+    });
+    afterEach(async () => {
+      if (savedGlobal === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
+      else process.env.OPENLORE_GLOBAL_CONFIG = savedGlobal;
+      await rm(root, { recursive: true, force: true });
+    });
+    const input = (project_dir: string, current_dir: string) =>
+      JSON.stringify({ workspace: { project_dir, current_dir }, cwd: current_dir });
+
+    it('keeps a project dir that is an OpenLore project', () => {
+      expect(workingDirectoryFromInput(input(project, join(project, 'ui')), '/f')).toBe(project);
+    });
+
+    it('uses the current dir when a resumed session kept a project dir outside any project', () => {
+      expect(workingDirectoryFromInput(input(root, project), '/f')).toBe(project);
+    });
+
+    it('walks past a bare .openlore/ without a config to the project root', () => {
+      expect(workingDirectoryFromInput(input(root, join(project, 'ui')), '/f')).toBe(project);
+      expect(openloreProjectRoot(join(project, 'ui', 'src'))).toBe(project);
+    });
+
+    it('never treats the user-level config as a project', async () => {
+      // The user config lives at <home>/.openlore/config.json; point it at this tree's own.
+      await mkdir(join(root, '.openlore'), { recursive: true });
+      await writeFile(join(root, '.openlore', 'config.json'), '{}');
+      process.env.OPENLORE_GLOBAL_CONFIG = join(root, '.openlore', 'config.json');
+      const outside = join(root, 'elsewhere');
+      await mkdir(outside);
+      expect(openloreProjectRoot(outside)).toBeUndefined();
+      expect(workingDirectoryFromInput(input(outside, outside), '/f')).toBe(outside);
+    });
+  });
 });
 
 describe('renderStatusLine', () => {
