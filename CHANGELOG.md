@@ -20,6 +20,10 @@ All notable changes to OpenLore are documented here. This project adheres to
   appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
   of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now
   wired between `init` and `analyze`.
+- **`detect_changes` and `search_specs` stopped sending agents to re-run `analyze` for nothing.**
+  `detect_changes` said "Re-run analyze_codebase" when the diff touched only non-code files, and
+  `search_specs` said "Run openlore analyze first" on a repository with no specs, which `analyze`
+  cannot fix. Both now say what is actually the case.
 
 ## [3.6.0] - 2026-11-09
 

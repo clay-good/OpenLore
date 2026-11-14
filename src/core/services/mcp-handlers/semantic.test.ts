@@ -245,10 +245,23 @@ describe('handleSearchSpecs', () => {
       },
     }));
 
+    await mkdir(join(tmpDir, 'openspec', 'specs', 'auth'), { recursive: true });
+    await writeFile(join(tmpDir, 'openspec', 'specs', 'auth', 'spec.md'), '# Auth\n');
     const { handleSearchSpecs } = await import('./semantic.js');
     const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string; hint: string };
     expect(result.error).toContain('No spec index found');
     expect(result.hint).toContain('keyword');
+  });
+
+  it('says there are no specs, not "run analyze", when the repository has none', async () => {
+    // `analyze` indexes no specs when none exist, so "run analyze first" never resolved.
+    vi.doMock('../../analyzer/spec-vector-index.js', () => ({
+      SpecVectorIndex: { exists: vi.fn().mockReturnValue(false), build: vi.fn(), search: vi.fn() },
+    }));
+    const { handleSearchSpecs } = await import('./semantic.js');
+    const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string; hint: string };
+    expect(result.error).toMatch(/^No specs to search/);
+    expect(result.hint).toContain('openlore generate');
   });
 });
 

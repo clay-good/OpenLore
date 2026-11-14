@@ -1862,7 +1862,17 @@ export async function handleDetectChanges(
   }
 
   if (changedFnIds.size === 0) {
-    return { changedFunctions: [], message: 'Changed files found but no matching function nodes. Re-run analyze_codebase.' };
+    // Only a changed file the index HAS functions for can be evidence of a stale index. When none
+    // does, the diff is non-code (config, docs, lockfiles) or files the graph does not index, and
+    // telling the agent to re-analyze sends it to rebuild an index that is already current.
+    const indexedFiles = new Set(cg.nodes.filter(n => !n.isExternal).map(n => relPath(n.filePath)));
+    const changedIndexed = [...changedLines.keys()].filter(f => indexedFiles.has(f)).length;
+    return {
+      changedFunctions: [],
+      message: changedIndexed === 0
+        ? `None of the ${changedLines.size} changed file(s) holds an indexed function (non-code, test-only, or unindexed files), so no function changed. If a changed file is new source the index has not seen yet, run analyze_codebase.`
+        : 'Changed files found but no matching function nodes. Re-run analyze_codebase.',
+    };
   }
 
   const callsEdges = cg.edges.filter(e => !e.kind || e.kind === 'calls');

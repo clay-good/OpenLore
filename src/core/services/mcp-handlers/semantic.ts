@@ -728,6 +728,15 @@ export async function handleSearchSpecs(
   const { resolveEmbedder, embedderMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
 
   if (!SpecVectorIndex.exists(outputDir)) {
+    // `analyze` builds no spec index when there are no specs to index, so "run analyze" was a loop
+    // on a repository that has none: say what is actually missing.
+    const listed = await handleListSpecDomains(directory) as { count?: number };
+    if (!listed.count) {
+      return {
+        error: 'No specs to search: this repository has no OpenSpec domain specs (openspec/specs/<domain>/spec.md).',
+        hint: 'Run "openlore generate" to author them (needs an LLM provider), then "openlore analyze" to index them. search_code searches the code itself.',
+      };
+    }
     return {
       error: 'No spec index found. Run "openlore analyze" first.',
       hint: 'Plain "openlore analyze" builds a keyword (BM25) spec index; configure EMBED_* for semantic spec search.',
