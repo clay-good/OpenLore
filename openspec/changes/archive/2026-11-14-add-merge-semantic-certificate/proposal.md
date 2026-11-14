@@ -1,5 +1,9 @@
 # Add merge semantic certificate: two branches that merge cleanly can still disagree
 
+> Archived 2026-11-14 as shipped. Parts of this proposal were not built and were cut; the delta spec in
+> this folder and the main spec state only what the code does. Cut parts are listed in the "Not doing"
+> table of `ROADMAP.md`; the original text is at commit `0dd75dbef`.
+
 > Status: PROPOSED (2026-07-27, ecosystem research sweep). `certify_merge`: a deterministic
 > verdict on whether two branches are structurally compatible — the "git merges cleanly, the
 > combination is broken" failure that textual merge cannot see. Completes the coordination arc:

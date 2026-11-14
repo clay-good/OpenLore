@@ -21,13 +21,8 @@
       `coordinate`; class `conclusion`; `_RO` annotation; epistemic-lease weight; Pi NAV/review
       group/glance (+ Pi `all` budget 8,700 → 9,400); TLS line; delivery-parity; tool-driver; tool
       count 79 → 80; payload budget (104,000 → 105,200 B) + KB/token + standing-context docs
-- [ ] Store lifecycle: expire records when a branch lands/closes — deferred (today records persist
-      until overwritten by id)
-- [ ] `carried` as a distinct surfaced state (vs. subsumed in `still-valid`) + the invalidating
-      commit on `invalidated` — deferred (needs the per-anchor verdict detail surfaced)
-- [ ] Live per-branch arc EXECUTION in `fleet_status` (today it references the arc tools to run per
-      branch) + the `openlore fleet-status` CLI — deferred
-- [ ] Addendum 2026-10-31: verification records move to the git-common-dir store (via
+- [x] Store lifecycle: records end on the same evidence as a peer-board entry (built in #698)
+- [x] Addendum 2026-10-31 (built in #648 and #698): verification records move to the git-common-dir store (via
       `add-peer-footprint-board`); branch-landed expiry shares the board rule
 
 ## Verification
@@ -38,8 +33,6 @@
 - [x] tool-registration guards green (contract, annotations, presets incl. coordination membership,
       payload budget, doc-claim-sync, tool-count, epistemic-lease, Pi parity + budget, TLS,
       delivery-parity, tool-driver)
-- [ ] Full lease integration over a real moved/changed symbol (with the carried-state + invalidating
-      commit work)
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD FleetVerificationMemorySurvivesBaseDrift (lifecycle, the distinct
@@ -47,3 +40,7 @@
 
 ## Dependencies
 - [x] Requires `add-merge-semantic-certificate` (`certify_merge`) — merged (#610)
+
+
+> Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the
+> "Not doing" table of `ROADMAP.md` with the commit to restore them from (`0dd75dbef`).

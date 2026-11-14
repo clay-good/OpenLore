@@ -16,16 +16,8 @@
 - [x] Register `callgraph-precision-order-violation` in `FINDING_CODE_REGISTRY`
       (enforcement-policy.ts) with defaultClass 'advisory' and a description; emit violations in
       the unified `GovernanceFinding` shape
-- [ ] CI job: run the checker over the OpenLore self-index + existing fixture repos (the exported
-      `calibratePrecisionOrder` is ready; wiring the dogfood job + triaging any pre-existing
-      findings is the remaining Part-1 step)
 
 ## Part 2 — execution-witnessed recall calibration (deferred to a follow-up PR)
-- [ ] Dev-only TraceEval harness (kept out of the shipped package): map extracted edges onto the
-      benchmark edge format for the Python and JavaScript suites; compute recall per
-      edge-confidence class
-- [ ] Committed results doc with the benchmark commit hash; cite it from
-      docs/language-support.md and the honesty copy, with the recall-floor caveat inline
 
 ## Verification
 - [x] Checker self-test: an injected monotone-refinement violation is detected with the correct
@@ -34,13 +26,11 @@
       `callgraph-soundness`
 - [x] Toggle test: `cha: false` synthesizes no `overrides` edges; default behaviour unchanged
 - [x] Integration: `calibratePrecisionOrder` reports no violation on a clean re-export fixture
-- [ ] Harness determinism (Part 2): two runs over the same benchmark commit produce identical
-      recall numbers
-- [ ] Package audit (Part 2): the harness and benchmark data are absent from the published artifact
-- [ ] Docs state partial coverage + recall-floor caveat (Part 2)
 - [x] Typecheck green; no serving-path or payload-budget impact (no tool change)
 
 ## Spec
 - [x] `analyzer` delta: PrecisionOrderConsistencyInvariant (monotone-refinement wording)
-- [ ] `analyzer` delta: ExecutionWitnessedRecallCalibration (Part 2) — spec written, not yet built;
-      change stays open until Part 2 ships, then archive
+
+
+> Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the
+> "Not doing" table of `ROADMAP.md` with the commit to restore them from (`0dd75dbef`).

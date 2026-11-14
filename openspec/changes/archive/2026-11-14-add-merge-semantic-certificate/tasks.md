@@ -21,12 +21,6 @@
       `coordinate`; class `conclusion`; `_RO` annotation; epistemic-lease weight; sibling
       cross-reference to `map_in_flight_conflicts` and the merge-tree oracle; full-surface tool
       count, payload budget, Pi surface, TLS line, delivery-parity, tool-driver, and docs updated
-- [ ] Retained (non-added) edges into a changed symbol — deferred (an author's own blast-radius
-      concern; added-edge conflicts are the merge-specific core)
-- [ ] Perf: scope the branch builds to the diff union via the hash-keyed Pass-1 cache (today it
-      builds the full graph at three refs) — deferred
-- [ ] `openlore certify-merge --ours <ref> --theirs <ref> [--base <ref>] [--json]` CLI — deferred
-      (today the capability ships as the MCP tool)
 
 ## Verification
 - [x] Cross-join: an added call into a removed symbol → `incompatible`; into a potentially-breaking
@@ -37,8 +31,12 @@
 - [x] tool-registration guards green (contract, annotations, presets incl. coordination membership,
       payload budget, doc-claim-sync, tool-count, epistemic-lease, Pi parity, TLS, delivery-parity,
       tool-driver)
-- [ ] Real-repo fixture with two branches (full git integration) — deferred with the CLI
+- [x] Real-repo fixture with two branches (full git integration) — built in #612
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD MergeSemanticCompatibilityIsCertified (retained-edge conflicts,
       perf scoping, and the CLI remain, so the change stays open)
+
+
+> Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the
+> "Not doing" table of `ROADMAP.md` with the commit to restore them from (`0dd75dbef`).
