@@ -15,6 +15,13 @@ The CI workflow that does the publish lives at [.github/workflows/release.yml](.
 
 If the `npm-publish` environment has a required reviewer, the `publish` job pauses for a human approval click before it can mint the OIDC token.
 
+4. **After the npm publish, pin the Claude Code plugin to it.** The plugin in `plugin/` installs an
+   exact `openlore` version from `plugin/runtime/package-lock.json` on first use, and Claude Code updates a plugin only when its
+   `version` changes. Run `node scripts/sync-plugin-version.mjs` on `main` (it reads `package.json`'s
+   version), then merge the result as `chore(plugin): pin openlore X.Y.Z`. The lockfile records the
+   published tarball, so this step cannot run before the publish. `plugin-manifest.test.ts` checks
+   that the pin, `plugin.json`, and the lockfile agree.
+
 ### Alternative paths
 
 - **Publish a GitHub Release by hand** (Releases → Draft a new release → pick the tag → Publish): the `create-release` job is skipped (the Release already exists) and `publish` runs.

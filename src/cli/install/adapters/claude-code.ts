@@ -294,7 +294,8 @@ interface ManagedHook {
 
 const EDIT_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit';
 
-const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
+/** Exported so the Claude Code plugin's hooks are checked against the same moments (plugin-manifest.test.ts). */
+export const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
   { key: 'SessionStart', args: ['orient', '--json'] },
   { key: 'UserPromptSubmit', args: ['orient', '--inject'] },
   { key: 'PreToolUse', args: ['hook', 'before-edit'], moment: 'before-edit', matcher: EDIT_TOOLS, timeout: 15 },
