@@ -36,6 +36,11 @@ All notable changes to OpenLore are documented here. This project adheres to
   which extracts imports only for TypeScript, JavaScript, Python, Java and Kotlin. In a Rust
   workspace 617 public functions were rated `high`, including a serde `default = "…"` callback.
   Candidates in other languages now stop at `medium` and say why.
+- **`find_dead_code` no longer rates a function called from module scope high-confidence dead.**
+  Top-level code has no call-graph node, so `if (!arg) die("usage")` or `start().catch(…)` made no
+  edge and `die` / `start` read as uncalled. A candidate its own file names outside every indexed
+  function is now capped at `low`, with the line. On OpenLore's own index the high tier fell from 16
+  to 9.
 - **A fresh `openlore install` no longer leaves its own index stale.** The decision-trail step
   appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
   of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now

@@ -117,6 +117,62 @@ export function externalWiringCaveats(report: ExternalWiringReport): string[] {
   return caveats;
 }
 
+/** A candidate file larger than this is not scanned for module-scope uses. */
+const MODULE_SCOPE_SCAN_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Candidates whose own file names them at MODULE SCOPE — on a line outside every indexed function's
+ * line span — mapped to the first such line. Module-level code has no call-graph node, so a
+ * top-level `start()` or `process.on('exit', cleanup)` produces no edge, and the candidate looks
+ * uncalled. A textual match (a comment, a string) can only LOWER confidence, the sound direction.
+ * One read per candidate file; an unreadable or oversized file contributes nothing.
+ */
+async function namedAtModuleScope(
+  absDir: string,
+  candidates: readonly FunctionNode[],
+  codeNodes: readonly FunctionNode[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const byFile = new Map<string, FunctionNode[]>();
+  for (const n of candidates) {
+    if (!/^[A-Za-z_$][\w$]*$/.test(n.name)) continue;
+    (byFile.get(n.filePath) ?? byFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  if (byFile.size === 0) return out;
+  const spansByFile = new Map<string, Array<[number, number]>>();
+  for (const n of codeNodes) {
+    if (!byFile.has(n.filePath) || n.startLine === undefined) continue;
+    (spansByFile.get(n.filePath) ?? spansByFile.set(n.filePath, []).get(n.filePath)!).push([n.startLine, n.endLine ?? n.startLine]);
+  }
+  for (const [file, nodes] of byFile) {
+    let text: string;
+    try {
+      const abs = join(absDir, file);
+      if ((await stat(abs)).size > MODULE_SCOPE_SCAN_MAX_BYTES) continue;
+      text = await readFile(abs, 'utf-8');
+    } catch {
+      continue;
+    }
+    const spans = spansByFile.get(file) ?? [];
+    const lines = text.split('\n');
+    const names = new Set(nodes.map(n => n.name));
+    const firstLine = new Map<string, number>();
+    for (let i = 0; i < lines.length && firstLine.size < names.size; i++) {
+      const line = i + 1;
+      if (spans.some(([a, b]) => line >= a && line <= b)) continue;
+      for (const match of lines[i].matchAll(/[A-Za-z_$][\w$]*/g)) {
+        const name = match[0];
+        if (names.has(name) && !firstLine.has(name)) firstLine.set(name, line);
+      }
+    }
+    for (const n of nodes) {
+      const line = firstLine.get(n.name);
+      if (line !== undefined) out.set(n.id, line);
+    }
+  }
+  return out;
+}
+
 /** Languages a `package.json` manifest can wire. */
 const MANIFEST_WIRED_LANGS = new Set(['TypeScript', 'JavaScript']);
 
@@ -596,6 +652,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   );
 
   const unreadManifest = await unreadEnclosingManifests(absDir, candidates, wiring.report);
+  const moduleScopeNamed = await namedAtModuleScope(absDir, candidates, codeNodes);
 
   const ranked = candidates
     .map(n => {
@@ -692,6 +749,15 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       // or `exports` may name this very file as the package's entry point. Never high-confidence
       // dead: the reader does not search the tree for manifests to root, but it must not rate what
       // such a manifest could wire as certainly unused either.
+      // Its own file names it outside every indexed function — a top-level `main()`, `start()`
+      // or `process.on('exit', cleanup)`. Module-scope code has no call-graph node, so that call
+      // is no edge at all, and "no internal caller" was read as certain.
+      const moduleLine = moduleScopeNamed.get(n.id);
+      if (moduleLine !== undefined) {
+        confidence = 'low';
+        reasons.push(`its file names it at module scope (line ${moduleLine}), outside every indexed function — module-level code has no call-graph node, so that use is not an edge`);
+      }
+
       const manifest = unreadManifest.get(n.filePath);
       if (manifest) {
         confidence = 'low';
