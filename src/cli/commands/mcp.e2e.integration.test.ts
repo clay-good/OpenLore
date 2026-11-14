@@ -824,7 +824,9 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
     // `count` is the authoritative total. On a repository whose full list does not fit the
     // response budget the list is bounded and `omitted` says by how much, exactly
     // (change: fix-whole-repo-answers-under-budget).
-    const omittedGods = (data as unknown as { omitted?: Record<string, number> }).omitted?.godFunctions ?? 0;
+    // The trim receipt lives under `responseBudget` (it used to be a top-level `omitted`).
+    const omittedGods = (data as unknown as { responseBudget?: { omitted?: Record<string, number> } })
+      .responseBudget?.omitted?.godFunctions ?? 0;
     expect(data.count).toBe(data.godFunctions.length + omittedGods);
 
     // Sorted by fanOut descending
@@ -848,9 +850,11 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
       'handleOrient', 'CallGraphBuilder.build', 'dispatchTool', 'startMcpServer',
       'handleStructuralDiff', 'handleDetectChanges', 'configureServer', 'openloreRun',
     ]);
-    const top = data.godFunctions[0];
+    const top = data.godFunctions[0] as (typeof data.godFunctions)[number] & { className?: string | null };
+    // A method is named by its class: the response carries `name: "build"` + `className`.
+    const qualified = top.className ? `${top.className}.${top.name}` : top.name;
     expect(
-      KNOWN_ORCHESTRATORS.has(top.name),
+      KNOWN_ORCHESTRATORS.has(qualified),
       `top god function "${top.name}" (fanOut ${top.fanOut}) is not a recognized orchestrator`,
     ).toBe(true);
   });
