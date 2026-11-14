@@ -2443,3 +2443,46 @@ export function bare() { return new NoCtor(); }
     expect(b.edges.some(e => e.calleeName === 'Map' || e.calleeName === 'NoCtor')).toBe(false);
   });
 });
+
+describe('Python C(...) binds to C.__init__', () => {
+  it('binds a same-file and an imported class, and leaves an unknown class external', async () => {
+    const b = await new CallGraphBuilder().build([
+      { path: 'pkg/ctx.py', language: 'Python', content: `
+class Ctx:
+    def __init__(self, limit):
+        self.limit = limit
+
+def make(limit):
+    return Ctx(limit)
+` },
+      { path: 'pkg/use.py', language: 'Python', content: `
+from pkg.ctx import Ctx
+
+def build():
+    return Ctx(2)
+
+def other():
+    return OrderedDict()
+` },
+    ]);
+    const init = [...b.nodes.values()].find(n => n.className === 'Ctx' && n.name === '__init__')!;
+    const into = b.edges.filter(e => e.calleeId === init.id).map(e => [e.callerId, e.confidence]).sort();
+    // An absolute in-project import records no binding, so it binds by the unique name — the
+    // same policy plain functions get.
+    expect(into).toEqual([['pkg/ctx.py::make', 'same_file'], ['pkg/use.py::build', 'name_only']]);
+    expect(b.edges.some(e => e.calleeId === 'external::Ctx')).toBe(false);
+    expect(b.edges.some(e => e.calleeId === 'external::OrderedDict')).toBe(true);
+  });
+
+  it('binds a relative import with import confidence, and never a class imported from a third party', async () => {
+    const b = await new CallGraphBuilder().build([
+      { path: 'pkg/ctx.py', language: 'Python', content: 'class Session:\n    def __init__(self):\n        pass\n' },
+      { path: 'pkg/use.py', language: 'Python', content: 'from .ctx import Session\n\ndef build():\n    return Session()\n' },
+      { path: 'pkg/net.py', language: 'Python', content: 'from requests import Session\n\ndef fetch():\n    return Session()\n' },
+    ]);
+    const init = [...b.nodes.values()].find(n => n.className === 'Session' && n.name === '__init__')!;
+    const into = b.edges.filter(e => e.calleeId === init.id).map(e => [e.callerId, e.confidence]);
+    expect(into).toEqual([['pkg/use.py::build', 'import']]);
+  });
+});
+

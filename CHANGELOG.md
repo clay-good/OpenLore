@@ -17,6 +17,10 @@ All notable changes to OpenLore are documented here. This project adheres to
   constructs a class, and constructors read as dead. The edge binds only to the class declared in
   the caller's file or the file it imports `C` from; `new Map()` and classes without an explicit
   constructor add nothing.
+- **Python `C(…)` of an in-repo class now reaches `C.__init__`.** It fell through to an
+  `external::C` leaf, listing the repository's own class as an external dependency and leaving
+  every `__init__` without a caller (0 of 172 on one sample project; 164 of 172 now). It binds on
+  the same proof as other calls; a class imported from a third-party module is never bound.
 - **A `super.m()` call is no longer fanned out to every same-named method.** In
   `class HeaderMap extends Map`, `super.get(…)` was wired to each unrelated in-repo `get` (one in a
   test file). A super call binds to the base class, which the direct resolver already follows.

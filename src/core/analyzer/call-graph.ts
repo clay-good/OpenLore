@@ -6529,6 +6529,30 @@ export class CallGraphBuilder {
         }
       }
 
+      // Strategy 3p — Python instantiation `C(...)` of an in-repo class binds to `C.__init__`, on
+      // the same proof as `new C(...)`: declared in the caller's file, or in the file the caller
+      // imports `C` from. Without it the call fell through to an `external::C` leaf, listing the
+      // repository's own class as an external dependency and leaving `__init__` without a caller.
+      if (!calleeNode && !raw.calleeObject && callerNode.language === 'Python') {
+        const inits = trie.findByQualifiedName(raw.calleeName, '__init__');
+        if (inits.length > 0) {
+          const sameFile = inits.filter(n => n.filePath === callerNode.filePath);
+          const importedFile = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+          const imported = importedFile ? inits.filter(n => matchesImportedTarget(n.filePath, importedFile)) : [];
+          if (sameFile.length === 1) { calleeNode = sameFile[0]; confidence = 'same_file'; }
+          else if (sameFile.length === 0 && imported.length === 1) { calleeNode = imported[0]; confidence = 'import'; }
+          // An absolute in-project import records no binding (see buildBaseImportMap), which is
+          // why a plain function reached that way binds by its unique name below. A class gets the
+          // same policy — the one in-repo `C.__init__` — unless the file imported `C` from a
+          // module outside the repository, which the source has just contradicted.
+          else if (sameFile.length === 0 && imported.length === 0 && inits.length === 1
+            && !callImportMap.get(callerNode.filePath)?.has(`${EXTERNAL_IMPORT_PREFIX}${raw.calleeName}`)) {
+            calleeNode = inits[0];
+            confidence = 'name_only';
+          }
+        }
+      }
+
       // Strategy 4 — same-file preference (only for calls without a typed receiver)
       // When a receiver is explicitly present but unresolvable (e.g. redis_client.get()),
       // skip name_only fallback to avoid false-positive edges.
