@@ -12,8 +12,8 @@ Many edits depend on one question: does this function change shared state or do 
 call twice, to memoize, to move out of a loop? OpenLore holds no such fact, so the agent guesses
 from the name (`get…` is probably pure). The agent also cannot see module-level state that other
 functions write. In async code, an `await` between a read and a write of the same module binding
-lets another task run in between. That shape is visible in the stored control-flow data, but
-nothing reports it.
+lets another task run in between. The stored control-flow data holds the reads and writes
+but not the `await` points, and nothing reports the shape.
 
 ## What changes
 
