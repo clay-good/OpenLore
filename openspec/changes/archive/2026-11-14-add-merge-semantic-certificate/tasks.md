@@ -35,7 +35,7 @@
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD MergeSemanticCompatibilityIsCertified (retained-edge conflicts,
-      perf scoping, and the CLI remain)
+      perf scoping, and the CLI are cut)
 
 
 > Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the

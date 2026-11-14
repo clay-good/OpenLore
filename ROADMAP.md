@@ -121,7 +121,7 @@ Cut work is deleted, not archived: in OpenSpec, archived means shipped. Restore 
 | `add-shared-state-hazard-conclusions` | Merged into `add-effect-purity-inference`; Go support and the reader census are dropped | `0dd75dbef` |
 | `add-symbol-provenance-conclusions` | Merged into `add-refactoring-aware-churn`; the separate tool is dropped | `0dd75dbef` |
 | `add-callgraph-soundness-calibration` tasks: CI job; execution-witnessed recall harness, results doc, its checks | Benchmark track; proof comes from daily use | `0dd75dbef` |
-| `add-change-provenance-certificate` tasks: CLI; public-surface field; addendum fold-ins | New surface; the MCP tool stays as shipped | `0dd75dbef` |
+| `add-change-provenance-certificate` tasks: CLI; public-surface field; addendum fold-ins; in-toto check against an external validator | New surface; the MCP tool stays as shipped | `0dd75dbef` |
 | `add-merge-semantic-certificate` tasks: retained edges; diff-union build scoping; CLI | New surface or low value for the agent loop | `0dd75dbef` |
 | `add-fleet-coordination-arc` tasks: `carried` state and invalidating commit; live arc execution; CLI; lease test for both | No tool records a verdict yet, so these add surface with no user | `0dd75dbef` |
 | `add-verification-feedback-loop` tasks: `openlore verify-change` CLI; pre-commit gate; their tests | New surfaces; the MCP tool and the before-stop hook already deliver the receipt | `0dd75dbef` |

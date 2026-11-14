@@ -35,8 +35,8 @@
       delivery-parity, tool-driver)
 
 ## Spec
-- [x] `mcp-handlers` delta: ADD FleetVerificationMemorySurvivesBaseDrift (lifecycle, the distinct
-      `carried` state + invalidating commit, live arc execution, and the CLI remain —)
+- [x] `mcp-handlers` delta: ADD FleetVerificationMemorySurvivesBaseDrift (lifecycle built in #698;
+      the distinct `carried` state + invalidating commit, live arc execution, and the CLI are cut)
 
 ## Dependencies
 - [x] Requires `add-merge-semantic-certificate` (`certify_merge`) — merged (#610)
