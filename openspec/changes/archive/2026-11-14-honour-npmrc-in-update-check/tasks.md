@@ -12,4 +12,7 @@
 
 - [x] 2.1 Run `npx vitest run src/core/services/update-notifier.test.ts src/core/services/tls-coverage.test.ts src/cli/commands/update.test.ts` and `npm run typecheck`. Result: all pass. The one failure in `platform-command.posix-oracle.test.ts` also fails on clean `main`.
 - [x] 2.2 Check the real lookup against the live npm: it prints the resolved argv, `cwd`, and the version. Result: `latest: 3.2.0` in about 1.1 s. Before the array fix it returned `null`.
-- [ ] 2.3 Check the lookup against a private registry (Nexus). This needs a machine configured for one, so the author must do it.
+
+
+> Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the
+> "Not doing" table of `ROADMAP.md` with the commit to restore them from (`0dd75dbef`).

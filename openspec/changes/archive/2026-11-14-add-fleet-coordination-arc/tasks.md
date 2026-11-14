@@ -7,27 +7,22 @@
 
 ## Implementation
 - [x] Typed coordination verification record `{ id, verdict, branch, baseCommit, producedBy,
-      anchors }`, recorded for a clean `blast_radius` / stable `certify_public_surface` / passed
-      `certify_merge`, in a coordination-scoped JSON store (`recordVerification`)
+      anchors }` in a coordination-scoped JSON store, written through the `recordVerification` API;
+      no tool calls it yet
 - [x] Base-drift resolution: `classifyRecords` maps the freshness-lease verdict to `still-valid` /
       `invalidated` / `needs-reverification` (carry is handled upstream by the anchor system, so a
       moved-but-unchanged symbol reads fresh → still-valid); a verdict is NEVER served fresh without
       the check (no graph → every record is needs-reverification, not silently fresh)
 - [x] `fleet_status` composing conclusion: the classified records + the arc references
-      (plan_parallel_work → map_in_flight_conflicts → certify_merge) per in-flight branch, each line
-      attributed to its producing tool; references components, re-derives nothing
+      (plan_parallel_work → map_in_flight_conflicts → certify_merge) named, and the `branches` input
+      echoed; references components, re-derives nothing
 - [x] Boundary disclosure: no-graph and unanchored records → needs-reverification; advisory
 - [x] `fleet_status` MCP handler + dispatch; `coordination` preset (budget 3,100 → 3,400); family
       `coordinate`; class `conclusion`; `_RO` annotation; epistemic-lease weight; Pi NAV/review
       group/glance (+ Pi `all` budget 8,700 → 9,400); TLS line; delivery-parity; tool-driver; tool
       count 79 → 80; payload budget (104,000 → 105,200 B) + KB/token + standing-context docs
-- [ ] Store lifecycle: expire records when a branch lands/closes — deferred (today records persist
-      until overwritten by id)
-- [ ] `carried` as a distinct surfaced state (vs. subsumed in `still-valid`) + the invalidating
-      commit on `invalidated` — deferred (needs the per-anchor verdict detail surfaced)
-- [ ] Live per-branch arc EXECUTION in `fleet_status` (today it references the arc tools to run per
-      branch) + the `openlore fleet-status` CLI — deferred
-- [ ] Addendum 2026-10-31: verification records move to the git-common-dir store (via
+- [x] Store lifecycle: records end on the same evidence as a peer-board entry (built in #698)
+- [x] Addendum 2026-10-31 (built in #648 and #698): verification records move to the git-common-dir store (via
       `add-peer-footprint-board`); branch-landed expiry shares the board rule
 
 ## Verification
@@ -38,12 +33,14 @@
 - [x] tool-registration guards green (contract, annotations, presets incl. coordination membership,
       payload budget, doc-claim-sync, tool-count, epistemic-lease, Pi parity + budget, TLS,
       delivery-parity, tool-driver)
-- [ ] Full lease integration over a real moved/changed symbol (with the carried-state + invalidating
-      commit work)
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD FleetVerificationMemorySurvivesBaseDrift (lifecycle, the distinct
-      `carried` state + invalidating commit, live arc execution, and the CLI remain — change stays open)
+      `carried` state + invalidating commit, live arc execution, and the CLI remain —)
 
 ## Dependencies
 - [x] Requires `add-merge-semantic-certificate` (`certify_merge`) — merged (#610)
+
+
+> Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the
+> "Not doing" table of `ROADMAP.md` with the commit to restore them from (`0dd75dbef`).

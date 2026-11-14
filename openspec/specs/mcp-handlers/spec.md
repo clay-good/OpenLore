@@ -4600,6 +4600,7 @@ crash and never read as "no routes".
 - **GIVEN** a `route-inventory.json` that is absent or truncated mid-JSON
 - **THEN** the answer is the edge-derived one it had before the join, and
   `routeInventoryRoots.boundary` states that the inventory could not be read
+
 ### Requirement: AmbientDeclarationsAreNotDeadCodeCandidates
 A function-shaped symbol in a TypeScript ambient declaration file (`.d.ts`, `.d.mts`, `.d.cts`)
 is a bodyless type declaration: there is no code in it to be dead. `find_dead_code` and every
@@ -4609,6 +4610,7 @@ exclusion in `declarationsExcluded` rather than drop it silently.
 #### Scenario: A declared static method is not dead code
 - **GIVEN** `public static create(properties?: ITrace): Trace;` in a `.d.ts` file, with no caller
 - **THEN** `create` is absent from `candidateDead` and `declarationsExcluded.count` includes it
+
 ### Requirement: GeneratedFileSymbolsAreNeverHighConfidenceDead
 A generated file's symbols are driven by whatever generated them — protobuf reflection, Go struct
 embedding, a runtime registry — not by a direct in-repo call. `find_dead_code` SHALL classify each
@@ -5070,3 +5072,121 @@ file, unrelated candidates in that file are capped as well: precision is lost, s
   truncation
 - **WHEN** `find_dead_code` runs
 - **THEN** the candidate keeps its `high` rating and carries no contract reason
+
+### Requirement: SemanticChangeProvenanceIsReproducibleAndPortable
+
+The system SHALL provide an opt-in `certify_provenance` conclusion tool that emits a semantic change
+certificate for the working tree against a base resolved through `resolveBaseRefDisclosed`. The
+certificate SHALL record what the change does: the structural delta as counts, the blast radius, the
+specs touched and any drift, and the tests reaching the change. The certificate SHALL be
+reproducible (same inputs produce a byte-identical document) and content-addressed by a digest of
+its predicate body, so that any consumer can recompute it and verify it rather than trusting its
+source. It SHALL be emittable as an in-toto statement with a stable, versioned `predicateType`
+(input `format: "in-toto"`), and equivalently as standalone JSON; OpenLore SHALL emit the document
+and SHALL NOT perform signing. The certificate SHALL disclose unresolved dynamic dispatch and
+present its claims as a sound lower bound, never as "safe"; a base that cannot be resolved SHALL be
+an error unless the caller opts in to a disclosed fallback. It SHALL cross-reference
+`change_impact_certificate` as its sibling — that tool briefs the author's pending diff in-session,
+this emits a portable, recomputable record a third party can verify.
+
+#### Scenario: A consumer recomputes and verifies the certificate
+
+- **GIVEN** a certificate emitted for a working tree and base, and its recorded digest
+- **WHEN** a consumer calls `certify_provenance` over the same tree and base
+- **THEN** the document is byte-identical and the digest matches, so the certificate is verified
+  without trusting who produced it
+
+#### Scenario: It attaches to existing attestation without replacing it
+
+- **WHEN** the certificate is requested with `format: "in-toto"`
+- **THEN** it is a statement with a stable versioned `predicateType`, and OpenLore performs no
+  signing of its own
+
+#### Scenario: A bad base is an error
+
+- **GIVEN** a base ref that cannot be resolved and no opt-in fallback
+- **WHEN** the certificate is requested
+- **THEN** the tool returns an error with the reason rather than certifying against a substituted
+  base
+
+### Requirement: MergeSemanticCompatibilityIsCertified
+
+The system SHALL provide an opt-in `certify_merge` conclusion tool that, given two refs and their
+merge-base, deterministically certifies their structural compatibility: each symbol one side
+removed or changed in signature is joined — in both directions — against the direct call edges the
+other side added into it; only direct call edges are joined. Each finding SHALL be classified
+`incompatible` (severity `error`) or `potentially-incompatible` (severity `warning`) using the same
+closed classification rules as public-surface certification — a change that cannot be proven
+compatible is `potentially-incompatible`, never silently compatible — and SHALL name the edge and
+the rule; the certificate's overall `verdict` and `summary` carry the labels, and the certificate
+SHALL name the two refs and the base. The verdict SHALL be presented as a sound lower bound (`no-detected-conflict`, never
+"safe"), and the certificate SHALL disclose that calls the other side already had, import edges,
+unindexed languages, and dynamic dispatch are not assessed. A ref that cannot be resolved SHALL be
+an error, not a certificate. Findings SHALL be emitted under the registered governance finding code
+`merge-semantic-conflict`, advisory by default. The tool SHALL cross-reference its siblings:
+footprint hazards (in-flight overlap) and the textual merge oracle (will git conflict) versus this
+tool (what breaks when git does not).
+
+#### Scenario: Cleanly merging branches are caught disagreeing
+
+- **GIVEN** branch A adds a call to `parseConfig` and branch B adds a required parameter to
+  `parseConfig`, with no textual overlap between the branches
+- **WHEN** `certify_merge` runs on A and B
+- **THEN** the certificate reports the A-call-site × B-signature-change join as `incompatible`
+  with the classification rule
+
+#### Scenario: A migrated rename is not a false conflict
+
+- **GIVEN** branch B renames a symbol and updates every caller within B, and branch A adds a
+  caller to the old name
+- **WHEN** the certificate is computed
+- **THEN** only A's new edge is reported, and B's migrated callers produce no finding
+
+#### Scenario: The unprovable is never silently compatible
+
+- **GIVEN** one branch changes a parameter type in a way that cannot be proven wider or narrower
+  (an incomparable or untyped change, or a language with no signature classification), and the
+  other branch adds a call to that function
+- **WHEN** the certificate is computed
+- **THEN** the finding is `potentially-incompatible`, with rule `signature-unprovable`
+
+#### Scenario: An unresolvable ref is an error
+
+- **GIVEN** a ref that cannot be resolved
+- **WHEN** the certificate is requested
+- **THEN** the tool returns an error and no certificate
+
+### Requirement: FleetVerificationMemorySurvivesBaseDrift
+
+The system SHALL hold, under the opt-in coordination preset, a verification memory of typed anchored
+records, each carrying the base commit it was proven against and the symbols it was proven over.
+When a live record is read in the worktree that recorded it, the system SHALL decide its state
+deterministically with the freshness lease — `still-valid`, `invalidated` (an anchored symbol
+changed), or `needs-reverification` (an anchor cannot be located, carries no content hash, or
+cannot be checked) — and SHALL NOT serve a record as fresh without a graph to check it against. A
+record from another worktree and an ended record are not classified here; see
+`FleetRecordsAndPlansUseTheBoard`. The `fleet_status` conclusion SHALL report the classified records and the peer
+board summary, and SHALL point to the dispatch, in-flight, and landing tools by name without running
+them. Where records live, when they end, and the disclosure that no tool records a verdict yet are
+stated in `FleetRecordsAndPlansUseTheBoard`.
+
+#### Scenario: A still-valid record is reported without re-verification
+
+- **GIVEN** a record proven against base commit X, read in the worktree that recorded it, and the
+  base advances to Y touching unrelated code
+- **WHEN** `fleet_status` is read before the record ends
+- **THEN** the record is `still-valid`
+
+#### Scenario: Drift invalidates the record
+
+- **GIVEN** a live record, read in the worktree that recorded it, whose proven symbols a later
+  commit changed
+- **WHEN** `fleet_status` is read
+- **THEN** the record is `invalidated`, not fresh
+
+#### Scenario: A lost anchor is never silently trusted or dropped
+
+- **GIVEN** a live record, read in the worktree that recorded it, whose anchored symbol can no
+  longer be located
+- **WHEN** `fleet_status` is read
+- **THEN** the record is `needs-reverification`, surfaced as such, neither served fresh nor dropped
