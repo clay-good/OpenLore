@@ -7,6 +7,13 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **GraphQL schemas in a monorepo are graded per project.** Type identity was computed across the
+  whole repository, so two projects that each declare `type Query` voided each other and no root
+  operation of either was graded — a required argument added to one project's query went
+  unreported. A schema's identity is now scoped to its nearest enclosing project root (a
+  `package.json` or a GraphQL/Relay config), stated in `boundaries`; a collision inside one project
+  is still not assessed. A duplicate field now withholds only its own type, not the whole document,
+  and a capped `notAssessed` list carries `notAssessedOmitted`.
 - **The refactor report's cycles are real call cycles again.** It read three kinds of edge as
   calls: the derived `tested_by` edge (production function → test), so each function closed a false
   cycle with every test that calls it — 474 "cycles" on a 1,500-function Python repository; the

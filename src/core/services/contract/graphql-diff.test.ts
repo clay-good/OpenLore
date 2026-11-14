@@ -8,7 +8,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readGraphql, mergeGraphqlSchema, type GqlDocument, type GqlSchema } from '../../analyzer/contract/graphql.js';
-import { diffGraphql } from './graphql-diff.js';
+import { diffGraphql, diffGraphqlUniverses } from './graphql-diff.js';
+import { partitionSchemaUniverses } from '../../analyzer/contract/types.js';
+import { mergeGraphqlUniverses } from '../../analyzer/contract/graphql.js';
 import { CONTRACT_RULES, contractBump, type ContractChange } from './contract-diff.js';
 
 const schema = (files: Record<string, string>): GqlSchema => mergeGraphqlSchema(Object.entries(files).map(([file, text]) => {
@@ -402,5 +404,105 @@ describe('diffGraphql: review repros (roots, Federation 1, ambiguity, directive 
     expect(cs.map(c => `${c.rule} ${c.class} ${c.address}`)).toEqual(['schema-unassessed potentially-breaking schema.query']);
     expect(cs[0].detail).toContain('at head');
     expect(diffGraphql(head, base).map(c => `${c.rule} ${c.address}`)).toEqual(['schema-unassessed schema.query']);
+  });
+});
+
+describe('diffGraphqlUniverses (change: scope-graphql-schema-universes)', () => {
+  const docs = (files: Record<string, string>) => Object.entries(files).map(([file, text]) => {
+    const r = readGraphql(file, text);
+    if ('error' in r || 'clientDocument' in r) throw new Error(`${file}: not a schema`);
+    return r as GqlDocument;
+  });
+  const ROOTS = ['packages/a', 'packages/b'];
+  const universes = (files: Record<string, string>) => {
+    const d = docs(files);
+    return mergeGraphqlUniverses(d, partitionSchemaUniverses(d.map(x => x.file), ROOTS).universeOf);
+  };
+  const A = 'type Query { info: String! feed(take: Int): [Link!]! }\ntype Link { id: ID! }\n';
+  const B = 'type Query { ping: Boolean! }\ntype Link { url: String! }\n';
+
+  it('grades a breaking change inside one project while the other is untouched', () => {
+    const cs = diffGraphqlUniverses(
+      universes({ 'packages/a/s.graphql': A, 'packages/b/s.graphql': B }),
+      universes({ 'packages/a/s.graphql': A.replace('info: String!', 'info: String').replace('feed(take: Int)', 'feed(take: Int, tenant: ID!)'), 'packages/b/s.graphql': B }),
+    );
+    expect(rows(cs)).toEqual([
+      'required-param-added Query.feed [argument tenant]',
+      'field-type-changed Query.info',
+    ]);
+    expect(cs.every(c => c.class === 'breaking')).toBe(true);
+    expect(contractBump(cs)).toBe('major');
+  });
+
+  it('a project added or removed whole is graded as its operations added or removed', () => {
+    const added = diffGraphqlUniverses(universes({ 'packages/a/s.graphql': A }), universes({ 'packages/a/s.graphql': A, 'packages/b/s.graphql': B }));
+    expect(rows(added).sort()).toEqual(['operation-added Query.ping', 'type-added Link']);
+    const removed = diffGraphqlUniverses(universes({ 'packages/a/s.graphql': A, 'packages/b/s.graphql': B }), universes({ 'packages/a/s.graphql': A }));
+    expect(rows(removed).sort()).toEqual(['operation-removed Query.ping', 'type-removed Link']);
+  });
+
+  it('a project removed whole grades a type named like a root it never had', () => {
+    // `schema { query: Q }` names no mutation root, so `type Mutation` is an ordinary type. The
+    // absent side must not read it as a root and skip its removal.
+    const WEIRD = 'schema { query: Q }\ntype Q { a: Int }\ntype Mutation { m: Int }\n';
+    const removed = diffGraphqlUniverses(universes({ 'packages/a/s.graphql': A, 'packages/b/s.graphql': WEIRD }), universes({ 'packages/a/s.graphql': A }));
+    expect(rows(removed)).toContain('type-removed Mutation');
+    const added = diffGraphqlUniverses(universes({ 'packages/a/s.graphql': A }), universes({ 'packages/a/s.graphql': A, 'packages/b/s.graphql': WEIRD }));
+    expect(rows(added)).toContain('type-added Mutation');
+  });
+
+  it('a withheld ROOT type is unassessed with its reason, not read as every operation removed', () => {
+    const base = one('type Query { a: Int b: Int }\n');
+    const head = one('type Query { a: Int\n a: String\n b: Int }\n');
+    const cs = diffGraphql(base, head);
+    expect(rows(cs)).toEqual(['schema-unassessed Query']);
+    expect(cs[0].detail).toContain('field `a` is declared twice');
+    expect(cs.some(c => c.rule === 'operation-removed')).toBe(false);
+  });
+
+  it('a duplicate in an `extend` never downgrades a real removal in the file that DEFINES the type', () => {
+    // The unsound direction a review found: withholding the merged type made `field-removed`
+    // (breaking) read as `schema-unassessed` (potentially-breaking), and on a root type it made
+    // every operation of the project go ungraded.
+    const BAD = 'extend type User { tag: String\n tag: String }\nextend type Query { dup: Int\n dup: Int }\n';
+    const base = schema({ 'a.graphql': 'type Query { me: User }\ntype User { id: ID! email: String }\n', 'b.graphql': BAD });
+    const head = schema({ 'a.graphql': 'type Query { other: User }\ntype User { id: ID! }\n', 'b.graphql': BAD });
+    const cs = diffGraphql(base, head);
+    expect(rows(cs).sort()).toEqual([
+      'field-removed User [field email]',
+      'operation-added Query.other',
+      'operation-removed Query.me',
+    ]);
+    expect(cs.find(c => c.rule === 'field-removed')!.class).toBe('breaking');
+    expect(cs.some(c => c.rule === 'schema-unassessed')).toBe(false);
+    expect(contractBump(cs)).toBe('major');
+  });
+
+  it('a collision INSIDE one project is still unassessed, never graded', () => {
+    const cs = diffGraphqlUniverses(
+      universes({ 'packages/a/s.graphql': A, 'packages/a/copy.graphql': A }),
+      universes({ 'packages/a/s.graphql': A.replace('info: String!', 'info: String'), 'packages/a/copy.graphql': A }),
+    );
+    expect(cs.every(c => c.rule === 'schema-unassessed')).toBe(true);
+    expect(cs.some(c => c.detail.includes('is defined in more than one file on both sides and changed'))).toBe(true);
+    expect(contractBump(cs)).toBeNull();
+  });
+
+  it('a type withheld for a duplicate field is schema-unassessed with its reason, and its neighbours are graded', () => {
+    const base = one('type Query { a: Int }\ntype Dup { x: Int }\ntype Fine { y: Int }\n');
+    const head = one('type Query { a: Int }\ntype Dup { x: Int\n x: String }\ntype Fine { y: Int! }\n');
+    const cs = diffGraphql(base, head);
+    expect(rows(cs).sort()).toEqual(['output-field-made-non-null Fine [field y]', 'schema-unassessed Dup']);
+    expect(cs.find(c => c.address === 'Dup')!.detail).toContain('field `x` is declared twice');
+    // A withheld type is never read as removed.
+    expect(cs.some(c => c.rule === 'type-removed')).toBe(false);
+  });
+
+  it('a type withheld on BOTH sides and unchanged is silent; changed, it is unassessed', () => {
+    const dup = 'type Query { a: Int }\ntype Dup { x: Int\n x: String }\n';
+    expect(diffGraphql(one(dup), one(dup))).toEqual([]);
+    const cs = diffGraphql(one(dup), one(dup.replace('x: Int\n x: String', 'x: ID\n x: String')));
+    expect(rows(cs)).toEqual(['schema-unassessed Dup']);
+    expect(CONTRACT_RULES['schema-unassessed']).toBe('potentially-breaking');
   });
 });
