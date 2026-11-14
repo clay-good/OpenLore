@@ -95,6 +95,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   `search_specs` said "Run openlore analyze first" on a repository with no specs, which `analyze`
   cannot fix. Both now say what is actually the case.
 
+### Docs
+
+- **The roadmap names one direction and one next step.** `ROADMAP.md` now plans OpenLore as
+  evidence delivered to the agent through hooks (ADR-0036, superseding ADR-0035), names the Claude
+  Code plugin as the next build, and lists cut work with the commit to restore it from. Shipped
+  changes are archived, and the main specs state only what the code does today.
+
 ## [3.6.0] - 2026-11-09
 
 **The graph learns your service contracts, and the agent loop leaves receipts.**

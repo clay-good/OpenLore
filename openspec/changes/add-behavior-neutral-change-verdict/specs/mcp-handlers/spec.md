@@ -2,31 +2,36 @@
 
 ## ADDED Requirements
 
-### Requirement: ConsumersSubtractProvenNeutralChangesDisclosed
+### Requirement: ProvenNeutralEditsAreCountedAndStated
 
-Change-shaped conclusions that consume a changed-symbol set (structural diff, diff-seeded blast
-radius and test selection, the change-significance briefing) SHALL exclude or de-tier symbols
-classified `provably-neutral`, and SHALL disclose the subtraction — the count excluded and the
-verdict basis — in the same response. A `not-proven-neutral` symbol SHALL be treated exactly as a
-changed symbol is today. No consumer may subtract silently, and no consumer may treat
-`not-proven-neutral` as evidence of behavioral change beyond what the underlying diff already
-establishes.
+`blast_radius` and `verify_change` SHALL report how many touched symbols are proven
+behavior-neutral: symbols whose text differs from the base while their normalized content hash is
+equal. The count SHALL appear in `changeGranularity.provenNeutral` with a bounded sample, and
+`verify_change` SHALL carry one `info` item when the count is above zero. A symbol in a file kept
+whole SHALL NOT be counted, and SHALL remain reported as not assessed. The count SHALL NOT change
+which symbols are seeded or which tests are selected.
 
-#### Scenario: Blast radius de-noises a reformat commit
+#### Scenario: A mixed diff states the neutral part
 
-- **GIVEN** a diff of 30 changed symbols of which 14 are proven neutral
-- **WHEN** blast radius is computed for the diff
-- **THEN** the radius is seeded by the 16 remaining symbols and the response states that 14
-  proven-neutral symbols were excluded
+- **WHEN** a diff re-indents 30 functions and changes one operator in one of them
+- **THEN** `blast_radius` seeds that one function and reports 29 proven-neutral symbols
 
-#### Scenario: The briefing labels rather than tiers a neutral hub change
+#### Scenario: A whole diff is proven neutral
 
-- **GIVEN** a high-fan-in hub changed only by a comment sweep
-- **WHEN** the change-significance briefing is computed
-- **THEN** the hub appears labeled proven-neutral instead of occupying a change tier
+- **WHEN** `verify_change` runs on a diff of only comment and layout edits in hashed languages
+- **THEN** the receipt has one `info` item that says the diff is proven behavior-neutral, with the symbol and file counts
 
-#### Scenario: No silent subtraction
+#### Scenario: What cannot be hashed is not neutral
 
-- **GIVEN** any consumer that excluded proven-neutral symbols
-- **WHEN** its response is rendered
-- **THEN** the exclusion count and basis are present in the response
+- **WHEN** a changed file has a parse error or its language is not hashed
+- **THEN** its symbols add nothing to the count and the file is listed as not assessed
+
+#### Scenario: String contents are behavior
+
+- **WHEN** an edit changes only the inside of a string literal
+- **THEN** the symbol is reported as changed, not as proven neutral
+
+#### Scenario: The before-stop receipt says it once
+
+- **WHEN** the before-stop hook runs twice in one session with the same neutral counts
+- **THEN** the item is printed the first time only

@@ -2,54 +2,45 @@
 
 ## ADDED Requirements
 
-### Requirement: ResourceLifecycleVerdictsAreProvenLeakPathsOnly
+### Requirement: ChangedFunctionsReportProvenUnreleasedResourcePaths
 
-The system SHALL provide a resource-lifecycle conclusion that, for each resource acquisition site
-within a function, traverses the persisted control-flow graph to every function exit and reports
-per path `released-on-all-paths`, `unreleased-on-path` with the escaping path's branch or throw
-line and the exit it reaches, or `undecidable`. Acquire and release forms SHALL come from a closed
-per-language table, and scope-based automatic release forms SHALL be recognized as releasing on
-every path. A resource returned from the function or otherwise transferred out of it SHALL be
-`undecidable`, never a leak. Where a leaking path is an exception path, the conclusion SHALL name
-the escaping exception type using the existing error-propagation evaluator. The system SHALL
-report only paths it can prove lack a release: it SHALL NOT claim that a resource is correctly
-released or safe, and the absence of a leak verdict SHALL NOT be presented as a safety claim.
-Unmatched pairings, unresolvable releases, truncation, and index staleness SHALL be disclosed as
-boundaries; an unsupported language SHALL return an explicit unsupported result rather than an
-empty one. The conclusion SHALL be advisory by default, gateable only through explicit enforcement
-policy.
+For each resource acquired inside a function that the diff changed, `verify_change` and the
+`after-tools` hook moment SHALL report an advisory `resource-unreleased-on-path` finding for every
+path from the acquisition to a function exit that has no release and that the base commit did not
+have, with the file, the branch or throw line, and the exit reached. Acquire, release, and
+auto-release scope forms SHALL come from a closed per-language table.
 
-#### Scenario: An early return that skips the release is proven
+#### Scenario: An added early return that skips the release is reported
 
-- **GIVEN** a function that opens a handle, returns early on a condition, and closes the handle at
-  the end
-- **WHEN** the resource-lifecycle conclusion is requested for that function
-- **THEN** the early-return path is reported `unreleased-on-path` with the return line and the exit
-  it reaches
+- **WHEN** a change adds a conditional return between a handle's `open` and its `close`
+- **THEN** `verify_change` and the `after-tools` receipt report `resource-unreleased-on-path` with
+  the return line and the exit it reaches
 
-#### Scenario: Scope-based release is quiet
+#### Scenario: Scope-based release is silent
 
-- **GIVEN** a function acquiring a resource inside a scope form that releases automatically, with a
-  throw inside that scope
-- **WHEN** the conclusion is requested
-- **THEN** the acquisition is reported released on all paths and no leak verdict is emitted
+- **WHEN** the changed function acquires a resource inside `with`, `defer`, `using`, or
+  `try/finally`, with a throw inside that scope
+- **THEN** no finding is reported
 
-#### Scenario: A leaking exception path names its exception
+#### Scenario: An open exception path names its exception
 
-- **GIVEN** a function whose acquisition is followed by a call that can throw a typed exception
-  before the release
-- **WHEN** the conclusion is requested
-- **THEN** the reported leak path names that exception type from the error-propagation analysis
+- **WHEN** a changed function calls something that can throw a typed exception between acquire and
+  release
+- **THEN** the finding names that exception type from the error-propagation analysis
 
-#### Scenario: Ownership transfer is undecidable, not a leak
+### Requirement: ResourceFindingsNeverClaimSafety
 
-- **GIVEN** a function that acquires a resource and returns it to its caller
-- **WHEN** the conclusion is requested
-- **THEN** the site is reported `undecidable` with the transfer disclosed, and no leak is claimed
+The system SHALL report only paths it can prove lack a release. A resource that is returned,
+stored outside the function, passed to an unresolved call, or paired outside the table SHALL be
+counted as not assessed and SHALL NOT be reported as a leak. A function in an unsupported language
+SHALL be counted as not assessed. No output SHALL state that a resource is correctly released.
 
-#### Scenario: No safety claim is made
+#### Scenario: Ownership transfer is not a leak
 
-- **GIVEN** a function whose acquisition yields no leak verdict
-- **WHEN** the conclusion is returned
-- **THEN** the payload does not state or imply that the resource is correctly released or that the
-  function is safe
+- **WHEN** a changed function acquires a resource and returns it to its caller
+- **THEN** no finding is reported and the not-assessed count increases by one
+
+#### Scenario: Silence is not a safety claim
+
+- **WHEN** a changed function yields no finding
+- **THEN** the output does not say the resource is released or the function is safe

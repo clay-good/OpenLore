@@ -1,64 +1,58 @@
-# Tasks — add verification feedback loop
+# Tasks — finish the verify_change receipt
 
-> Composition note (as built): `blast_radius` already composes `select_tests` (tests to run) and
-> the spec/memory/decision drift passes, so `verify_change` reaches those transitively through one
-> `blast_radius` call, then adds `structural_diff` (removed/re-signed functions, deprecated calls).
-> `certify_public_surface` is the one named conclusion not yet folded in — a remaining task; the
-> change stays open until it lands.
+The tool, its first fold-ins (#605, #629, #632, #634, #658), and the before-stop hook (#637) are
+shipped and are not listed here.
 
-## Implementation
-- [x] Diff resolution: via `blast_radius`/`structural_diff`, base resolved through
-      `resolveBaseRefDisclosed`; an unresolvable base returns an error, never a partial pass
-- [x] Composition layer: `blast_radius` (affected callers/layers/hubs + tests to run + spec drift,
-      transitively `select_tests` + `check_spec_drift`) and `structural_diff` (removed/re-signed
-      functions, `deprecatedCalls`) → common receipt item `{ subject, check, severity, nextAction }`
-      (`verify-change.ts`, pure `projectVerifyReceipt`)
-- [x] Ordering + budget: severity-rank items, cap with a disclosed `truncated` count; never drop a
-      higher severity for a lower one
-- [x] Documented receipt shape so a hook/CI/agent can consume it mechanically
-- [x] Reuses the component checks' signals; invents no finding code; advisory (grader-not-author:
-      runs no tests, edits no files)
-- [x] `verify_change` MCP tool + dispatch wiring; `verify` preset membership + token budget
-      re-baselined; `change` family + `conclusion` class + epistemic-lease weight; full-surface
-      tool-count docs updated
-- [ ] Fold in `certify_public_surface` (explicit breaking-export verdicts with affected consumers)
-- [ ] `openlore verify-change [--base <ref>] [--staged] [--json]` CLI + opt-in pre-landing gate hook
-      (today the capability ships as the MCP tool; the CLI + `--staged` are the remaining surface)
+## 1. Fold in facts OpenLore already computes
 
-- [ ] Speculative `patch` input (addendum 2026-10-31): parse a unified diff, apply in memory to the
-      current file contents (new files allowed within include patterns), build from the patched
-      in-memory file list through the on-disk Pass-1 cache, compose every check over it; `speculative: true` + patched-file list in the
-      receipt; non-applying hunk / out-of-corpus file / over-cap patch → fatal with reason; never
-      writes to disk
+- [ ] 1.1 Compose `handleCertifyPublicSurface` against the receipt's resolved base in
+      `src/core/services/mcp-handlers/verify-change.ts`; each breaking or potentially-breaking export
+      is an item with its rule code and consumers. Test: `verify-change.test.ts`. Done when a
+      narrowed export appears above spec drift, with its consumers named.
+- [ ] 1.2 Compose the `handleCertifyServiceContract` verdicts (`contract-breaking`,
+      `contract-declared-unimplemented`, `contract-implemented-undeclared`) in `verify-change.ts`.
+      Test: `verify-change.test.ts`. Done when a removed declared operation with an in-repo caller
+      is an item, and an unreadable spec is a boundary, not "no findings".
+- [ ] 1.3 Project `envDeclarations.stillSet` from `blast-radius.ts` as items naming file and line.
+      Test: `verify-change.test.ts`. Done when a removed env read still set in a Dockerfile yields
+      one item with the Dockerfile line.
 
-- [ ] Addendum 2026-10-31: compose `check_architecture` violations whose edges the diff adds (not
-      pre-existing ones); `secret-added` finding over added lines via `secret-redaction.ts` patterns
-      (registered, advisory, value never echoed); `cycle-introduced` from
-      `detectDependencyCycles` at base vs after (new cycles only, files named in order); receipt sections for the contract / weakening /
-      phantom / generated families as each ships
+## 2. New diff-scoped findings
 
-- [ ] Reword `nextAction` strings (`verify-change.ts`) as facts naming the check or file ("tests to
-      re-run: …", "consumers of the narrowed export: …"), not orders, so hooks can push them under
-      the neutral-wording rule (decision 8e95746d)
+- [ ] 2.1 Add only the `check_architecture` violations whose edge the diff adds
+      (`architecture.ts` → `verify-change.ts`). Test: `verify-change.test.ts`. Done when a base
+      violation is not reported and a new one is.
+- [ ] 2.2 Register `secret-added` and `cycle-introduced` in `FINDING_CODE_REGISTRY`
+      (`enforcement-policy.ts`); compute them from `secret-redaction.ts` on added lines and from
+      `detectDependencyCycles` (`dependency-graph.ts`) at base and after. Tests:
+      `verify-change.test.ts`, `enforcement-policy.test.ts`. Done when a pasted key yields a finding
+      with file and line but the key text appears in no output, and only a new cycle is reported.
 
-## Verification
-- [x] Projection test: risk + removed fn + spec drift + deprecated call → one severity-ranked
-      receipt, each item carries subject/check/severity/next-action, tests-to-run named
-      (`verify-change.test.ts`)
-- [x] structural_diff failure → disclosed boundary, no crash
-- [x] tests-unavailable surfaced honestly (not conflated with "no tests")
-- [x] base-ref fallback + index staleness disclosed as boundaries
-- [x] item cap holds
-- [x] tool-registration guards green (tool-contract, honesty-contract budget, doc-claim-sync,
-      mcp-tool-count-doc, epistemic-lease)
-- [ ] CLI + gate-hook tests (with the remaining CLI surface)
-- [ ] Speculative patch: a patch that removes a called function yields the same receipt items as the
-      same edit written to disk; the working tree is byte-identical before and after; a hunk that
-      does not apply fails the verification with the hunk named
+## 3. Receipt shape and inputs
 
-## Spec
-- [ ] `mcp-handlers` delta: ADD SpeculativePatchIsGradedInMemory
-- [ ] `mcp-handlers` delta: ADD DiffScopedRuleAndSecretFindings
-- [x] `mcp-handlers` delta: ADD ChangeVerificationReceiptIsComposedAndActionable (MCP tool;
-      `certify_public_surface` fold-in and the CLI/`--staged` surface remain, so the change stays
-      open until they land)
+- [ ] 3.1 Reword the imperative `nextAction` strings in `verify-change.ts` as facts, and add a
+      `schemaVersion` field to the receipt. Test: `verify-change.test.ts`. Done when no
+      `nextAction` starts with an imperative verb and existing field names are unchanged.
+- [ ] 3.2 Add an optional `staged` input (schema in `src/cli/commands/mcp.ts`, handler in
+      `verify-change.ts`). Decide whether an explicit base that does not resolve is fatal or a
+      disclosed fallback, and record it with `openlore decisions record`. Test:
+      `verify-change.test.ts`. Done when a staged-only change is graded and the decision is recorded.
+- [ ] 3.3 Add the optional `patch` input: apply a unified diff in memory, build through the Pass-1
+      cache, mark the receipt `speculative: true` with the patched files; a non-applying hunk, an
+      out-of-corpus path, or an over-cap patch fails with the reason. Test:
+      `verify-change.test.ts`. Done when a patch that removes a called function gives the same items
+      as the same edit on disk, and the working tree is byte-identical before and after.
+
+## 4. Before-stop receipt speaks to the agent (`stop-hook-speaks-to-agent`)
+
+- [ ] 4.1 Design and build delivery of the before-stop receipt to the agent as context, quiet when
+      no item is new since the last stop (`src/cli/commands/hook.ts`). Test: `hook.test.ts`. Done
+      when the design is written here and a repeat stop with no new item prints nothing.
+
+## 5. Docs and parity
+
+- [ ] 5.1 Update the `verify_change` row in `docs/mcp-tools.md` and the tool description in
+      `src/cli/commands/mcp.ts` for the new item families and inputs. Done when
+      `doc-claim-sync.test.ts` and `tool-contract.test.ts` pass.
+- [ ] 5.2 Mirror the new inputs in `src/pi/extension.ts`. Test: `src/pi/extension.test.ts`. Done
+      when the MCP↔Pi parity guard passes.

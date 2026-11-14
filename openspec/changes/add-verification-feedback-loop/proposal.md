@@ -1,132 +1,84 @@
-# Verification feedback loop: one actionable receipt from the checks we already have
+# Finish the verify_change receipt: every diff check in one place, before and after the edit
 
-> Status: PROPOSED (2026-10-24, roadmap direction ADR-0035). A new `verify_change` conclusion +
-> `openlore verify-change` CLI that runs OpenLore's existing deterministic checks over a diff and
-> returns ONE ordered, actionable receipt — what broke, who's affected, which tests to run — so an
-> agent (or a human) gets external feedback at the moment it can still act on it. Trend evidence:
-> verification, not generation, is the 2026 bottleneck, and the recurring finding is that agents
-> cannot self-correct without external feedback — "an agent can only achieve what it receives
-> feedback on"
-> (https://futurumgroup.com/insights/why-ai-coding-agents-need-an-independent-review-layer-trust-not-output-is-the-bottleneck/,
-> https://arxiv.org/pdf/2608.13867).
+> Priority: P2 · Partly built (the `verify_change` tool and its before-stop hook shipped)
+> Reaches the agent through: `verify_change`; the before-stop hook moment
+> Why it helps the agent: one receipt names every break the diff causes, with proof, at the moment the agent can still fix it.
 
-## The gap
+## Problem
 
-OpenLore already computes every piece of deterministic feedback a change needs — `blast_radius`
-(who's affected), `select_tests` (what to re-run), `check_spec_drift` (what diverged from spec),
-`certify_public_surface` (what breaks consumers), `structural_diff` (`deprecatedCalls`,
-footprint escapes). But they are **pull tools**: an agent benefits only if it thinks to call each
-one, in the right order, and then assemble the answer itself. `openlore enforce` gates a commit on
-registered findings, but it is a pass/fail wall, not a single *actionable* "here is what to fix and
-what to re-run next" receipt an agent can consume and correct against. The research is consistent
-that this missing external-feedback step is exactly why agents fail to self-correct: belief
-strengthens while the artifact gets less safe, and the agent's own confidence is not a signal. The
-substrate has the signal; it just never hands it back in one actionable shape.
+`verify_change` shipped in #605 and the before-stop hook calls it (#637). It folds in `blast_radius`
+(which carries `select_tests` and spec drift), `structural_diff` (removed and re-signed functions,
+deprecated calls, check weakening #634), the generated-file guard (#629), phantom references (#632),
+and request-body checks (#658). Some diff facts OpenLore already computes still do not reach the
+receipt: breaking exports, contract breaks, IaC sites that still set a renamed env key. Some diff
+facts are not computed at all: new architecture violations, pasted secrets, new import cycles. The
+agent cannot grade an edit before it writes it. Many `nextAction` strings are orders, not facts.
 
 ## What changes
 
-A new `verify_change` conclusion tool (opt-in `verify` preset) + `openlore verify-change [--base
-<ref>] [--staged] [--json]` CLI and a pre-landing gate hook:
+Fold-ins first (facts that already exist):
 
-- **Input**: the working-tree or `--staged` diff against a base resolved through the shared
-  `resolveBaseRefDisclosed` discipline (a bad base is fatal for a verification, per the CLI
-  conclusion-honesty rule).
-- **Composition, not new analysis**: run the existing conclusions over the diff's changed and
-  reachable symbols and fold them into ONE receipt — per item: the symbol/file, the check that
-  produced it, a severity, and the single next action ("re-run `select_tests` set X", "a public
-  export narrowed — consumers A, B", "requirement R drifted", "new call into deprecated `foo`").
-- **Ordered and budgeted**: items are severity-ranked (breaking surface change and spec drift
-  above advisory deprecations), truncated with a disclosed count, never a raw dump — the same
-  whole-response budgeting discipline `orient` uses.
-- **Stable schema**: the receipt is a documented, versioned shape so a harness or hook can consume
-  it mechanically (the Claude Code / Pi gate, a CI step, an agent's own correction turn).
-- **Advisory by default**; a consumer gates on it through `enforcement.policy` on the finding
-  codes the composed checks already register. No new finding codes are invented.
+- **Breaking exports.** Compose `handleCertifyPublicSurface` (`public-surface.ts`) against the
+  receipt's base. Each breaking or potentially-breaking export becomes an item with its rule code and
+  the consumers it breaks.
+- **Contract breaks and parity.** Compose the verdicts of `handleCertifyServiceContract`
+  (`service-contract.ts`): `contract-breaking`, `contract-declared-unimplemented`,
+  `contract-implemented-undeclared`. Today only `contract-payload-missing-required` is folded in.
+- **Env keys still set.** Project `blast_radius`'s `envDeclarations.stillSet` (an env read the diff
+  removed that a Dockerfile, Kubernetes, or Terraform site still sets) as items naming file and line.
 
-Deliberately NOT borrowed: no LLM judgment of the diff, no auto-fix, and no running of the tests —
-`verify_change` *names* the tests to run and the breaks to fix; the harness runs and fixes. It is
-the grader, not the author.
+New diff-scoped findings (registered, advisory):
 
-## Addendum (2026-10-31): check a proposed patch before it is written
+- **Architecture rules, new violations only.** From `handleCheckArchitecture` (`architecture.ts`),
+  only violations whose edge the diff adds.
+- **`secret-added`.** The patterns in `secret-redaction.ts` run over added lines only. The item names
+  file, line, and pattern class, never the value. A safety net, not a scanner.
+- **`cycle-introduced`.** `detectDependencyCycles` (`dependency-graph.ts`) at base and after; only a
+  new cycle is reported, with its files in order.
 
-Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. Today `verify_change` grades only a diff that is
-already on disk. An agent that wants to know "what does this edit break?" must write the file first,
-then call the tool, then undo the edit if it was wrong — a broken intermediate state that a parallel
-agent, a watcher, or a hook can observe. The research notes call this a speculative "simulate the
-impact" step; we fold it into `verify_change` instead of adding a sibling tool, because the receipt
-it returns is the same conclusion (`NoRedundantConclusions`).
+Receipt shape and inputs:
 
-- **New optional input `patch`**: a unified diff (text) over files in the working tree. The tool
-  applies it **in memory** to the current file contents, never to disk, and grades the result as if
-  it were the working-tree diff.
-- **Mechanism**: `CallGraphBuilder` already builds from an in-memory file list (`certify_merge`
-  does this for each git ref). Here the list is the working tree with the patched files replaced,
-  and the build goes through the on-disk hash-keyed Pass-1 fact cache, so unchanged files are cache
-  hits and only patched files are re-parsed. (`graphAtRef` itself reads every file at a git ref with a
-  fresh cache, so it is the pattern, not the function, that is reused.) Nothing is persisted.
-- **Same receipt, plus a `speculative: true` marker** and the list of patched files. Every composed
-  check runs over the overlay, so the contract verdicts and parity from
-  `add-service-contract-certification` are included once that change ships.
-- **Honesty**: a hunk that does not apply cleanly is fatal to the verification (the reason names the
-  file and hunk) — never a partial grade. A patch may create new files inside the analyzed
-  corpus's include patterns. A patch touching paths outside them, or exceeding the patched-file cap,
-  is refused with the reason. Index staleness relative to
-  the working tree is disclosed as today.
-- **Not built**: applying the patch, a persistent "branch" of the index, multi-step speculative
-  sessions. The agent writes the file itself when it is satisfied.
+- **`nextAction` as facts.** Reword the imperative strings in `verify-change.ts` as facts that name
+  the check, file, or consumers (decision 8e95746d, neutral wording for pushed text).
+- **Versioned receipt.** Add a `schemaVersion` field. Existing fields keep their names.
+- **`staged` input.** An optional boolean on the existing tool: grade the staged diff instead of the
+  working tree.
+- **Bad base.** Decide and record whether an explicitly requested base that does not resolve is
+  fatal or stays a disclosed fallback (today: disclosed fallback through `baseRefFallback`).
+- **Speculative `patch` input.** An optional unified diff applied in memory to the working-tree
+  files. The tool builds the graph through the hash-keyed Pass-1 cache and returns the same receipt,
+  marked `speculative: true` with the patched files. It never writes to disk. A hunk that does not
+  apply, a path outside the include patterns, or a patch over the file cap fails with the reason.
 
-## Addendum (2026-10-31): the receipt is the one place every diff check lands
+**The before-stop receipt speaks to the agent** (roadmap item `stop-hook-speaks-to-agent`). Today
+the before-stop hook prints the receipt as a `systemMessage` (`hook.ts`), so the user sees it, and
+the model sees it only when `enforcement.policy` blocks. This change also makes the receipt reach the
+agent as context, and keeps it quiet when no item is new since the last stop. The design is a later
+task.
 
-Source: `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`. Several new changes add finding families
-that are facts about a diff. Rather than one tool each, they all land in this receipt (and so in the
-before-stop and after-tools hook receipts of `add-agent-loop-hook-surfaces`):
+## What does not change
 
-| Family | Change |
-|---|---|
-| contract breaks and parity | `add-service-contract-certification` |
-| check weakening | `add-check-weakening-findings` |
-| phantom references | `add-phantom-reference-findings` |
-| generated-file edits | `add-generated-file-guard` |
-| IaC sites still setting a renamed env key | `add-iac-code-binding` (via `blast_radius`) |
+- No new MCP tool, preset, or CLI command. `verify_change` and its fields keep their names.
+- Advisory by default. Blocking stays opt-in through `enforcement.policy`.
+- Local only. No network calls, no LLM. The tool runs no tests and edits no files.
+- Works without OpenSpec: spec drift is one item family among many; every other family needs only
+  code, tests, and git.
 
-Two more come from code that already exists and need no new change:
+## Limits we disclose
 
-- **Architecture rules, new violations only.** `check_architecture` (`architecture.ts`) already
-  evaluates author-declared rules over the dependency graph. The receipt includes only violations
-  whose import or call edge the diff adds, so a repo with existing violations is not flooded and the
-  rules can be tightened over time.
-- **Secrets on added lines.** The existing credential patterns (`secret-redaction.ts`) run over the
-  diff's added lines only; a match is a `secret-added` finding (registered, advisory) naming the file,
-  line, and pattern class, never the value. This is a safety net, not a scanner: gitleaks and
-  trufflehog stay the real tools.
+- Each composed check keeps its own limits (for example, public-surface signatures cover
+  TypeScript, JavaScript, and Python only). A check that fails is a boundary, never "no findings".
+- The receipt is capped at 25 items; the omitted count is disclosed.
+- `secret-added` uses OpenLore's own patterns; it misses what they miss.
+- A speculative patch is graded against the current index; index staleness is disclosed as today.
 
-- **New import cycles.** The file-level dependency cycles that `detectDependencyCycles`
-  (`dependency-graph.ts`) already finds are computed for the base and for the patched or written
-  tree; a cycle present only after the change is a `cycle-introduced` finding (registered, advisory)
-  that names the files in the cycle in order. Cycles that already existed are not reported.
+## Depends on
 
-Each family ships with its own change; this addendum only fixes where they appear.
+Shipped code only: `verify-change.ts`, `public-surface.ts`, `service-contract.ts`, `blast-radius.ts`,
+`architecture.ts`, `secret-redaction.ts`, `dependency-graph.ts`, `hook.ts`.
 
-## Why this is in scope
+## Cut (not doing)
 
-Pure composition of shipped, deterministic conclusions into one conclusion-shaped receipt — no new
-graph analysis, no LLM, local. It closes the "pull-only feedback" gap the trust research names as
-the missing self-correction ingredient, and it is the loop every other verification conclusion
-plugs into. It cross-references its siblings rather than replacing them (`NoRedundantConclusions`):
-each component tool still answers its own question; `verify_change` only assembles their answers
-for one diff into one next-action list.
-
-## Impact
-
-- New: `verify_change` handler composing `blast_radius` / `select_tests` / `check_spec_drift` /
-  `certify_public_surface` / `structural_diff`; a versioned receipt schema; `openlore verify-change`
-  CLI + an opt-in gate hook. Registered in `TOOL_CAPABILITY_FAMILY` (`change` — it reasons about a
-  diff, like its sibling `blast_radius`; the `verify` label is the opt-in preset it ships in, not
-  its capability family), classified
-  `conclusion` in `tool-contract.ts`, cross-referencing each composed sibling; tools/list payload
-  budget re-asserted or consciously bumped.
-- Specs: `mcp-handlers` — 3 ADDED requirements (receipt; speculative patch input; diff-scoped architecture + secret findings).
-- Risk: cost of running several conclusions at once (mitigated: scope is the diff's reachable set,
-  not the repo; hash-keyed Pass-1 memo means re-parse touches only changed files). Receipt bloat
-  (mitigated: severity-ranked, budgeted, truncation disclosed). No new behavior in the composed
-  tools — a regression there surfaces in their own suites.
+- `openlore verify-change [--base] [--staged] [--json]` CLI command: a new surface; the MCP tool and the before-stop hook already deliver the receipt.
+- Opt-in pre-landing (pre-commit) gate hook, and `openlore enforce` running `verify_change`: a new surface; the before-stop hook already blocks under `enforcement.policy`.
+- CLI and gate-hook tests: they follow the two cut surfaces.

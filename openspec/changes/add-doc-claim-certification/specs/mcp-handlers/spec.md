@@ -2,48 +2,49 @@
 
 ## ADDED Requirements
 
-### Requirement: DocumentationClaimsAreCertifiedAgainstTheSubstrate
+### Requirement: ChangeVerificationReportsDocClaimsTheDiffMadeFalse
 
-The system SHALL certify machine-checkable documentation claims against the indexed substrate.
-Claims SHALL be extracted only from a closed, syntactic vocabulary — symbol references, path
-references, `path:line` citations, invocations of the repository's own command surface, and
-registered tool names — and each SHALL resolve to `holds`, `refuted` with counter-evidence, or
-`uncheckable`. An extraction whose subject is ambiguous or external SHALL resolve to `uncheckable`,
-which SHALL be counted and reported rather than silently skipped; it SHALL NOT be reported as
-refuted. A documented symbol that was renamed or moved SHALL be reported as renamed with its
-current name rather than as missing. Certification SHALL be deterministic, with no LLM and no
-judgment of prose meaning, style, or completeness, and SHALL be advisory by default: its finding
-code is gateable only through explicit enforcement policy.
+`verify_change` SHALL check local Markdown claims the diff can break, from a closed, syntactic set:
+a backticked name of exactly one indexed symbol, a local path or relative link target, and a
+`path:line` citation. A claim that held at the merge-base and is false in the working tree SHALL be
+reported as the advisory finding `doc-claim-refuted`, with the doc file and line and the evidence.
+A symbol that was renamed or moved SHALL be reported as renamed with its current name. An ambiguous
+or external subject SHALL be counted as unverifiable and SHALL NOT be reported as refuted. The check
+SHALL use no model, SHALL read local files only, and SHALL NOT add a tool.
 
-#### Scenario: A stale documented symbol is refuted with evidence
+#### Scenario: A deleted function leaves a false doc line
 
-- **GIVEN** documentation referencing a function that no longer exists in the index
-- **WHEN** documentation claims are certified
-- **THEN** that claim is `refuted` with the non-resolution as counter-evidence
+- **GIVEN** a README line that names a function in backticks, and a diff that deletes the function
+- **WHEN** `verify_change` runs
+- **THEN** a `doc-claim-refuted` finding names the README line and states that the symbol is gone
 
-#### Scenario: A drifted line citation is caught
+#### Scenario: A rename is reported as a rename
 
-- **GIVEN** documentation citing `path:line` for a symbol whose span no longer covers that line
-- **WHEN** documentation claims are certified
-- **THEN** the claim is `refuted` and names the symbol's current span
+- **GIVEN** a doc that names a symbol the diff renamed
+- **WHEN** `verify_change` runs
+- **THEN** the finding gives the current name, not "missing"
 
-#### Scenario: A renamed symbol is reported as renamed
+#### Scenario: An old error the diff did not cause is not reported
 
-- **GIVEN** documentation referencing a symbol that was renamed and carried forward by identity
-  continuity
-- **WHEN** documentation claims are certified
-- **THEN** the claim reports the rename with the current name, not a missing symbol
+- **GIVEN** a doc claim that was already false at the merge-base
+- **WHEN** `verify_change` runs on a diff that does not touch its subject
+- **THEN** no finding is emitted for that claim
 
-#### Scenario: An external or ambiguous subject is uncheckable, never refuted
+### Requirement: DocCurrentClaimKind
 
-- **GIVEN** documentation describing another project's command-line flag
-- **WHEN** documentation claims are certified
-- **THEN** the claim is `uncheckable`, is counted in the report, and is not refuted
+`verify_claim` SHALL accept the kind `doc-current`, whose subject is a local Markdown path with an
+optional line. It SHALL return `holds` when every checkable claim there resolves, `refuted` with
+each false claim and its evidence, and `unverifiable` when there is no checkable claim or the file
+cannot be read.
 
-#### Scenario: Certification is advisory unless policy says otherwise
+#### Scenario: A stale line citation is refuted
 
-- **GIVEN** a repository with refuted documentation claims and no enforcement policy naming the
-  documentation finding code
-- **WHEN** certification runs
-- **THEN** the findings are reported without blocking
-- **AND** the same run blocks when the policy names that code as blocking
+- **GIVEN** a doc that cites `src/a.ts:400` when the file now has 120 lines
+- **WHEN** `verify_claim` runs with kind `doc-current` on that doc
+- **THEN** the verdict is `refuted` and names the citation and the current file length
+
+#### Scenario: Another project's path is not refuted
+
+- **GIVEN** a doc line that names only a path in another project
+- **WHEN** `verify_claim` runs with kind `doc-current` on that line
+- **THEN** the verdict is `unverifiable`

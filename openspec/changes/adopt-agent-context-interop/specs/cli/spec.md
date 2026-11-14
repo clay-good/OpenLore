@@ -2,18 +2,46 @@
 
 ## ADDED Requirements
 
-### Requirement: SkillEmissionFollowsTheOpenStandard
+### Requirement: SlimDigestIsPrintedOncePerSession
 
-Skill installation SHALL deliver the orient skill through the Agent Skills open
-standard's discovery paths for supported non-Claude harnesses, installing the same
-SKILL.md content (frontmatter conformant to the standard) that the Claude Code
-destination receives. A harness without a standard discovery path is out of scope and
-not guessed at.
+`openlore analyze` SHALL write a slim digest of at most 12 lines beside the full `CODEBASE.md`.
+At the prompt-submitted moment, `orient --inject` SHALL print the slim digest before the task block
+on the first prompt of a harness session, and SHALL NOT print it again in that session unless its
+content changed. The full `CODEBASE.md` SHALL keep its name and content.
 
-#### Scenario: A non-Claude harness discovers the orient skill
+#### Scenario: The first prompt carries the digest
 
-- **GIVEN** a repo where setup targets a harness that reads the Agent Skills standard
-- **WHEN** skill installation runs
-- **THEN** the harness's standard discovery path receives a frontmatter-valid SKILL.md
-  identical in content to the Claude Code skill, and re-running installation is
-  idempotent
+- **WHEN** the first prompt of a session is submitted in an indexed repository
+- **THEN** the hook output contains the slim digest followed by the task orientation
+
+#### Scenario: Later prompts stay quiet
+
+- **WHEN** a second prompt is submitted in the same session and the index has not changed
+- **THEN** the hook output contains no digest
+
+#### Scenario: No session identity
+
+- **WHEN** the hook payload has no `session_id`, or `contextInjection.mode` is `off`
+- **THEN** no digest is printed
+
+#### Scenario: A repository with no spec framework
+
+- **WHEN** the slim digest is written for a repository with no specs and no decisions
+- **THEN** it has no spec or decision line and names no spec framework
+
+### Requirement: PluginSkillsAreFewShortAndCallable
+
+The Claude Code plugin SHALL ship exactly five skills: `openlore-orient`, `openlore-debug`,
+`openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`. Each `SKILL.md`
+SHALL be 80 lines or fewer, SHALL name only OpenLore tools that the `plugin` preset exposes, and
+SHALL be byte-identical to the canonical file under `skills/`.
+
+#### Scenario: A skill names a tool the plugin does not expose
+
+- **WHEN** a plugin skill names a tool outside the `plugin` preset
+- **THEN** the skill guard test fails
+
+#### Scenario: The plugin copy drifts from the canonical skill
+
+- **WHEN** `plugin/skills/openlore-debug/SKILL.md` differs from `skills/openlore-debug/SKILL.md`
+- **THEN** the skill guard test fails

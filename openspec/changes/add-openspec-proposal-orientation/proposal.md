@@ -1,67 +1,67 @@
-# Orient OpenSpec proposals from conversation intent and repository structure
+# Orient any plan or spec the agent is about to write
 
-## Why
+> Priority: P2 · Not built (the OpenSpec-only version is built; see "Already built")
+> Reaches the agent through: the prompt-submitted moment, then `orient`
+> Why it helps the agent: a plan, spec, or proposal starts from what the user asked for and from the real code, in any spec workflow.
 
-An OpenSpec `propose` workflow can start after a long discussion in which the actual request is
-implicit in earlier turns. The latest prompt may be only “propose it,” and may follow an `explore`
-that discussed options without settling on any action. Treating that last prompt as a complete
-request can produce a proposal that invents intent, turns an unaccepted suggestion into a decision,
-or misses the repository architecture that should shape the change.
+## Problem
 
-OpenLore already provides structural orientation and has agent-specific integration points. It can
-prepare the proposal workflow with both a careful summary of the conversation and relevant
-repository evidence, before OpenSpec writes change artifacts.
+The agent often writes a plan from a short prompt such as "propose it" or "write the spec." The
+real request is in earlier turns. The agent can invent intent, turn an option nobody chose into a
+decision, or miss the code the plan must fit.
 
-## What Changes
+OpenLore already corrects this, but only for OpenSpec. `isOpenSpecProposalInvocation` in
+`src/cli/commands/proposal-context.ts` recognizes only `/opsx:propose`, `/openspec-propose`,
+`/propose`, and prose that contains the word "openspec." A Spec Kit, Kiro, ADR, or plain-markdown
+plan gets no preparation. The printed text also says "proposal files," which is OpenSpec wording.
 
-- When an OpenSpec `propose` workflow is invoked, OpenLore instructs the agent to derive a concise
-  change brief from the conversation: the user's requested outcome, explicitly accepted decisions,
-  constraints, and unresolved questions.
-- The agent distinguishes a concrete request from exploration. Questions, options, and assistant
-  suggestions do not become user requirements unless the user accepted them. If no actionable
-  request can be recovered, the agent asks one focused clarification and does not create proposal
-  files yet.
-- For a clear request, the agent calls OpenLore `orient()` with the brief before authoring the
-  proposal. The resulting structural evidence informs the proposal and its spec delta; it does not
-  decide product questions or replace user intent.
-- **Claude Code:** extend OpenLore's existing managed `UserPromptSubmit` hook and
-  `openlore orient --inject` path so a `propose` invocation receives the conversation-brief
-  instruction and task-scoped structural orientation.
-- **Pi:** default to on-demand context instead of reinjecting the repository-wide architecture
-  digest and spec-domain index on every turn. Keep a concise proposal instruction for recognized
-  `propose` invocations and use `openlore_orient` with the conversation brief for task-specific
-  evidence. Preserve the current full digest injection as an opt-in through
-  `.openlore/config.json` (`pi.contextMode: "full"`).
-- **Codex:** add an OpenLore-managed prompt-submission hook adapter and register the OpenLore MCP
-  server so the agent can call `openlore_orient`; installation and trust follow Codex's own rules.
-- OpenSpec core and its command implementation remain unchanged.
+## Already built (PR #623, not part of this change)
 
-## Capabilities
+- The `[OpenLore proposal preparation]` block and its instruction: recover the requested outcome,
+  accepted decisions, constraints, and open questions; ask one question if there is no actionable
+  request; call `orient` with the brief; disclose when orientation is unavailable.
+- Delivery in three harnesses: Claude Code (`orient --inject`, `buildInjection` in
+  `src/cli/commands/orient-inject.ts`), Pi (`before_agent_start` in `src/pi/extension.ts`), and
+  Codex (`orient --proposal-only`, wired by `src/cli/install/adapters/codex.ts`).
+- Pi's on-demand default with `pi.contextMode: "full"` as the opt-in.
 
-### New Capabilities
+## What changes
 
-(none)
+- **Recognize plan authoring in any workflow.** A new `isPlanAuthoringInvocation` in
+  `proposal-context.ts` accepts a closed list: the OpenSpec forms above (unchanged), the Spec Kit
+  commands (`/speckit.specify`, `/speckit.plan`, `/speckit.tasks`), and a narrow phrase rule: a
+  verb (create, draft, write) close to a plan noun (spec, requirements, design doc, ADR, RFC,
+  proposal, implementation plan). `proposalContextForPrompt` calls it. No spec framework has to be
+  installed.
+- **Neutral instruction text.** The block says "plan or spec files," not "proposal files." The
+  header `[OpenLore proposal preparation]` stays, so current hooks and tests keep matching.
+- **Name where the plan belongs, when known.** When the detector from the change
+  `spec-framework-neutrality` reports the repository's spec layout (for example `openspec/`,
+  `.specify/`, `.kiro/specs/`, `docs/adr/`), the block adds one line with that path and format.
+  Without that change, or when nothing is detected, the line is absent.
+- The block still joins the normal task orientation that `orient --inject` prints. Pi and Codex get
+  the same text from the same function.
 
-### Modified Capabilities
+## What does not change
 
-- `openspec`: prepare proposal workflows from explicit conversation intent and OpenLore structural
-  orientation, while stopping for clarification when no concrete request is present.
-- `cli`: make Pi's standing repository context on-demand by default, while retaining full digest
-  injection as an opt-in.
+- No new tool, command, flag, or config key. `isOpenSpecProposalInvocation`, `--proposal-only`, and
+  the block header keep their names.
+- Advisory only: the block is an instruction to the agent. It blocks nothing and writes no files.
+- Local only. No LLM: detection is a fixed pattern list.
+- `contextInjection.mode: "off"` still turns the block off.
 
-## Impact
+## Limits we disclose
 
-- **Claude Code:** extend the existing `UserPromptSubmit` / `openlore orient --inject` integration
-  with proposal-specific intent synthesis and orientation.
-- **Pi:** make `before_agent_start` omit the repeated architecture digest and spec-domain index by
-  default, retain them under an explicit full-context setting, and inject only the concise
-  proposal-preparation instruction for recognized proposal invocations. The OpenLore tool surface
-  itself is unchanged by this change.
-- **Codex:** add a supported hook and MCP-server adapter to OpenLore's installer/detection surfaces;
-  users must trust or approve the configured hook as Codex requires.
-- `openspec` spec delta defines when to orient, when to ask for clarification, and how to preserve
-  unresolved decisions.
-- No OpenSpec upstream change, no autonomous choice among alternatives, and no proposal files
-  written when the conversation contains only exploration.
-- If the repository has no usable OpenLore analysis index, the workflow remains available and
-  proceeds without structural evidence, explicitly disclosing that orientation was unavailable.
+- Detection is a closed list of commands and phrases. A plan started with other wording gets normal
+  task orientation and no preparation block.
+- The hook sees only the submitted prompt. The agent, not OpenLore, recovers intent from the
+  conversation.
+- Reading Spec Kit, Kiro, ADR, or plain-markdown content is not in this change. It comes from
+  `spec-framework-neutrality`.
+- A harness whose prompt hook passes an expanded skill prompt can hide a slash command. Then only
+  the phrase rule can match.
+
+## Depends on
+
+- Shipped: `proposal-context.ts`, `orient --inject`, the Pi and Codex prompt hooks.
+- `spec-framework-neutrality` (separate change) for the "where the plan belongs" line only.

@@ -1,42 +1,52 @@
-# Tasks — adopt-mcp-tasks-and-cache-hints
+# Tasks: adopt-mcp-tasks-and-cache-hints
 
-## Implementation
-- [ ] Stage 0 gate: track the 2026-07-28 RC → final transition (spec revision + SDK release);
-      record the go/no-go in this change before any code lands — nothing ships against the
-      moving spec
-- [ ] Stage 1: derive `ttlMs`/`cacheScope` from the lease's existing thresholds
-      (`epistemic-lease.ts:10`) beside the prose note (`:777-807`) — hint only ever more
-      conservative than the lease; watcher-event-bound results (recall, certificates) declare the
-      no-store-equivalent scope; no new tuning constant
-- [ ] Stage 2: task handles for `analyze_codebase` and the cold-start bootstrap
-      (`mcp.ts:2441-2452`) when the client negotiates the tasks capability — progress via
-      `tasks/get`, cancel via `tasks/cancel`; capability absent → byte-identical behavior
-- [ ] Stage 3: `find_clones` `symbol` XOR `snippet` as 2020-12 `oneOf` (`mcp.ts:1763-1773`,
-      prose XOR at `:1767-1768`); sweep all prose-only exclusivity constraints; keep
-      `validateToolArgs` (`mcp.ts:2476-2481`) as defense in depth
-- [ ] Stage 4: retire the custom initialize handler (`mcp.ts:2402-2423`); re-home the breadth
-      pointer, version report, and client-identity capture on the final spec's carriers, keeping
-      the old path for pre-RC protocol versions the SDK still pins
-- [ ] Addendum 2026-10-31: gate on SDK support; required `ttlMs`/`cacheScope` on `tools/list`
-      (+ resources if served); guard test pinning deterministic `tools/list` order; tasks follow the
-      redesigned extension (`tasks/get`/`tasks/update`)
+## 1. Gate (the only work allowed now)
 
-## Verification
-- [ ] Conformance test: every emitted cache hint is ≤ the lease's own validity for the same
-      response state (fresh/degraded/stale table-driven), and the prose note is byte-identical to
-      today's for every state
-- [ ] Task lifecycle test: `analyze_codebase` under the tasks capability returns a handle;
-      `tasks/get` reports progress; `tasks/cancel` stops the build without corrupting the store;
-      without the capability the blocking behavior is unchanged
-- [ ] Schema test: `find_clones` with both `symbol` and `snippet` (or neither) is rejected by
-      schema validation before dispatch; each alone passes; error text remains actionable
-- [ ] Handshake matrix: a pre-RC client negotiates the legacy initialize path and still receives
-      the lean-default breadth pointer; a final-spec client gets it via the new carrier
-- [ ] tools/list payload budget re-asserted (`mcp-presets.test.ts:582-584`, full < 88k) with the
-      per-bump rationale if `oneOf` grows schemas
-- [ ] Full suite green; no conclusion output changes anywhere (snapshot pins on the substrate
-      preset's 13 tools)
+- [ ] 1.1 Record in `openspec/changes/adopt-mcp-tasks-and-cache-hints/proposal.md` the date each
+      gate is met: revision final, pinned `@modelcontextprotocol/sdk` support (`package.json`),
+      Claude Code support. Done when all three have a date and a source; until then no task below
+      starts.
 
-## Spec
-- [ ] `mcp-quality` delta: ADD RcAdoptionGatedOnFinalization, SchemasExpressParameterExclusivity
-- [ ] `mcp-handlers` delta: ADD CacheHintsNeverOutrunTheLease, LongOperationsAreTasksWhenNegotiated
+## 2. Cache hints
+
+- [ ] 2.1 Derive `ttlMs` / `cacheScope` from the lease state beside `getFreshnessSignal` in
+      `src/core/services/mcp-handlers/epistemic-lease.ts`, with no new tuning constant. Test:
+      `src/core/services/mcp-handlers/epistemic-lease.test.ts`. Done when, for fresh, degraded, and
+      stale, the hint is never longer than the lease and the prose note is byte-identical to
+      today's.
+- [ ] 2.2 Attach the hints to `tools/list` and to tool results in `src/cli/commands/mcp.ts`; give
+      `recall` verdicts and certificates the most conservative scope. Test:
+      `src/cli/commands/mcp.conformance.integration.test.ts`. Done when `tools/list` carries both
+      fields and a `recall` result carries no time-based hint.
+- [ ] 2.3 Pin the `tools/list` order with a guard in `src/cli/commands/mcp-presets.test.ts`. Done
+      when two listings of each preset are identical in order.
+
+## 3. Tasks for long builds
+
+- [ ] 3.1 Return a task handle from `analyze_codebase` and from the first-run build
+      (`src/core/services/cold-start-bootstrap.ts`, wired in `src/cli/commands/mcp.ts`) when the
+      client negotiates tasks. Test: `src/core/services/cold-start-bootstrap.test.ts` and
+      `src/cli/commands/mcp.test.ts`. Done when progress is readable, cancel stops the build
+      without a torn store, and a client without the capability sees today's behavior.
+
+## 4. Schemas
+
+- [ ] 4.1 Declare `find_clones` `symbol` XOR `snippet` with `oneOf` in `src/cli/commands/mcp.ts`,
+      and convert the other prose-only exclusivity rules; keep `validateToolArgs`
+      (`src/core/services/mcp-handlers/tool-guard.ts`). Test: `src/cli/commands/mcp.test.ts` and
+      the payload budget in `src/cli/commands/mcp-presets.test.ts`. Done when both-or-neither is
+      rejected with an actionable message, one alone passes, and the budget holds.
+
+## 5. Handshake
+
+- [ ] 5.1 Move the version, client identity, and preset pointer from the custom `initialize`
+      handler in `src/cli/commands/mcp.ts` to the final revision's carriers; keep the handler for
+      older protocol versions. Test: `src/cli/commands/mcp.conformance.integration.test.ts`. Done
+      when an old client and a new client both receive the preset pointer and the real version.
+
+## 6. Parity and docs
+
+- [ ] 6.1 Confirm no tool output shape changed with `src/pi/extension.test.ts` (MCP↔Pi parity
+      guard). Done when it passes with no edit to expected tool output.
+- [ ] 6.2 Describe the hints, the two task-capable operations, and the fallback in
+      `docs/mcp-tools.md`. Done when `src/doc-claim-sync.test.ts` passes.

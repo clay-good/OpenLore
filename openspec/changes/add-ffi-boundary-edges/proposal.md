@@ -1,69 +1,50 @@
-# Add FFI boundary edges: the graph stops lying at the language seam
+# Callers across a language boundary appear in the graph
 
-> Status: PROPOSED (2026-07-27, ecosystem research sweep). Extract cross-language binding
-> declarations (N-API/napi-rs, pyo3, cgo `//export`, JNI naming, wasm-bindgen, ctypes) into a
-> confidence-tiered `ffi::` edge lane, so dead-code and blast-radius conclusions in polyglot
-> repos stop reporting false "no callers" at the seam. This is the residue the known-limitations
-> pass named and no open change covers: "cross-language bridges … stay uncovered". Prior art on
-> the blind spot: https://www.usenix.org/system/files/sec22-li-wen.pdf,
-> https://arxiv.org/pdf/2602.00303.
+> Priority: P3 · Not built
+> Reaches the agent through: `blast_radius`, `orient`, `verify_claim` (they become correct across a language seam)
+> Why it helps the agent: it stops calling a Rust or Go function "dead" or "safe to change" when another language calls it through a binding.
 
-## The gap
+## Problem
 
-In a polyglot repo the call graph ends at the binding boundary with a silent lower bound in the
-worst direction: a Rust function exported through napi and called from every TypeScript request
-path has *zero* in-graph callers — `find_dead_code` lists it as a candidate, `blast_radius`
-scopes its change at nothing, `select_tests` selects nothing. The 2026-07-25 limitations audit
-explicitly verified this residue and left it uncovered by any proposal (the dynamic-boundary
-pair covers single-language reflection only). The substrate already has the two patterns this
-needs: synthetic provenance-labeled edges with per-rule names (`CallEdge.synthesizedBy`,
-`src/core/analyzer/call-graph-types.ts:158-160`) and the `external::` leaf convention
-(`call-graph-external.ts:74`).
+In a repository with two languages joined by a binding, the call graph ends at the binding. A Rust
+function exported with `#[napi]` and called from every TypeScript request path has zero callers in
+the graph. `blast_radius` says a change to it affects nothing, `orient` shows no callers, the
+`dead` kind of `verify_claim` can hold, and no test is selected. This is a wrong answer in the
+worst direction, and it is silent.
 
 ## What changes
 
-- **Binding-site extraction in the existing walk**: per-binding-kind extractors recognize the
-  *declared* boundary constructs — attribute/macro-declared exports (pyo3 `#[pyfunction]`,
-  napi-rs `#[napi]`, wasm-bindgen, cgo `//export`), registration calls (N-API
-  `exports.Set`-style), and convention-named symbols (JNI `Java_pkg_Cls_method`) — emitting
-  boundary facts with file/line receipts.
-- **A joined `ffi::` edge lane, confidence-tiered like everything else**: a caller-side foreign
-  call joined to a binding-side declaration by exact bound name yields an edge with confidence
-  reflecting its evidence class — attribute-declared bindings above convention-name matches,
-  both below resolved same-language edges, all labeled with the producing rule (the
-  `synthesizedBy` discipline). No joinable pair, no edge.
-- **Honesty at the undecidable rim**: string-computed foreign names (`dlsym`, `getattr`-built,
-  reflection-loaded) are *counted and disclosed* as unresolved-binding boundaries on affected
-  conclusions — the confidence-boundary contract — never guessed. Repos with fewer than two
-  bound languages skip the pass entirely (no cost, no claims).
-- **Consumers inherit the fix for free**: `find_dead_code` demotes bound-but-foreign-called
-  symbols from clean candidates (the framework-entry-point treatment), `blast_radius` and
-  `select_tests` cross the seam with the edge's confidence carried, and `get_language_support`
-  gains an honest per-language `ffiBridges` capability row derived from the live extractors.
+- The existing AST walk records **declared** binding sites, from a closed first set:
+  napi-rs `#[napi]`, pyo3 `#[pyfunction]` / `#[pymethods]`, wasm-bindgen `#[wasm_bindgen]`, and
+  cgo `//export`. Each fact has file, line, and the bound name (the explicit `js_name` / `name`
+  when given, else the kind's fixed naming rule, such as camelCase for napi-rs).
+- A join pass adds an edge when an unresolved or external call in the other language has exactly
+  that bound name, and exactly one binding declares it. The edge uses the existing `synthesized`
+  confidence with `synthesizedBy: 'ffi-<kind>'`. No joinable pair, no edge.
+- Every reader of the graph gets the fix with no change of its own: `blast_radius` and `orient`
+  show the cross-language callers, `select_tests` reaches their tests, `find_dead_code` and the
+  `dead` claim stop listing the bound function. `blast_radius` already counts synthesized edges
+  by rule (`synthesizedEdges`), so the agent sees which callers rest on a binding.
+- The language-support registry (`src/core/analyzer/language-support.ts`) gains an `ffiBridges`
+  capability, derived from the live extractors.
 
-Deliberately NOT borrowed from the polyglot-analysis literature: dynamic/hybrid analysis
-(runtime tracing is a settled won't-do), whole-program cross-language dataflow (PolyCruise's
-lane; OpenLore adds edges, not taint), and marshaling/type-compatibility checking at the
-boundary (a type-checker's job).
+## What does not change
 
-## Why this is in scope
+- No new tool, command or field name. Answers change only where they were wrong.
+- No runtime tracing, no data-flow across the boundary, no type check of the marshaled values.
+- A repository with fewer than two bound languages skips the pass: no cost, no claims.
+- Local only. Works without OpenSpec.
 
-Closes a named, verified, uncovered honesty gap in the graph itself — the substrate every
-conclusion reads — using two shipped mechanisms (synthesis provenance, external leaves) and the
-capability-registry discipline for scope truth. Deterministic extraction of declared constructs;
-the undecidable rest becomes a disclosed boundary instead of a silent absence.
+## Limits we disclose
 
-## Impact
+- A foreign name built at run time (`dlsym`, `getattr` with a computed string) gets no edge. These
+  sites are counted and disclosed through the confidence boundary of the affected answer.
+- Two bindings with the same bound name: no edge, and the ambiguity is disclosed. No first match.
+- The first set is four binding kinds. JNI names, N-API C registration, `ctypes` and others are
+  not claimed; `ffiBridges` is off for them.
+- The edges are a lower bound: a caller in a package outside the repository is not seen.
 
-- Touches: per-language extractors (binding-site recognition in the existing AST walk),
-  edge-join pass, `find_dead_code` / reachability consumers, the language-support registry
-  (`ffiBridges` column derived, never asserted), capability conformance fixtures per supported
-  binding kind.
-- No new tool; conclusions change only where they were wrong (a bound symbol stops being
-  cleanly dead).
-- Specs: `analyzer` — 1 ADDED requirement.
-- Risk: binding-kind breadth pressure (mitigated: closed initial set with fixtures — napi/pyo3/
-  cgo/JNI-name/wasm-bindgen — everything else is a disclosed non-claim via the registry);
-  false edges from name collisions in convention matching (mitigated: convention matches carry
-  the lower confidence tier and require the language pair to be present; ambiguity refuses per
-  the no-first-match rule).
+## Depends on
+
+Shipped: synthesized edges with rule names, `external::` leaves
+(`src/core/analyzer/call-graph-external.ts`), the confidence boundary, the capability registry.
