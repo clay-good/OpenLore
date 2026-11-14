@@ -2415,3 +2415,31 @@ describe('callDistance', () => {
     expect(callDistance(bad)).toBe(3);
   });
 });
+
+describe('TS `new C(...)` binds to the constructor', () => {
+  // `new` is not a call_expression, so no constructor ever had a caller: invisible to
+  // analyze_impact / blast_radius, and read as dead.
+  it('binds a same-file and an imported class constructor, and nothing else', async () => {
+    const b = await new CallGraphBuilder().build([
+      { path: 'src/ctx.ts', language: 'TypeScript', content: `
+export class Ctx {
+  constructor(private readonly limit: number) {}
+  run() { return this.limit; }
+}
+export function make(limit: number) { return new Ctx(limit); }
+` },
+      { path: 'src/use.ts', language: 'TypeScript', content: `
+import { Ctx } from './ctx';
+export function build() { return new Ctx(2); }
+export function other() { return new Map(); }
+class NoCtor { run() { return 1; } }
+export function bare() { return new NoCtor(); }
+` },
+    ]);
+    const ctor = [...b.nodes.values()].find(n => n.className === 'Ctx' && n.name === 'constructor')!;
+    const into = b.edges.filter(e => e.calleeId === ctor.id).map(e => [e.callerId, e.confidence]).sort();
+    expect(into).toEqual([['src/ctx.ts::make', 'same_file'], ['src/use.ts::build', 'import']]);
+    // No external leaf for `new Map()`, and no edge for a class without an explicit constructor.
+    expect(b.edges.some(e => e.calleeName === 'Map' || e.calleeName === 'NoCtor')).toBe(false);
+  });
+});

@@ -1280,6 +1280,12 @@ const TS_CALL_QUERY = `
                  property: (property_identifier) @call.name)]) @call.node
 `;
 
+/** `new C(...)` with a plain identifier class — `new ns.C()` and `new (f())()` are not bound. */
+const TS_NEW_QUERY = `
+  (new_expression
+    constructor: (identifier) @new.name) @new.node
+`;
+
 async function extractTSGraph(
   filePath: string,
   content: string,
@@ -1443,6 +1449,27 @@ async function extractTSGraph(
       callType,
       ...callArgumentFacts(nodeCapture.node, language),
     });
+  }
+
+  // `new C(...)` is not a call_expression, so before this no constructor ever had a caller: its
+  // callers were invisible to analyze_impact and blast_radius, and it read as dead.
+  const newQuery = nativeQuerySoft(language, lang, TS_NEW_QUERY);
+  if (newQuery) {
+    for (const match of newQuery.matches(tree.rootNode)) {
+      const nameCapture = match.captures.find(c => c.name === 'new.name');
+      const nodeCapture = match.captures.find(c => c.name === 'new.node');
+      if (!nameCapture || !nodeCapture) continue;
+      const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+      if (!caller) continue;
+      rawEdges.push({
+        callerId: caller.id,
+        calleeName: nameCapture.node.text,
+        line: nodeCapture.node.startPosition.row + 1,
+        callType: 'constructor',
+        newExpression: true,
+        ...callArgumentFacts(nodeCapture.node, language),
+      });
+    }
   }
 
   const style = tallyStyle('TypeScript', tree, nodes, filePath);
@@ -6283,6 +6310,20 @@ export class CallGraphBuilder {
 
       let calleeNode: FunctionNode | undefined;
       let confidence: EdgeConfidence = 'name_only';
+
+      // Strategy 0n — `new C(...)` (TS/JS) binds only to class C's own `constructor`, declared in
+      // the caller's file or in the file the caller imports C from. Anything else — an external
+      // class (`new Map()`), a class with no explicit constructor, an unproven same name elsewhere —
+      // makes no edge at all, exactly as before this site was extracted.
+      if (raw.newExpression) {
+        const ctors = trie.findByQualifiedName(raw.calleeName, 'constructor');
+        const sameFile = ctors.filter(n => n.filePath === callerNode.filePath);
+        const importedFile = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+        const imported = importedFile ? ctors.filter(n => matchesImportedTarget(n.filePath, importedFile)) : [];
+        if (sameFile.length === 1) { calleeNode = sameFile[0]; confidence = 'same_file'; }
+        else if (sameFile.length === 0 && imported.length === 1) { calleeNode = imported[0]; confidence = 'import'; }
+        if (!calleeNode) continue;
+      }
 
       // Strategy 1r — CHAINED intra-object receiver: `this.repo.save()` / `self.repo.save()`
       // (change: shrink-receiver-resolution-boundary). Before this change the call query matched

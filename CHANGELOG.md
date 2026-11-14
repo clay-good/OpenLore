@@ -12,6 +12,11 @@ All notable changes to OpenLore are documented here. This project adheres to
   cycle with every test that calls it — 474 "cycles" on a 1,500-function Python repository; the
   `overrides` edge, so every override that calls `super.m()` cycled with its base; and the
   deliberately over-approximate `cha-name-only` guess, so unrelated same-named methods cycled.
+- **TypeScript/JavaScript `new C(…)` is now a call edge to `C`'s constructor.** It was never
+  extracted, so no constructor had a caller: `analyze_impact` and `blast_radius` could not see who
+  constructs a class, and constructors read as dead. The edge binds only to the class declared in
+  the caller's file or the file it imports `C` from; `new Map()` and classes without an explicit
+  constructor add nothing.
 - **A `super.m()` call is no longer fanned out to every same-named method.** In
   `class HeaderMap extends Map`, `super.get(…)` was wired to each unrelated in-repo `get` (one in a
   test file). A super call binds to the base class, which the direct resolver already follows.
