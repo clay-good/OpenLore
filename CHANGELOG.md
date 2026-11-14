@@ -26,6 +26,9 @@ All notable changes to OpenLore are documented here. This project adheres to
   was a TypeScript source line.
 - **`openlore change-status` no longer crashes on a repository with no open changes.** It failed
   with a raw `ENOENT` when `openspec/changes/` did not exist — the state `openlore install` leaves.
+- **OpenLore's own `.openlore/` output no longer counts as a source change.** In a repository that
+  does not ignore it, `openlore import` warned "the checkout changed while the bundle was being
+  imported" on an untouched clone, and a first analysis recorded its own tree as dirty.
 - **`find_dead_code` no longer rates a package's entry point high-confidence dead** when that
   package's `package.json` was never read (it is neither the root's nor a declared workspace
   member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped
