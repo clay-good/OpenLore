@@ -55,7 +55,7 @@ const candidate = {
 function authorized(plan: ConfigurationPlan): ConfigurationOptions {
   return {
     rootPath: root,
-    authority: { root, planId: plan.id, permissions: ['write-config', 'replace-choices'] },
+    authority: { root: plan.root, planId: plan.id, permissions: ['write-config', 'replace-choices'] },
   };
 }
 describe('provider-free configuration workflow', () => {

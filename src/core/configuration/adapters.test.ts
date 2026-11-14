@@ -50,7 +50,7 @@ describe('configuration host adapters', () => {
         action: 'apply',
         plan,
         approved: true,
-        authority: { root, planId: plan.id, permissions: ['write-config'] },
+        authority: { root: plan.root, planId: plan.id, permissions: ['write-config'] },
       },
       root
     )) as { outcome: string; confidenceBoundary: { complete: boolean } };
@@ -137,7 +137,7 @@ describe('configuration host adapters', () => {
     });
     const probe = vi.fn(async () => ({ delivered: true, cleaned: true }));
     const authority = {
-      root,
+      root: plan.root,
       planId: plan.id,
       permissions: ['write-config', 'runtime'] as Array<'write-config' | 'runtime'>,
     };
@@ -155,7 +155,7 @@ describe('configuration host adapters', () => {
       { action: 'verify', plan },
       {
         rootPath: root,
-        authority: { root, planId: plan.id, permissions: ['probe'] },
+        authority: { root: plan.root, planId: plan.id, permissions: ['probe'] },
         canary: probe,
       }
     );
@@ -168,13 +168,13 @@ describe('configuration host adapters', () => {
     )) as ConfigurationPlan;
     await configureOpenLore(
       { action: 'apply', plan },
-      { rootPath: root, authority: { root, planId: plan.id, permissions: ['write-config'] } }
+      { rootPath: root, authority: { root: plan.root, planId: plan.id, permissions: ['write-config'] } }
     );
     const result = (await configureOpenLore(
       { action: 'verify', plan },
       {
         rootPath: root,
-        authority: { root, planId: plan.id, permissions: ['probe'] },
+        authority: { root: plan.root, planId: plan.id, permissions: ['probe'] },
         observe: async () => ({}),
         canary: async () => new Promise(() => {}),
         canaryTimeoutMs: 10,
