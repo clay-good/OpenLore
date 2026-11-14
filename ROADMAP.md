@@ -12,6 +12,11 @@
   human in the agent's own final message or PR body. It stays quiet unless something is new and real.
 - **Simple, local, always on.** No new MCP tools, integrations, services, or network calls. No LLM
   in the hot path. No separate UI. Findings are advisory; enforcement stays off by default.
+- **Silent in the background.** OpenLore speaks to the agent only with evidence it can act on. It
+  speaks to the user only when work runs that the user would otherwise wonder about, such as an
+  index build: then the status line shows progress. Otherwise it says nothing.
+- **A utility for agents, not a spec generator.** The plugin carries deterministic evidence tools
+  only, used on demand like a shell tool. Spec generation stays in the npm CLI and MCP presets.
 - **Any spec workflow.** OpenSpec is the first-class format, but no feature may require OpenSpec or
   its CLI. A repo with no spec framework still gets full value from code, tests, and decisions.
 - **Every current user keeps working.** No tool renames, no aliases. The npm CLI, the MCP server and
@@ -45,9 +50,9 @@ improves what those hooks deliver.
 | # | Change | Why it helps the agent | Needs |
 |---|--------|------------------------|-------|
 | 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) ([PR #727](https://github.com/clay-good/OpenLore/pull/727)) | Hooks and tools arrive with one install and stay current | — |
-| 2 | [`hook-reliability`](openspec/changes/hook-reliability) | Hooks never slow or break a session, and each finding is said once | — |
-| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) | One small tool set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
-| 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) | Intent in Spec Kit, Kiro, ADRs, plain requirements, or tests counts, not only OpenSpec | can start any time |
+| 2 | [`hook-reliability`](openspec/changes/hook-reliability) | Hooks never slow or break a session, each finding is said once, and index progress goes to the status line, not the agent | — |
+| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) | `verify_change` joins the default set; one small plugin set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
+| 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) | OpenSpec, Spec Kit and BMAD are detected; none is required; "no specs" is an honest state, never a zero | can start any time |
 | 5 | [`curate-product-surface`](openspec/changes/curate-product-surface) | Fewer, current skills and docs, so nothing stale misleads the agent | 1, 3 |
 
 ## P2: next, after P1 ships
@@ -60,7 +65,7 @@ that carries it today.
 | `stop-hook-speaks-to-agent` | The before-stop receipt reaches the agent, not only the user, and is silent when nothing is new | `add-verification-feedback-loop` |
 | `intent-check-at-stop` | Before stop, the change is checked against the intent it touches: requirements, asserting tests, decisions | `add-test-evidence-claims`, `adopt-spec-link-status-vocabulary` |
 | `test-failure-localization` | A failed test or command points at the line that emitted the error and the changed code that reaches it | `add-log-anchor-conclusions` |
-| `first-session-experience` | The first prompt in a repo gets a short digest and an honest "index is building" line; a plan prompt is oriented | `adopt-agent-context-interop`, `add-openspec-proposal-orientation` |
+| `first-session-experience` | The first prompt in a repo gets a short digest; a plan prompt is oriented. Build progress is `hook-reliability` group 9 | `adopt-agent-context-interop`, `add-openspec-proposal-orientation` |
 
 | Change | Why it helps the agent |
 |--------|------------------------|
@@ -125,6 +130,7 @@ Cut work is deleted, not archived: in OpenSpec, archived means shipped. Restore 
 | `add-merge-semantic-certificate` tasks: retained edges; diff-union build scoping; CLI | New surface or low value for the agent loop | `0dd75dbef` |
 | `add-fleet-coordination-arc` tasks: `carried` state and invalidating commit; live arc execution; CLI; lease test for both | No tool records a verdict yet, so these add surface with no user | `0dd75dbef` |
 | `add-verification-feedback-loop` tasks: `openlore verify-change` CLI; pre-commit gate; their tests | New surfaces; the MCP tool and the before-stop hook already deliver the receipt | `0dd75dbef` |
+| `spec-framework-neutrality` task: Kiro adapter | The owner named OpenSpec, Spec Kit and BMAD; add Kiro when a user asks | `63001d670` |
 
 ## Research notes (removed)
 
@@ -141,6 +147,17 @@ Reports that sat in `openspec/changes/` but were not changes. Restore with
 | `KOTLIN-TOTAL-SUPPORT-2026-10.md`, `PARALLEL-WORK-COORDINATION.md`, `SPEC-STORE-INTEGRATION.md` | `0dd75dbef` |
 
 ## Notes for the owner
+
+Decided 2026-11-14 (owner's answers to the open questions):
+
+| Question | Decision | Where |
+|---|---|---|
+| Plugin tool set (ADR-0037) | `verify_change` joins `substrate`, gated by the benchmark; the `plugin` set is a subset of `substrate` with no spec-generation tool | `reframe-governance-as-agent-evidence` design 1 |
+| Spec frameworks | Detect OpenSpec, Spec Kit and BMAD; require none | `spec-framework-neutrality` |
+| No specs found | Spec numbers are `null` with reason `no-spec-source` and a `no spec source found` note, never 0 | `spec-framework-neutrality` design 3 |
+| Index-building message | Progress in the status line and `openlore status`; nothing in the agent's context; one start and one ready line only for users without OpenLore's status line | `hook-reliability` group 9 |
+| Spec skills in the plugin | No; the plugin ships evidence skills only | `curate-product-surface` |
+
 
 - `honour-npmrc-in-update-check` is archived as shipped. One task is manual: check the update
   notifier against a private registry (Nexus) on a machine set up for one.

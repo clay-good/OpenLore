@@ -23,7 +23,7 @@
 type SpecItemKind = 'requirement' | 'scenario' | 'decision' | 'task' | 'test-intent';
 interface SpecItem { id: string; text: string; file: string; line: number; kind: SpecItemKind }
 interface SpecSource {
-  id: 'openspec' | 'spec-kit' | 'kiro' | 'adr' | 'markdown-requirements' | 'tests';
+  id: 'openspec' | 'spec-kit' | 'bmad' | 'adr' | 'markdown-requirements' | 'tests';
   detect(root: string, config: OpenLoreConfig | null): Promise<string[]>; // paths found, [] = absent
   list(root: string, config: OpenLoreConfig | null): Promise<SpecItem[]>;
 }
@@ -42,8 +42,8 @@ first and which wins when two sources claim one file.
 | # | Source | Detected when | Files read | Kinds |
 |---|---|---|---|---|
 | 1 | `openspec` | `<openspecPath or openspec>/specs/*/spec.md` exists; for a bare `specs/` or `docs/specs`, a file must also have `### Requirement:` | `specs/*/spec.md`, `decisions/adr-*.md` | requirement, scenario, decision |
-| 2 | `spec-kit` | `.specify/` exists, or `specs/*/spec.md` has no `### Requirement:` and has `FR-NNN` (assumption, confirm in task 9.1) | `specs/<feature>/spec.md`, `plan.md`, `tasks.md` | requirement, scenario, task |
-| 3 | `kiro` | `.kiro/specs/*/requirements.md` exists (assumption, confirm in task 8.1) | `requirements.md`, `design.md`, `tasks.md` | requirement, task |
+| 2 | `spec-kit` | `.specify/` exists, or `specs/*/spec.md` has no `### Requirement:` and has `FR-NNN` (assumption, confirm in task 6.1) | `specs/<feature>/spec.md`, `plan.md`, `tasks.md` | requirement, scenario, task |
+| 3 | `bmad` | a BMAD install marker (`.bmad-core/` or `_bmad/`) or its PRD file exists (assumption, confirm in task 7.1) | PRD, architecture, story files | requirement, decision, task |
 | 4 | `adr` | `docs/adr`, `docs/decisions`, or a path in `adrPaths` holds `*.md` | each ADR file | decision |
 | 5 | `markdown-requirements` | a tracked `*.md` outside the sources above has a heading or sentence with SHALL / MUST / EARS shape | those files | requirement |
 | 6 | `tests` | the analyzer found test files (`isTestFile`, `src/core/analyzer/test-file.ts:97`) | test names, describe blocks | test-intent |
@@ -59,7 +59,8 @@ renames), drop the "run `openlore generate`" advice, and add `reason: "no-spec-s
 `lookedFor` (the source ids checked). `orient` adds one optional field,
 `specSources: { found: string[], lookedFor: string[] }`, returned only when `found` is empty or a
 non-OpenSpec source is present. `get_test_coverage` returns `coveragePercent: null` with the same
-reason instead of 0. Why: an empty list reads as "nothing governs this code" and 0% reads as
+reason instead of 0, plus `note: "no spec source found (looked for: …)"` for a human reader.
+Why: an empty list reads as "nothing governs this code" and 0% reads as
 "untested"; both are false. Rejected: returning `isError`; the agent retries or stops.
 `openlore drift` keeps exit code 2 for this case (`src/cli/commands/drift.ts:682`), which the main
 spec `DriftHookDistinguishesFailureFromDrift` already calls "could not check"; only the text changes.

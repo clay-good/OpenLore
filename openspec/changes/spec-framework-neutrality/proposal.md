@@ -2,7 +2,7 @@
 
 > Priority: P1 · Not built
 > Reaches the agent through: `orient`, `blast_radius`, `verify_change`, `verify_claim`, and `recall` (no new tool, no new hook)
-> Why it helps the agent: it gets the repo's written intent from where the team keeps it (OpenSpec, Spec Kit, Kiro, ADRs, plain requirements, tests), and an honest "no spec source found" when there is none.
+> Why it helps the agent: it gets the repo's written intent from where the team keeps it (OpenSpec, Spec Kit, BMAD, ADRs, plain requirements, tests), and an honest "no spec source found" when there is none. OpenLore works the same with no spec framework.
 
 ## Problem
 
@@ -17,7 +17,7 @@ OpenLore reads intent from one place only: `openspec/specs/<domain>/spec.md`. Me
   the user to run `openlore generate` (an LLM step) as if it were required.
 - 14 sites hard-code the literal `openspec` and ignore `openspecPath`. About 15 places list spec
   files and about 11 parse `### Requirement:` on their own. There is no adapter interface.
-- `.kiro/specs/`, `docs/adr`, `docs/decisions`, and Spec Kit specs are read by nothing.
+- Spec Kit specs, BMAD planning files, `docs/adr` and `docs/decisions` are read by nothing.
 
 A team that uses another workflow, or none, gets an extra folder, wrong zeros, and advice that does
 not fit.
@@ -27,15 +27,19 @@ not fit.
 - **One small read-only interface, the spec source.** `detect` says if a source is present. `list`
   returns requirement-like items: `id`, `text`, `file`, `line`, `kind`. Nothing else. New folder
   `src/core/spec-sources/`.
+- **Three named frameworks, none required (owner, 2026-11-14).** OpenLore detects OpenSpec (which
+  OpenLore uses for its own development), Spec Kit and BMAD. Every answer computed from code, tests
+  and decisions works the same when none of them is present.
 - **OpenSpec is the first adapter and stays first-class.** `loadSpecCorpus`, `buildSpecMap` and
   `detectExistingSpecDir` move behind it with no behavior change. Generating OpenSpec-format specs
   stays as it is.
 - **Five more adapters, one PR each, read-only:** ADR folders (`docs/adr`, `docs/decisions`),
   markdown requirements (EARS and RFC 2119 sentences), tests as intent (test names and describe
-  blocks), Kiro (`.kiro/specs/*/requirements.md`, `design.md`, `tasks.md`), Spec Kit
-  (`specs/<feature>/spec.md`, `plan.md`, `tasks.md`, marker `.specify/`).
+  blocks), Spec Kit (`specs/<feature>/spec.md`, `plan.md`, `tasks.md`, marker `.specify/`), BMAD
+  (PRD, architecture and story files; layout confirmed in task 7.1).
 - **"None" is a normal state.** Code, tests and decisions still give full value. Answers that need
-  a spec say `no spec source found` and name what was looked for. They never tell the user to run
+  a spec say `no spec source found` and name what was looked for. A number that needs specs, such
+  as spec coverage, is `null` with that reason, never 0 (owner, 2026-11-14). They never tell the user to run
   `openlore generate`, and never return a bare zero or empty list.
 - **No runtime need for the `openspec` CLI.** `change-status` reports a missing binary as
   `not-assessed` with the reason.
@@ -55,7 +59,7 @@ not fit.
   names and shapes. New data arrives as added optional fields.
 - A repo that has `openspec/` today behaves the same: same paths, same findings, same exit codes.
 - OpenLore still does not reimplement the OpenSpec change lifecycle.
-- Adapters never write. OpenLore does not create or edit Spec Kit, Kiro or ADR files.
+- Adapters never write. OpenLore does not create or edit Spec Kit, BMAD or ADR files.
 - Findings stay advisory. Everything is local.
 - Not re-planned: what PR #692 removed (the `plugin-manifest` command, its schema, the `openspec`
   key in `package.json`).
@@ -69,7 +73,7 @@ not fit.
   SHALL"). A requirement written another way is not listed. The count is a lower bound.
 - Tests as intent covers TypeScript, JavaScript, Python and Go test names. Other languages are not
   assessed. A test name is intent, not proof that the behavior is checked.
-- The Spec Kit and Kiro layouts are assumptions taken from their public templates. Each adapter's
+- The Spec Kit and BMAD layouts are assumptions taken from their public templates. Each adapter's
   first task confirms the layout against a real project before code is written.
 - ADR files are read in MADR and Nygard shapes. Other shapes are listed by title only.
 
@@ -81,7 +85,7 @@ Depends on nothing. Ship in this order; each group in `tasks.md` is one small PR
 2. Honest "no spec source found" answers.
 3. Config, then the interface with OpenSpec moved behind it (no behavior change), then the
    hard-coded `openspec` sites.
-4. One adapter per PR: ADR folders, markdown requirements, tests as intent, Kiro, Spec Kit.
+4. One adapter per PR: Spec Kit, BMAD, ADR folders, markdown requirements, tests as intent.
 5. Text: tool descriptions, install, skills, docs, examples.
 
 Related main specs, reused and not duplicated: `agent-neutral-spec-reconciliation` and

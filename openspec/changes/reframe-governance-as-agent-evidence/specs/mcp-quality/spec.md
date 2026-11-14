@@ -36,8 +36,10 @@ hold for every harness that runs the moments.
 ### Requirement: PluginToolSetIsFixedAndSmall
 
 The server SHALL define a `plugin` preset of at most 12 tools for the Claude Code plugin, and it
-SHALL contain `orient`, `blast_radius`, `verify_change`, `verify_claim` and `recall`. The npm
-default SHALL stay the `substrate` preset with its current members. Every tool outside the `plugin`
+SHALL contain `orient`, `blast_radius`, `verify_change`, `verify_claim` and `recall`. Every `plugin`
+tool SHALL also be in the `substrate` preset, and the `plugin` preset SHALL NOT contain a
+spec-generation tool. The npm default SHALL stay the `substrate` preset; it SHALL keep its current
+members and SHALL add `verify_change` once the benchmark protocol shows no regression. Every tool outside the `plugin`
 preset SHALL stay registered under its current name and callable through the other presets, the
 full surface, and Pi. A CI test SHALL guard the set.
 
@@ -48,10 +50,17 @@ full surface, and Pi. A CI test SHALL guard the set.
   `get_function_skeleton`, `suggest_insertion_points`, `recall`, `verify_claim`, `blast_radius`
   and `verify_change`
 
-#### Scenario: The npm default is unchanged
+#### Scenario: The npm default gains only verify_change
 
 - **WHEN** `openlore mcp` starts with no preset
-- **THEN** the active surface is the `substrate` preset with the same 15 tools as before this change
+- **THEN** the active surface is the `substrate` preset: its 15 tools from before this change, plus
+  `verify_change`
+
+#### Scenario: The plugin set is a subset of the default
+
+- **WHEN** the presets are compared
+- **THEN** every tool in `plugin` is also in `substrate`
+- **AND** `prepare_spec_generation` and `prepare_spec_repair` are not in `plugin`
 
 #### Scenario: A hidden tool stays reachable
 

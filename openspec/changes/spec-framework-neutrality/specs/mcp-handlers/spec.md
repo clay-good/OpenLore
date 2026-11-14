@@ -20,6 +20,7 @@ tests and decisions SHALL be returned in full.
 - **GIVEN** a repository with no spec source
 - **WHEN** an agent calls `get_test_coverage`
 - **THEN** `coveragePercent` is `null` with the reason `no-spec-source`, not `0`
+- **AND** a `note` says `no spec source found` and names the kinds looked for
 
 #### Scenario: Spec search and drift do not point at an LLM step
 

@@ -31,22 +31,27 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 2. The `plugin` preset
 
-- [ ] 2.1 Edit `src/cli/commands/mcp.ts`: add `plugin` to `TOOL_PRESETS` (line 2620) with the 11
-  tools in `design.md` section 2; add a `plugin` entry to `STANDING_CONTEXT_BUDGETS` with the
-  measured baseline plus about 7% headroom; add `"plugin"` to the `--preset` help text (line 3484).
-  Do not touch `substrate` or `src/constants.ts`. Test: `src/cli/commands/mcp-presets.test.ts`
-  (add: `plugin` = exactly the 11 names; the guard fails above 12 tools; contains `orient`, `blast_radius`,
-  `verify_change`, `verify_claim`, `recall`; `substrate` still has its 15 names).
+- [ ] 2.1 Run the default-surface benchmark (`DefaultSurfaceDecisionsRideTheBenchmarkProtocol`)
+  for `substrate` with and without `verify_change`; record the result with `openlore decisions
+  record`. If it regresses, skip the `substrate` edit in 2.2 and keep the rest (design section 1).
+  Done when: the decision names the run and the verdict.
+- [ ] 2.2 Edit `src/cli/commands/mcp.ts`: add `verify_change` to `substrate` (if 2.1 passed); add
+  `plugin` to `TOOL_PRESETS` (line 2620) with the 11 tools in `design.md` section 2; update the
+  `substrate` budget and add a `plugin` entry to `STANDING_CONTEXT_BUDGETS` with the measured
+  baseline plus about 7% headroom; add `"plugin"` to the `--preset` help text (line 3484). Do not
+  touch `src/constants.ts`. Test: `src/cli/commands/mcp-presets.test.ts` (add: `plugin` = exactly
+  the 11 names; the guard fails above 12 tools; `plugin ⊂ substrate`; no `prepare_spec_*` in
+  `plugin`; `substrate` = its 15 names plus `verify_change`).
   Done when: the test file passes and `node dist/cli/index.js mcp --preset plugin --list-tools`
   (after `npm run build`) lists 11 tools.
-- [ ] 2.2 Run the guards that read every preset, and fix only what `plugin` makes them report:
+- [ ] 2.3 Run the guards that read every preset, and fix only what the two edits make them report:
   `src/doc-claim-sync.test.ts`, `src/cli/commands/mcp-tool-count-doc.test.ts`,
   `src/core/analyzer/guidance-preset-coherence.test.ts`, `src/honesty-contract.test.ts`,
   `src/cli/commands/default-preset-single-source.test.ts`, `src/cli/commands/serve.test.ts`.
   Edit `docs/mcp-tools.md` (the `standing-context-cost` table near line 127: add the `plugin` row).
   Done when: all 6 test files pass.
-- [ ] 2.3 Edit `docs/mcp-tools.md`, `docs/install.md` (line 120) and `docs/cli-reference.md`
-  (line 147): name the `plugin` preset, its 11 tools, and state that every other tool stays
+- [ ] 2.4 Edit `docs/mcp-tools.md`, `docs/install.md` (line 120) and `docs/cli-reference.md`
+  (line 147): name the `plugin` preset, its 11 tools, `verify_change` in `substrate`, and state that every other tool stays
   available under its current name through `--preset <name>`, `--preset full` and Pi. Test:
   `src/doc-claim-sync.test.ts`.
   Done when: the test passes and `grep -c "preset plugin\|\`plugin\`" docs/mcp-tools.md` is at least 1.
