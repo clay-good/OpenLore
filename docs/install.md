@@ -67,8 +67,11 @@ default** — pass `--user-scope` to remove the machine-wide entries too.
 
 When `openlore install` wires Claude Code's user scope, it also sets Claude's custom status line
 (`~/.claude/settings.json` `statusLine`) to run `openlore statusline --installed-by-openlore`. The
-command reports the search-index state of the session's project directory: green when current,
-yellow when missing, stale, or unknown, and red when degraded. It is never written to a
+command reports the search-index state of the OpenLore project (the nearest directory with a
+`.openlore/config.json`) that contains the session's project directory, or else its current
+directory. A session resumed from one started outside the project, for example in `/`, keeps that
+stale project directory; the current directory then still finds the project. The status is green
+when current, yellow when missing, stale, or unknown, and red when degraded. It is never written to a
 repository's shared `.claude/settings.json`, which would override every teammate's own status line.
 If `statusLine` is already set, install keeps it and prints a hint instead; call the unmarked
 `openlore statusline` from your own status-line script to show both. Re-running install refreshes
