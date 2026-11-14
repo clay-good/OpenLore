@@ -25,11 +25,11 @@ agent has no short recipe for "debug this," "review my change," or "which tests 
 - **Printed once per session at the prompt-submitted moment.** `buildInjection`
   (`src/cli/commands/orient-inject.ts`) puts the slim digest before the task block on the first
   prompt of a session. It records the delivery under the payload's `session_id` in the per-session
-  record that `src/cli/commands/hook.ts` already keeps, so later prompts do not repeat it. A rebuilt
+  record that `src/core/services/hook-session.ts` keeps (hook-reliability task 3.1), so later prompts do not repeat it. A rebuilt
   index with a different digest is printed once more. No `session_id`: the digest is not printed.
 - **Five plugin skills.** The plugin ships `openlore-orient`, `openlore-debug`,
   `openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`. Each `SKILL.md`
-  in `skills/` is cut to 80 lines or fewer, names only tools in the `substrate` preset, and ends
+  in `skills/` is cut to 80 lines or fewer, names only tools in the `plugin` preset, and ends
   with one of three actions: fix it, record a decision with the proof, or raise it to the human.
   The copies under `plugin/skills/` are byte-identical to `skills/`.
 - **A guard test** pins the skill list, the line budgets, the tool names, and the digest size.

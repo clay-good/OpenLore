@@ -15,8 +15,8 @@
 ## 2. Delivery at the prompt-submitted moment
 
 - [ ] 2.1 In `buildInjection` (`src/cli/commands/orient-inject.ts`), print the slim digest before
-      the task block on the first prompt of a session. Export the per-session record helpers from
-      `src/cli/commands/hook.ts` and key the delivery on the digest's content hash. Test:
+      the task block on the first prompt of a session. Import the per-session record helpers from
+      `src/core/services/hook-session.ts` (hook-reliability task 3.1) and key the delivery on the digest's content hash. Test:
       `src/cli/commands/orient-inject.test.ts`. Done when the first prompt carries the digest, the
       second does not, and a changed digest is printed once more.
 - [ ] 2.2 Print nothing extra when the payload has no `session_id`, when
@@ -34,10 +34,10 @@
 - [ ] 3.1 Cut `skills/openlore-debug/SKILL.md`, `skills/openlore-review-changes/SKILL.md`,
       `skills/openlore-write-tests/SKILL.md`, and `skills/openlore-implement-story/SKILL.md` to 80
       lines or fewer each; `skills/openlore-orient/SKILL.md` already fits. Each names only
-      `substrate` tools and ends with the three actions. Test: `src/cli/install/skill-wrapper.test.ts`.
+      `plugin` tools and ends with the three actions. Test: `src/cli/install/skill-wrapper.test.ts`.
       Done when the line budget and frontmatter checks pass for all five.
 - [ ] 3.2 Add a tool-name check to `src/cli/install/skill-wrapper.test.ts`: every OpenLore tool a
-      plugin skill names is in `presetToolNames('substrate')` (`src/core/services/wired-preset.ts`).
+      plugin skill names is in `presetToolNames('plugin')` (`src/core/services/wired-preset.ts`).
       Done when a skill that names `get_change_coupling` fails the test.
 - [ ] 3.3 Copy the five skills to `plugin/skills/<name>/SKILL.md` (folder from
       `ship-claude-code-plugin`) and assert in `src/cli/install/skill-wrapper.test.ts` that each

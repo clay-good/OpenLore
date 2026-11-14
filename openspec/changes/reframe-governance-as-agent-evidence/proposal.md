@@ -77,6 +77,12 @@
 - The prompt-submitted moment carries orientation context, not findings. The quiet rule governs
   findings. This change does not move `orient --inject` into `HOOK_MOMENTS`.
 
+## Open question for the owner
+
+The plugin set is a new preset entry, `plugin` (11 tools). The alternative is to add
+`verify_change` to `substrate`, which changes the npm default and needs the benchmark protocol
+(ADR-0023).
+
 ## Depends on / order
 
 - Shipped: `LoopMomentsReceiveBudgetedReceipts` and `LoopHooksAreAdvisoryUnlessPolicyBlocks`

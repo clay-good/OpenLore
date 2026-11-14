@@ -1,7 +1,7 @@
 # Work with any spec or test workflow, and with none
 
 > Priority: P1 · Not built
-> Reaches the agent through: `orient`, `blast_radius`, `verify_change`, `verify_claim`, `recall`, and the prompt-submitted moment (no new tool, no new hook)
+> Reaches the agent through: `orient`, `blast_radius`, `verify_change`, `verify_claim`, and `recall` (no new tool, no new hook)
 > Why it helps the agent: it gets the repo's written intent from where the team keeps it (OpenSpec, Spec Kit, Kiro, ADRs, plain requirements, tests), and an honest "no spec source found" when there is none.
 
 ## Problem
@@ -44,8 +44,8 @@ not fit.
 - **Config:** `openspecPath` becomes optional. One new optional key, `adrPaths`, names extra ADR
   folders to read.
 - **Text:** tool descriptions, install messages, skills and docs say "spec source" where the
-  behavior is general and "OpenSpec" only where the format is OpenSpec. The proposal hint at the
-  prompt-submitted moment also fires for Spec Kit and Kiro authoring commands.
+  behavior is general and "OpenSpec" only where the format is OpenSpec. The prompt hint for other
+  workflows is `add-openspec-proposal-orientation`.
 
 ## What does not change
 
@@ -82,7 +82,7 @@ Depends on nothing. Ship in this order; each group in `tasks.md` is one small PR
 3. Config, then the interface with OpenSpec moved behind it (no behavior change), then the
    hard-coded `openspec` sites.
 4. One adapter per PR: ADR folders, markdown requirements, tests as intent, Kiro, Spec Kit.
-5. Text: tool descriptions, prompt hint, install, skills, docs, examples.
+5. Text: tool descriptions, install, skills, docs, examples.
 
 Related main specs, reused and not duplicated: `agent-neutral-spec-reconciliation` and
 `mcp-spec-workflow-composites` (agent- and client-neutral; this change adds format neutrality), and

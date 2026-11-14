@@ -125,10 +125,7 @@ Each group is one small PR. Build them in order. Do not start before PR #727
 
 ## 6. Plugin skill list (PR 6)
 
-- [ ] 6.1 Add a case to `src/cli/install/skill-wrapper.test.ts`: the folders in `plugin/skills/`
-      are exactly `openlore-orient`, `openlore-implement-story`, `openlore-write-tests`,
-      `openlore-debug`, `openlore-review-changes` (the list `adopt-agent-context-interop` uses;
-      that change copies and shortens the files). Done when adding or removing a folder fails the test.
+- [ ] 6.1 None: `adopt-agent-context-interop` task 3.3 guards `plugin/skills/`.
 - [ ] 6.2 Run `openspec validate curate-product-surface`, `npm run audit:packlist` and
       `npx vitest run src/core/services/spec-workflow-skills.test.ts src/cli/help-groups.test.ts
       src/cli/commands/docs-index.test.ts src/doc-claim-sync.test.ts src/honesty-contract.test.ts

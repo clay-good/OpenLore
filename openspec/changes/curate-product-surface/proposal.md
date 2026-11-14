@@ -28,7 +28,9 @@ one outcome: SHIP IN PLUGIN, KEEP, MERGE, or DELETE. The full table is in `desig
 - **Skills.** The 8 loose files go. The 11 folder skills stay for `openlore setup` (10) and Pi (11).
   The plugin ships 5 folders, one per loop job: `openlore-orient`, `openlore-implement-story`,
   `openlore-write-tests`, `openlore-debug`, and `openlore-review-changes`. The spec pair
-  (`openlore-generate`, `openlore-repair`) joins after `spec-framework-neutrality`. A test fails when a loose file appears beside the folders.
+  (`openlore-generate`, `openlore-repair`) stays out of the plugin: it calls
+  `prepare_spec_generation`/`prepare_spec_repair`, which are OpenSpec-format and not in the `plugin`
+  preset. A test fails when a loose file appears beside the folders.
 - **Skill copies.** `examples/opencode-skills/` and `examples/mistral-vibe/skills/` are each
   replaced by a 3-line `README.md` that points to `skills/`. The guard test changes in the same task.
 - **Examples.** `drift-demo`, `drift-test`, `openspec-analysis` and `openspec-cli` are deleted.
@@ -47,7 +49,7 @@ one outcome: SHIP IN PLUGIN, KEEP, MERGE, or DELETE. The full table is in `desig
 - `openlore setup` installs the same 10 skills from the same paths.
 - Pi keeps `pi.skills: ["./skills"]` and still loads all 11 folder skills.
 - The default MCP tools are not decided here. `reframe-governance-as-agent-evidence` defines the
-  plugin default of about 10 pull tools. The README section only reads that list.
+  `plugin` preset of 11 pull tools. The README section only reads that list.
 - Skill content and the slim digest are not decided here. `adopt-agent-context-interop` owns them.
 - No file under `scripts/` is deleted. Only `scripts/postinstall.mjs` ships, as today.
 - Advisory, local only, no LLM. Nothing here needs OpenSpec or the `openspec` CLI.

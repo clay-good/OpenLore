@@ -33,12 +33,12 @@ content changed. The full `CODEBASE.md` SHALL keep its name and content.
 
 The Claude Code plugin SHALL ship exactly five skills: `openlore-orient`, `openlore-debug`,
 `openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`. Each `SKILL.md`
-SHALL be 80 lines or fewer, SHALL name only OpenLore tools that the `substrate` preset exposes, and
+SHALL be 80 lines or fewer, SHALL name only OpenLore tools that the `plugin` preset exposes, and
 SHALL be byte-identical to the canonical file under `skills/`.
 
 #### Scenario: A skill names a tool the plugin does not expose
 
-- **WHEN** a plugin skill names a tool outside the `substrate` preset
+- **WHEN** a plugin skill names a tool outside the `plugin` preset
 - **THEN** the skill guard test fails
 
 #### Scenario: The plugin copy drifts from the canonical skill

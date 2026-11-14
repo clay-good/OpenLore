@@ -44,9 +44,9 @@ improves what those hooks deliver.
 
 | # | Change | Why it helps the agent | Needs |
 |---|--------|------------------------|-------|
-| 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) | Hooks and tools arrive with one install and stay current | — |
-| 2 | [`hook-reliability`](openspec/changes/hook-reliability) | Hooks never slow or break a session, and each finding is said once | 1 |
-| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) | One small tool set; governance arrives as quiet findings with proof | 1 |
+| 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) ([PR #727](https://github.com/clay-good/OpenLore/pull/727)) | Hooks and tools arrive with one install and stay current | — |
+| 2 | [`hook-reliability`](openspec/changes/hook-reliability) | Hooks never slow or break a session, and each finding is said once | — |
+| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) | One small tool set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
 | 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) | Intent in Spec Kit, Kiro, ADRs, plain requirements, or tests counts, not only OpenSpec | can start any time |
 | 5 | [`curate-product-surface`](openspec/changes/curate-product-surface) | Fewer, current skills and docs, so nothing stale misleads the agent | 1, 3 |
 
@@ -55,7 +55,7 @@ improves what those hooks deliver.
 Four items get their own change folder only when P1 has shipped. Each names the existing change
 that carries it today.
 
-| Item | What it does for the agent | Carried by |
+| Item (no folder yet) | What it does for the agent | Carried by |
 |------|----------------------------|------------|
 | `stop-hook-speaks-to-agent` | The before-stop receipt reaches the agent, not only the user, and is silent when nothing is new | `add-verification-feedback-loop` |
 | `intent-check-at-stop` | Before stop, the change is checked against the intent it touches: requirements, asserting tests, decisions | `add-test-evidence-claims`, `adopt-spec-link-status-vocabulary` |

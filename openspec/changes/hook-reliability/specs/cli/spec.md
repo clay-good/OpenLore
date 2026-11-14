@@ -14,7 +14,7 @@ blocking findings and their next actions; a finding that is blocking only by its
 SHALL NOT block a stop, and the hook SHALL NOT block when the payload says a stop hook is already
 active. The hook SHALL add no imperative of its own; receipt next actions SHALL be carried as
 labeled data. The hook's standard output SHALL carry only the receipt. A test SHALL assert this
-contract for each of the four moments.
+contract for every moment in `LOOP_MOMENTS`.
 
 #### Scenario: Stop does not block by default
 
@@ -29,9 +29,9 @@ contract for each of the four moments.
 - **WHEN** the before-stop hook runs on the same diff
 - **THEN** the hook blocks the stop and its message names the finding
 
-#### Scenario: A source default alone does not block a stop
+#### Scenario: A finding the policy does not name does not block a stop
 
-- **GIVEN** no `enforcement.policy` and a finding whose code is blocking by its source default
+- **GIVEN** no `enforcement.policy` and a finding whose code the policy does not name
 - **WHEN** the before-stop hook runs
 - **THEN** it does not block
 
@@ -144,6 +144,25 @@ one.
 - **WHEN** the hook runs
 - **THEN** the agent receives nothing, and `openlore status` counts one error for the prompt-submitted moment
 
+### Requirement: UninstallDisclosesWhatItKeeps
+
+`openlore install --uninstall` SHALL end its summary by naming the paths it deliberately keeps
+(the `.openlore/` data directory: index, decisions, memories; and each skill directory copied by
+`openlore setup`) and the command to remove them. It SHALL NOT delete them.
+
+#### Scenario: Uninstall names the kept data directory
+
+- **GIVEN** a repository with an initialized `.openlore/` store
+- **WHEN** `openlore install --uninstall` completes
+- **THEN** the summary lists `.openlore/` as kept and shows how to delete it
+
+#### Scenario: Uninstall names what it keeps
+
+- **GIVEN** a repository with `.openlore/` and skills copied by `openlore setup`
+- **WHEN** `openlore install --uninstall` completes
+- **THEN** no hook entry calls OpenLore, and the summary lists `.openlore/` and the copied skills as
+  kept, with the command to remove each
+
 ## ADDED Requirements
 
 ### Requirement: FindingsAreShownOncePerSessionAndTheirOutcomeIsCounted
@@ -241,7 +260,8 @@ records SHALL NOT be sent anywhere.
 `openlore install` run again after an upgrade SHALL leave exactly one current OpenLore group for
 each managed hook and none for a moment the installed version no longer has. `openlore install
 --uninstall` SHALL leave no hook entry that calls OpenLore, SHALL leave the user's own hooks
-byte-identical, and SHALL name what it keeps on purpose without deleting it. `openlore doctor`
+byte-identical, and SHALL name what it keeps on purpose without deleting it (see
+`UninstallDisclosesWhatItKeeps`). `openlore doctor`
 SHALL report a wired hook command whose runtime file does not exist.
 
 #### Scenario: Upgrade leaves no duplicate
@@ -255,13 +275,6 @@ SHALL report a wired hook command whose runtime file does not exist.
 - **GIVEN** a settings file with an OpenLore group for a moment the installed version does not have
 - **WHEN** `openlore install` or `openlore install --uninstall` runs
 - **THEN** that group is removed and the user's own hooks are unchanged
-
-#### Scenario: Uninstall names what it keeps
-
-- **GIVEN** a repository with `.openlore/` and skills copied by `openlore setup`
-- **WHEN** `openlore install --uninstall` completes
-- **THEN** no hook entry calls OpenLore, and the summary lists `.openlore/` and the copied skills as
-  kept, with the command to remove each
 
 #### Scenario: Doctor finds a hook with no runtime
 

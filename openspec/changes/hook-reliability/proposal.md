@@ -74,6 +74,10 @@ one slow or broken hook hurts every turn. Today:
 
 ## Depends on / order
 
+- The rule "a finding that is blocking only by its source default does not block a stop" holds
+  once `reframe-governance-as-agent-evidence` group 1 makes every source default advisory. Build
+  that group first, or keep the stop-block check from reading source defaults.
+
 - Nothing blocks the start. Build order is in `tasks.md`: measure, fail-open tests, prompt-submitted
   moment, once per session, latency test, health line, acted-on counts, upgrade and uninstall.
 - `ship-claude-code-plugin` must keep its `hooks.json` equal to `MANAGED_HOOKS`. If group 8 changes

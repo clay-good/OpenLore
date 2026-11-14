@@ -30,6 +30,18 @@ SHALL be named once in the first-run output.
 
 ## MODIFIED Requirements
 
+### Requirement: FreshInstallEmptinessIsNotAWarning
+
+When no spec source exists, first-run messages SHALL present it as the normal state ("no spec
+source found") and SHALL NOT name `openlore generate` as a step.
+
+#### Scenario: The spec-index skip note on a fresh install
+
+- **GIVEN** a fresh `openlore install` in a repository with no spec source
+- **WHEN** the index build reports the skipped spec index
+- **THEN** the message is informational ("no spec source found") and does not name
+  `openlore generate`
+
 ### Requirement: ChangeStatusIsComputedFromDocumentedEvidence
 
 `openlore change-status` SHALL compute each open change's status from the documented evidence

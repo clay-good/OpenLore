@@ -23,8 +23,10 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
   Done when: `npx vitest run src/cli/commands/enforce.test.ts src/cli/commands/corpus-integrity-surfaces.test.ts src/cli/commands/doctor.test.ts` passes.
 - [ ] 1.4 Edit `CHANGELOG.md` under `## [Unreleased]`, new `### Changed` entry: the 7 codes are
   advisory by default; give the 7-line `enforcement.policy` block from `design.md` section 5 for
-  repositories that relied on the default block. Edit `docs/configuration.md` (the finding-code
-  catalogue near line 283) so the 7 rows read `advisory`.
+  repositories that relied on the default block. Edit `docs/configuration.md`: add 7 rows to the finding-code catalogue (after line 289), one for
+  each code, with source `corpus-integrity` and default `advisory`. In line 289, replace "the
+  corpus-integrity codes (blocking by default) fail on it, so a commit is blocked until it is fixed"
+  with "a corpus-integrity code that `enforcement.policy` names as blocking fails on it".
   Done when: `npx vitest run src/doc-claim-sync.test.ts` passes and the CHANGELOG entry names all 7 codes.
 
 ## 2. The `plugin` preset
@@ -72,11 +74,13 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 4. Proof and action on every hook finding
 
-- [ ] 4.1 Edit `src/cli/commands/hook.ts`: add `proof?: string` and
-  `action?: 'fix' | 'decide' | 'raise'` to `HookItem` (line 62); set both where each item is built
-  (before-edit, after-tools, before-stop, the 3 new sources); print them as labeled data next to
-  `next`; drop a finding item that has no proof. Keep the dedupe keys unchanged
-  (lines 232-262). Test: `src/cli/commands/hook.test.ts` (each moment's item has proof and one
+- [ ] 4.1 Edit `src/cli/commands/hook.ts`: add `action?: 'fix' | 'decide' | 'raise'` to
+  `HookItem`; use the `code`, `subject` and `proof` fields from hook-reliability task 4.2; set
+  `proof` and `action` where each item is built (before-edit, after-tools, before-stop, the 3 new
+  sources); print them as labeled data next to `next`; drop an item from before-edit, after-tools
+  or before-stop that has no proof; `after-compact` and `subagent-start` items are briefings and are
+  exempt. Filter with the finding identity from hook-reliability (build hook-reliability group 4
+  first). Test: `src/cli/commands/hook.test.ts` (each moment's item has proof and one
   action; an item with no proof is not printed; a second run in the same session prints nothing).
   Done when: the test file passes and the budget tests (lines 57-61, 294) still pass.
 - [ ] 4.2 Check the other harnesses carry the same text: `src/cli/install/adapters/codex.ts` and

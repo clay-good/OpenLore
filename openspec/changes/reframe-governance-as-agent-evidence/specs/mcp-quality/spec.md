@@ -11,7 +11,7 @@ hold for every harness that runs the moments.
 
 - **GIVEN** a session in which a finding was already stated
 - **WHEN** a later moment computes the same finding and nothing else
-- **THEN** the moment emits no finding
+- **THEN** the moment gives the agent no finding; the before-stop receipt for the user may list it once
 
 #### Scenario: An emitted finding has proof and an action
 

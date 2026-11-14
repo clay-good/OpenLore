@@ -11,23 +11,18 @@ nothing outside its own folder; every file below is edited when the group is bui
   spawned CLI. Test: `src/cli/commands/hook-fixture.test.ts` (new: the fixture has the stated size).
   Done when: the measured table is pasted into `design.md` section 2, each proposed target and
   runtime limit is marked confirmed or corrected by the rule there, and the owner has seen any
-  number that the rule does not settle.
+  number that the rule does not settle. Measure before-stop with the three reframe evidence
+  sources wired, if reframe group 3 has landed.
 
 ## 2. Fail-open contract tests
 
-- [ ] 2.1 Add `src/cli/commands/hook-fail-open.test.ts` (new). For `before-edit`, `after-tools`,
-  `before-stop`: a check module that throws (`vi.doMock`), `timeoutMs: 1`, no `.openlore/`,
+- [ ] 2.1 Add `src/cli/commands/hook-fail-open.test.ts` (new). For every moment in `HOOK_MOMENTS`
+  (`before-edit`, `after-tools`, `before-stop`, `after-compact`, `before-subagent`, `subagent-start`): a check module that throws (`vi.doMock`), `timeoutMs: 1`, no `.openlore/`,
   `.openlore` as a file, corrupt `config.json`, corrupt session record, no index, a truncated index
   file, a read-only `.openlore/`, empty stdin, non-JSON stdin. Edit `src/cli/commands/hook.ts` only
   where a case fails. Done when: every case returns `{ stdout: '', exitCode: 0 }` and the file
   passes with `npx vitest run src/cli/commands/hook-fail-open.test.ts`.
-- [ ] 2.2 Stop block by named policy only: in `beforeStop` (`src/cli/commands/hook.ts:506`), block
-  only for codes named `blocking` in the repository's `enforcement.policy` (read with
-  `normalizeEnforcementPolicy` from `src/core/services/mcp-handlers/enforcement-policy.ts`). Test:
-  `src/cli/commands/hook.test.ts`. Done when: a finding with a blocking source default and no
-  policy entry does not block; the existing "blocks only when the policy makes a finding blocking"
-  test still passes.
-- [ ] 2.3 Spawn test `src/cli/commands/hook-fail-open.integration.test.ts` (new; add it to
+- [ ] 2.2 Spawn test `src/cli/commands/hook-fail-open.integration.test.ts` (new; add it to
   `test:integration:ci` in `package.json`): run the built CLI for each moment in a directory with a
   corrupt `.openlore/`. Done when: exit code 0, stdout empty, stderr empty for every moment.
 
@@ -117,8 +112,8 @@ nothing outside its own folder; every file below is edited when the group is bui
   `src/core/services/hook-health.test.ts`. Done when: a decision whose rationale contains
   `f:1a2b3c4d` moves that finding to `decided`, and the 4 counts sum to findings shown.
 - [ ] 7.3 Docs: `docs/session-ledger.md` (new section "Hook runs and finding outcomes": the 2 files,
-  the 4 states, local only, never sent) and `docs/install.md` (health line). Done when: both pages
-  state the limits from `proposal.md`.
+  the 4 states, local only, never sent) and `docs/install.md` (health line). Test: `src/doc-claim-sync.test.ts`. Done when: both
+  pages state the limits from `proposal.md`.
 
 ## 8. Upgrade and uninstall
 
@@ -143,5 +138,5 @@ nothing outside its own folder; every file below is edited when the group is bui
   ("--uninstall names the retained .openlore data"). Done when: the summary lists `.openlore/` and
   each existing copied-skill directory, and deletes neither.
 - [ ] 8.5 Docs: `docs/install.md` (upgrade, uninstall, what is kept, the guard and its shell
-  limit). Tell `ship-claude-code-plugin` the final command form. Done when: the page states what
-  uninstall removes and keeps.
+  limit). Tell `ship-claude-code-plugin` the final command form. Test: `src/doc-claim-sync.test.ts`. Done when: the page
+  states what uninstall removes and keeps.

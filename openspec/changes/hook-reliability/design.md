@@ -136,17 +136,6 @@ names `.openlore/` (`install/index.ts:817-821`); copied skills are not named tod
 
 **Rejected.** An interactive "remove data too?" prompt: uninstall also runs without a terminal.
 
-## 7. The stop block needs a named policy entry
-
-**Decision.** `before-stop` blocks only for a finding whose code is named `blocking` in the
-repository's `enforcement.policy`. A source default of `blocking` does not block a stop.
-
-**Why.** Today the hook filters on `enforcementClass === 'blocking'` (`hook.ts:506`), and
-`resolveEnforcementClass` falls back to the source default (`enforcement-policy.ts:612`). 7 codes
-have a blocking default. The contract says a hook blocks only by the operator's explicit choice.
-
-**Rejected.** Changing the 7 defaults: `openlore enforce` uses them, and that is out of scope.
-
 ## Spec placement
 
 All deltas are in `cli`. `mcp-quality` "Real-World Reliability and Graceful Degradation" is about

@@ -17,9 +17,6 @@ entry gets every guard for free: dispatch enforcement, the standing-context budg
 | Shrink `substrate` to this set | Removes 5 tools from current users |
 | A tool list inside `plugin/.mcp.json` | No such flag exists; the set would live outside `src/` and outside the guards |
 
-Note: the rewrite brief says a kept change may not add a preset. This entry adds no tool and no
-capability. It is the one place the plugin's fixed set can be guarded. The owner should confirm.
-
 ## 2. The 11 tools
 
 "Skills" = how many of the 11 folder skills name the tool (measured with `grep -rlw`).
@@ -61,7 +58,7 @@ Left out of the plugin set, still in `substrate` and `full`:
 
 Rules: base ref = the session start commit (`startHead`, already kept by the dedupe record). The
 three slices start with `handleVerifyChange` and run in parallel. A slice that errors or passes its
-limit adds nothing. The total stays inside `TIMEOUT_MS['before-stop']` (50 s) and
+limit adds nothing. The total stays inside `TIMEOUT_MS['before-stop']` (50 s today; hook-reliability may lower it to 20 s, so each slice stays at 10 s) and
 `BUDGET_CHARS['before-stop']` (8,000). `hooks.before-stop: false` turns all of it off.
 
 **Why not before-edit or after-edit.** Their limits are 8 s / 1,600 chars and 15 s / 4,800 chars.
@@ -72,9 +69,11 @@ and slows every pull call. Calling the CLI as a child process: a second cold sta
 
 ## 4. Proof and action are fields on the hook item
 
-**Decision.** `HookItem` (`hook.ts:62`) gains `proof` (file and line, edge, or receipt id) and
-`action: 'fix' | 'decide' | 'raise'`. The receipt prints them as labeled data, as `next` is today.
-An item with no proof is dropped, not printed.
+**Decision.** `HookItem` (`hook.ts:62`) gains `action: 'fix' | 'decide' | 'raise'`. The `proof`
+field (file and line, edge, or receipt id), with `code` and `subject`, comes from hook-reliability
+task 4.2. The receipt prints them as labeled data, as `next` is today. An item from before-edit,
+after-tools or before-stop with no proof is dropped, not printed; `after-compact` and
+`subagent-start` items are briefings and are exempt.
 
 | Action | When | Example |
 |---|---|---|
