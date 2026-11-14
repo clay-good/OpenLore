@@ -31,12 +31,12 @@ The system SHALL maintain separation between:
 
 ### Requirement: SecurityModel
 
-The system SHALL implement security via: API key-based authentication for LLM providers; no user authentication for CLI tool
+The system SHALL implement security via: API key-based authentication for LLM providers; no user authentication for CLI tool; and an optional `x-openlore-token` on its local HTTP servers (see mcp-security `Local Daemon Authentication and Origin Defense`)
 
 #### Scenario: AuthenticatedAccess
-- **GIVEN** an unauthenticated request
-- **WHEN** accessing protected resources
-- **THEN** access is denied
+- **GIVEN** a local HTTP server started with a token and bound to a non-loopback host
+- **WHEN** a request carries no valid `x-openlore-token` (or session cookie)
+- **THEN** the response is 401 and no tool runs
 
 ### Requirement: DurableAtomicStorePersistence
 
@@ -209,8 +209,8 @@ not. Each writer's whole artifact-mutation section — the analyze save-set, and
 and deletion lanes — SHALL be one locked critical section, so overlap resolves to one writer's
 complete, self-consistent output followed by the other's, never an interleaving of the two. The
 per-artifact persist helper SHALL remain lock-free (it runs inside a lane that already holds the
-lock), so a lane never re-acquires the lock it holds. Implemented in `src/core/decisions/lock.ts`
-(`acquireAnalysisLock`/`withAnalysisLock`); guarded by `lock.test.ts`.
+lock), so a lane never re-acquires the lock it holds. Implemented in `src/core/runtime/advisory-lock.ts`
+(`acquireAnalysisLock`/`withAnalysisLock`); guarded by `advisory-lock.test.ts`.
 
 #### Scenario: Watcher self-heal does not race the watcher
 - **GIVEN** a watcher that has spawned a detached `analyze --force` while continuing to serve and
@@ -793,7 +793,7 @@ graph TB
 ### CLI
 
 **Purpose**: Command-line interface for user interaction and command processing
-**Location**: `src/cli/commands/mcp.ts, src/cli/commands/view.ts, src/cli/commands/openlore.ts`
+**Location**: `src/cli/index.ts, src/cli/commands/mcp.ts, src/cli/commands/view.ts`
 
 ### API
 
@@ -813,7 +813,7 @@ graph TB
 ### Repository
 
 **Purpose**: Data persistence and retrieval
-**Location**: `src/utils/command-helpers.ts, src/core/services/mcp-handlers/utils.ts`
+**Location**: `src/core/services/edge-store.ts, src/core/analyzer/vector-index.ts, src/core/decisions/atomic-store.ts`
 
 ## Data Flow
 

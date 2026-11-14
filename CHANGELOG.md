@@ -5,6 +5,103 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **`orient` and `search_code` stop claiming coverage over content they could not read.** With
+  unparseable files, an oversized contract schema, or an unreadable parse-health record in the
+  repository, both answered `covered` (or a confident empty `uncovered`). The verdict is now
+  `partial`, naming the cause, with the unobstructed verdict kept as `evidenceVerdict`. An index
+  whose artifacts no longer match their published generation is refused, as the graph tools already
+  refuse it. A hit matched only on a file's language marker is weak evidence and says so, and
+  `search --json` reports how many results were returned, matched and clamped.
+- **GraphQL schemas in a monorepo are graded per project.** Type identity was computed across the
+  whole repository, so two projects that each declare `type Query` voided each other and no root
+  operation of either was graded — a required argument added to one project's query went
+  unreported. A schema's identity is now scoped to its nearest enclosing project root (a
+  `package.json` or a GraphQL/Relay config), stated in `boundaries`; a collision inside one project
+  is still not assessed. A duplicate field now withholds only its own type, not the whole document,
+  and a capped `notAssessed` list carries `notAssessedOmitted`.
+- **The refactor report's cycles are real call cycles again.** It read three kinds of edge as
+  calls: the derived `tested_by` edge (production function → test), so each function closed a false
+  cycle with every test that calls it — 474 "cycles" on a 1,500-function Python repository; the
+  `overrides` edge, so every override that calls `super.m()` cycled with its base; and the
+  deliberately over-approximate `cha-name-only` guess, so unrelated same-named methods cycled.
+- **TypeScript/JavaScript `new C(…)` is now a call edge to `C`'s constructor.** It was never
+  extracted, so no constructor had a caller: `analyze_impact` and `blast_radius` could not see who
+  constructs a class, and constructors read as dead. The edge binds only to the class declared in
+  the caller's file or the file it imports `C` from; `new Map()` and classes without an explicit
+  constructor add nothing.
+- **Python `C(…)` of an in-repo class now reaches `C.__init__`.** It fell through to an
+  `external::C` leaf, listing the repository's own class as an external dependency and leaving
+  every `__init__` without a caller (0 of 172 on one sample project; 164 of 172 now). It binds on
+  the same proof as other calls; a class imported from a third-party module is never bound.
+- **A `super.m()` call is no longer fanned out to every same-named method.** In
+  `class HeaderMap extends Map`, `super.get(…)` was wired to each unrelated in-repo `get` (one in a
+  test file). A super call binds to the base class, which the direct resolver already follows.
+- **Renaming a function no longer reports its existing `try/catch` as a newly swallowed error.**
+  The `error-swallowed` check keyed each handler by its enclosing function's name, so the
+  after-edit hook flagged a plain method rename as a weakened check. A handler around code the
+  baseline already discarded, in any function of the file, is now matched first.
+- **`search_code`'s literal-text answers state their coverage.** When no indexed symbol matched —
+  including the few seconds while the watcher re-indexes a function just written — the text-index
+  fallback (and forced `mode: "text"`) returned results with no `coverage` verdict, which the
+  runtime contract check flags, and said the hits came "from markup/text files" when the top hit
+  was a TypeScript source line.
+- **`openlore change-status` no longer crashes on a repository with no open changes.** It failed
+  with a raw `ENOENT` when `openspec/changes/` did not exist — the state `openlore install` leaves.
+- **OpenLore's own `.openlore/` output no longer counts as a source change.** In a repository that
+  does not ignore it, `openlore import` warned "the checkout changed while the bundle was being
+  imported" on an untouched clone, and a first analysis recorded its own tree as dirty.
+- **`find_dead_code` no longer rates a package's entry point high-confidence dead** when that
+  package's `package.json` was never read (it is neither the root's nor a declared workspace
+  member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped
+  at low with the manifest named, and `verify_claim` `dead` answers `unverifiable` instead of
+  `confirmed`.
+- **`find_dead_code` no longer rates Go, Rust, C# and other code high-confidence dead on a signal it
+  never collected.** "Not imported by name from any other file" comes from the dependency graph,
+  which extracts imports only for TypeScript, JavaScript, Python, Java and Kotlin. In a Rust
+  workspace 617 public functions were rated `high`, including a serde `default = "…"` callback.
+  Candidates in other languages now stop at `medium` and say why.
+- **`find_dead_code` no longer rates a function called from module scope high-confidence dead.**
+  Top-level code has no call-graph node, so `if (!arg) die("usage")` or `start().catch(…)` made no
+  edge and `die` / `start` read as uncalled. A candidate its own file names outside every indexed
+  function is now capped at `low`, with the line. On OpenLore's own index the high tier fell from 16
+  to 9.
+- **`find_dead_code` no longer rates closures, visitor methods or used constructors high-confidence
+  dead.** A function defined inside a live function is a value it hands out (a callback, a returned
+  visitor's `enter`/`leave`) whose caller is outside the graph; a constructor of a class with live
+  members has run, though `new X()` is not a call edge. Both are capped at `low` with the reason.
+- **Every symbol-taking tool accepts a qualified symbol.** `EdgeStore.open` — the form the
+  generated `CODEBASE.md` prints for a hub — was answered "not found" by `get_subgraph`,
+  `analyze_impact`, `trace_execution_path`, `find_path`, `get_minimal_context`, `get_cluster` and
+  `locate_symbol_span`; `find_clones` and `analyze_error_propagation` resolved an external leaf
+  carrying the dotted call text and called the method uncomparable / unsupported; and a bare `open`
+  matched every `open` in the repository. `Class.method`,
+  `name::path`, `Class.method::path` and node ids now resolve; a plain or dotted name that is not a
+  `Class.method` keeps the existing lookup.
+- **`locate_symbol_span` serves `/`-separated paths on Windows.** Its `file` and `name::path`
+  were built with `path.relative`, so a Windows agent got `src\store.ts` beside node ids of
+  `src/store.ts`, and a symbol id no other tool would accept back.
+- **`verify_claim` can verify a symbol whose name is shared.** An ambiguous subject was answered
+  "Disambiguate before verifying", but no form was accepted — not `name::path` (which every other
+  symbol-taking tool accepts), `Class.method`, or the node id. All three now resolve, and the
+  ambiguity reason names the candidates in that form.
+- **A fresh `openlore install` no longer leaves its own index stale.** The decision-trail step
+  appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
+  of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now
+  wired between `init` and `analyze`.
+- **`detect_changes` and `search_specs` stopped sending agents to re-run `analyze` for nothing.**
+  `detect_changes` said "Re-run analyze_codebase" when the diff touched only non-code files, and
+  `search_specs` said "Run openlore analyze first" on a repository with no specs, which `analyze`
+  cannot fix. Both now say what is actually the case.
+
+### Docs
+
+- **The roadmap names one direction and one next step.** `ROADMAP.md` now plans OpenLore as
+  evidence delivered to the agent through hooks (ADR-0036, superseding ADR-0035), names the Claude
+  Code plugin as the next build, and lists cut work with the commit to restore it from. Shipped
+  changes are archived, and the main specs state only what the code does today.
+
 ## [3.6.0] - 2026-11-09
 
 **The graph learns your service contracts, and the agent loop leaves receipts.**

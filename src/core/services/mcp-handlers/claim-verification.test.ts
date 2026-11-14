@@ -86,6 +86,19 @@ describe('verify_claim — unresolved / ambiguous symbols are unverifiable', () 
     const r = await handleVerifyClaim({ directory: '/p', kind: 'dead', subject: 'dup' }) as { verdict: string; reason: string };
     expect(r.verdict).toBe('unverifiable');
     expect(r.reason).toMatch(/ambiguous/);
+    // …and says how to pick one, naming the forms that resolve.
+    expect(r.reason).toContain('Pass name::path');
+    expect(r.reason).toContain('dup::a.ts');
+  });
+  it('resolves an ambiguous name by name::path, Class.method::path, or node id', async () => {
+    // The ambiguity reason told agents to disambiguate, and no form was accepted.
+    const a = node({ id: 'src/a.ts::A.run', name: 'run', className: 'A' });
+    const b = node({ id: 'src/b.ts::B.run', name: 'run', className: 'B' });
+    useGraph([a, b, MAIN], []);
+    for (const subject of ['run::src/a.ts', 'A.run::src/a.ts', 'src/a.ts::A.run', 'A.run']) {
+      const r = await handleVerifyClaim({ directory: '/p', kind: 'dead', subject }) as { verdict: string; reason: string };
+      expect(r.verdict, subject).toBe('confirmed');
+    }
   });
 });
 
@@ -174,6 +187,21 @@ describe('verify_claim — dead', () => {
     const r = await handleVerifyClaim({ directory: '/p', kind: 'dead', subject: 'orphan' }) as { verdict: string; reason: string };
     expect(r.verdict).toBe('confirmed');
     expect(r.reason).toMatch(/unreachable from every liveness root/);
+  });
+  it('will not confirm a symbol inside a package whose manifest was never read', async () => {
+    // `ext/package.json` may name `ext/src/extension.ts` as its `main`; it is neither the root's
+    // manifest nor a declared workspace member's, so nothing read it.
+    const dir = await mkdtemp(join(tmpdir(), 'ol-claim-manifest-'));
+    try {
+      await mkdir(join(dir, 'ext', 'src'), { recursive: true });
+      await writeFile(join(dir, 'ext', 'package.json'), '{"main":"./out/extension.js"}');
+      useGraph([MAIN, node({ id: 'ext/src/extension.ts::activate' })], []);
+      const r = await handleVerifyClaim({ directory: dir, kind: 'dead', subject: 'activate' }) as { verdict: string; reason: string };
+      expect(r.verdict).toBe('unverifiable');
+      expect(r.reason).toMatch(/inside the package declared by ext\/package\.json, which was not read for wiring/);
+    } finally {
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   });
   it('refutes a symbol reached by direct edges', async () => {
     const r = await handleVerifyClaim({ directory: '/p', kind: 'dead', subject: 'helper' }) as { verdict: string };

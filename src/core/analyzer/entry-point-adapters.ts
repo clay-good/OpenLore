@@ -62,6 +62,11 @@ export interface ExternalWiringReport {
   boundaries: WiringBoundary[];
   /** Boundaries beyond {@link MAX_REPORTED_BOUNDARIES}, counted rather than listed. */
   boundariesOmitted: number;
+  /**
+   * The repo-relative `package.json` manifests that were read and parsed. A manifest NOT in this list
+   * contributed no wiring, so code it would make an entry point can read as unused.
+   */
+  manifestsRead: string[];
 }
 
 /** Bytes of one config file read; a larger file is an unreadable-config boundary. */
@@ -174,6 +179,8 @@ class Collector {
   readonly disclosures: WiringBoundary[] = [];
   /** Boundaries dropped by the per-config cap. */
   droppedBoundaries = 0;
+  /** The package manifests read and parsed, repo-relative. */
+  readonly manifestsRead = new Set<string>();
   private referencesPerConfig = new Map<string, number>();
   private boundariesPerConfig = new Map<string, number>();
   private seenReferences = new Set<string>();
@@ -256,6 +263,7 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
     wired,
     boundaries: boundaries.slice(0, MAX_REPORTED_BOUNDARIES),
     boundariesOmitted: Math.max(0, boundaries.length - MAX_REPORTED_BOUNDARIES) + out.droppedBoundaries,
+    manifestsRead: [...out.manifestsRead].sort(compareText),
   };
 }
 
@@ -270,6 +278,7 @@ export async function collectExternalWiring(rootPath: string): Promise<ExternalW
 async function readPackageJson(root: string, out: Collector, config = 'package.json'): Promise<Record<string, unknown> | null> {
   const manifest = await readJsonConfig(root, config, out);
   if (!manifest) return null;
+  out.manifestsRead.add(config);
   const dir = manifestDirectory(config);
   const add = (key: string, value: unknown) => {
     if (typeof value === 'string' && value.length > 0) out.reference({ config, key, reference: inDirectory(dir, value) });

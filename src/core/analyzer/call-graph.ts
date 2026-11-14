@@ -1280,6 +1280,12 @@ const TS_CALL_QUERY = `
                  property: (property_identifier) @call.name)]) @call.node
 `;
 
+/** `new C(...)` with a plain identifier class — `new ns.C()` and `new (f())()` are not bound. */
+const TS_NEW_QUERY = `
+  (new_expression
+    constructor: (identifier) @new.name) @new.node
+`;
+
 async function extractTSGraph(
   filePath: string,
   content: string,
@@ -1443,6 +1449,27 @@ async function extractTSGraph(
       callType,
       ...callArgumentFacts(nodeCapture.node, language),
     });
+  }
+
+  // `new C(...)` is not a call_expression, so before this no constructor ever had a caller: its
+  // callers were invisible to analyze_impact and blast_radius, and it read as dead.
+  const newQuery = nativeQuerySoft(language, lang, TS_NEW_QUERY);
+  if (newQuery) {
+    for (const match of newQuery.matches(tree.rootNode)) {
+      const nameCapture = match.captures.find(c => c.name === 'new.name');
+      const nodeCapture = match.captures.find(c => c.name === 'new.node');
+      if (!nameCapture || !nodeCapture) continue;
+      const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+      if (!caller) continue;
+      rawEdges.push({
+        callerId: caller.id,
+        calleeName: nameCapture.node.text,
+        line: nodeCapture.node.startPosition.row + 1,
+        callType: 'constructor',
+        newExpression: true,
+        ...callArgumentFacts(nodeCapture.node, language),
+      });
+    }
   }
 
   const style = tallyStyle('TypeScript', tree, nodes, filePath);
@@ -5691,6 +5718,11 @@ export interface CallGraphBuilderOptions {
   /** Schema files deliberately not read (fixtures, a Relay compiler's copy), each with why. */
   contractFilesSkipped?: ReadonlyArray<{ file: string; reason: string }>;
   /**
+   * Project-root directories the walk saw (change: scope-graphql-schema-universes), so GraphQL
+   * schema identity is scoped to a project instead of the whole repository.
+   */
+  projectRoots?: readonly string[];
+  /**
    * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
    * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
    * no mapping: a built path then binds only if it is itself indexed.
@@ -5717,6 +5749,7 @@ export class CallGraphBuilder {
   private readonly protoFilesOmitted: number;
   private readonly graphqlFilesOmitted: number;
   private readonly contractFilesSkipped: ReadonlyArray<{ file: string; reason: string }>;
+  private readonly projectRoots: readonly string[];
   private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
   private readonly pathAliases: readonly PathAlias[];
 
@@ -5730,6 +5763,7 @@ export class CallGraphBuilder {
     this.protoFilesOmitted = options.protoFilesOmitted ?? 0;
     this.graphqlFilesOmitted = options.graphqlFilesOmitted ?? 0;
     this.contractFilesSkipped = options.contractFilesSkipped ?? [];
+    this.projectRoots = options.projectRoots ?? [];
     this.buildOutput = options.buildOutput;
     this.pathAliases = options.pathAliases ?? [];
     this.resolution = {
@@ -6284,6 +6318,20 @@ export class CallGraphBuilder {
       let calleeNode: FunctionNode | undefined;
       let confidence: EdgeConfidence = 'name_only';
 
+      // Strategy 0n — `new C(...)` (TS/JS) binds only to class C's own `constructor`, declared in
+      // the caller's file or in the file the caller imports C from. Anything else — an external
+      // class (`new Map()`), a class with no explicit constructor, an unproven same name elsewhere —
+      // makes no edge at all, exactly as before this site was extracted.
+      if (raw.newExpression) {
+        const ctors = trie.findByQualifiedName(raw.calleeName, 'constructor');
+        const sameFile = ctors.filter(n => n.filePath === callerNode.filePath);
+        const importedFile = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+        const imported = importedFile ? ctors.filter(n => matchesImportedTarget(n.filePath, importedFile)) : [];
+        if (sameFile.length === 1) { calleeNode = sameFile[0]; confidence = 'same_file'; }
+        else if (sameFile.length === 0 && imported.length === 1) { calleeNode = imported[0]; confidence = 'import'; }
+        if (!calleeNode) continue;
+      }
+
       // Strategy 1r — CHAINED intra-object receiver: `this.repo.save()` / `self.repo.save()`
       // (change: shrink-receiver-resolution-boundary). Before this change the call query matched
       // no alternative for a nested receiver, so the site produced NO raw edge — not a resolved
@@ -6484,6 +6532,30 @@ export class CallGraphBuilder {
               calleeNode = candidates[0];
               confidence = viaReExport ? 're_export' : 'import';
             }
+          }
+        }
+      }
+
+      // Strategy 3p — Python instantiation `C(...)` of an in-repo class binds to `C.__init__`, on
+      // the same proof as `new C(...)`: declared in the caller's file, or in the file the caller
+      // imports `C` from. Without it the call fell through to an `external::C` leaf, listing the
+      // repository's own class as an external dependency and leaving `__init__` without a caller.
+      if (!calleeNode && !raw.calleeObject && callerNode.language === 'Python') {
+        const inits = trie.findByQualifiedName(raw.calleeName, '__init__');
+        if (inits.length > 0) {
+          const sameFile = inits.filter(n => n.filePath === callerNode.filePath);
+          const importedFile = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+          const imported = importedFile ? inits.filter(n => matchesImportedTarget(n.filePath, importedFile)) : [];
+          if (sameFile.length === 1) { calleeNode = sameFile[0]; confidence = 'same_file'; }
+          else if (sameFile.length === 0 && imported.length === 1) { calleeNode = imported[0]; confidence = 'import'; }
+          // An absolute in-project import records no binding (see buildBaseImportMap), which is
+          // why a plain function reached that way binds by its unique name below. A class gets the
+          // same policy — the one in-repo `C.__init__` — unless the file imported `C` from a
+          // module outside the repository, which the source has just contradicted.
+          else if (sameFile.length === 0 && imported.length === 0 && inits.length === 1
+            && !callImportMap.get(callerNode.filePath)?.has(`${EXTERNAL_IMPORT_PREFIX}${raw.calleeName}`)) {
+            calleeNode = inits[0];
+            confidence = 'name_only';
           }
         }
       }
@@ -6794,6 +6866,7 @@ export class CallGraphBuilder {
           protoFilesOmitted: this.protoFilesOmitted,
           graphqlFilesOmitted: this.graphqlFilesOmitted,
           ...(this.contractFilesSkipped.length ? { skippedFiles: this.contractFilesSkipped } : {}),
+          ...(this.projectRoots.length ? { projectRoots: this.projectRoots } : {}),
           importTargets: (() => {
             // Built lazily, once: a repository with no imported handler never indexes its files.
             let resolve: ReturnType<typeof createImportResolver> | undefined;

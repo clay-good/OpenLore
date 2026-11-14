@@ -1,143 +1,146 @@
 # OpenLore roadmap
 
-> Governing decision: [ADR-0035](openspec/decisions/) — focus on the verification/governance moat and
-> cross-harness interop. This file sequences the open [`openspec/changes/`](openspec/changes) backlog
-> against that decision. It is a priority view, not a spec: normative behavior still lives in
-> `openspec/specs/`, and each change folds its delta into those specs only when it ships and is
-> archived.
+> Governing decision: [ADR-0036](openspec/decisions/adr-0036-deliver-deterministic-evidence-to-the-agent-at-hoo.md)
+> (supersedes ADR-0035). Normative behavior lives in `openspec/specs/`. Each item below is an open
+> change in `openspec/changes/` until it ships and is archived.
 
-## The thesis in one breath
+## Direction
 
-Claude Code and Codex still ship **no persistent codebase index** — they grep or clone-per-task — so a
-deterministic, local-first structural substrate fills a real gap for them. The *retrieval* half of
-that is commoditizing and the IDEs are absorbing memory, so we don't compete on retrieval breadth. We
-deepen the two things that are hard to replicate and that harness vendors are least likely to build:
+- **Evidence at four moments.** Through hooks, the agent gets deterministic evidence when a prompt
+  is submitted, before an edit, after an edit, and before stop. Each finding carries proof (file,
+  line, edge, or receipt) and leads to one action: fix it, decide and record why, or raise it to a
+  human in the agent's own final message or PR body. It stays quiet unless something is new and real.
+- **Simple, local, always on.** No new MCP tools, integrations, services, or network calls. No LLM
+  in the hot path. No separate UI. Findings are advisory; enforcement stays off by default.
+- **Any spec workflow.** OpenSpec is the first-class format, but no feature may require OpenSpec or
+  its CLI. A repo with no spec framework still gets full value from code, tests, and decisions.
+- **Every current user keeps working.** No tool renames, no aliases. The npm CLI, the MCP server and
+  the Pi extension stay supported; tools hidden from the plugin's default set stay available there.
+- **Proof from daily use**, not benchmark tracks. Target: `claude plugin install`, no config.
 
-1. **The verification/governance moat** — deterministic, no-LLM blast radius, spec drift, public-surface
-   contracts, claim verification, provenance-tracked memory on one graph. What makes an agent
-   *trustworthy*, not just *informed*. The 2026 bottleneck is verification, not generation: agents
-   can't self-correct without external feedback, and "an agent can only achieve what it receives
-   feedback on."
-2. **Interop** — AGENTS.md / SKILL.md / SCIP / LSP / MCP, so OpenLore augments *whatever* agent the
-   user runs instead of being one more tool to choose. "Best tool for agents" means best *underneath*
-   the agent.
+## Build next
 
-## Execution order
+**[`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin)**, in progress on
+[PR #727](https://github.com/clay-good/OpenLore/pull/727). It comes first because it is the
+one-command install that puts the hooks in front of every Claude Code user. Every P1 item after it
+improves what those hooks deliver.
 
-Work the phases in order. Within a phase, each change ships as its own reviewed PR and folds its delta
-into `openspec/specs/` on archive. Nothing here is code yet — these are the specs and the path.
+## P0: 3.6.0 follow-ups (small fixes, any time)
 
-| Phase | What | Why this order |
-|-------|------|----------------|
-| **0 — Harden first** | Make the moat's claims measured, not asserted | The whole pitch is "deterministic and sound"; prove it before building more on top |
-| **1 — New direction (3 features)** | Verification feedback loop, change-provenance certificate, fleet coordination arc | The net-new capabilities that extend the moat into the industry's open problems |
-| **1b — Into the agent loop** | Diff findings agents most need, pushed through harness hooks; contract graph; parallel-agent facts | Turns pull-only receipts into feedback at the moment the agent can act |
-| **2 — Remaining moat + interop** | The rest of the BUILD/interop set | Still high-value; sequenced after the new direction lands |
-| **3 — Defer** | Breadth proposals | Promote only on a concrete user need |
+| Fix | Where | Source |
+|-----|-------|--------|
+| The watcher ignores `.openlore-ignore` and reads ignore rules only at start | `src/core/services/mcp-watcher.ts` | #717 |
+| Three project-root walkers use three different rules | `hook.ts` `openloreRoot`, Pi `piProjectRoot`, statusline `openloreProjectRoot` | #722 / #723 |
+| JS and JSX nodes are labeled TypeScript | `src/core/analyzer/call-graph.ts` | #724 |
+| A Java field of an external type is still fanned out by name | Java resolution in `call-graph.ts` | #724 |
+| OpenAPI enum details render double-escaped | `src/core/services/mcp-handlers/service-contract.ts` | #724 |
+| CI runs 12 of 26 integration test files | `package.json` `test:integration:ci` | #724 |
+| Three `yaml` parses do not pass `YAML_QUIET` | `entry-point-adapters.ts:484,1104`, `contract/openapi.ts:177` | `fix-analyze-console-report-caps` |
+| Two tool input schemas have properties without descriptions; 15 descriptions exceed 800 characters | `explain_retrieval_miss`, `declare_footprint` in `src/cli/commands/mcp.ts` | `mcp-quality` spec |
+| References to removed planning files | `change-status.ts` (`STATUS.md`), `docs/reachability-dead-code.md`, `spec-corpus-lint.test.ts:172` (lists `validator` as removed) | this curation |
+| CHANGELOG: 3.6.0 omits fleet record expiry (#698); `[Unreleased]` says both that `new X()` is and is not a call edge | `CHANGELOG.md` | review |
 
-## Phase 0 — Harden first
+## P1: the agent-evidence direction (in this order)
 
-The moat's credibility is the product. Harden the claims before extending them.
+| # | Change | Why it helps the agent | Needs |
+|---|--------|------------------------|-------|
+| 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) ([PR #727](https://github.com/clay-good/OpenLore/pull/727)) | Hooks and tools arrive with one install and stay current | — |
+| 2 | [`hook-reliability`](openspec/changes/hook-reliability) | Hooks never slow or break a session, and each finding is said once | — |
+| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) | One small tool set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
+| 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) | Intent in Spec Kit, Kiro, ADRs, plain requirements, or tests counts, not only OpenSpec | can start any time |
+| 5 | [`curate-product-surface`](openspec/changes/curate-product-surface) | Fewer, current skills and docs, so nothing stale misleads the agent | 1, 3 |
 
-| Work | What | Status |
-|------|------|--------|
-| [`add-callgraph-soundness-calibration`](openspec/changes/add-callgraph-soundness-calibration) | Measure the soundness/precision numbers instead of asserting them | open proposal |
-| Freshness-lease correctness under drift | Guarantee a receipt is never served stale-as-fresh when the base moves (the same discipline the fleet arc depends on) | hardening theme — scope a proposal when picked up |
-| Known-limitations residue | Package-aware monorepo scale and keyword recall for abbreviated identifiers — where big real repos quietly underperform | hardening theme |
+## P2: next, after P1 ships
 
-## Phase 1 — New direction (the three features)
+Four items get their own change folder only when P1 has shipped. Each names the existing change
+that carries it today.
 
-Each is net-new, but built almost entirely by composing shipped deterministic conclusions — no new
-analysis engine, no LLM.
+| Item (no folder yet) | What it does for the agent | Carried by |
+|------|----------------------------|------------|
+| `stop-hook-speaks-to-agent` | The before-stop receipt reaches the agent, not only the user, and is silent when nothing is new | `add-verification-feedback-loop` |
+| `intent-check-at-stop` | Before stop, the change is checked against the intent it touches: requirements, asserting tests, decisions | `add-test-evidence-claims`, `adopt-spec-link-status-vocabulary` |
+| `test-failure-localization` | A failed test or command points at the line that emitted the error and the changed code that reaches it | `add-log-anchor-conclusions` |
+| `first-session-experience` | The first prompt in a repo gets a short digest and an honest "index is building" line; a plan prompt is oriented | `adopt-agent-context-interop`, `add-openspec-proposal-orientation` |
 
-| Feature | What it does | Builds on |
-|---------|--------------|-----------|
-| [`add-verification-feedback-loop`](openspec/changes/add-verification-feedback-loop) | `verify_change`: one ordered, actionable receipt from the existing checks (blast radius, tests to run, spec drift, surface breaks) — external feedback at the moment the agent can act on it | composes shipped `blast_radius` / `select_tests` / `check_spec_drift` / `certify_public_surface` / `structural_diff` |
-| [`add-change-provenance-certificate`](openspec/changes/add-change-provenance-certificate) | `certify_provenance`: a reproducible, content-addressed record of *what a change does*, shaped to attach to SLSA/in-toto identity attestation — the semantic half of provenance nobody provides | composes shipped `change_impact_certificate` etc.; supersedes the deferred attested-governance proposal |
-| [`add-merge-semantic-certificate`](openspec/changes/add-merge-semantic-certificate) | `certify_merge`: "git merges cleanly, the combination is broken" — the landing verdict the fleet arc records | the public-surface breaking-change classifier (shipped); **dependency of the fleet arc** |
-| [`add-fleet-coordination-arc`](openspec/changes/add-fleet-coordination-arc) | Drift-aware shared verification memory + `fleet_status`: completes dispatch → in-flight → landing so parallel agents don't re-verify what's still valid and never trust a verdict the base invalidated | shipped `plan_parallel_work` / `map_in_flight_conflicts` + anchored memory + freshness lease + `certify_merge` |
+| Change | Why it helps the agent |
+|--------|------------------------|
+| [`add-verification-feedback-loop`](openspec/changes/add-verification-feedback-loop) | One receipt names every break the diff causes, with proof, while the agent can still fix it |
+| [`add-test-evidence-claims`](openspec/changes/add-test-evidence-claims) | Before it says "this is tested," it knows if a test asserts on the symbol, only calls it, or only reaches it |
+| [`adopt-spec-link-status-vocabulary`](openspec/changes/adopt-spec-link-status-vocabulary) | It sees when it touches code that a requirement covers but no test reaches, or that no requirement asks for |
+| [`add-log-anchor-conclusions`](openspec/changes/add-log-anchor-conclusions) | It starts at the line that emitted an error instead of grepping fragments of a message |
+| [`adopt-agent-context-interop`](openspec/changes/adopt-agent-context-interop) | A few lines of repository shape once per session and five short skills, not a long file every turn |
+| [`add-openspec-proposal-orientation`](openspec/changes/add-openspec-proposal-orientation) | A plan, spec, or proposal starts from what the user asked and from the real code, in any spec workflow |
+| [`add-incremental-early-cutoff`](openspec/changes/add-incremental-early-cutoff) | After an edit that changed no structure, answers stay fresh and it is not told to re-orient |
+| [`add-behavior-neutral-change-verdict`](openspec/changes/add-behavior-neutral-change-verdict) | It can say "these symbols changed only in comments and layout" with proof, and check the rest |
 
-## Phase 1b — Into the agent loop (added 2026-10-31)
+## P3: later
 
-Research and triage: [`CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`](openspec/changes/CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md).
-Phase 1 builds the receipts; Phase 1b catches the diff shapes agents most often get wrong and
-pushes every receipt to the agent at the moment it can act, including between parallel agents.
-Work in this order:
+| Change | Why it helps the agent |
+|--------|------------------------|
+| [`add-agent-loop-hooks-task-created`](openspec/changes/add-agent-loop-hooks-task-created) | A team task that will collide with a live peer is stopped before work starts (waits on harness facts) |
+| [`add-assumption-anchored-resolutions`](openspec/changes/add-assumption-anchored-resolutions) | A known gap in the graph is answered once, with proof, instead of disclosed on every call |
+| [`add-call-site-usage-profile`](openspec/changes/add-call-site-usage-profile) | It copies the call shape the repo already uses and sees which callers a signature change breaks |
+| [`add-codeowners-ownership-evidence`](openspec/changes/add-codeowners-ownership-evidence) | It can name the right human in its final message or PR body |
+| [`add-datastore-access-graph`](openspec/changes/add-datastore-access-graph) | Before it drops or narrows a column, it sees the functions and tests that still use it |
+| [`add-doc-claim-certification`](openspec/changes/add-doc-claim-certification) | It fixes the README line it just broke, in the same change |
+| [`add-effect-purity-inference`](openspec/changes/add-effect-purity-inference) | It stops guessing purity from names and sees when an edit splits a shared-state update across an `await` |
+| [`add-ffi-boundary-edges`](openspec/changes/add-ffi-boundary-edges) | It stops calling a function dead or safe to change when another language calls it through a binding |
+| [`add-iac-deploy-binding-commands`](openspec/changes/add-iac-deploy-binding-commands) | When it edits a script a container runs, it sees which image or pod runs it |
+| [`add-invalidation-receipts`](openspec/changes/add-invalidation-receipts) | It reads the one commit that broke a remembered fact and decides to re-anchor or drop it |
+| [`add-refactoring-aware-churn`](openspec/changes/add-refactoring-aware-churn) | It sees when a function appeared, what changed it last, and what changes with it, across renames |
+| [`add-resource-lifecycle-conclusions`](openspec/changes/add-resource-lifecycle-conclusions) | It learns at once that its new early return skips a `close()`, with the line |
+| [`adopt-mcp-tasks-and-cache-hints`](openspec/changes/adopt-mcp-tasks-and-cache-hints) | The client reads freshness as data, and a first index build shows progress and can be canceled (waits on the MCP revision) |
 
-| # | Change | What it does for the agent |
-|---|--------|----------------------------|
-| 1 | [`add-generated-file-guard`](openspec/changes/archive/2026-10-31-add-generated-file-guard) — **shipped** (#629, [docs](docs/generated-files.md)) | "This file is generated from `order.proto`; regenerate with …" |
-| 2 | [`add-phantom-reference-findings`](openspec/changes/archive/2026-10-31-add-phantom-reference-findings) — **shipped** (#632, [docs](docs/phantom-references.md)) | Invented imports, exports, and packages caught; pre-write once `verify_change` gains its `patch` input |
-| 3 | [`add-check-weakening-findings`](openspec/changes/archive/2026-10-31-add-check-weakening-findings) — **shipped** ([docs](docs/check-weakening.md)) | Skipped/deleted tests, removed assertions, suppressions, relaxed CI — joined to the code they guarded |
-| 4 | [`add-session-structural-ledger`](openspec/changes/archive/2026-10-31-add-session-structural-ledger) — **shipped** ([docs](docs/session-ledger.md)); edits after the last test run **shipped** in [`add-session-ledger-runs-contracts-tokens`](openspec/changes/archive/2026-11-01-add-session-ledger-runs-contracts-tokens); lease tokens **shipped** in [`add-session-lease-tokens`](openspec/changes/archive/2026-11-01-add-session-lease-tokens); session change counts **shipped** in [`add-ledger-session-counts`](openspec/changes/archive/2026-11-01-add-ledger-session-counts); contract and resource hashes **shipped** in [`add-ledger-contract-hashes`](openspec/changes/archive/2026-11-01-add-ledger-contract-hashes) | Names the symbol that changed under the agent; sees modify/revert loops; edits after the last test run |
-| 5 | [`add-agent-loop-hook-surfaces`](openspec/changes/archive/2026-10-31-add-agent-loop-hook-surfaces) — **shipped** for Claude Code: before-edit, after-edit, before-stop, and after-compact (with item 6) ([docs](docs/install.md#agent-loop-hooks)); sub-agent start **shipped** in [`add-agent-loop-hooks-subagents-codex-pi`](openspec/changes/archive/2026-11-01-add-agent-loop-hooks-subagents-codex-pi); pending-edit references **shipped** in [`add-agent-loop-hooks-codex-pi-and-pending-edits`](openspec/changes/archive/2026-11-01-add-agent-loop-hooks-codex-pi-and-pending-edits); Codex **shipped** in [`add-agent-loop-hooks-codex-and-pi`](openspec/changes/archive/2026-11-01-add-agent-loop-hooks-codex-and-pi); the Pi after-edit receipt **shipped** in [`add-agent-loop-hooks-pi-and-task-created`](openspec/changes/archive/2026-11-01-add-agent-loop-hooks-pi-and-task-created); Pi compaction **shipped** in [`add-agent-loop-hooks-task-created-and-compaction`](openspec/changes/archive/2026-11-01-add-agent-loop-hooks-task-created-and-compaction); task creation follows in [`add-agent-loop-hooks-task-created`](openspec/changes/add-agent-loop-hooks-task-created) | Receipts pushed after edits, after compaction, before stop, at sub-agent start, at task creation |
-| 6 | [`add-session-handoff-briefing`](openspec/changes/archive/2026-11-01-add-session-handoff-briefing) — **shipped**: `get_handoff_briefing` (`full`), `openlore handoff`, and the after-compact hook | Compaction no longer loses the in-flight change (promoted from Defer) |
-| 7 | [`add-service-contract-certification`](openspec/changes/archive/2026-11-01-add-service-contract-certification) — **shipped** (OpenAPI phase): `certify_service_contract` (`full`), `openlore certify-service-contract`; briefings (`contracts` in `orient` and `blast_radius`) **shipped** in [`add-contract-briefings`](openspec/changes/archive/2026-11-01-add-contract-briefings); the payload check **shipped** in [`add-contract-payload-check`](openspec/changes/archive/2026-11-01-add-contract-payload-check) and in `verify_change` ([`add-verify-change-payload-findings`](openspec/changes/archive/2026-11-01-add-verify-change-payload-findings)); tests per consumer **shipped** ([`add-contract-consumer-tests`](openspec/changes/archive/2026-11-01-add-contract-consumer-tests)); operations as graph nodes with `implements_endpoint` / `consumes_endpoint` and the `contractSchemas` capability **shipped** in [`add-contract-node-projection`](openspec/changes/archive/2026-11-01-add-contract-node-projection) ([docs](docs/contracts.md)); named schemas, generated clients, federated consumers, the protobuf reader and the GraphQL reader **shipped** in [`add-contract-graph-projection`](openspec/changes/archive/2026-11-07-add-contract-graph-projection) ([docs](docs/contracts.md#protobuf)) | Schema ↔ code parity and breaking verdicts joined to callers (promoted from Phase 2) |
-| 8 | [`add-iac-code-binding`](openspec/changes/archive/2026-11-01-add-iac-code-binding) — **shipped** (env half): `declaredBy` in `analyze_env_impact`, `envDeclarations` in `blast_radius`, OpenTofu; Lambda handler binding **shipped** in [`add-iac-deploy-binding`](openspec/changes/archive/2026-11-01-add-iac-deploy-binding); the Serverless reader, the build-output mapping, the `orient` field and the `iacCodeBinding` capability **shipped** in [`add-serverless-and-build-output-binding`](openspec/changes/archive/2026-11-01-add-serverless-and-build-output-binding) ([docs](docs/iac.md)); container commands follow in [`add-iac-deploy-binding-commands`](openspec/changes/add-iac-deploy-binding-commands) | Which manifests still set a renamed env var; which code a resource runs |
-| 9 | [`add-peer-footprint-board`](openspec/changes/archive/2026-11-01-add-peer-footprint-board) — **shipped**: `declare_footprint` (`coordination`), `openlore footprint`, board read by `map_in_flight_conflicts` and `fleet_status`; peer change notices **shipped** for declared reads ([`add-peer-change-notices`](openspec/changes/archive/2026-11-01-add-peer-change-notices)) and served functions ([`add-peer-notices-served-set-and-fleet-records`](openspec/changes/archive/2026-11-01-add-peer-notices-served-set-and-fleet-records)); fleet records shared on the board and `plan_parallel_work` `includeBoard` **shipped** ([`add-board-fleet-records-and-planning`](openspec/changes/archive/2026-11-01-add-board-fleet-records-and-planning)) | Parallel agents see each other's footprints and are told when a peer changes what they read |
-| 10 | [`add-graph-claim-kinds`](openspec/changes/archive/2026-11-01-add-graph-claim-kinds) — **shipped**: `verify_claim` kinds `decision-governed`, `endpoint-implemented`, `endpoint-consumed`; `lease-current` **shipped** in [`add-session-lease-tokens`](openspec/changes/archive/2026-11-01-add-session-lease-tokens) | `verify_claim` answers "is this endpoint implemented / called?" and "does a decision govern this?" |
+## Later (not now)
 
-**Phase 1b follow-ups** (split from the items above as they shipped; work these next, in this order):
-[`add-iac-deploy-binding-commands`](openspec/changes/add-iac-deploy-binding-commands) ·
-[`add-agent-loop-hooks-task-created`](openspec/changes/add-agent-loop-hooks-task-created) (waiting on harness facts)
+- Adapters for more harnesses (Codex, Cursor, Antigravity, others) beyond what ships today.
+- Agent Plugins 1.0 packaging.
 
-Items 1–3 add findings, not tools, and land in `verify_change` (its 2026-10-31 addenda also add the
-speculative `patch` input, diff-scoped architecture violations, and `secret-added`). The phase adds
-three tools, none in the default surface: `get_handoff_briefing` and `certify_service_contract`
-(`full` preset) and `declare_footprint` (`coordination` preset). The lane for parallel
-agents: OpenLore computes and publishes coordination facts; harness transports deliver them; no
-messaging, dispatch, or locks.
+## Not doing
 
-## Phase 2 — Remaining moat + interop
+Cut work is deleted, not archived: in OpenSpec, archived means shipped. Restore a change with
+`git show 0dd75dbef:openspec/changes/<name>/proposal.md`; restore a cut task from the same path's
+`tasks.md`.
 
-Kept as open proposals; sequence after Phase 1.
+| Name | Reason | Restore SHA |
+|------|--------|-------------|
+| `add-build-graph-ingest` | New integration (Nx, Turborepo, Bazel exports); its zero-config manifest tier goes with it | `0dd75dbef` |
+| `add-coverage-map-test-selection` | New integration (coverage artifacts); `select_tests` already works from the graph | `0dd75dbef` |
+| `add-dependency-impact-analysis` | New tool; its convenience path fetches packages from a registry | `0dd75dbef` |
+| `add-lsp-evidence-tier` | New integration (a language-server sidecar) | `0dd75dbef` |
+| `add-scip-index-interchange` | New integration (a `--scip` mode on `openlore import`) | `0dd75dbef` |
+| `add-store-origin-provenance` | Serves the commit gate and operator policy, not evidence about the change in hand | `0dd75dbef` |
+| `add-team-memory-promotion` | A workflow for humans to manage, not evidence for the agent | `0dd75dbef` |
+| `add-vuln-reachability-triage` | New tool that needs caller-supplied advisory data | `0dd75dbef` |
+| `add-data-flow-conclusions` | New tool and a new analysis engine; too large for the value | `0dd75dbef` |
+| `add-structural-search-tool` | New tool; agents already have grep and ast-grep | `0dd75dbef` |
+| `add-flag-impact-analysis` | New tool for a narrow case | `0dd75dbef` |
+| `add-knowledge-map-and-coupling-upgrades` | Mostly facts about people (bus factor); its coupling noise guards go with it | `0dd75dbef` |
+| `add-ownership-tagged-conclusions` | Lease tokens (#644) already give exact staleness of what `orient` and `recall` served; the rest is plumbing | `0dd75dbef` |
+| `add-migration-impact-certificate` | Merged into `add-datastore-access-graph`; its lock-hazard rule table is dropped | `0dd75dbef` |
+| `add-shared-state-hazard-conclusions` | Merged into `add-effect-purity-inference`; Go support and the reader census are dropped | `0dd75dbef` |
+| `add-symbol-provenance-conclusions` | Merged into `add-refactoring-aware-churn`; the separate tool is dropped | `0dd75dbef` |
+| `add-callgraph-soundness-calibration` tasks: CI job; execution-witnessed recall harness, results doc, its checks | Benchmark track; proof comes from daily use | `0dd75dbef` |
+| `add-change-provenance-certificate` tasks: CLI; public-surface field; addendum fold-ins; in-toto check against an external validator | New surface; the MCP tool stays as shipped | `0dd75dbef` |
+| `add-merge-semantic-certificate` tasks: retained edges; diff-union build scoping; CLI | New surface or low value for the agent loop | `0dd75dbef` |
+| `add-fleet-coordination-arc` tasks: `carried` state and invalidating commit; live arc execution; CLI; lease test for both | No tool records a verdict yet, so these add surface with no user | `0dd75dbef` |
+| `add-verification-feedback-loop` tasks: `openlore verify-change` CLI; pre-commit gate; their tests | New surfaces; the MCP tool and the before-stop hook already deliver the receipt | `0dd75dbef` |
 
-**Interop:** [`adopt-agent-context-interop`](openspec/changes/adopt-agent-context-interop) (AGENTS.md/SKILL.md + slim injected digest) ·
-[`add-scip-index-interchange`](openspec/changes/add-scip-index-interchange) ·
-[`add-lsp-evidence-tier`](openspec/changes/add-lsp-evidence-tier) ·
-[`adopt-mcp-tasks-and-cache-hints`](openspec/changes/adopt-mcp-tasks-and-cache-hints) ·
-[`add-structural-search-tool`](openspec/changes/add-structural-search-tool)
+## Research notes (removed)
 
-**Moat / value:** [`add-dependency-impact-analysis`](openspec/changes/add-dependency-impact-analysis) ·
-[`add-vuln-reachability-triage`](openspec/changes/add-vuln-reachability-triage) ·
-[`add-store-origin-provenance`](openspec/changes/add-store-origin-provenance) ·
-[`add-behavior-neutral-change-verdict`](openspec/changes/add-behavior-neutral-change-verdict) ·
-[`add-team-memory-promotion`](openspec/changes/add-team-memory-promotion) ·
-[`add-coverage-map-test-selection`](openspec/changes/add-coverage-map-test-selection) ·
-[`add-incremental-early-cutoff`](openspec/changes/add-incremental-early-cutoff) ·
-[`add-call-site-usage-profile`](openspec/changes/add-call-site-usage-profile) (promoted from Defer) ·
-[`add-build-graph-ingest`](openspec/changes/add-build-graph-ingest) (promoted from Defer: zero-config workspace tier)
+Reports that sat in `openspec/changes/` but were not changes. Restore with
+`git show 0dd75dbef:openspec/changes/<file>`.
 
-## Phase 3 — Defer
+| Files | Restore SHA |
+|-------|-------------|
+| `README.md`, `STATUS.md` (this file replaces them) | `0dd75dbef` |
+| `DOGFOOD-call-resolution-recall.md`, `DOGFOOD-change-impact-certificate.md`, `DOGFOOD-v2.0.19.md`, `DOGFOOD-v2.1.1-tool-count-drift.md`, `DOGFOOD-widen-js.md` | `0dd75dbef` |
+| `RELEASE-v2.1.0.md`, `RELEASE-v2.1.1.md`, `RELEASE-v2.1.2.md`, `RELEASE-v2.1.4.md`, `RELEASE-v2.1.5.md` | `0dd75dbef` |
+| `E2E-AUDIT-2026-07.md`, `E2E-FIRSTRUN-2026-07-27.md`, `KNOWN-LIMITATIONS-2026-07.md`, `FEATURE-UPDATES.md`, `HARDEN-DISTRIBUTION-AND-SUBSTRATE.md` | `0dd75dbef` |
+| `BACKGROUND-SUBSTRATE-2026-10.md`, `COMPETITIVE-SUBSTRATE-2026-07.md`, `CONTRACT-GRAPH-AND-AGENT-LOOP-2026-10.md`, `ECOSYSTEM-RESEARCH-2026-07-27.md`, `FIELD-RESEARCH-2026-07.md`, `GOVERNANCE-SUBSTRATE-2026-07-31.md`, `SUBSTRATE-WHITESPACE-2026-07-27.md`, `STRUCTURAL-CONTEXT-PATTERNS.md` | `0dd75dbef` |
+| `KOTLIN-TOTAL-SUPPORT-2026-10.md`, `PARALLEL-WORK-COORDINATION.md`, `SPEC-STORE-INTEGRATION.md` | `0dd75dbef` |
 
-Plausible, not now — mostly the `*-conclusions` / `*-certificate` / `*-graph` breadth cluster. Each is
-a new tool on a surface already shrunk to a lean default ([ADR-0023](openspec/decisions/)); the bar to
-promote one is a concrete user need, not completeness.
+## Notes for the owner
 
-`add-data-flow-conclusions` · `add-datastore-access-graph` · `add-ffi-boundary-edges` ·
-`add-effect-purity-inference` · `add-resource-lifecycle-conclusions` · `add-shared-state-hazard-conclusions` ·
-`add-flag-impact-analysis` · `add-log-anchor-conclusions` ·
-`add-doc-claim-certification` · `add-migration-impact-certificate` · `add-knowledge-map-and-coupling-upgrades` ·
-`add-refactoring-aware-churn` · `add-symbol-provenance-conclusions` · `add-ownership-tagged-conclusions` ·
-`add-codeowners-ownership-evidence` · `add-invalidation-receipts` · `add-assumption-anchored-resolutions` ·
-`add-test-evidence-claims` ·
-`adopt-spec-link-status-vocabulary`
-
-`honour-npmrc-in-update-check` is effectively **built** — only a manual private-registry check remains.
-
-## Won't do — archived 2026-10-24
-
-Moved to [`openspec/changes/archive/2026-10-24-*`](openspec/changes/archive) with full text preserved
-(archive, not delete). Batch note: [`2026-10-24-WONT-DO-roadmap-focus.md`](openspec/changes/archive/2026-10-24-WONT-DO-roadmap-focus.md).
-
-- **The 22 Kotlin changes** — full first-class support for one more language is breadth, not moat; the
-  multi-language ladder already fails soft for Kotlin. Already NOT DOING in `STATUS.md`.
-- **`add-notebook-cell-graph`**, **`add-line-provenance-evidence`**, **`add-render-guard-index`** — narrow / speculative.
-- **`add-attested-governance-artifacts`** — **superseded** by `add-change-provenance-certificate`, which carries the interop target and the recompute-to-verify guarantee it lacked.
-
-## How we execute
-
-Phases in order; within a phase, one change per PR, each shipping behind its tests and then
-`openspec archive <name>` to fold its delta into `openspec/specs/`. Promote from Defer only on
-evidence. Re-run this triage whenever a sweep adds proposals — the tiers are a living view, not a
-contract.
+- `honour-npmrc-in-update-check` is archived as shipped. One task is manual: check the update
+  notifier against a private registry (Nexus) on a machine set up for one.

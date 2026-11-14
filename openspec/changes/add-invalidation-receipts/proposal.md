@@ -1,60 +1,50 @@
-# Add invalidation receipts: the commit that killed each belief, with its cause
+# A stale memory names the commit that made it stale, and why
 
-> Status: PROPOSED (2026-07-27, ecosystem research sweep). When a memory or decision stops being
-> fresh, pin the invalidating commit and the cause as a permanent record, so `recall --asOf`
-> answers not just "what was believed then" but "when and why did this belief die." Prior art:
-> bi-temporal fact invalidation in temporal knowledge graphs for agent memory
-> (https://arxiv.org/abs/2501.13956).
+> Priority: P3 · Not built
+> Reaches the agent through: `recall`, and the stale-memory lists of `orient` and `blast_radius`
+> Why it helps the agent: it can read the one commit that broke a remembered fact and decide to re-anchor it or drop it.
 
-## The gap
+## Problem
 
-OpenLore is bitemporal on the way in and vague on the way out. A memory records
-`validFromCommit` at write (`src/types/index.ts:838-842`), and `asOf`/`changedSince` queries work
-— but the valid-time *endpoint* exists only for one cause: explicit supersession sets
-`invalidatedAt`/`invalidatedByCommit` (`index.ts:843-846`). Every other death is implicit and
-evidence-free: an anchor that drifted or orphaned is detected at read time as a present-tense
-verdict ("orphaned now", `mcp-handlers/memory.ts:176`) with no record of *which commit* did it or
-*why*. The result: a drifted memory tells the agent to distrust it but cannot say what changed,
-`asOf` history shows beliefs winking out with no receipt, and two teammates' stores disagree
-about staleness with no common evidence to reconcile against.
+A memory records the commit where it became valid (`validFromCommit`, `src/types/index.ts`). The
+end is recorded for one case only: supersession sets `invalidatedAt` and `invalidatedByCommit`.
+Every other end has no evidence. A drifted or orphaned memory is a present-tense verdict from
+`recall` ("orphaned now"). It cannot say which commit changed the anchor or what the change was.
+The agent is told to distrust the memory and is given nothing to check.
 
 ## What changes
 
-- **Generalize the existing endpoint fields** — no new schema concept. Whenever staleness
-  detection concludes a memory or decision is no longer fresh, it writes (once, immutably)
-  `invalidatedByCommit` + a `cause` from a closed set: `anchor-content-changed`,
-  `symbol-deleted`, `superseded-by <id>` (today's only writer), and `claim-refuted` (if
-  `add-memory-claim-verdicts` ships; composes, does not block).
-- **Pin the commit deterministically**: the detecting pass (analyze / watcher / read-path
-  staleness) knows the last-fresh graph fingerprint and the first-stale one; the receipt commit
-  is found by a bounded walk of the anchored file's history between the two fingerprints'
-  commits — the first commit whose touch of the anchored span breaks the anchor's content hash.
-  Unresolvable cases (force-pushed history, shallow clone) record `cause` with
-  `commit: unknown` and the reason — never a guessed SHA.
-- **Serve the receipt**: `recall` attaches it to `drifted`/`orphaned` results ("orphaned since
-  `ab12cd34`: symbol deleted"), and `recall --asOf` reports closed validity intervals with both
-  endpoints evidenced. Detection semantics change nowhere — the same memories are stale; they
-  now carry proof.
+- Reuse the existing end fields and add one: `invalidation: { cause, commit, reason? }` on
+  `AnchoredMemory`. `cause` is from a closed set: `anchor-content-changed`, `symbol-deleted`,
+  `superseded-by <id>` (today's only writer).
+- Find the commit with a bounded walk: the commits that touch the anchored file between
+  `validFromCommit` and `HEAD`, oldest first; the first one where the anchor's content hash
+  (`src/core/analyzer/symbol-content-hash.ts`, or the anchor's `span` text) no longer matches.
+  The walk has a fixed commit cap.
+- When the commit cannot be found (shallow clone, rewritten history, cap reached, no
+  `validFromCommit`), the receipt says `commit: "unknown"` with the reason. Never a guessed SHA.
+- `openlore analyze` and the watcher write the receipt once, when they first see the memory stale.
+  `recall` serves it; if none is stored yet, `recall` computes it for the response and does not
+  write. Example: "orphaned since `ab12cd34`: symbol deleted".
+- `recall` with `asOf` reports the closed interval (valid from A, ended at C, cause).
+- `staleTriggeredMemories` in `orient` and `blast_radius` carry the same receipt.
 
-Deliberately NOT borrowed from the temporal-KG lineage: LLM-driven contradiction detection at
-ingestion (invalidation here is triggered only by the existing deterministic detectors) and
-wall-clock validity decay (the cursor stays the commit, never time — house rule).
+## What does not change
 
-## Why this is in scope
+- No new tool. `recall` keeps its name, verdicts and lanes.
+- Which memories are stale does not change. The receipt is evidence for the existing verdict.
+- The cursor stays the commit, never wall-clock time. No model. Local git only.
+- Old records without a receipt stay valid. Works without OpenSpec.
 
-Turns a bare verdict into a conclusion with evidence — the house shape ("no receipt, no claim").
-It is cheap (the detectors already run; the walk is bounded and cached per anchor), additive, and
-it upgrades `asOf` from a snapshot query into an honest belief history — the thing the substrate
-uniquely can offer over every non-anchored memory system.
+## Limits we disclose
 
-## Impact
+- Memories only. Decisions keep their own supersession record.
+- A memory refuted by a `verify_claim` claim (`evidenceRefuted`) gets no receipt in this change.
+- A stored receipt is not rewritten. Two clones that saw different history can hold different
+  receipts; each is correct for the history it saw.
+- An uncommitted edit has no commit: the receipt says `commit: "unknown"`, reason "working tree".
 
-- Touches: staleness detection paths (analyze-time continuity/orphan pass, watcher, read-path
-  verdicts in `mcp-handlers/memory.ts`), the store types (additive `cause` field beside the
-  existing endpoint fields), `recall` output.
-- No new tool; no behavior change to which facts are stale.
-- Specs: `drift` — 1 ADDED requirement.
-- Risk: receipt-walk cost on churny files (mitigated: bounded to the inter-fingerprint range,
-  computed once per invalidation and stored); disagreeing receipts across machines that observed
-  different fingerprint gaps (acceptable: each receipt is honest about its observation window —
-  the walk range is part of the evidence).
+## Depends on
+
+Shipped: bitemporal memory fields, anchor verdicts (`src/core/decisions/anchor.ts`), per-symbol
+content hashes, continuity carry-forward at analyze.

@@ -36,6 +36,7 @@ vi.mock('./utils.js', () => ({
 }));
 
 import {
+  resolveQualifiedSymbol,
   buildAdjacency,
   bfs,
   buildWeightedAdjacency,
@@ -1643,5 +1644,36 @@ describe('leaf and low-risk lists hold code only (change: add-contract-graph-pro
     expect(leaves.leaves.map(l => l.file)).toEqual(['srv/main.go']);
     const low = await handleGetLowRiskRefactorCandidates('/tmp/proj') as { candidates: Array<{ language: string }> };
     expect(low.candidates.map(c => c.language)).not.toContain('Protobuf');
+  });
+});
+
+describe('resolveQualifiedSymbol', () => {
+  // `Class.method` is how the generated digest prints a hub (`EdgeStore.open`); get_subgraph and
+  // analyze_impact answered it "No function matching", and a bare `open` matched every `open`.
+  const n = (filePath: string, name: string, className?: string, extra: Partial<FunctionNode> = {}): FunctionNode => ({
+    id: `${filePath}::${className ? `${className}.` : ''}${name}`, name, filePath, className,
+    isAsync: false, language: 'TypeScript', startIndex: 0, endIndex: 1, fanIn: 0, fanOut: 0, ...extra,
+  });
+  const nodes = [
+    n('src/store.ts', 'open', 'EdgeStore'),
+    n('src/spill.ts', 'open', 'Spill'),
+    n('src/util.ts', 'open'),
+    n('infra/main.tf', 'aws_s3_bucket.logs'),
+  ];
+  const byName = (name: string) => nodes.filter(x => x.name === name);
+  const byId = (id: string) => nodes.find(x => x.id === id);
+  const ids = (q: string) => resolveQualifiedSymbol(q, byName, byId)?.map(x => x.id) ?? null;
+
+  it('resolves Class.method, name::path, Class.method::path and a node id', () => {
+    expect(ids('EdgeStore.open')).toEqual(['src/store.ts::EdgeStore.open']);
+    expect(ids('open::src/util.ts')).toEqual(['src/util.ts::open']);
+    expect(ids('Spill.open::spill.ts')).toEqual(['src/spill.ts::Spill.open']);
+    expect(ids('src/store.ts::EdgeStore.open')).toEqual(['src/store.ts::EdgeStore.open']);
+  });
+
+  it('leaves a plain name, and a dotted name with no Class.method reading, to the caller', () => {
+    expect(ids('open')).toBeNull();
+    expect(ids('aws_s3_bucket.logs')).toBeNull();
+    expect(ids('open::src/missing.ts')).toEqual([]);
   });
 });

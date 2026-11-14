@@ -294,17 +294,44 @@ describe.skipIf(!launcherAvailable)('the gate reports honestly when it cannot be
 });
 
 describe('the trail is wired on a repository seeing OpenLore for the first time', () => {
-  it('wires the gate AFTER the index build, which is what creates the config', async () => {
-    // The ordering that matters: on a fresh repo `.openlore/config.json` does not
-    // exist until the install's own index build runs `init`. Wiring the gate before
-    // that meant the headline flow always reported "no config yet" and silently
-    // skipped the decision trail — invisible to any test that pre-creates a config.
+  it('wires the gate between init (which creates the config) and analyze (which fingerprints it)', async () => {
+    // Before init: a fresh repo has no `.openlore/config.json`, so the headline flow reported "no
+    // config yet" and skipped the decision trail. After analyze: the gate's CLAUDE.md / AGENTS.md
+    // guidance changed the fingerprinted corpus, so the index was stale on arrival.
     const source = readFileSync(fileURLToPath(new URL('./index.ts', import.meta.url)), 'utf8');
+    const build = source.slice(source.indexOf('export async function buildIndex'));
+    const initAt = build.indexOf('await openloreInit(');
+    const hookAt = build.indexOf('await opts.afterInit?.()');
+    const analyzeAt = build.indexOf('await analyzeCommand.parseAsync(');
+    expect(initAt).toBeGreaterThan(-1);
+    expect(hookAt).toBeGreaterThan(initAt);
+    expect(analyzeAt).toBeGreaterThan(hookAt);
     const analyzeBlock = source.slice(source.indexOf('const shouldAnalyze'));
-    const buildAt = analyzeBlock.indexOf('await buildIndex(cwd)');
-    const gateAt = analyzeBlock.indexOf('await wireGovernanceGate(cwd)');
-    expect(buildAt).toBeGreaterThan(-1);
-    expect(gateAt).toBeGreaterThan(-1);
-    expect(gateAt).toBeGreaterThan(buildAt);
+    expect(analyzeBlock).toContain('await buildIndex(cwd, { afterInit: wireGate })');
   });
+});
+
+describe.skipIf(!launcherAvailable)('a fresh install leaves a fresh index', () => {
+  let dir: string;
+  let home: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-gate-fresh-'));
+    home = await mkdtemp(join(tmpdir(), 'openlore-gate-fresh-home-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  it('does not change the analyzed corpus after the index is built', async () => {
+    await execFileAsync('git', ['init', '-q'], { cwd: dir });
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src', 'index.ts'), 'export function greet(): string { return "hi"; }\n');
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', home, repoOnly: true })).toBe(0);
+    // The gate did write its guidance…
+    expect(await readFile(join(dir, 'CLAUDE.md'), 'utf8')).toMatch(/decision/i);
+    // …and the index already accounts for it: a re-run would skip, not re-analyze.
+    const { isCacheFresh } = await import('../../core/services/mcp-handlers/utils.js');
+    expect(await isCacheFresh(dir)).toBe(true);
+  }, 60_000);
 });

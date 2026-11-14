@@ -124,6 +124,6 @@ change with the measured delta stated.
   `scripts/bench-agent.ts`, `src/bench/container-launch.ts`, `src/bench/pinned-repository.ts`,
   `src/bench/preregistered-rule.ts`, `src/bench/protocol-verdict.ts`, `src/bench/result-path.ts`,
   `src/bench/fixtures/trajectory.txt`, `src/core/analyzer/perf-counters.ts`,
-  `src/core/analyzer/parse-budget.ts`, `src/core/analyzer/json-stream.ts`,
+  `src/core/analyzer/extraction-budget.ts`, `src/core/analyzer/json-stream.ts`,
   `src/core/services/edge-store.ts`, `src/core/services/mcp-handlers/graph.ts`,
   and `src/core/decisions/atomic-store.ts`.

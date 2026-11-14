@@ -87,6 +87,11 @@ export interface RawEdge {
   argCount?: number;
   /** True when a spread/splat makes argCount a lower bound rather than an exact count. */
   argCountLowerBound?: true;
+  /**
+   * A TS/JS `new C(...)` site: `calleeName` is the CLASS name, and the edge binds only to that
+   * class's own `constructor` node — never to an unrelated same-named function or an external leaf.
+   */
+  newExpression?: true;
 }
 
 /** Plain-data class relationship extracted while the Pass-1 syntax tree is alive. */

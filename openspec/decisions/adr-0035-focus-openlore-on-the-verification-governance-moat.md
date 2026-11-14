@@ -2,7 +2,11 @@
 
 ## Status
 
-accepted
+superseded by ADR-0036 (decision b30f08a9, 2026-11-14)
+
+> OpenLore now delivers deterministic evidence to the agent at hook moments, not through new tools
+> or integrations. Most of this ADR's BUILD tier was cut; see the "Not doing" table in `ROADMAP.md`.
+> This ADR is kept as the historical record.
 
 **Domains**: 
 

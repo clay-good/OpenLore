@@ -95,7 +95,15 @@ export async function validateWithOpenSpec(rootPath: string, name: string): Prom
 
 async function listOpenChanges(rootPath: string): Promise<string[]> {
   const changesRoot = safeJoin(rootPath, 'openspec/changes');
-  const entries = await readdir(changesRoot, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(changesRoot, { withFileTypes: true });
+  } catch (error) {
+    // No `openspec/changes/` is a repository with no open change — the state of every repository
+    // `openlore install` sets up. It crashed with a raw ENOENT instead.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
   const names = entries
     .filter((entry) => entry.isDirectory() && entry.name !== 'archive')
     .map((entry) => entry.name)

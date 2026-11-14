@@ -189,9 +189,9 @@ Confidence is deliberately conservative — the bias is toward **false-live over
 
 | Confidence | When |
 |------------|------|
-| `high` | static language · no internal caller · not imported by name · **and its module is not imported anywhere** |
-| `medium` | reachable only from other dead code, or no dependency-graph signal available |
-| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve), **or a dynamic-boundary site can name it**, **or contract wiring names it and the binding was refused**, **or the route inventory names it as a handler it could not pin**, **or its file is classified generated/vendored** |
+| `high` | static language whose imports the dependency graph extracts (TypeScript/JavaScript/Java/Kotlin) · no internal caller · not imported by name · **and its module is not imported anywhere** |
+| `medium` | reachable only from other dead code, or no dependency-graph signal available, **or a language whose imports are not extracted** (Go, Rust, C#, …: "not imported by name" is not evidence there) |
+| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve), **or a dynamic-boundary site can name it**, **or contract wiring names it and the binding was refused**, **or the route inventory names it as a handler it could not pin**, **or its file is classified generated/vendored**, **or its nearest `package.json` was not read for wiring** (neither the root's nor a declared workspace member's) |
 | *(not a candidate)* | a bodyless declaration in a `.d.ts` / `.d.mts` / `.d.cts` file — counted in `declarationsExcluded` |
 
 That last rule matters: on a real repo it cut high-confidence candidates from ~470 to ~35 — a

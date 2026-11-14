@@ -2,51 +2,50 @@
 
 ## ADDED Requirements
 
-### Requirement: DatastoreAccessSitesAreConclusionsWithDisclosedConfidence
+### Requirement: BlastRadiusNamesDatastoreAccessWithDisclosedConfidence
 
-The system SHALL provide a datastore impact conclusion that, given a table or model name, returns
-the line-precise access sites that read, write, or alter it, the upstream functions that
-transitively reach those sites, and the tests that reach them. Each site SHALL carry an access
-class and a confidence of `resolved`, `partial`, or `unresolvable`, and column attribution SHALL
-be claimed only where the column appears literally at the site — a wildcard or dynamic projection
-SHALL report the column set as unknown rather than empty. The result SHALL be a sound lower bound:
-query sites the extractor cannot resolve, files whose data-access library is outside the supported
-pattern set, and index staleness SHALL be disclosed as boundaries, never omitted. An unrecognized
-table name SHALL return an explicit not-found with candidates, never an empty result implying the
-table is unused. The conclusion SHALL be computed deterministically from static extraction and the
-cached graph, with no database connection, no query execution, and no LLM.
+`blast_radius` SHALL report, in a `datastoreAccess` field, the tables and columns that each changed
+function reads or writes, each site with file, line, access class (`read`, `write`, `ddl`) and
+confidence (`resolved`, `partial`, `unresolvable`). Sites it cannot resolve and files it cannot
+scan SHALL be counted and located in `datastoreNotAssessed`. The facts SHALL come from static
+extraction only, and no new tool SHALL be added for this answer.
 
-#### Scenario: A table's readers, writers, and blast radius are returned
+#### Scenario: A changed writer names its table
 
-- **GIVEN** an indexed repository where two functions read the `orders` table and one writes it
-- **WHEN** the datastore impact conclusion is requested for `orders`
-- **THEN** all three sites are returned with file, line, enclosing function, and access class
-- **AND** functions that transitively call them are returned as the affected set, with the tests
-  that reach those sites
+- **WHEN** the diff edits a function that writes the `orders` table through a supported ORM
+- **THEN** `blast_radius` lists `orders` under `datastoreAccess` for that function with file, line and access class `write`
 
-#### Scenario: An unresolvable query is disclosed, not dropped
+#### Scenario: A query built at run time is disclosed
 
-- **GIVEN** a function that issues a query whose table name is assembled at runtime
-- **WHEN** the conclusion is requested for any table
-- **THEN** that site is reported as unresolvable in the boundaries with its file and line
-- **AND** the returned access set is presented as a lower bound
+- **WHEN** a changed function issues a query whose table name is assembled at run time
+- **THEN** the site appears in `datastoreNotAssessed` with its file and line
+- **AND** the answer does not state that the function touches no table
 
 #### Scenario: Wildcard selection does not claim columns
 
-- **GIVEN** a read site selecting all columns of a table
-- **WHEN** the conclusion is requested for that table
-- **THEN** the site is reported as a table-level read with its column set stated as unknown
+- **WHEN** a read site selects all columns of a table
+- **THEN** the site is reported as a table-level read with its columns stated as unknown
 
-#### Scenario: An unsupported data-access library is a stated gap
+### Requirement: VerifyChangeReportsMigrationTargetsStillInUse
 
-- **GIVEN** a repository whose queries are issued through a library outside the supported pattern
-  set
-- **WHEN** the conclusion is requested
-- **THEN** the unscanned files are disclosed as a boundary rather than contributing a silently
-  empty access set
+When the diff drops or narrows a table or column, in a raw SQL migration file or a supported ORM
+model, `verify_change` SHALL emit the advisory finding `migration-target-still-used` for each
+target that still has an access site, naming the functions with file and line and the reaching
+tests. The join is a name-based lower bound: a target with no site SHALL read "no reference found
+in the index", never "unreferenced".
 
-#### Scenario: An unknown table is not reported as unused
+#### Scenario: A dropped column names its surviving readers
 
-- **GIVEN** a table name that does not appear in the schema inventory or any access site
-- **WHEN** the conclusion is requested for it
-- **THEN** an explicit not-found is returned with candidate names
+- **WHEN** a migration in the diff drops a column that three indexed functions still read
+- **THEN** `verify_change` reports one `migration-target-still-used` finding that names the three functions with file and line and the reaching tests
+
+#### Scenario: The ORM path reaches the same conclusion
+
+- **WHEN** the diff removes a field from a supported ORM model and code still reads that field
+- **THEN** the same finding is reported for the removed field
+
+#### Scenario: An unreadable statement is not safe
+
+- **WHEN** a migration contains a statement the scanner does not recognize
+- **THEN** the statement is counted in `datastoreNotAssessed`
+- **AND** no claim is made that the migration is safe

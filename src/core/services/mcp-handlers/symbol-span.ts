@@ -32,8 +32,9 @@
  * or deletes any file.
  */
 
+import { resolveQualifiedSymbol } from './symbol-query.js';
 import { createHash } from 'node:crypto';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { stat } from 'node:fs/promises';
 import {
   OPENLORE_DIR,
@@ -116,6 +117,9 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
   if (pathPart) {
     candidates = candidates.filter(n => n.filePath === pathPart || n.filePath.endsWith(pathPart));
   }
+  if (candidates.length === 0) {
+    candidates = resolveQualifiedSymbol(sym, name => pool.filter(n => n.name === name), () => undefined) ?? [];
+  }
 
   if (candidates.length === 0) {
     // A symbol WRITTEN since the index was built is not in the pool at all, so resolution
@@ -168,14 +172,16 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
     return {
       verdict: 'ambiguous' as const,
       query: sym,
-      candidates: candidates.slice(0, 10).map(n => `${n.name}::${relative(absDir, confinedPaths.get(n)!)}`),
+      candidates: candidates.slice(0, 10).map(n => `${n.name}::${posixRelative(absDir, confinedPaths.get(n)!)}`),
       hint: `"${sym}" matches ${candidates.length} symbols. Pass name::path to disambiguate.`,
     };
   }
 
   const node = candidates[0];
   const abs = confinedPaths.get(node)!;
-  const confinedFile = relative(absDir, abs);
+  // POSIX on every OS: `relative()` alone served a Windows agent `src\a.ts` beside node ids of
+  // `src/a.ts`, and a `name::path` it could not pass back to any other tool.
+  const confinedFile = posixRelative(absDir, abs);
   const symbolId = `${node.name}::${confinedFile}`;
 
   // Locatability guards — a symbol that resolves but has no trustworthy raw-source
@@ -285,4 +291,9 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
     contentHash: hashSpan(spanText),
     note: SPAN_NOTE,
   };
+}
+
+/** A repo-relative path, always `/`-separated. */
+function posixRelative(fromDir: string, target: string): string {
+  return relative(fromDir, target).split(sep).join('/');
 }

@@ -35,7 +35,7 @@
 
 import { emittedText, classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
 import { loadRouteInventoryRoots, routeHandlerReason, type RouteInventoryRoots } from './route-inventory-roots.js';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
@@ -51,6 +51,8 @@ import {
 import { isProjectedLanguage } from '../../analyzer/projected-language.js';
 import { isContractLanguage } from '../../analyzer/contract/types.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
+import { readArtifactBytesBounded } from '../../../utils/bounded-artifact-read.js';
+import { extractsImports } from '../../analyzer/import-parser.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
@@ -97,7 +99,7 @@ const DYNAMIC_LANGS = new Set(['Python', 'Ruby', 'PHP', 'Lua', 'Elixir', 'Bash']
  */
 export async function loadExternalWiring(absDir: string): Promise<{ report: ExternalWiringReport; byFile: Map<string, WiringReceipt[]> }> {
   const report = await collectExternalWiring(absDir)
-    .catch((): ExternalWiringReport => ({ wired: [], boundaries: [], boundariesOmitted: 0 }));
+    .catch((): ExternalWiringReport => ({ wired: [], boundaries: [], boundariesOmitted: 0, manifestsRead: [] }));
   return { report, byFile: new Map(report.wired.map(w => [w.file, w.receipts])) };
 }
 
@@ -114,6 +116,129 @@ export function externalWiringCaveats(report: ExternalWiringReport): string[] {
     caveats.push(`${unresolved} config reference(s) could not be resolved to a repository file (dynamic, unsupported, missing, outside the repository, or an unreadable config; see externalWiring.boundaries) — code they would wire can appear dead.`);
   }
   return caveats;
+}
+
+/**
+ * Candidates whose line span lies strictly inside a LIVE function's span in the same file, mapped to
+ * that function's name (the innermost one). Spans come from the index; no file is read.
+ */
+function liveEnclosingFunctions(
+  candidates: readonly FunctionNode[],
+  codeNodes: readonly FunctionNode[],
+  live: ReadonlySet<string>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const liveByFile = new Map<string, FunctionNode[]>();
+  for (const n of codeNodes) {
+    if (!live.has(n.id) || n.startLine === undefined) continue;
+    (liveByFile.get(n.filePath) ?? liveByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  for (const c of candidates) {
+    if (c.startLine === undefined) continue;
+    const end = c.endLine ?? c.startLine;
+    let best: FunctionNode | undefined;
+    for (const f of liveByFile.get(c.filePath) ?? []) {
+      const fEnd = f.endLine ?? f.startLine!;
+      const inside = f.startLine! <= c.startLine && end <= fEnd && (f.startLine! < c.startLine || end < fEnd);
+      if (inside && (!best || f.startLine! >= best.startLine!)) best = f;
+    }
+    if (best) out.set(c.id, best.className ? `${best.className}.${best.name}` : best.name);
+  }
+  return out;
+}
+
+/** A candidate file larger than this is not scanned for module-scope uses. */
+const MODULE_SCOPE_SCAN_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Candidates whose own file names them at MODULE SCOPE — on a line outside every indexed function's
+ * line span — mapped to the first such line. Module-level code has no call-graph node, so a
+ * top-level `start()` or `process.on('exit', cleanup)` produces no edge, and the candidate looks
+ * uncalled. A textual match (a comment, a string) can only LOWER confidence, the sound direction.
+ * One read per candidate file; an unreadable or oversized file contributes nothing.
+ */
+async function namedAtModuleScope(
+  absDir: string,
+  candidates: readonly FunctionNode[],
+  codeNodes: readonly FunctionNode[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const byFile = new Map<string, FunctionNode[]>();
+  for (const n of candidates) {
+    if (!/^[A-Za-z_$][\w$]*$/.test(n.name)) continue;
+    (byFile.get(n.filePath) ?? byFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  if (byFile.size === 0) return out;
+  const spansByFile = new Map<string, Array<[number, number]>>();
+  for (const n of codeNodes) {
+    if (!byFile.has(n.filePath) || n.startLine === undefined) continue;
+    (spansByFile.get(n.filePath) ?? spansByFile.set(n.filePath, []).get(n.filePath)!).push([n.startLine, n.endLine ?? n.startLine]);
+  }
+  for (const [file, nodes] of byFile) {
+    // One bounded read (no stat-then-read race; a symlink, FIFO or oversized file is refused).
+    const read = await readArtifactBytesBounded(join(absDir, file), MODULE_SCOPE_SCAN_MAX_BYTES).catch(() => null);
+    if (read?.state !== 'ok') continue;
+    const text = read.bytes.toString('utf-8');
+    const spans = spansByFile.get(file) ?? [];
+    const lines = text.split('\n');
+    const names = new Set(nodes.map(n => n.name));
+    const firstLine = new Map<string, number>();
+    for (let i = 0; i < lines.length && firstLine.size < names.size; i++) {
+      const line = i + 1;
+      if (spans.some(([a, b]) => line >= a && line <= b)) continue;
+      for (const match of lines[i].matchAll(/[A-Za-z_$][\w$]*/g)) {
+        const name = match[0];
+        if (names.has(name) && !firstLine.has(name)) firstLine.set(name, line);
+      }
+    }
+    for (const n of nodes) {
+      const line = firstLine.get(n.name);
+      if (line !== undefined) out.set(n.id, line);
+    }
+  }
+  return out;
+}
+
+/** Languages a `package.json` manifest can wire. */
+const MANIFEST_WIRED_LANGS = new Set(['TypeScript', 'JavaScript']);
+
+/**
+ * For each JS/TS candidate file: the repo-relative path of its NEAREST enclosing `package.json`, when
+ * that manifest was not read for wiring. Absent when the nearest manifest was read, or when there is
+ * none. One `stat` per distinct ancestor directory.
+ */
+export async function unreadEnclosingManifests(
+  absDir: string,
+  candidates: readonly FunctionNode[],
+  report: ExternalWiringReport,
+): Promise<Map<string, string>> {
+  const read = new Set(report.manifestsRead);
+  const nearestByDir = new Map<string, Promise<string | null>>();
+  const nearest = (dir: string): Promise<string | null> => {
+    let pending = nearestByDir.get(dir);
+    if (!pending) {
+      pending = (async () => {
+        const manifest = dir === '' ? 'package.json' : `${dir}/package.json`;
+        try {
+          if ((await stat(join(absDir, manifest))).isFile()) return manifest;
+        } catch { /* no manifest here */ }
+        if (dir === '') return null;
+        const slash = dir.lastIndexOf('/');
+        return nearest(slash < 0 ? '' : dir.slice(0, slash));
+      })();
+      nearestByDir.set(dir, pending);
+    }
+    return pending;
+  };
+  const out = new Map<string, string>();
+  for (const n of candidates) {
+    if (!MANIFEST_WIRED_LANGS.has(n.language) || out.has(n.filePath)) continue;
+    const file = wiringKey(n.filePath);
+    const slash = file.lastIndexOf('/');
+    const manifest = await nearest(slash < 0 ? '' : file.slice(0, slash));
+    if (manifest && !read.has(manifest)) out.set(n.filePath, manifest);
+  }
+  return out;
 }
 
 /** A path's directory, trailing slash kept, for the one proven class scope. */
@@ -552,15 +677,31 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       .map(file => file.filePath),
   );
 
+  const unreadManifest = await unreadEnclosingManifests(absDir, candidates, wiring.report);
+  const moduleScopeNamed = await namedAtModuleScope(absDir, candidates, codeNodes);
+  const liveEnclosing = liveEnclosingFunctions(candidates, codeNodes, live);
+  // Classes with a live instance member. Their constructor ran — an instance method cannot be
+  // reached without an instance — but `new X()` is not a call edge, so the constructor itself had
+  // no caller and read as dead.
+  const liveClasses = new Set(
+    codeNodes.filter(n => n.className && live.has(n.id)).map(n => `${n.filePath}::${n.className}`),
+  );
+
   const ranked = candidates
     .map(n => {
       const noCaller = (n.fanIn ?? 0) === 0;
       const dynamic = DYNAMIC_LANGS.has(n.language) || !STATIC_LANGS.has(n.language);
       const moduleUsed = importedFiles !== null && fileImported(n.filePath, importedFiles);
+      // The dependency graph records imports only for the languages the import parser reads. For a
+      // Rust or Go file, "no file imports it by name" means nothing was looked for — not evidence.
+      const importSignal = importedNames !== null && extractsImports(n.filePath);
       const reasons: string[] = [];
       if (noCaller) reasons.push('no internal caller');
       else reasons.push('reachable only from other candidate-dead code');
-      if (importedNames !== null && !importedNames.has(n.name)) reasons.push('not imported by name from any other file');
+      if (importSignal && !importedNames.has(n.name)) reasons.push('not imported by name from any other file');
+      else if (importedNames !== null && !importSignal) {
+        reasons.push(`imports are not extracted for ${n.language}, so whether another file uses it by name is unknown`);
+      }
       if (moduleUsed) reasons.push('but its module IS imported elsewhere (symbol-level usage unresolved — e.g. namespace/default import or external API)');
       // The inventory's own word overrides the generic clause: a symbol it calls a route
       // handler must never be told it is "not a route handler" (change: root-framework-routes).
@@ -572,7 +713,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       let confidence: Confidence;
       if (dynamic) confidence = 'low';
       else if (moduleUsed) confidence = 'low';
-      else if (exportSignal === 'none') confidence = 'medium';
+      else if (!importSignal) confidence = 'medium';
       else confidence = noCaller ? 'high' : 'medium';
 
       // A candidate reached into by a synthesized dynamic-dispatch edge (its
@@ -634,6 +775,41 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (unboundContract.files.has(wiringKey(n.filePath))) {
         confidence = 'low';
         reasons.push('declared in a file holding a contract registration or resolver map whose implementation argument could not be read (see contractRootsNotAssessed) — it may name this symbol, and which symbol cannot be said');
+      }
+
+      // The nearest package manifest above this file was never read for wiring — it is neither the
+      // root's nor a declared workspace member's (or it could not be parsed) — so its `main`, `bin`
+      // or `exports` may name this very file as the package's entry point. Never high-confidence
+      // dead: the reader does not search the tree for manifests to root, but it must not rate what
+      // such a manifest could wire as certainly unused either.
+      // Its own file names it outside every indexed function — a top-level `main()`, `start()`
+      // or `process.on('exit', cleanup)`. Module-scope code has no call-graph node, so that call
+      // is no edge at all, and "no internal caller" was read as certain.
+      // Defined INSIDE a live function: a closure, a returned visitor's `enter`/`leave`, a handler
+      // object's method. That function hands it out as a value, so whatever calls it — a library,
+      // a framework, an event loop — is outside the graph. Not high-confidence dead.
+      if ((n.name === 'constructor' || n.name === '__init__') && n.className
+        && liveClasses.has(`${n.filePath}::${n.className}`)) {
+        confidence = 'low';
+        reasons.push(`a constructor of \`${n.className}\`, which has live members — the class is instantiated, and \`new ${n.className}(…)\` is not a call edge`);
+      }
+
+      const enclosing = liveEnclosing.get(n.id);
+      if (enclosing) {
+        confidence = 'low';
+        reasons.push(`defined inside \`${enclosing}\`, which is live — it is a value that function creates (a callback, visitor or returned closure), and what calls it is not visible`);
+      }
+
+      const moduleLine = moduleScopeNamed.get(n.id);
+      if (moduleLine !== undefined) {
+        confidence = 'low';
+        reasons.push(`its file names it at module scope (line ${moduleLine}), outside every indexed function — module-level code has no call-graph node, so that use is not an edge`);
+      }
+
+      const manifest = unreadManifest.get(n.filePath);
+      if (manifest) {
+        confidence = 'low';
+        reasons.push(`inside the package declared by ${manifest}, which was not read for wiring (only the root and declared workspace manifests are) — its main/bin/exports may make this an entry point`);
       }
 
       if (scriptContainerFiles.has(n.filePath)) {

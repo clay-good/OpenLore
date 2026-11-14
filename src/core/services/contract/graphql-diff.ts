@@ -12,7 +12,7 @@
  * `schema-unassessed`, never silently "no change".
  */
 
-import { type GqlArg, type GqlField, type GqlMergedType, type GqlSchema } from '../../analyzer/contract/graphql.js';
+import { emptyGqlSchema, elementFingerprint, type GqlArg, type GqlField, type GqlMergedType, type GqlSchema, type GqlUniverseSchema } from '../../analyzer/contract/graphql.js';
 import { CONTRACT_RULES, type ContractChange, type ContractRule } from './contract-diff.js';
 
 interface TypeShape { nonNull: boolean; list?: TypeShape; name?: string }
@@ -89,11 +89,41 @@ function diffOutputField(file: string, address: string, b: GqlField, f: GqlField
   if (f.directivesHash !== b.directivesHash) out.push(change(file, address, f.line, 'schema-unassessed', `${element ?? address}: a directive changed (directives are outside the model)`, element));
 }
 
+/**
+ * Elements an `extend` declared more than once, on either side (`field` or `value`), each with what
+ * to report when its fingerprint differs between the sides. Such an element is never compared
+ * field by field, and never read as added or removed: which declaration a server keeps is not known.
+ */
+function heldElements(
+  b: GqlMergedType | undefined,
+  t: GqlMergedType | undefined,
+  element: 'field' | 'value',
+): Map<string, { changed: boolean; reason: string; file: string }> {
+  const out = new Map<string, { changed: boolean; reason: string; file: string }>();
+  const fp = (x: GqlMergedType | undefined, n: string): string => {
+    const held = x?.unassessableElements?.[`${element}:${n}`];
+    if (held) return held.fingerprint;
+    const plain = element === 'field' ? x?.fields.find(f => f.name === n) : x?.values.find(v => v.name === n);
+    return plain ? elementFingerprint([plain]) : 'absent';
+  };
+  for (const x of [b, t]) {
+    for (const [key, held] of Object.entries(x?.unassessableElements ?? {})) {
+      if (!key.startsWith(`${element}:`)) continue;
+      const n = key.slice(element.length + 1);
+      if (out.has(n)) continue;
+      out.set(n, { changed: fp(b, n) !== fp(t, n), reason: held.reason, file: held.file });
+    }
+  }
+  return out;
+}
+
 function diffType(b: GqlMergedType, t: GqlMergedType, out: ContractChange[]): void {
   const push = (rule: ContractRule, detail: string, line: number, element?: string, file = t.file) => out.push(change(file, t.name, line, rule, detail, element));
   if (b.kind !== t.kind) { push('type-removed', `${t.name} changed from ${b.kind} to ${t.kind}`, t.line); return; }
-  const was = new Map(b.fields.map(f => [f.name, f]));
-  const now = new Map(t.fields.map(f => [f.name, f]));
+  const heldFields = heldElements(b, t, 'field');
+  for (const [n, h] of heldFields) if (h.changed) push('schema-unassessed', `field \`${n}\`: ${h.reason}, so it is not compared`, t.line, `field ${n}`, h.file);
+  const was = new Map(b.fields.filter(f => !heldFields.has(f.name)).map(f => [f.name, f]));
+  const now = new Map(t.fields.filter(f => !heldFields.has(f.name)).map(f => [f.name, f]));
   for (const [n, f] of now) {
     const old = was.get(n);
     const el = `field ${n}`;
@@ -114,14 +144,17 @@ function diffType(b: GqlMergedType, t: GqlMergedType, out: ContractChange[]): vo
     } else diffOutputField(fileOf(t, f), t.name, old, f, out, el);
   }
   for (const [n, old] of was) if (!now.has(n)) push('field-removed', `field \`${n}\` removed`, t.line, `field ${n}`, fileOf(b, old));
-  const bValues = new Map(b.values.map(v => [v.name, v]));
+  const heldValues = heldElements(b, t, 'value');
+  for (const [n, h] of heldValues) if (h.changed) push('schema-unassessed', `enum value ${n}: ${h.reason}, so it is not compared`, t.line, n, h.file);
+  const bValues = new Map(b.values.filter(v => !heldValues.has(v.name)).map(v => [v.name, v]));
   for (const v of t.values) {
+    if (heldValues.has(v.name)) continue;
     const old = bValues.get(v.name);
     if (!old) { push('graphql-enum-value-added', `enum value ${v.name} added (a client switching over this enum may not handle it)`, v.line, v.name); continue; }
     if (v.deprecated && !old.deprecated) push('enum-value-deprecated', `enum value ${v.name} is now deprecated`, v.line, v.name);
     if (v.directivesHash !== old.directivesHash) push('schema-unassessed', `enum value ${v.name}: a directive changed (directives are outside the model)`, v.line, v.name);
   }
-  const tValues = new Set(t.values.map(v => v.name));
+  const tValues = new Set([...t.values.map(v => v.name), ...heldValues.keys()]);
   for (const v of b.values) if (!tValues.has(v.name)) push('enum-value-removed', `enum value ${v.name} removed`, t.line, v.name);
   const bMembers = new Set(b.members);
   const tMembers = new Set(t.members);
@@ -134,15 +167,33 @@ function diffType(b: GqlMergedType, t: GqlMergedType, out: ContractChange[]): vo
   if (b.directivesHash !== t.directivesHash) push('schema-unassessed', `${t.name}: a directive changed (directives are outside the model)`, t.line);
 }
 
-/** Compare the merged GraphQL schemas of two revisions. */
+/**
+ * A type the merged schema withheld: ambiguous across files, or unassessable for its own shape
+ * (a duplicate field — change: scope-graphql-schema-universes). Both are compared by fingerprint
+ * and never graded: which definition wins is not knowable either way.
+ */
+type Withheld = { name: string; files: string[]; fingerprint: string; reason?: string };
+
+const withheldOf = (s: GqlSchema): Map<string, Withheld> => {
+  const m = new Map<string, Withheld>(s.ambiguous.map(a => [a.name, a as Withheld]));
+  // A name both defined twice AND holding a duplicate field keeps the ambiguity reason: it is the
+  // one that explains why no single definition was read.
+  for (const u of s.unassessableTypes) if (!m.has(u.name)) m.set(u.name, u);
+  return m;
+};
+
+/** Why a withheld type is not compared, in the tense the sentence around it needs. */
+const clause = (w: Withheld, when: string, past = false): string =>
+  (w.reason ? `${past ? 'had' : 'has'} an unreadable shape (${w.reason}) ${when}` : `${past ? 'was' : 'is'} defined in more than one file ${when}`);
+
+/** Compare the merged GraphQL schemas of two revisions, WITHIN one universe. */
 export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] {
   const out: ContractChange[] = [];
   const rootSet = (s: GqlSchema) => new Set(Object.values(s.roots).filter((r): r is string => !!r));
   const baseRoots = rootSet(base);
   const headRoots = rootSet(head);
-  const ambiguity = (s: GqlSchema) => new Map(s.ambiguous.map(a => [a.name, a]));
-  const bAmb = ambiguity(base);
-  const hAmb = ambiguity(head);
+  const bAmb = withheldOf(base);
+  const hAmb = withheldOf(head);
   // ── Operations, by root kind ──
   for (const kind of ['query', 'mutation', 'subscription'] as const) {
     // Two files naming different roots of one kind: which type is the root cannot be said.
@@ -158,14 +209,19 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
     if (bAmbiguous || hAmbiguous) {
       const one = hAmbiguous ?? bAmbiguous!;
       if (!(bAmbiguous && hAmbiguous) || bAmbiguous.fingerprint !== hAmbiguous.fingerprint) {
-        out.push(change(one.files[0], one.name, 1, 'schema-unassessed', `the ${kind} root type ${one.name} is defined in more than one file ${hAmbiguous && bAmbiguous ? 'on both sides and changed' : hAmbiguous ? 'at head' : 'at the base revision'}, so its operations are not compared`));
+        const when = hAmbiguous && bAmbiguous ? 'on both sides and changed' : hAmbiguous ? 'at head' : 'at the base revision';
+        out.push(change(one.files[0], one.name, 1, 'schema-unassessed', `the ${kind} root type ${one.name} ${clause(one, when)}, so its operations are not compared`));
       }
       continue;
     }
     const b = base.roots[kind] ? base.types.get(base.roots[kind]!) : undefined;
     const h = head.roots[kind] ? head.types.get(head.roots[kind]!) : undefined;
-    const was = new Map((b?.fields ?? []).map(f => [f.name, f]));
-    const now = new Map((h?.fields ?? []).map(f => [f.name, f]));
+    const heldOps = heldElements(b, h, 'field');
+    for (const [n, held] of heldOps) {
+      if (held.changed) out.push(change(held.file, `${(h ?? b)!.name}.${n}`, 1, 'schema-unassessed', `${kind} ${n}: ${held.reason}, so it is not compared`));
+    }
+    const was = new Map((b?.fields ?? []).filter(f => !heldOps.has(f.name)).map(f => [f.name, f]));
+    const now = new Map((h?.fields ?? []).filter(f => !heldOps.has(f.name)).map(f => [f.name, f]));
     for (const [n, f] of now) {
       const address = `${h!.name}.${n}`;
       const old = was.get(n);
@@ -183,7 +239,7 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
     const t = head.types.get(name);
     if (!t) {
       // Defined twice at head is ambiguous there, not removed.
-      if (hAmb.has(name)) out.push(change(b.file, name, b.line, 'schema-unassessed', `${name} is defined in more than one file at head, so it is not compared`));
+      if (hAmb.has(name)) out.push(change(b.file, name, b.line, 'schema-unassessed', `${name} ${clause(hAmb.get(name)!, 'at head')}, so it is not compared`));
       else if (!headRoots.has(name)) out.push(change(b.file, name, b.line, 'type-removed', `${b.kind} ${name} removed`));
       continue;
     }
@@ -192,7 +248,7 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
   }
   for (const [name, t] of head.types) {
     if (headRoots.has(name) || base.types.has(name) || baseRoots.has(name)) continue;
-    if (bAmb.has(name)) out.push(change(t.file, name, t.line, 'schema-unassessed', `${name} was defined in more than one file at the base revision, so it is not compared`));
+    if (bAmb.has(name)) out.push(change(t.file, name, t.line, 'schema-unassessed', `${name} ${clause(bAmb.get(name)!, 'at the base revision', true)}, so it is not compared`));
     else out.push(change(t.file, name, t.line, 'type-added', `${t.kind} ${name} added`));
   }
   // A name ambiguous on both sides (a schema beside a checked-in copy) is compared by fingerprint;
@@ -200,12 +256,12 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
   for (const [name, a] of bAmb) {
     if (baseRoots.has(name) || headRoots.has(name) || head.types.has(name)) continue;
     const h = hAmb.get(name);
-    if (!h) out.push(change(a.files[0], name, 1, 'schema-unassessed', `${name} was defined in more than one file at the base revision and is gone at head, so its removal is not assessed`));
-    else if (h.fingerprint !== a.fingerprint) out.push(change(h.files[0], name, 1, 'schema-unassessed', `${name} is defined in more than one file on both sides and changed, so it is not compared`));
+    if (!h) out.push(change(a.files[0], name, 1, 'schema-unassessed', `${name} ${clause(a, 'at the base revision', true)} and is gone at head, so its removal is not assessed`));
+    else if (h.fingerprint !== a.fingerprint) out.push(change(h.files[0], name, 1, 'schema-unassessed', `${name} ${clause(h, 'on both sides and changed')}, so it is not compared`));
   }
   for (const [name, h] of hAmb) {
     if (bAmb.has(name) || baseRoots.has(name) || headRoots.has(name) || base.types.has(name)) continue;
-    out.push(change(h.files[0], name, 1, 'schema-unassessed', `${name} is new and defined in more than one file at head, so it is not compared`));
+    out.push(change(h.files[0], name, 1, 'schema-unassessed', `${name} is new and ${h.reason ? `has an unreadable shape (${h.reason})` : 'defined in more than one file'} at head, so it is not compared`));
   }
   // ── Directive definitions: a client writes them in its operations ──
   // A directive defined in two files (each subgraph declaring `@key`) is compared by fingerprint,
@@ -234,4 +290,24 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
   }
   const sortKey = (c: ContractChange) => `${c.address}\0${c.rule}\0${c.element ?? ''}\0${c.detail}`;
   return out.sort((x, y) => (sortKey(x) < sortKey(y) ? -1 : sortKey(x) > sortKey(y) ? 1 : 0));
+}
+
+/**
+ * Compare two revisions universe by universe (change: scope-graphql-schema-universes).
+ *
+ * Both sides must have been partitioned with the SAME project roots, so a universe key means the
+ * same project on each side. A universe present on one side only is compared against an empty
+ * schema — a whole project added or removed — which is exactly what the rule table already says.
+ * That empty schema carries NO root names (see `emptyGqlSchema`): GraphQL's defaults there would
+ * let a type NAMED `Mutation` in a project with no mutation root be skipped as a root, so its
+ * removal would never be graded.
+ */
+export function diffGraphqlUniverses(base: readonly GqlUniverseSchema[], head: readonly GqlUniverseSchema[]): ContractChange[] {
+  const b = new Map(base.map(u => [u.universe, u.schema]));
+  const h = new Map(head.map(u => [u.universe, u.schema]));
+  const out: ContractChange[] = [];
+  for (const universe of [...new Set([...b.keys(), ...h.keys()])].sort()) {
+    out.push(...diffGraphql(b.get(universe) ?? emptyGqlSchema(), h.get(universe) ?? emptyGqlSchema()));
+  }
+  return out;
 }

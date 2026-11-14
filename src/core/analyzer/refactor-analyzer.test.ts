@@ -283,6 +283,41 @@ describe('analyzeForRefactoring — in_cycle', () => {
     expect(report.cycles[0].participants.map(p => p.function).sort()).toEqual(['a', 'b', 'c']);
   });
 
+  it('does NOT read a tested_by edge as a call back into the test', () => {
+    // test → prod is a call; prod → test is the derived `tested_by` reverse edge, not a call.
+    // Counting it closed a false cycle between every function and each test that calls it.
+    const prod = makeNode({ id: 'm.py::Incident.is_open', name: 'is_open', filePath: 'm.py', fanIn: 1 });
+    const test = makeNode({ id: 't.py::test_is_open', name: 'test_is_open', filePath: 't.py', fanOut: 1, isTest: true });
+
+    const graph = makeGraph([prod, test], [
+      { callerId: test.id, calleeId: prod.id, calleeName: 'is_open', confidence: 'type_inference' as const },
+      { callerId: prod.id, calleeId: test.id, calleeName: 'test_is_open', confidence: 'type_inference' as const, kind: 'tested_by' as const },
+    ]);
+
+    const report = analyzeForRefactoring(graph);
+    expect(report.stats.cyclesDetected).toBe(0);
+    expect(report.cycles).toEqual([]);
+    expect(issuesOf(report, 'is_open')).not.toContain('in_cycle');
+  });
+
+  it('does NOT close a cycle through an override edge or a name-only CHA guess', () => {
+    // D.m overrides B.m and calls super.m(); X.run and Y.run are unrelated same-named delegates
+    // that the name-only pass wired to each other.
+    const bm = makeNode({ id: 'b.ts::B.m', name: 'm', filePath: 'b.ts', fanIn: 1 });
+    const dm = makeNode({ id: 'd.ts::D.m', name: 'm', filePath: 'd.ts', fanOut: 1 });
+    const xr = makeNode({ id: 'x.ts::X.run', name: 'run', filePath: 'x.ts', fanIn: 1, fanOut: 1 });
+    const yr = makeNode({ id: 'y.ts::Y.run', name: 'run', filePath: 'y.ts', fanIn: 1, fanOut: 1 });
+    const graph = makeGraph([bm, dm, xr, yr], [
+      { callerId: bm.id, calleeId: dm.id, calleeName: 'm', confidence: 'synthesized' as const, kind: 'overrides' as const, synthesizedBy: 'override' },
+      { callerId: dm.id, calleeId: bm.id, calleeName: 'm', confidence: 'self_cls' as const },
+      { callerId: xr.id, calleeId: yr.id, calleeName: 'run', confidence: 'synthesized' as const, synthesizedBy: 'cha-name-only' },
+      { callerId: yr.id, calleeId: xr.id, calleeName: 'run', confidence: 'synthesized' as const, synthesizedBy: 'cha-name-only' },
+    ]);
+
+    const report = analyzeForRefactoring(graph);
+    expect(report.stats.cyclesDetected).toBe(0);
+  });
+
   it('does NOT flag a linear chain as a cycle', () => {
     // a → b → c (no cycle)
     const a = makeNode({ id: 'l.ts::a', name: 'a', filePath: 'l.ts', fanIn: 0, fanOut: 1 });

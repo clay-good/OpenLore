@@ -85,7 +85,8 @@ describe('Pass-1 late-fact reuse', () => {
 
     expect(samples[0]).toEqual(samples[1]);
     expect(samples[0].parses).toBe(corpus.length);
-    expect(samples[0].nativeQueryCompiles).toBe(4);
+    // One compile per distinct query; the `new C(...)` query made it five.
+    expect(samples[0].nativeQueryCompiles).toBe(5);
     expect(samples[0].nativeQueryCompileCounts.every(count => count === 1)).toBe(true);
   });
 

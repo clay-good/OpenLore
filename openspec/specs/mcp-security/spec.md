@@ -414,7 +414,8 @@ already hardens elsewhere.
 
 The server SHALL ship a machine-readable declaration of its security-relevant capabilities
 — which filesystem trees it reads and writes, that it spawns `git`, and that it makes
-outbound calls only to the configured LLM provider — so hosts, humans, and scanners can
+outbound calls only to the configured LLM provider, the configured embedding endpoint, and
+its own loopback daemon — so hosts, humans, and scanners can
 audit intent without inferring it from taint analysis. Benign data-flow patterns that a
 generic scanner flags but that are inherent to a local code-analysis tool (read source →
 invoke git; read config → call the configured LLM endpoint) SHALL be documented in an

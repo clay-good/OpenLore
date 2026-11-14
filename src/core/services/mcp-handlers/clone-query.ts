@@ -20,6 +20,7 @@
  * never a graph.
  */
 
+import { resolveQualifiedSymbol } from './symbol-query.js';
 import { readFileConfined } from '../../../utils/path-confinement.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import {
@@ -147,6 +148,11 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
     let candidates = nodes.filter(n => n.name === namePart);
     if (pathPart) {
       candidates = candidates.filter(n => n.filePath === pathPart || n.filePath.endsWith(pathPart));
+    }
+    // `Class.method` (as the digest prints a hub): read before deciding the name is absent — an
+    // external leaf can carry the dotted call text as its name, which read as "no comparable body".
+    if (candidates.length === 0) {
+      candidates = resolveQualifiedSymbol(sym, name => nodes.filter(n => n.name === name), () => undefined) ?? [];
     }
 
     if (candidates.length === 0) {

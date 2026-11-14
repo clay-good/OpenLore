@@ -7,8 +7,7 @@
 ## Purpose
 
 OpenLore ships an MCP (Model Context Protocol) server (`openlore mcp`, stdio transport,
-`@modelcontextprotocol/sdk`) that currently exposes ~55 tools (and trending upward) across five
-handler modules (`graph`, `semantic`, `analysis`, `change`, `decisions`). The server is registered in
+`@modelcontextprotocol/sdk`) that exposes the full tool registry `TOOL_DEFINITIONS`. The server is registered in
 `src/cli/commands/mcp.ts` (`startMcpServer`, `TOOL_DEFINITIONS`) with handlers under
 `src/core/services/mcp-handlers/`. Because the total count grows over time, the quality lever is the
 *opt-in preset* surface, not the full registry (see "Tool Surface Size and Progressive Disclosure").
@@ -54,22 +53,23 @@ for parameters — an agent that reads only the schema SHALL be able to construc
 
 ### Requirement: Structured Output Schemas
 
-Tools that return machine-parseable data SHALL declare an `outputSchema` and return
-`structuredContent` alongside the human-readable `content` text, per the MCP structured-output
-capability. This lets calling agents parse results deterministically instead of regex-scraping
-JSON out of a text blob. Tools whose output is inherently prose (e.g. a rendered report) MAY
-omit `outputSchema` but SHALL document the output shape in the tool description.
+Tools that return machine-parseable data SHALL return it as one JSON text item in `content`,
+so a calling agent can parse the result without scraping prose. The size cap SHALL truncate at
+the structured level, so a capped JSON result still parses. Freshness, panic, and ledger notes
+SHALL be separate `content` items, never concatenated into the result text. Tools whose output
+is inherently prose (e.g. a rendered report) SHALL document the output shape in the tool
+description.
 
-#### Scenario: Structured tool advertises its output
-- **GIVEN** a tool that today returns `JSON.stringify(result)` as text (e.g. `orient`, `analyze_impact`, `get_route_inventory`)
-- **WHEN** the tool is defined
-- **THEN** it declares an `outputSchema` describing the JSON shape
-- **AND** the handler returns `structuredContent` matching that schema in addition to the text content
+#### Scenario: Structured tool returns parseable JSON text
+- **GIVEN** a tool that returns machine-parseable data (e.g. `orient`, `analyze_impact`, `get_route_inventory`)
+- **WHEN** the tool executes successfully
+- **THEN** its result `content` item is text that parses as JSON
+- **AND** any freshness or panic note is a separate `content` item
 
-#### Scenario: Output schema matches actual output
-- **GIVEN** a tool that declares an `outputSchema`
-- **WHEN** the tool executes successfully on a fixture project
-- **THEN** the returned `structuredContent` validates against the declared schema
+#### Scenario: Capped result stays parseable
+- **GIVEN** a JSON result larger than `MCP_TOOL_MAX_BYTES`
+- **WHEN** the server caps it
+- **THEN** the returned result text still parses as JSON
 
 ### Requirement: Description Quality and Token Budget
 
@@ -114,9 +114,9 @@ capability) SHALL remain available strictly by opt-in: a named preset, or the ex
 selector (`--preset full` / `--all-tools`). The server SHALL document which set is appropriate for
 which use case.
 
-The server SHALL define a **`substrate` surface** that spans both faces of the substrate (per the
-`architecture` `UnifiedStructuralSubstrate` requirement): the `navigation` graph-traversal core plus
-the highest-value governance *reads* — `recall`, `verify_claim`, and `blast_radius` — so that an
+The server SHALL define a **`substrate` surface**: the `navigation` graph-traversal core, the
+spec-preparation composites (`prepare_spec_generation`, `prepare_spec_repair`), and the
+highest-value governance *reads* — `recall`, `verify_claim`, and `blast_radius` — so that an
 out-of-box agent receives the value of the whole substrate (navigate, recall what is known, verify a
 claim, weigh a diff) and not navigation alone. The `substrate` surface SHALL remain small and SHALL
 hold governance *reads* only, never write or gate tools.
@@ -144,8 +144,8 @@ evidence-backed justification.
 - **THEN** they get the lean, high-signal `substrate` surface (the navigation core plus the governance reads), not the full registry
 - **AND** the docs explain how to expand to the full set (`--preset full` / `--all-tools`) and why they would
 
-#### Scenario: The default surface spans both faces
-- **GIVEN** the `substrate` surface (navigation core + recall + verify_claim + blast_radius)
+#### Scenario: The default surface carries navigation, spec preparation and governance reads
+- **GIVEN** the `substrate` surface (navigation core + prepare_spec_generation + prepare_spec_repair + recall + verify_claim + blast_radius)
 - **WHEN** an out-of-box agent begins a task
 - **THEN** it can navigate, recall anchored knowledge, verify a claim, and weigh a diff without widening its preset
 - **AND** no write or gate tool is part of that default surface
@@ -163,13 +163,14 @@ expansion handle rather than the full payload. This is OpenLore's answer to loss
 compression: do not shrink bytes, send fewer items and make every omitted or collapsed
 item recoverable by a single deterministic follow-up call. The reference implementation is
 `src/core/services/mcp-handlers/progressive.ts` (`applyTokenBudget`, `collapseExactDuplicates`,
-`expandHandle`, `omissionNote`), today wired into `orient` and `search_code`; this
+`expandHandle`, `omissionNote`); `orient`, `search_code`, `get_minimal_context`,
+`working_set_context`, `get_handoff_briefing`, and `recall` accept a `tokenBudget`; this
 requirement generalizes that pattern to every tool whose result is an unbounded or
 importance-rankable list.
 
 A **high-volume tool** is any tool whose successful result is a list whose length scales
 with codebase size rather than being inherently bounded — e.g. `get_signatures`,
-`get_schema_inventory`, `get_route_inventory`, `get_env_vars`, `get_ui_components`,
+`get_schema_inventory`, `get_route_inventory`, `get_env_vars`, `get_ui_component_inventory`,
 `get_middleware_inventory`, `find_dead_code`, `get_critical_hubs`, `get_god_functions`,
 `get_leaf_functions`, `get_duplicate_report`, `get_change_coupling`, `analyze_impact`, and
 `select_tests`. Such tools SHOULD accept an optional `tokenBudget` parameter and, when it is
@@ -336,18 +337,15 @@ tool may reach are named, audited rebuildable-cache and self-repair paths.
 
 ### Requirement: MCP Protocol Capability Coverage
 
-The server SHOULD expose more than tools where it improves agent-native ergonomics. Stable,
-frequently-read artifacts (e.g. `CODEBASE.md`, generated spec domains, architecture overview)
-SHOULD be offered as MCP **resources** so an agent can read them without spending a tool call.
-Common multi-step workflows (e.g. the orient → search → analyze sequence) MAY be offered as
-MCP **prompts**. The server SHALL advertise exactly the capabilities it implements in its
-initialize response.
+The server SHALL advertise exactly the capabilities it implements in its initialize response.
+It implements tools only, so it SHALL advertise `capabilities: { tools: {} }` and no
+`resources` or `prompts` capability.
 
-#### Scenario: Stable artifacts are resources
-- **GIVEN** a project that has been analyzed
-- **WHEN** an agent lists MCP resources
-- **THEN** key generated artifacts (e.g. `CODEBASE.md`, spec domains) are available as resources to read directly
-- **AND** the server's advertised capabilities match what it actually serves
+#### Scenario: Advertised capabilities match what is served
+- **GIVEN** a client connected to `openlore mcp`
+- **WHEN** the client reads the initialize response
+- **THEN** `capabilities` is `{ tools: {} }`
+- **AND** no `resources` or `prompts` capability is present
 
 ### Requirement: Installation Reliability
 
@@ -589,9 +587,10 @@ question it asked.
 Every published description of a tool preset — the `instructions` breadth pointer, CLI `--help`,
 README, docs, and CLAUDE.md — SHALL match the preset's actual contents. A preset SHALL NOT be
 described as carrying a capability face (per the closed capability-family taxonomy) unless it
-contains that face's tools; in particular, a preset holding only governance *reads* (`recall`,
-`verify_claim`, `blast_radius`) SHALL be described as "the navigation core plus governance reads,"
-never as "both faces of the substrate," while it lacks the write face (`remember`,
+contains that face's tools; in particular, a preset holding the navigation core, the
+spec-preparation composites (`prepare_spec_generation`, `prepare_spec_repair`) and only governance
+*reads* (`recall`, `verify_claim`, `blast_radius`) SHALL be described as "the navigation core, spec
+preparation, and governance reads," never as "both faces of the substrate," while it lacks the write face (`remember`,
 `record_decision`). Copy naming the active default preset SHALL name the preset the code actually
 resolves (`LEAN_DEFAULT_PRESET`). The corrected claims SHALL be guarded (per
 QuantitativeDocClaimsAreGuarded and the honesty-contract pattern) so the retired phrasing cannot
@@ -601,11 +600,12 @@ candidate surface, a flip only on no-regression evidence, and a superseding reco
 
 #### Scenario: A reads-only default is described honestly
 
-- **GIVEN** the `substrate` preset containing the navigation core plus `recall`, `verify_claim`,
-  and `blast_radius`, and no `remember` or `record_decision`
+- **GIVEN** the `substrate` preset containing the navigation core, `prepare_spec_generation`,
+  `prepare_spec_repair`, `recall`, `verify_claim`, and `blast_radius`, and no `remember` or
+  `record_decision`
 - **WHEN** any shipped surface (instructions channel, `--help`, README, docs) describes the
   default surface
-- **THEN** it states the preset carries the navigation core plus governance reads
+- **THEN** it states the preset carries the navigation core, spec preparation, and governance reads
 - **AND** it does not claim the preset carries both faces of the substrate
 
 #### Scenario: The declared default matches the resolved default
@@ -861,7 +861,7 @@ fixed and source-declared:
 - `navigate` — read the structural graph, return a conclusion (orient, find_path, analyze_impact,
   get_subgraph, select_tests, find_dead_code, get_map, …).
 - `change` — reason about a specific diff or change set (structural_diff, blast_radius,
-  change_impact_certificate, change_footprint, certify_public_surface, briefing_since).
+  change_impact_certificate, certify_public_surface, briefing_since).
 - `remember` — record and recall durable, code-anchored facts (remember, recall, record_decision and
   its lifecycle).
 - `verify` — settle a claim or a decision's currency against the graph before it reaches a human
@@ -1392,7 +1392,7 @@ agent what to do, not only what is wrong.
 
 A retrieval-backed conclusion SHALL NOT be shaped like an answered question when its results rest on
 evidence too weak to answer it. Every such conclusion SHALL carry a coverage verdict derived from the
-match evidence already attached to its results: `covered`, `weak`, or `uncovered`. A conclusion whose
+match evidence already attached to its results: `covered`, `weak`, `uncovered`, or `partial`. A conclusion whose
 verdict is `uncovered` SHALL NOT return a ranked list of results; it SHALL return the reason and the
 remedy. A conclusion whose verdict is `weak` MAY return results, and SHALL state that every result
 rests on low-tier evidence.
@@ -1419,6 +1419,29 @@ tell "this is what you asked for" from "this is the closest thing I hold."
 - **GIVEN** a query with at least one result matching on a strong field
 - **WHEN** the conclusion is produced
 - **THEN** the verdict is `covered` and the result set is the same as before this requirement
+
+#### Scenario: A partial verdict names material the retrieval could not read
+
+- **GIVEN** a repository where some material in scope was unparseable, excluded by a size cap,
+  served from an index that cannot be vouched for, or whose readability record is itself unreadable
+- **WHEN** a retrieval-backed conclusion is produced
+- **THEN** the verdict is `partial`, never `covered` and never `uncovered`, and the conclusion names
+  the cause and carries the verdict the evidence alone would have produced as `evidenceVerdict`
+
+#### Scenario: A receipt never names evidence its field does not contain
+
+- **GIVEN** a result whose match evidence names a field and the terms that matched
+- **WHEN** the receipt is read
+- **THEN** every named term occurs in the named field's own text, so a hit on the corpus's language
+  marker is attributed to `language` and not to a path that contains no such token
+
+#### Scenario: A bounded page discloses its bound
+
+- **GIVEN** a retrieval request whose `limit` exceeds the per-call maximum, or whose matches reach
+  the served limit
+- **WHEN** the conclusion is produced
+- **THEN** it carries the returned count, the matched count, the requested and served limits, a
+  receipt for any clamp, and whether matches may exist beyond the page — never a silent cut
 
 #### Scenario: The verdict is derived, not tuned
 
@@ -1547,9 +1570,7 @@ SHALL be deterministic: the same payload yields the same hints.
   rejected (see `cli/spec.md` — server-side savings are ~2% and cost per-tool validation and
   discoverability). The high-leverage move is sending *fewer items* with exact, deterministic
   expansion handles, so omission is recoverable in one call rather than a fuzzy re-search. The
-  generic mechanism already exists in `progressive.ts`; the remaining work is wiring `tokenBudget`
-  through the high-volume list tools that do not yet accept it (today only `orient` and
-  `search_code` do).
+  generic mechanism is in `progressive.ts`.
 - **Trust is earned, not configured.** The external "Trust 50" is a no-data default; it rises
   only with real successful calls. The reliability, graceful-degradation, and smoke-validation
   requirements above are how OpenLore maximizes real-world success rate — the thing trust

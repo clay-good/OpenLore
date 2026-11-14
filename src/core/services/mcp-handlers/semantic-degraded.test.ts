@@ -52,6 +52,7 @@ describe('vector-index degradation disclosure', () => {
     }]);
     textSearch.mockReset().mockResolvedValue([{
       filePath: 'web/index.html', lineNumber: 12, text: 'literal banner', score: 1,
+      matchEvidence: { field: 'body', terms: ['literal', 'banner'], tier: 1 },
     }]);
   });
 

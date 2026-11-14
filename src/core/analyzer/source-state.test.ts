@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { captureSourceState, reconcileSourceStates } from './source-state.js';
@@ -41,6 +41,21 @@ describe('captureSourceState', () => {
     git(root, 'restore', 'a.ts');
     await writeFile(join(root, 'untracked.ts'), 'export const b = 1;\n');
     expect(await captureSourceState(root)).toMatchObject({ commit: clean.commit, treeState: 'dirty' });
+  });
+
+  it("does not count OpenLore's own unignored output directory as a source change", async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-source-state-own-'));
+    roots.push(root);
+    git(root, 'init', '-q');
+    await writeFile(join(root, 'a.ts'), 'export const a = 1;\n');
+    git(root, 'add', 'a.ts');
+    git(root, 'commit', '-q', '-m', 'initial');
+    await mkdir(join(root, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'analysis', 'llm-context.json'), '{}');
+    expect(await captureSourceState(root)).toMatchObject({ treeState: 'clean' });
+    // A real change elsewhere still counts.
+    await writeFile(join(root, 'b.ts'), 'export const b = 1;\n');
+    expect(await captureSourceState(root)).toMatchObject({ treeState: 'dirty' });
   });
 
   it('never calls a changed analysis interval clean', () => {
