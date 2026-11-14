@@ -19,6 +19,11 @@ All notable changes to OpenLore are documented here. This project adheres to
   The `error-swallowed` check keyed each handler by its enclosing function's name, so the
   after-edit hook flagged a plain method rename as a weakened check. A handler around code the
   baseline already discarded, in any function of the file, is now matched first.
+- **`search_code`'s literal-text answers state their coverage.** When no indexed symbol matched —
+  including the few seconds while the watcher re-indexes a function just written — the text-index
+  fallback (and forced `mode: "text"`) returned results with no `coverage` verdict, which the
+  runtime contract check flags, and said the hits came "from markup/text files" when the top hit
+  was a TypeScript source line.
 - **`find_dead_code` no longer rates a package's entry point high-confidence dead** when that
   package's `package.json` was never read (it is neither the root's nor a declared workspace
   member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped

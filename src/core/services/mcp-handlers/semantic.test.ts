@@ -381,6 +381,22 @@ describe('handleSearchCode', () => {
     expect((result.indexStaleness as { staleFiles: string[] }).staleFiles).toEqual(['src/a.ts']);
   });
 
+  it('a literal-text answer carries the coverage verdict the dispatch contract requires', async () => {
+    // Served whenever no indexed symbol matched — including the seconds while the watcher re-indexes
+    // a just-written function — and it had no `coverage`, which the runtime contract flags.
+    const analysisDir = join(tmpDir, '.openlore', 'analysis');
+    await mkdir(analysisDir, { recursive: true });
+    await TextLineIndex.build(analysisDir, [{ filePath: 'src/a.ts', content: 'export function zebraQuokka() {}\n' }]);
+    await writeAnalysisFile(tmpDir, 'llm-context.json', {});
+    const { handleSearchCode } = await import('./semantic.js');
+    const { assertConclusionShape } = await import('./tool-contract.js');
+    const result = await handleSearchCode(tmpDir, 'zebraQuokka', 10, undefined, undefined, undefined, 'text') as {
+      coverage?: { verdict: string };
+    };
+    expect(result.coverage?.verdict).toBe('covered');
+    expect(() => assertConclusionShape('search_code', result)).not.toThrow();
+  });
+
   it('checks stale text-index citations outside the programming-language allowlist', async () => {
     const analysisDir = join(tmpDir, '.openlore', 'analysis');
     const cssPath = join(tmpDir, 'src', 'styles.css');
