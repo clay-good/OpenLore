@@ -51,6 +51,7 @@ import {
 import { isProjectedLanguage } from '../../analyzer/projected-language.js';
 import { isContractLanguage } from '../../analyzer/contract/types.js';
 import { collectExternalWiring, type ExternalWiringReport, type WiringReceipt } from '../../analyzer/entry-point-adapters.js';
+import { readArtifactBytesBounded } from '../../../utils/bounded-artifact-read.js';
 import { extractsImports } from '../../analyzer/import-parser.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -174,14 +175,10 @@ async function namedAtModuleScope(
     (spansByFile.get(n.filePath) ?? spansByFile.set(n.filePath, []).get(n.filePath)!).push([n.startLine, n.endLine ?? n.startLine]);
   }
   for (const [file, nodes] of byFile) {
-    let text: string;
-    try {
-      const abs = join(absDir, file);
-      if ((await stat(abs)).size > MODULE_SCOPE_SCAN_MAX_BYTES) continue;
-      text = await readFile(abs, 'utf-8');
-    } catch {
-      continue;
-    }
+    // One bounded read (no stat-then-read race; a symlink, FIFO or oversized file is refused).
+    const read = await readArtifactBytesBounded(join(absDir, file), MODULE_SCOPE_SCAN_MAX_BYTES).catch(() => null);
+    if (read?.state !== 'ok') continue;
+    const text = read.bytes.toString('utf-8');
     const spans = spansByFile.get(file) ?? [];
     const lines = text.split('\n');
     const names = new Set(nodes.map(n => n.name));
