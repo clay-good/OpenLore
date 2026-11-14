@@ -622,7 +622,7 @@ export async function runConfigWizard(
     lastRun: typeof existing?.lastRun === 'string' || existing?.lastRun === null ? existing.lastRun : null,
   };
 
-  await writeConfig(ctx.cwd, config, hooks.global);
+  await writeConfig(piProjectRoot(ctx.cwd), config, hooks.global);
   ui.notify(hooks.global ? `Global configuration saved to ${globalOpenLoreConfigPath()}.` : 'Configuration saved.', 'info');
 
   const generationChanged = generation.provider !== prevProvider || generation.model !== prevModel;
@@ -640,10 +640,10 @@ export async function runConfigWizard(
           // (e.g. a PATH the host adjusted) rather than a stale snapshot — identical to the
           // default inherited env in normal use, but it keeps resolution deterministic.
           const proc = process.platform === 'win32'
-            ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: ctx.cwd, env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+            ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: piProjectRoot(ctx.cwd), env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
             // windowsHide is a documented no-op off Windows; set here too so the invariant is
             // uniform across both branches rather than a carve-out the guard has to know about.
-            : spawn(cmd, args, { cwd: ctx.cwd, env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+            : spawn(cmd, args, { cwd: piProjectRoot(ctx.cwd), env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
           proc.stderr?.on('data', (d: Buffer) => chunks.push(d));
           proc.on('close', (code) => res([code ?? 1, Buffer.concat(chunks).toString().trim()]));
           proc.on('error', () => res(null));
@@ -668,6 +668,13 @@ export async function runConfigWizard(
 interface Daemon {
   baseUrl: string;
   token?: string;
+  /**
+   * Process id `.openlore/serve.json` announced when this daemon was resolved. A cached daemon is
+   * reused only while the descriptor still names this pid at this address: another session or the
+   * CLI can replace the daemon while an older one keeps answering on its old port, and serving the
+   * status (or tool calls) from that one shows a stale state. Absent for an injected test daemon.
+   */
+  pid?: number;
   incompatibility?: string;
   /** A repository-bound health response found a version mismatch or missing Pi tools. */
   autoRecoverable?: boolean;
@@ -792,10 +799,22 @@ export function piDaemonSpawnCommand(cwd: string): { command: string; args: stri
   };
 }
 
+/**
+ * Is a cached daemon still the one `.openlore/serve.json` announces for this working tree? A
+ * draining or missing announcement, another pid, or another address means it was replaced or is
+ * going away. A daemon without a recorded pid has no identity to compare and is kept. @internal
+ */
+export async function piDaemonStillAnnounced(cwd: string, daemon: { baseUrl: string; pid?: number }): Promise<boolean> {
+  if (daemon.pid === undefined) return true;
+  const desc = await readDescriptor(cwd);
+  return desc !== null && desc.pid === daemon.pid && serveHttpBaseUrl(desc.host, desc.port) === daemon.baseUrl;
+}
+
 function incompatibleDaemon(desc: ServeDescriptor): Daemon {
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
+    pid: desc.pid,
     incompatibility:
       'The running openlore daemon does not report an authenticated, enforced tool surface for ' +
       'this repository. Stop the legacy or incompatible process manually, upgrade OpenLore, ' +
@@ -845,6 +864,7 @@ function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
+    pid: desc.pid,
     ...(autoRecoverable
       ? {
           autoRecoverable: true,
@@ -2287,6 +2307,24 @@ export function inOpenloreProject(cwd: string, file?: string): boolean {
   return walk(resolvePath(cwd)) || (!!file && walk(dirname(resolvePath(cwd, file))));
 }
 
+/**
+ * The project root for a Pi working directory: the nearest directory at or above `cwd` that holds a
+ * project `.openlore/config.json` or `.openlore/analysis/`, else the nearest git root, else `cwd`
+ * itself. The home directory never counts: its `.openlore/` holds the user-level config. Pi can be
+ * started in a subdirectory (`ui/`, `server/`); the daemon, status, config and context must still
+ * describe the project, not create a second `.openlore/` in that subdirectory. @internal
+ */
+export function piProjectRoot(cwd: string): string {
+  const home = resolvePath(process.env.OPENLORE_HOME ?? homedir());
+  const start = resolvePath(cwd);
+  for (let dir = start; dir !== home; dir = dirname(dir)) {
+    if (existsSync(join(dir, OPENLORE_DIR, 'config.json')) || existsSync(join(dir, OPENLORE_ANALYSIS_REL_PATH))) return dir;
+    if (existsSync(join(dir, '.git'))) return dir;
+    if (dirname(dir) === dir) break;
+  }
+  return cwd;
+}
+
 /** A path as Pi's tools resolve it: a leading `@` dropped, `~` expanded. */
 export function piToolPath(path: string): string {
   const p = path.startsWith('@') ? path.slice(1) : path;
@@ -2449,7 +2487,17 @@ function registerOpenlore(
     const pending = pendingDaemons.get(cwd);
     if (pending) return pending;
     const cached = daemons.get(cwd);
-    if (cached) return cached;
+    if (cached) {
+      // Reuse the cache only while serve.json still announces this daemon. A replaced daemon can
+      // keep answering on its old port, so liveness alone would keep serving the old one.
+      if (await piDaemonStillAnnounced(cwd, cached)) return cached;
+      if (daemons.get(cwd) === cached) dropDaemon(cwd);
+      // Another caller may have started resolving while the descriptor was read.
+      const racing = pendingDaemons.get(cwd);
+      if (racing) return racing;
+      const replaced = daemons.get(cwd);
+      if (replaced) return replaced;
+    }
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
     const resolving = resolveAndRecordDaemon(cwd).finally(() => pendingDaemons.delete(cwd));
     pendingDaemons.set(cwd, resolving);
@@ -2524,9 +2572,17 @@ function registerOpenlore(
     keepalive = setInterval(() => {
       for (const [cwd, daemon] of daemons) {
         const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
+        // Drop only the daemon this ping was for: a newer one may have replaced it meanwhile.
+        const drop = () => { if (daemons.get(cwd) === daemon) dropDaemon(cwd); };
         void fetch(`${daemon.baseUrl}/health`, { headers, signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' })
-          .then((res) => { if (!res.ok) dropDaemon(cwd); })
-          .catch(() => dropDaemon(cwd));
+          .then(async (res) => {
+            if (!res.ok) return drop();
+            // An answer is not enough: the port may now belong to another daemon or root, or the
+            // daemon may be draining. Keep the cache only for the same, repository-bound process.
+            const health = validateServeHealth(await res.json().catch(() => null), cwd);
+            if (!health || health.draining || (daemon.pid !== undefined && health.pid !== daemon.pid)) drop();
+          })
+          .catch(drop);
       }
     }, KEEPALIVE_MS);
     keepalive.unref?.(); // never keep the host process alive for the keepalive alone
@@ -2540,11 +2596,12 @@ function registerOpenlore(
   async function refreshStatus(ctx: ExtensionContext): Promise<void> {
     try {
       if (!ctx.hasUI) return;
-      const cwd = ctx.cwd;
-      // No usable daemon cached (the cwd moved, or a daemon was dropped): resolve the same way a
-      // tool call would, so the status reports this resolution, not a stale one. `getDaemon`
+      const cwd = piProjectRoot(ctx.cwd);
+      // Resolve the same way a tool call would, so the status reports this resolution, not a
+      // stale one: no daemon cached (the cwd moved, one was dropped), or a cached daemon that
+      // serve.json no longer announces (replaced by another session or the CLI). `getDaemon`
       // keeps its failure cooldown, so a failing daemon is not re-probed on every run.
-      if (!daemons.has(cwd)) await getDaemon(cwd);
+      await getDaemon(cwd);
       const daemon = daemons.has(cwd) ? 'usable' : (daemonViews.get(cwd) ?? 'unavailable');
       let health: HealthResult | undefined;
       try {
@@ -2577,7 +2634,7 @@ function registerOpenlore(
    */
   async function refreshStatusIfNotReady(result: unknown, ctx: ExtensionContext): Promise<void> {
     if (!result || typeof result !== 'object' || (result as { notReady?: unknown }).notReady !== true) return;
-    healthCache.delete(ctx.cwd);
+    healthCache.delete(piProjectRoot(ctx.cwd));
     await refreshStatus(ctx);
   }
 
@@ -2592,13 +2649,13 @@ function registerOpenlore(
       promptGuidelines: [tool.guideline],
       parameters: tool.parameters as TSchema,
       async execute(_id, params, signal, _onUpdate, ctx) {
-        const daemon = await getDaemon(ctx.cwd);
-        if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
+        const daemon = await getDaemon(piProjectRoot(ctx.cwd));
+        if (!daemon) return toolResult(daemonUnavailable(piProjectRoot(ctx.cwd)));
         let result: unknown;
         try {
-          result = await callTool(daemon, tool.name, params as Record<string, unknown>, ctx.cwd, signal ?? undefined);
+          result = await callTool(daemon, tool.name, params as Record<string, unknown>, piProjectRoot(ctx.cwd), signal ?? undefined);
         } catch (err) {
-          dropDaemon(ctx.cwd);
+          dropDaemon(piProjectRoot(ctx.cwd));
           return toolResult(
             `openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`,
           );
@@ -2647,18 +2704,18 @@ function registerOpenlore(
       maxItems: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: 'Maximum evidence items per deterministic page.' })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const daemon = await getDaemon(ctx.cwd);
-      if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
+      const daemon = await getDaemon(piProjectRoot(ctx.cwd));
+      if (!daemon) return toolResult(daemonUnavailable(piProjectRoot(ctx.cwd)));
       try {
         const { domain, cursor, maxItems } = params as { domain: string; cursor?: string; maxItems?: number };
         const result = await callTool(
           daemon, 'prepare_spec_generation',
-          { domain, cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES }, ctx.cwd, signal ?? undefined,
+          { domain, cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES }, piProjectRoot(ctx.cwd), signal ?? undefined,
         );
         await refreshStatusIfNotReady(result, ctx);
         return compositeToolResult(result);
       } catch (err) {
-        dropDaemon(ctx.cwd);
+        dropDaemon(piProjectRoot(ctx.cwd));
         return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
       }
     },
@@ -2678,19 +2735,19 @@ function registerOpenlore(
       maxItems: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: 'Maximum observations per bounded category.' })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const daemon = await getDaemon(ctx.cwd);
-      if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
+      const daemon = await getDaemon(piProjectRoot(ctx.cwd));
+      if (!daemon) return toolResult(daemonUnavailable(piProjectRoot(ctx.cwd)));
       const { domain, baseRef, cursor, maxItems } = params as { domain: string; baseRef?: string; cursor?: string; maxItems?: number };
       try {
         const result = await callTool(
           daemon, 'prepare_spec_repair',
           { domain, baseRef: baseRef ?? 'HEAD', cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES },
-          ctx.cwd, signal ?? undefined,
+          piProjectRoot(ctx.cwd), signal ?? undefined,
         );
         await refreshStatusIfNotReady(result, ctx);
         return compositeToolResult(result);
       } catch (err) {
-        dropDaemon(ctx.cwd);
+        dropDaemon(piProjectRoot(ctx.cwd));
         return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
       }
     },
@@ -2710,7 +2767,7 @@ function registerOpenlore(
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return toolResult('Config wizard requires an interactive session (tui or rpc mode).');
       const global = (params as { global?: boolean }).global === true;
-      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
+      const loaded = await loadExistingConfig(piProjectRoot(ctx.cwd), global ? 'global' : 'project');
       if (loaded.state === 'invalid') {
         return toolResult(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`);
       }
@@ -2765,7 +2822,7 @@ function registerOpenlore(
           ctx.ui.notify('Wait for the current agent turn to finish before restarting OpenLore.', 'warning');
           return;
         }
-        const cwd = ctx.cwd;
+        const cwd = piProjectRoot(ctx.cwd);
         if (pendingDaemons.has(cwd)) {
           ctx.ui.notify('OpenLore daemon startup or restart is already in progress; retry shortly.', 'info');
           return;
@@ -2798,7 +2855,7 @@ function registerOpenlore(
         ctx.ui.notify('Usage: /openlore configure [--global] | /openlore restart', 'error');
         return;
       }
-      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
+      const loaded = await loadExistingConfig(piProjectRoot(ctx.cwd), global ? 'global' : 'project');
       if (loaded.state === 'invalid') {
         ctx.ui.notify(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`, 'error');
         return;
@@ -2812,12 +2869,12 @@ function registerOpenlore(
     const generation = ++sessionGeneration;
     sessionActive = true;
     // Lean tool surface first, in every mode (spec: PiDefaultToolSurfaceIsLean).
-    await applyToolSurface(ctx.cwd);
+    await applyToolSurface(piProjectRoot(ctx.cwd));
 
     if (ctx.hasUI) {
-      const loaded = await loadExistingConfig(ctx.cwd);
-      if (loaded.state === 'absent' && !configHinted.has(ctx.cwd)) {
-        configHinted.add(ctx.cwd);
+      const loaded = await loadExistingConfig(piProjectRoot(ctx.cwd));
+      if (loaded.state === 'absent' && !configHinted.has(piProjectRoot(ctx.cwd))) {
+        configHinted.add(piProjectRoot(ctx.cwd));
         ctx.ui.notify('OpenLore is not configured for this project — run /openlore configure (or /openlore configure --global for user-wide defaults).', 'info');
       } else if (loaded.state === 'invalid') {
         ctx.ui.notify(`OpenLore config not changed: ${loaded.detail}. Repair the indicated config file to configure it.`, 'warning');
@@ -2835,12 +2892,12 @@ function registerOpenlore(
   // Session-start daemon warmup, run off the session_start handler. Resolution failures surface
   // through the status and tool results, so nothing rejects here.
   async function warmDaemon(ctx: ExtensionContext, generation: number): Promise<void> {
-    const daemon = await getDaemon(ctx.cwd).catch(() => null);
+    const daemon = await getDaemon(piProjectRoot(ctx.cwd)).catch(() => null);
     if (!sessionActive || generation !== sessionGeneration) return;
     if (ctx.hasUI && daemon?.incompatibility) ctx.ui.notify(daemon.incompatibility, 'warning');
-    const recoveryFailure = automaticRecoveryFailures.get(ctx.cwd);
+    const recoveryFailure = automaticRecoveryFailures.get(piProjectRoot(ctx.cwd));
     if (ctx.hasUI && recoveryFailure !== undefined) {
-      automaticRecoveryFailures.delete(ctx.cwd);
+      automaticRecoveryFailures.delete(piProjectRoot(ctx.cwd));
       ctx.ui.notify(recoveryFailure, 'warning');
     }
     startKeepalive();
@@ -2922,7 +2979,7 @@ function registerOpenlore(
   // background: one slot, the latest compaction's, delivered by the next before_agent_start.
   pi.on('session_compact', (_event: SessionCompactEvent, ctx: ExtensionContext): void => {
     if (ctx.mode === 'json' || ctx.mode === 'print') return;
-    if (!inOpenloreProject(ctx.cwd) || handoffDisabled(ctx.cwd)) return;
+    if (!inOpenloreProject(ctx.cwd) || handoffDisabled(piProjectRoot(ctx.cwd))) return;
     pendingHandoff?.abort.abort(); // an older compaction's briefing is stale
     let sessionId: string | undefined;
     try { sessionId = ctx.sessionManager.getSessionId(); } catch { /* no session id */ }
@@ -2938,20 +2995,21 @@ function registerOpenlore(
   pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
     if (ctx.mode === 'json' || ctx.mode === 'print') return;
     const handoff = await takeHandoff();
+    const projectDir = piProjectRoot(ctx.cwd);
 
     const blocks: string[] = [];
-    if (await piContextMode(ctx.cwd) === 'full') {
+    if (await piContextMode(projectDir) === 'full') {
       const [analysisProvenance, specProvenance] = await Promise.all([
-        readAnalysisContentProvenance(ctx.cwd),
-        reviewedFileContentProvenance(ctx.cwd, 'openspec'),
+        readAnalysisContentProvenance(projectDir),
+        reviewedFileContentProvenance(projectDir, 'openspec'),
       ]);
-      const digest = await readDigest(ctx.cwd);
+      const digest = await readDigest(projectDir);
       if (digest) blocks.push(frameServedContent(
         '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
         analysisProvenance,
         'codebase architecture digest',
       ));
-      const specIndex = await readSpecIndex(ctx.cwd);
+      const specIndex = await readSpecIndex(projectDir);
       if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
       if (blocks.length === 0) {
         blocks.push('[openlore: no analysis found — run `openlore analyze` to enable structural context.]');
