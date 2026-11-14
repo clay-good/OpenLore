@@ -4,21 +4,24 @@
 
 ### Requirement: SpecLinkStatusNamesUnwantedAndPredated
 
-The spec↔code link vocabulary SHALL name, as registered governance finding codes, two states it
-cannot express today: `spec-coverage-unwanted` — an anchored memory/decision or spec-linked symbol
-that no requirement requires (coverage a deleted or narrowed spec left behind) — and
-`spec-citation-predated` — a citation to a spec/decision revision newer than the indexed store
-knows. Both SHALL be deterministic lookups over the graph and store, emitted in the unified
-governance-finding shape, advisory by default.
+Drift detection SHALL report, as registered advisory finding codes, `spec-coverage-unwanted` for a
+decision or memory that cites a requirement no requirement source contains, and
+`spec-citation-predated` for a cited decision or requirement that exists on disk but not in the
+index. Both SHALL be computed from the spec link index and the stores only, for any requirement
+source the index reads, and SHALL carry the citing record and the requirement name as proof.
 
-#### Scenario: An orphaned implementation is named Unwanted
+#### Scenario: A citation to a deleted requirement is unwanted
 
-- **GIVEN** an anchored fact or spec-linked symbol whose requirement no longer exists
-- **WHEN** coverage is audited
-- **THEN** it surfaces as `spec-coverage-unwanted`, not silently ignored
+- **WHEN** drift is checked and a decision cites a requirement that was removed from its source
+- **THEN** the result includes `spec-coverage-unwanted` naming the decision and the requirement
 
-#### Scenario: A too-new citation is named Predated
+#### Scenario: A citation the index has not seen is predated
 
-- **GIVEN** a citation to a decision/spec revision the indexed store has not yet seen
-- **WHEN** the citation is checked
-- **THEN** it surfaces as `spec-citation-predated`, distinct from a valid citation
+- **WHEN** a cited decision exists on disk but is not in the indexed store
+- **THEN** the result includes `spec-citation-predated`, and `verify_claim` returns `unverifiable`
+  with the reason `predated`
+
+#### Scenario: A repository with no spec framework is silent
+
+- **WHEN** drift is checked in a repository that has no requirement source
+- **THEN** neither finding is reported and no error is raised

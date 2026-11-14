@@ -4,25 +4,19 @@
 
 ### Requirement: LeaseDistinguishesStructuralMovement
 
-The epistemic lease SHALL distinguish repository movement that changed extracted structure from
-movement that did not: alongside the git-commit baseline, the tracker SHALL compare an
-extraction-fact digest, and a HEAD move whose entire delta cut off (no extracted fact changed)
-SHALL be disclosed factually — "repo moved; extracted structure unchanged" — without applying the
-freshness downgrade that structural movement triggers. The commit fact SHALL never be suppressed:
-the note always states that HEAD moved. Movement that changed any extracted fact SHALL behave
-exactly as today.
+The freshness lease SHALL tell repository movement that changed extracted structure apart from
+movement that did not. When HEAD moved and every changed file cut off at the fact digest, the note
+SHALL state "repo moved; extracted structure unchanged" and the freshness state SHALL NOT be
+lowered for that movement. The note SHALL always state that HEAD moved. Movement that changed any
+extracted fact SHALL behave as before this change.
 
 #### Scenario: A comment-only commit does not degrade freshness
 
-- **GIVEN** an oriented session, followed by a commit whose whole delta is comment/formatting
-  edits that cut off at the extraction boundary
-- **WHEN** the next tool response computes the lease signal
-- **THEN** the freshness state is unchanged by the movement and the note discloses that the repo
-  moved with extracted structure unchanged
+- **WHEN** a session has oriented and a commit of only comment and formatting edits follows
+- **THEN** the freshness state stays as it was
+- **AND** the note says the repository moved with extracted structure unchanged
 
-#### Scenario: A structural commit still counts as movement
+#### Scenario: A structural commit still counts
 
-- **GIVEN** an oriented session, followed by a commit that changed at least one extracted fact
-- **WHEN** the next tool response computes the lease signal
-- **THEN** `repoMovedSinceOrient` behaves exactly as before this change — the movement is
-  disclosed and contributes to the freshness verdict as today
+- **WHEN** a session has oriented and a commit that changed one extracted fact follows
+- **THEN** `repoMovedSinceOrient` is true and the state moves from `fresh` to `degraded` as before
