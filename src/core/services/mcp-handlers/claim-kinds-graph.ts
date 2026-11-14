@@ -221,11 +221,11 @@ async function decisionGoverned(root: string, subject: string): Promise<unknown>
   const cg = ctx.callGraph as SerializedCallGraph;
   const staleness = await computeStaleness(root);
   const unverifiable = (reason: string) => ({ claim, verdict: 'unverifiable' as Verdict, reason, confidenceBoundary: assembleBoundary({ staleness }) });
-  const { resolveClaimSymbol, readIndexCommit, isAuthoritativeForCitation } = await import('./claim-verification.js');
+  const { resolveClaimSymbol, ambiguityAdvice, readIndexCommit, isAuthoritativeForCitation } = await import('./claim-verification.js');
   const res = resolveClaimSymbol(cg, subject);
   if (!res.node) {
     return unverifiable(res.how === 'ambiguous'
-      ? `Subject "${claim.subject}" is ambiguous — it matches ${res.matched} symbols. Disambiguate before verifying.`
+      ? `Subject "${claim.subject}" is ambiguous — it matches ${res.matched} symbols. ${ambiguityAdvice(res)}`
       : `Subject "${claim.subject}" was not found in the call graph.`);
   }
   const node = res.node;

@@ -48,6 +48,10 @@ All notable changes to OpenLore are documented here. This project adheres to
   dead.** A function defined inside a live function is a value it hands out (a callback, a returned
   visitor's `enter`/`leave`) whose caller is outside the graph; a constructor of a class with live
   members has run, though `new X()` is not a call edge. Both are capped at `low` with the reason.
+- **`verify_claim` can verify a symbol whose name is shared.** An ambiguous subject was answered
+  "Disambiguate before verifying", but no form was accepted — not `name::path` (which every other
+  symbol-taking tool accepts), `Class.method`, or the node id. All three now resolve, and the
+  ambiguity reason names the candidates in that form.
 - **A fresh `openlore install` no longer leaves its own index stale.** The decision-trail step
   appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
   of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now

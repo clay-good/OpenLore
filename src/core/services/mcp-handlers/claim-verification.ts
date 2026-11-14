@@ -134,6 +134,17 @@ interface Resolution {
   matched: number;
   /** The match strategy that resolved it. */
   how: 'exact' | 'fuzzy' | 'none' | 'ambiguous';
+  /** When ambiguous: the first few matches as `name::path`, the form that disambiguates. */
+  candidates?: string[];
+}
+
+/** How many ambiguous matches a reason names. */
+const MAX_NAMED_CANDIDATES = 5;
+
+/** The disambiguation advice for an ambiguous symbol, naming the `name::path` forms that resolve. */
+export function ambiguityAdvice(res: Resolution): string {
+  const named = res.candidates?.length ? ` Candidates: ${res.candidates.join(', ')}${res.matched > res.candidates.length ? ', …' : ''}.` : '';
+  return `Pass name::path (or Class.method::path) to pick one.${named}`;
 }
 
 /**
@@ -147,14 +158,35 @@ export function resolveClaimSymbol(cg: SerializedCallGraph, name: string): Resol
 }
 
 function resolveSymbol(cg: SerializedCallGraph, name: string): Resolution {
-  const lower = name.toLowerCase();
   const code = cg.nodes.filter(isCodeNode);
-  const exact = code.filter(n => n.name.toLowerCase() === lower);
+  const qualified = (n: FunctionNode) => (n.className ? `${n.className}.${n.name}` : n.name);
+  const ambiguous = (hits: FunctionNode[]): Resolution => ({
+    matched: hits.length,
+    how: 'ambiguous',
+    candidates: hits.slice(0, MAX_NAMED_CANDIDATES).map(n => `${qualified(n)}::${n.filePath}`),
+  });
+  // An exact node id (`path::Class.method`), as other tools report it.
+  const byId = code.find(n => n.id === name);
+  if (byId) return { node: byId, matched: 1, how: 'exact' };
+  // `name::path` / `Class.method::path` — the form every other symbol-taking tool accepts. The
+  // ambiguity reason told agents to disambiguate, and no form did.
+  const sep = name.indexOf('::');
+  if (sep > 0) {
+    const namePart = name.slice(0, sep);
+    const pathPart = name.slice(sep + 2).replace(/^\.\//, '');
+    const hits = code.filter(n => (n.name === namePart || qualified(n) === namePart)
+      && (n.filePath === pathPart || n.filePath.endsWith(`/${pathPart}`)));
+    if (hits.length === 1) return { node: hits[0], matched: 1, how: 'exact' };
+    if (hits.length > 1) return ambiguous(hits);
+    return { matched: 0, how: 'none' };
+  }
+  const lower = name.toLowerCase();
+  const exact = code.filter(n => n.name.toLowerCase() === lower || qualified(n).toLowerCase() === lower);
   if (exact.length === 1) return { node: exact[0], matched: 1, how: 'exact' };
-  if (exact.length > 1) return { matched: exact.length, how: 'ambiguous' };
+  if (exact.length > 1) return ambiguous(exact);
   const fuzzy = code.filter(n => n.name.toLowerCase().includes(lower));
   if (fuzzy.length === 1) return { node: fuzzy[0], matched: 1, how: 'fuzzy' };
-  if (fuzzy.length > 1) return { matched: fuzzy.length, how: 'ambiguous' };
+  if (fuzzy.length > 1) return ambiguous(fuzzy);
   return { matched: 0, how: 'none' };
 }
 
@@ -639,7 +671,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
       claim,
       verdict: 'unverifiable' as Verdict,
       reason: subjRes.how === 'ambiguous'
-        ? `Subject "${input.subject}" is ambiguous — it matches ${subjRes.matched} symbols. Disambiguate (e.g. by exact name) before verifying.`
+        ? `Subject "${input.subject}" is ambiguous — it matches ${subjRes.matched} symbols. ${ambiguityAdvice(subjRes)}`
         : `Subject "${input.subject}" was not found in the call graph. It may be external, mis-spelled, or in an unindexed file.`,
       confidenceBoundary: assembleBoundary({
         extraCrossings: [{ kind: 'unindexed-repo', count: 0, detail: `"${input.subject}" does not resolve to an indexed symbol.` }],
@@ -655,7 +687,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
         claim,
         verdict: 'unverifiable' as Verdict,
         reason: objRes.how === 'ambiguous'
-          ? `Object "${input.object}" is ambiguous — it matches ${objRes.matched} symbols. Disambiguate before verifying.`
+          ? `Object "${input.object}" is ambiguous — it matches ${objRes.matched} symbols. ${ambiguityAdvice(objRes)}`
           : `Object "${input.object}" was not found in the call graph. It may be external, mis-spelled, or in an unindexed file.`,
         confidenceBoundary: assembleBoundary({
           extraCrossings: [{ kind: 'unindexed-repo', count: 0, detail: `"${input.object}" does not resolve to an indexed symbol.` }],
