@@ -4094,9 +4094,12 @@ are not read, a GraphQL finding SHALL say its consumers are not assessed.
 Schema identity SHALL be scoped to the schema's own project (its nearest enclosing project root),
 so two unrelated projects in one repository do not void each other's types; a collision INSIDE one
 project SHALL stay unassessed. Both revisions SHALL be partitioned with the SAME project roots — a
-root present at only one revision SHALL be honored at neither, and disclosed — and the partition
-used SHALL be stated in `boundaries`. A duplicate field, enum value or argument SHALL withhold THAT
-type under `notAssessed` with its reason while the rest of the document is graded. Every bounded
+root present at only one revision SHALL be honored on both when the other revision has no schema under
+it, and otherwise at neither, disclosed — and the partition used SHALL be stated in `boundaries`.
+A duplicate field, enum value or argument SHALL withhold THAT type under `notAssessed` with its reason
+while the rest of the document is graded, and a change to the repeated declaration SHALL still be
+reported `schema-unassessed`. In an `extend`, only the duplicated element SHALL be set aside; the
+extension's other declarations SHALL never read as removed. Every bounded
 list of what was not assessed SHALL carry the count it omitted.
 
 #### Scenario: A root type each project declares is graded per project
@@ -4114,6 +4117,14 @@ list of what was not assessed SHALL carry the count it omitted.
 - **WHEN** `certify_service_contract` runs with the base ref
 - **THEN** both revisions are partitioned without that root, the one-sided root is disclosed, and
   nothing is reported added or removed because of it
+
+#### Scenario: A package added with its own schema is honored
+
+- **GIVEN** a root schema that loses an operation, and a new package with a `package.json` and its
+  own `type Query` added at head
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** the removal is graded `breaking`, the new package's operation is `operation-added`, and
+  nothing is reported ambiguous because of it
 
 #### Scenario: A duplicate field withholds its type, and the omitted count is given
 

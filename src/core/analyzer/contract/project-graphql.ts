@@ -118,7 +118,7 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
     out.notes.push(`GraphQL schema identity was scoped to ${universes.length} project(s): ${named.slice(0, 8).join(', ')}${named.length > 8 ? `, and ${named.length - 8} more` : ''}. A type defined in two of them does not collide.`);
   }
   if (partition.rootsOmitted) out.notes.push(`${partition.rootsOmitted} project root(s) past the cap were not honored, so the schemas under them were read in a wider project.`);
-  if (partition.tooDeep.length) out.notes.push(`${partition.tooDeep.length} GraphQL schema file(s) sit too deep for a project root to be looked for, so they were read in the repository root's project.`);
+  if (partition.tooDeep.length) out.notes.push(`${partition.tooDeep.length} GraphQL schema file(s) sit deeper than the project-root walk, so they were read in the deepest project root above them (the repository root when none is).`);
   const outside = [...new Set(docs.flatMap(d => d.unassessed))].sort();
   if (outside.length) out.notes.push(`GraphQL constructs outside the model were not read: ${outside.slice(0, 12).join(', ')}${outside.length > 12 ? ', …' : ''}`);
 
@@ -259,18 +259,30 @@ export function projectGraphql(input: GraphqlProjectionInput): GraphqlProjection
     // to a unique match anywhere keeps a monorepo that splits its server from its schema bound, and
     // an address two projects both declare is never guessed between.
     const own = perUniverse.get(partition.universeOf(map.file));
+    // Whether the map's own project has ANY definition of this root — read, defined twice, or
+    // withheld for its shape. If it does, the map is about THAT root: falling back to a unique
+    // match in another project would bind it to someone else's operation while its own root's
+    // answer is "not assessed".
+    const ownRootWithheld = own !== undefined && !own.at.schema.types.has(map.root)
+      && (own.at.schema.ambiguous.some(a => a.name === map.root) || own.at.schema.unassessableTypes.some(u => u.name === map.root));
+    const ownHasRoot = own !== undefined && (own.at.schema.types.has(map.root) || ownRootWithheld);
     for (const e of map.entries) {
       const address = `${map.root}.${e.field}`;
       const elsewhere = operationsByAddress.get(address) ?? [];
+      if (ownRootWithheld) {
+        out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, ...(e.fn ? { symbol: e.fn } : {}), reason: 'ambiguous-implementation',
+          detail: `${map.root} is defined more than once or has an unreadable shape in this map's own project (${universeLabel(partition.universeOf(map.file))}), so ${address} is not bound` });
+        continue;
+      }
       const target = own?.operations.get(address)
-        ?? (elsewhere.length === 1 ? elsewhere[0].node : undefined);
+        ?? (!ownHasRoot && elsewhere.length === 1 ? elsewhere[0].node : undefined);
       // Whether the schema declares the field at all: in the map's OWN project when it has one,
       // otherwise in any project — a field some project declares is never called unknown.
       const declared = own
         ? (own.at.schema.types.get(map.root)?.fields.some(f => f.name === e.field) ?? false)
         : (fieldsOfRoot.get(map.root)?.has(e.field) ?? false);
       if (!target) {
-        if (elsewhere.length > 1) {
+        if (!ownHasRoot && elsewhere.length > 1) {
           out.unresolvedResolvers.push({ file: map.file, line: e.line, root: map.root, field: e.field, ...(e.fn ? { symbol: e.fn } : {}), reason: 'ambiguous-implementation',
             detail: `${address} is declared by ${elsewhere.length} projects (${[...new Set(elsewhere.map(x => universeLabel(x.universe)))].slice(0, 3).join(', ')}) and this map is in none of them` });
           continue;

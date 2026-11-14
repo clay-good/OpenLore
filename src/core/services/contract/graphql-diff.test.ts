@@ -407,6 +407,28 @@ describe('diffGraphql: review repros (roots, Federation 1, ambiguity, directive 
   });
 });
 
+describe('diffGraphql: duplicates are compared, never dropped', () => {
+  it('a change to a duplicated field of a withheld type is seen', () => {
+    expect(rows(diff('type Query { a: Int }\ntype T { x: Int x: String }', 'type Query { a: Int }\ntype T { x: Int x: Boolean }'))).toEqual(['schema-unassessed T']);
+    expect(rows(diff('type Query { a(i: Int, i: String): Int }', 'type Query { a(i: Int, i: Boolean!): Int }'))).toEqual(['schema-unassessed Query']);
+    expect(diff('type Query { a: Int }\ntype T { x: Int x: String }', 'type Query { a: Int }\ntype T { x: Int x: String }')).toEqual([]);
+  });
+
+  it('an extension holding a duplicate keeps its other fields, and sets aside only the duplicate', () => {
+    const base = 'type Query { a: Int }\nextend type Query { b: Int c: Int }';
+    // Adding a duplicate `c` must not read `b` or `c` as removed.
+    expect(rows(diff(base, 'type Query { a: Int }\nextend type Query { b: Int c: Int c: Int }'))).toEqual(['schema-unassessed Query.c']);
+    // A real removal in the clean definition is still graded breaking beside it.
+    const removed = diff('type Query { a: Int z: Int }\nextend type Query { c: Int c: Int }', 'type Query { a: Int }\nextend type Query { c: Int c: Int }');
+    expect(removed.map(c => `${c.rule} ${c.address} ${c.class}`)).toEqual(['operation-removed Query.z breaking']);
+  });
+
+  it('an enum extension with a duplicate value sets aside only that value', () => {
+    const b = 'type Query { a: E }\nenum E { A B }\nextend enum E { C }';
+    expect(rows(diff(b, 'type Query { a: E }\nenum E { A B }\nextend enum E { C C }'))).toEqual(['schema-unassessed E [C]']);
+  });
+});
+
 describe('diffGraphqlUniverses (change: scope-graphql-schema-universes)', () => {
   const docs = (files: Record<string, string>) => Object.entries(files).map(([file, text]) => {
     const r = readGraphql(file, text);

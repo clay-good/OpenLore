@@ -12,7 +12,7 @@
  * `schema-unassessed`, never silently "no change".
  */
 
-import { emptyGqlSchema, type GqlArg, type GqlField, type GqlMergedType, type GqlSchema, type GqlUniverseSchema } from '../../analyzer/contract/graphql.js';
+import { emptyGqlSchema, elementFingerprint, type GqlArg, type GqlField, type GqlMergedType, type GqlSchema, type GqlUniverseSchema } from '../../analyzer/contract/graphql.js';
 import { CONTRACT_RULES, type ContractChange, type ContractRule } from './contract-diff.js';
 
 interface TypeShape { nonNull: boolean; list?: TypeShape; name?: string }
@@ -89,11 +89,41 @@ function diffOutputField(file: string, address: string, b: GqlField, f: GqlField
   if (f.directivesHash !== b.directivesHash) out.push(change(file, address, f.line, 'schema-unassessed', `${element ?? address}: a directive changed (directives are outside the model)`, element));
 }
 
+/**
+ * Elements an `extend` declared more than once, on either side (`field` or `value`), each with what
+ * to report when its fingerprint differs between the sides. Such an element is never compared
+ * field by field, and never read as added or removed: which declaration a server keeps is not known.
+ */
+function heldElements(
+  b: GqlMergedType | undefined,
+  t: GqlMergedType | undefined,
+  element: 'field' | 'value',
+): Map<string, { changed: boolean; reason: string; file: string }> {
+  const out = new Map<string, { changed: boolean; reason: string; file: string }>();
+  const fp = (x: GqlMergedType | undefined, n: string): string => {
+    const held = x?.unassessableElements?.[`${element}:${n}`];
+    if (held) return held.fingerprint;
+    const plain = element === 'field' ? x?.fields.find(f => f.name === n) : x?.values.find(v => v.name === n);
+    return plain ? elementFingerprint([plain]) : 'absent';
+  };
+  for (const x of [b, t]) {
+    for (const [key, held] of Object.entries(x?.unassessableElements ?? {})) {
+      if (!key.startsWith(`${element}:`)) continue;
+      const n = key.slice(element.length + 1);
+      if (out.has(n)) continue;
+      out.set(n, { changed: fp(b, n) !== fp(t, n), reason: held.reason, file: held.file });
+    }
+  }
+  return out;
+}
+
 function diffType(b: GqlMergedType, t: GqlMergedType, out: ContractChange[]): void {
   const push = (rule: ContractRule, detail: string, line: number, element?: string, file = t.file) => out.push(change(file, t.name, line, rule, detail, element));
   if (b.kind !== t.kind) { push('type-removed', `${t.name} changed from ${b.kind} to ${t.kind}`, t.line); return; }
-  const was = new Map(b.fields.map(f => [f.name, f]));
-  const now = new Map(t.fields.map(f => [f.name, f]));
+  const heldFields = heldElements(b, t, 'field');
+  for (const [n, h] of heldFields) if (h.changed) push('schema-unassessed', `field \`${n}\`: ${h.reason}, so it is not compared`, t.line, `field ${n}`, h.file);
+  const was = new Map(b.fields.filter(f => !heldFields.has(f.name)).map(f => [f.name, f]));
+  const now = new Map(t.fields.filter(f => !heldFields.has(f.name)).map(f => [f.name, f]));
   for (const [n, f] of now) {
     const old = was.get(n);
     const el = `field ${n}`;
@@ -114,14 +144,17 @@ function diffType(b: GqlMergedType, t: GqlMergedType, out: ContractChange[]): vo
     } else diffOutputField(fileOf(t, f), t.name, old, f, out, el);
   }
   for (const [n, old] of was) if (!now.has(n)) push('field-removed', `field \`${n}\` removed`, t.line, `field ${n}`, fileOf(b, old));
-  const bValues = new Map(b.values.map(v => [v.name, v]));
+  const heldValues = heldElements(b, t, 'value');
+  for (const [n, h] of heldValues) if (h.changed) push('schema-unassessed', `enum value ${n}: ${h.reason}, so it is not compared`, t.line, n, h.file);
+  const bValues = new Map(b.values.filter(v => !heldValues.has(v.name)).map(v => [v.name, v]));
   for (const v of t.values) {
+    if (heldValues.has(v.name)) continue;
     const old = bValues.get(v.name);
     if (!old) { push('graphql-enum-value-added', `enum value ${v.name} added (a client switching over this enum may not handle it)`, v.line, v.name); continue; }
     if (v.deprecated && !old.deprecated) push('enum-value-deprecated', `enum value ${v.name} is now deprecated`, v.line, v.name);
     if (v.directivesHash !== old.directivesHash) push('schema-unassessed', `enum value ${v.name}: a directive changed (directives are outside the model)`, v.line, v.name);
   }
-  const tValues = new Set(t.values.map(v => v.name));
+  const tValues = new Set([...t.values.map(v => v.name), ...heldValues.keys()]);
   for (const v of b.values) if (!tValues.has(v.name)) push('enum-value-removed', `enum value ${v.name} removed`, t.line, v.name);
   const bMembers = new Set(b.members);
   const tMembers = new Set(t.members);
@@ -183,8 +216,12 @@ export function diffGraphql(base: GqlSchema, head: GqlSchema): ContractChange[] 
     }
     const b = base.roots[kind] ? base.types.get(base.roots[kind]!) : undefined;
     const h = head.roots[kind] ? head.types.get(head.roots[kind]!) : undefined;
-    const was = new Map((b?.fields ?? []).map(f => [f.name, f]));
-    const now = new Map((h?.fields ?? []).map(f => [f.name, f]));
+    const heldOps = heldElements(b, h, 'field');
+    for (const [n, held] of heldOps) {
+      if (held.changed) out.push(change(held.file, `${(h ?? b)!.name}.${n}`, 1, 'schema-unassessed', `${kind} ${n}: ${held.reason}, so it is not compared`));
+    }
+    const was = new Map((b?.fields ?? []).filter(f => !heldOps.has(f.name)).map(f => [f.name, f]));
+    const now = new Map((h?.fields ?? []).filter(f => !heldOps.has(f.name)).map(f => [f.name, f]));
     for (const [n, f] of now) {
       const address = `${h!.name}.${n}`;
       const old = was.get(n);

@@ -767,6 +767,25 @@ enum Status { OPEN CLOSED }
     expect(changes.items.some(c => c.rule === 'operation-added' || c.rule === 'operation-removed')).toBe(false);
   });
 
+  it('a package added with its own schema is honored, and does not hide a breaking change in its parent', async () => {
+    const root = repo({ 'schema.graphql': 'type Query { order: Int gone: Int }\n' });
+    write(root, 'schema.graphql', 'type Query { order: Int }\n');
+    write(root, 'packages/b/package.json', PKG);
+    write(root, 'packages/b/schema.graphql', 'type Query { ping: Int }\n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; class: string; address: string }> };
+    expect(changes.items.map(c => `${c.rule} ${c.class} ${c.address}`).sort()).toEqual(['operation-added non-breaking Query.ping', 'operation-removed breaking Query.gone']);
+    expect(((r.boundaries ?? []) as string[]).some(b => b.includes('one revision only'))).toBe(false);
+  });
+
+  it('a bare .graphqlconfig marks a project for certify, as it does for analyze', async () => {
+    const root = repo({ 'schema.graphql': 'type Query { b: Int }\n', 'svc/.graphqlconfig': '{}\n', 'svc/schema.graphql': 'type Query { a: Int keep: Int }\n' });
+    write(root, 'svc/schema.graphql', 'type Query { keep: Int }\n');
+    const r = await handleCertifyServiceContract({ directory: root, baseRef: 'main' });
+    const changes = r.changes as { items: Array<{ rule: string; class: string; address: string }> };
+    expect(changes.items.map(c => `${c.rule} ${c.class} ${c.address}`)).toEqual(['operation-removed breaking Query.a']);
+  });
+
   it('moving an extension to another file is no change', async () => {
     const root = repo({ 'graphql/schema.graphql': SDL, 'graphql/ops.graphqls': EXT });
     rmSync(join(root, 'graphql/ops.graphqls'));

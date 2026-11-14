@@ -334,18 +334,26 @@ Nothing is parsed to decide this: a `package.json` that is not valid JSON still 
 | Several versioned definition files in ONE directory that redefine the same types | one universe, still **not assessed** |
 
 The partition is stated in `boundaries`, so the answer is checkable. A project root that exists at
-only one of the two revisions is **ignored on both**, and said so: honoring it would move a type
-between universes and read as one type removed and another added. A `relay.config.js`-only project
+only one of the two revisions is honored on both when the other revision has no schema under it — a
+package added or removed with its own schema moves no type between universes. When the other
+revision DOES have a schema under it, the root is **ignored on both**, and said so: honoring it would
+move a type between universes and read as one type removed and another added. Certify and `analyze`
+recognize the same markers, the bare `.graphqlconfig` included. A `relay.config.js`-only project
 (no manifest) falls back to the enclosing universe — the pre-partition answer, never a narrower one.
 Past 2,000 project roots, the deepest are dropped, which only ever widens a universe; a schema more
-than 40 directories deep falls back to the repository root. Both are disclosed.
+than 40 directories deep belongs to the deepest project root above it (the repository root when
+none is). Both are disclosed.
 
 ### What a duplicate declaration withholds
 
 A duplicate field, enum value or argument makes **that type** unassessable — which definition wins
 is not knowable — and nothing else. The type is withheld from the merged namespace and named with
-its reason; every other type in the same document is read and graded. (A duplicate argument on a
-`directive` definition, whose namespace is the whole document, still refuses the file.)
+its reason; every other type in the same document is read and graded. The repeated declarations are
+kept for comparison, so a change to one is still reported `schema-unassessed`, never silent. In an
+`extend`, only the duplicated field or enum value is set aside: the extension's other declarations
+are folded in as usual (none of them reads as removed), and the set-aside element is reported
+`schema-unassessed` when it changed. (A duplicate argument on a `directive` definition, whose
+namespace is the whole document, still refuses the file.)
 
 Resolvers of ordinary TYPE fields (`Order: { customer }`, `@order.field("customer")`) are not
 bound: a type field is not a node.

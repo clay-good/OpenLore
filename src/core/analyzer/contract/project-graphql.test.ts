@@ -213,6 +213,24 @@ describe('projectGraphql: schema universes (change: scope-graphql-schema-univers
     expect(edgesOf(p, 'implements_endpoint')).toEqual(['outside/r.ts::getOrder -> packages/a/schema.graphql::Query.order']);
   });
 
+  it("a map never binds to another project's operation while its own project's root is withheld", () => {
+    // packages/a defines `type Query` twice, so its root is not assessed; packages/b declares
+    // Query.user uniquely. The map in packages/a is about packages/a's root, not packages/b's.
+    const code = [fn('packages/a/src/r.ts::getUser')];
+    const p = projectGraphql({
+      files: [
+        { path: 'packages/a/s1.graphql', content: 'type Query { user: Int }\n' },
+        { path: 'packages/a/s2.graphql', content: 'type Query { user: Int }\n' },
+        { path: 'packages/b/s.graphql', content: 'type Query { user: String }\n' },
+      ],
+      projectRoots: ['packages/a', 'packages/b'],
+      resolverMaps: () => [{ file: 'packages/a/src/r.ts', line: 1, runtime: 'node', root: 'Query', entries: [{ field: 'user', fn: 'getUser', line: 2 }] }],
+      resolveImplementation: byName(code),
+    });
+    expect(edgesOf(p, 'implements_endpoint')).toEqual([]);
+    expect(p.unresolvedResolvers).toEqual([expect.objectContaining({ file: 'packages/a/src/r.ts', field: 'user', detail: expect.stringContaining("in this map's own project (packages/a)") })]);
+  });
+
   it('a type withheld for a duplicate field is named, and its neighbours are still projected', () => {
     const p = projectGraphql({
       files: [{ path: 's.graphql', content: 'type Query { a: Int }\ntype Dup { x: Int\n x: String }\ntype Fine { y: Int }\n' }],

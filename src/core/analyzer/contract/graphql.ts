@@ -84,6 +84,19 @@ export interface GqlType {
    * is kept with the reason and withheld from the merged namespace; every other type is still read.
    */
   unassessable?: string;
+  /**
+   * The repeated declarations the parser did not keep (the first one is kept). Carried so a
+   * withheld type's fingerprint still SEES a change to them: dropping them made `x: Int x: String`
+   * → `x: Int x: Boolean` compare as unchanged.
+   */
+  duplicates?: GqlDuplicate[];
+}
+
+/** One repeated declaration: a field (or one of its arguments, keyed by the field) or an enum value. */
+export interface GqlDuplicate {
+  element: 'field' | 'value';
+  name: string;
+  definition: unknown;
 }
 
 /** A directive definition: `directive @auth(role: Role!) repeatable on FIELD_DEFINITION | OBJECT`. */
@@ -236,6 +249,9 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
 
   /** Withhold one TYPE (never the document) and say why; the first reason read is the one kept. */
   const withhold = (t: GqlType, reason: string) => { t.unassessable ??= reason; };
+  const keepDuplicate = (t: GqlType, element: GqlDuplicate['element'], name: string, definition: unknown) => {
+    (t.duplicates ??= []).push({ element, name, definition });
+  };
 
   /** A balanced `{…}`, `[…]` or `(…)` group, or one token: a value or a selection set, as text. */
   const skipGroup = (): string => {
@@ -425,7 +441,7 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
           const v = inputValue();
           // A duplicate makes THIS type ambiguous, not the document: the rest is still read, and
           // the type is withheld from the merged namespace rather than guessed between.
-          if (seen.has(v.name)) { withhold(t, `field \`${v.name}\` is declared twice (line ${v.line})`); continue; }
+          if (seen.has(v.name)) { withhold(t, `field \`${v.name}\` is declared twice (line ${v.line})`); keepDuplicate(t, 'field', v.name, v); continue; }
           seen.add(v.name);
           t.fields.push({ name: v.name, type: v.type, args: [], ...(v.defaultValue !== undefined ? { defaultValue: v.defaultValue } : {}), deprecated: v.deprecated, directivesHash: v.directivesHash, line: v.line });
           continue;
@@ -441,7 +457,7 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
           while (!is(')')) {
             const a = inputValue();
             // A repeated argument name would let the last one silently win every comparison.
-            if (seenArgs.has(a.name)) { withhold(t, `argument \`${a.name}\` is declared twice on \`${f.v}\` (line ${a.line})`); continue; }
+            if (seenArgs.has(a.name)) { withhold(t, `argument \`${a.name}\` is declared twice on \`${f.v}\` (line ${a.line})`); keepDuplicate(t, 'field', f.v, { argument: a }); continue; }
             seenArgs.add(a.name);
             args.push(a);
           }
@@ -452,6 +468,7 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
         const d = directives();
         // The first definition is kept, so what IS read of a withheld type stays deterministic.
         if (!duplicate) t.fields.push({ name: f.v, type, args, deprecated: d.deprecated, directivesHash: d.hash, line: f.line });
+        else keepDuplicate(t, 'field', f.v, { type, args, deprecated: d.deprecated, directivesHash: d.hash });
       }
       expect('}');
     } else if (kind === 'enum' && is('{')) {
@@ -465,6 +482,7 @@ function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
         seen.add(v.v);
         const d = directives();
         if (!duplicate) t.values.push({ name: v.v, deprecated: d.deprecated, directivesHash: d.hash, line: v.line });
+        else keepDuplicate(t, 'value', v.v, { deprecated: d.deprecated, directivesHash: d.hash });
       }
       expect('}');
     }
@@ -500,6 +518,12 @@ export interface GqlMergedType extends GqlType {
    * extensions ARE this repository's contract and are compared as such.
    */
   extensionOnly?: true;
+  /**
+   * Elements an `extend` declared more than once (`field:<name>` / `value:<name>`). The extension's
+   * readable part is folded in; these alone are compared by fingerprint and, when they differ,
+   * reported `schema-unassessed` — never read as removed, and never hiding the rest of the type.
+   */
+  unassessableElements?: Record<string, { reason: string; fingerprint: string; file: string }>;
 }
 
 export type GqlRootKind = 'query' | 'mutation' | 'subscription';
@@ -540,6 +564,13 @@ export interface GqlSchema {
  * change to a withheld type.
  */
 const fingerprintOf = (x: unknown): string => sha(JSON.stringify(x, (k, v) => (k === 'line' || k === 'unassessable' ? undefined : v)));
+
+/**
+ * One element's content for comparison across revisions: no line, and no `file` (a merged field
+ * carries the extension file it came from, which moving the extension changes).
+ */
+export const elementFingerprint = (x: unknown): string =>
+  sha(JSON.stringify(x, (k, v) => (k === 'line' || k === 'file' ? undefined : v)));
 
 /**
  * Merge the documents of ONE project into one schema, as a GraphQL server does: one global namespace
@@ -600,14 +631,14 @@ export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
   }
   const orphanExtensions: GqlSchema['orphanExtensions'] = [];
   for (const [name, every] of exts) {
-    // An `extend` whose OWN shape cannot be read is not folded in — and does not withhold the type
-    // it extends, which another file may define cleanly. Before this type-scoped refusal existed,
-    // a duplicate made the whole FILE unreadable and the clean definition was compared normally;
-    // withholding the merged type instead would downgrade a real `field-removed` in the clean file
-    // to `schema-unassessed`, which is the one direction that must never happen.
-    const at = every.filter(x => !x.t.unassessable);
+    // An `extend` holding a duplicate is folded in for its READABLE part — the first declaration of
+    // each element, as for a definition — and only the duplicated element is set aside, compared by
+    // fingerprint. Dropping the whole extension read its other fields as REMOVED (a false breaking
+    // change); withholding the merged type would downgrade a real removal in a clean definition to
+    // `schema-unassessed`. This loses neither.
+    const at = every;
     for (const x of every) {
-      if (x.t.unassessable) conflicts.push(`\`extend ${x.t.kind} ${name}\` in ${x.file} is not read: ${x.t.unassessable}`);
+      if (x.t.unassessable) conflicts.push(`\`extend ${x.t.kind} ${name}\` in ${x.file}: ${x.t.unassessable}, so that element is not assessed (the rest of the extension is)`);
     }
     if (!at.length) continue;
     let base = types.get(name);
@@ -636,6 +667,12 @@ export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
       for (const m of t.members) if (!memberNames.has(m)) { memberNames.add(m); base.members.push(m); }
       for (const i of t.interfaces) if (!interfaceNames.has(i)) { interfaceNames.add(i); base.interfaces.push(i); }
       if (t.directivesHash !== NO_DIRECTIVES) extDirectives.push(t.directivesHash);
+      for (const dupl of t.duplicates ?? []) {
+        const key = `${dupl.element}:${dupl.name}`;
+        const kept = dupl.element === 'field' ? t.fields.find(f => f.name === dupl.name) : t.values.find(v => v.name === dupl.name);
+        const all = [kept ?? null, ...(t.duplicates ?? []).filter(o => o.element === dupl.element && o.name === dupl.name).map(o => o.definition)];
+        (base.unassessableElements ??= {})[key] = { reason: t.unassessable ?? `${dupl.element} \`${dupl.name}\` is declared twice`, fingerprint: elementFingerprint(all), file };
+      }
     }
     // Folded in independent of file order, and only when an extension carries a directive: moving
     // fields into a bare `extend`, or an extension to another file, changes no directive.

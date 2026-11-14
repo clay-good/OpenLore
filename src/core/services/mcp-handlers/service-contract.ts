@@ -84,7 +84,11 @@ export interface FederationCensus {
 const MAX_FEDERATED_CONSUMERS = 100;
 const MAX_FEDERATION_SKIPPED = 50;
 
-const SPEC_EXT = /\.(?:ya?ml|json|proto|graphqls?|gql)$/i;
+// The bare `.graphqlconfig` is listed too: it marks a GraphQL project root, and a listing that
+// missed it divided the repository differently from `analyze`, which sees every file.
+const SPEC_EXT = /(?:\.(?:ya?ml|json|proto|graphqls?|gql)|(?:^|\/)\.graphqlconfig)$/i;
+/** A project-root marker with no specification extension: listed for the partition, never sniffed. */
+const BARE_ROOT_MARKER = /(?:^|\/)\.graphqlconfig$/;
 /**
  * Generated / vendored / build-output directories, applied to UNTRACKED files only.
  *
@@ -275,12 +279,12 @@ function parseGraphqlSide(candidates: string[], texts: Map<string, string>, unre
 
 /** The candidates each scan reads: YAML/JSON, `.proto` and GraphQL in separate windows. */
 const windows = (listed: readonly string[]) => {
-  const yaml = listed.filter(f => !isProtobufPath(f) && !isGraphqlPath(f));
+  const yaml = listed.filter(f => !isProtobufPath(f) && !isGraphqlPath(f) && !BARE_ROOT_MARKER.test(f));
   // The same fixture rule as `analyze`: a test schema is a fake service, not this repository's contract.
   const proto = listed.filter(f => isProtobufPath(f));
   const graphql = listed.filter(f => isGraphqlPath(f) && !isFixtureSchemaPath(f));
   // Project roots: path presence only, so no text is read and a malformed manifest still marks its
-  // directory. Every marker form is a `.json`/`.yaml` file, so this listing already holds them all.
+  // directory. The specification listing includes every marker form, the bare `.graphqlconfig` included.
   const projectRoots = projectRootDirs(listed.filter(isProjectRootMarkerPath));
   return { yaml, proto, graphql, projectRoots, read: [...yaml.slice(0, MAX_CANDIDATES), ...proto.slice(0, MAX_PROTO_FILES), ...graphql.slice(0, MAX_CANDIDATES)] };
 };
@@ -739,7 +743,7 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
     boundaries.push(emittedText(`GraphQL type and field identity was scoped to ${headGql.universes.length} project(s) — the nearest enclosing directory holding a package.json or a GraphQL/Relay config: ${named.slice(0, 8).join(', ')}${named.length > 8 ? `, and ${named.length - 8} more` : ''}. A name two of them both define does not collide; a name defined twice INSIDE one of them is still not assessed.`));
   }
   if (headGql.partition.rootsOmitted) boundaries.push(`Past the project-root cap (${MAX_SCHEMA_UNIVERSE_ROOTS}), ${headGql.partition.rootsOmitted} project root(s) were not honored, so the schemas under them were read as part of a wider project.`);
-  if (headGql.partition.tooDeep.length) boundaries.push(`${headGql.partition.tooDeep.length} GraphQL schema file(s) sit deeper than the project-root walk, so they were read as part of the repository root's project.`);
+  if (headGql.partition.tooDeep.length) boundaries.push(`${headGql.partition.tooDeep.length} GraphQL schema file(s) sit deeper than the project-root walk, so they were read as part of the deepest project root above them (the repository root when none is).`);
   /** Entries past `limit` that the response does not list (see `notAssessedOmitted`). */
   let notAssessedOmitted = 0;
   const notAssessed = [...head.unreadable, ...head.proto.unreadable, ...head.graphql.unreadable].map(u => ({ file: emittedText(u.file), reason: emittedText(u.reason) }));
@@ -945,19 +949,27 @@ export async function handleCertifyServiceContract(input: CertifyServiceContract
       boundaries.push('gRPC client call sites are not read, so a breaking protobuf change names no consumer, in this repository or another.');
     }
     const gqlDocsOf = (side: SpecSide) => side.graphql.docs.filter(d => gqlComparable(d.file));
-    // ONE partition for both revisions: the project roots BOTH sides have. A manifest added or
-    // removed between them would otherwise move a type between universes and read as a type
-    // removed and another added. A root on one side only is ignored — the universe stays wider,
-    // which is the pre-partition answer — and the difference is disclosed rather than silent.
+    // ONE partition for both revisions. A root both sides have is honored. A root on ONE side only
+    // is honored too when the OTHER side has no schema under it — a package added (or removed)
+    // with its own schema moves no type between universes, and ignoring it merged the new
+    // package's `type Query` into its parent's, which then read as ambiguous and hid a real
+    // breaking change there. Only a one-sided root that WOULD move a type (the other side has a
+    // schema under it) is ignored, keeping that universe wider, and that is disclosed.
     const headRootSet = new Set(head.projectRoots);
     const baseRootSet = new Set(base.projectRoots);
-    const sharedRoots = head.projectRoots.filter(d => baseRootSet.has(d));
-    const onlyOneSide = [...head.projectRoots.filter(d => !baseRootSet.has(d)), ...base.projectRoots.filter(d => !headRootSet.has(d))].sort();
-    if (onlyOneSide.length) {
-      boundaries.push(emittedText(`${onlyOneSide.length} project root(s) exist at one revision only (${onlyOneSide.slice(0, 3).map(universeLabel).join(', ')}${onlyOneSide.length > 3 ? ', …' : ''}), so both revisions were partitioned without them and their schemas were compared as part of a wider project.`));
+    const under = (docs: readonly GqlDocument[], dir: string) => dir !== '' && docs.some(d => d.file.startsWith(`${dir}/`));
+    const headGqlDocs = gqlDocsOf(head);
+    const baseGqlDocs = gqlDocsOf(base);
+    const headOnly = head.projectRoots.filter(d => !baseRootSet.has(d));
+    const baseOnly = base.projectRoots.filter(d => !headRootSet.has(d));
+    const ignored = [...headOnly.filter(d => under(baseGqlDocs, d)), ...baseOnly.filter(d => under(headGqlDocs, d))].sort();
+    const ignoredSet = new Set(ignored);
+    const comparisonRoots = [...new Set([...head.projectRoots, ...base.projectRoots])].filter(d => !ignoredSet.has(d)).sort();
+    if (ignored.length) {
+      boundaries.push(emittedText(`${ignored.length} project root(s) exist at one revision only while the other revision has a schema under them (${ignored.slice(0, 3).map(universeLabel).join(', ')}${ignored.length > 3 ? ', …' : ''}), so both revisions were partitioned without them and those schemas were compared as part of a wider project.`));
     }
     const graphqlChanges = (head.graphql.docs.length || base.graphql.docs.length)
-      ? diffGraphqlUniverses(graphqlScope(gqlDocsOf(base), sharedRoots).universes, graphqlScope(gqlDocsOf(head), sharedRoots).universes)
+      ? diffGraphqlUniverses(graphqlScope(baseGqlDocs, comparisonRoots).universes, graphqlScope(headGqlDocs, comparisonRoots).universes)
         .map(cappedBy(incomplete(head.graphql), incomplete(base.graphql)))
       : [];
     if (graphqlChanges.some(c => c.class === 'breaking' || c.class === 'dangerous')) {

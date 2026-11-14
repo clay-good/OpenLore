@@ -307,24 +307,25 @@ describe('readGraphql: refusals', () => {
     expect(altered.unassessableTypes[0].fingerprint).not.toBe(merged.unassessableTypes[0].fingerprint);
   });
 
-  it('an `extend` holding a duplicate field is not folded in, and does NOT withhold the type it extends', () => {
+  it('an `extend` holding a duplicate field folds its readable part, sets aside the duplicate, and does NOT withhold the type', () => {
     const merged = mergeGraphqlSchema([
       read('type A { a: Int }', 'a.graphql'),
       read('extend type A { b: Int\n b: String }', 'b.graphql'),
     ]);
-    // The clean definition is still compared — before the type-scoped refusal existed, the whole
-    // bad FILE was dropped and `A` was compared normally; withholding `A` here would downgrade a
-    // real `field-removed` in a.graphql to `schema-unassessed`.
-    expect(merged.types.get('A')!.fields.map(f => f.name)).toEqual(['a']);
+    // The clean definition is still compared (withholding `A` would downgrade a real removal in
+    // a.graphql to `schema-unassessed`), and the extension's first `b` is kept, so its fields never
+    // read as REMOVED. Only `b` itself is set aside, compared by fingerprint.
+    expect(merged.types.get('A')!.fields.map(f => f.name)).toEqual(['a', 'b']);
+    expect(Object.keys(merged.types.get('A')!.unassessableElements ?? {})).toEqual(['field:b']);
     expect(merged.unassessableTypes).toEqual([]);
-    expect(merged.conflicts).toEqual([expect.stringMatching(/^`extend object A` in b\.graphql is not read: field `b` is declared twice/)]);
+    expect(merged.conflicts).toEqual([expect.stringMatching(/^`extend object A` in b\.graphql: field `b` is declared twice .*so that element is not assessed/)]);
   });
 
-  it('an `extend`-only type whose only extension is unreadable is not invented', () => {
-    const merged = mergeGraphqlSchema([read('extend type Ghost { b: Int\n b: String }', 'b.graphql')]);
-    expect(merged.types.has('Ghost')).toBe(false);
-    expect(merged.orphanExtensions).toEqual([]);
-    expect(merged.conflicts).toEqual([expect.stringContaining('`extend object Ghost` in b.graphql is not read')]);
+  it('an `extend`-only type whose only extension holds a duplicate keeps its readable part, with the duplicate set aside', () => {
+    const merged = mergeGraphqlSchema([read('extend type Ghost { a: Int\n b: Int\n b: String }', 'b.graphql')]);
+    expect(merged.types.get('Ghost')!.fields.map(f => f.name)).toEqual(['a', 'b']);
+    expect(Object.keys(merged.types.get('Ghost')!.unassessableElements ?? {})).toEqual(['field:b']);
+    expect(merged.conflicts).toEqual([expect.stringContaining('`extend object Ghost` in b.graphql: field `b` is declared twice')]);
   });
 
   it('schema blocks with unknown operations, bad keywords, and stray tokens are unreadable', () => {
@@ -669,6 +670,15 @@ describe('client-toolchain schema configs', () => {
 });
 
 describe('schema universes (change: scope-graphql-schema-universes)', () => {
+  it('a schema deeper than the walk still belongs to the deepest project root above it', () => {
+    const deep = `a/${Array.from({ length: 45 }, (_, i) => `d${i}`).join('/')}/s.graphql`;
+    const p = partitionSchemaUniverses(['a/s.graphql', deep, 'x/s.graphql'], ['a']);
+    expect(p.universeOf('a/s.graphql')).toBe('a');
+    expect(p.universeOf(deep)).toBe('a');
+    expect(p.universeOf('x/s.graphql')).toBe('');
+    expect(p.tooDeep).toEqual([deep]);
+  });
+
   it('keys a universe by the nearest enclosing project root, and the repository root otherwise', () => {
     const roots = projectRootDirs(['package.json', 'packages/a/package.json', 'packages/b/relay.config.json', 'packages/b/src/notes.md']);
     expect(roots).toEqual(['', 'packages/a', 'packages/b']);
@@ -703,9 +713,11 @@ describe('schema universes (change: scope-graphql-schema-universes)', () => {
     expect(projectRootDirs(['../a/package.json', '/b/package.json'])).toEqual([]);
   });
 
-  it('bounds the walk: a schema deeper than the bound falls back to the repository root, disclosed', () => {
+  it('bounds the walk: a schema deeper than the bound goes to the deepest root above it, disclosed', () => {
     const deep = `${Array.from({ length: MAX_SCHEMA_UNIVERSE_DEPTH + 5 }, (_, i) => `d${i}`).join('/')}/schema.graphql`;
-    const p = partitionSchemaUniverses([deep], ['d0']);
+    // Falling to the repository root SPLIT its project from `d0`'s other schemas; it now joins `d0`.
+    expect(partitionSchemaUniverses([deep], ['d0']).universeOf(deep)).toBe('d0');
+    const p = partitionSchemaUniverses([deep], ['other']);
     expect(p.universeOf(deep)).toBe('');
     expect(p.tooDeep).toEqual([deep]);
   });

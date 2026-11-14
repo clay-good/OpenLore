@@ -273,6 +273,11 @@ export function partitionSchemaUniverses(
   }
   const memo = new Map<string, string>();
   const tooDeep: string[] = [];
+  let byDepth: string[] | undefined;
+  const deepestAncestorRoot = (path: string): string => {
+    byDepth ??= [...roots].sort((a, b) => depth(b) - depth(a));
+    return byDepth.find(r => r !== '' && path.startsWith(`${r}/`)) ?? '';
+  };
   const resolve = (schemaPath: string): string => {
     const hit = memo.get(schemaPath);
     if (hit !== undefined) return hit;
@@ -284,7 +289,13 @@ export function partitionSchemaUniverses(
       for (;;) {
         if (roots.has(dir)) { found = dir; break; }
         if (dir === '') break;
-        if (++steps > MAX_SCHEMA_UNIVERSE_DEPTH) { tooDeep.push(norm); break; }
+        if (++steps > MAX_SCHEMA_UNIVERSE_DEPTH) {
+          tooDeep.push(norm);
+          // Past the walk, the deepest honored root that is an ancestor still owns it: falling to
+          // the repository root would SPLIT its project, not widen it. O(roots) for such a path only.
+          found = deepestAncestorRoot(norm);
+          break;
+        }
         dir = dirOf(dir);
       }
     }
