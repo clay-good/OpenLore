@@ -1,5 +1,5 @@
 {
-  "description": "OpenLore: orient on each prompt, check each edit, and brief the agent before it stops.",
+  "description": "OpenLore: brief the agent on each prompt, check each edit, and report before it stops.",
   "hooks": {
     "SessionStart": [
       {
@@ -9,7 +9,7 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js",
+              "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
               "orient",
               "--json"
             ],
@@ -24,7 +24,7 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js",
+              "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
               "hook",
               "after-compact"
             ],
@@ -40,28 +40,11 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js",
+              "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
               "orient",
               "--inject"
             ],
             "timeout": 25
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js",
-              "hook",
-              "before-edit"
-            ],
-            "timeout": 15
           }
         ]
       }
@@ -74,7 +57,7 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js",
+              "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
               "hook",
               "after-tools"
             ],
@@ -91,7 +74,7 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js",
+              "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
               "hook",
               "after-tools"
             ],
@@ -107,7 +90,7 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js",
+              "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
               "hook",
               "before-stop"
             ],

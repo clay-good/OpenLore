@@ -12,7 +12,7 @@ import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 const PLUGIN = join(ROOT, 'plugin');
-const CLI = '${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js';
+const LAUNCHER = '${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs';
 
 const readJson = (path: string): any => JSON.parse(readFileSync(path, 'utf8'));
 
@@ -33,8 +33,8 @@ function pluginHooks(): Array<{ event: string; matcher?: string; hook: PluginHoo
 describe('Claude Code plugin manifest', () => {
   it('pins one exact openlore version in plugin.json, package.json, and the lockfile', () => {
     const manifest = readJson(join(PLUGIN, '.claude-plugin', 'plugin.json'));
-    const pin = readJson(join(PLUGIN, 'package.json')).dependencies.openlore;
-    const lock = readJson(join(PLUGIN, 'package-lock.json'));
+    const pin = readJson(join(PLUGIN, 'runtime', 'package.json')).dependencies.openlore;
+    const lock = readJson(join(PLUGIN, 'runtime', 'package-lock.json'));
 
     expect(pin).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
     expect(manifest.version).toBe(pin);
@@ -42,13 +42,13 @@ describe('Claude Code plugin manifest', () => {
     expect(lock.packages['node_modules/openlore'].version).toBe(pin);
   });
 
-  it('runs every hook in exec form through the installed CLI, with no shell and no other variable', () => {
+  it('runs every hook in exec form through the launcher, with no shell and no other variable', () => {
     const hooks = pluginHooks();
     expect(hooks.length).toBeGreaterThan(0);
     for (const { hook } of hooks) {
       expect(hook.type).toBe('command');
       expect(hook.command).toBe('node');
-      expect(hook.args[0]).toBe(CLI);
+      expect(hook.args[0]).toBe(LAUNCHER);
       for (const arg of hook.args.slice(1)) expect(arg).toMatch(/^[a-z-]+$/);
       // The hook timeout must leave room under Claude Code's own cap for UserPromptSubmit (30 s).
       expect(hook.timeout).toBeLessThanOrEqual(90);
@@ -67,9 +67,15 @@ describe('Claude Code plugin manifest', () => {
     expect(userPrompt?.hook.timeout).toBeLessThan(30);
   });
 
-  it('starts the MCP server on the default preset through the installed CLI', () => {
+  it('starts the MCP server on the default preset through the launcher', () => {
     const { mcpServers } = readJson(join(PLUGIN, '.mcp.json'));
-    expect(mcpServers.openlore).toEqual({ command: 'node', args: [CLI, 'mcp', '--preset', LEAN_DEFAULT_PRESET] });
+    expect(mcpServers.openlore).toEqual({ command: 'node', args: [LAUNCHER, 'mcp', '--preset', LEAN_DEFAULT_PRESET] });
+  });
+
+  it('keeps package.json out of the plugin root, so Claude Code does not install 1.6 GB under its 60 s limit', () => {
+    // The launcher installs a lean runtime into ${CLAUDE_PLUGIN_DATA} instead (plugin/runtime/openlore.mjs).
+    expect(() => statSync(join(PLUGIN, 'package.json'))).toThrow();
+    expect(() => statSync(join(PLUGIN, 'package-lock.json'))).toThrow();
   });
 
   it('is listed by the self-hosted marketplace', () => {

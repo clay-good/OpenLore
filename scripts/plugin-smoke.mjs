@@ -5,16 +5,18 @@
  * Usage: node scripts/plugin-smoke.mjs   (needs `claude` on PATH; no Claude login is needed)
  *
  * 1. Adds a throwaway marketplace whose `git-subdir` source is this checkout, in an isolated
- *    CLAUDE_CONFIG_DIR, and installs the plugin. Claude Code runs its own npm install (60 s limit).
+ *    CLAUDE_CONFIG_DIR, and installs the plugin. The first prompt hook must return at once and
+ *    start the launcher's one-time runtime install into CLAUDE_PLUGIN_DATA; the test waits for it.
  * 2. Runs every hook from plugin/hooks/hooks.json exactly as written (exec form, with
  *    ${CLAUDE_PLUGIN_ROOT} substituted) in a fresh git repo with no openspec/, and checks each
  *    exits 0 within its timeout.
  * 3. Starts the MCP server from plugin/.mcp.json and checks tools/list.
  * 4. Waits for the background index build, then checks the prompt hook returns a briefing.
+ * 5. Checks the plugin's hooks stay silent when `openlore install` hooks exist.
  * The plugin must be committed: git-subdir clones HEAD of this checkout.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -74,8 +76,10 @@ try {
   const installed = JSON.parse(readFileSync(join(configDir, 'plugins', 'installed_plugins.json'), 'utf8'));
   const pluginRoot = installed.plugins['openlore@openlore-smoke'][0].installPath;
   const expand = (s) => s.replaceAll('${CLAUDE_PLUGIN_ROOT}', pluginRoot);
-  const cli = join(pluginRoot, 'node_modules', 'openlore', 'dist', 'cli', 'index.js');
-  check(spawnSync(process.execPath, [cli, '--version'], { encoding: 'utf8' }).status === 0, 'installed openlore CLI starts');
+  check(!existsSync(join(pluginRoot, 'node_modules')), 'Claude Code installed no npm packages into the plugin folder');
+  // Claude Code sets this for every hook and MCP server; the launcher installs the runtime there.
+  env.CLAUDE_PLUGIN_DATA = join(work, 'plugin-data');
+  env.CLAUDE_PROJECT_DIR = join(work, 'repo');
 
   // A fresh repository: some code and a test, no openspec/, no spec framework.
   const repo = join(work, 'repo');
@@ -97,6 +101,17 @@ try {
     tool_name: 'Edit', tool_input: { file_path: join(repo, 'src', 'math.ts'), old_string: 'a + b', new_string: 'a + b' },
     tool_response: { success: true }, source: 'startup', stop_hook_active: false,
   });
+
+  // First use: the prompt hook returns at once and starts the one-time runtime install.
+  const prompt = hooks.UserPromptSubmit[0].hooks[0];
+  const first = await run(expand(prompt.command), prompt.args.map(expand), { cwd: repo, input: payload('UserPromptSubmit'), timeoutMs: 30_000 });
+  check(first.code === 0 && first.seconds < 5 && first.stdout.includes('First use'),
+    `first prompt hook returns in ${first.seconds.toFixed(1)} s and says the runtime is installing`);
+  const ready = join(env.CLAUDE_PLUGIN_DATA, 'runtime', JSON.parse(readFileSync(join(pluginRoot, 'runtime', 'package.json'), 'utf8')).dependencies.openlore, '.ready');
+  const installStarted = Date.now();
+  while (!existsSync(ready) && Date.now() - installStarted < 600_000) await new Promise((r) => setTimeout(r, 2_000));
+  const installLog = existsSync(join(env.CLAUDE_PLUGIN_DATA, 'install.log')) ? readFileSync(join(env.CLAUDE_PLUGIN_DATA, 'install.log'), 'utf8') : '';
+  check(existsSync(ready), `runtime installed in ${((Date.now() - installStarted) / 1000).toFixed(1)} s\n${installLog.trim()}`);
   for (const [event, groups] of Object.entries(hooks)) {
     for (const group of groups) {
       for (const hook of group.hooks) {
@@ -138,7 +153,6 @@ try {
   check(unannotated.length === 0, `every MCP tool has a title and readOnlyHint${unannotated.length ? `: missing on ${unannotated.join(', ')}` : ''}`);
 
   // 4. Once the background build publishes, the prompt hook returns a briefing.
-  const prompt = hooks.UserPromptSubmit[0].hooks[0];
   let briefed = false;
   for (let attempt = 0; attempt < 24 && !briefed; attempt += 1) {
     await new Promise((r) => setTimeout(r, 5_000));
@@ -146,6 +160,12 @@ try {
     briefed = result.code === 0 && result.stdout.includes('total');
   }
   check(briefed, 'prompt hook returns a briefing that names `total` once the index is built');
+
+  // 5. Hooks that `openlore install` wrote take over: the plugin's hooks stay silent, so nothing runs twice.
+  writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ hooks: { UserPromptSubmit: [
+    { _openlore: true, hooks: [{ type: 'command', command: 'openlore orient --inject' }] }] } }));
+  const duplicate = await run(expand(prompt.command), prompt.args.map(expand), { cwd: repo, input: payload('UserPromptSubmit'), timeoutMs: 30_000 });
+  check(duplicate.code === 0 && duplicate.stdout === '', 'prompt hook stays silent when CLI-installed hooks exist');
 } catch (error) {
   console.log(`FAIL ${error.message}`);
   failures += 1;

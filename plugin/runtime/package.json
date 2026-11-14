@@ -1,5 +1,5 @@
 {
-  "name": "openlore-claude-plugin",
+  "name": "openlore-plugin-runtime",
   "private": true,
   "description": "Runtime for the OpenLore Claude Code plugin. Pins the published openlore package.",
   "license": "MIT",

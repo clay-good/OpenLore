@@ -2,7 +2,12 @@
   "mcpServers": {
     "openlore": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/node_modules/openlore/dist/cli/index.js", "mcp", "--preset", "substrate"]
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
+        "mcp",
+        "--preset",
+        "substrate"
+      ]
     }
   }
 }
