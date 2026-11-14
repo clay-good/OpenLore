@@ -283,6 +283,23 @@ describe('analyzeForRefactoring — in_cycle', () => {
     expect(report.cycles[0].participants.map(p => p.function).sort()).toEqual(['a', 'b', 'c']);
   });
 
+  it('does NOT read a tested_by edge as a call back into the test', () => {
+    // test → prod is a call; prod → test is the derived `tested_by` reverse edge, not a call.
+    // Counting it closed a false cycle between every function and each test that calls it.
+    const prod = makeNode({ id: 'm.py::Incident.is_open', name: 'is_open', filePath: 'm.py', fanIn: 1 });
+    const test = makeNode({ id: 't.py::test_is_open', name: 'test_is_open', filePath: 't.py', fanOut: 1, isTest: true });
+
+    const graph = makeGraph([prod, test], [
+      { callerId: test.id, calleeId: prod.id, calleeName: 'is_open', confidence: 'type_inference' as const },
+      { callerId: prod.id, calleeId: test.id, calleeName: 'test_is_open', confidence: 'type_inference' as const, kind: 'tested_by' as const },
+    ]);
+
+    const report = analyzeForRefactoring(graph);
+    expect(report.stats.cyclesDetected).toBe(0);
+    expect(report.cycles).toEqual([]);
+    expect(issuesOf(report, 'is_open')).not.toContain('in_cycle');
+  });
+
   it('does NOT flag a linear chain as a cycle', () => {
     // a → b → c (no cycle)
     const a = makeNode({ id: 'l.ts::a', name: 'a', filePath: 'l.ts', fanIn: 0, fanOut: 1 });

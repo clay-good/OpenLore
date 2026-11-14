@@ -289,7 +289,9 @@ export function analyzeForRefactoring(
   // dependency cycle to go and break — and this report is what the generated architecture
   // document prints.
   const nodes = callGraph.nodes.filter(n => !n.isExternal && !isProjectedLanguage(n.language));
-  const edges = callGraph.edges.filter(e => !isDeclarationEdgeKind(e.kind));
+  // A `tested_by` edge is the derived reverse of a test's call (production fn → test), not a
+  // call: counting it closed a false cycle between every function and each test that calls it.
+  const edges = callGraph.edges.filter(e => !isDeclarationEdgeKind(e.kind) && e.kind !== 'tested_by');
 
   // Build requirement reverse index: functionKey → requirement names
   // Key format: "name@filePath" (partial match — file suffix match)
