@@ -610,6 +610,36 @@ function ambiguousCallSitesBlock(
 }
 
 /**
+ * Resolve a QUALIFIED symbol — `Class.method`, `name::path`, `Class.method::path`, or an exact node
+ * id (`path::Class.method`) — to the nodes it names. Returns `null` when the query has none of those
+ * shapes, so a plain name keeps its existing fuzzy lookup. `Class.method` is how the generated
+ * digest prints a hub (`EdgeStore.open`), and was answered "No function matching".
+ */
+export function resolveQualifiedSymbol(
+  query: string,
+  byName: (name: string) => FunctionNode[],
+  byId: (id: string) => FunctionNode | null | undefined,
+): FunctionNode[] | null {
+  const q = query.trim();
+  const sep = q.indexOf('::');
+  const qualifiedName = sep >= 0 ? q.slice(0, sep) : q;
+  if (sep < 0 && !/^[\w$]+\.[\w$]+$/.test(q)) return null;
+  const exactId = byId(q);
+  if (exactId && !exactId.isExternal) return [exactId];
+  const dot = qualifiedName.lastIndexOf('.');
+  const className = dot > 0 ? qualifiedName.slice(0, dot) : undefined;
+  const name = dot > 0 ? qualifiedName.slice(dot + 1) : qualifiedName;
+  const path = sep >= 0 ? q.slice(sep + 2).replace(/^\.\//, '') : undefined;
+  const hits = byName(name).filter(n => !n.isExternal
+    && (className === undefined || n.className === className)
+    && (path === undefined || n.filePath === path || n.filePath.endsWith(`/${path}`)));
+  // A dotted NAME is not always `Class.method`: an infrastructure resource (`aws_s3_bucket.logs`)
+  // or a member-assigned function carries the dot in its own name. Nothing under the qualified
+  // reading → the caller's plain lookup decides.
+  return hits.length > 0 || sep >= 0 ? hits : null;
+}
+
+/**
  * Extract a depth-limited subgraph centred on a named function.
  * Falls back to semantic search if no exact name match is found.
  */
@@ -628,8 +658,10 @@ export async function handleGetSubgraph(
   if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.edgeStore) return notReadyResult('Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).', 'graph-unavailable');
 
+  const store = ctx.edgeStore;
+  const qualified = resolveQualifiedSymbol(functionName, n => store.getInternalNodesByName(n), id => store.getNode(id));
   const lower = functionName.toLowerCase();
-  let seeds = ctx.edgeStore.searchNodes(lower);
+  let seeds = qualified ?? store.searchNodes(lower);
 
   // searchNodes is a fuzzy FTS match, so a unique symbol can come back alongside
   // incidental hits. Prefer exact name matches so a known symbol resolves to a
@@ -799,8 +831,10 @@ export async function handleAnalyzeImpact(
   // error instead of crashing on `undefined.toLowerCase()`.
   if (typeof symbol !== 'string' || symbol.trim() === '') return { error: 'symbol is required.' };
 
+  const store = ctx.edgeStore;
+  const qualified = resolveQualifiedSymbol(symbol, n => store.getInternalNodesByName(n), id => store.getNode(id));
   const lower = symbol.toLowerCase();
-  let seeds = ctx.edgeStore.searchNodes(lower);
+  let seeds = qualified ?? store.searchNodes(lower);
 
   // searchNodes is a fuzzy FTS match, so a unique symbol can come back alongside
   // incidental hits. Prefer exact name matches so a known symbol resolves to a
@@ -1543,8 +1577,12 @@ export async function handleTraceExecutionPath(
 
   const entryLower  = entryFunction.toLowerCase();
   const targetLower = targetFunction.toLowerCase();
-  const entryMatches  = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
-  const targetMatches = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
+  const byName = (name: string) => cg.nodes.filter(n => !n.isTest && n.name === name);
+  const byId = (id: string) => nodeMap.get(id);
+  const entryMatches  = resolveQualifiedSymbol(entryFunction, byName, byId)
+    ?? cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
+  const targetMatches = resolveQualifiedSymbol(targetFunction, byName, byId)
+    ?? cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
 
   if (entryMatches.length === 0)  return { error: `No function matching "${entryFunction}" found in call graph.` };
   if (targetMatches.length === 0) return { error: `No function matching "${targetFunction}" found in call graph.` };
