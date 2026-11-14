@@ -41,6 +41,10 @@ All notable changes to OpenLore are documented here. This project adheres to
   edge and `die` / `start` read as uncalled. A candidate its own file names outside every indexed
   function is now capped at `low`, with the line. On OpenLore's own index the high tier fell from 16
   to 9.
+- **`find_dead_code` no longer rates closures, visitor methods or used constructors high-confidence
+  dead.** A function defined inside a live function is a value it hands out (a callback, a returned
+  visitor's `enter`/`leave`) whose caller is outside the graph; a constructor of a class with live
+  members has run, though `new X()` is not a call edge. Both are capped at `low` with the reason.
 - **A fresh `openlore install` no longer leaves its own index stale.** The decision-trail step
   appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
   of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now

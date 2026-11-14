@@ -1,5 +1,6 @@
 /**
- * find_dead_code and calls made at module scope.
+ * find_dead_code and calls the call graph cannot see: made at module scope, or made by whatever
+ * receives a function defined inside a live one.
  *
  * Module-level code has no call-graph node, so a top-level `start()` or
  * `process.on('exit', cleanup)` is no edge, and the function it names looked uncalled. On OpenLore's
@@ -12,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT, ARTIFACT_DEPENDENCY_GRAPH } from '../../../constants.js';
 import { handleFindDeadCode } from './reachability.js';
-import type { FunctionNode } from '../../analyzer/call-graph.js';
+import type { FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 
 let root: string;
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'ol-module-scope-')); });
@@ -23,15 +24,15 @@ const node = (file: string, name: string, startLine: number, endLine: number): F
   startIndex: 0, endIndex: 10, fanIn: 0, fanOut: 0, startLine, endLine,
 });
 
-async function setup(files: Record<string, string>, nodes: FunctionNode[]): Promise<void> {
+async function setup(files: Record<string, string>, nodes: FunctionNode[], edges: CallEdge[] = []): Promise<void> {
   for (const [file, text] of Object.entries(files)) {
     await mkdir(join(root, file, '..'), { recursive: true });
     await writeFile(join(root, file), text);
   }
   const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   await mkdir(dir, { recursive: true });
-  const callGraph = { nodes, edges: [], classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
-    stats: { totalNodes: nodes.length, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 } };
+  const callGraph = { nodes, edges, classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
+    stats: { totalNodes: nodes.length, totalEdges: edges.length, avgFanIn: 0, avgFanOut: 0 } };
   await writeFile(join(dir, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph }), 'utf-8');
   // A dependency graph that names neither candidate, so the ladder can reach `high`.
   await writeFile(join(dir, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify({
@@ -75,5 +76,48 @@ describe('find_dead_code with module-scope calls', () => {
     }, [node('src/a.ts', 'helper', 1, 3), node('src/a.ts', 'caller', 4, 6)]);
     const by = Object.fromEntries((await run()).map(c => [c.name, c]));
     expect(by.helper.reason).not.toContain('module scope');
+  });
+
+  it('caps a function defined inside a LIVE function (a returned visitor), but not inside a dead one', async () => {
+    // A validation rule factory returns `{ Field() {…}, leave() {…} }`; graphql-js
+    // calls them. They have no in-repo caller and were rated high.
+    await setup({
+      'src/rule.ts': [
+        'export function main() {',        // 1  (a root: main-like)
+        '  return {',                       // 2
+        '    Field() { return 1; },',       // 3
+        '  };',                             // 4
+        '}',                                // 5
+        'function unusedOuter() {',         // 6
+        '  return { Leave() { return 2; } };', // 7
+        '}',                                // 8
+      ].join('\n'),
+    }, [
+      node('src/rule.ts', 'main', 1, 5), node('src/rule.ts', 'Field', 3, 3),
+      node('src/rule.ts', 'unusedOuter', 6, 8), node('src/rule.ts', 'Leave', 7, 7),
+    ]);
+    const by = Object.fromEntries((await run()).map(c => [c.name, c]));
+    expect(by.Field.confidence).toBe('low');
+    expect(by.Field.reason).toContain('defined inside `main`, which is live');
+    expect(by.Leave.reason).not.toContain('defined inside');
+  });
+
+  it('caps the constructor of a class whose members are live (`new X()` is not a call edge)', async () => {
+    await setup({
+      'src/ctx.ts': [
+        'class Ctx {',                        // 1
+        '  constructor(readonly n: number) {}', // 2
+        '  run() { return this.n; }',           // 3
+        '}',                                  // 4
+        'export function main() { return new Ctx(1).run(); }', // 5
+      ].join('\n'),
+    }, [
+      { ...node('src/ctx.ts', 'constructor', 2, 2), id: 'src/ctx.ts::Ctx.constructor', className: 'Ctx' },
+      { ...node('src/ctx.ts', 'run', 3, 3), id: 'src/ctx.ts::Ctx.run', className: 'Ctx', fanIn: 1 },
+      node('src/ctx.ts', 'main', 5, 5),
+    ], [{ callerId: 'src/ctx.ts::main', calleeId: 'src/ctx.ts::Ctx.run', calleeName: 'run', confidence: 'receiver_inferred' }]);
+    const ctor = (await run()).find(c => c.name === 'constructor')!;
+    expect(ctor.confidence).toBe('low');
+    expect(ctor.reason).toContain('`new Ctx(…)` is not a call edge');
   });
 });

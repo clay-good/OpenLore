@@ -117,6 +117,35 @@ export function externalWiringCaveats(report: ExternalWiringReport): string[] {
   return caveats;
 }
 
+/**
+ * Candidates whose line span lies strictly inside a LIVE function's span in the same file, mapped to
+ * that function's name (the innermost one). Spans come from the index; no file is read.
+ */
+function liveEnclosingFunctions(
+  candidates: readonly FunctionNode[],
+  codeNodes: readonly FunctionNode[],
+  live: ReadonlySet<string>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const liveByFile = new Map<string, FunctionNode[]>();
+  for (const n of codeNodes) {
+    if (!live.has(n.id) || n.startLine === undefined) continue;
+    (liveByFile.get(n.filePath) ?? liveByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+  }
+  for (const c of candidates) {
+    if (c.startLine === undefined) continue;
+    const end = c.endLine ?? c.startLine;
+    let best: FunctionNode | undefined;
+    for (const f of liveByFile.get(c.filePath) ?? []) {
+      const fEnd = f.endLine ?? f.startLine!;
+      const inside = f.startLine! <= c.startLine && end <= fEnd && (f.startLine! < c.startLine || end < fEnd);
+      if (inside && (!best || f.startLine! >= best.startLine!)) best = f;
+    }
+    if (best) out.set(c.id, best.className ? `${best.className}.${best.name}` : best.name);
+  }
+  return out;
+}
+
 /** A candidate file larger than this is not scanned for module-scope uses. */
 const MODULE_SCOPE_SCAN_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -653,6 +682,13 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
 
   const unreadManifest = await unreadEnclosingManifests(absDir, candidates, wiring.report);
   const moduleScopeNamed = await namedAtModuleScope(absDir, candidates, codeNodes);
+  const liveEnclosing = liveEnclosingFunctions(candidates, codeNodes, live);
+  // Classes with a live instance member. Their constructor ran — an instance method cannot be
+  // reached without an instance — but `new X()` is not a call edge, so the constructor itself had
+  // no caller and read as dead.
+  const liveClasses = new Set(
+    codeNodes.filter(n => n.className && live.has(n.id)).map(n => `${n.filePath}::${n.className}`),
+  );
 
   const ranked = candidates
     .map(n => {
@@ -752,6 +788,21 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       // Its own file names it outside every indexed function — a top-level `main()`, `start()`
       // or `process.on('exit', cleanup)`. Module-scope code has no call-graph node, so that call
       // is no edge at all, and "no internal caller" was read as certain.
+      // Defined INSIDE a live function: a closure, a returned visitor's `enter`/`leave`, a handler
+      // object's method. That function hands it out as a value, so whatever calls it — a library,
+      // a framework, an event loop — is outside the graph. Not high-confidence dead.
+      if ((n.name === 'constructor' || n.name === '__init__') && n.className
+        && liveClasses.has(`${n.filePath}::${n.className}`)) {
+        confidence = 'low';
+        reasons.push(`a constructor of \`${n.className}\`, which has live members — the class is instantiated, and \`new ${n.className}(…)\` is not a call edge`);
+      }
+
+      const enclosing = liveEnclosing.get(n.id);
+      if (enclosing) {
+        confidence = 'low';
+        reasons.push(`defined inside \`${enclosing}\`, which is live — it is a value that function creates (a callback, visitor or returned closure), and what calls it is not visible`);
+      }
+
       const moduleLine = moduleScopeNamed.get(n.id);
       if (moduleLine !== undefined) {
         confidence = 'low';

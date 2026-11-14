@@ -155,7 +155,7 @@ describe('CHA — virtual-dispatch edges', () => {
   });
 
   it('A super call is never fanned out by name (it binds statically to the base)', async () => {
-    // apollo-server's `class HeaderMap extends Map` calls `super.get(...)`: the base is the external
+    // A `class HeaderMap extends Map` calling `super.get(...)`: the base is the external
     // `Map`, yet name-only CHA wired it to every in-repo `get`, closing false `get ↔ get` cycles.
     const b = await build(`
       class HeaderMap extends Map<string, string> {
