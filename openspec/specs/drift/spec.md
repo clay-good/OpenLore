@@ -206,7 +206,7 @@ The system SHALL validates a user-supplied git reference to prevent unexpected g
 
 ### Requirement: Resolvebaseref
 
-The system SHALL resolves a base reference, falling back through `main`, `master`,
+The system SHALL resolve a base reference, falling back through `main`, `master`,
 `refs/remotes/origin/HEAD`, `origin/main`, `origin/master`, `HEAD~1`, and last the empty-tree SHA.
 
 #### Scenario: ValidPreferredReference

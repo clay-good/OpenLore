@@ -3747,7 +3747,7 @@ A spec-store binding adds an optional OpenLoreConfig.specStore block { name, pat
 
 ### Lean default MCP surface = navigation preset; the then-current full seventy-three-tool surface is opt-in via --preset full / --all-tools
 
-**Status:** Approved
+**Status:** Superseded by c79ec7ca
 **Date:** 2026-06-22
 **ID:** a6c916ed
 
