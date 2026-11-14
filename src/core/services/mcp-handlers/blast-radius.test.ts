@@ -493,7 +493,7 @@ describe('computeBlastRadius', () => {
     } finally {
       const { getRepoPrefix } = await import('../../drift/git-diff.js');
       vi.mocked(getRepoPrefix).mockResolvedValue('');
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -562,7 +562,7 @@ describe('blast_radius names the boundary that bounds it', () => {
   });
   afterEach(async () => {
     const { rm } = await import('node:fs/promises');
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it("names a site in the CALLER CLOSURE, not only in the changed files", async () => {
