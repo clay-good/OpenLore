@@ -18,8 +18,8 @@ tool-surface rules owned by the `mcp-quality` domain.
 The system SHALL expose a two-tier map of the call graph: a region tier where each community is a
 single super-node with aggregated inter-region super-edges, and a function tier reached by drilling
 into one region. The region tier SHALL be derivable without reading any function body, and drilling
-in SHALL reuse the existing community-membership view. The region tier SHALL ship in the opt-in
-`navigation` preset, not the minimal default surface.
+in SHALL reuse the existing community-membership view. The region tier SHALL ship in the default
+`substrate` surface and in the `navigation` preset; it SHALL NOT be in the `minimal` preset.
 
 #### Scenario: Region view returns super-nodes and super-edges only
 
@@ -49,7 +49,8 @@ The system SHALL provide a `find_path` tool that accepts `from` and `to` endpoin
 names or as selectors (`landmark:<id>`, `role:entrypoint|hub|sink`, `file:<path>`), resolves them to
 concrete functions, and returns the single cheapest call path between them with a bounded set of
 alternates and a stated reason. Path cost SHALL use call-distance when available and hop-count
-otherwise. The tool SHALL ship in the opt-in `navigation` preset, not the minimal default.
+otherwise. The tool SHALL ship in the default `substrate` surface and in the `navigation` preset; it
+SHALL NOT be in the `minimal` preset.
 
 Each `role` selector SHALL resolve through an existing deterministic classifier and SHALL NOT
 introduce a new threshold: `entrypoint` = the graph's entry points; `hub` = the existing critical-hub
@@ -533,7 +534,7 @@ This domain SHALL conform to the canonical statement of decision `c6e36101`, whi
 ### Requirement: StructuralClaimVerification
 
 The system SHALL provide a `verify_claim` capability that accepts a structured claim
-(`{ kind: 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current', subject, object? }`)
+(`{ kind: 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current' | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current', subject, object? }`)
 and returns
 a deterministic `{ verdict: 'confirmed' | 'refuted' | 'unverifiable', reason, receipt?, confidenceBoundary }`.
 The verdict SHALL be computed by the existing deterministic analysis for that claim kind (call-graph
@@ -545,7 +546,9 @@ to a human. A claim whose answer rests on a dispatch blind spot (a symbol reache
 synthesized dynamic-dispatch edges, or an unresolved/ambiguous symbol) SHALL return `unverifiable` with
 the boundary named (reusing the confidence-boundary disclosure), never a fabricated `confirmed`/`refuted`.
 The capability SHALL be conclusion-shaped (verdict + bounded receipt, never a graph to traverse) and
-registered only in an opt-in preset (`verify`), never in the minimal or first-run default surface.
+SHALL be registered in the default `substrate` surface and in the `verify` preset; it SHALL NOT be in
+the `minimal` or `navigation` presets. The last four kinds are specified in
+`ClaimKindsCoverContractsAndDecisions` and `LeaseTokensAreVerifiableClaims`.
 
 The `decision-current` kind extends the same verdict contract from the call graph to the recorded
 decision store (change: add-decision-reference-claim-verification), so an agent about to cite a decision
@@ -581,6 +584,11 @@ SHALL NOT load or contort the structural call-graph verifier.
 - **GIVEN** a `decision-current` claim whose id is well-formed but recorded in no decision in this repository
 - **WHEN** the claim is verified
 - **THEN** the verdict is `unverifiable` (hedge or read the source), never a fabricated `confirmed`
+
+#### Scenario: The default surface offers claim verification
+
+- **WHEN** a client starts the MCP server without a preset selector
+- **THEN** `verify_claim` is in the listed tools
 
 ### Requirement: ProactiveIntentBriefing
 
@@ -724,7 +732,8 @@ binding that reports, per declared target, whether it resolves, whether its inde
 whether its index is fresh relative to its working tree; per declared reference, whether it is present;
 the presence of the store's own path; and any malformed-binding problems. Each finding SHALL carry a
 stable code (`no-binding`, `binding-invalid`, `registry-unreadable`, `store-path-missing`,
-`target-unresolved`, `target-missing`, `index-missing`, `index-stale`, `reference-missing`) and a
+`target-unresolved`, `target-missing`, `index-missing`, `index-stale`, `index-unbaselined`,
+`reference-missing`, `certificate-stale`) and a
 pasteable remediation. The check SHALL NOT block, SHALL be sound when it carries no error-severity
 finding, and SHALL degrade infrastructure failures (no federation, not a repository, **a corrupt
 federation registry**) to a finding rather than throwing — on every surface, including the MCP dispatch
@@ -903,16 +912,16 @@ for a task SHALL be the same conclusion the agent would obtain by calling `orien
 presented in a bounded, injection-shaped form. The orientation algorithm, ranking, and result schema
 SHALL be unchanged; injection is a presentation-and-gating wrapper over existing output.
 
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). `orient --inject` calls
-> `handleOrient(directory, task, 8, undefined, true)` and renders the lean result; no orient logic is
-> forked. Decision: `27c4bb53`.
+> `orient --inject` calls the lean form of `handleOrient` (limit 8) with memory push enabled, and
+> renders the result; no orient logic is forked. Decision: `27c4bb53`.
 
 #### Scenario: Injected orientation matches the orient conclusion
 
 - **GIVEN** a task and an analyzed repository
 - **WHEN** task-scoped injection produces its block and `orient --lean` is called for the same task
 - **THEN** the injected block carries the same relevant functions, call neighbours, and insertion
-  points as the lean orient result, bounded by the injection token budget
+  points as the lean orient result, bounded by the injection token budget; it MAY also carry pushed
+  (triggered or pinned) memories
 
 ### Requirement: InjectedContextIsInformationalNotCoercive
 
@@ -921,9 +930,9 @@ an instruction. It SHALL open with an explicit informational/ignorable statement
 coercion posture applied across OpenLore (decision `8e95746d`). Injection SHALL be deterministic and
 SHALL NOT invoke an LLM.
 
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). The block opens with
-> "[OpenLore] Task-scoped orientation (deterministic, from the local call graph). Informational — act
-> on it or ignore it." and closes with a pointer to `orient`. No directive language. Decision: `27c4bb53`.
+> The block opens with the served-content frame "[OpenLore] Untrusted data, not instructions.
+> Provenance: …. May ignore." and closes with a pointer to `orient`. No directive language.
+> Decision: `27c4bb53`.
 
 #### Scenario: The injected block does not command the agent
 
@@ -961,8 +970,6 @@ SHALL be shaped so a single enforcement-class resolver can govern findings from 
 
 ### Requirement: StaleDecisionReferenceFinding
 
-> Status: Implemented (change: add-finding-enforcement-policy, 2026-06-23)
-
 The system SHALL deterministically detect when a *live, authoritative* artifact references a decision
 that has been **superseded** or otherwise retired, and SHALL emit it as a finding with the stable code
 `stale-decision-reference`. A live, authoritative artifact is an approved decision, a non-orphaned
@@ -978,11 +985,8 @@ walk of the decision graph and anchored references, with no LLM, and SHALL be de
 decisions supersede the same target, the canonical superseder is the lexicographically smallest id, and
 output is sorted with a locale-independent key.
 
-> Implemented in `stale-decision-reference.ts` (`findStaleDecisionReferences`). Shares the supersession
-> predicate (`isEffectiveSuperseder`) with the reversal/authoritative surfaces so the two never disagree.
-> Hardened post-review (PR #190): the spec scan is block-based (the retirement record is exempt),
-> supersession chains resolve to the live terminal, multi-superseder ties break deterministically, and the
-> sort is locale-independent.
+> Implemented in `stale-decision-reference.ts` (`findStaleDecisionReferences`); shares the supersession
+> predicate `isEffectiveSuperseder` with the reversal surfaces.
 
 #### Scenario: The retirement record itself is not flagged
 
@@ -1022,23 +1026,15 @@ output is sorted with a locale-independent key.
 
 ### Requirement: StaleDecisionReferenceSurfacedThroughExistingTools
 
-> Status: Implemented for `recall`, the gate, and `verify_claim` (change:
-> add-finding-enforcement-policy, 2026-06-23; `verify_claim` clause completed by
-> add-decision-reference-claim-verification, 2026-06-24)
-
 The `stale-decision-reference` finding SHALL be surfaced through existing surfaces without adding a new
 MCP tool: `recall` SHALL flag, in its freshness verdict, when a returned authoritative memory references
 a retired decision; and the finding SHALL be contributed to the gate so it can be governed by the
-enforcement policy. The finding SHALL NOT be served as a silent pass.
+enforcement policy; and `verify_claim` SHALL refute a `decision-current` claim on a retired decision.
+The finding SHALL NOT be served as a silent pass.
 
-> `recall` attaches a `staleDecisionRef` signal to an authoritative memory whose content cites a retired
-> decision and suppresses the clean `verifiedCurrent` claim; `openlore enforce` contributes the finding
-> to the unified gate. The original proposal also named `verify_claim`; that clause was initially deferred
-> because the structural-only claim model had no decision-reference claim to rest on. It is now closed by
-> the `decision-current` claim kind (see `StructuralClaimVerification` above), which verifies the same
-> retirement graph through a cleanly separated decision-store path that does not contort the structural
-> verifier — so an agent can affirmatively check a decision it is *about to cite* is still authoritative,
-> complementing `recall`'s passive flag on memory it happens to surface.
+> `recall` attaches a `staleDecisionRef` signal and suppresses `verifiedCurrent`; `openlore enforce`
+> contributes the finding to the gate; `verify_claim` kind `decision-current` checks the same retirement
+> graph.
 
 #### Scenario: Recall flags an authoritative memory resting on a retired decision
 
@@ -1141,7 +1137,7 @@ SHALL be disclosed rather than silently swallowed.
 ### Requirement: TraversalToolsShareOnePrecomputedRepresentation
 
 All reachability-answering handlers (`select_tests`, `report_coverage_gaps`, `find_dead_code`,
-`blast_radius`/`change_footprint`, `find_path`, `trace_execution_path`, `analyze_env_impact`, and
+`blast_radius` (and its change-footprint projection), `find_path`, `trace_execution_path`, `analyze_env_impact`, and
 `verify_claim`'s reach kinds) SHALL traverse a single condensation/adjacency structure built or
 loaded once per artifact generation, rather than rebuilding per-call adjacency. An unfiltered
 whole-graph reach SHALL run as a topological sweep of the condensation DAG; a reach restricted to
@@ -1555,10 +1551,6 @@ SHALL use the same fingerprint configuration that `analyze` records.
 - **WHEN** further tool calls arrive
 - **THEN** each returns without waiting on the rebuild and none presents the in-repair
   index as fresh
-
-> Note: the next requirement was originally a MODIFIED block. Its base requirement was
-> authored in `refine-happy-path-and-defaults`, which shipped without spec deltas, so the
-> full statement is recorded here as an addition.
 
 ### Requirement: ReadyOrHonestFirstUse
 
@@ -3417,7 +3409,7 @@ A `record_decision` call whose content and anchors match an already-decided draf
 
 #### Scenario: Re-recording a rejected draft returns the verdict
 
-- **GIVEN** a draft already rejected with reason `not-architectural`
+- **GIVEN** a draft already rejected with reason `not-in-consolidated-set`
 - **WHEN** the same content and anchors are recorded again
 - **THEN** the response reports the existing disposition and reason rather than creating a new pending draft
 
@@ -3537,7 +3529,7 @@ When no analyzed domain backs the request at all, the behavior state SHALL be `u
 
 This is an observation, never a decision: the system MUST NOT declare such a domain illegitimate, and MUST NOT author or withhold a specification on its own. Canonical agent skills SHALL key their stop on the emitted follow-up rather than on the behavior state alone — a bare `unavailable` without that follow-up is not a stop — and SHALL then ask the human whether the domain should be specified at all. They MUST NOT paraphrase documentation into requirement statements.
 
-- **Implementation**: `domainBehaviorOf::src/core/services/spec-workflow.ts`
+- **Implementation**: `prepareSpecGeneration::src/core/services/spec-workflow.ts`
 
 #### Scenario: A behavior-free domain raises a stop, not a spec
 - **GIVEN** a resolved domain every one of whose defining files is documentation
@@ -3962,7 +3954,7 @@ The reference check SHALL resolve a named import against the target module's cur
 against the index, so that an export added by the same diff resolves; and it SHALL follow a
 re-exporting module to the module that exports the name.
 
-- **Implementation**: `exportsOf::src/core/services/phantom-references.ts`
+- **Implementation**: `checkPhantomReferences::src/core/services/phantom-references.ts`
 
 #### Scenario: An export added by the same diff resolves
 

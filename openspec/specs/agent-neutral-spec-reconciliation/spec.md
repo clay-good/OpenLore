@@ -1,7 +1,9 @@
 # agent-neutral-spec-reconciliation Specification
 
 ## Purpose
-TBD - created by archiving change unify-agent-neutral-spec-generation-repair. Update Purpose after archive.
+Defines the client-neutral Generate and Repair protocol for OpenLore specifications. One deterministic
+evidence layer serves both the standalone generator and any MCP-compatible host agent, and semantic
+authorship stays with the consumer.
 
 ## Requirements
 
@@ -21,21 +23,13 @@ OpenLore SHALL define Generate for a scope without a specification and Repair fo
 - **THEN** the Repair workflow supplies evidence for both conditions in the same pass
 - **AND** Generate does not separately write that domain spec
 
-### Requirement: Shared Evidence Layer With Task-Specific Composition
-OpenLore SHALL expose one deterministic evidence layer to all MCP-compatible host agents. Generate and Repair SHALL compose only the evidence needed for their respective tasks and SHALL NOT require one identical evidence bundle.
+### Requirement: Shared Evidence Representation Across Consumers
+OpenLore SHALL build one deterministic, domain-scoped evidence representation that is consumable by both the standalone generator and MCP-compatible host agents, including Pi. Generate and Repair SHALL compose only the task-specific subset of that representation they need, SHALL NOT require one identical evidence bundle, and SHALL NOT duplicate or independently rederive its structural facts.
 
 #### Scenario: Generate creates a new domain spec
 - **WHEN** an agent generates a specification for a scope with no existing spec
 - **THEN** it composes structural inventory and code-context evidence needed to draft that scope
 - **AND** it does not require mapping, drift or existing-spec evidence
-
-#### Scenario: Repair reconciles an existing domain spec
-- **WHEN** an agent repairs a specification that already exists
-- **THEN** it composes existing-spec, mapping, coverage, drift and structural-change evidence as applicable
-- **AND** it uses the same underlying OpenLore evidence layer without requiring the Generate bundle
-
-### Requirement: Shared Evidence Representation Across Consumers
-OpenLore SHALL build one deterministic, domain-scoped evidence representation that is consumable by both the standalone generator and MCP-compatible host agents, including Pi. Consumers MAY compose different task-specific subsets of that representation, but SHALL NOT duplicate or independently rederive its structural facts.
 
 #### Scenario: Standalone and agent-hosted generation address the same domain
 - **WHEN** the standalone generator and an MCP-compatible host agent obtain evidence for the same analyzed domain
@@ -45,7 +39,7 @@ OpenLore SHALL build one deterministic, domain-scoped evidence representation th
 #### Scenario: Repair needs additional spec-state evidence
 - **WHEN** an agent repairs an existing specification
 - **THEN** it augments the shared domain evidence with spec, mapping, coverage, drift and structural-change observations
-- **AND** it does not create a separate code-analysis representation
+- **AND** it does not create a separate code-analysis representation or require the Generate bundle
 
 ### Requirement: Deterministic Observations Remain Non-Semantic
 OpenLore SHALL report structural observations such as covered functions, uncovered functions, stale mappings, orphan requirements and structural changes without inferring business intent or automatically deleting requirements.
