@@ -41,7 +41,7 @@ import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { traversalIndexFor, messageFreeTraversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
-import { deadCodeIds, loadExternalWiring } from './reachability.js';
+import { deadCodeIds, loadExternalWiring, unreadEnclosingManifests } from './reachability.js';
 import {
   loadDynamicBoundaryReport,
   loadImportAdjacency,
@@ -341,7 +341,8 @@ async function dynamicHitFor(absDir: string, subject: FunctionNode): Promise<Qua
  *     dispatch blind spot; static reachability cannot decide deadness).
  */
 async function verifyDead(absDir: string, cg: SerializedCallGraph, subject: FunctionNode): Promise<ClaimResult> {
-  const externalWiring = (await loadExternalWiring(absDir)).byFile;
+  const wiring = await loadExternalWiring(absDir);
+  const externalWiring = wiring.byFile;
   const deadFull = await deadCodeIds(absDir, cg, { externalWiring });
   const strictCg: SerializedCallGraph = { ...cg, edges: cg.edges.filter(e => e.confidence !== 'synthesized') };
   const deadStrict = await deadCodeIds(absDir, strictCg, { externalWiring });
@@ -350,6 +351,14 @@ async function verifyDead(absDir: string, cg: SerializedCallGraph, subject: Func
   const inStrict = deadStrict.has(subject.id);
 
   if (inFull) {
+    // `find_dead_code` never rates such a candidate high-confidence dead; neither may this confirm it.
+    const manifest = (await unreadEnclosingManifests(absDir, [subject], wiring.report)).get(subject.filePath);
+    if (manifest) {
+      return {
+        verdict: 'unverifiable',
+        reason: `"${subject.name}" has no in-repo caller, but it sits inside the package declared by ${manifest}, which was not read for wiring (only the root and declared workspace manifests are) — that manifest's main/bin/exports may make it an entry point.`,
+      };
+    }
     return {
       verdict: 'confirmed',
       reason: `"${subject.name}" is unreachable from every liveness root (tests, imported symbols, route handlers, main, files a config invokes) — even counting synthesized dynamic-dispatch edges. It is a strong dead-code candidate; external consumers and reflection are still invisible to static analysis.`,

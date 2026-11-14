@@ -35,7 +35,7 @@
 
 import { emittedText, classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
 import { loadRouteInventoryRoots, routeHandlerReason, type RouteInventoryRoots } from './route-inventory-roots.js';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
@@ -97,7 +97,7 @@ const DYNAMIC_LANGS = new Set(['Python', 'Ruby', 'PHP', 'Lua', 'Elixir', 'Bash']
  */
 export async function loadExternalWiring(absDir: string): Promise<{ report: ExternalWiringReport; byFile: Map<string, WiringReceipt[]> }> {
   const report = await collectExternalWiring(absDir)
-    .catch((): ExternalWiringReport => ({ wired: [], boundaries: [], boundariesOmitted: 0 }));
+    .catch((): ExternalWiringReport => ({ wired: [], boundaries: [], boundariesOmitted: 0, manifestsRead: [] }));
   return { report, byFile: new Map(report.wired.map(w => [w.file, w.receipts])) };
 }
 
@@ -114,6 +114,48 @@ export function externalWiringCaveats(report: ExternalWiringReport): string[] {
     caveats.push(`${unresolved} config reference(s) could not be resolved to a repository file (dynamic, unsupported, missing, outside the repository, or an unreadable config; see externalWiring.boundaries) — code they would wire can appear dead.`);
   }
   return caveats;
+}
+
+/** Languages a `package.json` manifest can wire. */
+const MANIFEST_WIRED_LANGS = new Set(['TypeScript', 'JavaScript']);
+
+/**
+ * For each JS/TS candidate file: the repo-relative path of its NEAREST enclosing `package.json`, when
+ * that manifest was not read for wiring. Absent when the nearest manifest was read, or when there is
+ * none. One `stat` per distinct ancestor directory.
+ */
+export async function unreadEnclosingManifests(
+  absDir: string,
+  candidates: readonly FunctionNode[],
+  report: ExternalWiringReport,
+): Promise<Map<string, string>> {
+  const read = new Set(report.manifestsRead);
+  const nearestByDir = new Map<string, Promise<string | null>>();
+  const nearest = (dir: string): Promise<string | null> => {
+    let pending = nearestByDir.get(dir);
+    if (!pending) {
+      pending = (async () => {
+        const manifest = dir === '' ? 'package.json' : `${dir}/package.json`;
+        try {
+          if ((await stat(join(absDir, manifest))).isFile()) return manifest;
+        } catch { /* no manifest here */ }
+        if (dir === '') return null;
+        const slash = dir.lastIndexOf('/');
+        return nearest(slash < 0 ? '' : dir.slice(0, slash));
+      })();
+      nearestByDir.set(dir, pending);
+    }
+    return pending;
+  };
+  const out = new Map<string, string>();
+  for (const n of candidates) {
+    if (!MANIFEST_WIRED_LANGS.has(n.language) || out.has(n.filePath)) continue;
+    const file = wiringKey(n.filePath);
+    const slash = file.lastIndexOf('/');
+    const manifest = await nearest(slash < 0 ? '' : file.slice(0, slash));
+    if (manifest && !read.has(manifest)) out.set(n.filePath, manifest);
+  }
+  return out;
 }
 
 /** A path's directory, trailing slash kept, for the one proven class scope. */
@@ -552,6 +594,8 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       .map(file => file.filePath),
   );
 
+  const unreadManifest = await unreadEnclosingManifests(absDir, candidates, wiring.report);
+
   const ranked = candidates
     .map(n => {
       const noCaller = (n.fanIn ?? 0) === 0;
@@ -634,6 +678,17 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (unboundContract.files.has(wiringKey(n.filePath))) {
         confidence = 'low';
         reasons.push('declared in a file holding a contract registration or resolver map whose implementation argument could not be read (see contractRootsNotAssessed) — it may name this symbol, and which symbol cannot be said');
+      }
+
+      // The nearest package manifest above this file was never read for wiring — it is neither the
+      // root's nor a declared workspace member's (or it could not be parsed) — so its `main`, `bin`
+      // or `exports` may name this very file as the package's entry point. Never high-confidence
+      // dead: the reader does not search the tree for manifests to root, but it must not rate what
+      // such a manifest could wire as certainly unused either.
+      const manifest = unreadManifest.get(n.filePath);
+      if (manifest) {
+        confidence = 'low';
+        reasons.push(`inside the package declared by ${manifest}, which was not read for wiring (only the root and declared workspace manifests are) — its main/bin/exports may make this an entry point`);
       }
 
       if (scriptContainerFiles.has(n.filePath)) {

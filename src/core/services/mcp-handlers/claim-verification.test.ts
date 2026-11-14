@@ -175,6 +175,21 @@ describe('verify_claim — dead', () => {
     expect(r.verdict).toBe('confirmed');
     expect(r.reason).toMatch(/unreachable from every liveness root/);
   });
+  it('will not confirm a symbol inside a package whose manifest was never read', async () => {
+    // `ext/package.json` may name `ext/src/extension.ts` as its `main`; it is neither the root's
+    // manifest nor a declared workspace member's, so nothing read it.
+    const dir = await mkdtemp(join(tmpdir(), 'ol-claim-manifest-'));
+    try {
+      await mkdir(join(dir, 'ext', 'src'), { recursive: true });
+      await writeFile(join(dir, 'ext', 'package.json'), '{"main":"./out/extension.js"}');
+      useGraph([MAIN, node({ id: 'ext/src/extension.ts::activate' })], []);
+      const r = await handleVerifyClaim({ directory: dir, kind: 'dead', subject: 'activate' }) as { verdict: string; reason: string };
+      expect(r.verdict).toBe('unverifiable');
+      expect(r.reason).toMatch(/inside the package declared by ext\/package\.json, which was not read for wiring/);
+    } finally {
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
   it('refutes a symbol reached by direct edges', async () => {
     const r = await handleVerifyClaim({ directory: '/p', kind: 'dead', subject: 'helper' }) as { verdict: string };
     expect(r.verdict).toBe('refuted');

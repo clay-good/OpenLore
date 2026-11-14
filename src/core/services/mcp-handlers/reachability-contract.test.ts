@@ -67,7 +67,7 @@ type DeadResult = { candidateDead: Array<{ name: string }> };
 
 describe('find_dead_code with a declared operation', () => {
   beforeEach(() => {
-    vi.mocked(collectExternalWiring).mockResolvedValue({ wired: [], boundaries: [], boundariesOmitted: 0 });
+    vi.mocked(collectExternalWiring).mockResolvedValue({ wired: [], boundaries: [], boundariesOmitted: 0, manifestsRead: [] });
   });
 
   it('keeps the handler and what it calls live, and never ranks the operation itself', async () => {
