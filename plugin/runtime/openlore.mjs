@@ -195,7 +195,7 @@ async function main() {
     const failure = started || existsSync(lockDir) ? undefined : lastFailure();
     return say(failure
       ? `Not running: its one-time runtime install failed (${failure}). It retries later; details in ${logFile}.`
-      : 'First use: installing its runtime in the background (about a minute). Briefings start when it finishes.');
+      : 'First use: installing its runtime in the background (one or two minutes). Briefings start when it finishes.');
   }
   // The MCP server has no useful answer without the runtime, so it waits. It leaves stdin unread
   // (the client's first message must reach the real server) and stops if its parent is gone.

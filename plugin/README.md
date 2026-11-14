@@ -15,8 +15,8 @@ claude plugin install openlore@openlore
 No config is needed. Requires Node.js 22.22 or later on your `PATH`.
 
 **First use.** The plugin ships a small launcher, not the runtime. On the first hook it installs the
-pinned `openlore` npm package once (about 15 s on a fast connection, longer on Windows or a slow
-link), in the background. The first prompt says so; briefings start when it finishes. Then the first
+pinned `openlore` npm package once, in the background: about 15 s on macOS or Linux, about two
+minutes on Windows, longer on a slow link. The first prompt says so; briefings start when it finishes. Then the first
 prompt in each repository starts a background index build (seconds for a small repo, minutes for a
 monorepo).
 
