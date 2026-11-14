@@ -562,7 +562,14 @@ describe('blast_radius names the boundary that bounds it', () => {
   });
   afterEach(async () => {
     const { rm } = await import('node:fs/promises');
-    await rm(root, { recursive: true, force: true });
+    await rm(root, {
+      recursive: true,
+      force: true,
+      // Windows runners can briefly hold a just-read artifact directory open (for example while
+      // indexing it). Let Node retry transient EBUSY/EPERM/ENOTEMPTY before failing the test.
+      maxRetries: process.platform === 'win32' ? 8 : 0,
+      retryDelay: 50,
+    });
   });
 
   it("names a site in the CALLER CLOSURE, not only in the changed files", async () => {
