@@ -797,6 +797,12 @@ The canonical statement of this decision lives in the `analyzer` domain — see 
 
 The canonical statement of this decision lives in the `mcp-handlers` domain — see [mcp-handlers/spec.md](../mcp-handlers/spec.md) (decision `6c32e6c6`).
 
+### Sub-component: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
+
+#### Requirement: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
+
+The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `c79ec7ca`).
+
 ## Technical Notes
 
 - Default configuration reads share user/project layering with the CLI and MCP through
@@ -846,5 +852,15 @@ Adversarial e2e on the default-to-lean-tool-surface change (a6c916ed) found four
 jsonc-parser modify() throws when indexing into a non-container parent (e.g. mcpServers is a string/number/null/array instead of an object). Since mergeEntries already coerces the non-object value to {} and produces the correct nextObject, serializeManaged wraps the format-preserving path in try/catch and falls back to JSON.stringify(nextObject) — the same fresh-write path used for unparseable files. This trades formatting preservation (only in the hostile case) for never crashing or half-installing.
 
 **Consequences:** A malformed/hostile .mcp.json no longer crashes install mid-flight; the OpenLore server is wired correctly (exit 0) and existing content is reconstructed from the merged object. Formatting is preserved in every normal case; only the previously-crashing non-container-parent case loses byte-exact formatting.
+
+### Flip default MCP surface to the substrate (both-faces) preset
+
+**Status:** Approved
+**Date:** 2026-06-28
+**ID:** c79ec7ca
+
+Benchmark-cleared. The DefaultSurfaceRevealsAllFaces gate ran all three quantities and none regressed: (1) token economy — substrate ~4.5k tokens, +1.2k over navigation, within the ~10k tool-search threshold; (2) face coverage — substrate exposes navigate+change+remember+verify, navigation only navigate; (3) selection accuracy — substrate 90% vs navigation 80% on shared tool selection (no regression) and 100% vs 0% on governance, plus end-to-end task COMPLETION on the pinned real-repo corpus across TWO models (sonnet + haiku) on BOTH tiers: 100% correctness everywhere, substrate cheaper on 3 of 4 model×tier cells. The lean navigation default under-sold the substrate: agents installed the documented way never discovered recall/verify_claim/blast_radius.
+
+**Consequences:** The out-of-box default install now exposes the substrate preset (navigation core + recall + verify_claim + blast_radius, 13 tools) instead of navigation (10). No tool removed; navigation stays a named preset and is a one-flag reversible escape (--preset navigation). Reverses ADR-0022 (a6c916ed). Lean-default payload budget rises ~13.2KB to ~17.7KB. The BREADTH_POINTER now describes the substrate default and points to full/federation/navigation. Docs/guards updated to the 13-tool default.
 
 > Decision pointer: 84eb98ed — "Scope cold-read repair to active repository hosts" is recorded in `openspec/specs/mcp-handlers/spec.md`; it also affects this domain.
