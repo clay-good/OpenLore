@@ -5,6 +5,18 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **The refactor report no longer finds a cycle between every function and its tests.** The derived
+  `tested_by` edge (production function → test) was read as a call, so each function a test calls
+  closed a false two-node cycle with that test; on a 1,500-function Python repository 474 "cycles"
+  were reported, almost all of them this.
+- **`find_dead_code` no longer rates a package's entry point high-confidence dead** when that
+  package's `package.json` was never read (it is neither the root's nor a declared workspace
+  member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped
+  at low with the manifest named, and `verify_claim` `dead` answers `unverifiable` instead of
+  `confirmed`.
+
 ## [3.6.0] - 2026-11-09
 
 **The graph learns your service contracts, and the agent loop leaves receipts.**
