@@ -1,5 +1,9 @@
 # Call-graph soundness calibration: measure the honesty claims instead of asserting them
 
+> Archived 2026-11-14 as shipped. Parts of this proposal were not built and were cut; the delta spec in
+> this folder and the main spec state only what the code does. Cut parts are listed in the "Not doing"
+> table of `ROADMAP.md`; the original text is at commit `0dd75dbef`.
+
 > Status: PROPOSED (2026-07-03, e2e audit pass 3). OpenLore's conclusions lean on asserted
 > honesty — "sound lower bound", disclosed boundaries — but nothing measures whether the
 > resolution ladder actually behaves that way. Two offline/CI mechanisms make the honesty

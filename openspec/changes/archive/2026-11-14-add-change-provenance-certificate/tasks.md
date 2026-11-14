@@ -20,12 +20,6 @@
       `conclusion`; `_RO` annotation with the gated-write (`persist:false`) allowlist entry;
       epistemic-lease weight; sibling cross-reference to `change_impact_certificate`; full-surface
       tool count, payload budget, and standing-context docs updated
-- [ ] Fold in `certify_public_surface` (explicit breaking-export verdicts) as a predicate field
-- [ ] `openlore certify-provenance [--base <ref>] [--change <id>] [--format in-toto|json] [--out
-      <path>]` CLI (today the capability ships as the MCP tool; the CLI is the CI-emission surface)
-- [ ] Addendum 2026-10-31: fold contract verdicts + parity, diff-scoped architecture violations and
-      `cycle-introduced`, weakening/phantom/generated/`secret-added` findings, anchored decisions on
-      changed symbols with freshness, and ledger session counts — each as its source ships
 
 ## Verification
 - [x] Reproducibility test: same inputs → same digest; digest changes with the change content
@@ -35,7 +29,7 @@
 - [x] OpenLore emits but does not sign (no crypto introduced beyond sha256 content-addressing)
 - [x] tool-registration guards green (contract, annotations incl. read-only write-audit, presets,
       payload budget, doc-claim-sync, tool-count, epistemic-lease, Pi parity, TLS coverage)
-- [~] in-toto Statement v1 envelope validation. DONE: a local, dependency-free STRUCTURAL check of
+- [x] in-toto Statement v1 envelope validation. DONE: a local, dependency-free STRUCTURAL check of
       the envelope (`validateInTotoStatement`), run on every `format: "in-toto"` emission and
       disclosed as the `statementValidation` receipt. NOT DONE: validation against an external
       validator or a published schema, and the CLI surface — both still open. The check also
@@ -44,5 +38,9 @@
 
 ## Spec
 - [x] `mcp-handlers` delta: ADD SemanticChangeProvenanceIsReproducibleAndPortable (MCP tool;
-      `certify_public_surface` fold-in + the CLI remain, so the change stays open until they land)
+      `certify_public_surface` fold-in + the CLI remain)
 - [x] Archived `add-attested-governance-artifacts` as superseded (done in #603)
+
+
+> Archived 2026-11-14. Unbuilt tasks were removed before archiving; they are listed in the
+> "Not doing" table of `ROADMAP.md` with the commit to restore them from (`0dd75dbef`).

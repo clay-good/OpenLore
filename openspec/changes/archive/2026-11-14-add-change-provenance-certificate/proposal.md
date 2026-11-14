@@ -1,5 +1,9 @@
 # Change provenance certificate: a reproducible record of what a change does, not just who made it
 
+> Archived 2026-11-14 as shipped. Parts of this proposal were not built and were cut; the delta spec in
+> this folder and the main spec state only what the code does. Cut parts are listed in the "Not doing"
+> table of `ROADMAP.md`; the original text is at commit `0dd75dbef`.
+
 > Status: PROPOSED (2026-10-24, roadmap direction ADR-0035). `openlore certify-provenance` emits a
 > deterministic, reproducible, content-addressed certificate of what a change *does* — blast
 > radius, surfaces crossed, specs touched and drifted, tests reaching it — shaped to attach to the
