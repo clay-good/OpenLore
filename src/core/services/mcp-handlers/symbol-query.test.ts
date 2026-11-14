@@ -17,6 +17,7 @@ import { handleFindPath } from './pathfind.js';
 import { handleLocateSymbolSpan } from './symbol-span.js';
 import { handleFindClones } from './clone-query.js';
 import { handleAnalyzeErrorPropagation } from './error-propagation.js';
+import { _resetContextCacheForTesting } from './utils.js';
 
 let dir: string;
 beforeAll(async () => {
@@ -54,7 +55,11 @@ beforeAll(async () => {
   await openloreInit({ rootPath: dir });
   await openloreAnalyze({ rootPath: dir });
 }, 60_000);
-afterAll(async () => { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
+afterAll(async () => {
+  // Close the cached graph store first: Windows will not delete an open SQLite file.
+  _resetContextCacheForTesting();
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}, 60_000);
 
 const json = (r: unknown) => JSON.stringify(r);
 

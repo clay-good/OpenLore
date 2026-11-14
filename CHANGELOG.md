@@ -65,6 +65,9 @@ All notable changes to OpenLore are documented here. This project adheres to
   matched every `open` in the repository. `Class.method`,
   `name::path`, `Class.method::path` and node ids now resolve; a plain or dotted name that is not a
   `Class.method` keeps the existing lookup.
+- **`locate_symbol_span` serves `/`-separated paths on Windows.** Its `file` and `name::path`
+  were built with `path.relative`, so a Windows agent got `src\store.ts` beside node ids of
+  `src/store.ts`, and a symbol id no other tool would accept back.
 - **`verify_claim` can verify a symbol whose name is shared.** An ambiguous subject was answered
   "Disambiguate before verifying", but no form was accepted — not `name::path` (which every other
   symbol-taking tool accepts), `Class.method`, or the node id. All three now resolve, and the
