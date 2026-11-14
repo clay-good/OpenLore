@@ -1,3 +1,4 @@
+import { FilePolicyResolver } from '../configuration/policy.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -595,5 +596,23 @@ describe('VectorIndex', () => {
       await VectorIndex.search(tmpDir, 'authenticate', spy, { limit: 10 });
       expect(spy.embed).toHaveBeenCalled(); // ANN path active again
     });
+  });
+});
+
+describe('embedding lane selection',() => {
+  it('retains keyword rows while avoiding embedding excluded source',async () => {
+    const dir = await mkdtemp(join(tmpdir(),'ol-selective-embedding-'));
+    const policy = new FilePolicyResolver({rules:[{id:'keyword',pattern:'src/users.ts',lanes:{embed:'exclude'},reason:'Keyword-only source'}]});
+    const embed = vi.fn(async (texts:string[]) => texts.map(() => makeVector(1)));
+    const service = {modelName:'selective-test',embed};
+    try {
+      const built = await VectorIndex.build(dir,SAMPLE_NODES,SAMPLE_SIGNATURES,new Set(),new Set(),service,undefined,false,false,undefined,undefined,policy);
+      expect(built.total).toBe(3);expect(built.embedded).toBe(2);
+      expect(embed.mock.calls.flatMap(call => call[0]).every(text => !text.includes('getUser'))).toBe(true);
+      const keyword = await VectorIndex.search(dir,'getUser',null,{limit:10});
+      expect(keyword.some(row => row.record.filePath === 'src/users.ts')).toBe(true);
+      const incremental = await VectorIndex.updateFiles(dir,[SAMPLE_NODES[1]],new Set(['src/users.ts']),SAMPLE_SIGNATURES,new Set(),new Set(),service,undefined,undefined,policy);
+      expect(incremental.embedded).toBe(0);
+    } finally {await import('node:fs/promises').then(fs => fs.rm(dir,{recursive:true,force:true}));}
   });
 });

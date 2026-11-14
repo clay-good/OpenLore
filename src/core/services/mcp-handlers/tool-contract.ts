@@ -41,6 +41,7 @@ export type ToolOutputClass = 'conclusion' | 'explicit-topology';
  * completeness test fail, forcing the author to declare a class.
  */
 export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
+  configure_openlore: 'conclusion',
   // --- explicit-topology (the only intentional graph emitters) ---
   get_subgraph: 'explicit-topology',
   get_call_graph: 'explicit-topology',
@@ -188,6 +189,7 @@ export const CAPABILITY_FAMILY_LABELS: Record<CapabilityFamily, string> = {
  * completeness test fail, forcing the author to declare a family.
  */
 export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
+  configure_openlore: 'verify',
   // --- navigate: read the structural/spec graph, return a conclusion ---
   get_subgraph: 'navigate',
   get_call_graph: 'navigate',

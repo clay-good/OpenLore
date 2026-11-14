@@ -130,6 +130,7 @@ export interface EpistemicTracker {
 // ============================================================================
 
 const TOOL_WEIGHTS: Record<string, number> = {
+  configure_openlore: 0,
   // Resets tracker — not counted
   orient: 0,
   analyze_codebase: 0,

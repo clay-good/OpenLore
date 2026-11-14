@@ -103,13 +103,13 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **83 tools / ~106 KB / ~27k tokens** (estimated) of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **84 tools / ~110 KB / ~28k tokens** (estimated) of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **The default surface is the `substrate` preset (the navigation core plus governance and spec-workflow reads)**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`substrate`** preset — 15 tools: the navigation graph-traversal core, the three highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and `prepare_spec_generation` / `prepare_spec_repair`. An out-of-box capable MCP agent can therefore obtain a bounded evidence bundle and author specs with its native editor; OpenLore performs no internal LLM call in these composites. The lean navigate-only **`navigation`** preset (10 tools) stays a one-flag escape (`--preset navigation`); the full surface is one explicit opt-in away (`--preset full` / `--all-tools`). When the default surface is active, the server advertises breadth once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
 
 **Spec 28 measured how far the *server* can shrink that prefix, honestly:** MCP has no server-driven lazy-schema mechanism (`tools/list` always returns full schemas), and the lossless server-side byte-lever is only ~2% — the payload is dominated by irreducible per-tool schema structure plus the selection text an agent needs to pick a tool. So the real lever is the *client* (deferred schemas, below) and *tool count* (`--preset`), not byte-shaving. The surface has been trimmed losslessly anyway (shared param descriptions, no boilerplate) and is now **bounded by a regression guard** so it can't silently bloat. Two ways to get the lean surface, in order of preference:
 
-1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 83 tools without paying their schema cost up front.
+1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 84 tools without paying their schema cost up front.
 2. **`--preset navigation` (server-side, navigation-only — the lean escape below the default).** A bare `openlore mcp` / `openlore install` wires the wider `substrate` default (see below); `--preset navigation` is the one-flag way down to the navigate-only core: a graph-traversal surface of 10 tools (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). It is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories, and the `substrate` default's governance reads), so if you use the decision gate or architecture checks during a session, prefer option 1 (deferred schemas) or wire a governance-bearing preset (`--minimal`, or the full surface with `--preset full`).
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
@@ -126,6 +126,7 @@ live registry.
 <!-- standing-context-cost:start -->
 | Preset | Tools | Measured tokens | Budget |
 |---|---:|---:|---:|
+| `configuration` | 1 | 545 | 585 |
 | `minimal` | 6 | 2,854 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
 | `memory` | 3 | 1,510 | 1,610 |
@@ -133,7 +134,7 @@ live registry.
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 8 | 3,562 | 3,720 |
 | `substrate` | 15 | 5,248 | 5,500 |
-| `full` | 83 | 27,338 | 28,400 |
+| `full` | 84 | 27,880 | 28,400 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
@@ -908,3 +909,10 @@ openlore analyze             # embedding is automatic when configured
 - `batchSize`: Number of texts to embed per API call (default: 64)
 
 See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full retrieval-mode reference. The index is stored in `.openlore/analysis/vector-index/` and is automatically used by the viewer's search bar and the `search_code` / `suggest_insertion_points` MCP tools.
+
+### Configuration management (opt-in)
+
+`configure_openlore` offers `inspect`, `preview`, `apply`, `verify` and `revert` through the
+`configuration` preset. It bypasses index/daemon/watcher bootstrap and conservatively declares
+mutation/destructive hints for the whole tool. Reads need no mutation grant; writes require a
+trusted scoped host grant outside tool arguments. See the [configuration workflow](configuration-assistant.md).

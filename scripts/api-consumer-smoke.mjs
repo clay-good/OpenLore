@@ -104,6 +104,18 @@ if (typeof readServeDescriptor !== 'function') { console.error('subpath did not 
   const leaked = forbidden.filter((needle) => loaded.includes(needle));
   if (leaked.length > 0) fail('openlore/serve-descriptor loaded modules it must not', leaked.join(', '));
 
+  const configurationTrace = join(fixture,'configuration-trace.tsv');
+  const configurationProbe = join(fixture,'configuration-probe.mjs');
+  writeFileSync(configurationProbe, `
+import { inspectConfiguration } from 'openlore/configuration';
+const report = await inspectConfiguration({rootPath:process.cwd(),budget:{entries:100}});
+if (report.version !== 1 || report.runtime.index !== 'absent') throw new Error('Configuration inspection unexpectedly needs an index');
+`);
+  runNode(root,[configurationProbe],{cwd:fixture,trace:configurationTrace,block:optional});
+  const configurationModules = readFileSync(configurationTrace,'utf8');
+  const configurationLeaks = [...forbidden,'commands/mcp.js','embedding-service','local-embedding-service'].filter(needle => configurationModules.includes(needle));
+  if (configurationLeaks.length) fail('openlore/configuration eagerly loaded structural or provider modules',configurationLeaks.join(', '));
+
   // 2. The CLI starts and lists every command with every optional package absent.
   const help = runNode(root, [cli, '--help'], { cwd: fixture, block: optional }).output;
   for (const command of ['analyze', 'serve', 'view', 'mcp', 'orient']) {
@@ -190,6 +202,10 @@ import {
 } from 'openlore';
 // The descriptor contract is published on its OWN subpath, never on ".": importing it must not
 // drag the analyzer into a supervising host (change: extend-api-for-supervising-hosts).
+import {inspectConfiguration,previewConfiguration,applyConfiguration,verifyConfiguration,revertConfiguration,type ConfigurationOptions} from 'openlore/configuration';
+const configurationOptions:ConfigurationOptions = {rootPath:'.',budget:{entries:100}};
+void inspectConfiguration(configurationOptions);
+void previewConfiguration;void applyConfiguration;void verifyConfiguration;void revertConfiguration;
 import {
   readServeDescriptor,
   validateServeHealth,

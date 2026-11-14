@@ -29,6 +29,7 @@ import { allowInsecureTls } from '../core/services/tls-scope.js';
 import { Command } from 'commander';
 import { createRequire } from 'node:module';
 import { initCommand } from './commands/init.js';
+import { configureCommand } from './commands/configure.js';
 import { analyzeCommand } from './commands/analyze.js';
 import { embedCommand } from './commands/embed.js';
 import { orientCommand } from './commands/orient.js';
@@ -127,7 +128,7 @@ program.hook('preAction', (thisCommand, actionCommand) => {
   // value came from the CLI, not the built-in default (OutputContractsAreUniform).
   const configSource = thisCommand.getOptionValueSource('config') as OptionValueSource;
   const configGuard = checkExplicitConfig(configSource, opts.config as string | undefined);
-  if (!configGuard.ok) {
+  if (!configGuard.ok && actionCommand.name() !== 'configure') {
     logger.error(configGuard.message!);
     process.exit(1);
   }
@@ -223,6 +224,7 @@ Learn more: https://github.com/clay-good/OpenLore
   );
 
 // Register subcommands
+program.addCommand(configureCommand);
 program.addCommand(initCommand);
 program.addCommand(analyzeCommand);
 program.addCommand(embedCommand);

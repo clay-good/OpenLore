@@ -1,3 +1,5 @@
+import { configurationCandidateSchema } from '../core/configuration/tool-schema.js';
+import { configureOpenLore, configurationRoot, reviewConfigurationOnIdle, type ConfigurationRequest } from '../api/configuration.js';
 /**
  * openlore Pi extension — src/pi/extension.ts
  *
@@ -1931,7 +1933,7 @@ export function piActivatorDescription(): string {
  * raising a budget changes both a number and its rationale (the STANDING_CONTEXT_BUDGETS pattern).
  */
 export const PI_STANDING_CONTEXT_BUDGETS: Record<PiSessionToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
-  lean: { baselineTokens: 2_789, maxTokens: 2_980, rationale: 'Shrank when spec authoring moved to the specs group; measured baseline plus 6.8% headroom.' },
+  lean: { baselineTokens: 3_241, maxTokens: 3_470, rationale: 'Includes the native configuration workflow; measured baseline plus 7% headroom.' },
   search: { baselineTokens: 240, maxTokens: 300, rationale: 'Measured budget for orient and search_code; Pi tool_search loads specialized tools only when requested.' },
   all: { baselineTokens: 8_825, maxTokens: 9_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, and fleet_status (the moat/interop features); measured baseline plus 6.5% headroom.' },
 };
@@ -1959,6 +1961,7 @@ export function estimatePiStandingTokens(tools: ReadonlyArray<{
 // conclusion tool fails CI until its author makes this decision explicitly, the
 // same fails-until-you-classify discipline tool-contract.test.ts enforces.
 export const PI_EXCLUDED_CONCLUSION_TOOLS: Record<string, string> = {
+  configure_openlore: 'Projected through the native openlore_configure workflow; does not require a daemon.',
   declare_footprint: 'opt-in coordination preset write surface; `openlore footprint` serves it from the CLI.',
   certify_service_contract: 'opt-in full-preset API-contract check; `openlore certify-service-contract` serves it from the CLI.',
   get_handoff_briefing: 'Session succession reaches Pi through its compaction event (`session_before_compact`) in add-agent-loop-hooks-subagents-codex-pi; until then `openlore handoff` serves it from the CLI.',
@@ -2701,13 +2704,36 @@ function registerOpenlore(
     name: 'openlore_configure',
     label: 'openlore configure',
     exposure: toolExposure('configure'),
-    description: 'Open the openlore configuration wizard for project settings or user-wide defaults (global: true).',
+    description: 'Configure OpenLore: inspect repository evidence, preview a candidate, apply, verify or revert a plan; omit action for the settings wizard (global: user defaults).',
     promptSnippet: 'Configure openlore settings (provider, model, API key, embedding).',
     promptGuidelines: ['Use openlore_configure to change the LLM provider, model, or embedding settings.'],
     parameters: Type.Object({
+      action: Type.Optional(Type.Union(['inspect','preview','apply','verify','revert'].map(value => Type.Literal(value)))),
+      candidate: Type.Optional(Type.Unsafe(configurationCandidateSchema)),
+      activate: Type.Optional(Type.Boolean({description:'Request authenticated daemon restart after applying; requires host confirmation.'})),
+      plan: Type.Optional(Type.Unknown()),
       global: Type.Optional(Type.Boolean({ description: 'Edit user-wide defaults instead of project configuration.' })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const request = params as unknown as ConfigurationRequest & {global?:boolean};
+      if (request.action) {
+        if (request.global) return toolResult('Agent-assisted configuration targets the project; use the wizard for user defaults.');
+        const root = await configurationRoot(ctx.cwd);
+        const mutation = request.action === 'apply' || request.action === 'revert';
+        if (mutation && (!ctx.hasUI || !request.plan)) {
+          const refused = request.plan
+            ? await configureOpenLore(request,{rootPath:root,signal:_signal})
+            : {version:1,outcome:'needs-input',configPublished:false,reason:'Exact preview plan and host authorization required.'};
+          return toolResult(JSON.stringify(refused,null,2),refused);
+        }
+        if (mutation && !(await ctx.ui.confirm('Apply OpenLore configuration plan?', JSON.stringify({action:request.action,id:request.plan!.id,patches:request.plan!.patches,conflicts:request.plan!.conflicts,restartDaemon:request.activate === true,sharedSessionImpact:request.activate ? 'Restart may interrupt other sessions sharing this project daemon.' : undefined},null,2)))) return toolResult('Configuration unchanged.');
+        const result = await configureOpenLore(request,{rootPath:root,signal:_signal,...(request.activate ? {activate:async () => {
+          if (!(await piMaySpawnDaemon(root))) throw new Error('Daemon lifecycle is externally supervised');
+          const restarted = await restartDaemon(root);
+          if (!restarted.daemon || !isUsableDaemon(restarted.daemon)) throw new Error('Daemon recovery could not be verified');
+        }} : {}),...(mutation ? {authority:{root,planId:request.plan!.id,permissions:['write-config','replace-choices',...(request.activate ? ['runtime' as const] : [])] as Array<'write-config'|'replace-choices'|'runtime'>}} : {})});
+        return toolResult(JSON.stringify(result,null,2),result);
+      }
       if (!ctx.hasUI) return toolResult('Config wizard requires an interactive session (tui or rpc mode).');
       const global = (params as { global?: boolean }).global === true;
       const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
@@ -2756,6 +2782,11 @@ function registerOpenlore(
   pi.registerCommand('openlore', {
     description: 'Configure OpenLore (configure [--global]) or restart its daemon (restart)',
     async handler(args, ctx) {
+      if (args.trim() === 'configure assist') {
+        const result = await configureOpenLore({action:'inspect'},{rootPath:ctx.cwd});
+        pi.sendMessage({customType:'openlore-configuration',content:'Use the openlore-configure workflow to review these facts, explain index/watch/embed choices and preview a configuration plan. '+JSON.stringify(result,null,2),display:true},{triggerTurn:true});
+        return;
+      }
       if (!ctx.hasUI) {
         ctx.ui.notify('Config wizard requires an interactive session.', 'error');
         return;
@@ -2851,6 +2882,10 @@ function registerOpenlore(
   // with a refresh. Cheap when nothing moved: a few stats against the cached key.
   pi.on('agent_end', async (_event: AgentEndEvent, ctx: ExtensionContext) => {
     await refreshStatus(ctx);
+    try {
+      const reviewed = await reviewConfigurationOnIdle({rootPath:ctx.cwd,idle:true,operationActive:pendingDaemons.has(ctx.cwd),notificationsAuthorized:process.env.OPENLORE_CONFIGURATION_NOTIFICATIONS === '1',canDeliver:() => ctx.isIdle() && !pendingDaemons.has(ctx.cwd)});
+      if (reviewed?.notice && ctx.isIdle() && !pendingDaemons.has(ctx.cwd)) pi.sendMessage({customType:'openlore-configuration-review',content:reviewed.notice.message,display:true},{triggerTurn:false});
+    } catch { /* Uncertain evidence or unavailable private state remains silent. */ }
   });
 
   // Stop pinging when the session ends gracefully so the now-unused daemon can

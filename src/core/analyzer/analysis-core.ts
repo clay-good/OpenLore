@@ -1,3 +1,5 @@
+import { FilePolicyResolver, repositoryPath } from '../configuration/policy.js';
+import type { FilePolicies } from '../configuration/types.js';
 import { join, relative, resolve } from 'node:path';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { joinCapped, INVENTORY_ITEMS_SHOWN } from '../../utils/capped-list.js';
@@ -125,8 +127,9 @@ export function analysisConfigFingerprintInput(
   exclude: string[],
   maxFiles: number,
   protectedExcludePatterns: string[] = [],
-): { includePatterns: string[]; excludePatterns: string[]; maxFiles: number; protectedExcludePatterns: string[] } {
-  return { ...mergeAnalysisPatterns(configured, include, exclude), maxFiles, protectedExcludePatterns };
+  filePolicies?: FilePolicies,
+): { includePatterns: string[]; excludePatterns: string[]; maxFiles: number; protectedExcludePatterns: string[]; indexPolicyRevision?: string; indexPolicies?:FilePolicies } {
+  return { ...mergeAnalysisPatterns(configured, include, exclude), maxFiles, protectedExcludePatterns, ...(filePolicies?.rules.some(r => r.lanes.index) ? {indexPolicyRevision:new FilePolicyResolver(filePolicies).revisionFor('index'),indexPolicies:{rules:filePolicies.rules.filter(r => r.lanes.index).map((r,index) => ({id:'index-'+index,pattern:repositoryPath(r.pattern),reason:'Index selection policy',lanes:{index:r.lanes.index}}))}} : {}) };
 }
 
 export function analysisGeneratedExcludes(rootPath: string, outputPath: string, openspecPath?: string): string[] {
@@ -169,7 +172,7 @@ export async function runAnalysisCore(
     options.exclude ?? [],
   );
   const protectedExcludePatterns = analysisGeneratedExcludes(rootPath, outputPath, config?.openspecPath);
-  const fingerprintConfig = analysisConfigFingerprintInput(config?.analysis, options.include ?? [], options.exclude ?? [], options.maxFiles, protectedExcludePatterns);
+  const fingerprintConfig = analysisConfigFingerprintInput(config?.analysis, options.include ?? [], options.exclude ?? [], options.maxFiles, protectedExcludePatterns, config?.filePolicies);
 
   // Partial first-run serving (change: refine-first-run-partial-serving). The lane is armed
   // only when the caller asked for it AND this repository has no published generation to
@@ -187,6 +190,7 @@ export async function runAnalysisCore(
 
   await stage('mapping', 0, 'Scanning directory structure');
   const mapper = new RepositoryMapper(rootPath, {
+    filePolicies: config?.filePolicies,
     maxFiles: options.maxFiles,
     includePatterns: patterns.includePatterns.length > 0 ? patterns.includePatterns : undefined,
     restrictedIncludePatterns: config?.analysis.includePatterns?.filter(
@@ -435,6 +439,7 @@ export async function runAnalysisCore(
       // fingerprint a different corpus and report a mismatch on an unchanged tree. Recording them
       // is what makes `openloreIndexState` able to answer at all.
       fingerprintConfig,
+      ...(config?.filePolicies ? {indexPolicyRevision:new FilePolicyResolver(config.filePolicies).revisionFor('index')} : {}),
     }));
     await writeAnalysisContentProvenance(outputPath, 'source-derived');
     if (await computeProjectFingerprint(rootPath, { configuration: fingerprintConfig, protectedExcludePatterns }) !== fingerprintHash) {

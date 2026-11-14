@@ -1,3 +1,5 @@
+import { FilePolicyResolver } from '../configuration/policy.js';
+import type { FilePolicies } from '../configuration/types.js';
 /**
  * FileWalker Service
  *
@@ -79,6 +81,7 @@ interface NestedIgnore {
  * Options for the FileWalker
  */
 export interface FileWalkerOptions {
+  filePolicies?: FilePolicies;
   /** Maximum number of files to process */
   maxFiles?: number;
   /** Additional glob patterns to include */
@@ -569,7 +572,9 @@ export class FileWalker {
 
   constructor(rootPath: string, options: FileWalkerOptions = {}) {
     this.rootPath = rootPath;
+    this.explicitPolicies = options.filePolicies;
     this.options = {
+      filePolicies: options.filePolicies ?? {rules:[]},
       maxFiles: options.maxFiles ?? DEFAULT_MAX_FILES,
       includePatterns: options.includePatterns ?? [],
       restrictedIncludePatterns: options.restrictedIncludePatterns ?? [],
@@ -584,6 +589,8 @@ export class FileWalker {
   }
 
   /** Real paths of directories already walked — stops a symlink cycle from walking forever. */
+  private policy = new FilePolicyResolver();
+  private readonly explicitPolicies: FilePolicies | undefined;
   private readonly visitedRealDirs = new Set<string>();
 
   /** The root, resolved, so confinement compares like with like when the root itself is a link. */
@@ -922,6 +929,11 @@ export class FileWalker {
           }
         }
 
+        if (!this.policy.admitted(posixSubPath,'index',true,true) && !this.policy.mayIncludeDescendant(posixSubPath)) {
+          this.recordSkip('file-policy');
+          continue;
+        }
+
         // Following symlinks makes two hazards reachable that could not occur while they were
         // being dropped, so both are handled HERE rather than left to chance.
         //
@@ -978,7 +990,7 @@ export class FileWalker {
           continue;
         }
 
-        if (this.shouldSkipFile(posixPath)) {
+        if (this.shouldSkipFile(posixPath) || !this.policy.admitted(posixPath,'index',true)) {
           this.recordSkip('pattern');
           continue;
         }
@@ -1106,6 +1118,7 @@ export class FileWalker {
     this.restrictedIncludePrefixes = [];
     this.restrictedIncludeMatchesAnyDir = false;
 
+    this.policy = new FilePolicyResolver(this.explicitPolicies, this.options.protectedExcludePatterns);
     // Load ignore patterns
     this.ig = await loadIgnorePatterns(this.rootPath);
     this.igRepositoryIgnore = await loadRepositoryIgnorePatterns(this.rootPath);

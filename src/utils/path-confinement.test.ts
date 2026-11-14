@@ -136,6 +136,21 @@ describe('safeOpenspecDir', () => {
 });
 
 describe('readFileConfined', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'accepts Windows short-name paths when symlink paths are rejected',
+    async ({ skip }) => {
+      const aliasRoot = await mkdtemp(join(tmpdir(), 'openlore-confine-alias-'));
+      try {
+        await writeFile(join(aliasRoot, 'state.json'), '{"ok":true}');
+        if ((await realpath(aliasRoot)) === aliasRoot) skip();
+        await expect(readFileConfinedWithStat(aliasRoot, 'state.json', undefined, true))
+          .resolves.toMatchObject({ content: '{"ok":true}' });
+      } finally {
+        await rm(aliasRoot, { recursive: true, force: true });
+      }
+    }
+  );
+
   it('reads a stable in-root regular file through its confined descriptor', async () => {
     await expect(readFileConfined(root, 'openspec/specs/core/spec.md')).resolves.toBe('# real spec\n');
   });
@@ -182,6 +197,13 @@ describe('readFileConfined', () => {
     await expect(readFileConfined(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
     await expect(readFileConfinedWithStat(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
   });
+
+  it('rejects an in-root symlink when the caller disallows symlink paths', async () => {
+    const alias = join(root, 'openspec', 'specs', 'core', 'aliased.md');
+    await symlink(join(root, 'openspec', 'specs', 'core', 'spec.md'), alias);
+    await expect(readFileConfinedWithStat(root, 'openspec/specs/core/aliased.md', undefined, true))
+      .rejects.toThrow(/symbolic-link path component/);
+  });
 });
 
 describe('confinedAtomicWriteFile expected identity', () => {
@@ -209,6 +231,16 @@ describe('confinedAtomicWriteFile expected identity', () => {
 
     await expect(readFile(guard, 'utf-8')).resolves.toBe('# user file\n');
     await expect(readFile(path, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not treat a missing target parent as a missing recovery journal', async () => {
+    const path = join(root, 'removed-parent', 'recover.md');
+    const journal = join(root, 'recover-missing-parent.journal');
+    const guardName = '.recover.md.openlore-cas-backup.36b8f84d-0a96-4eeb-8694-73f7a330e775';
+    await writeFile(journal, JSON.stringify({ guard: guardName }));
+
+    await expect(recoverConfinedAtomicWriteFile(root, path, journal)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(journal, 'utf-8')).resolves.toBe(JSON.stringify({ guard: guardName }));
   });
 
   it('keeps the journal when a post-rename read fails, then recovers', async () => {
