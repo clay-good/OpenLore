@@ -107,6 +107,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   for it (only when declared one way); generic declarations (`Map<K, V> cache`) count. (#724
   follow-up)
 
+- **The live watcher honors `.openlore-ignore` and `analysis.excludePatterns`, and picks up an
+  edited ignore file.** `openlore analyze` excludes those paths, but the watcher (MCP server, Pi)
+  re-indexed them on every save unless `filePolicies` was configured, and read `.gitignore` only at
+  start. Now the watcher uses the same rules, and an edit to `.gitignore` or `.openlore-ignore`
+  applies to the next file event. A directory an edit newly includes is picked up at the next
+  watcher start. (#717 follow-up)
+
 - **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
   `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
   length-preserving, parse-only mask now hides them from it. On this repository: files with parse
