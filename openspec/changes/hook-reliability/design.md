@@ -66,7 +66,7 @@ Result of the rule:
 
 | Moment | p95 target | Runtime limit |
 |---|---|---|
-| prompt-submitted | 1,000 ms **confirmed** (643 ms) | **owner**: 2,448 ms is above one third of 3 s, and there is no limit today to keep |
+| prompt-submitted | 1,000 ms **confirmed** (643 ms) | none → 3 s, timed in-process **owner, 2026-11-14** (103 ms in-process; 2,448 ms whole-process) |
 | before-edit | 800 ms **confirmed** (380 ms) | 8 s → 3 s **confirmed** (306 ms ≤ 1 s) |
 | after-tools, edit | 1,500 ms **confirmed** (403 ms) | 15 s → 6 s **confirmed** (447 ms ≤ 2 s) |
 | after-tools, shell command | 600 ms **confirmed** (266 ms) | (shares the after-tools limit) |
