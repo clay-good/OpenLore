@@ -22,7 +22,12 @@ export interface OpenLoreConfig {
   configurationAssistant?: ConfigurationAssistantConfig;
   version: string;
   projectType: ProjectType;
-  openspecPath: string;
+  openspecPath?: string;
+  /**
+   * Extra folders of architecture decision records, read-only and repository-relative (change:
+   * spec-framework-neutrality, task 3.2). `docs/adr` and `docs/decisions` are read without it.
+   */
+  adrPaths?: string[];
   analysis: AnalysisConfig;
   generation: GenerationConfig;
   llm?: LLMConfig;
@@ -428,7 +433,7 @@ export interface GlobalOptions {
 
 export interface InitOptions extends GlobalOptions {
   force: boolean;
-  openspecPath: string;
+  openspecPath?: string;
 }
 
 export interface AnalyzeOptions extends GlobalOptions {

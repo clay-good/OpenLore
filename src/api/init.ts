@@ -71,9 +71,10 @@ async function init(options: InitApiOptions): Promise<InitResult> {
     };
   }
 
-  // Create config
+  // Create config. The spec path is recorded only when a corpus was found or named.
   progress(onProgress, 'Creating configuration', 'start');
-  const config = getDefaultConfig(detection.projectType, openspecRelPath);
+  const recordedSpecPath = options.openspecPath ?? (await detectExistingSpecDir(rootPath))?.root;
+  const config = getDefaultConfig(detection.projectType, recordedSpecPath);
   await writeOpenLoreConfig(rootPath, config, options.configPath);
   progress(onProgress, 'Creating configuration', 'complete');
 

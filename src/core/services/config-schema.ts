@@ -59,7 +59,7 @@ export const CONFIG_DEFAULT_STAMP_VERSION = '1.2.0';
  * Top-level value shapes retained as the public compatibility map for callers and tests.
  * The recursive schema below refines object fields without changing this exported shape.
  */
-export type ConfigFieldKind = 'string' | 'string-or-null' | 'boolean' | 'object';
+export type ConfigFieldKind = 'string' | 'string-or-null' | 'boolean' | 'object' | 'array';
 
 type RequiredKeys<T> = {
   [K in keyof T]-?: Record<string, never> extends Pick<T, K> ? never : K
@@ -318,6 +318,7 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
     version: stringRule,
     projectType: { kind: 'enum', values: ['nodejs', 'python', 'rust', 'go', 'java', 'ruby', 'php', 'unknown'] },
     openspecPath: stringRule,
+    adrPaths: stringArrayRule,
     analysis: analysisRule,
     generation: generationRule,
     llm: llmRule,
@@ -342,7 +343,6 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   required: requiredFor<OpenLoreConfig>({
     version: true,
     projectType: true,
-    openspecPath: true,
     analysis: true,
     generation: true,
     createdAt: true,
@@ -361,6 +361,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   version: 'string',
   projectType: 'string',
   openspecPath: 'string',
+  adrPaths: 'array',
   analysis: 'object',
   generation: 'object',
   llm: 'object',
@@ -865,6 +866,21 @@ export function validateOpenLoreConfig(
         roots.add(root);
       });
     }
+  }
+  if (isConfigObject(parsed) && Array.isArray(parsed.adrPaths)) {
+    // Read-only folders inside the repository: an absolute path or one that climbs out of it is
+    // named, not followed. Not fatal — the rest of the config is still usable.
+    parsed.adrPaths.forEach((value, index) => {
+      if (typeof value !== 'string') return; // the type rule already names it
+      const p = value.trim().replace(/\\/g, '/');
+      const absolute = p.startsWith('/') || /^[A-Za-z]:\//.test(p) || p.startsWith('//');
+      if (!p || absolute || p.split('/').includes('..')) {
+        findings.mismatches.push({
+          kind: 'type-mismatch', key: `adrPaths[${index}]`,
+          message: `config key 'adrPaths[${index}]' must be a non-empty path inside the repository (no absolute path, no '..'); it is ignored`,
+        });
+      }
+    });
   }
   const versionFindings = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
     ? checkConfigVersion((parsed as Record<string, unknown>).version, opts)
