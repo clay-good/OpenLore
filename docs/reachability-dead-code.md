@@ -250,7 +250,7 @@ to the real target (labelled `re_export`) instead of stalling at the barrel and 
 ambiguous first-same-named-candidate (`name_only`). Concretely, dogfooding this repo moved **29 symbols
 off the false-dead / false-entry-point list** — e.g. `EdgeStore.open` went from a reported *zero
 callers* to its real 22 — because a method/static call through an imported receiver now binds to its
-definition. See [openspec/changes/add-call-resolution-recall/](../openspec/changes/add-call-resolution-recall/).
+definition. See [openspec/changes/archive/add-call-resolution-recall/](../openspec/changes/archive/add-call-resolution-recall/).
 
 ## Tool contract
 

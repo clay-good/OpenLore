@@ -24,6 +24,7 @@
  */
 
 import { opendir, readdir, stat } from 'node:fs/promises';
+import { YAML_QUIET } from './yaml-diagnostics.js';
 import { join, posix, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { readArtifactBytesBounded } from '../../utils/bounded-artifact-read.js';
@@ -481,7 +482,7 @@ async function workspacePatterns(
   if (source !== null) {
     let document: unknown;
     try {
-      const parsed = parseDocument(source, { merge: false });
+      const parsed = parseDocument(source, { merge: false, ...YAML_QUIET });
       if (parsed.errors.length > 0) throw new Error('invalid YAML');
       document = parsed.toJS({ maxAliasCount: 100 });
     } catch {
@@ -1101,7 +1102,7 @@ async function readWorkflows(root: string, out: Collector): Promise<void> {
     try {
       // No merge keys: `<<` merges of aliases expand exponentially. Plain aliases stay bounded by the
       // parser's alias-count guard.
-      const doc = parseDocument(maskExpressions(source), { merge: false });
+      const doc = parseDocument(maskExpressions(source), { merge: false, ...YAML_QUIET });
       if (doc.errors.length > 0) throw new Error('invalid YAML');
       workflow = doc.toJS({ maxAliasCount: 100 });
     } catch {

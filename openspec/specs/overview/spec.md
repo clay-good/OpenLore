@@ -43,7 +43,7 @@ This system is organized into the following domains (each link resolves to a spe
 | Operator-tls-trust | Which principal may relax TLS certificate verification for outbound requests, and for which network surface. | [spec.md](../operator-tls-trust/spec.md) |
 | Overview | This document: the system purpose, the domain index, the technical stack, and the north-star requirement. | [spec.md](../overview/spec.md) |
 | Project | Detects the project type of an analyzed repository and maps each type key to its display name. | [spec.md](../project/spec.md) |
-| Validator | Surfaces generation-time OpenSpec validation errors and warnings in the generation report (advisory). | `validator/spec.md` |
+| Validator | Surfaces generation-time OpenSpec validation errors and warnings in the generation report (advisory). | [spec.md](../validator/spec.md) |
 | Verifier | Verifies the accuracy of a generated spec against the codebase by analyzing file purposes, imports, exports, and requirement coverage. | [spec.md](../verifier/spec.md) |
 
 ## Technical Stack
