@@ -76,6 +76,9 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
 
 - [ ] 5.1 Handlers `orient.ts`, `blast-radius.ts`, `semantic.ts`, `change.ts`, `working-set.ts`.
   Tests: beside. Done when: `openspecPath: "docs"` serves `docs/specs/<domain>/spec.md` from all 5.
+  Progress (2026-11-15): `orient`, `blast-radius` and `semantic` (search_specs, search_unified) read
+  the configured root for spec paths and provenance (#771, #773). Open: `change.ts` (proposal
+  writing) and `working-set.ts` (the spec store's own layout).
 - [ ] 5.2 CLI and Pi: `src/cli/commands/{change-status,test,analyze,digest,import,doctor,refresh-stories}.ts`,
   `src/cli/manifest/emit.ts`, `src/pi/extension.ts`. Tests: beside. Done when: the `docs` fixture
   gives the same results as the default layout for each command.
@@ -83,6 +86,7 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
   `decisions/extractor.ts`, `verification-engine.ts`, `artifact-generator.ts`, `adr-generator.ts`.
   Tests: beside. Done when: `grep -rn "'openspec/\|\"openspec/\|\`openspec/" src --include="*.ts"`
   outside tests, the OpenSpec adapter, the generator and `src/constants.ts` returns 0 lines.
+  Progress (2026-11-15): `codebase-digest.ts` lists spec domains from the configured root (#773).
 
 ## 6. Adapter: Spec Kit
 
