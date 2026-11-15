@@ -100,6 +100,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   files were stored with `language: "TypeScript"`, so per-language answers (language support,
   filters, summaries) counted them as TypeScript. Extraction itself is unchanged. (#724 follow-up)
 
+- **Java and C# calls through a field use the field's declared type.** `log.info(…)` on a `Logger`
+  field was wired to every in-repo method named `info`, `cache.get(…)` on a `Map` field to every
+  in-repo `get`, and `repo.save(…)` on an in-repo `Repo` field was only name-guessed and also listed
+  as an external call. A receiver its method does not declare now takes the type the file declares
+  for it (only when declared one way); generic declarations (`Map<K, V> cache`) count. (#724
+  follow-up)
+
 - **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
   `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
   length-preserving, parse-only mask now hides them from it. On this repository: files with parse

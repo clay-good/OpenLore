@@ -36,7 +36,7 @@
  */
 import type { FunctionNode, ClassNode, InheritanceEdge, CallEdge } from './call-graph.js';
 import { EXTERNAL_QUALIFIER_PREFIX, type ImportMap } from './import-resolver-bridge.js';
-import { inferReceiverTypeAt, inferTypesFromSource } from './type-inference-engine.js';
+import { inferReceiverTypeAt, inferTypesFromSource, inferUnambiguousFileTypes } from './type-inference-engine.js';
 import { logger } from '../../utils/logger.js';
 
 /** Per-call-site / per-base-method target fan-out cap — mirrors the dynamic-dispatch bound. */
@@ -453,6 +453,8 @@ function synthesizeVirtualDispatchEdges(
   const emitted = new Set<string>(); // dedup `${callerId}\0${calleeId}` across call sites
   // Cache inferred receiver types per caller function body (one inference per fn).
   const typesByCaller = new Map<string, Map<string, string>>();
+  // Unambiguous whole-file declarations (Java/C# fields), one scan per file.
+  const typesByFile = new Map<string, Map<string, string>>();
   // Receiver → non-repo package qualifying its declared type, one bounded scan per caller body
   // (change: suppress-false-cha-name-only). Cached so the per-call-site check is a map lookup.
   const qualifiersByCaller = new Map<string, Map<string, string>>();
@@ -487,6 +489,17 @@ function synthesizeVirtualDispatchEdges(
         typesByCaller.set(call.callerId, inferred);
       }
       declaredType = inferred.get(call.recv);
+      // A Java/C# receiver the method body does not declare is usually a field: its type is
+      // declared once at class level. Without it, `log.info()` on a `Logger` field was fanned out
+      // to every in-repo `info`, and `repo.save()` on a `Repo` field was only name-guessed.
+      if (!declaredType && content) {
+        let fileTypes = typesByFile.get(caller.filePath);
+        if (!fileTypes) {
+          fileTypes = inferUnambiguousFileTypes(content, caller.language);
+          typesByFile.set(caller.filePath, fileTypes);
+        }
+        declaredType = fileTypes.get(call.recv);
+      }
       }
     }
 

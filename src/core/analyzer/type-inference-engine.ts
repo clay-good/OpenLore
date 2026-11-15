@@ -222,10 +222,16 @@ function inferRust(source: string): InferredTypes {
   return result;
 }
 
+/**
+ * `Type name = …` / `Type name;`, generic arguments included (`Map<String, List<Integer>> cache`
+ * declares `cache` as a `Map`). Arrays are left out: their members are not the element type's.
+ */
+const JAVA_LIKE_DECLARATION = /\b([A-Z]\w*)(?:\s*<[^;=(){}]*>)?\s+(\w+)\s*(?:=|;)/g;
+
 function inferJava(source: string): InferredTypes {
   const result: InferredTypes = new Map();
-  // ClassName var = ...  or  ClassName var;
-  for (const m of source.matchAll(/\b([A-Z]\w*)\s+(\w+)\s*(?:=|;)/g))
+  // ClassName var = ...  or  ClassName var;  (generic arguments allowed)
+  for (const m of source.matchAll(JAVA_LIKE_DECLARATION))
     result.set(m[2], m[1]);
   // Interface var = new ConcreteClass(...)  — prefer the concrete type
   for (const m of source.matchAll(/\b([A-Z]\w*)\s+(\w+)\s*=\s*new\s+([A-Z]\w*)\s*\(/g))
@@ -240,8 +246,8 @@ function inferJava(source: string): InferredTypes {
 
 function inferCSharp(source: string): InferredTypes {
   const result: InferredTypes = new Map();
-  // Type var = ...  or  Type var;
-  for (const m of source.matchAll(/\b([A-Z]\w*)\s+(\w+)\s*(?:=|;)/g))
+  // Type var = ...  or  Type var;  (generic arguments allowed)
+  for (const m of source.matchAll(JAVA_LIKE_DECLARATION))
     result.set(m[2], m[1]);
   // IInterface var = new ConcreteClass(...)  — prefer the concrete type
   for (const m of source.matchAll(/\b([A-Z]\w*)\s+(\w+)\s*=\s*new\s+([A-Z]\w*)\s*[(<{]/g))
@@ -372,3 +378,24 @@ export function resolveViaTypeInference(
   // insertion order; the call-graph builder applies its richer affinity ladder.
   return candidates.length === 1 ? candidates[0] : undefined;
 }
+
+/**
+ * Names declared exactly one way in a whole Java or C# file — the class's fields, mostly — for a
+ * receiver its method body does not declare (`private final Repo repo;` … `repo.save(id)`). A name
+ * declared with two different types anywhere in the file is left out: no guess between them.
+ * Other languages return an empty map. (ROADMAP P0, #724: a Java field of an external type was
+ * fanned out by name.)
+ */
+export function inferUnambiguousFileTypes(source: string, language: string): InferredTypes {
+  const out: InferredTypes = new Map();
+  if (language !== 'Java' && language !== 'C#') return out;
+  const seen = new Map<string, Set<string>>();
+  for (const m of source.matchAll(JAVA_LIKE_DECLARATION)) {
+    const types = seen.get(m[2]) ?? new Set<string>();
+    types.add(m[1]);
+    seen.set(m[2], types);
+  }
+  for (const [name, types] of seen) if (types.size === 1) out.set(name, [...types][0]);
+  return out;
+}
+
