@@ -247,7 +247,7 @@ export function projectVerifyReceipt(
   // ── Tests to run (select_tests, composed inside blast_radius) ──
   const testsToRun = b.tests.unavailable
     ? { unavailable: b.tests.unavailable }
-    : { count: b.tests.count, toRun: b.tests.toRun };
+    : { count: b.tests.count, toRun: b.tests.toRun, files: b.tests.files };
 
   if (b.baseRefFallback) {
     boundaries.push(`base ref '${b.baseRefFallback.requested}' did not resolve; diffed against '${b.baseRefFallback.resolved}'.`);

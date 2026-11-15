@@ -162,6 +162,7 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
       tests: {
         count: 0,
         toRun: [],
+        files: [],
         truncatedAtDepth: 2,
         soundness: { caveats: ['Symbol scope resolved by substring fallback and may have widened.'] },
       },

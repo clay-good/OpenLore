@@ -156,8 +156,9 @@ function renderHuman(b: BlastRadiusBriefing): string {
     lines.push('   Governing decisions: ' + b.impact.governingDecisionProvenance.map(d => `[${d.provenance}] ${d.title}`).join('; '));
   }
   if (b.tests.count > 0) {
-    const top = b.tests.toRun.slice(0, 8).map(t => t.test === '*' ? t.file : t.test).join(', ');
-    lines.push(`   Tests to run (${b.tests.count}): ${top}${b.tests.count > 8 ? ', …' : ''}`);
+    const files = b.tests.files ?? [];
+    lines.push(`   Tests to run: ${b.tests.count} test(s) in ${files.length} file(s)`);
+    for (const file of files) lines.push(`     ${file}`);
   }
   if (b.tests.truncatedAtDepth !== undefined) {
     lines.push(`   ⚠ Test reachability was truncated at depth ${b.tests.truncatedAtDepth}; deeper tests may exist.`);
