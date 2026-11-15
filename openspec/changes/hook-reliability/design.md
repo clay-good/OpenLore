@@ -78,10 +78,10 @@ repository is a tail (p50 941 ms, in-process 103 ms): cold start and index load,
 The reframe evidence sources are not wired yet (reframe group 3 has not landed). Linux and Windows
 numbers come from task 5.3.
 
-Open for the owner: the prompt-submitted limit. The runtime limit starts its timer inside the
-process, so the in-process p95 (103 ms) is the time it bounds; by that reading 3 s passes the rule
-with room. By the whole-process reading it does not. Recommended: 3 s, timed in-process as the other
-moments' limits are.
+Decided by the owner (2026-11-14): the prompt-submitted limit is 3 s, timed in-process. Every
+runtime limit starts its timer inside the process, after cold start and module load, so the rule
+compares a limit with the in-process p95 (103 ms here). The whole-process numbers bound the p95
+targets only.
 
 **How the test avoids flakiness.** A generated fixture of fixed size (200 files, 2,000 functions,
 one index build in `beforeAll`). The handler is timed in-process: 3 warm-up runs, then 30 runs,
