@@ -17,7 +17,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
-import { HOOK_MOMENTS } from './hook.js';
+import { LOOP_MOMENTS } from '../../core/services/hook-session.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
 import { readLiveLedger, type LedgerSnapshot } from '../../core/services/session-ledger.js';
@@ -100,23 +100,35 @@ export type SessionStatus =
       editOscillation: LedgerSnapshot['editOscillation']; withheld?: string }
   | { withheld: string };
 
-/** The loop moments wired in this repository's Claude Code settings, and the config opt-outs. */
-function collectHookMoments(rootPath: string): Array<{ moment: string; wired: boolean; enabled: boolean }> {
+/**
+ * The loop moments wired in this repository's Claude Code settings, and the config opt-outs. The
+ * prompt-submitted moment (`openlore orient --inject`) is the plain `_openlore` group on
+ * `UserPromptSubmit`; the others carry their moment in `_openloreHook` (change: hook-reliability).
+ */
+export function collectHookMoments(rootPath: string): Array<{ moment: string; wired: boolean; enabled: boolean }> {
   const wired = new Set<string>();
   try {
     const settings = JSON.parse(readFileSync(join(rootPath, '.claude', 'settings.json'), 'utf-8')) as { hooks?: Record<string, unknown> };
-    for (const groups of Object.values(settings?.hooks ?? {})) {
+    for (const [event, groups] of Object.entries(settings?.hooks ?? {})) {
       for (const g of Array.isArray(groups) ? groups : []) {
-        const m = g && typeof g === 'object' ? (g as Record<string, unknown>)._openloreHook : undefined;
+        if (!g || typeof g !== 'object') continue;
+        const m = (g as Record<string, unknown>)._openloreHook;
         if (typeof m === 'string') wired.add(m);
+        else if (event === 'UserPromptSubmit' && (g as Record<string, unknown>)._openlore === true) wired.add('prompt-submitted');
       }
     }
   } catch { /* no settings: nothing wired */ }
-  let off: Record<string, unknown> = {};
+  let cfg: { hooks?: Record<string, unknown>; contextInjection?: { mode?: unknown } } = {};
   try {
-    off = (JSON.parse(readFileSync(join(rootPath, OPENLORE_DIR, 'config.json'), 'utf-8')) as { hooks?: Record<string, unknown> })?.hooks ?? {};
+    cfg = (JSON.parse(readFileSync(join(rootPath, OPENLORE_DIR, 'config.json'), 'utf-8')) as typeof cfg) ?? {};
   } catch { /* unreadable config: every moment on */ }
-  return HOOK_MOMENTS.map(moment => ({ moment, wired: wired.has(moment), enabled: off[moment] !== false }));
+  const off = cfg.hooks ?? {};
+  const injectionOff = cfg.contextInjection?.mode === 'off';
+  return LOOP_MOMENTS.map(moment => ({
+    moment,
+    wired: wired.has(moment),
+    enabled: off[moment] !== false && !(moment === 'prompt-submitted' && injectionOff),
+  }));
 }
 
 function collectSessionStatus(rootPath: string): SessionStatus {

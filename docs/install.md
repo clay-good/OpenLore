@@ -320,14 +320,22 @@ Task-scoped injection is on by default. To disable it (while leaving the MCP ser
 }
 ```
 
-With `mode: "off"`, `openlore orient --inject` emits nothing and exits 0.
+With `mode: "off"`, `openlore orient --inject` emits nothing and exits 0. To turn off only this
+hook moment, set `"hooks": { "prompt-submitted": false }` instead: the command then does nothing at
+all (no lookup, no index build) and exits 0.
+
+If the lookup fails, or the moment passes its 3 s time limit, the hook prints nothing and exits 0:
+the agent is told nothing about OpenLore's own trouble. A gate that withholds the briefing (no
+index, a weak match, a management turn, an empty prompt) still prints its one pointer line.
 
 ### Performance and activation notes
 
 - **It runs on every prompt and blocks the turn until it returns**, so it is built to be fast: `orient`
-  is a local, deterministic lookup (~300 ms for the work itself; the `npx` wrapper that resolves the
-  package adds ~200 ms). That is well under Claude Code's 30 s `UserPromptSubmit` timeout. On a weak
-  match it short-circuits to the one-line pointer, so the slow path is the rare strong-match case.
+  is a local, deterministic lookup. Measured on this repository (about 5,400 functions): about 0.1 s
+  for the work itself and about 1 s for the whole process (`npm run bench:hooks`). Its time limit is
+  3 s, timed from when the command has loaded; past it the hook prints nothing. That is well under
+  Claude Code's 30 s `UserPromptSubmit` timeout. On a weak match it short-circuits to the one-line
+  pointer, so the slow path is the rare strong-match case.
 - **Activation tracks the installed version.** The wired command is `npx --yes openlore orient
   --inject`, which resolves the `openlore` your environment already has. If that is an older published
   version without `--inject`, the hook is a clean no-op (it prints nothing to stdout, writes a short
@@ -379,6 +387,11 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
   working directory that has `.openlore/`.
 - **Bounded.** Each receipt has a size budget (the most severe facts first, the rest counted) and a
   time limit (8 s, 15 s, 50 s, 30 s, 5 s, 10 s); past it the hook prints nothing.
+- **Silent on failure.** A check that throws or does not load, a passed time limit, a missing,
+  corrupt, or read-only `.openlore/`, a missing or unusable index, and an unreadable payload all end
+  the same way: exit 0, nothing printed. The prompt-submitted moment (`openlore orient --inject`,
+  [above](#task-scoped-context-injection)) follows the same rule, with its own off switch,
+  `hooks.prompt-submitted`.
 - **Advisory.** Hooks exit 0 and never block, with one exception: when your
   [`enforcement.policy`](configuration.md#enforcement-policy) makes a finding code `blocking`, the
   `before-stop` hook blocks the stop and lists those findings for the agent. It does not block twice

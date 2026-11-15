@@ -9,6 +9,7 @@ vi.mock('../../utils/logger.js', () => ({
     error: vi.fn(), info: vi.fn(), section: vi.fn(), success: vi.fn(),
     warning: vi.fn(), discovery: vi.fn(), blank: vi.fn(), debug: vi.fn(),
   },
+  withLoggerOptions: (_options: unknown, callback: () => unknown) => callback(),
 }));
 
 vi.mock('../../core/services/mcp-handlers/orient.js', () => ({
@@ -30,7 +31,7 @@ vi.mock('../../core/services/one-shot-index-build.js', async (importOriginal) =>
   };
 });
 
-import { autoAcceptLine, implicitOrientRoot, orientCommand, readStdin } from './orient.js';
+import { TIMED_OUT, autoAcceptLine, implicitOrientRoot, orientCommand, promptSubmittedOff, readStdin, withinLimit } from './orient.js';
 import { appendLedgerEntries } from '../../core/decisions/ledger.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -145,14 +146,18 @@ describe('orient command', () => {
       expect(process.exitCode).toBeUndefined();
     });
 
-    it('emits the pointer line (never throws) when handleOrient returns an error result', async () => {
+    it('prints nothing (never throws) when handleOrient returns an error result', async () => {
       mockHandleOrient.mockResolvedValue({ error: 'No analysis found.' });
       await orientCommand.parseAsync(['--inject', '--task', 'whatever'], { from: 'user' });
-      // The pointer line now states WHY the briefing was withheld
-      // (change: scope-advisory-noise-to-touched-code) — here, orientation failed.
-      expect(output()).toContain('[OpenLore] No briefing:');
-      expect(output()).toContain('orientation failed for this turn');
-      expect(output()).toContain('orient');
+      // A failed lookup is silent to the agent (change: hook-reliability).
+      expect(output()).toBe('');
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it('prints nothing (never throws) when handleOrient throws', async () => {
+      mockHandleOrient.mockRejectedValue(new Error('index mid-rebuild'));
+      await orientCommand.parseAsync(['--inject', '--task', 'auth flow'], { from: 'user' });
+      expect(output()).toBe('');
       expect(process.exitCode).toBeUndefined();
     });
 
@@ -476,5 +481,30 @@ describe('implicitOrientRoot', () => {
 
   it('keeps the start directory when nothing encloses it', () => {
     expect(implicitOrientRoot('/fake/proj')).toBe('/fake/proj');
+  });
+});
+
+describe('the prompt-submitted moment (change: hook-reliability)', () => {
+  it('withinLimit: a passed limit settles to TIMED_OUT, a throw to silence, an answer to itself', async () => {
+    await expect(withinLimit(() => new Promise(r => setTimeout(() => r('late'), 200)), 5)).resolves.toBe(TIMED_OUT);
+    await expect(withinLimit(async () => { throw new Error('boom'); }, 1000)).resolves.toBe('');
+    await expect(withinLimit(async () => 'block', 1000)).resolves.toBe('block');
+  });
+
+  it('promptSubmittedOff reads hooks.prompt-submitted, and an unreadable config is on', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'olpromptoff-'));
+    try {
+      expect(promptSubmittedOff(dir)).toBe(false);
+      mkdirSync(join(dir, '.openlore'));
+      writeFileSync(join(dir, '.openlore', 'config.json'), JSON.stringify({ hooks: { 'prompt-submitted': false } }));
+      expect(promptSubmittedOff(dir)).toBe(true);
+      writeFileSync(join(dir, '.openlore', 'config.json'), JSON.stringify({ hooks: { 'prompt-submitted': true } }));
+      expect(promptSubmittedOff(dir)).toBe(false);
+      writeFileSync(join(dir, '.openlore', 'config.json'), '{"hooks": {');
+      expect(promptSubmittedOff(dir)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -28,6 +28,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **The prompt hook follows the same rules as the other hook moments.** `openlore orient --inject`
+  now has its own off switch, `hooks.prompt-submitted: false` (which also starts no index build), a
+  3 s time limit, and silence on a failed lookup: the "orientation failed for this turn" line is
+  gone, and nothing is written to stderr. `openlore status` lists it as `prompt-submitted`. Gate
+  pointer lines (no index, weak match, management turn, empty prompt) are unchanged.
 - **Agent-loop hooks stay silent when something breaks.** A check that failed to load on the
   shell-command or sub-agent path threw out of the hook instead of ending in silence; it now ends
   in silence, like every other failure. After a compaction, the handoff no longer pastes raw error text or temporary

@@ -299,6 +299,7 @@ const hooksRule: ConfigRule = {
   kind: 'object',
   strict: true,
   fields: fieldsFor<HooksConfig>({
+    'prompt-submitted': booleanRule,
     'before-edit': booleanRule,
     'after-tools': booleanRule,
     'before-stop': booleanRule,

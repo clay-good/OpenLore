@@ -28,15 +28,14 @@ import { Command } from 'commander';
 import { createHash } from 'node:crypto';
 import { sanitizeForTerminal, screenJsonText } from '../../utils/misc.js';
 import { homedir } from 'node:os';
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
-import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
+import { HOOK_MOMENTS, readSession, writeSession, type HookMoment } from '../../core/services/hook-session.js';
 
-export const HOOK_MOMENTS = ['before-edit', 'after-tools', 'before-stop', 'after-compact', 'before-subagent', 'subagent-start'] as const;
-export type HookMoment = typeof HOOK_MOMENTS[number];
+export { HOOK_MOMENTS, type HookMoment };
 
 /** The harness event each moment is wired to (Claude Code). */
 export const HOOK_EVENT: Record<HookMoment, string> = {
@@ -54,7 +53,6 @@ const BUDGET_CHARS: Record<HookMoment, number> = { 'before-edit': 1600, 'after-t
 /** Hard time limit per moment; past it the hook prints nothing. */
 const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000, 'after-compact': 30_000, 'before-subagent': 5_000, 'subagent-start': 10_000 };
 const STDIN_MAX_BYTES = 8 * 1024 * 1024;
-const MAX_DELIVERED = 2000;
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, error: 1, warning: 2, info: 3 };
 
@@ -217,48 +215,6 @@ function renderShown(moment: HookMoment, items: HookItem[], budgetChars = BUDGET
   if (!lines.length) return { text: null, shown: [] };
   if (omitted) lines.push(`- ${omitted} more fact(s) not shown (budget); they are stated on a later call.`);
   return { text: `${header}\n${lines.join('\n')}`, shown };
-}
-
-function deliveredDir(root: string): string {
-  return join(root, OPENLORE_DIR, 'session-ledger', 'hook-delivered');
-}
-
-function deliveredPath(root: string, sessionId: string): string {
-  const id = createHash('sha256').update(sessionId).digest('hex').slice(0, 24);
-  return join(deliveredDir(root), `${id}.json`);
-}
-
-/** Per harness session: the facts already delivered, and the commit the session started from. */
-interface SessionRecord { keys: Set<string>; startHead?: string }
-
-function readSession(root: string, sessionId: string | undefined): SessionRecord {
-  if (!sessionId) return { keys: new Set() };
-  try {
-    const v = JSON.parse(readFileSync(deliveredPath(root, sessionId), 'utf-8')) as { keys?: unknown; startHead?: unknown } | unknown[];
-    // Fail-open on an older or foreign shape.
-    const keys = Array.isArray(v) ? v : Array.isArray((v as { keys?: unknown }).keys) ? (v as { keys: unknown[] }).keys : [];
-    const head = Array.isArray(v) ? undefined : (v as { startHead?: unknown }).startHead;
-    return { keys: new Set(keys.filter((x): x is string => typeof x === 'string')), ...(typeof head === 'string' && /^[0-9a-f]{40,64}$/.test(head) ? { startHead: head } : {}) };
-  } catch {
-    return { keys: new Set() };
-  }
-}
-
-/**
- * Write the session record, merged with what a concurrent hook of the same session wrote meanwhile
- * (the harness runs matching hooks in parallel). Records untouched for a week are removed.
- */
-async function writeSession(root: string, sessionId: string | undefined, rec: SessionRecord): Promise<void> {
-  if (!sessionId) return;
-  try {
-    const now = readSession(root, sessionId);
-    const keys = [...new Set([...now.keys, ...rec.keys])].slice(-MAX_DELIVERED);
-    await atomicWriteFile(deliveredPath(root, sessionId), JSON.stringify({ startHead: now.startHead ?? rec.startHead, keys }));
-    const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
-    for (const n of readdirSync(deliveredDir(root))) {
-      try { if (statSync(join(deliveredDir(root), n)).mtimeMs < cutoff) unlinkSync(join(deliveredDir(root), n)); } catch { /* raced */ }
-    }
-  } catch { /* dedupe is best-effort: at worst a fact is said twice */ }
 }
 
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf899d15f71049056';
