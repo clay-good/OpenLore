@@ -413,7 +413,7 @@ Checks performed:
 | Git repository | `.git` directory and `git` binary on PATH |
 | openlore config | `.openlore/config.json` exists and is parseable |
 | Analysis artifacts | `repo-structure.json` freshness (warns if >24h old) |
-| OpenSpec directory | `openspec/specs/` exists |
+| Spec source | the OpenSpec corpus in use, or `none` (a supported state, never a warning) |
 | LLM provider | API key or `claude` CLI detected |
 | Disk space | Warns < 500 MB, fails < 200 MB |
 | Install health | Warns when more than one `openlore` install is on PATH, or when the user-scope MCP entry (`~/.claude.json`) names a launcher that no longer exists; `--fix` re-wires the launcher |

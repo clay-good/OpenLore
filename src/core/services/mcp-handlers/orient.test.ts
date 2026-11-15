@@ -673,6 +673,29 @@ describe('handleOrient', () => {
     expect(domains.some(d => d.domain === 'auth')).toBe(true);
   });
 
+  it('states "no spec source" instead of an empty specDomains alone, and is unchanged when specs exist', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult({ filePath: 'src/auth.ts' })]);
+    const bare = mkdtempSync(join(tmpdir(), 'olorient-nospec-'));
+    const withSpecs = mkdtempSync(join(tmpdir(), 'olorient-spec-'));
+    try {
+      const none = await handleOrient(bare, 'auth') as Record<string, unknown>;
+      expect(none.specDomains).toEqual([]);
+      expect(none.specSources).toEqual({ found: [], lookedFor: ['openspec'] });
+
+      mkdirSync(join(withSpecs, 'openspec', 'specs', 'auth'), { recursive: true });
+      writeFileSync(join(withSpecs, 'openspec', 'specs', 'auth', 'spec.md'), '# Auth\n');
+      const some = await handleOrient(withSpecs, 'auth') as Record<string, unknown>;
+      expect('specSources' in some).toBe(false);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+      rmSync(withSpecs, { recursive: true, force: true });
+    }
+  });
+
   it('includes call paths derived from call graph context', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     const searchResult = makeSearchResult({ id: 'src/foo.ts::doFoo', name: 'doFoo', filePath: 'src/foo.ts' });

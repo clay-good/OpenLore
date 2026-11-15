@@ -144,7 +144,15 @@ export interface TestCoverageReport {
   taggedScenarios: number;      // covered via // openlore: tag
   discoveredScenarios: number;  // covered via semantic match
   coveredScenarios: number;     // taggedScenarios + discoveredScenarios
-  coveragePercent: number;
+  /**
+   * `null` when the repository has no spec source: there is nothing to cover, which is not 0%
+   * (change: spec-framework-neutrality, task 2.3).
+   */
+  coveragePercent: number | null;
+  /** With `coveragePercent: null`: `no-spec-source`, the sources checked, and a note for a reader. */
+  reason?: 'no-spec-source';
+  lookedFor?: string[];
+  note?: string;
   byDomain: Record<string, DomainCoverage>;
   covered: CoveredScenario[];
   uncovered: UncoveredScenario[];

@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { noSpecSourceText } from '../../core/spec-sources/state.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { embeddingTlsRelaxed, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile, realpath } from 'node:fs/promises';
@@ -710,14 +711,10 @@ async function checkOpenSpecDir(rootPath: string): Promise<CheckResult> {
   const rel = `${configuredRoot.replace(/^\.\//, '').replace(/\/$/, '')}/${OPENSPEC_SPECS_SUBDIR}/`;
   try {
     await access(specsDir);
-    return { name: 'OpenSpec directory', status: 'ok', detail: `${rel} exists` };
+    return { name: 'Spec source', status: 'ok', detail: `openspec: ${rel}` };
   } catch {
-    return {
-      name: 'OpenSpec directory',
-      status: 'warn',
-      detail: `${rel} not found`,
-      fix: "Run 'openlore init' then 'openlore generate'",
-    };
+    // No spec source is a supported state, not a problem to fix (change: spec-framework-neutrality).
+    return { name: 'Spec source', status: 'ok', detail: `none: ${noSpecSourceText()}; code answers work in full` };
   }
 }
 
@@ -1301,7 +1298,7 @@ Checks performed:
   • Config schema (unknown keys, type mismatches, version skew)
   • Analysis artifacts freshness
   • Graph store lifecycle (schema mismatch / quarantined index)
-  • OpenSpec directory presence
+  • Spec source (none is a supported state)
   • Governance corpus reference integrity
   • Injection-shaped unreviewed content (lexical advisory; never a guarantee)
   • MCP wiring (Claude Code reads .mcp.json, not .claude/settings.json)

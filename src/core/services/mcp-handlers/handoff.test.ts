@@ -83,6 +83,16 @@ describe('get_handoff_briefing', () => {
     expect(renderHandoff(r)).toContain('unchecked: "Handle empty `src/config.ts` input"');
   });
 
+  it('with no OpenSpec folder, states the missing spec source instead of a silent empty openChanges', async () => {
+    const root = repo({ 'src/config.ts': 'export const a = 1;\n' });
+    write(root, 'src/config.ts', 'export const a = 2;\n');
+    const none = await handleGetHandoffBriefing({ directory: root });
+    expect(none.specSources).toEqual({ found: [], lookedFor: ['openspec'] });
+    write(root, 'openspec/changes/x/tasks.md', '- [ ] t\n');
+    const some = await handleGetHandoffBriefing({ directory: root });
+    expect(some.specSources).toBeUndefined();
+  });
+
   it('a tight budget trims the least central sections first, with receipts naming the call', async () => {
     const root = repo({ 'src/config.ts': 'export const a = 1;\n' });
     blast.result = briefing({

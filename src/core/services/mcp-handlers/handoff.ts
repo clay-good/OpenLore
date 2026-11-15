@@ -25,6 +25,8 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { SPEC_SOURCES_LOOKED_FOR } from '../../spec-sources/state.js';
 import { validateDirectory } from './utils.js';
 import { execFileGit } from '../../../utils/git-exec.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
@@ -311,6 +313,9 @@ export async function handleGetHandoffBriefing(input: HandoffInput): Promise<Rec
         ? { ledger: { backgroundChanges: ledger.backgroundChanges.map(c => ({ name: c.name, file: c.file })), editOscillation: ledger.editOscillation.map(o => ({ name: o.name, file: o.file, returns: o.returns })) } }
         : {}),
     },
+    // No OpenSpec folder: `openChanges: []` and `driftedSpecs: []` are a state of the repository,
+    // not "nothing open" (change: spec-framework-neutrality, task 2.5).
+    ...(!existsSync(join(root, openspec)) ? { specSources: { found: [] as string[], lookedFor: [...SPEC_SOURCES_LOOKED_FOR] } } : {}),
     ...(boundaries.length ? { boundaries: boundaries.sort() } : {}),
     note: 'Computed from the repository (no transcript). Each element\'s `expand` is the call that returns its detail.',
   };

@@ -730,6 +730,8 @@ export interface MappingCoverageStatus {
   reason?: MappingCoverageReason;
   message?: string;
   remediation?: string;
+  /** With `specs-unavailable`: the spec sources checked (change: spec-framework-neutrality). */
+  lookedFor?: string[];
   artifactPath: string;
   /** Where available coverage came from: the persisted cache, or an in-memory rebuild. */
   source?: 'cache' | 'derived';

@@ -19,6 +19,7 @@
  */
 
 import { Command } from 'commander';
+import { noSpecSourceText } from '../../core/spec-sources/state.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -33,10 +34,7 @@ import type { TestCoverageReport } from '../../types/test-generator.js';
 import {
   OPENLORE_DIR,
   OPENLORE_LOGS_SUBDIR,
-  OPENSPEC_DIR,
-  OPENSPEC_SPECS_SUBDIR,
 } from '../../constants.js';
-import { fileExists } from '../../utils/command-helpers.js';
 import { jsonOutput } from '../output.js';
 
 // ============================================================================
@@ -64,7 +62,9 @@ function displayCoverageReport(report: TestCoverageReport, json: boolean): void 
     report.minCoverage !== undefined
       ? `  (target: ${report.minCoverage}%) ${report.belowThreshold ? '✗ below threshold' : '✓'}`
       : '';
-  console.log(`   Effective coverage: ${report.coveragePercent}%${thresholdSuffix}`);
+  console.log(report.coveragePercent === null
+    ? `   Effective coverage: not assessed, ${noSpecSourceText()}`
+    : `   Effective coverage: ${report.coveragePercent}%${thresholdSuffix}`);
   console.log('');
   console.log('   By domain:');
 
@@ -151,12 +151,8 @@ To write tests, use the openlore-write-tests skill:
 
     if (!isJson) logger.section('Spec Test Coverage');
 
-    const specsPath = join(rootPath, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
-    if (!(await fileExists(specsPath))) {
-      logger.error('No specs found. Run "openlore generate" first.');
-      process.exitCode = 1;
-      return;
-    }
+    // No spec source is a state, not an error: the report states coverage as not assessed
+    // (change: spec-framework-neutrality, task 2.3).
 
     // ── LLM Setup (only needed for --discover) ───────────────────────────
     let llm: LLMService | undefined;

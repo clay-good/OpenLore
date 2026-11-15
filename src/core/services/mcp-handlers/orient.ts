@@ -29,6 +29,7 @@ import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { isContractLanguage } from '../../analyzer/contract/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
 import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
+import { SPEC_SOURCES_LOOKED_FOR } from '../../spec-sources/state.js';
 import { fitPayloadToBudget } from './budget-fit.js';
 import { estimateTokens } from '../llm-service.js';
 import { loadArchitectureRules } from '../../architecture/rules.js';
@@ -406,8 +407,11 @@ export async function handleOrient(
   // "no spec governs this code". Say which it is: an absent index is a missing CACHE, not a
   // finding about the repository (change: fix-governance-face-dark).
   let specLinkage: { state: 'unavailable'; reason: string; remediation: string } | undefined;
+  const specCount = await countSpecDomains(absDir, cfg?.openspecPath);
+  // No spec source at all is a state of the repository, not an empty result: `specDomains: []`
+  // alone would read as "nothing governs this code" (change: spec-framework-neutrality, task 2.1).
+  const specSources = specCount === 0 ? { found: [] as string[], lookedFor: [...SPEC_SOURCES_LOOKED_FOR] } : undefined;
   if (!mappingIdx) {
-    const specCount = await countSpecDomains(absDir, cfg?.openspecPath);
     if (specCount > 0) {
       specLinkage = {
         state: 'unavailable',
@@ -1269,6 +1273,7 @@ export async function handleOrient(
     ...(behavioralHotspots !== undefined ? { behavioralHotspots } : {}),
     ...(regionStyle !== undefined ? { regionStyle } : {}),
     ...(specLinkage ? { specLinkage } : {}),
+    ...(specSources ? { specSources } : {}),
     ...(contracts !== undefined ? { contracts } : {}),
     ...(infrastructure !== undefined ? { infrastructure } : {}),
     nextSteps,
