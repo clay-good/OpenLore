@@ -32,6 +32,7 @@ import { usesTsxGrammar } from './language-detection.js';
 import { readNamedChildren } from './ast-children.js';
 import { parseWithBudget, type BudgetableParser } from './extraction-budget.js';
 import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
+import { sameNode } from './same-node.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
  *  single authoritative source the language-support registry derives the
@@ -398,15 +399,6 @@ export function resolveCurrentFunctionSpan(
     !(node.startIndex <= selected.startIndex && selected.endIndex <= node.endIndex));
   if (crossesSibling) return null;
   return { startIndex: selected.startIndex, endIndex: selected.endIndex };
-}
-
-/**
- * Two reads of the same syntax node. The native binding caches node objects WEAKLY, so after a
- * garbage collection a second read of a node can return a different object: `===` between two reads
- * depends on GC timing. Compare the node id instead (stable for the life of the tree).
- */
-function sameNode(a: Node | null | undefined, b: Node | null | undefined): boolean {
-  return !!a && !!b && a.id === b.id;
 }
 
 const MAX_TRAVERSAL_DEPTH = 512;
@@ -1056,7 +1048,7 @@ export function extractGoErrorFacts(
   const fnBody = fnNode.childForFieldName('body');
   const scopeOf = (node: Node): Node => {
     let current: Node | null = node.parent;
-    while (current && current !== fnNode && current.type !== 'block') current = current.parent;
+    while (current && !sameNode(current, fnNode) && current.type !== 'block') current = current.parent;
     return current?.type === 'block' ? current : (fnBody ?? fnNode);
   };
   const visibleBinding = (name: string, index: number): Binding | undefined =>
