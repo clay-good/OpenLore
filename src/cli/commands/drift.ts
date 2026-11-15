@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { noSpecSourceText } from '../../core/spec-sources/state.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { basename, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -678,7 +679,8 @@ Exit codes:
 
       // Check if specs exist
       if (!(await fileExists(specsPath))) {
-        logger.error('No specs found. Run "openlore generate" first.');
+        // Exit 2 = "could not check", distinct from drift (DriftHookDistinguishesFailureFromDrift).
+        logger.error(`${noSpecSourceText()}; spec drift not assessed.`);
         process.exitCode = 2;
         return;
       }

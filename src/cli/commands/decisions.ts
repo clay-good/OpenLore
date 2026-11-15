@@ -9,6 +9,7 @@
  */
 
 import { Command, Option } from 'commander';
+import { DECISIONS_KEPT_LOCALLY, NO_SPEC_SOURCE, SPEC_SOURCES_LOOKED_FOR } from '../../core/spec-sources/state.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -1477,8 +1478,9 @@ the ledger. Review the trail with: openlore decisions review
       const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
       if (!(await fileExists(specsPath))) {
-        logger.error('No specs found. Run "openlore generate" first.');
-        process.exitCode = 1;
+        // A state, not a failure: nothing is synced and no spec folder is created.
+        if (options.json) process.stdout.write(jsonOutput({ synced: [], skipped: { reason: NO_SPEC_SOURCE, lookedFor: [...SPEC_SOURCES_LOOKED_FOR], note: DECISIONS_KEPT_LOCALLY } }) + '\n');
+        else logger.info('Sync skipped', DECISIONS_KEPT_LOCALLY);
         return;
       }
 

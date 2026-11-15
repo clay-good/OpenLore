@@ -65,6 +65,22 @@ describe('analyzeTestCoverage', () => {
     expect(report.belowThreshold).toBe(false);
   });
 
+  it('no spec source is null with its reason, never 0%; a corpus with 0 covered stays 0', async () => {
+    const bare = join(tmpdir(), `coverage-nospec-${Date.now()}`);
+    await mkdir(bare, { recursive: true });
+    try {
+      const none = await analyzeTestCoverage({ rootPath: bare, testDirs: ['spec-tests'], minCoverage: 80 });
+      expect(none.coveragePercent).toBeNull();
+      expect(none).toMatchObject({ reason: 'no-spec-source', lookedFor: ['openspec'], note: 'no spec source found (looked for: openspec)', belowThreshold: false });
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+    }
+    const zero = await analyzeTestCoverage({ rootPath: tmpDir, testDirs: ['spec-tests'] });
+    expect(zero.totalScenarios).toBeGreaterThan(0);
+    expect(zero.coveragePercent).toBe(0);
+    expect(zero.reason).toBeUndefined();
+  });
+
   it('treats a __proto__ domain as data without mutating Object.prototype', async () => {
     const protoSpecDir = join(tmpDir, 'openspec', 'specs', '__proto__');
     await mkdir(protoSpecDir, { recursive: true });

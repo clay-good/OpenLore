@@ -9,6 +9,7 @@
  */
 
 import { childEnvWithoutScopedTlsRelaxation } from '../tls-scope.js';
+import { DECISIONS_KEPT_LOCALLY, NO_SPEC_SOURCE, SPEC_SOURCES_LOOKED_FOR } from '../../spec-sources/state.js';
 import { spawn } from 'node:child_process';
 import { validateDirectory, sanitizeMcpError, safeOpenspecDir } from './utils.js';
 import { emit } from '../telemetry.js';
@@ -37,6 +38,8 @@ import { validateDecisionConstraintBlock } from '../../decisions/constraint-ledg
 import { DECISIONS_REVIEW_COMMAND, resolveAutopilotMode } from '../../decisions/autopilot.js';
 import { safeJoin } from '../../../utils/path-confinement.js';
 import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { OPENSPEC_SPECS_SUBDIR } from '../../../constants.js';
 
 type ConsolidateSpawnOutcome =
   | { outcome: 'started' }
@@ -556,6 +559,15 @@ export async function handleSyncDecisions(
       if (!after || (after.status !== 'approved' && after.status !== 'synced')) {
         return { error: `Decision ${id} could not be promoted for sync — it was concurrently removed or changed.` };
       }
+    }
+
+    // No OpenSpec corpus: nothing to sync into, and no spec folder is created for it (change:
+    // spec-framework-neutrality, task 2.5). The decisions stay in the store.
+    if (!(await stat(join(openspecPath, OPENSPEC_SPECS_SUBDIR)).then(() => true, () => false))) {
+      return {
+        synced: [], errors: [], modifiedSpecs: [], dryRun,
+        skipped: { reason: NO_SPEC_SOURCE, lookedFor: [...SPEC_SOURCES_LOOKED_FOR], note: DECISIONS_KEPT_LOCALLY },
+      };
     }
 
     const { result } = await syncApprovedDecisions(store, {

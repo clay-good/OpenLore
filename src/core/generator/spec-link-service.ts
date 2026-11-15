@@ -16,6 +16,7 @@
  */
 
 import { realpathSync, statSync } from 'node:fs';
+import { SPEC_SOURCES_LOOKED_FOR, noSpecSourceText } from '../spec-sources/state.js';
 import { readFile, readdir } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
@@ -65,6 +66,8 @@ export interface LinkIndexResolutionUnavailable {
   reason: MappingCoverageReason;
   message: string;
   remediation: string;
+  /** With `specs-unavailable`: the spec sources checked (change: spec-framework-neutrality). */
+  lookedFor?: string[];
   artifactPath: string;
 }
 
@@ -283,8 +286,9 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
     return {
       state: 'unavailable',
       reason: 'specs-unavailable',
-      message: 'No domain specifications were found to derive requirement links from.',
-      remediation: 'Run `openlore generate` to author specifications, or check the configured openspec path.',
+      message: `No domain specifications were found to derive requirement links from: ${noSpecSourceText()}.`,
+      remediation: 'Nothing to repair: requirement links need a spec source. If this repository keeps specs elsewhere, point openspecPath at them.',
+      lookedFor: [...SPEC_SOURCES_LOOKED_FOR],
       artifactPath,
     };
   }
@@ -433,7 +437,7 @@ export function mappingViewOf(
   orphansOnly?: boolean,
 ): Record<string, unknown> {
   if (resolution.state === 'unavailable') {
-    return { schemaVersion: 2, error: `${resolution.message} ${resolution.remediation}`, reason: resolution.reason };
+    return { schemaVersion: 2, error: `${resolution.message} ${resolution.remediation}`, reason: resolution.reason, ...(resolution.lookedFor ? { lookedFor: resolution.lookedFor } : {}) };
   }
 
   const { index } = resolution;

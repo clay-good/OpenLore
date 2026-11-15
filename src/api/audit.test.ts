@@ -314,7 +314,9 @@ describe('openloreAudit — coverage availability', () => {
 
   it('reports unavailable when no specifications exist to derive links from', async () => {
     const report = await openloreAudit({ rootPath: await fixture(), save: false });
-    expect(report.mappingCoverage).toMatchObject({ state: 'unavailable', reason: 'specs-unavailable' });
+    expect(report.mappingCoverage).toMatchObject({ state: 'unavailable', reason: 'specs-unavailable', lookedFor: ['openspec'] });
+    expect(report.mappingCoverage.message).toContain('no spec source found (looked for: openspec)');
+    expect(report.mappingCoverage.remediation).not.toContain('openlore generate');
     expect(report.summary.coveragePct).toBe(0);
   });
 

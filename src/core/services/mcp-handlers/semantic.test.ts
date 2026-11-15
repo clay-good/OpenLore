@@ -166,9 +166,11 @@ describe('handleListSpecDomains', () => {
 
   it('returns empty domains when openspec/specs/ does not exist', async () => {
     const { handleListSpecDomains } = await import('./semantic.js');
-    const result = await handleListSpecDomains(tmpDir) as { domains: string[]; note?: string };
+    const result = await handleListSpecDomains(tmpDir) as { domains: string[]; note?: string; reason?: string; lookedFor?: string[] };
     expect(result.domains).toEqual([]);
-    expect(result.note).toContain('No openspec/specs/');
+    expect(result).toMatchObject({ reason: 'no-spec-source', lookedFor: ['openspec'] });
+    expect(result.note).toBe('no spec source found (looked for: openspec); no openspec/specs/ directory.');
+    expect(JSON.stringify(result)).not.toContain('openlore generate');
   });
 
   it('returns the list of domains that have a spec.md', async () => {
@@ -253,15 +255,16 @@ describe('handleSearchSpecs', () => {
     expect(result.hint).toContain('keyword');
   });
 
-  it('says there are no specs, not "run analyze", when the repository has none', async () => {
+  it('states "no spec source" as an empty answer, not an error, and names no generate step', async () => {
     // `analyze` indexes no specs when none exist, so "run analyze first" never resolved.
     vi.doMock('../../analyzer/spec-vector-index.js', () => ({
       SpecVectorIndex: { exists: vi.fn().mockReturnValue(false), build: vi.fn(), search: vi.fn() },
     }));
     const { handleSearchSpecs } = await import('./semantic.js');
-    const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string; hint: string };
-    expect(result.error).toMatch(/^No specs to search/);
-    expect(result.hint).toContain('openlore generate');
+    const result = await handleSearchSpecs(tmpDir, 'email validation') as Record<string, unknown>;
+    expect(result).toMatchObject({ count: 0, results: [], reason: 'no-spec-source', lookedFor: ['openspec'] });
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/openlore generate|openlore analyze/);
   });
 });
 

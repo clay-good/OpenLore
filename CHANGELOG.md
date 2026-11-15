@@ -37,6 +37,14 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Changed
 
+- **"No spec source" is stated, not hidden or failed.** In a repository with no spec corpus,
+  `orient` and `get_handoff_briefing` add `specSources: { found: [], lookedFor: ["openspec"] }`;
+  `list_spec_domains`, `search_specs`, `check_spec_drift` and the link index return
+  `reason: "no-spec-source"` with `lookedFor` (`search_specs` returns an empty answer, not an
+  error); `get_test_coverage` returns `coveragePercent: null` with a note, never 0%; `openlore drift`
+  exits 2 with "spec drift not assessed"; `openlore doctor` shows `Spec source: none` as ok; decision
+  sync names the skip and creates no folder. No answer tells the agent to run `openlore generate`.
+  `doctor --json` names the check `Spec source` (was `OpenSpec directory`).
 - **First run creates no spec folder.** `openlore init` and `openlore install` no longer create an
   empty `openspec/`; OpenLore works without one, and `openlore generate` creates the folders it
   writes. An existing `openspec/` is left untouched. The `.gitignore` entry is now exactly

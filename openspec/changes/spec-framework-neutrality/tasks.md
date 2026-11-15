@@ -24,19 +24,19 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
 
 ## 2. Honest answers when there is no spec source
 
-- [ ] 2.1 `orient` (`mcp-handlers/orient.ts:214-232, 405-430`): optional `specSources: { found,
+- [x] 2.1 `orient` (`mcp-handlers/orient.ts:214-232, 405-430`): optional `specSources: { found,
   lookedFor }` when no source is found; classify it in `confidence-boundary.ts`. Tests:
   `orient.test.ts`, `completeness-invariant.test.ts`. Done when: no spec folder gives `specDomains: []`
   plus `specSources.found: []`, and a repo with `openspec/` returns the same bytes as before.
-- [ ] 2.2 "run `openlore generate`" → `reason: "no-spec-source"` + `lookedFor` in `semantic.ts`,
+- [x] 2.2 "run `openlore generate`" → `reason: "no-spec-source"` + `lookedFor` in `semantic.ts`,
   `analysis.ts`, `spec-link-service.ts`. Tests: beside. Done when: no response there names `openlore generate`; each names the reason.
-- [ ] 2.3 `get_test_coverage` with no spec source: `coveragePercent: null` + reason + `note: "no spec source found (looked for: …)"`, never 0 (`coverage-analyzer.ts`,
+- [x] 2.3 `get_test_coverage` with no spec source: `coveragePercent: null` + reason + `note: "no spec source found (looked for: …)"`, never 0 (`coverage-analyzer.ts`,
   `types/test-generator.ts`, `tool-dispatch.ts`). Test: beside. Done when: no source → `null`; 0 of 4 covered → 0.
-- [ ] 2.4 CLI text: `src/cli/commands/drift.ts:680-683` (exit code stays 2), `src/api/drift.ts:76`,
+- [x] 2.4 CLI text: `src/cli/commands/drift.ts:680-683` (exit code stays 2), `src/api/drift.ts:76`,
   `doctor.ts:699-716, 1261` (text "Spec source", status `ok` when none), `analyze.ts`,
   `analysis-indexes.ts`. Tests: beside. Done when: `openlore drift` with no source exits 2 with "no
   spec source found; spec drift not assessed," and `doctor` shows no warning for it.
-- [ ] 2.5 Decision sync and handoff name the skip: `src/cli/commands/decisions.ts` ("no OpenSpec
+- [x] 2.5 Decision sync and handoff name the skip: `src/cli/commands/decisions.ts` ("no OpenSpec
   corpus; decision kept in `.openlore/decisions/`"), `mcp-handlers/decisions.ts` (`sync_decisions`
   returns `skipped` with the reason), `mcp-handlers/handoff.ts:87-111, 294-303`. Tests:
   `decisions-record.test.ts`, beside. Done when: each of the 3 names the skip and creates no folder.

@@ -230,10 +230,12 @@ describe('doctor command', () => {
       expect(artifactCheck).toBeDefined();
     });
 
-    it('should include an OpenSpec directory check', async () => {
+    it('reports the spec source, and none is ok (not a warning)', async () => {
       const checks = await runDoctorJson();
-      const openspecCheck = checks.find(c => c.name === 'OpenSpec directory');
-      expect(openspecCheck).toBeDefined();
+      const specCheck = checks.find(c => c.name === 'Spec source');
+      expect(specCheck).toBeDefined();
+      expect(specCheck!.status).toBe('ok');
+      expect(checks.find(c => c.name === 'OpenSpec directory')).toBeUndefined();
     });
 
     it('should include an LLM connection check', async () => {

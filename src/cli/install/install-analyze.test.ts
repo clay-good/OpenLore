@@ -128,7 +128,7 @@ describe('openlore install — auto index build', () => {
     expect(out).toContain('Analysis is up to date');
     // First run creates no spec folder (change: spec-framework-neutrality, task 1.1), so the
     // absence is stated as information, never as a warning.
-    expect(out).toContain('ℹ No OpenSpec specs directory — spec index skipped');
+    expect(out).toContain('ℹ Spec index skipped: no spec source found (looked for: openspec)');
     expect(out).not.toContain('⚠ Spec index skipped');
   }, 30_000);
 });

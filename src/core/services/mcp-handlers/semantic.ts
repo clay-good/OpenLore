@@ -4,6 +4,7 @@
  */
 
 import { join, relative } from 'node:path';
+import { NO_SPEC_SOURCE, SPEC_SOURCES_LOOKED_FOR, noSpecSourceText } from '../../spec-sources/state.js';
 import {
   INSERTION_SEMANTIC_WEIGHT,
   INSERTION_STRUCTURAL_WEIGHT,
@@ -828,7 +829,9 @@ export async function handleListSpecDomains(directory: string): Promise<unknown>
   if (!(await fileExists(specsDir))) {
     return {
       domains: [],
-      note: `No ${relativeSpecsDir}/ directory found. Run "openlore generate" first.`,
+      reason: NO_SPEC_SOURCE,
+      lookedFor: [...SPEC_SOURCES_LOOKED_FOR],
+      note: `${noSpecSourceText()}; no ${relativeSpecsDir}/ directory.`,
     };
   }
 
@@ -873,9 +876,13 @@ export async function handleSearchSpecs(
     // on a repository that has none: say what is actually missing.
     const listed = await handleListSpecDomains(directory) as { count?: number };
     if (!listed.count) {
+      // A state, not an error: an error makes the agent retry or stop (change:
+      // spec-framework-neutrality, design section 3).
       return {
-        error: 'No specs to search: this repository has no OpenSpec domain specs (openspec/specs/<domain>/spec.md).',
-        hint: 'Run "openlore generate" to author them (needs an LLM provider), then "openlore analyze" to index them. search_code searches the code itself.',
+        query, count: 0, results: [],
+        reason: NO_SPEC_SOURCE,
+        lookedFor: [...SPEC_SOURCES_LOOKED_FOR],
+        note: `${noSpecSourceText()}. search_code searches the code itself.`,
       };
     }
     return {

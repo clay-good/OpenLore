@@ -449,6 +449,8 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
   'cli/commands/test.ts': [
     'bar.padStart(6)',
     'drift',
+    // A fixed string built from the SPEC_SOURCES_LOOKED_FOR constants; no repository text.
+    'noSpecSourceText()',
     'pct.padEnd(8)',
     'report.coveragePercent',
     'report.discoveredScenarios',

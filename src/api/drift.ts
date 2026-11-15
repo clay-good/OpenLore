@@ -6,6 +6,7 @@
  */
 
 import { join, resolve } from 'node:path';
+import { noSpecSourceText } from '../core/spec-sources/state.js';
 import { DEFAULT_DRIFT_MAX_FILES, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_REPO_STRUCTURE } from '../constants.js';
 import { fileExists } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
@@ -73,7 +74,7 @@ async function drift(options: DriftApiOptions): Promise<DriftResult> {
   const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
   if (!(await fileExists(specsPath))) {
-    throw new Error('No specs found. Run openloreGenerate() first.');
+    throw new Error(`${noSpecSourceText()}; spec drift not assessed.`);
   }
 
   // Create LLM service if needed — support all four providers

@@ -7,6 +7,7 @@
  */
 
 import { resolveQualifiedSymbol } from './symbol-query.js';
+import { NO_SPEC_SOURCE, SPEC_SOURCES_LOOKED_FOR, noSpecSourceText } from '../../spec-sources/state.js';
 import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
@@ -410,7 +411,7 @@ export async function handleCheckSpecDrift(
   domains: string[] = [],
   failOn: 'error' | 'warning' | 'info' = 'warning',
   maxFiles = DEFAULT_DRIFT_MAX_FILES
-): Promise<DriftResult | { error: string }> {
+): Promise<DriftResult | { error: string; reason?: typeof NO_SPEC_SOURCE; lookedFor?: string[] }> {
   const absDir = await validateDirectory(directory);
 
   if (!Number.isSafeInteger(maxFiles) || maxFiles < 1) {
@@ -432,7 +433,7 @@ export async function handleCheckSpecDrift(
   try {
     await stat(specsPath);
   } catch {
-    return { error: 'No specs found. Run "openlore generate" first.' };
+    return { error: `${noSpecSourceText()}; spec drift is not assessed.`, reason: NO_SPEC_SOURCE, lookedFor: [...SPEC_SOURCES_LOOKED_FOR] };
   }
 
   const startTime = Date.now();
@@ -1300,7 +1301,7 @@ export async function handleGenerateTests(args: {
   });
 
   if (scenarios.length === 0) {
-    return { files: [], message: 'No scenarios found. Run "openlore generate" first.' };
+    return { files: [], message: 'No scenarios found in the spec corpus.' };
   }
 
   // Resolve framework
