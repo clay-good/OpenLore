@@ -25,10 +25,10 @@
 
 ## Build next
 
-**[`hook-reliability`](openspec/changes/hook-reliability)**, one PR per task group. The plugin
-([PR #727](https://github.com/clay-good/OpenLore/pull/727), merged) puts the hooks in front of every
-Claude Code user, so the hooks must never slow or break a session. Group 1 (measure) is done; the
-measured table is in its `design.md` section 2.
+**[`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence)**,
+one PR per task group. `hook-reliability` shipped (PRs #733 and #736–#744, archived as
+`openspec/changes/archive/2026-11-15-hook-reliability`), so the hooks are safe to carry more
+evidence.
 
 ## P0: 3.6.0 follow-ups (small fixes, any time)
 
@@ -50,7 +50,7 @@ measured table is in its `design.md` section 2.
 | # | Change | Why it helps the agent | Needs |
 |---|--------|------------------------|-------|
 | 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) ([PR #727](https://github.com/clay-good/OpenLore/pull/727), merged; dogfooding, the 3.7.0 pin, and the directory submission remain) | Hooks and tools arrive with one install and stay current | — |
-| 2 | [`hook-reliability`](openspec/changes/hook-reliability) | Hooks never slow or break a session, each finding is said once, and index progress goes to the status line, not the agent | — |
+| 2 | `hook-reliability` (shipped; [archived](openspec/changes/archive/2026-11-15-hook-reliability)) | Hooks never slow or break a session, each finding is said once, and index progress goes to the status line, not the agent | — |
 | 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) | `verify_change` joins the default set; one small plugin set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
 | 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) | OpenSpec, Spec Kit and BMAD are detected; none is required; "no specs" is an honest state, never a zero | can start any time |
 | 5 | [`curate-product-surface`](openspec/changes/curate-product-surface) | Fewer, current skills and docs, so nothing stale misleads the agent | 1, 3 |
