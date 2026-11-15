@@ -38,7 +38,7 @@ edit-time hooks, guarded to OpenLore projects (#762).
 
 | Fix | Where | Source |
 |-----|-------|--------|
-| Two tool input schemas have properties without descriptions; 15 descriptions exceed 800 characters | `explain_retrieval_miss`, `declare_footprint` in `src/cli/commands/mcp.ts` | `mcp-quality` spec |
+| 15 tool descriptions exceed 800 characters (token cost, not accuracy) | `analyze_error_propagation`, `find_clones`, `briefing_since`, … in `src/cli/commands/mcp.ts` | `mcp-quality` spec |
 
 ## P1: the agent-evidence direction (in this order)
 

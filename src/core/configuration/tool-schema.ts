@@ -1,6 +1,6 @@
 /** Shared agent-facing wire shape. The workflow still validates all untrusted input. */
-const decision = { type: 'string', enum: ['include', 'exclude'] };
-const patterns = { type: 'array', maxItems: 100, items: { type: 'string' } };
+const decision = (lane: string) => ({ type: 'string', enum: ['include', 'exclude'], description: `${lane} lane.` });
+const patterns = (what: string) => ({ type: 'array', maxItems: 100, items: { type: 'string' }, description: `Globs ${what}.` });
 export const configurationCandidateSchema = {
   type: 'object',
   additionalProperties: false,
@@ -16,7 +16,7 @@ export const configurationCandidateSchema = {
         type: 'object',
         additionalProperties: false,
         properties: {
-          id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,80}$' },
+          id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,80}$', description: 'Stable rule id.' },
           pattern: {
             type: 'string',
             description: 'Repository-relative gitignore pattern, e.g. build-cache/.',
@@ -25,19 +25,21 @@ export const configurationCandidateSchema = {
             type: 'object',
             additionalProperties: false,
             minProperties: 1,
-            properties: { index: decision, watch: decision, embed: decision },
+            description: 'Last matching rule wins per lane.',
+            properties: { index: decision('Index'), watch: decision('Live-watch'), embed: decision('Embedding (subset of index)') },
           },
-          reason: { type: 'string' },
-          evidenceRefs: { type: 'array', maxItems: 16, items: { type: 'string' } },
+          reason: { type: 'string', description: 'Why; shown to the reviewer.' },
+          evidenceRefs: { type: 'array', maxItems: 16, items: { type: 'string' }, description: 'Supporting evidence ids from inspect.' },
         },
         required: ['id', 'pattern', 'lanes', 'reason'],
       },
     },
-    reviewMode: { type: 'string', enum: ['manual', 'notify'] },
+    reviewMode: { type: 'string', enum: ['manual', 'notify'], description: 'manual (default), or notify: idle review offers (needs host opt-in).' },
     analysis: {
       type: 'object',
       additionalProperties: false,
-      properties: { includePatterns: patterns, excludePatterns: patterns },
+      description: 'Omit to keep the existing patterns.',
+      properties: { includePatterns: patterns('to analyze'), excludePatterns: patterns('to skip') },
     },
   },
   required: ['rules'],

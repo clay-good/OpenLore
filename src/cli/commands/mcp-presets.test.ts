@@ -698,7 +698,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // change: add-change-provenance-certificate).
     // Detailed configuration candidate schema adds 1,436 B after the live usability trial;
     // measured 111,518 B. The default surface does not include this opt-in tool.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(112_000);
+    // A description on each of the 47 inputs that had none (mcp-quality Complete Input
+    // Schemas): 112,000 → 115,500 B (measured 114,718 B). The wording was kept short first.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(115_500);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
