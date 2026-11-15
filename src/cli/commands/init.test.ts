@@ -129,10 +129,10 @@ describe('init command', () => {
       expect(configManager.writeOpenLoreConfig).toHaveBeenCalled();
     });
 
-    it('should create openspec structure when directory does not exist', async () => {
+    it('creates no spec folder when none exists (generate creates what it writes)', async () => {
       const configManager = await import('../../core/services/config-manager.js');
       await initCommand.parseAsync([], { from: 'user' });
-      expect(configManager.createOpenSpecStructure).toHaveBeenCalled();
+      expect(configManager.createOpenSpecStructure).not.toHaveBeenCalled();
     });
 
     it('should not create openspec structure when directory already exists', async () => {
@@ -256,7 +256,6 @@ describe('init command', () => {
         expect(gitignoreManager.ensureGitignored).toHaveBeenCalledWith(
           expect.any(String),
           '.openlore/',
-          expect.any(String)
         );
       } finally {
         Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });

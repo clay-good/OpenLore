@@ -126,15 +126,7 @@ export async function buildIndex(
   try {
     const { openloreInit } = await import('../../api/init.js');
     // Silent + idempotent: creates config if absent, no-ops (created:false) if present.
-    let freshSpecDirectory = false;
-    await openloreInit({
-      rootPath: cwd,
-      onProgress: event => {
-        if (event.step === 'Creating openspec directory' && event.status === 'complete') {
-          freshSpecDirectory = true;
-        }
-      },
-    });
+    await openloreInit({ rootPath: cwd });
 
     // Anything that writes into the analyzed corpus (the decisions guidance in CLAUDE.md and
     // AGENTS.md) must land BEFORE analyze fingerprints it, or the index is stale on arrival.
@@ -165,7 +157,6 @@ export async function buildIndex(
     analyzeCommand.setOptionValue('force', false);
     analyzeCommand.setOptionValue('reanalyze', opts.repair === true);
     const analyzeArgs = opts.repair ? ['--reanalyze', '--embedded'] : ['--embedded'];
-    if (freshSpecDirectory) analyzeArgs.push('--fresh-spec-directory');
     // `process.exitCode` BEFORE the call, so a value analyze set is distinguishable from one that
     // was already there (a warning from an earlier step).
     const exitCodeBefore = process.exitCode;

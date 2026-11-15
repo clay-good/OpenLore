@@ -21,7 +21,6 @@ import {
   readOpenSpecConfig,
   openspecDirExists,
   openspecConfigExists,
-  createOpenSpecStructure,
   detectExistingSpecDir,
 } from '../../core/services/config-manager.js';
 import {
@@ -182,11 +181,8 @@ After initialization, run 'openlore analyze' to scan your codebase.
     await writeOpenLoreConfig(rootPath, config);
     logger.success(`Created ${OPENLORE_CONFIG_REL_PATH}`);
 
-    // Step 4: Create OpenSpec structure if needed
-    if (!existingOpenspecDir) {
-      await createOpenSpecStructure(openspecPath);
-      logger.success(`Created ${openspecRelPath}/ directory structure`);
-    }
+    // No spec folder is created here: OpenLore works without one, and `openlore generate` creates
+    // what it writes (change: spec-framework-neutrality, task 1.1).
 
     // Step 5: Update .gitignore
     logger.blank();
@@ -212,7 +208,7 @@ After initialization, run 'openlore analyze' to scan your codebase.
       }
 
       if (shouldAdd) {
-        const result = await ensureGitignored(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
+        const result = await ensureGitignored(rootPath, `${OPENLORE_DIR}/`);
         logger.success(
           result === 'created'
             ? `Created .gitignore with ${OPENLORE_DIR}/`

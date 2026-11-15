@@ -114,6 +114,16 @@ MCP clients send every tool's JSON Schema on every request, so tools the agent n
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
 
+#### The `plugin` preset
+
+`openlore mcp --preset plugin` serves the evidence set the Claude Code plugin needs (eleven in all):
+`orient`, `search_code`, `get_subgraph`, `analyze_impact`, `suggest_insertion_points`,
+`get_function_skeleton`, `find_path`, `recall`, `verify_claim`, `blast_radius` and
+`verify_change`. It leaves out spec generation (`prepare_spec_generation`, `prepare_spec_repair`)
+and three orientation views (`trace_execution_path`, `get_landmarks`, `get_map`). `verify_change`
+is not in `substrate` yet: it joins the default only after a benchmark-protocol run. Every tool
+keeps its name and stays available through another preset, `--preset full`, and Pi.
+
 #### Measured standing context cost
 
 OpenLore measures the exact live `tools/list` result that each preset places in context before the
@@ -134,6 +144,7 @@ live registry.
 | `federation` | 10 | 3,912 | 4,100 |
 | `coordination` | 8 | 3,562 | 3,720 |
 | `substrate` | 15 | 5,248 | 5,500 |
+| `plugin` | 11 | 4,225 | 4,520 |
 | `full` | 84 | 27,880 | 28,400 |
 <!-- standing-context-cost:end -->
 

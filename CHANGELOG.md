@@ -37,6 +37,15 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Changed
 
+- **First run creates no spec folder.** `openlore init` and `openlore install` no longer create an
+  empty `openspec/`; OpenLore works without one, and `openlore generate` creates the folders it
+  writes. An existing `openspec/` is left untouched. The `.gitignore` entry is now exactly
+  `.openlore/` (no comment, no blank line), and it is not written when git already ignores
+  `.openlore/` another way. `openlore change-status` reports `validates: not assessed (…)` and
+  `"assessed": false` when the `openspec` CLI is missing or not executable, instead of a failure;
+  such a change is never an archivable candidate.
+
+
 - **Corpus-integrity findings no longer block a commit by default.** `corpus-reference-unresolved`,
   `corpus-reference-ambiguous`, `corpus-self-reference`, `corpus-duplicate-identifier`,
   `corpus-edge-unsupported`, `corpus-target-type-mismatch` and `corpus-supersession-cycle` now
