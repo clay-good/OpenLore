@@ -7,6 +7,15 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **The before-stop receipt carries three certificates.** When the session diff touches a
+  `.ts/.tsx/.js/.jsx/.py` file, the receipt names each exported symbol the change breaks and the
+  files that use it (`certify_public_surface`). When it touches an OpenAPI, protobuf or GraphQL file,
+  it names each breaking or dangerous contract change and its in-repo call sites
+  (`certify_service_contract`). When `impactCertificate.surfaces` is declared, it names each path
+  the change newly opens into a surface (`change_impact_certificate`, never persisted). Each runs
+  beside `verify_change` with its own 10 s limit and at most 3 lines, says nothing when it fails or
+  runs out of time, and is not repeated when `verify_change` already names the same symbol.
+
 - **OpenLore is a Claude Code plugin.** `claude plugin marketplace add clay-good/OpenLore`, then
   `claude plugin install openlore@openlore`, wires the MCP server (the default `substrate` tools) and
   the session-start, prompt, after-edit, and before-stop hooks, with no global npm install and no
