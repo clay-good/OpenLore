@@ -6,7 +6,7 @@
  * 1 MB. Local only: nothing here is sent anywhere. Recording never throws and never changes what a
  * hook prints.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
@@ -42,9 +42,22 @@ export async function recordHookRun(root: string, run: Omit<HookRun, 't'> & { t?
     const path = hookRunsPath(root);
     mkdirSync(join(root, OPENLORE_DIR, 'session-ledger'), { recursive: true });
     const line = JSON.stringify({ t: run.t ?? new Date().toISOString(), moment: run.moment, ms: Math.round(run.ms), outcome: run.outcome, shown: run.shown });
-    appendFileSync(path, `${line}\n`);
-    if (statSync(path).size > MAX_BYTES) {
-      const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean);
+    // One descriptor for the append, the size, and the read: no check-then-use on the path.
+    const fd = openSync(path, 'a+');
+    let text: string | undefined;
+    try {
+      writeSync(fd, `${line}\n`);
+      const size = fstatSync(fd).size;
+      if (size > MAX_BYTES) {
+        const buf = Buffer.alloc(size);
+        readSync(fd, buf, 0, size, 0);
+        text = buf.toString('utf8');
+      }
+    } finally {
+      closeSync(fd);
+    }
+    if (text !== undefined) {
+      const lines = text.split('\n').filter(Boolean);
       await atomicWriteFile(path, `${lines.slice(Math.floor(lines.length / 2)).join('\n')}\n`);
     }
   } catch { /* health is best-effort */ }
