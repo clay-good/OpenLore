@@ -328,7 +328,13 @@ function capPaths(f: { staged: string[]; unstaged: string[]; untracked: string[]
 }
 
 /** A plain-text rendering for a hook or a terminal. */
-export function renderHandoff(b: Record<string, unknown>): string {
+/**
+ * Render the briefing as text. `boundaries: 'summary'` (the after-compact hook) replaces the
+ * boundary notes with one line: they carry raw causes (an error text, a temporary path) that are
+ * for `openlore handoff`, not for a hook's model context, which must say nothing about a broken
+ * store (change: hook-reliability).
+ */
+export function renderHandoff(b: Record<string, unknown>, opts: { boundaries?: 'full' | 'summary' } = {}): string {
   if (b.inFlight !== true) return `[openlore handoff] ${String(b.message ?? 'Nothing is in flight.')}`;
   // (inFlight 'unknown' is stated the same way: its message says why.)
   const lines: string[] = ['[openlore handoff] In-flight work in this repository:'];
@@ -349,7 +355,12 @@ export function renderHandoff(b: Record<string, unknown>): string {
     const n = (k: string) => (Array.isArray(u.uncommitted![k]) ? (u.uncommitted![k] as unknown[]).length : 0) + Number(u.uncommitted![`${k}Omitted`] ?? 0);
     lines.push(`Uncommitted: ${n('staged')} staged, ${n('unstaged')} unstaged, ${n('untracked')} untracked.`);
   }
-  for (const note of Array.isArray(b.boundaries) ? b.boundaries as string[] : []) lines.push(`Note: ${note}`);
+  const notes = Array.isArray(b.boundaries) ? b.boundaries as string[] : [];
+  if (opts.boundaries === 'summary') {
+    if (notes.length) lines.push(`Note: ${notes.length} part(s) of this briefing could not be computed; \`openlore handoff\` names them.`);
+  } else {
+    for (const note of notes) lines.push(`Note: ${note}`);
+  }
   if (b.truncated) lines.push('Some lists were cut to the budget; `openlore handoff --json` names the call that returns each.');
   return lines.join('\n');
 }

@@ -28,6 +28,13 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **Agent-loop hooks stay silent when something breaks.** A check that failed to load on the
+  shell-command or sub-agent path threw out of the hook instead of ending in silence; it now ends
+  in silence, like every other failure. After a compaction, the handoff no longer pastes raw error text or temporary
+  paths into the agent's context (one summary line names `openlore handoff` instead). A sub-agent
+  briefing no longer tells the sub-agent to run `openlore analyze` when the index is missing. A new
+  test runs every moment against throwing checks, a time limit, and a missing, corrupt, or
+  read-only `.openlore/`, and CI now runs the built CLI's hooks on a corrupt store.
 - **`orient` and `search_code` stop claiming coverage over content they could not read.** With
   unparseable files, an oversized contract schema, or an unreadable parse-health record in the
   repository, both answered `covered` (or a confident empty `uncovered`). The verdict is now
