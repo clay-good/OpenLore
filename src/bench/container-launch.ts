@@ -67,6 +67,9 @@ export function launchBenchmarkContainer(
   for (const name of [
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_AUTH_TOKEN',
+    // A Claude subscription, as made by `claude setup-token`: the keychain login of the host
+    // never reaches a container.
+    'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
     'CLAUDE_CODE_USE_BEDROCK',
     'CLAUDE_CODE_USE_VERTEX',

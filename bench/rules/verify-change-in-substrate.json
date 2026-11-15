@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "verify-change-in-substrate-v1",
+  "sharedSelectionRegressionMax": 0,
+  "tierCorrectnessRegressionMax": 0.05,
+  "medianCostIncreaseMax": 0.2,
+  "requiredCandidateFamilies": [
+    "navigate",
+    "change",
+    "remember",
+    "verify"
+  ]
+}

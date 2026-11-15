@@ -2697,6 +2697,15 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // `substrate` too; verify_change joins `substrate` only after a benchmark-protocol run
   // (DefaultSurfaceDecisionsRideTheBenchmarkProtocol). Every tool left out stays available under
   // its own name through another preset, `--preset full`, and Pi.
+  // Benchmark candidate only (reframe-governance-as-agent-evidence task 2.1): `substrate` plus
+  // verify_change, compared with `substrate` under bench/rules/verify-change-in-substrate.json.
+  'substrate-verify': new Set([
+    'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
+    'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
+    'get_landmarks', 'get_map', 'find_path',
+    'recall', 'verify_claim', 'blast_radius',
+    'prepare_spec_generation', 'prepare_spec_repair', 'verify_change',
+  ]),
   plugin: new Set([
     'orient', 'search_code', 'get_subgraph', 'analyze_impact', 'suggest_insertion_points',
     'get_function_skeleton', 'find_path', 'recall', 'verify_claim', 'blast_radius', 'verify_change',
@@ -2725,6 +2734,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   verify: { baselineTokens: 2_075, maxTokens: 2_220, rationale: 'Grew with verify_change then certify_provenance (add-verification-feedback-loop, add-change-provenance-certificate); exact measured baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
   coordination: { baselineTokens: 3_476, maxTokens: 3_720, rationale: 'Grew with certify_merge, fleet_status, then declare_footprint (add-merge-semantic-certificate, add-fleet-coordination-arc, add-peer-footprint-board); exact measured baseline plus 7.0% headroom.' },
+  'substrate-verify': { baselineTokens: 5565, maxTokens: 5954, rationale: 'Benchmark candidate (substrate + verify_change); exact measured baseline plus 7.0% headroom.' },
   plugin: { baselineTokens: 4_225, maxTokens: 4_520, rationale: 'The Claude Code plugin set (change: reframe-governance-as-agent-evidence); exact measured baseline plus 7.0% headroom.' },
   substrate: { baselineTokens: 5_131, maxTokens: 5_500, rationale: 'Exact v1 wire baseline plus 7.2% headroom.' },
   full: { baselineTokens: 27_125, maxTokens: 28_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, get_handoff_briefing, certify_service_contract, and declare_footprint; re-baselined at 27,125 measured (add-peer-footprint-board) plus 4.7% headroom.' },
