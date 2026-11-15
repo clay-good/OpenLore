@@ -27,7 +27,7 @@ export function dynamicImportNames(content: string): Array<{ name: string; speci
   }
   for (const m of content.matchAll(MEMBER)) out.push({ name: m[2], specifier: m[1] });
   for (const m of content.matchAll(NAMESPACE)) {
-    const ns = m[1].replace(/\$/g, '\\$');
+    const ns = m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     for (const use of content.matchAll(new RegExp(String.raw`(?<![\w$.])${ns}\s*\.\s*([A-Za-z_$][\w$]*)`, 'g'))) {
       out.push({ name: use[1], specifier: m[2] });
     }
