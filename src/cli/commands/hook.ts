@@ -494,16 +494,112 @@ async function testRunItem(root: string, sessionId: string | undefined): Promise
   };
 }
 
+/** Each certificate's own limit inside before-stop, and its item cap (change:
+ *  reframe-governance-as-agent-evidence, design section 3). */
+export const CERTIFICATE_MS = 10_000;
+const CERTIFICATE_ITEMS = 3;
+
+/**
+ * Run one certificate source. Its items (at most {@link CERTIFICATE_ITEMS}), or none when it throws,
+ * rejects, or passes its limit: a certificate that did not finish says nothing, never "passed".
+ */
+export async function certificateSlice(run: () => Promise<HookItem[]>, ms = CERTIFICATE_MS): Promise<HookItem[]> {
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<HookItem[]>(r => { timer = setTimeout(() => r([]), ms); timer.unref?.(); });
+  try {
+    const work = Promise.resolve().then(run).catch(() => [] as HookItem[]);
+    return (await Promise.race([work, limit])).slice(0, CERTIFICATE_ITEMS);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** The files whose exports the public-surface certificate classifies. */
+export const PUBLIC_SURFACE_FILE = /\.(?:tsx?|jsx?|py)$/i;
+/** The files the service-contract reader may accept (OpenAPI, protobuf, GraphQL). */
+export const CONTRACT_FILE = /(?:\.(?:ya?ml|json|proto|graphqls?|gql)|(?:^|\/)\.graphqlconfig)$/i;
+
+function consumersText(consumers: Array<{ file: string }> | undefined): string {
+  const files = [...new Set((consumers ?? []).map(c => c.file))];
+  if (!files.length) return 'no consumer in this repository; consumers outside it are not assessed';
+  return `used by ${files.slice(0, 3).join(', ')}${files.length > 3 ? ` and ${files.length - 3} more file(s)` : ''}`;
+}
+
+/**
+ * The before-stop certificates (design section 3): the public-surface, service-contract and
+ * change-impact certificates, each started only when the session diff can give it something to
+ * find, each limited by {@link certificateSlice}. Base ref = the session baseline.
+ */
+async function certificateItems(root: string, baseRef: string): Promise<HookItem[][]> {
+  const { getChangedFiles } = await import('../../core/drift/git-diff.js');
+  const changed = (await getChangedFiles({ rootPath: root, baseRef, includeUnstaged: true })).files.map(f => f.path);
+  const slices: Array<Promise<HookItem[]>> = [];
+  if (changed.some(f => PUBLIC_SURFACE_FILE.test(f))) {
+    slices.push(certificateSlice(async () => {
+      const { handleCertifyPublicSurface } = await import('../../core/services/mcp-handlers/public-surface.js');
+      const r = await handleCertifyPublicSurface({ directory: root, baseRef }) as {
+        breaking?: Array<{ class: string; name: string; file: string; changeKind: string; ruleCodes: string[]; consumers?: Array<{ file: string }> }>;
+      };
+      return (r.breaking ?? []).filter(b => b.class === 'breaking').map(b => ({
+        key: `public-surface:${b.file}::${b.name}`, code: b.ruleCodes[0] ?? 'export-removed', subject: `${b.file}::${b.name}`,
+        check: 'public_surface', file: b.file, severity: 'error',
+        proof: { path: b.file, discriminator: `${b.changeKind}:${b.ruleCodes.join(',')}` },
+        text: sanitizeForTerminal(`exported ${b.name} (${b.file}) ${b.changeKind.replace(/-/g, ' ')}: breaks ${b.ruleCodes.join(', ')}; ${consumersText(b.consumers)}`),
+        next: 'update the consumers or keep the export compatible',
+      }));
+    }));
+  }
+  if (changed.some(f => CONTRACT_FILE.test(f))) {
+    slices.push(certificateSlice(async () => {
+      const { handleCertifyServiceContract } = await import('../../core/services/mcp-handlers/service-contract.js');
+      const r = await handleCertifyServiceContract({ directory: root, baseRef }) as {
+        findings?: Array<{ code: string; severity: string; subject: string; discriminator?: string; message: string; location?: { path: string } }>;
+      };
+      return (r.findings ?? []).filter(f => f.code === 'contract-breaking').map(f => ({
+        key: `service-contract:${f.subject}:${f.discriminator ?? ''}`, code: f.code, subject: f.subject,
+        check: 'service_contract', file: f.location?.path, severity: f.severity === 'error' ? 'error' : 'warning',
+        proof: { path: f.location?.path, discriminator: f.discriminator },
+        text: sanitizeForTerminal(`${f.subject}: ${f.message}`),
+        next: 'update the callers or keep the contract compatible',
+      }));
+    }));
+  }
+  const { readOpenLoreConfig } = await import('../../core/services/config-manager.js');
+  const config = await readOpenLoreConfig(root).catch(() => null);
+  if (config?.impactCertificate?.surfaces?.length) {
+    slices.push(certificateSlice(async () => {
+      const { handleChangeImpactCertificate } = await import('../../core/services/mcp-handlers/impact-certificate.js');
+      const r = await handleChangeImpactCertificate({ directory: root, baseRef, persist: false }) as {
+        findings?: Array<{ code: string; severity: string; subject: string; message: string; remediation: string }>;
+        newlyOpenedPaths?: Array<{ surface: string; openingEdge: { from: string; to: string } }>;
+      };
+      return (r.findings ?? []).filter(f => f.code === 'surface-critical' || f.code === 'surface-newly-reached').map(f => {
+        const edge = r.newlyOpenedPaths?.find(p => p.surface === f.subject)?.openingEdge;
+        return {
+          key: `impact:${f.subject}`, code: f.code, subject: f.subject, check: 'impact_certificate',
+          severity: f.severity === 'error' ? 'error' : 'warning',
+          proof: { discriminator: edge ? `${edge.from}->${edge.to}` : f.message },
+          text: sanitizeForTerminal(f.message), next: f.remediation,
+        };
+      });
+    }));
+  }
+  return Promise.all(slices);
+}
+
 async function beforeStop(root: string, baseline: string | undefined, sessionId?: string): Promise<{ items: HookItem[]; block?: string }> {
   const runItem = await testRunItem(root, sessionId).catch(() => undefined);
   const { handleVerifyChange } = await import('../../core/services/mcp-handlers/verify-change.js');
+  // The certificates start with verify_change and run beside it; a failure there costs only them.
+  const certificates = certificateItems(root, baseline ?? 'HEAD').catch(() => [] as HookItem[][]);
   const r = await handleVerifyChange({ directory: root, ...(baseline ? { baseRef: baseline } : {}) }) as {
     error?: string;
     items?: Array<{ subject: string; check: string; severity: string; nextAction: string }>;
     findings?: Array<{ code: string; subject: string; message: string; enforcementClass?: string; remediation?: string; discriminator?: string; location?: { path: string; line?: number } }>;
     gated?: boolean;
   };
-  if (r.error) return { items: runItem ? [runItem] : [] };
+  const certified = (await certificates).flat();
+  if (r.error) return { items: [...certified, ...(runItem ? [runItem] : [])] };
   // A receipt item built from a phantom-reference or check-weakening finding gets that finding's
   // identity, the same one the after-edit hook gave it: one problem is one finding, so its outcome
   // (fixed, decided, open) is counted once (change: hook-reliability, task 7.2).
@@ -523,6 +619,14 @@ async function beforeStop(root: string, baseline: string | undefined, sessionId?
       });
     }
     items.push(item);
+  }
+  // One problem is one line: a certificate item verify_change already names (the same removed or
+  // re-signed symbol in the same file) is dropped.
+  const named = new Set(items.map(i => i.text));
+  for (const c of certified) {
+    const [file, name] = c.check === 'public_surface' && c.subject ? [c.subject.slice(0, c.subject.lastIndexOf('::')), c.subject.slice(c.subject.lastIndexOf('::') + 2)] : [];
+    if (name && [`removed ${name} (${file}) [structural_diff]`, `signature changed: ${name} (${file}) [structural_diff]`].some(t => named.has(t))) continue;
+    items.push(c);
   }
   if (runItem) items.push(runItem);
   const blocking = (r.findings ?? []).filter(f => f.enforcementClass === 'blocking');
