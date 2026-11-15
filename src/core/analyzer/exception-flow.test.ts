@@ -13,6 +13,7 @@ import {
   resolveCurrentFunctionSpan,
   type TryGuard,
 } from './exception-flow.js';
+import { freshOnEveryRead } from './fixtures/fresh-node-reads.js';
 
 describe('extractExceptionFacts — TypeScript', () => {
   it('parses TSX without regressing TypeScript angle-bracket assertions', async () => {
@@ -589,25 +590,6 @@ describe('guard helpers', () => {
     expect(guardsCatch(enclosingGuards([inner], 60), 'ValueError')).toBe(false);
   });
 });
-
-// The native binding caches node objects WEAKLY (tree-sitter `src/tree.cc`, `CacheNodeForTree`): after
-// a garbage collection, or while a dead entry waits for its finalizer, reading the same node again
-// returns a NEW object. Identity (`===`, `includes`) between two reads is therefore decided by GC
-// timing, which made these Go facts differ only under full-suite load. This wrapper makes every read
-// return a fresh object, so the facts must not depend on node identity.
-function freshOnEveryRead<T extends object>(node: T): T {
-  const wrap = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(wrap);
-    return v && typeof v === 'object' && 'startIndex' in v && 'type' in v ? freshOnEveryRead(v as object) : v;
-  };
-  return new Proxy(node, {
-    get(target, prop) {
-      const v = Reflect.get(target, prop, target);
-      if (typeof v === 'function') return (...args: unknown[]) => wrap((v as (...a: unknown[]) => unknown).apply(target, args));
-      return wrap(v);
-    },
-  });
-}
 
 describe('extractGoErrorFacts — independent of node object identity', () => {
   it('gives the same facts when every read of a node returns a new object', async () => {

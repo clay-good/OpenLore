@@ -38,6 +38,7 @@ import { scanJavaMethodDeclarations } from './java-method-scanner.js';
 import { lineFromIndex } from './line-index.js';
 import { readNamedChildren } from './ast-children.js';
 import { getExceptionParser } from './exception-flow.js';
+import { sameNode } from './same-node.js';
 import type Parser from 'tree-sitter';
 import { extractionBudgetOverrunMs, parseWithBudget, type BudgetableParser } from './extraction-budget.js';
 
@@ -449,7 +450,7 @@ export function extractPythonHttpCallsFromRoot(filePath: string, root: SyntaxNod
     if (node.type === 'import_statement') {
       const conditional = (() => {
         let parent = node.parent;
-        while (parent && parent !== active.node) {
+        while (parent && !sameNode(parent, active.node)) {
           if (['if_statement', 'for_statement', 'while_statement', 'try_statement', 'match_statement'].includes(parent.type)) return true;
           parent = parent.parent;
         }
@@ -639,7 +640,7 @@ export function extractGoHttpCallsFromRoot(filePath: string, root: SyntaxNode, o
     const httpClients = new Map<string, number>();
     const lexicalBlock = (node: SyntaxNode): number | undefined => {
       let current: SyntaxNode | null = node;
-      while (current && current !== fn) {
+      while (current && !sameNode(current, fn)) {
         if (current.type === 'block') return current.startIndex;
         current = current.parent;
       }
