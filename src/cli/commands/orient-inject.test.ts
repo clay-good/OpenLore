@@ -473,8 +473,8 @@ describe('buildInjection (fail-open integration)', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('emits the empty-prompt pointer line for an empty prompt', async () => {
-    expect(await buildInjection(dir, '')).toBe(pointerLineFor('empty-prompt'));
+  it('says nothing for an empty prompt (the silence contract is stated once by the caller)', async () => {
+    expect(await buildInjection(dir, '')).toBe('');
   });
 
   it('emits the no-graph pointer line when there is no analysis graph (never throws)', async () => {
@@ -624,11 +624,12 @@ describe('buildInjection intent gate', () => {
     );
   };
 
-  it('withholds on a management turn, before any structural lookup', async () => {
-    // No analysis exists here, so an ungated turn would report `no-graph`.
-    // Getting `management-intent` proves the gate ran ahead of the lookup.
-    expect(await buildInjection(dir, 'push and open the PR'))
-      .toBe(pointerLineFor('management-intent'));
+  it('withholds on a management turn, before any structural lookup, and says nothing', async () => {
+    // No analysis exists here, so an ungated turn would report `no-graph`. Silence (not the
+    // no-graph line) proves the gate ran ahead of the lookup.
+    const seen: Array<string | undefined> = [];
+    expect(await buildInjection(dir, 'push and open the PR', e => seen.push(e.reason))).toBe('');
+    expect(seen).toEqual(['management-intent']);
   });
 
   it('reports the withhold reason to the gate-evaluation callback', async () => {
@@ -648,15 +649,11 @@ describe('buildInjection intent gate', () => {
       .toBe(pointerLineFor('no-graph'));
   });
 
-  it('is never silent while injection is enabled — only mode "off" emits nothing', async () => {
-    const prompts = ['', 'push and open the PR', 'fix the failing test in src/auth.ts'];
-    for (const prompt of prompts) {
-      expect((await buildInjection(dir, prompt)).length).toBeGreaterThan(0);
-    }
+  it('speaks per turn only about a missing index; mode "off" silences that too', async () => {
+    expect(await buildInjection(dir, 'fix the failing test in src/auth.ts')).toBe(pointerLineFor('no-graph'));
+    expect(await buildInjection(dir, '')).toBe('');
     await writeConfig({ mode: 'off' });
-    for (const prompt of prompts) {
-      expect(await buildInjection(dir, prompt)).toBe('');
-    }
+    expect(await buildInjection(dir, 'fix the failing test in src/auth.ts')).toBe('');
   });
 });
 

@@ -380,10 +380,7 @@ An optional `contextInjection` block controls the per-task orientation that `ope
 {
   "contextInjection": {
     "mode": "task-scoped",
-    "tokenBudget": 600,
-    "relevanceMinMatches": 2,
-    "relevanceMinFanIn": 2,
-    "relevanceMinScore": 0.3
+    "tokenBudget": 600
   }
 }
 ```
@@ -392,10 +389,10 @@ An optional `contextInjection` block controls the per-task orientation that `ope
 |-------|:---:|---------|
 | `mode` | `task-scoped` | `task-scoped` enables injection; `off` makes `orient --inject` a no-op (exit 0). Disabling does **not** affect the MCP server or the `SessionStart` primer. |
 | `tokenBudget` | `600` | Hard cap on the injected block, in estimated tokens, with a 68-token minimum for the mandatory framed task and stale-index disclosure. Lower positive values are clamped to `68`; lower-priority detail (functions → files → call neighbours → specs → tools) is dropped to stay within budget. |
-| `relevanceMinMatches` | `2` | Relevance gate: minimum matched-function count unless the prompt names a matched identifier exactly (below it → a one-line pointer). |
-| `relevanceMinFanIn` | `2` | Relevance gate: a match with at least this fan-in (or a hub) clears the gate structurally. Exact identifier mentions and scale-free top-match identifier overlap can also clear the gate. |
-| `relevanceMinScore` | `0.3` | Relevance gate: minimum top match score — used **only** on the bounded semantic/hybrid score scale (BM25-fallback scores are corpus-relative and the score path is disabled there). |
+| `relevanceMinMatches`, `relevanceMinFanIn`, `relevanceMinScore` | — | Accepted for compatibility; no longer used. The prompt hook briefs only code the prompt names exactly (see [install](install.md#task-scoped-context-injection)). |
 
-The relevance gate is deterministic and never learned: when a task's graph match is weak (the small/familiar/shallow case), injection degrades to a single pointer line rather than taxing a task that needs no orientation. Injection is fail-open — any failure (no graph, parse error, empty/weak match) emits the pointer line and exits 0, so the hook can never break the agent's turn. Set `OPENLORE_INJECT_DEBUG=1` to write the gate verdict and applicable failed criteria to stderr; stdout remains injection-only.
-
-> **Without embeddings** (the default keyword/BM25 index) the gate never compares the unbounded, corpus-relative BM25 score to a fixed threshold. It uses matched-function count plus scale-free evidence: an exact identifier mention, top-match identifier-token overlap, or fan-in/hub centrality. Running `openlore embed --local` (one command, on-device, no API key) — or configuring a remote `EMBED_*` endpoint — additionally enables the bounded semantic-score path (`relevanceMinScore`). The injected block is always explicitly ignorable, so a false positive costs only a few tokens.
+The gate is deterministic and never learned: a prompt is briefed only when it names code that
+resolves exactly in the index, and the block shows only that code. Every other prompt is silent;
+the first silent prompt of a session gets one line explaining this. Injection is fail-open: a
+failure prints nothing and exits 0. Set `OPENLORE_INJECT_DEBUG=1` to write the verdict and the
+withhold reason to stderr; stdout remains injection-only.

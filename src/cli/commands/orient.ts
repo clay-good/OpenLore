@@ -26,6 +26,7 @@ import { estimateTokens } from '../../core/services/llm-service.js';
 import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_DIR } from '../../constants.js';
 import { DECISIONS_REVIEW_COMMAND, takeAutoAcceptsSinceLastSession } from '../../core/decisions/autopilot.js';
 import { buildInjection, buildProposalOnlyInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
+import { SILENCE_CONTRACT_LINE } from './orient-inject-render.js';
 import {
   oneShotBuildNote,
   registerOneShotRepair,
@@ -91,10 +92,12 @@ export async function injectOutput(
     // context. Redirect diagnostics to stderr (same discipline as --json mode)
     // so stdout carries only the orientation block.
     const debug = process.env.OPENLORE_INJECT_DEBUG === '1';
+    let withheld: string | undefined;
     // Quiet logger too: a hook writes nothing to stderr either ("[ok] Successfully validated…").
     const block = await withQuietStdout(() => withLoggerOptions({ quiet: true }, () => buildInjection(directory, prompt, evaluation => {
       // A failed lookup is silent to the agent and counted for the operator.
       if (evaluation.reason === 'error' && run) run.outcome = 'error';
+      withheld = evaluation.passes ? undefined : evaluation.reason;
       if (!debug) return;
       const verdict = evaluation.passes ? 'passed' : 'suppressed';
       process.stderr.write(
@@ -124,6 +127,12 @@ export async function injectOutput(
       const notice = silentWithoutIndex || buildNote ? undefined : 'no-index';
       const head = notice && await firstTimeThisSession(directory, sessionId, notice) ? noGraph : '';
       out = [head, rest].filter(Boolean).join('\n\n');
+    }
+    // A turn the anchor gate kept silent: what silence means is said once per session, not on every
+    // turn (change: anchor-gated-prompt-briefing).
+    if (!out && withheld && ['no-anchor', 'management-intent', 'empty-prompt'].includes(withheld)
+      && await firstTimeThisSession(directory, sessionId, 'silence-contract')) {
+      out = SILENCE_CONTRACT_LINE;
     }
     // Screened on the way out, whole-block: the framed part is already screened by
     // frameServedContent, but the pointer line and the build note are assembled here, and this is

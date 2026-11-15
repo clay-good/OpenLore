@@ -37,6 +37,15 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Changed
 
+- **The prompt briefing is given only for code the prompt names exactly.** `orient --inject` (the
+  `UserPromptSubmit` hook) now looks only at `backticked` names, file paths and identifier-shaped
+  words in your own words (pasted content excluded), and shows only what those resolve to exactly,
+  with callers. Prose prompts are not searched. Withheld turns print nothing, except one line per
+  session that explains this, and the once-per-session no-index line. On 68 real prompts from this
+  repository the briefing went from 25 blocks with 4% of named files relevant to 2 blocks, both
+  relevant, about a quarter of the size. The `relevanceMin*` settings are accepted and no longer
+  used. Pasted content also no longer starts the OpenSpec proposal instruction.
+
 - **"No spec source" is stated, not hidden or failed.** In a repository with no spec corpus,
   `orient` and `get_handoff_briefing` add `specSources: { found: [], lookedFor: ["openspec"] }`;
   `list_spec_domains`, `search_specs`, `check_spec_drift` and the link index return

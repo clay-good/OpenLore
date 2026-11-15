@@ -18,6 +18,9 @@
  * prompt — degrades to a single pointer line and exits 0.
  */
 
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { presetToolNames, resolveUserScopePreset, resolveWiredPreset } from '../../core/services/wired-preset.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -26,7 +29,10 @@ import { proposalContextForPrompt } from './proposal-context.js';
 import {
   INJECTION_DEFAULTS,
   classifyTurnIntent,
+  extractCodeAnchors,
+  userWords,
   isHarnessEvent,
+  keepExactAnchors,
   pointerLineFor,
   resolveInjectionConfig,
   evaluateRelevanceGate,
@@ -148,7 +154,10 @@ async function buildTaskInjection(
     const evaluation: RelevanceGateEvaluation = { passes: false, passedCriteria: [], failedCriteria, reason };
     onGateEvaluation?.(evaluation);
     recordInjectionVerdict(directory, evaluation);
-    return reason === 'error' || reason === 'harness-event' ? '' : pointerLineFor(reason);
+    // Only a missing index is said here (once per session, by the caller); every other withhold is
+    // silent, and the meaning of silence is stated once per session (change:
+    // anchor-gated-prompt-briefing).
+    return reason === 'no-graph' ? pointerLineFor('no-graph') : '';
   };
 
   const task = prompt.trim();
@@ -165,8 +174,27 @@ async function buildTaskInjection(
     return withhold('management-intent', ['turn-intent']);
   }
 
+  // Brief only the code the prompt names: an anchor (a symbol, a path, a `backticked` name). Prose
+  // alone is never searched — a keyword search over a request matched unrelated hubs on real
+  // prompts (change: anchor-gated-prompt-briefing).
+  // The anchor gate decides before any lookup, so check for an index first: a missing one is still
+  // stated (the caller says it once per session).
+  if (!existsSync(join(directory, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'))) return withhold('no-graph', ['no-graph']);
+  const anchors = extractCodeAnchors(userWords(task));
+  if (anchors.length === 0) return withhold('no-anchor', ['no-anchor']);
+
   try {
-    const result = (await handleOrient(directory, task, 8, undefined, true, 'distance', { pushMemories: true })) as LeanOrientResult;
+    const found = (await handleOrient(directory, anchors.join(' '), 8, undefined, true, 'distance', { pushMemories: true, repoWideParseHealth: false })) as LeanOrientResult;
+    if (found.error) {
+      const evaluation = evaluateRelevanceGate(found, cfg);
+      onGateEvaluation?.(evaluation);
+      recordInjectionVerdict(directory, evaluation);
+      return evaluation.reason === 'no-graph' ? pointerLineFor('no-graph') : '';
+    }
+    const exact = keepExactAnchors(found, anchors);
+    if (!exact) return withhold('no-anchor', ['anchor-unresolved']);
+    const result = exact;
+    result.suggestedTools = found.suggestedTools;
     // Suggest only tools the wired MCP surface exposes (default surface when unwired).
     const wired = await resolveWiredPreset(directory);
     const preset = wired.source === 'default' ? (await resolveUserScopePreset()) ?? wired.preset : wired.preset;
@@ -174,13 +202,10 @@ async function buildTaskInjection(
     if (available && result.suggestedTools) {
       result.suggestedTools = result.suggestedTools.filter((t) => available.has(t));
     }
-    const evaluation = evaluateRelevanceGate(result, cfg);
+    // An exact anchor is the relevance evidence: nothing else is shown.
+    const evaluation: RelevanceGateEvaluation = { passes: true, passedCriteria: ['exact-anchor'], failedCriteria: [] };
     onGateEvaluation?.(evaluation);
     recordInjectionVerdict(directory, evaluation);
-    if (!evaluation.passes) {
-      // An orientation error result is silent, like a thrown one (change: hook-reliability).
-      return evaluation.reason === 'error' || evaluation.reason === 'harness-event' ? '' : pointerLineFor(evaluation.reason ?? 'weak-relevance');
-    }
     return renderInjectionBlock(result, cfg);
   } catch {
     // A failed lookup is silent: a hook says nothing about OpenLore's own failure, and the agent

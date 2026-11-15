@@ -12,7 +12,7 @@ const stdin = vi.hoisted(() => ({ raw: '' }));
 vi.mock('../../utils/stdin.js', () => ({ readStdin: async () => stdin.raw }));
 
 import { injectOutput } from './orient.js';
-import { pointerLineFor } from './orient-inject-render.js';
+import { pointerLineFor, SILENCE_CONTRACT_LINE } from './orient-inject-render.js';
 
 const NO_GRAPH = pointerLineFor('no-graph');
 let root = '';
@@ -59,3 +59,20 @@ describe('no-index notices, once per session', () => {
     expect(existsSync(join(root, '.openlore'))).toBe(false);
   });
 });
+
+describe('the silence contract, once per session (change: anchor-gated-prompt-briefing)', () => {
+  it('the first prose prompt of a session explains silence; later ones say nothing; a new session explains it again', async () => {
+    mkdirSync(join(root, '.openlore', 'analysis'), { recursive: true });
+    writeFileSync(join(root, '.openlore', 'analysis', 'llm-context.json'), '{}');
+    const say = (session: string, text: string) => { stdin.raw = JSON.stringify({ session_id: session, prompt: text }); };
+    say('s1', 'please start group 2 and drive it to merge');
+    expect(await injectOutput(root, undefined)).toBe(SILENCE_CONTRACT_LINE);
+    say('s1', 'push and open the PR');
+    expect(await injectOutput(root, undefined)).toBe('');
+    say('s1', 'please fix ci on 708');
+    expect(await injectOutput(root, undefined)).toBe('');
+    say('s2', 'thanks, continue');
+    expect(await injectOutput(root, undefined)).toBe(SILENCE_CONTRACT_LINE);
+  });
+});
+

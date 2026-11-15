@@ -64,14 +64,121 @@ export type WithholdReason =
   | 'no-graph'
   | 'empty-prompt'
   | 'error'
-  | 'harness-event';
+  | 'harness-event'
+  | 'no-anchor';
 
 /**
  * The withhold causes the agent is told about. `error` is not one: a failed lookup is silent to
  * the agent (change: hook-reliability). Nor is `harness-event`: the harness wrote that prompt, not
  * the user, so there is no turn to brief. Telemetry still counts both.
  */
-export type PointerReason = Exclude<WithholdReason, 'error' | 'harness-event'>;
+export type PointerReason = Exclude<WithholdReason, 'error' | 'harness-event' | 'no-anchor'>;
+
+/**
+ * The once-per-session contract that replaces per-turn pointer lines (change:
+ * anchor-gated-prompt-briefing). Silence is unambiguous because its meaning is stated once.
+ */
+export const SILENCE_CONTRACT_LINE =
+  '[OpenLore] Prompts are briefed only when they name code that resolves exactly in the index '
+  + '(a symbol, a file path, or a `backticked` name); no briefing means none did. Call `orient` '
+  + 'to search.';
+
+/** Brand and platform words shaped like identifiers that never name code in this repository's sense. */
+const NON_CODE_WORDS = new Set([
+  'OpenLore', 'OpenSpec', 'GitHub', 'GitLab', 'JavaScript', 'TypeScript', 'CodeQL', 'macOS', 'iOS',
+  'PostgreSQL', 'MySQL', 'MongoDB', 'OpenAI', 'ChatGPT', 'YouTube', 'LinkedIn', 'VSCode', 'PowerShell',
+  'DevOps', 'GraphQL', 'OpenAPI', 'JetBrains', 'DynamoDB', 'WebSocket', 'OAuth',
+]);
+const CODE_FILE = /(?<![\w/.-])((?:[\w.-]+\/)*[\w-][\w.-]*\.(?:tsx?|jsx?|mjs|cjs|py|go|rs|java|kt|rb|php|cs|swift|scala|dart|lua|exs?|c|h|cpp|hpp|sh|json|ya?ml|toml|proto|graphqls?|sql|tf|md))(?![\w/-])/g;
+const IDENTIFIER_SHAPES: RegExp[] = [
+  /\b[a-z][a-z0-9]*(?:[A-Z][a-z0-9]*)+\b/g,          // camelCase
+  /\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+\b/g,          // PascalCase with two humps
+  /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g,              // snake_case
+  /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g,              // CONSTANT_CASE
+  /\b[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*(?=\()/g,   // member call: Class.method(
+];
+
+/**
+ * The user's own words in a prompt: text pasted into it (`<pasted_content …>…</pasted_content>`) is
+ * material the user brought, not their request, so it neither sets a briefing nor a workflow
+ * (change: anchor-gated-prompt-briefing).
+ */
+export function userWords(prompt: string): string {
+  return (prompt ?? '').replace(/<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content>/g, ' ');
+}
+
+/**
+ * The code a prompt names: `backticked` names, file paths, and identifier-shaped words (camelCase,
+ * two-hump PascalCase, snake_case, CONSTANT_CASE, `Class.method(`). Ordinary prose yields none,
+ * which is the point: a briefing is computed only for code the prompt names, and only what
+ * resolves exactly is shown (change: anchor-gated-prompt-briefing). At most 8, in order of first
+ * appearance.
+ */
+export function extractCodeAnchors(prompt: string): string[] {
+  const text = prompt ?? '';
+  const found: Array<{ at: number; value: string }> = [];
+  for (const m of text.matchAll(/`([^`\n]{1,120})`/g)) {
+    const inner = m[1].trim().replace(/\(\s*\)$/, '');
+    if (/^[\w$./-]+$/.test(inner) && /[A-Za-z_$]/.test(inner)) found.push({ at: m.index ?? 0, value: inner });
+  }
+  for (const m of text.matchAll(CODE_FILE)) found.push({ at: m.index ?? 0, value: m[1] });
+  for (const re of IDENTIFIER_SHAPES) for (const m of text.matchAll(re)) found.push({ at: m.index ?? 0, value: m[0] });
+  const out: string[] = [];
+  for (const { value } of found.sort((a, b) => a.at - b.at)) {
+    if (NON_CODE_WORDS.has(value) || out.includes(value)) continue;
+    out.push(value);
+    if (out.length === 8) break;
+  }
+  return out;
+}
+
+const CODE_FILE_EXTENSION = /\.(?:tsx?|jsx?|mjs|cjs|py|go|rs|java|kt|rb|php|cs|swift|scala|dart|lua|exs?|c|h|cpp|hpp|sh|json|ya?ml|toml|proto|graphqls?|sql|tf|md)$/;
+
+function isPathAnchor(anchor: string): boolean {
+  return anchor.includes('/') || CODE_FILE_EXTENSION.test(anchor);
+}
+
+/**
+ * The part of a lean orient result the anchors name EXACTLY: functions whose name (or its last
+ * `Class.` segment) equals an anchor or whose file is an anchored path, and those files. Search
+ * neighbours that merely ranked well are dropped, as are the result-wide extras (spec domains,
+ * house style, tool suggestions) that were not asked for. Undefined when nothing resolves.
+ */
+export function keepExactAnchors(result: LeanOrientResult, anchors: readonly string[]): LeanOrientResult | undefined {
+  const paths = anchors.filter(isPathAnchor).map(p => p.replace(/^\.\//, ''));
+  const names = new Set(anchors.filter(a => !isPathAnchor(a)));
+  const fileHit = (f: unknown): boolean => typeof f === 'string' && paths.some(p => f === p || f.endsWith(`/${p}`));
+  // Fixtures and examples are shown only when a path anchor points into them: a name a fixture
+  // happens to define (a pasted spec's `OrderService`) is not the code the user means.
+  const sample = (f: unknown): boolean => typeof f === 'string' && /(?:^|\/)(?:fixtures?|__fixtures__|examples?|testdata)\//.test(f) && !fileHit(f);
+  const matchName = (n: unknown, a: string): boolean => typeof n === 'string' && (n === a || n.split('.').pop() === a);
+  // A name defined in more than two files is ambiguous (a backticked `main`): not an anchor.
+  for (const a of [...names]) {
+    const defining = new Set((result.relevantFunctions ?? []).filter(f => !!f && matchName(f.name, a) && !sample(f.filePath)).map(f => f.filePath));
+    if (defining.size > 2) names.delete(a);
+  }
+  const nameHit = (n: unknown): boolean => typeof n === 'string' && [...names].some(a => matchName(n, a));
+  const fns = (result.relevantFunctions ?? []).filter(f => !!f && !sample(f.filePath) && (nameHit(f.name) || fileHit(f.filePath)));
+  const files = [...new Set([
+    ...(result.relevantFiles ?? []).filter(fileHit),
+    ...fns.map(f => f.filePath).filter((f): f is string => typeof f === 'string'),
+  ])];
+  if (!fns.length && !files.length) return undefined;
+  const keptNames = new Set(fns.map(f => f.name));
+  const stale = (result.indexStaleness?.staleFiles ?? []).filter(f => files.includes(f));
+  return {
+    task: anchors.filter(a => fns.some(f => f.name === a || f.name?.split('.').pop() === a) || files.some(f => fileHit(f) && paths.includes(a))).join(', '),
+    searchMode: result.searchMode,
+    ...(result.graphIndexNote ? { graphIndexNote: result.graphIndexNote } : {}),
+    relevantFunctions: fns,
+    relevantFiles: files,
+    callPaths: (result.callPaths ?? []).filter(p => keptNames.has(p.function)),
+    ...(typeof result.parseHealth === 'string' && files.some(f => result.parseHealth!.includes(f)) ? { parseHealth: result.parseHealth } : {}),
+    ...(stale.length && result.indexStaleness ? { indexStaleness: { ...result.indexStaleness, staleFiles: stale } } : {}),
+    ...(result.injectedMemories ? { injectedMemories: result.injectedMemories } : {}),
+    ...(result.servedContentProvenance ? { servedContentProvenance: result.servedContentProvenance } : {}),
+  };
+}
 
 /**
  * A prompt the harness generated rather than the user: Claude Code delivers a background task's

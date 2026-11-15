@@ -304,15 +304,18 @@ The injected block:
   never dominate the context it economizes;
 - is **clearly attributed to OpenLore** and opens with a one-line "informational; act on it or
   ignore it" framing — facts, not instructions;
-- is **gated**: exact identifier mentions, matched-function count, fan-in / hub centrality, and
-  retrieval-mode evidence decide whether the task warrants a full block; below the threshold it
-  degrades to a single pointer line, so injection stays out of the small/familiar arena it would
-  otherwise tax. Without embeddings, the default keyword/BM25 path uses scale-free top-match
-  identifier overlap and never compares the corpus-relative BM25 score to a fixed threshold. Run
-  `openlore embed --local` — a one-command, on-device, no-API-key upgrade — or set `EMBED_*` for a
-  remote endpoint to add the bounded semantic-score path.
-- **never breaks your turn**: any failure (no graph, parse error, empty/weak match) degrades to the
-  pointer line and exits 0.
+- is given **only for code the prompt names**: a `backticked` name, a file path, or an
+  identifier-shaped word (camelCase, two-hump PascalCase, snake_case, CONSTANT_CASE,
+  `Class.method(`). Prose is never searched, and text you paste (`<pasted_content>`) does not count.
+  The block shows only what those names match **exactly** in the index, with callers; search
+  neighbours are left out. A fixture or example file is shown only when you name its path, and a
+  name defined in more than two files is ambiguous and skipped. Measured on 68 real prompts from
+  this repository: 2 briefings, both naming a file the agent then worked on (the earlier
+  keyword gate gave 25, with 4% of named files relevant).
+- is **silent otherwise**: the first withheld prompt of a session gets one line saying that
+  briefings come only for code the prompt names exactly; later ones get nothing. A missing index is
+  stated once per session.
+- **never breaks your turn**: a failure prints nothing and exits 0.
 
 ### Per-adapter support
 
@@ -330,10 +333,7 @@ Task-scoped injection is on by default. To disable it (while leaving the MCP ser
 {
   "contextInjection": {
     "mode": "off",            // "task-scoped" (default) | "off"
-    "tokenBudget": 600,        // hard cap in estimated tokens; positive values below 68 clamp to 68
-    "relevanceMinMatches": 2,  // gate: minimum match count unless an identifier is exact
-    "relevanceMinFanIn": 2,    // gate: centrality; exact/ranked identifier evidence also clears it
-    "relevanceMinScore": 0.3   // gate: minimum top score (semantic/hybrid scale only)
+    "tokenBudget": 600         // hard cap in estimated tokens; positive values below 68 clamp to 68
   }
 }
 ```
@@ -343,8 +343,8 @@ hook moment, set `"hooks": { "prompt-submitted": false }` instead: the command t
 all (no lookup, no index build) and exits 0.
 
 If the lookup fails, or the moment passes its 3 s time limit, the hook prints nothing and exits 0:
-the agent is told nothing about OpenLore's own trouble. A gate that withholds the briefing (no
-index, a weak match, a management turn, an empty prompt) still prints its one pointer line.
+the agent is told nothing about OpenLore's own trouble. A withheld briefing (no named code, a
+management turn, an empty prompt) prints nothing, apart from the once-per-session line above.
 
 ### Performance and activation notes
 
