@@ -816,7 +816,7 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
  * would otherwise answer with an empty list of domains `get_spec` opens happily.
  */
 export async function handleListSpecDomains(directory: string): Promise<unknown> {
-  const { readdir } = await import('node:fs/promises');
+  const { readSpecFolderNames } = await import('../../spec-sources/openspec.js');
   const { join: pjoin } = await import('node:path');
   const absDir = await validateDirectory(directory);
 
@@ -837,7 +837,7 @@ export async function handleListSpecDomains(directory: string): Promise<unknown>
 
   let entries: string[];
   try {
-    entries = await readdir(specsDir);
+    entries = await readSpecFolderNames(specsDir);
   } catch {
     return { domains: [] };
   }
