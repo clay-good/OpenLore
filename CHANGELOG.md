@@ -130,6 +130,12 @@ All notable changes to OpenLore are documented here. This project adheres to
   not read. The status line also crossed into a parent repository and reported its index for a
   nested one, where the hooks stayed silent.
 
+- **Every MCP tool input now has a description.** 47 inputs across 7 tools had none (for example
+  `explain_retrieval_miss`'s `query`, `surface` and `target`, and `declare_footprint`'s `writeSet`),
+  so an agent had to guess the argument from its name. A new test fails when an input, nested
+  property or array-item property has no description. The `configuration`, `coordination` and `full`
+  token budgets were re-measured for the added text.
+
 - **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
   `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
   length-preserving, parse-only mask now hides them from it. On this repository: files with parse
