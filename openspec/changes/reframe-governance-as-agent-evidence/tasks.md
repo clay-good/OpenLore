@@ -95,15 +95,15 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 5. Docs and guards
 
-- [ ] 5.1 Run the MCP↔Pi parity guard: `npx vitest run src/pi/extension.test.ts`. `NAV_TOOLS` and
+- [x] 5.1 Run the MCP↔Pi parity guard: `npx vitest run src/pi/extension.test.ts`. `NAV_TOOLS` and
   `PI_EXCLUDED_CONCLUSION_TOOLS` in `src/pi/extension.ts` must have no diff in this change.
   Done when: the file passes and `git diff --stat src/pi/extension.ts` shows only lines from 4.2, if any.
-- [ ] 5.2 New-user docs: remove `enforcement.policy` from `README.md` (line 204) and from the
+- [x] 5.2 New-user docs: remove `enforcement.policy` from `README.md` (line 204) and from the
   install path in `docs/install.md` (lines 260-267, 383); keep one link to
   `docs/configuration.md#enforcement-policy`, which stays the reference. In `docs/install.md` and
   `docs/configuration.md` (hook table near line 344) describe the four moments, the three actions,
   and the three before-stop evidence sources with their triggers.
   Done when: `grep -c "enforcement.policy" README.md` is 0 and `npx vitest run src/doc-claim-sync.test.ts src/honesty-contract.test.ts` passes.
-- [ ] 5.3 Run `npm run build`, `npx eslint src`, and `npx vitest run src`. Run
+- [x] 5.3 Run `npm run build`, `npx eslint src`, and `npx vitest run src`. Run
   `openspec validate reframe-governance-as-agent-evidence`.
   Done when: all 4 commands exit 0.

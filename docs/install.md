@@ -281,9 +281,9 @@ keeps working exactly as written and still reaches every OpenLore block:
 | Blast-radius guard | `openlore blast-radius --install-hook` | the diff triggers a configured `blastRadius.block` pattern |
 | Change-impact certificate | `openlore impact-certificate --install-hook` | the diff opens a new path into a `impactCertificate.block` surface severity |
 
-`openlore enforce` is the recommended single gate: it resolves every governance finding through one
-`enforcement.policy`, and the per-surface `blastRadius.block` / `impactCertificate.block` configs lower
-onto it. All hooks are advisory by default — nothing blocks until you opt a finding into `blocking`.
+`openlore enforce` is the recommended single gate: it resolves every governance finding through the
+one policy linked in the table, and the per-surface `blastRadius.block` / `impactCertificate.block`
+configs lower onto it. All hooks are advisory by default — nothing blocks until you opt a finding into `blocking`.
 Use `claude` or `codex` instead of `all` to install only one agent host; use `none` to remove
 OpenLore's entries from both without changing user-authored hooks.
 See [cli-reference.md](cli-reference.md#enforcement-gate).
@@ -371,10 +371,28 @@ event's `additionalContext` — or nothing, when there is nothing new.
 |--------|-------------------|------------------------|
 | `before-edit` | `PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | the target is a generated file (its source and regenerate command), vendored code, or a lockfile; an import or symbol the pending `Write`/`Edit`/`MultiEdit` text would add that does not resolve ([phantom references](phantom-references.md), graded in memory before the write) |
 | `after-tools` | `PostToolUse`, same tools and `Bash`; `PostToolUseFailure` on `Bash` (a failing command) | a shell command is counted, and a test run is recorded (below); an edit is recorded for the [session ledger](session-ledger.md), which can then name background changes; new ledger facts; for the edited file: [check weakening](check-weakening.md), [phantom references](phantom-references.md), and [generated files](generated-files.md); a live peer on the [board](mcp-tools.md) that changed a symbol this worktree declared reading (`declare_footprint` `readSet`) or that `orient`/`recall` served here in the last 30 minutes |
-| `before-stop` | `Stop` | the `verify_change` receipt for the session's diff, plus the symbols edited after the last test run and the tests that reach them, shown to **you** (a `systemMessage`): context for the agent at `Stop` would make it keep working |
+| `before-stop` | `Stop` | the `verify_change` receipt for the session's diff, the certificates below, and the symbols edited after the last test run with the tests that reach them, shown to **you** (a `systemMessage`): context for the agent at `Stop` would make it keep working |
 | `after-compact` | `SessionStart` (matcher `compact`) | the [handoff briefing](mcp-tools.md) of the in-flight change, so the agent resumes from computed state, not only the compaction summary (stated after every compaction) |
 | `before-subagent` | `PreToolUse` on `Agent\|Task` | nothing: it queues the sub-agent's task (credentials redacted, kept in `.openlore/session-ledger/` for at most 2 minutes), because `SubagentStart` does not carry it; nothing is stored when `subagent-start` or `contextInjection` is off |
 | `subagent-start` | `SubagentStart` | the sub-agent itself gets the task-scoped `orient` briefing for its own task, when that task is the only one queued for its session and agent type (two parallel calls of one type, or a sub-agent no `Agent` call started, get no task briefing rather than a wrong one), and the live peers of other worktrees on the board (`declare_footprint`) |
+
+**Every finding has proof and one action.** A line from `before-edit`, `after-tools` or
+`before-stop` names its proof (the file and the cited line, or the receipt that found it) and one
+action, printed as labeled data: `fix` (the repair is in the agent's own diff), `decide` (a
+trade-off the agent may take and record with `openlore decisions record`), or `raise` (only a person
+can accept it). A finding with no proof is not printed. A note about what was not observed (no
+shell command reached the hook, so test runs are not stated) carries no action.
+
+**Certificates at stop.** `before-stop` also runs three certificates beside `verify_change`, each
+only when the session's diff can give it something to find, each with its own 10 s limit and at
+most 3 lines. One that fails or runs out of time prints nothing. A symbol `verify_change` already
+names is not repeated.
+
+| Certificate | Runs when the diff | States |
+|---|---|---|
+| `certify_public_surface` | touches a `.ts`, `.tsx`, `.js`, `.jsx` or `.py` file | each exported symbol it breaks, and the files that use it (`decide`) |
+| `certify_service_contract` | touches an OpenAPI, protobuf or GraphQL file | each breaking or dangerous contract change, and its in-repository call sites (`decide`) |
+| `change_impact_certificate` | — and `impactCertificate.surfaces` is set in `.openlore/config.json` | each path the change newly opens into a declared surface, never persisted (`raise`) |
 
 **Codex.** A repository install also writes four of these moments into `.codex/hooks.json` (Codex's
 hooks follow the same protocol): `before-edit` on `PreToolUse` and `after-tools` on `PostToolUse`
@@ -435,9 +453,9 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
   the same way: exit 0, nothing printed. The prompt-submitted moment (`openlore orient --inject`,
   [above](#task-scoped-context-injection)) follows the same rule, with its own off switch,
   `hooks.prompt-submitted`.
-- **Advisory.** Hooks exit 0 and never block, with one exception: when your
-  [`enforcement.policy`](configuration.md#enforcement-policy) makes a finding code `blocking`, the
-  `before-stop` hook blocks the stop and lists those findings for the agent. It does not block twice
+- **Advisory.** Hooks exit 0 and never block, with one exception: when your enforcement policy
+  (see [pre-commit hooks](#pre-commit-hooks)) makes a finding code `blocking`, the `before-stop`
+  hook blocks the stop and lists those findings for the agent. It does not block twice
   in a row.
 - **Repository scope only.** The moments run on every edit, so a user-scope install does not wire
   them (they would run in every repository). Run `openlore install` in the repository to get them.
