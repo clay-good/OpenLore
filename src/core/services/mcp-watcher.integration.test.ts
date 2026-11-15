@@ -161,6 +161,40 @@ describe('McpWatcher — real fs watcher', () => {
     expect(updated.signatures?.some((s) => s.path === 'src/kept.cache.ts')).toBe(false);
   }, 20_000);
 
+  it('honors .openlore-ignore and analysis.excludePatterns like analyze, and an ignore file edited while running (ROADMAP P0, #717)', async () => {
+    const { rootPath, outputPath, contextPath } = await setupProject();
+    for (const dir of ['src', 'generated', 'legacy', 'vendored-lib']) await mkdir(join(rootPath, dir), { recursive: true });
+    await writeFile(join(rootPath, '.openlore-ignore'), 'generated/\n');
+    await writeFile(join(rootPath, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.2.0', projectType: 'nodejs', analysis: { maxFiles: 100, includePatterns: [], excludePatterns: ['vendored-lib/**'] },
+      generation: { model: 'x', domains: 'auto' }, createdAt: '2026-11-15T00:00:00.000Z', lastRun: null,
+    }));
+    const kept = join(rootPath, 'src', 'kept.ts');
+    const gen = join(rootPath, 'generated', 'client.ts');
+    const vendored = join(rootPath, 'vendored-lib', 'lib.ts');
+    const legacy = join(rootPath, 'legacy', 'old.ts');
+    for (const f of [kept, gen, vendored, legacy]) await writeFile(f, 'export function before() {}\n');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+    await wait(WATCHER_WARMUP_MS);
+
+    // Edited while running: legacy/ is excluded from the next event on.
+    await writeFile(join(rootPath, '.openlore-ignore'), 'generated/\nlegacy/\n');
+    await wait(QUIET_WINDOW_MS);
+    for (const f of [gen, vendored, legacy]) await writeFile(f, 'export function after() {}\n');
+    await writeFile(kept, 'export function after() {}\n');
+    await settle(contextPath);
+
+    const updated = JSON.parse(await readFile(contextPath, 'utf8')) as LLMContext;
+    const paths = (updated.signatures ?? []).map((s) => s.path);
+    expect(updated.signatures?.find((s) => s.path === 'src/kept.ts')?.entries.some((e) => e.name === 'after')).toBe(true);
+    expect(paths).not.toContain('generated/client.ts');
+    expect(paths).not.toContain('vendored-lib/lib.ts');
+    expect(paths).not.toContain('legacy/old.ts');
+  }, 30_000);
+
   it('picks up a changed TypeScript file and updates llm-context.json', async () => {
     const { rootPath, outputPath, contextPath } = await setupProject();
 
