@@ -15,6 +15,8 @@
 // tool spawning `openlore` under Node 20) gets one legible stderr line and a
 // stable exit code, never a stack trace. Keep this the first import.
 import './node-version-bootstrap.js';
+// Node 22 prints an ExperimentalWarning when `node:sqlite` loads; a hook must write nothing.
+import './sqlite-warning-filter.js';
 // Size the V8 heap to the machine BEFORE commander and the command modules load, so a large
 // repository analyzes with no `--max-old-space-size` flag (change: make-analyze-scale-to-any-repo).
 // Placed right after the Node-version guard: both are early import side effects, and a re-exec here
