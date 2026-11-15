@@ -49,7 +49,7 @@ import {
   compositeScore,
   buildReason,
 } from './semantic.js';
-import { configuredSpecRoot, specFileRel } from './spec-paths.js';
+import { indexedSpecProvenanceAt, specRootRelOrNull } from './spec-paths.js';
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type GraphFreshnessView, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
@@ -63,7 +63,6 @@ import { getSourceRoots, moduleFromPath } from './epistemic-lease.js';
 import { readHotspotArtifact, hotspotsForModules } from './behavioral-hotspots.js';
 import {
   decisionContentProvenance,
-  indexedSpecContentProvenance,
   readAnalysisContentProvenance,
   specCorpusContentProvenance,
   type AnalysisContentProvenance,
@@ -556,7 +555,7 @@ export async function handleOrient(
         limit: 3,
         vocabularyExpansion,
       });
-      const specRootRel = (await configuredSpecRoot(absDir)).relative;
+      const specRootRel = await specRootRelOrNull(absDir);
       matchingSpecs = await Promise.all(specResults.map(async r => ({
         domain: r.record.domain,
         section: r.record.section,
@@ -565,9 +564,10 @@ export async function handleOrient(
         matchEvidence: requireMatchEvidence(r.matchEvidence),
         ...(r.expansionTerms?.length ? { expansionTerms: r.expansionTerms } : {}),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
-        provenance: await indexedSpecContentProvenance(
+        provenance: await indexedSpecProvenanceAt(
           absDir,
-          specFileRel(specRootRel, r.record.domain),
+          specRootRel,
+          r.record.domain,
           [r.record.title, specRowProse(r.record.domain, r.record.title, r.record.text)],
         ),
       })));

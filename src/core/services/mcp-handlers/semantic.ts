@@ -23,10 +23,9 @@ import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsF
 import { loadParseHealth, parseHealthBoundary, readabilityShortfall } from './parse-health-boundary.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { configuredSpecRoot, specFileRel } from './spec-paths.js';
+import { configuredSpecRoot, indexedSpecProvenanceAt, specRootRelOrNull } from './spec-paths.js';
 import {
   readAnalysisContentProvenance,
-  indexedSpecContentProvenance,
   reviewedFileContentProvenance,
   type AnalysisContentProvenance,
 } from '../served-content.js';
@@ -906,7 +905,7 @@ export async function handleSearchSpecs(
     ? snapshotRetrievalMode
     : semanticRetrievalMode;
   const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
-  const specRootRel = (await configuredSpecRoot(absDir)).relative;
+  const specRootRel = await specRootRelOrNull(absDir);
   const servedResults = await Promise.all(results.map(async (r) => ({
     score: r.score,
     scoreKind: r.scoreKind ?? (isKeywordRetrievalMode(retrievalMode) ? 'bm25' : 'cosine_distance'),
@@ -917,9 +916,10 @@ export async function handleSearchSpecs(
     section: r.record.section,
     title: r.record.title,
     text: r.record.text,
-    provenance: await indexedSpecContentProvenance(
+    provenance: await indexedSpecProvenanceAt(
       absDir,
-      specFileRel(specRootRel, r.record.domain),
+      specRootRel,
+      r.record.domain,
       [r.record.title, specRowProse(r.record.domain, r.record.title, r.record.text), ...r.record.linkedFiles],
     ),
     linkedFiles: r.record.linkedFiles,
@@ -992,13 +992,14 @@ export async function handleUnifiedSearch(
     vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
   });
   const analysisProvenance = await readAnalysisContentProvenance(absDir);
-  const specRootRel = (await configuredSpecRoot(absDir)).relative;
+  const specRootRel = await specRootRelOrNull(absDir);
   const servedResults = await Promise.all(results.map(async result => ({
     ...result,
     provenance: result.source.domain
-      ? await indexedSpecContentProvenance(
+      ? await indexedSpecProvenanceAt(
           absDir,
-          specFileRel(specRootRel, result.source.domain),
+          specRootRel,
+          result.source.domain,
           [result.source.section, result.source.title].filter((value): value is string => Boolean(value)),
         )
       : analysisProvenance,
