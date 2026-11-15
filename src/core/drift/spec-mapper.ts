@@ -7,6 +7,7 @@
  */
 
 import { readFile, readdir } from 'node:fs/promises';
+import { readSpecDomainEntries } from '../spec-sources/openspec.js';
 import { join, relative } from 'node:path';
 import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
@@ -305,7 +306,7 @@ export async function buildSpecMap(options: SpecMapperOptions): Promise<SpecMap>
   // Read all spec domain directories
   let entries;
   try {
-    entries = await readdir(specsDir, { withFileTypes: true });
+    entries = await readSpecDomainEntries(specsDir);
   } catch {
     logger.debug('No specs directory found');
     return { byDomain, byFile, domainCount: 0, totalMappedFiles: 0 };
@@ -316,11 +317,7 @@ export async function buildSpecMap(options: SpecMapperOptions): Promise<SpecMap>
   // because many projects legitimately have an api domain with source files.
   const skipDomains = new Set(['overview', 'architecture']);
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-
-    const domain = String(entry.name);
-    const specPath = join(specsDir, domain, 'spec.md');
+  for (const { domain, specPath } of entries) {
     // The mapping produced here becomes a WRITE target in the decision syncer, so a
     // committed `spec.md -> ~/.zshrc` must be dropped at the source rather than
     // mapped and later appended to.

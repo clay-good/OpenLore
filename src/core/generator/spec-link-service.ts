@@ -16,8 +16,9 @@
  */
 
 import { realpathSync, statSync } from 'node:fs';
+import { readSpecDomainEntries } from '../spec-sources/openspec.js';
 import { SPEC_SOURCES_LOOKED_FOR, noSpecSourceText } from '../spec-sources/state.js';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 
@@ -128,20 +129,17 @@ export async function loadSpecCorpus(
 
   let entries;
   try {
-    entries = await readdir(specsDir, { withFileTypes: true });
+    entries = await readSpecDomainEntries(specsDir);
   } catch (error) {
     if (strict) throw error;
     return [];
   }
 
   const specs: SpecLinkIndexSpecInput[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const domain = String(entry.name);
+  for (const { domain, specPath } of entries) {
     if (!includeStructuralSpecs && NON_DOMAIN_SPECS.has(domain.toLowerCase())) continue;
     if (wanted && !wanted.has(domain.toLowerCase())) continue;
 
-    const specPath = join(specsDir, domain, 'spec.md');
     if (!isConfinedPath(rootPath, specPath)) continue;
     try {
       specs.push({
