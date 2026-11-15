@@ -102,6 +102,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   most confident first (up to 200, disclosed in `capped`); `verify_change` carries it, and the CLI
   prints the files.
 
+- **`select_tests` finds tests that load their module dynamically or read it by path.** A test
+  that loads its module after setting up mocks (`const { f } = await import('./m.js')`, 110 of
+  this repository's 700 test files) got no `tested_by` association, and a source guard that reads a
+  file as text (`'src/pi/extension.ts'`) had no edge at all. Replayed against three real changes,
+  `select_tests` found 9 of the 12 tests they broke; it now finds all 12. Path readers are selected
+  at medium confidence with their own reason.
+
 - **Spec text under a configured `openspecPath` is labeled reviewed only when it is.** `orient`,
   `blast_radius` and the Pi context checked git for a fixed `openspec/` folder. With
   `openspecPath: "docs"`, an uncommitted edit under `docs/specs/` was served as `reviewed-corpus`.

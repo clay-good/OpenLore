@@ -91,13 +91,21 @@ export const SELECTION_REASON = {
     return `included: reaches changed symbol at depth ${depth}${rules.length ? ` via ${rules.join(', ')}` : ''}`;
   },
   sameFile: 'included: tests a function in the same file as a changed symbol',
+  /** A test that reads a changed file's text by its path (a source guard); no call edge shows it. */
+  namesPath: (path: string) => `included: names the changed file ${path} by its path`,
 } as const;
+
+/** Test files read when looking for tests that name a changed file by its path. */
+const MAX_PATH_SCAN_TEST_FILES = 5000;
+/** Bytes read per test file for that scan. */
+const MAX_PATH_SCAN_BYTES = 2 * 1024 * 1024;
 
 /** Reason strength: a lower number is the stronger, tier-first receipt. */
 function reasonRank(reason: string): number {
   if (reason === SELECTION_REASON.newTest) return 0;
   if (reason === SELECTION_REASON.changedTest) return 1;
-  if (reason === SELECTION_REASON.sameFile) return 3;
+  if (reason.startsWith('included: names the changed file ')) return 3;
+  if (reason === SELECTION_REASON.sameFile) return 4;
   return 2;
 }
 
@@ -276,6 +284,8 @@ export async function handleSelectTests(
   let fileSeedCount = 0;
   /** Seeds kept for a reason other than their own change (naming one, or a dynamic-dispatch site). */
   let seededUnchanged = 0;
+  /** Changed production files, repository-relative: a test that names one by its path reads it. */
+  const changedSourcePaths: string[] = [];
   if (hasSymbols) {
     const resolution = resolveSymbolSeeds(cg, input.changedSymbols!);
     seeds = resolution.seeds;
@@ -306,6 +316,10 @@ export async function handleSelectTests(
         tierFileSet.add(local);
         tierFiles.push({ file: local, reason: f.status === 'added' ? SELECTION_REASON.newTest : SELECTION_REASON.changedTest });
       }
+      for (const f of diff.files) {
+        const path = normalizeRelative(f.path);
+        if (f.status !== 'deleted' && !isTestFile(path) && !hasControlCharacter(path)) changedSourcePaths.push(path);
+      }
       const untracked = await untrackedTestFiles(absDir);
       if (untracked === null) untrackedAssessed = false;
       // A path with control characters is not a test anyone wrote on purpose, and one that is not on
@@ -323,7 +337,10 @@ export async function handleSelectTests(
     }
   }
 
-  if (seeds.length === 0 && tierFiles.length === 0) {
+  // Tests that read a changed file by its path (source-text guards): no call edge reaches them.
+  const pathReaders = await testsNamingPaths(absDir, cg, changedSourcePaths);
+
+  if (seeds.length === 0 && tierFiles.length === 0 && pathReaders.files.length === 0) {
     // Honesty: if federation was opted into, say why no cross-repo selection ran
     // rather than silently omitting the federation block an active scope implies.
     const federationRequested = input.federation === true || (input.federationRepos?.length ?? 0) > 0;
@@ -461,6 +478,8 @@ export async function handleSelectTests(
     for (const t of tests) add(t.filePath, t.name, [t.name], 'high', reason);
   }
 
+  for (const { file, path } of pathReaders.files) add(file, WHOLE_FILE_TEST, [], 'medium', SELECTION_REASON.namesPath(path));
+
   // Source 1 — test nodes reached by the backward call-walk.
   for (const [id, depth] of depthOf) {
     if (depth === 0) continue;
@@ -578,6 +597,9 @@ export async function handleSelectTests(
     caveats.push('Some seeds had no reaching test; sibling-file tests were included at low confidence (likely newly-added or untested functions).');
   }
   if (!untrackedAssessed) caveats.push(UNTRACKED_NOT_ASSESSED);
+  if (pathReaders.omitted > 0) {
+    caveats.push(`${pathReaders.omitted} test file(s) past the first ${MAX_PATH_SCAN_TEST_FILES} were not searched for a changed file's path.`);
+  }
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   if (granularityNote) caveats.push(granularityNote);
   const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
@@ -797,6 +819,32 @@ function localPath(repoPath: string, prefix: string | undefined): string | undef
   const path = normalizeRelative(repoPath);
   if (!prefix) return path;
   return path.startsWith(prefix) ? path.slice(prefix.length) : undefined;
+}
+
+/**
+ * Test files that name one of `paths` as a quoted string: a guard that reads source text (line
+ * anchors, a forbidden-call scan) breaks when that file changes, yet no call edge reaches it. The
+ * test files are the ones the index knows; each is read once, bounded.
+ */
+async function testsNamingPaths(
+  absDir: string,
+  cg: SerializedCallGraph,
+  paths: readonly string[],
+): Promise<{ files: Array<{ file: string; path: string }>; omitted: number }> {
+  if (paths.length === 0) return { files: [], omitted: 0 };
+  const testFiles = new Set<string>();
+  for (const n of cg.nodes) if (n.isTest && !n.isExternal) testFiles.add(normalizeRelative(n.filePath));
+  for (const e of cg.edges) if (e.kind === 'tested_by' && e.calleeId.includes('::')) testFiles.add(normalizeRelative(e.calleeId.split('::')[0]));
+  const sorted = [...testFiles].sort();
+  const { readFileConfined } = await import('../../../utils/path-confinement.js');
+  const files: Array<{ file: string; path: string }> = [];
+  for (const file of sorted.slice(0, MAX_PATH_SCAN_TEST_FILES)) {
+    let text: string;
+    try { text = await readFileConfined(absDir, file, MAX_PATH_SCAN_BYTES); } catch { continue; }
+    const named = paths.find(p => text.includes(`'${p}'`) || text.includes(`"${p}"`) || text.includes(`\`${p}\``));
+    if (named) files.push({ file, path: named });
+  }
+  return { files, omitted: Math.max(0, sorted.length - MAX_PATH_SCAN_TEST_FILES) };
 }
 
 function normalizeRelative(path: string): string {

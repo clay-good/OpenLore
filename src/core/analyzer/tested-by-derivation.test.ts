@@ -34,6 +34,24 @@ describe('tested_by derivation — relative paths (bug B)', () => {
     expect(testedBy.some(e => e.callerId === add.id)).toBe(true);
   });
 
+  it('derives tested_by from a test that loads its module with a dynamic import', async () => {
+    // The module is loaded after mocks are set up: no static import, and the calls sit inside
+    // anonymous `it` callbacks that have no node. Before, no edge reached these tests.
+    const files = [
+      { path: 'src/calc.ts', content: 'export function add(a: number, b: number) { return a + b; }\nexport function sub(a: number, b: number) { return a - b; }\nexport function mul(a: number, b: number) { return a * b; }\n', language: 'TypeScript' },
+      { path: 'src/a.test.ts', content: 'const { add } = await import("./calc.js");\nit("adds", () => { expect(add(1, 2)).toBe(3); });\n', language: 'TypeScript' },
+      { path: 'src/b.test.ts', content: 'async function load() { return (await import("./calc.js")).sub; }\nit("subs", async () => { expect((await load())(2, 1)).toBe(1); });\n', language: 'TypeScript' },
+      { path: 'src/c.test.ts', content: 'const calc = await import("./calc.js");\nit("muls", () => { expect(calc.mul(2, 3)).toBe(6); });\n', language: 'TypeScript' },
+    ];
+    const cg = serializeCallGraph(await new CallGraphBuilder().build(files));
+    const testedBy = (name: string) => cg.edges
+      .filter(e => e.kind === 'tested_by' && e.callerId === `src/calc.ts::${name}`)
+      .map(e => e.calleeId);
+    expect(testedBy('add')).toContain('src/a.test.ts::*');
+    expect(testedBy('sub')).toContain('src/b.test.ts::*');
+    expect(testedBy('mul')).toContain('src/c.test.ts::*');
+  });
+
   it('marks newly supported language conventions and derives tested_by edges', async () => {
     const files = [
       { path: 'lib/calc.rb', content: 'def add(a, b)\n  a + b\nend\n', language: 'Ruby' },
