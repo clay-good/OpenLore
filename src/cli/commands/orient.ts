@@ -34,6 +34,7 @@ import {
   type OneShotBuild,
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
+import { findingIdentity, markShown, readSession, wasShown, writeSession } from '../../core/services/hook-session.js';
 import { autoInitSuppression, isInsideGitWorkTree, recordDetachedRepair } from '../../core/services/cold-start-bootstrap.js';
 import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -72,9 +73,12 @@ export async function injectOutput(
   silentWithoutIndex = false,
 ): Promise<string> {
   let prompt = taskOpt ?? '';
+  let sessionId: string | undefined;
   if (!prompt) {
     try {
-      prompt = extractPrompt(await readStdin());
+      const raw = await readStdin();
+      prompt = extractPrompt(raw);
+      sessionId = sessionIdOf(raw);
     } catch {
       prompt = '';
     }
@@ -102,8 +106,13 @@ export async function injectOutput(
     const noGraph = pointerLineFor('no-graph');
     if (out.startsWith(noGraph)) {
       const rest = out.slice(noGraph.length).trim();
-      if (silentWithoutIndex) out = rest;
-      else if (buildNote) out = [`[OpenLore] ${safe(buildNote)}`, rest].filter(Boolean).join('\n\n');
+      // The no-index line and the build note are notices: each is stated once per harness
+      // session (change: hook-reliability, task 4.3). A later prompt keeps only the rest.
+      const notice = silentWithoutIndex ? undefined : buildNote ? 'index-build' : 'no-index';
+      const head = notice && await firstTimeThisSession(directory, sessionId, notice)
+        ? (buildNote ? `[OpenLore] ${safe(buildNote)}` : noGraph)
+        : '';
+      out = [head, rest].filter(Boolean).join('\n\n');
     }
     // Screened on the way out, whole-block: the framed part is already screened by
     // frameServedContent, but the pointer line and the build note are assembled here, and this is
@@ -114,6 +123,31 @@ export async function injectOutput(
     // buildInjection is fail-open; guard the assembly too: never throw.
     return '';
   }
+}
+
+/** The harness session id in a hook payload, when it carries one. */
+function sessionIdOf(raw: string): string | undefined {
+  try {
+    const v = JSON.parse(raw) as { session_id?: unknown };
+    return typeof v?.session_id === 'string' && v.session_id ? v.session_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True the first time `notice` is asked about in this harness session, and records it. Without a
+ * session id, or without a `.openlore/` to record it in, every time (nothing is deduplicated).
+ */
+async function firstTimeThisSession(root: string, sessionId: string | undefined, notice: string): Promise<boolean> {
+  // No `.openlore/` (auto-init off): write nothing into the repository; nothing is deduplicated.
+  if (!sessionId || !existsSync(join(root, OPENLORE_DIR))) return true;
+  const session = readSession(root, sessionId);
+  const { identity } = findingIdentity('notice', notice);
+  if (wasShown(session, identity, 'agent')) return false;
+  markShown(session, identity, { code: 'notice', subject: notice }, 'prompt-submitted', 'agent');
+  await writeSession(root, sessionId, session);
+  return true;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -375,5 +376,63 @@ describe('Codex payloads (change: add-agent-loop-hooks-codex-and-pi)', () => {
     const out = context((await runHook('before-edit', JSON.stringify({ session_id: 'c1', cwd: root, hook_event_name: 'PreToolUse', tool_name: 'apply_patch', tool_input: { command: patch } }))).stdout);
     expect(out?.hookEventName).toBe('PreToolUse');
     expect(out?.additionalContext).toContain('src/gen.ts is generated');
+  });
+});
+
+describe('once per session (change: hook-reliability, group 4)', () => {
+  const G0 = "import { f } from './f';\nexport const g = f;\n";
+  const MISSING = "import { f, missing } from './f';";
+  const setup = () => {
+    const root = repo({ 'src/f.ts': 'export function f() { return 1; }\n', 'src/g.ts': G0 });
+    write(root, 'src/g.ts', `${MISSING}\nexport const g = [f, missing];\n`);
+    return root;
+  };
+  const say = async (root: string, moment: 'after-tools' | 'before-edit', session = 's1', extra: Record<string, unknown> = {}) =>
+    context((await runHook(moment, payload(root, 'src/g.ts', { session_id: session, ...extra }))).stdout)?.additionalContext ?? '';
+
+  it('prints a finding id after each finding', async () => {
+    expect(await say(setup(), 'after-tools')).toMatch(/missing.*\[f:[0-9a-f]{8}\]/);
+  });
+
+  it('a finding shown at after-tools is not shown again at after-tools or before-edit', async () => {
+    const root = setup();
+    expect(await say(root, 'after-tools')).toContain('missing');
+    expect(await say(root, 'after-tools')).toBe('');
+    // A pending edit that leaves the import unchanged.
+    expect(await say(root, 'before-edit', 's1', { tool_input: { file_path: join(root, 'src/g.ts'), old_string: 'export const g', new_string: 'export const gg' } })).toBe('');
+  });
+
+  it('a line shift is not a new finding; a changed cited line is', async () => {
+    const root = setup();
+    const first = await say(root, 'after-tools');
+    expect(first).toContain('missing');
+    write(root, 'src/g.ts', `// a comment above\n\n${MISSING}\nexport const g = [f, missing];\n`);
+    expect(await say(root, 'after-tools')).toBe('');
+    write(root, 'src/g.ts', "// a comment above\n\nimport { f, missing, other } from './f';\nexport const g = [f, missing, other];\n");
+    const again = await say(root, 'after-tools');
+    expect(again).toContain('missing');
+    expect(again.match(/\[f:([0-9a-f]{8})\]/)?.[1]).not.toBe(first.match(/\[f:([0-9a-f]{8})\]/)?.[1]);
+  });
+
+  it('a new session starts clean', async () => {
+    const root = setup();
+    expect(await say(root, 'after-tools', 's1')).toContain('missing');
+    expect(await say(root, 'after-tools', 's2')).toContain('missing');
+  });
+
+  it('the stop receipt still shows the user a finding the agent was told', async () => {
+    const root = setup();
+    verify.result = { items: [{ subject: 'src/g.ts', check: 'unresolved-internal-symbol', severity: 'error', nextAction: 'fix the import' }], gated: false };
+    const stop = async () => (JSON.parse((await runHook('before-stop', payload(root))).stdout || '{}') as { systemMessage?: string }).systemMessage ?? '';
+    expect(await stop()).toMatch(/src\/g\.ts \[unresolved-internal-symbol\].*\[f:[0-9a-f]{8}\]/);
+    // Once to the user too.
+    expect(await stop()).toBe('');
+  });
+
+  it('a record from before finding ids (keys only) does not hide a finding', async () => {
+    const root = setup();
+    const id = createHash('sha256').update('s1').digest('hex').slice(0, 24);
+    write(root, `.openlore/session-ledger/hook-delivered/${id}.json`, JSON.stringify({ keys: ['unrelated'] }));
+    expect(await say(root, 'after-tools')).toContain('missing');
   });
 });

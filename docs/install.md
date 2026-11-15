@@ -380,9 +380,13 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
 
 - **This session's changes.** Facts compare with the commit `HEAD` was at when the session's first
   hook ran, so work committed earlier is not raised again in every session.
-- **Once each.** A fact is stated once per Claude Code session (keyed by the payload's
-  `session_id`; without one, nothing is deduplicated). A fact cut by the size budget is stated on a
-  later call.
+- **Once each.** A finding is stated once per Claude Code session (keyed by the payload's
+  `session_id`; without one, nothing is deduplicated), and is printed with its id, such as
+  `[f:1a2b3c4d]`. Its identity is its code, its subject, and its proof: the text of the line it
+  cites, without the line number, so lines added above it do not repeat it, while a change to that
+  line does. The `before-stop` receipt is yours, not the agent's, so it lists each finding once
+  more, for you. A fact cut by the size budget is stated on a later call. The prompt-submitted
+  moment states its no-index line and its build note once per session too.
 - **Found from a subdirectory.** The hook uses the nearest directory at or above the session's
   working directory that has `.openlore/`.
 - **Bounded.** Each receipt has a size budget (the most severe facts first, the rest counted) and a

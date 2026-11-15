@@ -33,7 +33,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
 import { OPENLORE_DIR } from '../../constants.js';
-import { HOOK_MOMENTS, readSession, writeSession, type HookMoment } from '../../core/services/hook-session.js';
+import { HOOK_MOMENTS, findingIdentity, markShown, readSession, wasShown, writeSession, type FindingProof, type HookMoment } from '../../core/services/hook-session.js';
 
 export { HOOK_MOMENTS, type HookMoment };
 
@@ -56,8 +56,12 @@ const STDIN_MAX_BYTES = 8 * 1024 * 1024;
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, error: 1, warning: 2, info: 3 };
 
-/** One fact for the receipt. `key` identifies it for the per-session dedupe. */
-export interface HookItem { key: string; severity: string; text: string; next?: string }
+/**
+ * One fact for the receipt. `code`, `subject`, and `proof` give its identity for the per-session
+ * dedupe (`findingIdentity`; without a code, the `key` is the identity); `key` is still recorded
+ * for an older CLI reading the same session record.
+ */
+export interface HookItem { key: string; severity: string; text: string; next?: string; code?: string; subject?: string; proof?: FindingProof; id?: string }
 
 export interface HookPayload {
   sessionId?: string;
@@ -197,19 +201,19 @@ export function renderReceipt(moment: HookMoment, items: HookItem[], budgetChars
 }
 
 /** The receipt and the keys of the items it shows (only those count as delivered). */
-function renderShown(moment: HookMoment, items: HookItem[], budgetChars = BUDGET_CHARS[moment]): { text: string | null; shown: string[] } {
+function renderShown(moment: HookMoment, items: HookItem[], budgetChars = BUDGET_CHARS[moment]): { text: string | null; shown: HookItem[] } {
   if (!items.length) return { text: null, shown: [] };
   const sorted = [...items].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9));
   const header = `[openlore ${moment}]`;
   const lines: string[] = [];
   let used = header.length;
   let omitted = 0;
-  const shown: string[] = [];
+  const shown: HookItem[] = [];
   for (const it of sorted) {
-    const line = `- ${it.text}${it.next ? ` (next action: ${it.next})` : ''}`;
+    const line = `- ${it.text}${it.next ? ` (next action: ${it.next})` : ''}${it.id ? ` [f:${it.id}]` : ''}`;
     if (used + line.length + 1 > budgetChars) { omitted++; continue; }
     lines.push(line);
-    shown.push(it.key);
+    shown.push(it);
     used += line.length + 1;
   }
   if (!lines.length) return { text: null, shown: [] };
@@ -251,6 +255,23 @@ async function headSha(root: string): Promise<string | undefined> {
   }
 }
 
+/** The item's identity and printed id; an item with no code is identified by its key. */
+function withIdentity(i: HookItem): { identity: string; id: string } {
+  return i.code ? findingIdentity(i.code, i.subject ?? '', i.proof) : findingIdentity(i.key, '');
+}
+
+/** The text of line `line` of a repository path (`prefix` + root-relative), or undefined. */
+async function citedLine(root: string, prefix: string, repoFile: string, line: number): Promise<string | undefined> {
+  if (prefix && !repoFile.startsWith(prefix)) return undefined;
+  try {
+    const { readFileConfined } = await import('../../utils/path-confinement.js');
+    const text = await readFileConfined(root, repoFile.slice(prefix.length), MAX_PENDING_BYTES);
+    return text.split(/\r?\n/)[line - 1];
+  } catch {
+    return undefined;
+  }
+}
+
 /** Where `root` sits in its git repository (`packages/app/`), so git-based checks get repo paths. */
 async function repoPrefix(root: string): Promise<string> {
   const { getRepoPrefix } = await import('../../core/drift/git-diff.js');
@@ -263,6 +284,7 @@ async function beforeEdit(root: string, files: string[], edit?: HookPayload['edi
   const { facts } = await classifyGeneratedFiles(root, files);
   const items: HookItem[] = [...facts.values()].map(f => ({
     key: `generated:${f.file}`,
+    code: 'generated-file', subject: f.file, proof: { path: f.file, discriminator: f.kind },
     severity: 'warning',
     text: generatedText(f),
     ...(f.kind !== 'lockfile' ? { next: f.regenerateWith !== 'unknown' ? `regenerate with \`${f.regenerateWith}\`` : 'edit the source and regenerate' } : {}),
@@ -304,10 +326,17 @@ async function pendingReferences(root: string, file: string, edit: NonNullable<H
   const { checkPhantomReferences } = await import('../../core/services/phantom-references.js');
   const r = await checkPhantomReferences(root, 'HEAD', changed, undefined, { head: new Map([[file, next]]), base: new Map([[file, current]]) }).catch(() => undefined);
   // Own keys: a denied or failed edit must not silence the after-write fact of a later, real one.
+  // Identity: the cited line's text in the pending content (the line number is left out). A
+  // pending fact keeps its own code: a denied edit must not silence the after-write fact.
+  const lines = next.split(/\r?\n/);
+  const ident = (f: { code: string; subject: string; location?: { path: string; line?: number } }) => ({
+    code: `pending:${f.code}`, subject: f.subject,
+    proof: { path: f.location?.path ?? path, ...(f.location?.line ? { lineText: lines[f.location.line - 1] ?? '' } : {}) },
+  });
   return (r?.findings ?? []).slice(0, MAX_PENDING_FACTS).map(f => f.code === 'unresolved-internal-import'
     // The module may be the agent's next write: a pending state, not yet an error.
-    ? { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: 'warning', text: `Before the write: ${f.message.replace(/, which is not a module in this repository/, ', which does not exist yet')}`, next: 'create that module, or fix the path' }
-    : { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: f.severity, text: `Before the write: ${f.message}`, ...(f.remediation ? { next: f.remediation } : {}) });
+    ? { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, ...ident(f), severity: 'warning', text: `Before the write: ${f.message.replace(/, which is not a module in this repository/, ', which does not exist yet')}`, next: 'create that module, or fix the path' }
+    : { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, ...ident(f), severity: f.severity, text: `Before the write: ${f.message}`, ...(f.remediation ? { next: f.remediation } : {}) });
 }
 
 function generatedText(f: { file: string; kind: string; generatedFrom: string[] | 'unknown'; matched: string }): string {
@@ -329,10 +358,10 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   const live = readLiveLedger(root);
   if ('ledger' in live) {
     for (const c of live.ledger.backgroundChanges) {
-      items.push({ key: `bg:${c.id}@${c.changedAt}`, severity: 'warning', text: `${c.name} (${c.file}) changed since this session read it (another process's edit).` });
+      items.push({ key: `bg:${c.id}@${c.changedAt}`, code: 'background-change', subject: c.id, proof: { discriminator: String(c.changedAt) }, severity: 'warning', text: `${c.name} (${c.file}) changed since this session read it (another process's edit).` });
     }
     for (const o of live.ledger.editOscillation) {
-      items.push({ key: `loop:${o.id}#${o.returns}`, severity: 'warning', text: `${o.name} (${o.file}) returned to an earlier version ${o.returns} times this session.` });
+      items.push({ key: `loop:${o.id}#${o.returns}`, code: 'edit-loop', subject: o.id, proof: { discriminator: String(o.returns) }, severity: 'warning', text: `${o.name} (${o.file}) returned to an earlier version ${o.returns} times this session.` });
     }
   }
   // A peer changed a symbol this worktree's agent declared it reads or was served (changes:
@@ -343,6 +372,7 @@ async function afterTools(root: string, files: string[], baseline: string | unde
     for (const n of await peerChangeNotices(root)) {
       items.push({
         key: `peer:${n.peer.actorId}:${n.repoPath}#${n.symbol}`,
+        code: 'peer-change', subject: `${n.peer.actorId}:${n.repoPath}#${n.symbol}`,
         severity: 'warning',
         // Board fields are peer-written: screened before they reach the agent.
         text: sanitizeForTerminal(`Peer ${t(n.peer.actorId)} (${t(n.peer.branch || 'detached')} in ${t(n.peer.worktree)}) changed ${t(n.symbol)} (${t(n.file)}), which ${n.via === 'served' ? 'was served in this worktree' : 'an agent in this worktree declared reading'} at ${t(n.at).slice(11, 16)} UTC.`),
@@ -364,7 +394,13 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   const { checkPhantomReferences } = await import('../../core/services/phantom-references.js');
   const phantom = await checkPhantomReferences(root, baseline, changed).catch(() => undefined);
   for (const f of phantom?.findings ?? []) {
-    items.push({ key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, severity: f.severity, text: f.message, ...(f.remediation ? { next: f.remediation } : {}) });
+    // Identity: the cited line's text, not its number (the source's discriminator carries the number).
+    const lineText = f.location?.line ? await citedLine(root, prefix, f.location.path, f.location.line) : undefined;
+    items.push({
+      key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, code: f.code, subject: f.subject,
+      proof: lineText !== undefined ? { path: f.location!.path, lineText } : { path: f.location?.path, discriminator: f.discriminator },
+      severity: f.severity, text: f.message, ...(f.remediation ? { next: f.remediation } : {}),
+    });
   }
 
   const { checkWeakening } = await import('../../core/services/check-weakening.js');
@@ -372,7 +408,8 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   // differ on Windows: forward slashes, a long name for an 8.3 one).
   const top = resolve(root, ...prefix.split('/').filter(Boolean).map(() => '..'));
   const weak = top ? await checkWeakening({ root: top, baseRef: baseline, files: repoFiles }).catch(() => undefined) : undefined;
-  for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, severity: f.severity, text: f.message });
+  // Check-weakening discriminators are text-based (the added ignore line, the step), not line numbers.
+  for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, code: f.code, subject: f.subject, proof: { path: f.location?.path, discriminator: f.discriminator }, severity: f.severity, text: f.message });
   return items;
 }
 
@@ -392,12 +429,12 @@ async function testRunItem(root: string, sessionId: string | undefined): Promise
   const when = (t: number) => new Date(t).toISOString().slice(11, 16);
   const shellNote = 'Edits made through shell commands are not tracked.';
   if (r.kind === 'not-observed') {
-    return { key: 'test-runs:not-observed', severity: 'info', text: 'Test runs are not observed in this session (no shell command reached the after-tools hook), so edits after the last run are not stated.' };
+    return { key: 'test-runs:not-observed', code: 'test-runs', subject: 'not-observed', severity: 'info', text: 'Test runs are not observed in this session (no shell command reached the after-tools hook), so edits after the last run are not stated.' };
   }
   if (r.kind === 'no-run') {
     const files = r.files!.slice(0, 5).join(', ');
     return {
-      key: `test-runs:none:${r.files!.length}`, severity: 'warning',
+      key: `test-runs:none:${r.files!.length}`, code: 'test-runs', subject: 'no-run', proof: { discriminator: String(r.files!.length) }, severity: 'warning',
       text: `No completed test run was observed this session after editing ${files}${r.files!.length > 5 ? ` and ${r.files!.length - 5} more` : ''}${r.interruptedSince ? ` (${r.interruptedSince} run(s) were interrupted)` : ''}.`,
       next: 'run the tests that reach these files',
     };
@@ -406,7 +443,7 @@ async function testRunItem(root: string, sessionId: string | undefined): Promise
   const runText = `\`${run.command.slice(0, 80)}\` at ${when(run.at)} UTC${run.exit !== undefined ? `, exit ${run.exit}` : ''}`;
   if (r.kind === 'clean') {
     return run.exit !== undefined && run.exit !== 0
-      ? { key: `test-runs:failed:${run.at}`, severity: 'warning', text: `The last test run (${runText}) failed, and nothing was edited after it.`, next: 'fix the failure and rerun' }
+      ? { key: `test-runs:failed:${run.at}`, code: 'test-runs', subject: 'failed', proof: { discriminator: String(run.at) }, severity: 'warning', text: `The last test run (${runText}) failed, and nothing was edited after it.`, next: 'fix the failure and rerun' }
       : undefined;
   }
   const symbols = r.symbols ?? [];
@@ -441,6 +478,7 @@ async function testRunItem(root: string, sessionId: string | undefined): Promise
   const keyBase = [...symbols.map(s => `${s.file}#${s.name}`), ...(r.undetermined ?? [])].join('\0');
   return {
     key: `test-runs:after:${run.at}:${createHash('sha256').update(keyBase).digest('hex').slice(0, 12)}`,
+    code: 'test-runs', subject: 'edited-after-run', proof: { discriminator: `${run.at}:${createHash('sha256').update(keyBase).digest('hex')}` },
     severity: 'warning',
     text: sanitizeForTerminal(`Edited after the last test run (${runText}): ${parts.join('; ')}.${testText}${r.interruptedSince ? ` ${r.interruptedSince} later run(s) were interrupted.` : ''} ${shellNote}`),
     next: 'rerun the tests that reach these edits',
@@ -457,7 +495,7 @@ async function beforeStop(root: string, baseline: string | undefined, sessionId?
     gated?: boolean;
   };
   if (r.error) return { items: runItem ? [runItem] : [] };
-  const items: HookItem[] = (r.items ?? []).map(i => ({ key: `${i.check}:${i.subject}`, severity: i.severity, text: `${i.subject} [${i.check}]`, next: i.nextAction }));
+  const items: HookItem[] = (r.items ?? []).map(i => ({ key: `${i.check}:${i.subject}`, code: i.check, subject: i.subject, severity: i.severity, text: `${i.subject} [${i.check}]`, next: i.nextAction }));
   if (runItem) items.push(runItem);
   const blocking = (r.findings ?? []).filter(f => f.enforcementClass === 'blocking');
   if (!r.gated || !blocking.length) return { items };
@@ -635,9 +673,18 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
     if ('block' in done && done.block) {
       return { stdout: JSON.stringify({ decision: 'block', reason: done.block }), exitCode: 0 };
     }
-    const { text, shown } = renderShown(moment, done.items.filter(i => !session.keys.has(i.key)));
+    // Once per session per audience: the before-stop receipt is the user's, every other moment
+    // speaks to the agent (design section 3).
+    const audience = moment === 'before-stop' ? 'user' : 'agent';
+    const fresh = done.items
+      .map(i => ({ ...i, ...withIdentity(i) }))
+      .filter(i => !wasShown(session, i.identity, audience));
+    const { text, shown } = renderShown(moment, fresh);
     if (!text) { await writeSession(root, payload.sessionId, session); return silent; }
-    for (const k of shown) session.keys.add(k);
+    for (const i of shown as Array<HookItem & { identity: string }>) {
+      session.keys.add(i.key);
+      markShown(session, i.identity, { code: i.code ?? i.key, subject: i.subject ?? '' }, moment, audience);
+    }
     await writeSession(root, payload.sessionId, session);
     // At Stop, context for the model makes it continue working; the advisory receipt is for the
     // user instead. Only a policy block reaches the model at Stop.

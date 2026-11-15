@@ -67,21 +67,27 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 4. Once per session
 
-- [ ] 4.1 Add `findingIdentity(code, subject, proof)` and the `findings` map to
+- [x] 4.1 Add `findingIdentity(code, subject, proof)` and the `findings` map to
   `src/core/services/hook-session.ts` (design section 3). Keep writing `keys`. Test:
   `src/core/services/hook-session.test.ts`. Done when: a changed line number keeps the identity, a
   changed cited line changes it, and a record written by the current release still reads.
-- [ ] 4.2 In `src/cli/commands/hook.ts`, give every `HookItem` a `code`, `subject`, and `proof`
+- [x] 4.2 In `src/cli/commands/hook.ts`, give every `HookItem` a `code`, `subject`, and `proof`
   (lines 308-313, 351-354, 376-379, 389, 411, 419, 439-491, 504) and filter with the identity and
   audience instead of the text key (line 676). Print `[f:<8 hex>]` after each finding. Test:
   `src/cli/commands/hook.test.ts`. Done when: a finding shown at `after-tools` is not shown again
   at `before-edit` or `after-tools` in the session, is shown once in the stop receipt, and is shown
   again after its cited line changes.
-- [ ] 4.3 Prompt submitted: record the no-index line and the build note as notices and state each
+  Built (2026-11-14): a finding that cites a line uses that line's text as its proof; the
+  source's discriminator is used only without a cited line (the phantom-reference discriminator
+  carries the line number). A pending (before-write) finding keeps its own `pending:` code, as
+  #650 decided, so a denied edit does not silence the after-write fact; an unchanged import is
+  not reported by the pending check at all. Records are matched by identity; `keys` is still
+  written for an older CLI.
+- [x] 4.3 Prompt submitted: record the no-index line and the build note as notices and state each
   once per session (`src/cli/commands/orient.ts:96-104`). Test:
   `src/cli/commands/orient-inject.test.ts`. Done when: 2 prompts in one session with no index print
   the line once; a new `session_id` prints it again.
-- [ ] 4.4 Pi: the receipt text now carries finding ids. Check
+- [x] 4.4 Pi: the receipt text now carries finding ids. Check
   `src/pi/extension.test.ts` (after-tools receipt cases) and the MCP↔Pi parity guard
   (`src/pi/extension.test.ts:1330-1365`). Done when: both pass with no tool-shape change.
 
