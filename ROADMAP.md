@@ -43,7 +43,6 @@ edit-time hooks, guarded to OpenLore projects (#762).
 | JS and JSX nodes are labeled TypeScript | `src/core/analyzer/call-graph.ts` | #724 |
 | A Java field of an external type is still fanned out by name | Java resolution in `call-graph.ts` | #724 |
 | OpenAPI enum details render double-escaped | `src/core/services/mcp-handlers/service-contract.ts` | #724 |
-| CI runs 12 of 26 integration test files | `package.json` `test:integration:ci` | #724 |
 | Two tool input schemas have properties without descriptions; 15 descriptions exceed 800 characters | `explain_retrieval_miss`, `declare_footprint` in `src/cli/commands/mcp.ts` | `mcp-quality` spec |
 
 ## P1: the agent-evidence direction (in this order)
