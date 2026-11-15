@@ -102,6 +102,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **`select_tests` selects tests for a function just added to a file.** The index predates a new
+  function, so nothing seeded it and the file's own tests were not selected. Now the tests of the
+  file's other functions are selected at low confidence, with the same-file reason. On the
+  `bench:select-tests` replay this found the one test #771 had to change, at one extra file.
+
 - **`blast_radius` lists every test file to run.** It returned the first 15 single tests, cut per
   test, so the files past them were only counted. On one change, `orient.test.ts` (it calls the
   changed `handleOrient`) was outside the 15 shown. `tests.files` now lists every selected test file,

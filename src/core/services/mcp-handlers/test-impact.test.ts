@@ -536,6 +536,22 @@ describe('select_tests safeguard tiers', () => {
     expect(find(r, 'testOther')).toMatchObject({ file: 'src/other.test.ts', reason: SELECTION_REASON.changedTest, confidence: 'high' });
   });
 
+  it('a function added to an indexed file selects the tests of that file, at low confidence', async () => {
+    // `src/foo.ts::added` is new: the index predates it, so nothing can seed it.
+    changed([{ path: 'src/foo.ts', status: 'modified', isTest: false }]);
+    const set = {
+      baseRef: 'HEAD',
+      carried: [],
+      byFile: new Map([['src/foo.ts', { granularity: 'symbol', changed: [], appeared: ['src/foo.ts::added'], disappeared: [], referencing: [], dynamicDispatch: [] }]]),
+    };
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }, { changedSet: set as never }) as Result;
+    expect(r.selectedTests.map(t => [t.file, t.test, t.confidence, t.reason])).toEqual([
+      ['src/bar.test.ts', 'testBar', 'low', SELECTION_REASON.sameFile],
+      ['src/foo.test.ts', 'testFoo', 'low', SELECTION_REASON.sameFile],
+    ]);
+    expect(r.soundness.caveats.join(' ')).toMatch(/sibling-file tests were included at low confidence/);
+  });
+
   it('selects a test that names a changed file by its path, and none that does not', async () => {
     // A source guard reads the file as text (line anchors, a forbidden-call scan): no call edge.
     await mkdir(join(dir, 'src'), { recursive: true });
